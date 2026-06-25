@@ -1,0 +1,57 @@
+{
+  "name": "pi-persona",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Unified Pi extension: switchable supervisor personas with a clear orchestration grammar (opportunistic delegation or mandatory multi-agent strategies), file-based strategies on a core SDK, cross-OS. Replaces pi-subagents + pi-subagents-comtac + pi-subagents-persona.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "persona",
+    "subagents",
+    "orchestration",
+    "multi-agent",
+    "supervisor"
+  ],
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "test:unit": "node --import tsx --test \"test/unit/**/*.test.ts\""
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true }
+  },
+  "dependencies": {
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  }
+}
