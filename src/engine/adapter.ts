@@ -1,0 +1,69 @@
+/**
+ * Engine adapter — bridges the Strategy SDK's `StrategyEngine` seam to the real
+ * ChildProcessEngine. Resolves an agent name to its config (model/tools/prompt),
+ * runs the child, and (when a contract is requested) validates the structured
+ * output, attaching it or failing the result.
+ */
+
+import type { AgentConfig } from "../agents/agent.ts";
+import { type ContractDef, validateAgainst, type ValidationResult } from "../core/contract.ts";
+import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
+import type { AgentResult } from "../orchestration/types.ts";
+import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
+import { emptyUsage } from "./stream.ts";
+
+export interface EngineAdapterDeps {
+	resolveAgent: (name: string) => AgentConfig | undefined;
+	contracts?: (name: string) => ContractDef | undefined;
+	signal?: AbortSignal;
+	/** Forwarded to the child engine (e.g. a test invocation resolver). */
+	childOptions?: ChildEngineOptions;
+	cwd?: string;
+}
+
+export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
+	return {
+		async run(spec: AgentRunSpec): Promise<AgentResult> {
+			const cfg = deps.resolveAgent(spec.agent);
+			if (!cfg) {
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `unknown agent: ${spec.agent}` };
+			}
+
+			const childSpec: ChildRunSpec = { task: spec.task };
+			const model = spec.model ?? cfg.model;
+			if (model) childSpec.model = model;
+			const tools = spec.tools ?? cfg.tools;
+			if (tools) childSpec.tools = tools;
+			if (cfg.systemPrompt) childSpec.systemPrompt = cfg.systemPrompt;
+			if (deps.cwd) childSpec.cwd = deps.cwd;
+
+			const child = await runChildAgent(childSpec, deps.signal, deps.childOptions);
+
+			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
+			if (child.errorMessage) result.error = child.errorMessage;
+			else if (!child.ok) result.error = child.stderr.trim() || `agent failed (exit ${child.exitCode})`;
+
+			if (spec.outputContract && deps.contracts) {
+				const def = deps.contracts(spec.outputContract);
+				if (def) {
+					let parsed: unknown;
+					try {
+						parsed = JSON.parse(child.output);
+					} catch {
+						parsed = undefined;
+					}
+					const v: ValidationResult =
+						parsed === undefined ? { ok: false, errors: ["output was not valid JSON"] } : validateAgainst(def, parsed);
+					if (v.ok && v.value) {
+						result.structured = v.value;
+					} else {
+						result.ok = false;
+						result.error = `contract ${spec.outputContract} failed: ${v.errors.join("; ")}`;
+					}
+				}
+			}
+
+			return result;
+		},
+	};
+}

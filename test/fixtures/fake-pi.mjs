@@ -21,6 +21,18 @@ if (task.includes("[sleep]")) {
 		},
 	});
 	process.exit(0);
+} else if (task.includes("[json]")) {
+	emit({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: JSON.stringify({ result: "done", confidence: 0.9, stance: "approve" }) }],
+			model: "stub/model",
+			stopReason: "end",
+			usage: { input: 5, output: 3, cost: { total: 0.001 }, totalTokens: 20 },
+		},
+	});
+	process.exit(0);
 } else {
 	emit({ type: "turn_start" });
 	emit({
