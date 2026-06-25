@@ -1,0 +1,51 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+
+import { runChildAgent } from "../../src/engine/child.ts";
+
+const FAKE = fileURLToPath(new URL("../fixtures/fake-pi.mjs", import.meta.url));
+const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAKE, ...args] });
+
+test("runChildAgent spawns a child, parses output + usage, and reports success", async () => {
+	const r = await runChildAgent({ task: "do the thing" }, undefined, { resolveInvocation: resolveFake });
+	assert.equal(r.ok, true);
+	assert.equal(r.exitCode, 0);
+	assert.match(r.output, /echo: Task: do the thing/);
+	assert.equal(r.usage.input, 5);
+	assert.equal(r.usage.output, 3);
+	assert.equal(r.usage.turns, 1);
+	assert.equal(r.model, "stub/model");
+	assert.equal(r.stopReason, "end");
+	assert.equal(r.aborted, false);
+});
+
+test("runChildAgent passes model/tools flags through to the child", async () => {
+	const seen: string[] = [];
+	const r = await runChildAgent({ task: "x", model: "prov/m", tools: ["read", "grep"] }, undefined, {
+		resolveInvocation: (args) => {
+			seen.push(...args);
+			return resolveFake(args);
+		},
+	});
+	assert.equal(r.ok, true);
+	assert.ok(seen.includes("--model") && seen.includes("prov/m"));
+	assert.ok(seen.includes("--tools") && seen.includes("read,grep"));
+	assert.ok(seen.includes("--no-session"));
+});
+
+test("runChildAgent surfaces an error stop reason as a failure", async () => {
+	const r = await runChildAgent({ task: "boom [fail]" }, undefined, { resolveInvocation: resolveFake });
+	assert.equal(r.ok, false);
+	assert.equal(r.stopReason, "error");
+	assert.equal(r.errorMessage, "stub failure");
+});
+
+test("runChildAgent aborts a running child via the AbortSignal", async () => {
+	const ac = new AbortController();
+	const p = runChildAgent({ task: "wait [sleep]" }, ac.signal, { resolveInvocation: resolveFake, killGraceMs: 200 });
+	setTimeout(() => ac.abort(), 100);
+	const r = await p;
+	assert.equal(r.aborted, true);
+	assert.equal(r.ok, false);
+});
