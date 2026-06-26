@@ -132,7 +132,7 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	await m.cmd("persona", "coder", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
-	assert.match(injected.systemPrompt, /Coder supervisor/);
+	assert.match(injected.systemPrompt, /decisive software engineer/);
 });
 
 test("tool_call gating blocks delegation outside a restrictive project persona's allowlist", async () => {

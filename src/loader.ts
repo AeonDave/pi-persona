@@ -36,31 +36,55 @@ export function listMarkdown(dir: string): Array<{ name: string; path: string }>
 		.map((f) => ({ name: f.slice(0, -3), path: path.join(dir, f) }));
 }
 
-/** Load + classify all definitions across dirs (later dirs win same names). */
+function readSafe(path: string): string | undefined {
+	try {
+		return fs.readFileSync(path, "utf-8");
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Load + classify all definitions across dirs. Personas (`persona: true`) and
+ * agents live in SEPARATE namespaces — a persona and an agent may share a name
+ * without colliding — and each is merged by precedence independently (later dirs
+ * win same names within a namespace).
+ */
 export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
-	const layers: DiscoveredFile[][] = dirs.map((d) =>
-		listMarkdown(d.path).map((f) => ({ name: f.name, path: f.path, scope: d.scope })),
-	);
-	const { resolved, shadowed } = mergeByPrecedence(layers);
+	const personaLayers: DiscoveredFile[][] = [];
+	const agentLayers: DiscoveredFile[][] = [];
+	const content = new Map<string, string>();
+
+	for (const d of dirs) {
+		const personaFiles: DiscoveredFile[] = [];
+		const agentFiles: DiscoveredFile[] = [];
+		for (const f of listMarkdown(d.path)) {
+			const text = readSafe(f.path);
+			if (text === undefined) continue;
+			content.set(f.path, text);
+			const entry: DiscoveredFile = { name: f.name, path: f.path, scope: d.scope };
+			if (parsePersona(text, f.path)?.isPersona) personaFiles.push(entry);
+			else agentFiles.push(entry);
+		}
+		personaLayers.push(personaFiles);
+		agentLayers.push(agentFiles);
+	}
+
+	const personaMerge = mergeByPrecedence(personaLayers);
+	const agentMerge = mergeByPrecedence(agentLayers);
 
 	const personas: Persona[] = [];
+	for (const f of personaMerge.resolved) {
+		const persona = parsePersona(content.get(f.path) ?? "", f.path);
+		if (persona) personas.push(persona);
+	}
 	const agents: AgentConfig[] = [];
-	for (const file of resolved) {
-		let content: string;
-		try {
-			content = fs.readFileSync(file.path, "utf-8");
-		} catch {
-			continue;
-		}
-		const persona = parsePersona(content, file.path);
-		if (persona?.isPersona) {
-			personas.push(persona);
-			continue;
-		}
-		const agent = parseAgent(content, file.path);
+	for (const f of agentMerge.resolved) {
+		const agent = parseAgent(content.get(f.path) ?? "", f.path);
 		if (agent) agents.push(agent);
 	}
-	return { personas, agents, shadowed };
+
+	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed] };
 }
 
 /** Merge `teams.yaml` files (later files win). */
