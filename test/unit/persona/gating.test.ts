@@ -53,6 +53,17 @@ test("gateToolCall honours delegateDefaultAllow=false (lockdown) for an absent d
 	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "x" })?.block, true);
 });
 
+test("gateToolCall blocks a delegate that grants a sub-agent tools beyond the persona's (I4 escalation)", () => {
+	const caps = capsFor(p("name: r\npersona: true\ntools:\n  allow: [read]"));
+	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout", tools: ["write"] })?.block, true);
+	assert.equal(
+		gateToolCall(caps, "R", "delegate", { tasks: [{ agent: "scout", tools: ["grep"] }] })?.block,
+		true,
+		"also checks tasks[].tools",
+	);
+	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout", tools: ["read"] }), undefined, "an allowed tool is fine");
+});
+
 test("a tools-restricted persona still keeps delegate (delegation is preserved unless explicitly denied)", () => {
 	const caps = capsFor(p("name: r\npersona: true\ntools:\n  allow: [read]"));
 	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout" }), undefined, "delegate survives a tools allowlist");
