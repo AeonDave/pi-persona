@@ -52,6 +52,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	let lastCtx: ExtensionContext | undefined;
 	let orchestrating = false; // re-entrancy guard for the mandatory input hook
+	// A finished mandatory orchestration, injected (hidden) into the next turn's system prompt.
+	let pendingOrchestration: { label: string; output: string } | undefined;
 	let personas: Persona[] = [];
 	let agents: AgentConfig[] = [];
 	let teams: Record<string, string[]> = {};
@@ -205,9 +207,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
-		const prompt = controller.composePrompt(event.systemPrompt);
-		if (prompt !== undefined) return { systemPrompt: prompt };
-		return undefined;
+		let prompt = controller.composePrompt(event.systemPrompt) ?? event.systemPrompt;
+		if (pendingOrchestration) {
+			prompt = `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration was run on the user's request and produced the result below. Present and build on it as your answer — do not re-run it:\n\n${pendingOrchestration.output}`;
+			pendingOrchestration = undefined;
+		}
+		return prompt === event.systemPrompt ? undefined : { systemPrompt: prompt };
 	});
 
 	pi.on("tool_call", (event, ctx) => {
@@ -224,21 +229,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const orch = controller.activePersona?.orchestration;
 		const task = event.text?.trim();
 		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
-		const label = resolveStrategyName(orch);
+		const label = resolveStrategyName(orch) ?? "strategy";
 		orchestrating = true;
 		try {
+			const n = orch.roster ? (teams[orch.roster]?.length ?? 0) : 0;
+			ctx.ui.notify(
+				`⏳ ${label}: orchestrating${n ? ` ${n} agents` : ""} in parallel — real model calls, this can take ~30–60s. The result is woven into the answer below.`,
+				"info",
+			);
+		} catch {
+			/* cosmetic */
+		}
+		try {
 			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(), teams, limits: RUN_LIMITS });
-			if (!result) return undefined;
-			return {
-				action: "transform",
-				text: `${event.text}\n\n[pi-persona] The mandated "${label}" orchestration ran on this request and produced:\n\n${result.output}\n\nPresent and build on this result.`,
-			};
+			pendingOrchestration = { label, output: result ? result.output : "(the orchestration returned no result)" };
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			return { action: "transform", text: `${event.text}\n\n[pi-persona] "${label}" orchestration failed: ${message}` };
+			pendingOrchestration = { label, output: `orchestration failed: ${err instanceof Error ? err.message : String(err)}` };
 		} finally {
 			orchestrating = false;
 		}
+		// Let the user's original prompt proceed; the ruling is injected (hidden) into the
+		// turn's system prompt via before_agent_start — no internal plumbing in the chat.
+		return undefined;
 	});
 
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
