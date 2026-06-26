@@ -106,6 +106,19 @@ test("session_start loads the bundled personas and agents", async () => {
 	assert.match(listing, /coder/);
 	assert.match(listing, /review/);
 	assert.match(listing, /antagonist/);
+	assert.match(listing, /magi/);
+});
+
+test("the input hook leaves opportunistic personas (and no persona) to a normal turn", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+
+	assert.equal(await m.fire("input", { source: "interactive", text: "hi" }, ctx), undefined, "no persona ⇒ normal turn");
+
+	await m.cmd("persona", "coder", ctx); // coder has no orchestration block ⇒ opportunistic
+	assert.equal(await m.fire("input", { source: "interactive", text: "hi" }, ctx), undefined, "opportunistic ⇒ normal turn");
 });
 
 test("/persona activates a persona and before_agent_start injects its prompt", async () => {
