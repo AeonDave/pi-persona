@@ -16,6 +16,9 @@ export interface EngineAdapterDeps {
 	resolveAgent: (name: string) => AgentConfig | undefined;
 	contracts?: (name: string) => ContractDef | undefined;
 	signal?: AbortSignal;
+	/** Per-agent model override (e.g. a persona's configured ensemble models).
+	 *  Precedence: explicit spec.model > modelFor(agent) > the agent's own default. */
+	modelFor?: (agent: string) => string | undefined;
 	/** Forwarded to the child engine (e.g. a test invocation resolver). */
 	childOptions?: ChildEngineOptions;
 	cwd?: string;
@@ -34,7 +37,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`
 					: spec.task;
 			const childSpec: ChildRunSpec = { task };
-			const model = spec.model ?? cfg.model;
+			const model = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model;
 			if (model) childSpec.model = model;
 			const tools = spec.tools ?? cfg.tools;
 			if (tools) childSpec.tools = tools;
