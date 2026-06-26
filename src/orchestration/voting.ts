@@ -24,12 +24,22 @@ export interface VoteOpts {
 	keepBestFallback?: boolean;
 }
 
-/** The canonical vote key for a candidate, or undefined if it cannot vote. */
+/** Normalise a vote so case/separator variants tally together
+ *  (`json-first`, `JSON_First`, `json first` → `json-first`). */
+function normalizeVote(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[\s_-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+}
+
+/** The canonical (normalised) vote key for a candidate, or undefined if it cannot vote. */
 function voteKey(r: AgentResult): string | undefined {
 	if (!r.ok) return undefined;
 	const s = r.structured;
-	if (s && typeof s.vote === "string" && s.vote.trim()) return s.vote.trim();
-	if (s && typeof s.result === "string" && s.result.trim()) return s.result.trim();
+	if (s && typeof s.vote === "string" && s.vote.trim()) return normalizeVote(s.vote);
+	if (s && typeof s.result === "string" && s.result.trim()) return normalizeVote(s.result);
 	return undefined;
 }
 
