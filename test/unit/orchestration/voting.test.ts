@@ -30,6 +30,20 @@ test("vote keys are normalised (case/separators) so equivalent votes tally toget
 	assert.equal(r.winner?.structured?.vote, "json-first");
 });
 
+test("a threshold (best-of-X) requires the plurality winner to reach it, else fallback", () => {
+	const win = voteReduce([c("a", "A"), c("b", "A"), c("c", "B")], { aggregate: "majority", threshold: 2 });
+	assert.equal(win.status, "winner", "A has 2 votes, meets threshold 2");
+
+	const short = voteReduce([c("a", "A"), c("b", "A"), c("c", "B")], {
+		aggregate: "majority",
+		threshold: 3,
+		keepBestFallback: true,
+	});
+	assert.equal(short.status, "no_consensus", "A has 2 votes, short of best-of-3");
+	assert.equal(short.usedFallback, true);
+	assert.ok((short.dissent?.length ?? 0) >= 1, "dissent preserved on the threshold-miss fallback");
+});
+
 test("unanimity requires every valid candidate to agree", () => {
 	assert.equal(voteReduce([c("a", "X"), c("b", "X")], { aggregate: "unanimity" }).status, "winner");
 	assert.equal(voteReduce([c("a", "X"), c("b", "Y")], { aggregate: "unanimity" }).status, "no_consensus");

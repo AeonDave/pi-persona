@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { type AgentRunSpec, makeSDK, type StrategyEngine } from "../../../src/orchestration/sdk.ts";
+import { councilRounds } from "../../../src/orchestration/strategies/council-rounds.ts";
 import { criticLoop } from "../../../src/orchestration/strategies/critic-loop.ts";
 import { fanout } from "../../../src/orchestration/strategies/fanout.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
@@ -80,6 +81,37 @@ test("fanout throws when no roster is provided", async () => {
 	const engine: StrategyEngine = { run: async () => ({ agent: "x", output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: LIMITS });
 	await assert.rejects(() => fanout.run({ task: "T", params: {} }, sdk));
+});
+
+test("council-rounds runs more rounds until best-of-X is reached, carrying the debate forward", async () => {
+	const team = ["a", "b", "c"];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			const later = spec.task.includes("debate"); // round ≥ 2 carries the prior debate
+			const vote = later ? "x" : spec.agent === "a" ? "x" : spec.agent === "b" ? "y" : "z";
+			return { agent: spec.agent, output: `${spec.agent}:${vote}`, structured: { vote, confidence: 0.7 }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "t" ? team : []) }, limits: LIMITS });
+	const r = await councilRounds.run({ task: "decide", roster: "t", params: { rounds: 3, bestOf: 3 } }, sdk);
+	assert.equal(r.structured?.status, "winner");
+	assert.equal(r.structured?.rounds, 2, "split in round 1, converged in round 2");
+	assert.match(r.output, /best-of-3/);
+});
+
+test("council-rounds falls back to best-by-confidence on the final round without a supermajority", async () => {
+	const team = ["a", "b", "c"];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			const vote = spec.agent === "a" ? "x" : spec.agent === "b" ? "y" : "z"; // never converges
+			const confidence = spec.agent === "b" ? 0.9 : 0.4;
+			return { agent: spec.agent, output: spec.agent, structured: { vote, confidence }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => team }, limits: LIMITS });
+	const r = await councilRounds.run({ task: "decide", roster: "t", params: { rounds: 2, bestOf: 3 } }, sdk);
+	assert.equal(r.structured?.usedFallback, true);
+	assert.equal(r.structured?.rounds, 2);
 });
 
 test("critic-loop revises while the critic rejects, then stops on approve", async () => {
