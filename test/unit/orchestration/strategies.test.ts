@@ -36,6 +36,29 @@ test("the SDK reports per-agent status (running → done) via onAgentStatus", as
 	assert.deepEqual(events, ["melchior:running", "melchior:done"]);
 });
 
+test("the SDK enforces maxChildren regardless of strategy code", async () => {
+	const sdk = makeSDK({
+		engine: { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) },
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 2 },
+	});
+	await sdk.agent({ agent: "a", task: "t" });
+	await sdk.agent({ agent: "b", task: "t" });
+	await assert.rejects(() => sdk.agent({ agent: "c", task: "t" }), /maxChildren/);
+});
+
+test("the SDK enforces the token budget across a run", async () => {
+	const sdk = makeSDK({
+		engine: {
+			run: async (s) => ({ agent: s.agent, output: "o", usage: { ...usage(), input: 100, output: 100 }, ok: true }),
+		},
+		roster: { team: () => [] },
+		limits: { ...LIMITS, budgetTokens: 150 },
+	});
+	await sdk.agent({ agent: "a", task: "t" }); // spends 200 > 150
+	await assert.rejects(() => sdk.agent({ agent: "b", task: "t" }), /budget/);
+});
+
 test("the SDK forwards per-agent streaming progress via onAgentProgress", async () => {
 	const seen: string[] = [];
 	const sdk = makeSDK({

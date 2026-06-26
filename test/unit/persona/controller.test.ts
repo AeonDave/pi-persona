@@ -19,8 +19,13 @@ class MockHost implements PersonaHost {
 	status: string | undefined;
 	models: Record<string, ModelHandle> = { "prov/x": { provider: "prov", id: "x" } };
 
+	agents = ["scout", "ghost", "builder"];
+
 	allToolNames(): string[] {
 		return this.tools;
+	}
+	knownAgents(): string[] {
+		return this.agents;
 	}
 	setActiveTools(names: string[]): void {
 		this.active = names;

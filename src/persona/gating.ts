@@ -1,12 +1,12 @@
 /**
- * Persona delegation/tool gating — pure. Because the `delegate` tool has
- * structured params, target extraction reads `agent` / `tasks[].agent` directly
- * (no fragile text parsing, unlike the old persona over pi-subagents). The
- * extension's `tool_call` hook calls `gateToolCall` and returns its result.
+ * Persona delegation/tool gating — pure. The `tool_call` hook consults the
+ * persona's resolved `EffectiveCapabilities` (built once on activation) so every
+ * tool call / delegate target passes the same unified, deny-wins gate (I4).
+ * Delegate target extraction reads structured params (`agent` / `tasks[].agent`),
+ * never fragile text parsing.
  */
 
-import { isAllowed } from "../core/permissions.ts";
-import type { Persona } from "./persona.ts";
+import { canCallTool, canDelegateTo, type EffectiveCapabilities } from "../core/capabilities.ts";
 
 /** Pull the delegate target agent names out of a delegate tool call's input. */
 export function extractDelegateTargets(input: unknown): string[] {
@@ -29,22 +29,22 @@ export interface GateResult {
 	reason: string;
 }
 
-/** Decide whether a tool call is blocked by the active persona; undefined = allow. */
+/** Decide whether a tool call is blocked by the active capabilities; undefined = allow. */
 export function gateToolCall(
-	persona: Persona,
+	caps: EffectiveCapabilities,
+	personaLabel: string,
 	toolName: string,
 	input: unknown,
-	delegateDefaultAllow: boolean,
 	delegateTool = "delegate",
 ): GateResult | undefined {
-	if (persona.tools && !isAllowed(toolName, persona.tools)) {
-		return { block: true, reason: `Persona "${persona.label}" may not use tool: ${toolName}.` };
+	if (!canCallTool(caps, toolName)) {
+		return { block: true, reason: `Persona "${personaLabel}" may not use tool: ${toolName}.` };
 	}
 	if (toolName !== delegateTool) return undefined;
 
-	const blocked = extractDelegateTargets(input).filter((t) => !isAllowed(t, persona.delegate, delegateDefaultAllow));
+	const blocked = extractDelegateTargets(input).filter((t) => !canDelegateTo(caps, t));
 	if (blocked.length > 0) {
-		return { block: true, reason: `Persona "${persona.label}" may not delegate to: ${blocked.join(", ")}.` };
+		return { block: true, reason: `Persona "${personaLabel}" may not delegate to: ${blocked.join(", ")}.` };
 	}
 	return undefined;
 }

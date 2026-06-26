@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../../src/agents/agent.ts";
-import { DEFAULT_CONTRACT } from "../../src/core/contract.ts";
+import { type ContractDef, DEFAULT_CONTRACT } from "../../src/core/contract.ts";
 import { makeEngine } from "../../src/engine/adapter.ts";
 
 const FAKE = fileURLToPath(new URL("../fixtures/fake-pi.mjs", import.meta.url));
@@ -73,6 +73,25 @@ test("makeEngine validates structured output against the pinned contract", async
 	assert.equal(r.ok, true);
 	assert.equal(r.structured?.result, "done");
 	assert.equal(r.structured?.stance, "approve");
+});
+
+test("makeEngine pins the contract per run — a mid-run contract change can't affect an in-flight engine", async () => {
+	let calls = 0;
+	const lenient: ContractDef = { name: "c", fields: { result: { type: "string" } } };
+	const strict: ContractDef = {
+		name: "c",
+		fields: { result: { type: "string" }, mustHave: { type: "string", required: true } },
+	};
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		childOptions: { resolveInvocation: resolveFake },
+		contracts: () => (calls++ === 0 ? lenient : strict),
+	});
+	// fake-pi [json] emits {result,confidence,stance} with no `mustHave`.
+	const r1 = await eng.run({ agent: "scout", task: "do [json]", outputContract: "c" });
+	const r2 = await eng.run({ agent: "scout", task: "do [json]", outputContract: "c" });
+	assert.equal(r1.ok, true);
+	assert.equal(r2.ok, true, "the second run still validates against the pinned (lenient) contract");
 });
 
 test("makeEngine marks a contract failure when output is not valid JSON", async () => {

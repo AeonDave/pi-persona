@@ -131,6 +131,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				return [];
 			}
 		},
+		knownAgents: () => agents.map((a) => a.name),
 		setActiveTools: (names) => {
 			try {
 				pi.setActiveTools(names);
@@ -183,7 +184,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		},
 	};
 
-	const controller = new PersonaController(host, config.delegateDefaultAllow);
+	const controller = new PersonaController(host, config.delegateDefaultAllow, RUN_LIMITS);
 
 	// Async runs outlive the turn that launched them; on completion we surface the
 	// result back to the supervisor as a follow-up (which triggers a fresh turn).
