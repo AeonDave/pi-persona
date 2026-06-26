@@ -2,3 +2,4 @@
 # Referenced by a persona's `orchestration.roster`. Project/user copies override.
 review: [security, performance, tests]
 antagonist: [builder]
+magi: [melchior, balthasar, casper]

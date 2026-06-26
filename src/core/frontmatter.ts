@@ -49,8 +49,8 @@ function unquote(value: string): string {
 	return v;
 }
 
-/** Parse a scalar or inline list (`[a, "b", c]`) → string | string[] | boolean. */
-function parseValue(raw: string): string | string[] | boolean {
+/** Parse a scalar or inline list (`[a, "b", c]`) → string | string[] | boolean | number. */
+function parseValue(raw: string): string | string[] | boolean | number {
 	const v = raw.trim();
 	if (v.startsWith("[") && v.endsWith("]")) {
 		const inner = v.slice(1, -1).trim();
@@ -62,6 +62,7 @@ function parseValue(raw: string): string | string[] | boolean {
 	}
 	if (v === "true") return true;
 	if (v === "false") return false;
+	if (/^-?\d+(?:\.\d+)?$/.test(v)) return Number(v);
 	return unquote(v);
 }
 
