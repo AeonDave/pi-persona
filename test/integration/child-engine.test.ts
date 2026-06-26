@@ -102,6 +102,12 @@ test("runChildAgent caps retained stderr and marks it truncated", async () => {
 	assert.match(r.stderr, /\[stderr truncated\]/);
 });
 
+test("the timeout is idle-based — a child that keeps emitting is NOT killed (total runtime > the window)", async () => {
+	const r = await runChildAgent({ task: "busy [drip]" }, undefined, { resolveInvocation: resolveFake, timeoutMs: 100 });
+	assert.equal(r.timedOut, false, "output (re)arms the idle clock, so an active child survives");
+	assert.equal(r.ok, true);
+});
+
 test("runChildAgent surfaces a spawn failure (ENOENT) in errorMessage instead of swallowing it", async () => {
 	const r = await runChildAgent({ task: "x" }, undefined, {
 		resolveInvocation: () => ({ command: "definitely-not-a-real-binary-xyz", args: [] }),

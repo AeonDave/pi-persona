@@ -23,7 +23,7 @@ const DEFAULT_LIMITS: RunLimits = {
 	maxChildren: 64,
 	maxDepth: 2,
 	maxConcurrency: 4,
-	timeoutMs: 120_000,
+	timeoutMs: 180_000,
 	budgetTokens: 1_000_000,
 };
 

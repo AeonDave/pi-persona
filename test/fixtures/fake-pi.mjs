@@ -12,6 +12,28 @@ if (task.includes("[sleep]")) {
 } else if (task.includes("[ignore-term]")) {
 	process.on("SIGTERM", () => {}); // refuse graceful termination → forces the SIGKILL escalation
 	setInterval(() => {}, 1000);
+} else if (task.includes("[drip]")) {
+	// Emit an event every 40ms a few times (total > a short idle window, each gap < it),
+	// then finish — exercises the idle-timeout reset (an active child must NOT be killed).
+	let n = 0;
+	const iv = setInterval(() => {
+		n += 1;
+		emit({ type: "turn_start" });
+		if (n >= 4) {
+			clearInterval(iv);
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					model: "stub/model",
+					stopReason: "end",
+					usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },
+				},
+			});
+			process.exit(0);
+		}
+	}, 40);
 } else if (task.includes("[spew-stderr]")) {
 	process.stderr.write("E".repeat(500000)); // flood stderr to exercise the retention cap
 	emit({
