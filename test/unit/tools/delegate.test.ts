@@ -39,6 +39,25 @@ test("runDelegate reports a single-agent failure with its error", async () => {
 	assert.match(r.text, /boom/);
 });
 
+test("runDelegate reports live per-task views via onProgress (parallel)", async () => {
+	const engine = engineThat((s) => ({ agent: s.agent, output: `out:${s.agent}`, usage: usage(), ok: true }));
+	const doneCounts: number[] = [];
+	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] }, engine, 4, (views) =>
+		doneCounts.push(views.filter((v) => !v.running).length),
+	);
+	assert.equal(r.views.length, 2);
+	assert.ok(r.views.every((v) => !v.running && v.ok));
+	assert.ok(doneCounts.length >= 2, "progress reported as tasks complete");
+	assert.equal(doneCounts[doneCounts.length - 1], 2);
+});
+
+test("runDelegate single mode produces one done view", async () => {
+	const r = await runDelegate({ agent: "x", task: "t" }, engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true })));
+	assert.equal(r.views.length, 1);
+	assert.equal(r.views[0]?.running, false);
+	assert.equal(r.views[0]?.ok, true);
+});
+
 test("runDelegate rejects when neither single nor parallel params are given", async () => {
 	const engine = engineThat((s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }));
 	const r = await runDelegate({}, engine);
