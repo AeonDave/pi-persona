@@ -27,6 +27,7 @@ import type { StrategyEngine } from "./orchestration/sdk.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import type { Persona } from "./persona/persona.ts";
+import { readLastPersona, writeLastPersona } from "./persona/state.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -53,6 +54,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 	let agents: AgentConfig[] = [];
 	let teams: Record<string, string[]> = {};
 	let shadowed: Array<{ name: string; scope: string; path: string }> = [];
+
+	// Remembered selection lives in the global persona folder; only user gestures write it.
+	const stateFile = config.stateFile ?? join(userAgentDir(), "persona", "state.json");
+	const persist = (name: string | undefined): void => {
+		if (config.persist) writeLastPersona(stateFile, name);
+	};
 
 	const defDirs = (cwd: string): ScopedDir[] => [
 		{ path: join(BUNDLED_DIR, "personas"), scope: "builtin" },
@@ -182,8 +189,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
 		reload(ctx.cwd);
-		const wanted = config.defaultPersona ? personas.find((p) => p.name === config.defaultPersona) : undefined;
-		if (wanted) await controller.activate(wanted);
+		// Restore order: env pin > remembered-on-disk. Read-only — never writes here.
+		const remembered = config.defaultPersona ?? (config.persist ? readLastPersona(stateFile) : undefined);
+		const target = remembered ? personas.find((p) => p.name === remembered) : undefined;
+		if (target) await controller.activate(target);
 		else host.setStatus(controller.activePersona?.label);
 	});
 
@@ -342,8 +351,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const current = controller.activePersona;
 			const idx = current ? personas.findIndex((p) => p.name === current.name) : -1;
 			const next = idx + 1;
-			if (next >= personas.length) await controller.deactivate();
-			else await controller.activate(personas[next]!);
+			if (next >= personas.length) {
+				await controller.deactivate();
+				persist(undefined);
+			} else {
+				await controller.activate(personas[next]!);
+				persist(personas[next]!.name);
+			}
 		},
 	});
 
@@ -355,6 +369,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const arg = args.trim();
 			if (arg === "off" || arg === "none") {
 				await controller.deactivate();
+				persist(undefined);
 				ctx.ui.notify("persona: cleared (default supervisor)", "info");
 				return;
 			}
@@ -379,6 +394,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				return;
 			}
 			await controller.activate(persona);
+			persist(persona.name);
 			ctx.ui.notify(`persona: ${persona.label} active`, "info");
 		},
 	});

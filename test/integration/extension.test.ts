@@ -10,6 +10,9 @@ import piPersona from "../../src/extension.ts";
 // Hermetic: point the "user" agent dir at an empty temp dir so the real
 // ~/.pi/agent/agents (seeded by other tools) cannot shadow the bundled assets.
 process.env.PI_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-userdir-"));
+// Hermetic by default: general tests must not persist/restore the last persona.
+// The persistence test re-enables it explicitly with its own state file.
+process.env.PI_PERSONA_PERSIST = "off";
 
 // biome-ignore lint: a deliberately loose mock of the Pi ExtensionAPI surface
 type AnyFn = (...args: any[]) => any;
@@ -163,4 +166,28 @@ test("the f8 shortcut cycles into a persona", async () => {
 	await m.fire("session_start", undefined, ctx);
 	await m.fireShortcut(ctx);
 	assert.notEqual(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+});
+
+test("persistence: /persona writes the selection and a fresh session restores it", async () => {
+	const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-persist-")), "state.json");
+	process.env.PI_PERSONA_STATE_FILE = stateFile;
+	process.env.PI_PERSONA_PERSIST = "on";
+	try {
+		const m1 = makeMockPi();
+		piPersona(m1.pi);
+		const c1 = makeCtx(os.tmpdir());
+		await m1.fire("session_start", undefined, c1.ctx);
+		await m1.cmd("persona", "magi", c1.ctx); // user gesture → writes state
+
+		const m2 = makeMockPi();
+		piPersona(m2.pi);
+		const c2 = makeCtx(os.tmpdir());
+		await m2.fire("session_start", undefined, c2.ctx); // restores from disk
+		const injected = m2.fire("before_agent_start", { systemPrompt: "BASE" }, c2.ctx);
+		assert.notEqual(injected, undefined, "the remembered persona is restored");
+		assert.match(injected.systemPrompt, /MAGI/);
+	} finally {
+		delete process.env.PI_PERSONA_STATE_FILE;
+		process.env.PI_PERSONA_PERSIST = "off";
+	}
 });
