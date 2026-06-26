@@ -60,6 +60,23 @@ test("the SDK enforces the token budget across a run", async () => {
 	await assert.rejects(() => sdk.agent({ agent: "b", task: "t" }), /budget/);
 });
 
+test("the SDK exposes a per-agent abort via onAgentStart (engine sees the aborted signal)", async () => {
+	let sawAborted: boolean | undefined;
+	const sdk = makeSDK({
+		engine: {
+			run: async (s, _p, signal) => {
+				sawAborted = signal?.aborted;
+				return { agent: s.agent, output: "o", usage: usage(), ok: true };
+			},
+		},
+		roster: { team: () => [] },
+		limits: LIMITS,
+		onAgentStart: (_a, abort) => abort(), // stop this agent immediately
+	});
+	await sdk.agent({ agent: "x", task: "t" });
+	assert.equal(sawAborted, true, "the engine received the per-agent abort signal");
+});
+
 test("the SDK forwards per-agent streaming progress via onAgentProgress", async () => {
 	const seen: string[] = [];
 	const sdk = makeSDK({

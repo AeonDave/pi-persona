@@ -106,6 +106,7 @@ export async function runDelegate(
 	engine: StrategyEngine,
 	limits: DelegateLimits = { maxConcurrency: 4, maxChildren: 8 },
 	onProgress?: (views: DelegateView[]) => void,
+	onLegStart?: (index: number, abort: () => void) => void,
 ): Promise<DelegateOutcome> {
 	if (params.tasks && params.tasks.length > 0) {
 		// Enforce the hard ceilings: cap the fan-out and clamp the concurrency the
@@ -125,7 +126,9 @@ export async function runDelegate(
 		onProgress?.(views.map((v) => ({ ...v })));
 
 		const results = await mapWithConcurrency(tasks, concurrency, async (t, i) => {
-			const r = await engine.run(specOf(t));
+			const ac = new AbortController();
+			onLegStart?.(i, () => ac.abort());
+			const r = await engine.run(specOf(t), undefined, ac.signal);
 			views[i] = viewOf(t.agent, labels[i] as string, r);
 			onProgress?.(views.map((v) => ({ ...v })));
 			return r;
@@ -144,7 +147,9 @@ export async function runDelegate(
 		if (params.skills && params.skills.length > 0) single.skills = params.skills;
 		if (params.model) single.model = params.model;
 		if (params.tools && params.tools.length > 0) single.tools = params.tools;
-		const r = await engine.run(specOf(single));
+		const ac = new AbortController();
+		onLegStart?.(0, () => ac.abort());
+		const r = await engine.run(specOf(single), undefined, ac.signal);
 		const text = r.ok ? r.output || "(no output)" : `Agent "${params.agent}" failed: ${r.error ?? "(no detail)"}`;
 		return { text, results: [r], views: [viewOf(params.agent, labelFor(single, 0), r)], ok: r.ok };
 	}
