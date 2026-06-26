@@ -22,6 +22,8 @@ export interface ReducerResult {
 export interface VoteOpts {
 	aggregate: "majority" | "unanimity";
 	keepBestFallback?: boolean;
+	/** Best-of-X: a plurality winner must reach at least this many votes, else no_consensus. */
+	threshold?: number;
 }
 
 /** Normalise a vote so case/separator variants tally together
@@ -89,6 +91,8 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 	const max = Math.max(...Object.values(tally));
 	const top = Object.keys(tally).filter((k) => tally[k] === max);
 	if (top.length === 1) {
+		// Best-of-X: a clear plurality still needs `threshold` votes to win outright.
+		if (opts.threshold !== undefined && max < opts.threshold) return withFallback("no_consensus");
 		const winnerKey = top[0];
 		const winner = valid.find((v) => v.key === winnerKey)!.result;
 		const dissent = valid.filter((v) => v.key !== winnerKey).map((v) => v.result);

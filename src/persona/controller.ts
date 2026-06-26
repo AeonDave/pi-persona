@@ -20,7 +20,7 @@ import { type GateResult, gateToolCall } from "./gating.ts";
 import { composeSystemPrompt, type Persona } from "./persona.ts";
 
 const DEFAULT_LIMITS: RunLimits = {
-	maxChildren: 8,
+	maxChildren: 64,
 	maxDepth: 2,
 	maxConcurrency: 4,
 	timeoutMs: 120_000,

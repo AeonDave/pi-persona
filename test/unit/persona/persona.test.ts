@@ -63,6 +63,18 @@ test("a persona parses orchestration params (numbers + nested)", () => {
 	assert.deepEqual(p?.orchestration?.params, { aggregate: "unanimity", rounds: 3 });
 });
 
+test("a persona parses a council block + description (tool-driven, data-only ensemble)", () => {
+	const p = parsePersona(
+		"---\nname: magiv2\npersona: true\ndescription: nine-member council\ncouncil:\n  strategy: council-rounds\n  roster: magiv2\n  params:\n    rounds: 3\n    bestOf: 7\n---\nbody",
+		"/s",
+	);
+	assert.equal(p?.description, "nine-member council");
+	assert.equal(p?.council?.strategy, "council-rounds");
+	assert.equal(p?.council?.roster, "magiv2");
+	assert.deepEqual(p?.council?.params, { rounds: 3, bestOf: 7 });
+	assert.equal(p?.orchestration, undefined, "a council block does NOT trigger the mandatory input-hook");
+});
+
 test("an L1 declarative persona (mode: parallel, roster) parses its grammar", () => {
 	const p = parsePersona(
 		"---\nname: review\npersona: true\norchestration:\n  mode: parallel\n  roster: review\n---\nReview supervisor.",

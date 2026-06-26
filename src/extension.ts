@@ -42,7 +42,9 @@ import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } f
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
-	maxChildren: 8,
+	// A generous anti-runaway backstop, not a council-size cap: a declared ensemble
+	// (e.g. 9 members × several rounds) must fit; the token budget is the real cost guard.
+	maxChildren: 64,
 	maxDepth: 2,
 	maxConcurrency: 4,
 	timeoutMs: 120_000,
@@ -529,7 +531,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── council tool (deliberate → vote → ruling; the executor then applies it) ───
 	const CouncilParams = Type.Object({
 		question: Type.String({ description: "The decision or problem to deliberate — specific and self-contained" }),
-		roster: Type.Optional(Type.String({ description: "Council to convene (default: the active persona's, e.g. magi)" })),
+		strategy: Type.Optional(
+			Type.String({ description: "Deliberation strategy (default: the persona's council strategy)" }),
+		),
+		roster: Type.Optional(Type.String({ description: "Council roster to convene (default: the persona's)" })),
 	});
 	pi.registerTool({
 		name: "council",
@@ -544,8 +549,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 			try {
-				const roster = params.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
-				const orch: OrchestrationGrammar = { mode: "strategy", strategy: "magi", roster, params: {} };
+				// Fully persona-driven: a persona's `council:` block picks the strategy, roster,
+				// and params — a new ensemble (more members, supermajority, multi-round) needs no
+				// code, just a team + (optional) strategy file + a council block. Params override.
+				const council = controller.activePersona?.council;
+				const strategy = params.strategy ?? council?.strategy ?? "magi";
+				const roster = params.roster ?? council?.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
+				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: council?.params ?? {} };
 				const result = await runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
 				return {
 					content: [{ type: "text", text: result?.output ?? "(the council returned no ruling)" }],
