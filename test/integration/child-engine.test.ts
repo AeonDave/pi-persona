@@ -59,15 +59,47 @@ test("runChildAgent surfaces an error stop reason as a failure", async () => {
 	assert.equal(r.errorMessage, "stub failure");
 });
 
-test("runChildAgent kills a hung child after timeoutMs and reports the timeout", async () => {
+test("runChildAgent kills a hung child after timeoutMs and reports the timeout (timedOut, not aborted)", async () => {
 	const r = await runChildAgent({ task: "hang [sleep]" }, undefined, {
 		resolveInvocation: resolveFake,
 		killGraceMs: 200,
 		timeoutMs: 150,
 	});
-	assert.equal(r.aborted, true);
+	assert.equal(r.timedOut, true, "timeout is reported via timedOut");
+	assert.equal(r.aborted, false, "a timeout is NOT an abort");
 	assert.equal(r.ok, false);
 	assert.match(r.errorMessage ?? "", /timed out/);
+});
+
+test(
+	"runChildAgent escalates to a force tree-kill when the child ignores SIGTERM",
+	{ skip: process.platform === "win32" },
+	async () => {
+		const killed: number[] = [];
+		const r = await runChildAgent({ task: "stubborn [ignore-term]" }, undefined, {
+			resolveInvocation: resolveFake,
+			timeoutMs: 120,
+			killGraceMs: 120,
+			killProcessTree: (pid) => {
+				killed.push(pid);
+				process.kill(pid, "SIGKILL"); // SIGKILL can't be caught → child actually dies
+			},
+		});
+		assert.equal(killed.length, 1, "escalation fired exactly once via the kill seam");
+		assert.equal(r.timedOut, true);
+		assert.equal(r.aborted, false);
+		assert.equal(r.ok, false);
+	},
+);
+
+test("runChildAgent caps retained stderr and marks it truncated", async () => {
+	const r = await runChildAgent({ task: "loud [spew-stderr]" }, undefined, {
+		resolveInvocation: resolveFake,
+		maxStderrBytes: 1000,
+	});
+	assert.equal(r.ok, true, "a normal exit is still a success despite noisy stderr");
+	assert.ok(r.stderr.length <= 1000 + 32, "stderr is bounded near the cap");
+	assert.match(r.stderr, /\[stderr truncated\]/);
 });
 
 test("runChildAgent surfaces a spawn failure (ENOENT) in errorMessage instead of swallowing it", async () => {

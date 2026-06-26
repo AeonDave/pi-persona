@@ -177,3 +177,53 @@ test("feedLines: empty chunk preserves buffer as rest; consecutive newlines yiel
 test("snapshot of a brand-new stream state is zeroed", () => {
 	assert.deepEqual(snapshot(createStreamState()), { output: "", turns: 0, tokens: 0 });
 });
+
+// --- G1: cacheWrite is num-guarded like the other usage fields ---
+test("num guard applies to cacheWrite (NaN contributes 0)", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [], usage: { cacheWrite: NaN } } });
+	assert.equal(s.usage.cacheWrite, 0);
+});
+
+// --- G2: CRLF input yields clean lines (trailing CR stripped) ---
+test("feedLines strips a trailing CR so CRLF output parses cleanly", () => {
+	assert.deepEqual(feedLines("", "a\r\nb"), { lines: ["a"], rest: "b" });
+	assert.deepEqual(feedLines("", "a\r\nb\r\nc"), { lines: ["a", "b"], rest: "c" });
+	// A bare CR (no following LF) stays in the partial remainder.
+	assert.deepEqual(feedLines("", "a\rb"), { lines: [], rest: "a\rb" });
+});
+
+// --- G3: sawAssistant stays true once set, even across later ignored events ---
+test("sawAssistant remains true after a subsequent ignored event", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } });
+	assert.equal(s.sawAssistant, true);
+	applyEvent(s, { type: "turn_start" });
+	assert.equal(s.sawAssistant, true);
+});
+
+// --- G4: a text part whose `text` is non-string is skipped, not accepted ---
+test("firstText skips a text part with a non-string body and takes the next valid one", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text: 123 }, { type: "text", text: "ok" }] },
+	});
+	assert.equal(s.output, "ok");
+});
+
+// --- G5: cost.total is num-guarded (non-number total contributes 0) ---
+test("usage.cost contributes 0 when cost.total is non-number", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [], usage: { cost: { total: NaN } } } });
+	assert.equal(s.usage.cost, 0);
+});
+
+// --- G6: a later turn without totalTokens must NOT zero the running contextTokens ---
+test("contextTokens is preserved when a later turn omits totalTokens", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [], usage: { totalTokens: 100 } } });
+	assert.equal(s.usage.contextTokens, 100);
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [], usage: { input: 1 } } });
+	assert.equal(s.usage.contextTokens, 100, "missing totalTokens leaves the prior value intact");
+});

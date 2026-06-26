@@ -72,7 +72,11 @@ export function applyEvent(state: StreamState, event: unknown): void {
 		state.usage.cacheRead += num(usage.cacheRead);
 		state.usage.cacheWrite += num(usage.cacheWrite);
 		state.usage.cost += isObject(usage.cost) ? num(usage.cost.total) : 0;
-		state.usage.contextTokens = num(usage.totalTokens);
+		// contextTokens is the *current* window size, not a sum — replace it, but
+		// only when this turn actually reported one (don't zero it out otherwise).
+		if (typeof usage.totalTokens === "number" && !Number.isNaN(usage.totalTokens)) {
+			state.usage.contextTokens = usage.totalTokens;
+		}
 	}
 
 	if (state.model === undefined && typeof msg.model === "string") state.model = msg.model;
@@ -95,5 +99,8 @@ export function snapshot(state: StreamState): ProgressSnapshot {
 export function feedLines(buffer: string, chunk: string): { lines: string[]; rest: string } {
 	const parts = (buffer + chunk).split("\n");
 	const rest = parts.pop() ?? "";
-	return { lines: parts, rest };
+	// Strip a trailing CR so CRLF (Windows) output yields clean lines; the partial
+	// remainder is left untouched (it may be mid-line).
+	const lines = parts.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	return { lines, rest };
 }
