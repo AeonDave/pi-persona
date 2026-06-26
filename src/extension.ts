@@ -228,13 +228,24 @@ export default function piPersona(pi: ExtensionAPI): void {
 	});
 
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
+	const SkillsSchema = Type.Array(Type.String(), {
+		description: "Skills the sub-agent loads first — spawns a dynamic specialist (skills are inherited from the host)",
+	});
+	const DelegateTaskItem = Type.Object({
+		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
+		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
+		skills: Type.Optional(SkillsSchema),
+		model: Type.Optional(Type.String({ description: "Model override for this sub-agent" })),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent" })),
+	});
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
+		skills: Type.Optional(SkillsSchema),
+		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode)" })),
 		tasks: Type.Optional(
-			Type.Array(Type.Object({ agent: Type.String(), task: Type.String() }), {
-				description: "Independent tasks to run in parallel, each {agent, task}",
-			}),
+			Type.Array(DelegateTaskItem, { description: "Independent tasks to run in parallel — give each a disjoint scope" }),
 		),
 		concurrency: Type.Optional(Type.Number({ description: "Max children to run at once (default 4)" })),
 		async: Type.Optional(

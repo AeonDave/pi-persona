@@ -33,6 +33,13 @@ test("makeEngine runs a named agent and returns its output", async () => {
 	assert.equal(r.usage.input, 5);
 });
 
+test("makeEngine prepends a skill-load directive when skills are requested (dynamic sub-agent)", async () => {
+	const r = await engine().run({ agent: "scout", task: "explore", skills: ["python-patterns", "python-testing"] });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /Load these skills/);
+	assert.match(r.output, /python-patterns/);
+});
+
 test("makeEngine fails cleanly for an unknown agent", async () => {
 	const r = await engine().run({ agent: "ghost", task: "x" });
 	assert.equal(r.ok, false);

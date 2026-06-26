@@ -51,6 +51,23 @@ test("runDelegate reports live per-task views via onProgress (parallel)", async 
 	assert.equal(doneCounts[doneCounts.length - 1], 2);
 });
 
+test("runDelegate passes per-task skills/model/tools to the engine (dynamic sub-agent)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (s) => {
+			specs.push(s);
+			return { agent: s.agent, output: "o", usage: usage(), ok: true };
+		},
+	};
+	await runDelegate(
+		{ tasks: [{ agent: "operator", task: "do it", skills: ["python-patterns"], model: "prov/m", tools: ["read"] }] },
+		engine,
+	);
+	assert.deepEqual(specs[0]?.skills, ["python-patterns"]);
+	assert.equal(specs[0]?.model, "prov/m");
+	assert.deepEqual(specs[0]?.tools, ["read"]);
+});
+
 test("runDelegate single mode produces one done view", async () => {
 	const r = await runDelegate({ agent: "x", task: "t" }, engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true })));
 	assert.equal(r.views.length, 1);

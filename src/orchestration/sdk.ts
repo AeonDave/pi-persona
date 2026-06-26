@@ -16,6 +16,8 @@ export interface AgentRunSpec {
 	task: string;
 	model?: string;
 	tools?: string[];
+	/** Skills the sub-agent must load first (dynamic specialisation). */
+	skills?: string[];
 	outputContract?: string;
 }
 
