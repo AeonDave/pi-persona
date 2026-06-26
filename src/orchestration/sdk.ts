@@ -31,7 +31,7 @@ export interface AgentProgress {
 
 /** The engine seam the SDK runs agents through (real child engine or a stub). */
 export interface StrategyEngine {
-	run(spec: AgentRunSpec, onProgress?: (progress: AgentProgress) => void): Promise<AgentResult>;
+	run(spec: AgentRunSpec, onProgress?: (progress: AgentProgress) => void, signal?: AbortSignal): Promise<AgentResult>;
 }
 
 export interface Roster {
@@ -75,6 +75,8 @@ export interface SDKDeps {
 	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
 	/** Per-agent streaming progress (rolling output), for live UI. */
 	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
+	/** Called as each agent starts with a handle to abort just that agent (for UI stop). */
+	onAgentStart?: (agent: string, abort: () => void) => void;
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
@@ -92,10 +94,16 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				throw new Error(`run exceeded token budget (${deps.limits.budgetTokens})`);
 			}
 			childrenSpawned += 1;
+			const ac = new AbortController();
+			deps.onAgentStart?.(spec.agent, () => ac.abort());
 			deps.onAgentStatus?.(spec.agent, "running");
 			const onProgress = deps.onAgentProgress;
 			try {
-				const result = await deps.engine.run(spec, onProgress ? (p) => onProgress(spec.agent, p) : undefined);
+				const result = await deps.engine.run(
+					spec,
+					onProgress ? (p) => onProgress(spec.agent, p) : undefined,
+					ac.signal,
+				);
 				tokensSpent += result.usage.input + result.usage.output;
 				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result);
 				return result;
