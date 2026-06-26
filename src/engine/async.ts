@@ -28,6 +28,7 @@ export class AsyncRunTracker {
 	private readonly runs = new Map<string, AsyncRun>();
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
 	private seq = 0;
+	private readonly maxRetained = 25;
 
 	launch(meta: { agent: string; task: string }, run: RunThunk): string {
 		this.seq += 1;
@@ -54,10 +55,20 @@ export class AsyncRunTracker {
 				entry.error = err instanceof Error ? err.message : String(err);
 			})
 			.finally(() => {
+				this.prune();
 				for (const cb of this.completeListeners) cb(entry);
 			});
 
 		return id;
+	}
+
+	/** Keep the map bounded by evicting the oldest *completed* runs (FIFO). */
+	private prune(): void {
+		if (this.runs.size <= this.maxRetained) return;
+		for (const [id, run] of this.runs) {
+			if (this.runs.size <= this.maxRetained) break;
+			if (run.status !== "running") this.runs.delete(id);
+		}
 	}
 
 	peek(id: string): AsyncRun | undefined {

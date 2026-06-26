@@ -37,7 +37,8 @@ export function flattenTree(nodes: AgentNode[]): FlatRow[] {
 	return rows;
 }
 
-const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗" };
+/** Status → glyph, shared by every agent surface (tree, overlay). */
+export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗" };
 
 /** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
 export function renderAgentTree(nodes: AgentNode[]): string[] {

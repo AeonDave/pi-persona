@@ -59,6 +59,17 @@ test("runChildAgent surfaces an error stop reason as a failure", async () => {
 	assert.equal(r.errorMessage, "stub failure");
 });
 
+test("runChildAgent kills a hung child after timeoutMs and reports the timeout", async () => {
+	const r = await runChildAgent({ task: "hang [sleep]" }, undefined, {
+		resolveInvocation: resolveFake,
+		killGraceMs: 200,
+		timeoutMs: 150,
+	});
+	assert.equal(r.aborted, true);
+	assert.equal(r.ok, false);
+	assert.match(r.errorMessage ?? "", /timed out/);
+});
+
 test("runChildAgent aborts a running child via the AbortSignal", async () => {
 	const ac = new AbortController();
 	const p = runChildAgent({ task: "wait [sleep]" }, ac.signal, { resolveInvocation: resolveFake, killGraceMs: 200 });

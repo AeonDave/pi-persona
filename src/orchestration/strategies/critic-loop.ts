@@ -13,7 +13,7 @@ export const criticLoop: Strategy = {
 	name: "critic-loop",
 	async run(input, sdk) {
 		const rosterAgents = input.roster ? sdk.roster.team(input.roster) : [];
-		const generator = str(input.params.generator, rosterAgents[0] ?? "worker");
+		const generator = str(input.params.generator, rosterAgents[0] ?? "builder");
 		const critic = str(input.params.critic, "skeptic");
 		const maxRounds = typeof input.params.rounds === "number" ? input.params.rounds : 3;
 
