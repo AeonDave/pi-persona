@@ -54,6 +54,30 @@ export const DEFAULT_CONTRACT: ContractDef = {
 	},
 };
 
+/**
+ * Pull a JSON candidate out of an LLM reply before parsing. Models very often wrap
+ * structured output in a ```json fence or surround it with prose ("Here you go: {…}"),
+ * which makes a raw `JSON.parse` throw and silently fails the whole contract (the magi
+ * bug: every member's vote excluded as "invalid output"). This strips a fenced code
+ * block and narrows to the outermost {…}/[…]. Returns the trimmed input unchanged when
+ * no object/array is found, so genuinely-malformed output still fails parsing naturally.
+ */
+export function extractJsonCandidate(text: string): string {
+	let s = text.trim();
+	// 1) Unwrap a fenced code block: ```json\n…\n``` or ```\n…\n``` (language tag optional).
+	const fence = s.match(/^```[^\n`]*\n([\s\S]*?)```\s*$/);
+	if (fence?.[1] !== undefined) s = fence[1].trim();
+	// 2) Narrow to the outermost object/array if prose surrounds it. lastIndexOf finds the
+	//    final closer, so a `}`/`]` inside a string value doesn't truncate the object.
+	const starts = [s.indexOf("{"), s.indexOf("[")].filter((i) => i >= 0);
+	if (starts.length > 0) {
+		const start = Math.min(...starts);
+		const end = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
+		if (end > start) s = s.slice(start, end + 1);
+	}
+	return s;
+}
+
 /** Deterministic, key-order-independent serialisation for hashing. */
 function stableStringify(v: unknown): string {
 	if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";

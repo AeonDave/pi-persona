@@ -33,6 +33,41 @@ test("magi runs the roster, votes by majority, and reports the ruling + tally", 
 	assert.match(r.output, /dissent/i);
 });
 
+test("magi's ruling renders the winner's human fields, not the raw JSON envelope", async () => {
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => ({
+			agent: s.agent,
+			output: '```json\n{"result":"ship json","vote":"json","output":"because reasons","confidence":0.9}\n```',
+			structured: { result: "ship json", vote: "json", output: "because reasons", confidence: 0.9 },
+			usage: usage(),
+			ok: true,
+		}),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["melchior", "balthasar", "casper"] }, limits: LIMITS });
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
+	assert.match(r.output, /ship json/, "shows the winner's one-line result");
+	assert.match(r.output, /because reasons/, "shows the winner's output synthesis");
+	assert.doesNotMatch(r.output, /```/, "no code fence leaks into the ruling");
+	assert.doesNotMatch(r.output, /"vote":/, "no raw JSON envelope in the ruling");
+});
+
+test("magi leads with the ruling (not the decision/tally plumbing) and exposes a headline", async () => {
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => ({
+			agent: s.agent,
+			output: "raw",
+			structured: { result: "ship json", vote: "json", output: "because reasons", confidence: 0.9 },
+			usage: usage(),
+			ok: true,
+		}),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["melchior", "balthasar", "casper"] }, limits: LIMITS });
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
+	assert.doesNotMatch(r.output.split("\n")[0] ?? "", /MAGI decision|tally/, "content leads with the ruling, not the plumbing");
+	assert.match(r.output, /ship json/);
+	assert.equal(r.structured?.headline, "ship json", "headline is the winner's one-liner, for the collapsed card");
+});
+
 test("magi honours unanimity and surfaces no_consensus when the 3 disagree", async () => {
 	const sdk = makeSDK({
 		engine: votingEngine({ melchior: "A", balthasar: "B", casper: "C" }),

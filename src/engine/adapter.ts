@@ -6,7 +6,7 @@
  */
 
 import type { AgentConfig } from "../agents/agent.ts";
-import { type ContractDef, pinContract, type PinnedContract, validateAgainst, type ValidationResult } from "../core/contract.ts";
+import { type ContractDef, extractJsonCandidate, pinContract, type PinnedContract, validateAgainst, type ValidationResult } from "../core/contract.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
@@ -94,7 +94,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				if (def) {
 					let parsed: unknown;
 					try {
-						parsed = JSON.parse(child.output);
+						// Strip ```json fences / surrounding prose first — models routinely wrap
+						// structured output, and a raw parse would fail every fenced member's vote.
+						parsed = JSON.parse(extractJsonCandidate(child.output));
 					} catch {
 						parsed = undefined;
 					}

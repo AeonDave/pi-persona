@@ -84,6 +84,52 @@ test("applyEvent captures error stop reason and message", () => {
 	assert.equal(s.errorMessage, "boom");
 });
 
+test("message_update streams the in-progress text live (partial), cleared when the message ends", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "Three facts clo" }] } });
+	assert.match(snapshot(s).output, /Three facts clo/, "partial text is visible mid-generation");
+	applyEvent(s, { type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "Three facts close this" }] } });
+	assert.match(snapshot(s).output, /Three facts close this/, "partial grows as more streams in");
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Three facts close this decisively." }] } });
+	assert.match(snapshot(s).output, /decisively/);
+	assert.equal(s.partial, "", "partial clears once the message completes (it's now in the transcript)");
+});
+
+test("message_update shows thinking while there is no answer text yet", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_update", message: { role: "assistant", content: [{ type: "thinking", thinking: "Let me weigh JSON vs YAML…" }] } });
+	assert.match(snapshot(s).output, /weigh JSON vs YAML/, "reasoning is surfaced so a thinking agent isn't a mute 'waiting'");
+});
+
+test("message_update keeps reasoning AND answer visible together — new text doesn't erase the thinking", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_update",
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "weighing the options" },
+				{ type: "text", text: "the answer is json" },
+			],
+		},
+	});
+	const out = snapshot(s).output;
+	assert.match(out, /weighing the options/, "reasoning stays visible");
+	assert.match(out, /the answer is json/, "answer is visible too");
+});
+
+test("snapshot accumulates a transcript of assistant messages (live view), while state.output stays the last", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "first message" }] } });
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "second message" }] } });
+	// The live snapshot must show BOTH messages (the user reads the progression in f9),
+	// not just the latest — a new message must not erase the previous one.
+	assert.match(snapshot(s).output, /first message/);
+	assert.match(snapshot(s).output, /second message/);
+	// The final answer (used for the returned result) is still the last text only.
+	assert.equal(s.output, "second message");
+});
+
 test("snapshot exposes a compact progress view of the accumulating state", () => {
 	const s = createStreamState();
 	applyEvent(s, {
