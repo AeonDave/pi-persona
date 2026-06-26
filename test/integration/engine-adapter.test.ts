@@ -62,6 +62,27 @@ test("makeEngine streams the child's rolling output via the per-call onProgress"
 	);
 });
 
+test("makeEngine appends an explicit thinking level to the child model (avoids default adaptive)", async () => {
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		childOptions: { resolveInvocation: resolveFake },
+		childThinking: "high",
+	});
+	const r = await eng.run({ agent: "scout", task: "do [args]" });
+	assert.match(r.output, /--model m:high/, "thinking appended as model:level");
+});
+
+test("makeEngine does not double a thinking suffix already on the model", async () => {
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		childOptions: { resolveInvocation: resolveFake },
+		childThinking: "high",
+	});
+	const r = await eng.run({ agent: "scout", task: "do [args]", model: "prov/x:low" });
+	assert.match(r.output, /--model prov\/x:low/);
+	assert.doesNotMatch(r.output, /:low:high/);
+});
+
 test("makeEngine fails cleanly for an unknown agent", async () => {
 	const r = await engine().run({ agent: "ghost", task: "x" });
 	assert.equal(r.ok, false);
