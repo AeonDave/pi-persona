@@ -21,6 +21,18 @@ if (task.includes("[sleep]")) {
 		},
 	});
 	process.exit(0);
+} else if (task.includes("[env]")) {
+	emit({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: `PI_PERSONA_DISABLE=${process.env.PI_PERSONA_DISABLE ?? "unset"} PI_PERSONA_CHILD=${process.env.PI_PERSONA_CHILD ?? "unset"}` }],
+			model: "stub/model",
+			stopReason: "end",
+			usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },
+		},
+	});
+	process.exit(0);
 } else if (task.includes("[json]")) {
 	emit({
 		type: "message_end",
