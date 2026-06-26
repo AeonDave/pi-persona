@@ -19,7 +19,7 @@ about what is actually buildable. Vote on the SAME decision the question poses.
 Return ONLY a JSON object (no prose around it):
 {
   "result": "<one-line ruling — the implementable synthesis>",
-  "vote": "<the option you back — a single lowercase, hyphen-joined token, comparable to the others>",
+  "vote": "<your answer to the EXACT question, as the bare option token: for 'X or Y?' vote 'x' or 'y' — NO qualifiers or conditions (never 'json-only'/'json-first'). Put nuance in result/output so the votes tally together>",
   "confidence": 0.0,
   "output": "<the synthesized, executable plan>",
   "evidence": "<why this is the most robust doable form>"

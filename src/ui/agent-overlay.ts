@@ -15,9 +15,9 @@ import {
 	getKeybindings,
 	Spacer,
 	Text,
-	truncateToWidth,
 	type TUI,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
 import { type AgentTree, type FlatRow, flattenTree, GLYPH } from "./agent-tree.ts";
@@ -124,14 +124,20 @@ export class AgentOverlay extends Container {
 			: live
 				? "(working… the report appears here when the agent writes text — see its current tool above)"
 				: "(no output)";
-		const all = raw.split("\n");
+		const w = this.inner() - 1;
+		// Wrap long lines instead of truncating — the user must be able to read the full
+		// text. The viewport + scroll then operate over the wrapped display lines, so a
+		// long message spans several rows rather than being cut off with an ellipsis.
+		const all = raw.split("\n").flatMap((line) => {
+			const wrapped = wrapTextWithAnsi(line, w);
+			return wrapped.length > 0 ? wrapped : [""]; // keep blank lines (paragraph spacing)
+		});
 		const maxScroll = Math.max(0, all.length - VIEWPORT);
 		if (this.detailScroll > maxScroll) this.detailScroll = maxScroll;
 		const end = all.length - this.detailScroll;
 		const start = Math.max(0, end - VIEWPORT);
-		const w = this.inner() - 1;
 		if (start > 0) this.addChild(new Text(t.fg("dim", `▲ ${start} earlier`), 1, 0));
-		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", truncateToWidth(line, w)), 1, 0));
+		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
 
 		this.addChild(new Spacer(1));

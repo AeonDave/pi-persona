@@ -20,8 +20,14 @@ export interface ChildUsage {
 }
 
 export interface StreamState {
-	/** The last assistant text content seen (the agent's answer). */
+	/** The last assistant text content seen (the agent's answer — the returned result). */
 	output: string;
+	/** All assistant texts so far, accumulated — the live transcript shown in the f9
+	 *  detail view so the user reads the whole progression, not just the latest message. */
+	transcript: string;
+	/** The current in-progress message's visible content (streamed text, or reasoning
+	 *  while there's no answer text yet). Cleared on message_end (folded into transcript). */
+	partial: string;
 	usage: ChildUsage;
 	model?: string;
 	stopReason?: string;
@@ -36,7 +42,7 @@ export function emptyUsage(): ChildUsage {
 }
 
 export function createStreamState(): StreamState {
-	return { output: "", usage: emptyUsage(), sawAssistant: false };
+	return { output: "", transcript: "", partial: "", usage: emptyUsage(), sawAssistant: false };
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {
@@ -53,6 +59,20 @@ function firstText(content: unknown): string | undefined {
 		if (isObject(part) && part.type === "text" && typeof part.text === "string") return part.text;
 	}
 	return undefined;
+}
+
+/** The visible content of an in-progress message: its reasoning AND its answer text,
+ *  in content order, so a thinking agent isn't a mute "waiting" and the answer appearing
+ *  doesn't erase the reasoning that led to it. */
+function liveContent(content: unknown): string | undefined {
+	if (!Array.isArray(content)) return undefined;
+	const parts: string[] = [];
+	for (const part of content) {
+		if (!isObject(part)) continue;
+		if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) parts.push(part.thinking);
+		else if (part.type === "text" && typeof part.text === "string" && part.text.trim()) parts.push(part.text);
+	}
+	return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
 /** A short "toolName arg" activity label from a tool_execution_start event. */
@@ -81,16 +101,32 @@ export function applyEvent(state: StreamState, event: unknown): void {
 		return;
 	}
 
+	// Live partial: pi streams the growing message as `message_update` events. Surface
+	// its text (or reasoning) so a long-thinking agent shows progress, not just tokens.
+	if ((event.type === "message_update" || event.type === "message_start") && isObject(event.message)) {
+		const live = liveContent(event.message.content);
+		if (live !== undefined) {
+			state.partial = live;
+			delete state.activity; // generating, not running a tool
+		}
+		return;
+	}
+
 	if (event.type !== "message_end" || !isObject(event.message)) return;
 	const msg = event.message;
 	if (msg.role !== "assistant") return;
 
 	delete state.activity; // a message means it's reasoning, not mid-tool
+	state.partial = ""; // the completed message is folded into the transcript below
 	state.sawAssistant = true;
 	state.usage.turns++;
 
 	const text = firstText(msg.content);
-	if (text !== undefined) state.output = text;
+	if (text !== undefined) {
+		state.output = text;
+		// Append (don't replace) so the live view keeps the full progression of messages.
+		if (text) state.transcript += (state.transcript ? "\n\n" : "") + text;
+	}
 
 	const usage = msg.usage;
 	if (isObject(usage)) {
@@ -122,7 +158,9 @@ export interface ProgressSnapshot {
 
 export function snapshot(state: StreamState): ProgressSnapshot {
 	const snap: ProgressSnapshot = {
-		output: state.output,
+		// The live view shows completed messages (transcript) plus the in-progress one
+		// (partial), falling back to the last text before anything has accumulated.
+		output: [state.transcript, state.partial].filter((s) => s).join("\n\n") || state.output,
 		turns: state.usage.turns,
 		tokens: state.usage.input + state.usage.output,
 	};
