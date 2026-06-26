@@ -29,7 +29,11 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `unknown agent: ${spec.agent}` };
 			}
 
-			const childSpec: ChildRunSpec = { task: spec.task };
+			const task =
+				spec.skills && spec.skills.length > 0
+					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`
+					: spec.task;
+			const childSpec: ChildRunSpec = { task };
 			const model = spec.model ?? cfg.model;
 			if (model) childSpec.model = model;
 			const tools = spec.tools ?? cfg.tools;
