@@ -17,6 +17,9 @@
   "license": "MIT",
   "files": [
     "src",
+    "personas",
+    "agents",
+    "teams.yaml",
     "README.md",
     "AGENTS.md"
   ],

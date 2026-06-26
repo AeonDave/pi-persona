@@ -1,0 +1,4 @@
+# Rosters: a team name → an ordered list of agent names.
+# Referenced by a persona's `orchestration.roster`. Project/user copies override.
+review: [security, performance, tests]
+antagonist: [builder]
