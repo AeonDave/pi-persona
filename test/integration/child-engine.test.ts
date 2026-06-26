@@ -70,6 +70,15 @@ test("runChildAgent kills a hung child after timeoutMs and reports the timeout",
 	assert.match(r.errorMessage ?? "", /timed out/);
 });
 
+test("runChildAgent surfaces a spawn failure (ENOENT) in errorMessage instead of swallowing it", async () => {
+	const r = await runChildAgent({ task: "x" }, undefined, {
+		resolveInvocation: () => ({ command: "definitely-not-a-real-binary-xyz", args: [] }),
+	});
+	assert.equal(r.ok, false);
+	assert.equal(r.exitCode, 1);
+	assert.match(r.errorMessage ?? "", /failed to spawn pi:/);
+});
+
 test("runChildAgent aborts a running child via the AbortSignal", async () => {
 	const ac = new AbortController();
 	const p = runChildAgent({ task: "wait [sleep]" }, ac.signal, { resolveInvocation: resolveFake, killGraceMs: 200 });

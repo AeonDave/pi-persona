@@ -24,6 +24,22 @@ export function extractDelegateTargets(input: unknown): string[] {
 	return targets;
 }
 
+/** The tool overrides a delegate call requests for its sub-agents (single + tasks[]). */
+export function extractDelegateTools(input: unknown): string[] {
+	const out: string[] = [];
+	const collect = (o: Record<string, unknown>): void => {
+		if (Array.isArray(o.tools)) for (const t of o.tools) if (typeof t === "string") out.push(t);
+	};
+	if (input && typeof input === "object") {
+		const o = input as Record<string, unknown>;
+		collect(o);
+		if (Array.isArray(o.tasks)) {
+			for (const t of o.tasks) if (t && typeof t === "object") collect(t as Record<string, unknown>);
+		}
+	}
+	return [...new Set(out)];
+}
+
 export interface GateResult {
 	block: true;
 	reason: string;
@@ -45,6 +61,15 @@ export function gateToolCall(
 	const blocked = extractDelegateTargets(input).filter((t) => !canDelegateTo(caps, t));
 	if (blocked.length > 0) {
 		return { block: true, reason: `Persona "${personaLabel}" may not delegate to: ${blocked.join(", ")}.` };
+	}
+	// I4: a sub-agent's tool override cannot exceed the persona's own capabilities —
+	// otherwise a tools-restricted persona could escalate via `delegate({ tools: [...] })`.
+	const escalated = extractDelegateTools(input).filter((t) => !canCallTool(caps, t));
+	if (escalated.length > 0) {
+		return {
+			block: true,
+			reason: `Persona "${personaLabel}" cannot grant a sub-agent tools it lacks: ${escalated.join(", ")}.`,
+		};
 	}
 	return undefined;
 }

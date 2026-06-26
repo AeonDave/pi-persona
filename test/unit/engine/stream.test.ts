@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyEvent, createStreamState, feedLines, snapshot } from "../../../src/engine/stream.ts";
+import { applyEvent, createStreamState, emptyUsage, feedLines, snapshot } from "../../../src/engine/stream.ts";
 
 test("feedLines buffers partial lines across chunks", () => {
 	assert.deepEqual(feedLines("", "a\nb\nc"), { lines: ["a", "b"], rest: "c" });
@@ -96,4 +96,84 @@ test("applyEvent ignores non-message_end events, non-assistant roles, and malfor
 	assert.equal(s.output, "");
 	assert.equal(s.usage.turns, 0);
 	assert.equal(s.sawAssistant, false);
+});
+
+test("emptyUsage returns a fresh all-zero usage object on each call", () => {
+	const a = emptyUsage();
+	assert.deepEqual(a, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 });
+	const b = emptyUsage();
+	assert.notEqual(a, b, "each call returns a new object");
+	a.input = 99;
+	assert.equal(b.input, 0, "mutating one does not affect another");
+});
+
+test("firstText picks text after a non-text part, and the first of multiple texts", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "toolCall", name: "x" }, { type: "text", text: "after-tool" }] },
+	});
+	assert.equal(s.output, "after-tool");
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] },
+	});
+	assert.equal(s.output, "one", "first text part wins");
+});
+
+test("firstText leaves output unchanged when content is missing or not an array", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "keep" }] } });
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: "not-an-array" } });
+	applyEvent(s, { type: "message_end", message: { role: "assistant" } });
+	assert.equal(s.output, "keep");
+	assert.equal(s.usage.turns, 3);
+});
+
+test("num guards: NaN or non-number usage fields contribute 0", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [], usage: { input: "x", output: NaN, cacheRead: 5 } },
+	});
+	assert.equal(s.usage.input, 0);
+	assert.equal(s.usage.output, 0);
+	assert.equal(s.usage.cacheRead, 5);
+});
+
+test("usage.cost contributes 0 when cost is a plain number (only cost.total counts)", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [], usage: { cost: 0.5 } },
+	});
+	assert.equal(s.usage.cost, 0);
+});
+
+test("contextTokens is replaced each turn, not summed", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [], usage: { totalTokens: 100 } } });
+	assert.equal(s.usage.contextTokens, 100);
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [], usage: { totalTokens: 250 } } });
+	assert.equal(s.usage.contextTokens, 250);
+});
+
+test("model ignored when non-string; stopReason and errorMessage ignored when non-string", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [], model: 123, stopReason: 5, errorMessage: { x: 1 } },
+	});
+	assert.equal(s.model, undefined);
+	assert.equal(s.stopReason, undefined);
+	assert.equal(s.errorMessage, undefined);
+});
+
+test("feedLines: empty chunk preserves buffer as rest; consecutive newlines yield an empty line", () => {
+	assert.deepEqual(feedLines("buf", ""), { lines: [], rest: "buf" });
+	assert.deepEqual(feedLines("", "a\n\nb"), { lines: ["a", ""], rest: "b" });
+});
+
+test("snapshot of a brand-new stream state is zeroed", () => {
+	assert.deepEqual(snapshot(createStreamState()), { output: "", turns: 0, tokens: 0 });
 });

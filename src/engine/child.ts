@@ -99,6 +99,7 @@ export async function runChildAgent(
 	let stderr = "";
 	let aborted = false;
 	let timedOut = false;
+	let spawnError: Error | undefined;
 
 	try {
 		const exitCode = await new Promise<number>((resolveP) => {
@@ -147,7 +148,10 @@ export async function runChildAgent(
 				if (buffer.trim()) onLine(buffer);
 				resolveP(code ?? 0);
 			});
-			proc.on("error", () => {
+			// A spawn failure (e.g. ENOENT: `pi` not on PATH) must not be silently
+			// folded into a bare exit code — capture it so it surfaces in errorMessage.
+			proc.on("error", (err: Error) => {
+				spawnError = err;
 				if (timer) clearTimeout(timer);
 				resolveP(1);
 			});
@@ -179,6 +183,7 @@ export async function runChildAgent(
 		if (state.model !== undefined) result.model = state.model;
 		if (state.stopReason !== undefined) result.stopReason = state.stopReason;
 		if (state.errorMessage !== undefined) result.errorMessage = state.errorMessage;
+		if (spawnError && result.errorMessage === undefined) result.errorMessage = `failed to spawn pi: ${spawnError.message}`;
 		if (timedOut && result.errorMessage === undefined) result.errorMessage = `agent timed out after ${opts.timeoutMs}ms`;
 		return result;
 	} finally {
