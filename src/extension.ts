@@ -38,9 +38,10 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import { type DelegateView, labelFor, runDelegate } from "./tools/delegate.ts";
+import { type DelegateView, labelFor, runDelegate, shortModel } from "./tools/delegate.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
+import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -98,9 +99,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (!lastCtx) return;
 		const empty = agentTree.isEmpty();
 		try {
-			const lines = empty
-				? undefined
-				: [...renderAgentTree(agentTree.snapshot()), agentTree.hasRunning() ? "  f9: navigate · drill in" : ""];
+			const lines = empty ? undefined : renderAgentTree(agentTree.snapshot());
 			lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
 		} catch {
 			/* cosmetic — the widget is best-effort */
@@ -261,6 +260,23 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return makeEngine(deps);
 	}
 
+	// The models the user actually has configured (authenticated) — NOT every model in
+	// the registry. `getAvailable()` is the registry's "has auth configured" filter; we
+	// fall back to `getAll()` only if it's unexpectedly empty, so a picker is never blank.
+	// This is why the per-agent model popup lists only your providers, and why a loose
+	// name like "sonnet" can't resolve to an unconfigured Bedrock look-alike.
+	function configuredModels(ctx: ExtensionContext): Array<{ provider: string; id: string }> {
+		const reg = ctx.modelRegistry;
+		let list = reg.getAll();
+		try {
+			const avail = reg.getAvailable();
+			if (avail.length > 0) list = avail;
+		} catch {
+			/* older pi without getAvailable() → keep getAll() */
+		}
+		return list.map((m) => ({ provider: m.provider, id: m.id }));
+	}
+
 	// Ask-on-first-run: a parallel ensemble is pointless if every core runs the same
 	// model. The first time a persona runs one, prompt for a model per roster agent and
 	// persist it (per-persona config); later runs reuse the saved assignment.
@@ -272,14 +288,25 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const missing = roster.filter((a) => !configured[a]);
 		if (missing.length === 0) return;
 		modelsPrompted.add(persona);
-		const available = ctx.modelRegistry.getAll();
-		if (available.length < 2) return; // can't diversify with a single model
-		const options = available.map((m) => `${m.provider}/${m.id}`);
+		const available = configuredModels(ctx);
+		if (available.length < 2) return; // can't diversify with a single configured model
+		const options = orderModelRefs(available.map((m) => `${m.provider}/${m.id}`), ctx.model?.provider);
 		try {
 			ctx.ui.notify(`${persona}: pick a model per agent so the ensemble is diverse (Esc keeps the session default).`, "info");
 			const chosen: Record<string, string> = {};
 			for (const agent of missing) {
-				const pick = await ctx.ui.select(`Model for "${agent}"  ·  ${persona}`, options);
+				const title = `Model for "${agent}"  ·  ${persona}`;
+				// In the TUI: a searchable picker (type to filter) whose viewport follows the
+				// selection — the built-in select can't scroll a hundreds-long provider list
+				// usefully. Outside the TUI (RPC), fall back to the built-in select.
+				const pick =
+					ctx.mode === "tui"
+						? await ctx.ui.custom<string | undefined>(
+								(tui, theme, _kb, done) =>
+									new ModelPicker(tui, theme, title, options, ctx.model?.provider, (ref) => done(ref)),
+								{ overlay: true },
+							)
+						: await ctx.ui.select(title, options);
 				if (pick) chosen[agent] = pick;
 			}
 			if (Object.keys(chosen).length > 0) {
@@ -303,9 +330,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
 		await ensurePersonaModels(ctx, roster);
+		// Show each core's model next to its name (e.g. "melchior · sonnet-4-6"): the
+		// per-persona assignment, else the agent's own default, else the session model.
+		const persona = controller.activePersona?.name;
+		const configured = persona ? personaModels(personaConfigs, persona) : {};
+		const labelOf = (agent: string): string => {
+			const model =
+				configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+			const short = shortModel(model);
+			return short ? `${agent} · ${short}` : agent;
+		};
 		const rootId = `${idPrefix}:${label}`;
 		agentTree.add({ id: rootId, label, status: "running" });
-		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: a, parentId: rootId, status: "running" });
+		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: labelOf(a), parentId: rootId, status: "running" });
 		try {
 			return await runPersonaStrategy(orch, task, {
 				engine: buildEngine(signal),
@@ -317,7 +354,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				onAgentStatus: (agent, st, result) => {
 					const id = `${rootId}/${agent}`;
 					if (st === "running") {
-						agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
+						agentTree.add({ id, label: labelOf(agent), parentId: rootId, status: "running" });
 						return;
 					}
 					stopRegistry.delete(id);
@@ -350,11 +387,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 	function searchModels(ctx: ExtensionContext, query?: string): { lines: string[]; total: number; capped: boolean } {
 		const session = ctx.model?.provider;
 		const isSession = (ref: string): boolean => session !== undefined && ref.startsWith(`${session}/`);
-		const all = ctx.modelRegistry.getAll().map((m) => `${m.provider}/${m.id}`);
-		const q = query?.trim().toLowerCase();
-		const filtered = (q ? all.filter((r) => r.toLowerCase().includes(q)) : all).sort(
-			(a, b) => Number(!isSession(a)) - Number(!isSession(b)) || a.localeCompare(b),
-		);
+		const all = configuredModels(ctx).map((m) => `${m.provider}/${m.id}`);
+		const filtered = orderModelRefs(filterModels(all, query ?? ""), session);
 		const cap = 40;
 		const lines = filtered.slice(0, cap).map((r) => `${isSession(r) ? "★ " : "  "}${r}`);
 		return { lines, total: filtered.length, capped: filtered.length > cap };
@@ -471,7 +505,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// error (no spawn) when one is ambiguous/unknown so the supervisor retries with a
 	// valid id instead of wasting a child on an unauthenticated provider.
 	function resolveDelegateModels(params: Static<typeof DelegateParams>, ctx: ExtensionContext): string | undefined {
-		const models = ctx.modelRegistry.getAll().map((m) => ({ provider: m.provider, id: m.id }));
+		const models = configuredModels(ctx);
 		if (models.length === 0) return undefined;
 		const preferProvider = ctx.model?.provider; // the loader/session provider (the authenticated one)
 		const slots: Array<{ ref: string; set: (v: string) => void; who: string }> = [];
@@ -626,16 +660,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 			}
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const running = views.filter((v) => v.running).length;
-			// While running, stay one compact line — the live per-agent detail is the agent
-			// tree (press f9 to navigate). Show the full per-leg cards only once complete.
-			if (running > 0) {
-				const done = views.length - running;
-				return new Text(
-					`${title}${theme.fg("warning", "⏳ ")}${theme.fg("accent", `${done}/${views.length}`)}${theme.fg("dim", " · f9 to watch")}`,
-					0,
-					0,
-				);
-			}
+			// While running, render nothing — the live per-agent view is the tree widget
+			// (and the f9 overlay). A sticky card here would just duplicate it. The full
+			// per-leg cards below appear once the run completes.
+			if (running > 0) return new Container();
 			const okCount = views.filter((v) => v.ok).length;
 			const container = new Container();
 			container.addChild(new Text(`${title}${theme.fg("accent", `${okCount}/${views.length} ok`)}`, 0, 0));
@@ -701,9 +729,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const roster = params.roster ?? council?.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
 				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: council?.params ?? {} };
 				const result = await runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
+				const s = (result?.structured ?? {}) as { headline?: string; status?: string; tally?: Record<string, number> };
 				return {
 					content: [{ type: "text", text: result?.output ?? "(the council returned no ruling)" }],
-					details: { ruling: result?.output ?? "", status: result?.structured?.status },
+					details: {
+						headline: s.headline ?? s.status ?? "",
+						status: s.status,
+						tally: s.tally,
+						body: result?.output ?? "",
+						roster,
+					},
 					isError: !(result?.ok ?? false),
 				};
 			} catch (err) {
@@ -712,13 +747,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 			}
 		},
 		renderCall(args, theme) {
-			const q = args.question ?? "";
-			const preview = q.length > 60 ? `${q.slice(0, 60)}…` : q;
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", args.roster ?? "magi")}${theme.fg("dim", ` ${preview}`)}`,
-				0,
-				0,
-			);
+			// Keep the call line minimal — the question is long and gets truncated; the
+			// verdict shows in the (collapsed) result instead.
+			return new Text(`${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", args.roster ?? "magi")}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme) {
+			const d = (result.details ?? {}) as { headline?: string; tally?: Record<string, number>; body?: string; roster?: string; error?: string };
+			const head = theme.fg("toolTitle", theme.bold("council "));
+			if (d.error) return new Text(`${head}${theme.fg("error", d.error)}`, 0, 0);
+			const tallyStr = d.tally ? Object.entries(d.tally).map(([k, v]) => `${k}=${v}`).join(" ") : "";
+			const tag = theme.fg("dim", `${d.roster ?? "magi"}${tallyStr ? ` · ${tallyStr}` : ""}`);
+			const first = result.content[0];
+			const body = d.body || (first && first.type === "text" ? first.text : "");
+			// Collapsed by default (ctrl+o to expand): a one-line verdict, not the full ruling.
+			if (!expanded) {
+				const src = d.headline || body.split("\n").find((l) => l.trim()) || "(ruling)";
+				const verdict = src.length > 80 ? `${src.slice(0, 80)}…` : src;
+				return new Text(`${head}${tag}  ${theme.fg("accent", verdict)}${theme.fg("dim", "  · ctrl+o")}`, 0, 0);
+			}
+			const c = new Container();
+			c.addChild(new Text(`${head}${tag}`, 0, 0));
+			c.addChild(new Text(theme.fg("toolOutput", body), 0, 0));
+			return c;
 		},
 	});
 
