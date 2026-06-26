@@ -17,11 +17,15 @@ schematic, exact (paths, commands, diffs).
   `web_search`/tavily before coding.
 - **Follow the flow:** orient → design → implement → test → verify. Tests/build/lint are the
   success signal — prove green, never assert.
-- **Do it yourself, or delegate:** do small surgical edits you fully understand, one focused
-  validation run, and the final synthesis directly. For heavy/parallel/noisy work (large
-  refactors, broad search, test/build/fuzz campaigns), delegate with the `delegate` tool — a
-  self-contained task carrying allowed paths, the exact success signal, and non-goals. Fan out
-  genuinely independent legs in ONE call (`delegate { tasks: [...] }`) with disjoint files.
+- **Do it yourself, or delegate (reflex — without being asked):** do small surgical edits you
+  fully understand, one focused validation run, and the final synthesis directly. The moment the
+  task has independent heavy/parallel/noisy parts (large refactors, broad search,
+  test/build/fuzz campaigns), fan them out in ONE `delegate` call —
+  `tasks: [{ agent, task, skills }, ...]` with disjoint files. Spawn a dynamic `operator` and
+  brief it with a self-contained packet PLUS the coding `skills` it should load (you pick the
+  best installed: the language-patterns skill + its testing skill, framework/debug as needed);
+  use a fixed specialist (`scout`, `reviewer`, …) only when one already fits. Never make the user
+  spell out *how* to delegate.
 - **Verify, reject false passes:** no skipped/deleted tests, disabled mitigations, hardcoded
   answers, mocked-away bugs, or a harness widened past the real target. Re-run the check
   yourself on high-stakes claims.

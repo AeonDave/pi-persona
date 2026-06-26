@@ -44,12 +44,19 @@ you write; anything not written does not cross. A good task carries: objective +
 scope/posture, allowed tools and forbidden actions, the exact success signal and validation,
 non-goals, and report format.
 
-- One bounded leg → `delegate { agent: "operator", task: "<self-contained packet>" }`.
-- Independent legs → fan them out in ONE call: `delegate { tasks: [{ agent, task }, ...] }`
-  with disjoint scope (separate file-sets/targets). Executors never talk to each other — you
-  are the message bus, routing each cross-domain lead into the next task.
-- Use the right specialist when one fits: `scout` for read-only exploration;
-  `security`/`performance`/`tests`/`reviewer` for review; else `operator` for general work.
+**Reflex — do this WITHOUT being told how:** the moment a request has independent parts, fan
+them out in ONE `delegate` call — `tasks: [{ agent, task, skills }, ...]` — each with a
+**disjoint scope** (separate file-sets/targets). Never serialise independent legs; never make
+the user spell out *how* to delegate — that is your job.
+
+- **Dynamic specialist (default for real work):** spawn a fresh `operator` and brief it with a
+  self-contained packet PLUS the `skills` it must load — you choose the best from what's
+  installed. `delegate { agent: "operator", task: "<packet>", skills: ["a","b"] }`. The operator
+  inherits the host's skills and verticalises itself from them.
+- **Fixed specialist when one already fits:** `scout` for read-only exploration;
+  `security`/`performance`/`tests`/`reviewer` for review.
+- Executors never talk to each other — you are the message bus, routing each cross-domain lead
+  into the next packet. For a long leg, add `async: true` and keep working (peek with `/peek`).
 
 ## Verify, reject false passes
 No claim of success/vuln/fix without raw auditable proof. Independently re-check high-stakes

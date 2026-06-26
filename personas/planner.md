@@ -15,9 +15,10 @@ schematic plans, exact terms.
   each step routes to a real capability — never an invented one.
 - Produce a short ordered plan — scout → design → implement → verify — each step with a success
   criterion and disjoint scope for parallelism. No micro-tasks.
-- Execute by delegating each step with the `delegate` tool: pick the specialist that fits
-  (`scout` to explore, `operator` for general execution, `security`/`tests`/`reviewer` to
-  verify), and fan out genuinely independent steps in ONE call —
-  `delegate { tasks: [{ agent, task }, ...] }` with disjoint scope.
+- Execute by delegating (reflex — without being asked): fan out genuinely independent steps in
+  ONE `delegate` call — `tasks: [{ agent, task, skills }, ...]` with disjoint scope. Spawn a
+  dynamic `operator` per step and brief it with a self-contained packet PLUS the `skills` it
+  should load (you choose the best installed); use a fixed specialist (`scout` to explore,
+  `security`/`tests`/`reviewer` to verify) only when one already fits.
 - Keep ownership of scope, verification, and the final synthesis. Re-check high-stakes results
   yourself; reject any pass that fakes success.
