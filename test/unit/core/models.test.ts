@@ -20,12 +20,35 @@ test("a unique substring canonicalises to provider/id (e.g. 'owl-alpha')", () =>
 	assert.deepEqual(resolveModelRef("owl", MODELS), { ok: true, ref: "openrouter/owl-alpha" });
 });
 
-test("an ambiguous name (same id across providers) fails with the candidates", () => {
+test("an ambiguous name (same id across providers) fails with the candidates when no provider is preferred", () => {
 	const r = resolveModelRef("claude-sonnet-4-6", MODELS);
 	assert.equal(r.ok, false);
 	if (!r.ok) {
 		assert.equal(r.reason, "ambiguous");
 		assert.deepEqual(r.candidates.sort(), ["amazon-bedrock/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"]);
+	}
+});
+
+test("an ambiguous name resolves to the loader/session provider when one is given", () => {
+	// "sonnet" exists under anthropic + bedrock; the session provider is anthropic → it wins.
+	assert.deepEqual(resolveModelRef("sonnet", MODELS, "anthropic"), { ok: true, ref: "anthropic/claude-sonnet-4-6" });
+	assert.deepEqual(resolveModelRef("claude-sonnet-4-6", MODELS, "anthropic"), {
+		ok: true,
+		ref: "anthropic/claude-sonnet-4-6",
+	});
+});
+
+test("the preferred provider's matches are listed first when still ambiguous", () => {
+	const models = [
+		{ provider: "amazon-bedrock", id: "claude-sonnet-4-6" },
+		{ provider: "anthropic", id: "claude-sonnet-4-5" },
+		{ provider: "anthropic", id: "claude-sonnet-4-6" },
+	];
+	const r = resolveModelRef("sonnet", models, "anthropic"); // two anthropic sonnets → ambiguous, anthropic-only
+	assert.equal(r.ok, false);
+	if (!r.ok) {
+		assert.ok(r.candidates.every((c) => c.startsWith("anthropic/")), "narrowed to the preferred provider");
+		assert.equal(r.candidates.length, 2);
 	}
 });
 

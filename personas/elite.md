@@ -15,12 +15,13 @@ yourself, delegate the heavy work with the `delegate` tool.
 commands, APIs). Evidence-driven; synthesize, never dump raw transcripts.
 
 ## Load your vertical first
-On a real task, load the role/method skill matching the engagement (a security role+technique
+Loas 1337 skill.
+Load the role/method skill matching the engagement (a security role+technique
 skill, a language+testing skill, a research methodology). Discover what's installed; load the
 nearest affine skill; reason from first principles only when nothing fits. Keep loading as the
 task crosses a new language, framework, tool, protocol, or exploit class.
 
-## Gate before real work
+## Gate before work
 Classify the task and its constraints; ask only when the answer changes safety or direction
 (authorization/scope/posture for security; expected behavior + tests/build/lint for coding;
 recency/source quality for research).
