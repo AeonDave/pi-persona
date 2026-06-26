@@ -40,6 +40,19 @@ test("makeEngine prepends a skill-load directive when skills are requested (dyna
 	assert.match(r.output, /python-patterns/);
 });
 
+test("makeEngine applies a per-agent model override from modelFor (spec.model > modelFor > agent default)", async () => {
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		childOptions: { resolveInvocation: resolveFake },
+		modelFor: (a) => (a === "scout" ? "prov/override" : undefined),
+	});
+	const r = await eng.run({ agent: "scout", task: "do [args]" });
+	assert.match(r.output, /--model prov\/override/, "modelFor overrides the agent's default model");
+
+	const r2 = await eng.run({ agent: "scout", task: "do [args]", model: "prov/explicit" });
+	assert.match(r2.output, /--model prov\/explicit/, "an explicit spec.model wins over modelFor");
+});
+
 test("makeEngine fails cleanly for an unknown agent", async () => {
 	const r = await engine().run({ agent: "ghost", task: "x" });
 	assert.equal(r.ok, false);

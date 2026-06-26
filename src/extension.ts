@@ -26,8 +26,9 @@ import { loadDefinitions, loadTeams, type ScopedDir } from "./loader.ts";
 import type { StrategyEngine } from "./orchestration/sdk.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
-import type { Persona } from "./persona/persona.ts";
+import type { OrchestrationGrammar, Persona } from "./persona/persona.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
+import { type PersonaConfigStore, readPersonaConfigs, withPersonaModels, writePersonaConfigs } from "./persona/config-store.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
 import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
 import { formatUsage } from "./ui/usage.ts";
@@ -80,6 +81,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const persist = (name: string | undefined): void => {
 		if (config.persist) writeLastPersona(stateFile, name);
 	};
+
+	// Per-persona config (model assignments today, open-ended), indexed by persona name.
+	const configFile = join(userAgentDir(), "persona", "config.json");
+	let personaConfigs: PersonaConfigStore = {};
+	const modelsPrompted = new Set<string>(); // ask-once-per-session guard
 
 	const defDirs = (cwd: string): ScopedDir[] => [
 		{ path: join(BUNDLED_DIR, "personas"), scope: "builtin" },
@@ -182,11 +188,70 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const deps: EngineAdapterDeps = {
 			resolveAgent: (n) => agents.find((a) => a.name === n),
 			contracts: (n) => (n === "default" ? DEFAULT_CONTRACT : undefined),
+			modelFor: (agent) => {
+				const persona = controller.activePersona?.name;
+				return persona ? personaConfigs[persona]?.models?.[agent] : undefined;
+			},
 		};
 		if (signal) deps.signal = signal;
 		if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
 		if (onProgress) deps.childOptions = { onProgress };
 		return makeEngine(deps);
+	}
+
+	// Ask-on-first-run: a parallel ensemble is pointless if every core runs the same
+	// model. The first time a persona runs one, prompt for a model per roster agent and
+	// persist it (per-persona config); later runs reuse the saved assignment.
+	async function ensurePersonaModels(ctx: ExtensionContext, roster: string[]): Promise<void> {
+		const persona = controller.activePersona?.name;
+		if (!persona || !ctx.hasUI || roster.length < 2) return;
+		if (modelsPrompted.has(persona)) return;
+		const configured = personaConfigs[persona]?.models ?? {};
+		const missing = roster.filter((a) => !configured[a]);
+		if (missing.length === 0) return;
+		modelsPrompted.add(persona);
+		const available = ctx.modelRegistry.getAll();
+		if (available.length < 2) return; // can't diversify with a single model
+		const options = available.map((m) => `${m.provider}/${m.id}`);
+		try {
+			ctx.ui.notify(`${persona}: pick a model per agent so the ensemble is diverse (Esc keeps the session default).`, "info");
+			const chosen: Record<string, string> = {};
+			for (const agent of missing) {
+				const pick = await ctx.ui.select(`Model for "${agent}"  ·  ${persona}`, options);
+				if (pick) chosen[agent] = pick;
+			}
+			if (Object.keys(chosen).length > 0) {
+				personaConfigs = withPersonaModels(personaConfigs, persona, chosen);
+				writePersonaConfigs(configFile, personaConfigs);
+			}
+		} catch {
+			/* dismissed / no UI → fall back to the default model */
+		}
+	}
+
+	// Run a persona strategy with the unified tree wired in: assign models on first run,
+	// seed the roster (cores show by name at once), flip ⏳ → ✓/✗ live, clear when done.
+	async function runStrategyVisible(ctx: ExtensionContext, orch: OrchestrationGrammar, task: string, idPrefix: string) {
+		const label = resolveStrategyName(orch) ?? "strategy";
+		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
+		await ensurePersonaModels(ctx, roster);
+		const rootId = `${idPrefix}:${label}`;
+		agentTree.add({ id: rootId, label, status: "running" });
+		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: a, parentId: rootId, status: "running" });
+		try {
+			return await runPersonaStrategy(orch, task, {
+				engine: buildEngine(),
+				teams,
+				limits: RUN_LIMITS,
+				onAgentStatus: (agent, st) => {
+					const id = `${rootId}/${agent}`;
+					if (st === "running") agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
+					else agentTree.update(id, { status: st });
+				},
+			});
+		} finally {
+			agentTree.remove(rootId);
+		}
 	}
 
 	function doctorReport(): string {
@@ -209,6 +274,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
 		reload(ctx.cwd);
+		personaConfigs = readPersonaConfigs(configFile);
 		// Restore order: env pin > remembered-on-disk. Read-only — never writes here.
 		const remembered = config.defaultPersona ?? (config.persist ? readLastPersona(stateFile) : undefined);
 		const target = remembered ? personas.find((p) => p.name === remembered) : undefined;
@@ -247,30 +313,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
 		const label = resolveStrategyName(orch) ?? "strategy";
 		orchestrating = true;
-		// Register the run in the unified agent tree (sticky widget above the input),
-		// seeded with the roster so the cores show by name immediately, then flip
-		// ⏳ → ✓/✗ as each finishes. Non-roster agents (e.g. a critic) appear on first run.
-		const rootId = `strategy:${label}`;
-		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
-		agentTree.add({ id: rootId, label, status: "running" });
-		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: a, parentId: rootId, status: "running" });
 		try {
-			const result = await runPersonaStrategy(orch, task, {
-				engine: buildEngine(),
-				teams,
-				limits: RUN_LIMITS,
-				onAgentStatus: (agent, st) => {
-					const id = `${rootId}/${agent}`;
-					if (st === "running") agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
-					else agentTree.update(id, { status: st });
-				},
-			});
+			const result = await runStrategyVisible(ctx, orch, task, "strategy");
 			pendingOrchestration = { label, output: result ? result.output : "(the orchestration returned no result)" };
 		} catch (err) {
 			pendingOrchestration = { label, output: `orchestration failed: ${err instanceof Error ? err.message : String(err)}` };
 		} finally {
 			orchestrating = false;
-			agentTree.remove(rootId);
 		}
 		// Let the user's original prompt proceed; the ruling is injected (hidden) into the
 		// turn's system prompt via before_agent_start — no internal plumbing in the chat.
@@ -494,7 +543,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				return;
 			}
 			try {
-				const result = await runPersonaStrategy(orch, task, { engine: buildEngine(), teams, limits: RUN_LIMITS });
+				const result = await runStrategyVisible(ctx, orch, task, "orchestrate");
 				ctx.ui.notify(result?.output || "(no output)", result?.ok ? "info" : "warning");
 			} catch (err) {
 				ctx.ui.notify(`orchestrate failed: ${err instanceof Error ? err.message : String(err)}`, "error");
