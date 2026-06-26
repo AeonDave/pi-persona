@@ -19,6 +19,7 @@ import { type Static, Type } from "typebox";
 import type { AgentConfig } from "./agents/agent.ts";
 import { resolveConfig } from "./core/config.ts";
 import { resolveModelRef } from "./core/models.ts";
+import { isThinkingLevel } from "./core/types.ts";
 import { DEFAULT_CONTRACT } from "./core/contract.ts";
 import type { RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
@@ -238,6 +239,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 		};
 		if (signal) deps.signal = signal;
 		if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
+		// The main model thinks adaptively (it picks effort by difficulty); a spawned child
+		// can't inherit "adaptive" if its model doesn't support it, so give children an
+		// explicit level — the supervisor's (if concrete) or a sane default, overridable.
+		const supLevel = host.getThinkingLevel();
+		deps.childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
 		deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs }; // hard wall-clock cap on every child
 		if (onProgress) deps.childOptions.onProgress = onProgress;
 		return makeEngine(deps);
