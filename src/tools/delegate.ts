@@ -45,6 +45,8 @@ export interface DelegateView {
 	running: boolean;
 	ok: boolean;
 	output: string;
+	/** The tool the leg is currently running (e.g. "grep src/…"), "" if none. */
+	activity: string;
 	usage: ChildUsage;
 }
 
@@ -97,6 +99,7 @@ function viewOf(agent: string, label: string, r: AgentResult): DelegateView {
 		running: false,
 		ok: r.ok,
 		output: r.ok ? r.output || "(no output)" : r.error ?? "(failed)",
+		activity: "",
 		usage: r.usage,
 	};
 }
@@ -121,6 +124,7 @@ export async function runDelegate(
 			running: true,
 			ok: false,
 			output: "",
+			activity: "",
 			usage: emptyUsage(),
 		}));
 		onProgress?.(views.map((v) => ({ ...v })));
@@ -131,8 +135,9 @@ export async function runDelegate(
 			const r = await engine.run(
 				specOf(t),
 				(p) => {
-					// Stream the leg's rolling output so the overlay shows it live.
-					if (p.output) views[i] = { ...(views[i] as DelegateView), output: p.output };
+					// Stream the leg's rolling output + current tool activity.
+					const cur = views[i] as DelegateView;
+					views[i] = { ...cur, output: p.output || cur.output, activity: p.activity ?? "" };
 					onProgress?.(views.map((v) => ({ ...v })));
 				},
 				ac.signal,
@@ -156,7 +161,15 @@ export async function runDelegate(
 		if (params.model) single.model = params.model;
 		if (params.tools && params.tools.length > 0) single.tools = params.tools;
 		const label = labelFor(single, 0);
-		const view: DelegateView = { agent: params.agent, label, running: true, ok: false, output: "", usage: emptyUsage() };
+		const view: DelegateView = {
+			agent: params.agent,
+			label,
+			running: true,
+			ok: false,
+			output: "",
+			activity: "",
+			usage: emptyUsage(),
+		};
 		onProgress?.([{ ...view }]);
 		const ac = new AbortController();
 		onLegStart?.(0, () => ac.abort());
@@ -164,6 +177,7 @@ export async function runDelegate(
 			specOf(single),
 			(p) => {
 				if (p.output) view.output = p.output;
+				view.activity = p.activity ?? "";
 				onProgress?.([{ ...view }]);
 			},
 			ac.signal,

@@ -53,7 +53,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	return {
 		async run(
 			spec: AgentRunSpec,
-			onProgress?: (p: { output: string; tokens?: number }) => void,
+			onProgress?: (p: { output: string; tokens?: number; activity?: string }) => void,
 			callSignal?: AbortSignal,
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
@@ -77,7 +77,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
-			if (onProgress) childOptions.onProgress = (snap) => onProgress({ output: snap.output, tokens: snap.tokens });
+			if (onProgress) {
+				childOptions.onProgress = (snap) =>
+					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
+			}
 			// The run aborts if EITHER the whole-run signal or this agent's own (UI stop) fires.
 			const signal = combineSignals(deps.signal, callSignal);
 			const child = await runChildAgent(childSpec, signal, childOptions);

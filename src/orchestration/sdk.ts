@@ -27,6 +27,8 @@ export interface AgentProgress {
 	output: string;
 	/** Tokens consumed so far (best-effort). */
 	tokens?: number;
+	/** The tool the agent is currently running (e.g. "grep src/…"), if any. */
+	activity?: string;
 }
 
 /** The engine seam the SDK runs agents through (real child engine or a stub). */
