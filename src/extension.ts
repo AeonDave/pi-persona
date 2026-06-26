@@ -188,6 +188,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// result back to the supervisor as a follow-up (which triggers a fresh turn).
 	const tracker = new AsyncRunTracker();
 	tracker.onComplete((run) => {
+		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
 		try {
 			const body = run.status === "done" ? (run.result?.output ?? "(no output)") : `failed: ${run.error ?? "(no detail)"}`;
 			pi.sendUserMessage(`[pi-persona] async run ${run.id} (${run.agent}) ${run.status}:\n\n${body}`, {
@@ -270,6 +271,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 						if (result.output) patch.output = result.output;
 					}
 					agentTree.update(id, patch);
+				},
+				onAgentProgress: (agent, p) => {
+					// Live streaming: update the core's output buffer + a token counter as it runs.
+					const id = `${rootId}/${agent}`;
+					const patch: { output?: string; detail?: string } = {};
+					if (p.output) patch.output = p.output;
+					if (p.tokens) patch.detail = `${p.tokens} tok`;
+					if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(id, patch);
 				},
 			});
 		} finally {
@@ -389,7 +398,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (params.async && params.agent && params.task) {
 				const agent = params.agent;
 				const task = params.task;
-				const id = tracker.launch({ agent, task }, (onProgress) => buildEngine(undefined, onProgress).run({ agent, task }));
+				let nodeId = "";
+				const id = tracker.launch({ agent, task }, (onProgress) =>
+					buildEngine(undefined, (snap) => {
+						onProgress(snap);
+						if (!nodeId) return;
+						const patch: { output?: string; detail?: string } = {};
+						if (snap.output) patch.output = snap.output;
+						if (snap.tokens) patch.detail = `${snap.tokens} tok`;
+						if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
+					}).run({ agent, task }),
+				);
+				nodeId = `async:${id}`;
+				agentTree.add({ id: nodeId, label: `${agent} (async)`, status: "running" });
 				return {
 					content: [
 						{

@@ -6,7 +6,14 @@
 
 import type { RunLimits } from "../core/capabilities.ts";
 import { makeRoster } from "../orchestration/roster.ts";
-import { type AgentStatus, makeSDK, type SDKDeps, type StrategyEngine, type StrategyInput } from "../orchestration/sdk.ts";
+import {
+	type AgentProgress,
+	type AgentStatus,
+	makeSDK,
+	type SDKDeps,
+	type StrategyEngine,
+	type StrategyInput,
+} from "../orchestration/sdk.ts";
 import { getStrategy } from "../orchestration/strategy.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import type { OrchestrationGrammar } from "./persona.ts";
@@ -26,6 +33,8 @@ export interface RunStrategyDeps {
 	log?: (message: string) => void;
 	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result). */
 	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
+	/** Per-agent streaming progress (rolling output), for live UI. */
+	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
 }
 
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */
@@ -43,6 +52,7 @@ export async function runPersonaStrategy(
 	if (deps.signal) sdkDeps.signal = deps.signal;
 	if (deps.log) sdkDeps.log = deps.log;
 	if (deps.onAgentStatus) sdkDeps.onAgentStatus = deps.onAgentStatus;
+	if (deps.onAgentProgress) sdkDeps.onAgentProgress = deps.onAgentProgress;
 
 	const input: StrategyInput = { task, params: orch.params ?? {} };
 	if (orch.roster) input.roster = orch.roster;

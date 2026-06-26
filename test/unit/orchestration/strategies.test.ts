@@ -36,6 +36,23 @@ test("the SDK reports per-agent status (running → done) via onAgentStatus", as
 	assert.deepEqual(events, ["melchior:running", "melchior:done"]);
 });
 
+test("the SDK forwards per-agent streaming progress via onAgentProgress", async () => {
+	const seen: string[] = [];
+	const sdk = makeSDK({
+		engine: {
+			run: async (s, onProgress) => {
+				onProgress?.({ output: "partial", tokens: 5 });
+				return { agent: s.agent, output: "final", usage: usage(), ok: true };
+			},
+		},
+		roster: { team: () => [] },
+		limits: LIMITS,
+		onAgentProgress: (a, p) => seen.push(`${a}:${p.output}:${p.tokens}`),
+	});
+	await sdk.agent({ agent: "melchior", task: "t" });
+	assert.deepEqual(seen, ["melchior:partial:5"]);
+});
+
 test("fanout throws when no roster is provided", async () => {
 	const engine: StrategyEngine = { run: async () => ({ agent: "x", output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: LIMITS });

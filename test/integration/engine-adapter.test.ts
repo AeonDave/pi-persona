@@ -53,6 +53,15 @@ test("makeEngine applies a per-agent model override from modelFor (spec.model > 
 	assert.match(r2.output, /--model prov\/explicit/, "an explicit spec.model wins over modelFor");
 });
 
+test("makeEngine streams the child's rolling output via the per-call onProgress", async () => {
+	const outputs: string[] = [];
+	await engine().run({ agent: "scout", task: "explore" }, (p) => outputs.push(p.output));
+	assert.ok(
+		outputs.some((o) => o.includes("echo: Task: explore")),
+		"onProgress saw the rolling assistant output",
+	);
+});
+
 test("makeEngine fails cleanly for an unknown agent", async () => {
 	const r = await engine().run({ agent: "ghost", task: "x" });
 	assert.equal(r.ok, false);
