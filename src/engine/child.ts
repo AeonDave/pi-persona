@@ -216,6 +216,19 @@ export async function runChildAgent(
 				resolveP(code);
 			};
 
+			// Idle timeout: a child that emits NOTHING for `timeoutMs` is treated as hung
+			// and killed — but any output (re)arms the timer, so a long-but-*active* agent
+			// (streaming turn/tool events) keeps running.
+			const armTimeout = () => {
+				if (!opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
+				if (timer) clearTimeout(timer);
+				timer = setTimeout(() => {
+					timedOut = true;
+					kill();
+				}, opts.timeoutMs);
+				timer.unref?.();
+			};
+
 			proc.stdout?.setEncoding("utf8");
 			proc.stdout?.on("data", (d: string) => {
 				const { lines, rest } = feedLines(buffer, d);
@@ -223,6 +236,7 @@ export async function runChildAgent(
 				buffer = rest.length > maxLineBytes ? "" : rest;
 				for (const l of lines) onLine(l);
 				opts.onProgress?.(snapshot(state));
+				armTimeout(); // output → reset the idle clock
 			});
 			// A stream 'error' (e.g. EPIPE on a dying child) on an emitter with no
 			// listener is rethrown as an uncaught exception — tolerate it.
@@ -255,15 +269,7 @@ export async function runChildAgent(
 				finish(1);
 			});
 
-			// Hard timeout: a hung child (no output, never closes) is killed so it
-			// can't block the turn forever.
-			if (opts.timeoutMs && opts.timeoutMs > 0) {
-				timer = setTimeout(() => {
-					timedOut = true;
-					kill();
-				}, opts.timeoutMs);
-				timer.unref?.();
-			}
+			armTimeout(); // start the idle clock (reset on every chunk of output)
 			if (signal) {
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
@@ -288,7 +294,7 @@ export async function runChildAgent(
 		// stream message hide why the child actually stopped.
 		const streamErr = state.errorMessage;
 		if (timedOut) {
-			result.errorMessage = `agent timed out after ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
+			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (aborted) {
 			result.errorMessage = `agent aborted${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (spawnError) {

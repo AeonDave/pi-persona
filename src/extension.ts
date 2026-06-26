@@ -14,17 +14,18 @@ import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 
 import type { AgentConfig } from "./agents/agent.ts";
 import { resolveConfig } from "./core/config.ts";
+import { resolveModelRef } from "./core/models.ts";
 import { DEFAULT_CONTRACT } from "./core/contract.ts";
 import type { RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { AsyncRunTracker, buildPeekDigest } from "./engine/async.ts";
 import type { ProgressSnapshot } from "./engine/stream.ts";
 import { loadDefinitions, loadTeams, type ScopedDir } from "./loader.ts";
-import type { StrategyEngine } from "./orchestration/sdk.ts";
+import type { AgentRunSpec, StrategyEngine } from "./orchestration/sdk.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import type { OrchestrationGrammar, Persona } from "./persona/persona.ts";
@@ -47,7 +48,7 @@ const RUN_LIMITS: RunLimits = {
 	maxChildren: 64,
 	maxDepth: 2,
 	maxConcurrency: 4,
-	timeoutMs: 120_000,
+	timeoutMs: 180_000, // IDLE window (resets on output) — kills a hung child, not a busy one
 	budgetTokens: 1_000_000,
 };
 
@@ -418,6 +419,29 @@ export default function piPersona(pi: ExtensionAPI): void {
 		),
 	});
 
+	// Canonicalise a delegate's requested model names to provider/id; return a clear
+	// error (no spawn) when one is ambiguous/unknown so the supervisor retries with a
+	// valid id instead of wasting a child on an unauthenticated provider.
+	function resolveDelegateModels(params: Static<typeof DelegateParams>, ctx: ExtensionContext): string | undefined {
+		const models = ctx.modelRegistry.getAll().map((m) => ({ provider: m.provider, id: m.id }));
+		if (models.length === 0) return undefined;
+		const slots: Array<{ ref: string; set: (v: string) => void; who: string }> = [];
+		if (params.model) slots.push({ ref: params.model, set: (v) => { params.model = v; }, who: "the sub-agent" });
+		params.tasks?.forEach((t, i) => {
+			if (t.model) slots.push({ ref: t.model, set: (v) => { t.model = v; }, who: `task ${i + 1} (${t.agent})` });
+		});
+		for (const s of slots) {
+			const r = resolveModelRef(s.ref, models);
+			if (r.ok) {
+				s.set(r.ref);
+				continue;
+			}
+			const list = r.candidates.slice(0, 10).join(", ");
+			return `delegate: model "${s.ref}" for ${s.who} is ${r.reason} — use an exact model id. Candidates: ${list}${r.candidates.length > 10 ? ", …" : ""}.`;
+		}
+		return undefined;
+	}
+
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
@@ -429,9 +453,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			lastCtx = ctx;
+			const modelErr = resolveDelegateModels(params, ctx);
+			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: {}, isError: true };
 			if (params.async && params.agent && params.task) {
 				const agent = params.agent;
 				const task = params.task;
+				const runSpec: AgentRunSpec = { agent, task };
+				if (params.model) runSpec.model = params.model;
+				if (params.tools && params.tools.length > 0) runSpec.tools = params.tools;
+				if (params.skills && params.skills.length > 0) runSpec.skills = params.skills;
 				let nodeId = "";
 				const id = tracker.launch({ agent, task }, (onProgress) =>
 					buildEngine(undefined, (snap) => {
@@ -441,7 +471,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 						if (snap.output) patch.output = snap.output;
 						if (snap.tokens) patch.detail = `${snap.tokens} tok`;
 						if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
-					}).run({ agent, task }),
+					}).run(runSpec),
 				);
 				nodeId = `async:${id}`;
 				agentTree.add({ id: nodeId, label: `${agent} (async)`, status: "running" });
