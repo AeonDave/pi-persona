@@ -7,6 +7,16 @@ import type { AgentResult } from "../../../src/orchestration/types.ts";
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
+test("the tracker caps retained runs by evicting old completed ones", async () => {
+	const tracker = new AsyncRunTracker();
+	for (let i = 0; i < 40; i++) {
+		tracker.launch({ agent: `a${i}`, task: "t" }, async () => ({ agent: `a${i}`, output: "o", usage: usage(), ok: true }));
+	}
+	await tick();
+	await tick();
+	assert.ok(tracker.list().length <= 25, `retained ${tracker.list().length} runs (expected ≤ 25)`);
+});
+
 test("launch tracks a run and exposes its result on completion", async () => {
 	const tracker = new AsyncRunTracker();
 	const id = tracker.launch({ agent: "scout", task: "explore" }, async (onProgress) => {

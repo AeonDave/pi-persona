@@ -39,6 +39,8 @@ export interface ChildEngineOptions {
 	killGraceMs?: number;
 	/** Live progress callback (for async peek / supervision). */
 	onProgress?: (snapshot: ProgressSnapshot) => void;
+	/** Hard wall-clock cap; a child exceeding it is killed (SIGTERM→SIGKILL). */
+	timeoutMs?: number;
 }
 
 /** Resolve how to re-invoke `pi` on any OS (script vs generic runtime vs PATH). */
@@ -96,6 +98,7 @@ export async function runChildAgent(
 	const state = createStreamState();
 	let stderr = "";
 	let aborted = false;
+	let timedOut = false;
 
 	try {
 		const exitCode = await new Promise<number>((resolveP) => {
@@ -110,7 +113,18 @@ export async function runChildAgent(
 				// supervisor that re-spawns → exponential fork bomb.
 				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1" },
 			});
+			// Decode stdout as UTF-8 so a multibyte char split across chunks isn't mangled.
+			proc.stdout?.setEncoding("utf8");
 			let buffer = "";
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const kill = () => {
+				aborted = true;
+				proc.kill("SIGTERM");
+				const t = setTimeout(() => {
+					if (!proc.killed) proc.kill("SIGKILL");
+				}, killGraceMs);
+				t.unref?.();
+			};
 			const onLine = (line: string) => {
 				if (!line.trim()) return;
 				try {
@@ -129,20 +143,25 @@ export async function runChildAgent(
 				stderr += d.toString();
 			});
 			proc.on("close", (code) => {
+				if (timer) clearTimeout(timer);
 				if (buffer.trim()) onLine(buffer);
 				resolveP(code ?? 0);
 			});
-			proc.on("error", () => resolveP(1));
+			proc.on("error", () => {
+				if (timer) clearTimeout(timer);
+				resolveP(1);
+			});
 
+			// Hard timeout: a hung child (no output, never closes) is killed so it can't
+			// block the turn forever.
+			if (opts.timeoutMs && opts.timeoutMs > 0) {
+				timer = setTimeout(() => {
+					timedOut = true;
+					kill();
+				}, opts.timeoutMs);
+				timer.unref?.();
+			}
 			if (signal) {
-				const kill = () => {
-					aborted = true;
-					proc.kill("SIGTERM");
-					const t = setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, killGraceMs);
-					t.unref?.();
-				};
 				if (signal.aborted) kill();
 				else signal.addEventListener("abort", kill, { once: true });
 			}
@@ -160,6 +179,7 @@ export async function runChildAgent(
 		if (state.model !== undefined) result.model = state.model;
 		if (state.stopReason !== undefined) result.stopReason = state.stopReason;
 		if (state.errorMessage !== undefined) result.errorMessage = state.errorMessage;
+		if (timedOut && result.errorMessage === undefined) result.errorMessage = `agent timed out after ${opts.timeoutMs}ms`;
 		return result;
 	} finally {
 		prompt?.cleanup();

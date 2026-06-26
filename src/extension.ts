@@ -3,9 +3,10 @@
  *
  * Loads personas/agents/teams on session_start; applies a persona (prompt +
  * model/thinking/tools) and gates delegation via the PersonaController; registers
- * the `delegate` tool (opportunistic L0), the `f8` cycle, and the `/persona`,
- * `/doctor`, `/orchestrate` commands. Orchestration strategies run through the
- * SDK + ChildProcessEngine. v0.1: child-process engine only.
+ * the `delegate` and `council` tools, the unified agent tree + navigable overlay
+ * (`f9` / `/agents`), the `f8` persona cycle, and the `/persona`, `/doctor`,
+ * `/orchestrate`, `/peek` commands. Orchestration runs through the Strategy SDK +
+ * ChildProcessEngine (the only engine backend so far).
  */
 
 import { dirname, join, resolve } from "node:path";
@@ -210,7 +211,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		};
 		if (signal) deps.signal = signal;
 		if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
-		if (onProgress) deps.childOptions = { onProgress };
+		deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs }; // hard wall-clock cap on every child
+		if (onProgress) deps.childOptions.onProgress = onProgress;
 		return makeEngine(deps);
 	}
 
@@ -246,7 +248,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	// Run a persona strategy with the unified tree wired in: assign models on first run,
 	// seed the roster (cores show by name at once), flip ⏳ → ✓/✗ live, clear when done.
-	async function runStrategyVisible(ctx: ExtensionContext, orch: OrchestrationGrammar, task: string, idPrefix: string) {
+	async function runStrategyVisible(
+		ctx: ExtensionContext,
+		orch: OrchestrationGrammar,
+		task: string,
+		idPrefix: string,
+		signal?: AbortSignal,
+	) {
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
 		await ensurePersonaModels(ctx, roster);
@@ -255,7 +263,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: a, parentId: rootId, status: "running" });
 		try {
 			return await runPersonaStrategy(orch, task, {
-				engine: buildEngine(),
+				engine: buildEngine(signal),
 				teams,
 				limits: RUN_LIMITS,
 				onAgentStatus: (agent, st, result) => {
@@ -425,7 +433,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const delRoot = `delegate:${_toolCallId}`;
 			agentTree.add({ id: delRoot, label: "delegate", status: "running" });
 			try {
-				const outcome = await runDelegate(params, buildEngine(signal), RUN_LIMITS.maxConcurrency, (views) => {
+				const delegateLimits = { maxConcurrency: RUN_LIMITS.maxConcurrency, maxChildren: RUN_LIMITS.maxChildren };
+				const outcome = await runDelegate(params, buildEngine(signal), delegateLimits, (views) => {
 					views.forEach((v, i) => {
 						const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
 						const node: AddNodeInput = { id: `${delRoot}/${i}`, label: v.agent, parentId: delRoot, status };
@@ -525,16 +534,21 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"execution surfaces a new decision.",
 		].join(" "),
 		parameters: CouncilParams,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
+		async execute(_id, params, signal, _onUpdate, ctx) {
 			lastCtx = ctx;
-			const roster = params.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
-			const orch: OrchestrationGrammar = { mode: "strategy", strategy: "magi", roster, params: {} };
-			const result = await runStrategyVisible(ctx, orch, params.question, "council");
-			return {
-				content: [{ type: "text", text: result?.output ?? "(the council returned no ruling)" }],
-				details: { ruling: result?.output ?? "", status: result?.structured?.status },
-				isError: !(result?.ok ?? false),
-			};
+			try {
+				const roster = params.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
+				const orch: OrchestrationGrammar = { mode: "strategy", strategy: "magi", roster, params: {} };
+				const result = await runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
+				return {
+					content: [{ type: "text", text: result?.output ?? "(the council returned no ruling)" }],
+					details: { ruling: result?.output ?? "", status: result?.structured?.status },
+					isError: !(result?.ok ?? false),
+				};
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				return { content: [{ type: "text", text: `council failed: ${message}` }], details: { error: message }, isError: true };
+			}
 		},
 		renderCall(args, theme) {
 			const q = args.question ?? "";

@@ -42,8 +42,11 @@ test("runDelegate reports a single-agent failure with its error", async () => {
 test("runDelegate reports live per-task views via onProgress (parallel)", async () => {
 	const engine = engineThat((s) => ({ agent: s.agent, output: `out:${s.agent}`, usage: usage(), ok: true }));
 	const doneCounts: number[] = [];
-	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] }, engine, 4, (views) =>
-		doneCounts.push(views.filter((v) => !v.running).length),
+	const r = await runDelegate(
+		{ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] },
+		engine,
+		{ maxConcurrency: 4, maxChildren: 8 },
+		(views) => doneCounts.push(views.filter((v) => !v.running).length),
 	);
 	assert.equal(r.views.length, 2);
 	assert.ok(r.views.every((v) => !v.running && v.ok));
@@ -73,6 +76,27 @@ test("runDelegate single mode produces one done view", async () => {
 	assert.equal(r.views.length, 1);
 	assert.equal(r.views[0]?.running, false);
 	assert.equal(r.views[0]?.ok, true);
+});
+
+test("runDelegate clamps concurrency and caps the task count to the limits", async () => {
+	let inFlight = 0;
+	let maxInFlight = 0;
+	const ran: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (s) => {
+			inFlight++;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise((r) => setTimeout(r, 5));
+			inFlight--;
+			ran.push(s.agent);
+			return { agent: s.agent, output: "o", usage: usage(), ok: true };
+		},
+	};
+	const tasks = Array.from({ length: 6 }, (_, i) => ({ agent: `a${i}`, task: "t" }));
+	const r = await runDelegate({ tasks, concurrency: 99 }, engine, { maxConcurrency: 2, maxChildren: 4 });
+	assert.equal(ran.length, 4, "task count capped to maxChildren");
+	assert.ok(maxInFlight <= 2, "concurrency clamped to maxConcurrency");
+	assert.match(r.text, /dropped/);
 });
 
 test("runDelegate rejects when neither single nor parallel params are given", async () => {

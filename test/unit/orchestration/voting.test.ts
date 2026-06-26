@@ -44,6 +44,18 @@ test("a tie returns status 'tie', or a best-by-confidence fallback when enabled"
 	assert.equal(fb.status, "tie");
 	assert.equal(fb.usedFallback, true);
 	assert.equal(fb.winner?.structured?.vote, "B", "fallback picks the highest-confidence candidate");
+	assert.equal(fb.dissent?.length, 1, "the minority report is preserved even on the fallback path");
+	assert.equal(fb.dissent?.[0]?.structured?.vote, "A");
+});
+
+test("no_consensus fallback also records the dissenting cores (3-way tie)", () => {
+	const r = voteReduce([c("a", "A", 0.3), c("b", "B", 0.9), c("c", "C", 0.5)], {
+		aggregate: "unanimity",
+		keepBestFallback: true,
+	});
+	assert.equal(r.status, "no_consensus");
+	assert.equal(r.winner?.structured?.vote, "B");
+	assert.equal(r.dissent?.length, 2, "both losing cores are recorded as dissent");
 });
 
 test("candidates that failed or have no usable vote are invalid", () => {

@@ -11,9 +11,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 
-import { type AgentNodeStatus, type AgentTree, flattenTree } from "./agent-tree.ts";
-
-const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗" };
+import { type AgentTree, flattenTree, GLYPH } from "./agent-tree.ts";
 
 export class AgentOverlay extends Container {
 	private tree: AgentTree;

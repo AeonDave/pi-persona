@@ -68,7 +68,11 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 	const withFallback = (status: ReducerStatus): ReducerResult => {
 		const res: ReducerResult = { status, invalid, tally, usedFallback: false };
 		if (opts.keepBestFallback) {
-			res.winner = bestByConfidence();
+			const winner = bestByConfidence();
+			res.winner = winner;
+			// Preserve the minority report even when we fall back — this is exactly the
+			// case (tie / no_consensus) where the dissent matters most.
+			res.dissent = valid.filter((v) => v.result !== winner).map((v) => v.result);
 			res.usedFallback = true;
 		}
 		return res;
