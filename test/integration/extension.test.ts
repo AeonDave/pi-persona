@@ -92,8 +92,17 @@ test("piPersona registers the delegate tool, an f8 shortcut, and persona/doctor/
 	const m = makeMockPi();
 	piPersona(m.pi);
 	assert.ok(m.toolNames().includes("delegate"));
-	assert.deepEqual(m.commandNames().sort(), ["doctor", "orchestrate", "persona"]);
+	assert.deepEqual(m.commandNames().sort(), ["doctor", "orchestrate", "peek", "persona"]);
 	assert.equal(m.shortcutCount(), 1);
+});
+
+test("/peek reports no async runs initially", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx, notes } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("peek", "", ctx);
+	assert.match(notes.join("\n"), /No async runs/);
 });
 
 test("session_start loads the bundled personas and agents", async () => {
