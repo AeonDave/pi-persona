@@ -29,7 +29,13 @@ import { type ModelHandle, PersonaController, type PersonaHost } from "./persona
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import type { OrchestrationGrammar, Persona } from "./persona/persona.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
-import { type PersonaConfigStore, readPersonaConfigs, withPersonaModels, writePersonaConfigs } from "./persona/config-store.ts";
+import {
+	type PersonaConfigStore,
+	personaModels,
+	readPersonaConfigs,
+	withPersonaModels,
+	writePersonaConfigs,
+} from "./persona/config-store.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
@@ -207,7 +213,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			contracts: (n) => (n === "default" ? DEFAULT_CONTRACT : undefined),
 			modelFor: (agent) => {
 				const persona = controller.activePersona?.name;
-				return persona ? personaConfigs[persona]?.models?.[agent] : undefined;
+				return persona ? personaModels(personaConfigs, persona)[agent] : undefined;
 			},
 		};
 		if (signal) deps.signal = signal;
