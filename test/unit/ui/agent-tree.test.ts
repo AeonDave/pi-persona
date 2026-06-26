@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { AgentTree, type AgentNode, renderAgentTree } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, flattenTree, renderAgentTree } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -30,6 +30,20 @@ test("AgentTree.add is idempotent on id and update mutates status/detail + notif
 	assert.equal(snap[0]?.status, "done");
 	assert.equal(snap[0]?.detail, "$0.01");
 	assert.ok(changes >= 3, "every mutation notifies listeners");
+});
+
+test("flattenTree yields rows in display order with depth; update can set a node's output", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "magi", label: "magi" });
+	tree.add({ id: "magi/m", label: "Melchior", parentId: "magi" });
+	tree.add({ id: "magi/b", label: "Balthasar", parentId: "magi", status: "done" });
+	const rows = flattenTree(tree.snapshot());
+	assert.deepEqual(
+		rows.map((r) => `${r.depth}:${r.node.label}`),
+		["0:magi", "1:Melchior", "1:Balthasar"],
+	);
+	tree.update("magi/m", { output: "line1\nline2" });
+	assert.equal(tree.snapshot().find((n) => n.id === "magi/m")?.output, "line1\nline2");
 });
 
 test("removing a parent removes its descendants; isEmpty + hasRunning reflect state", () => {
