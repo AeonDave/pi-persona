@@ -113,6 +113,19 @@ test("runDelegate carries the display label in each view", async () => {
 	assert.equal(r.views[0]?.label, "pippo · sonnet-4-6");
 });
 
+test("runDelegate exposes a per-leg abort via onLegStart", async () => {
+	const starts: number[] = [];
+	const engine = engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }));
+	await runDelegate(
+		{ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] },
+		engine,
+		undefined,
+		undefined,
+		(i) => starts.push(i),
+	);
+	assert.deepEqual(starts.sort(), [0, 1]);
+});
+
 test("runDelegate rejects when neither single nor parallel params are given", async () => {
 	const engine = engineThat((s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }));
 	const r = await runDelegate({}, engine);

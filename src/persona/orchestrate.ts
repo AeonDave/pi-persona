@@ -35,6 +35,8 @@ export interface RunStrategyDeps {
 	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
 	/** Per-agent streaming progress (rolling output), for live UI. */
 	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
+	/** Called as each agent starts with a handle to abort just that agent (UI stop). */
+	onAgentStart?: (agent: string, abort: () => void) => void;
 }
 
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */
@@ -53,6 +55,7 @@ export async function runPersonaStrategy(
 	if (deps.log) sdkDeps.log = deps.log;
 	if (deps.onAgentStatus) sdkDeps.onAgentStatus = deps.onAgentStatus;
 	if (deps.onAgentProgress) sdkDeps.onAgentProgress = deps.onAgentProgress;
+	if (deps.onAgentStart) sdkDeps.onAgentStart = deps.onAgentStart;
 
 	const input: StrategyInput = { task, params: orch.params ?? {} };
 	if (orch.roster) input.roster = orch.roster;

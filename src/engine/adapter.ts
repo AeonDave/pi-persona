@@ -27,6 +27,14 @@ export interface EngineAdapterDeps {
 	cwd?: string;
 }
 
+/** One signal that fires when any of the given signals fires (ignores undefined). */
+function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+	const live = signals.filter((s): s is AbortSignal => s !== undefined);
+	if (live.length === 0) return undefined;
+	if (live.length === 1) return live[0];
+	return AbortSignal.any(live);
+}
+
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	// Per-run contract pinning (I3): an engine instance is created per run, so the first
 	// time a contract is used we pin `name@hash` and reuse that frozen snapshot for the
@@ -43,7 +51,11 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	};
 
 	return {
-		async run(spec: AgentRunSpec, onProgress?: (p: { output: string; tokens?: number }) => void): Promise<AgentResult> {
+		async run(
+			spec: AgentRunSpec,
+			onProgress?: (p: { output: string; tokens?: number }) => void,
+			callSignal?: AbortSignal,
+		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `unknown agent: ${spec.agent}` };
@@ -66,7 +78,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
 			if (onProgress) childOptions.onProgress = (snap) => onProgress({ output: snap.output, tokens: snap.tokens });
-			const child = await runChildAgent(childSpec, deps.signal, childOptions);
+			// The run aborts if EITHER the whole-run signal or this agent's own (UI stop) fires.
+			const signal = combineSignals(deps.signal, callSignal);
+			const child = await runChildAgent(childSpec, signal, childOptions);
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
 			if (child.errorMessage) result.error = child.errorMessage;

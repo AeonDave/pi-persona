@@ -72,6 +72,18 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
+	// node id → abort that one agent (so the overlay can STOP a single sub-agent).
+	const stopRegistry = new Map<string, () => void>();
+	const clearStops = (prefix: string): void => {
+		for (const k of [...stopRegistry.keys()]) if (k === prefix || k.startsWith(`${prefix}/`)) stopRegistry.delete(k);
+	};
+	function stopAgent(nodeId: string): boolean {
+		const fn = stopRegistry.get(nodeId);
+		if (!fn) return false;
+		fn();
+		stopRegistry.delete(nodeId);
+		return true;
+	}
 
 	// The live count of agents in flight (leaf cores/legs), published as a status so a
 	// custom UI (e.g. pi-1337's frame) can show "N agents" — covers strategy/council
@@ -109,7 +121,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			return;
 		}
 		await ctx.ui.custom<void>(
-			(tui, theme, _kb, done) => new AgentOverlay(agentTree, tui, theme, () => done(undefined)),
+			(tui, theme, _kb, done) => new AgentOverlay(agentTree, tui, theme, () => done(undefined), stopAgent),
 			{ overlay: true },
 		);
 	}
@@ -299,12 +311,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 				engine: buildEngine(signal),
 				teams,
 				limits: RUN_LIMITS,
+				onAgentStart: (agent, abort) => {
+					stopRegistry.set(`${rootId}/${agent}`, abort);
+				},
 				onAgentStatus: (agent, st, result) => {
 					const id = `${rootId}/${agent}`;
 					if (st === "running") {
 						agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
 						return;
 					}
+					stopRegistry.delete(id);
 					const patch: { status: AgentNodeStatus; detail?: string; output?: string } = { status: st };
 					if (result) {
 						const u = formatUsage(result.usage);
@@ -323,6 +339,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				},
 			});
 		} finally {
+			clearStops(rootId);
 			agentTree.remove(rootId);
 		}
 	}
@@ -519,24 +536,33 @@ export default function piPersona(pi: ExtensionAPI): void {
 			agentTree.add({ id: delRoot, label: "delegate", status: "running" });
 			try {
 				const delegateLimits = { maxConcurrency: RUN_LIMITS.maxConcurrency, maxChildren: RUN_LIMITS.maxChildren };
-				const outcome = await runDelegate(params, buildEngine(signal), delegateLimits, (views) => {
-					views.forEach((v, i) => {
-						const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
-						const node: AddNodeInput = { id: `${delRoot}/${i}`, label: v.label, parentId: delRoot, status };
-						const usageStr = formatUsage(v.usage);
-						if (usageStr) node.detail = usageStr;
-						if (v.output) node.output = v.output;
-						agentTree.add(node);
-					});
-					const done = views.filter((v) => !v.running).length;
-					onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
-				});
+				const outcome = await runDelegate(
+					params,
+					buildEngine(signal),
+					delegateLimits,
+					(views) => {
+						views.forEach((v, i) => {
+							const id = `${delRoot}/${i}`;
+							if (!v.running) stopRegistry.delete(id);
+							const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
+							const node: AddNodeInput = { id, label: v.label, parentId: delRoot, status };
+							const usageStr = formatUsage(v.usage);
+							if (usageStr) node.detail = usageStr;
+							if (v.output) node.output = v.output;
+							agentTree.add(node);
+						});
+						const done = views.filter((v) => !v.running).length;
+						onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
+					},
+					(i, abort) => stopRegistry.set(`${delRoot}/${i}`, abort),
+				);
 				return {
 					content: [{ type: "text", text: outcome.text }],
 					details: { views: outcome.views },
 					isError: !outcome.ok,
 				};
 			} finally {
+				clearStops(delRoot);
 				agentTree.remove(delRoot);
 			}
 		},

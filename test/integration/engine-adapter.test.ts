@@ -83,6 +83,19 @@ test("makeEngine does not double a thinking suffix already on the model", async 
 	assert.doesNotMatch(r.output, /:low:high/);
 });
 
+test("makeEngine aborts the child when the per-call (UI stop) signal fires", async () => {
+	const ac = new AbortController();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		childOptions: { resolveInvocation: resolveFake, killGraceMs: 200 },
+	});
+	const p = eng.run({ agent: "scout", task: "wait [sleep]" }, undefined, ac.signal);
+	setTimeout(() => ac.abort(), 80);
+	const r = await p;
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /abort/i, "an abort surfaces as a failed result");
+});
+
 test("makeEngine fails cleanly for an unknown agent", async () => {
 	const r = await engine().run({ agent: "ghost", task: "x" });
 	assert.equal(r.ok, false);

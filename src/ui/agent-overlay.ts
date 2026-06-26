@@ -18,16 +18,18 @@ export class AgentOverlay extends Container {
 	private tui: TUI;
 	private theme: Theme;
 	private done: () => void;
+	private onStop: ((nodeId: string) => boolean) | undefined;
 	private unsubscribe: () => void;
 	private selectedIndex = 0;
 	private detailId: string | undefined;
 
-	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void) {
+	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void, onStop?: (nodeId: string) => boolean) {
 		super();
 		this.tree = tree;
 		this.tui = tui;
 		this.theme = theme;
 		this.done = done;
+		this.onStop = onStop;
 		this.unsubscribe = tree.onChange(() => this.refresh());
 		this.rebuild();
 	}
@@ -73,7 +75,7 @@ export class AgentOverlay extends Container {
 			});
 		}
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(t.fg("dim", "↑↓ navigate   ⏎ open   esc close"), 1, 0));
+		this.addChild(new Text(t.fg("dim", "↑↓ navigate   ⏎ open   x stop   esc close"), 1, 0));
 	}
 
 	private renderDetail(): void {
@@ -98,13 +100,14 @@ export class AgentOverlay extends Container {
 		}
 		for (const line of tail) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(t.fg("dim", "esc back"), 1, 0));
+		this.addChild(new Text(t.fg("dim", live ? "esc back   ·   x stop" : "esc back"), 1, 0));
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (this.detailId) {
-			if (kb.matches(keyData, "tui.select.cancel")) {
+			if (keyData === "x") this.tryStop(this.detailId);
+			else if (kb.matches(keyData, "tui.select.cancel")) {
 				this.detailId = undefined;
 				this.refresh();
 			}
@@ -123,9 +126,17 @@ export class AgentOverlay extends Container {
 				this.detailId = row.node.id;
 				this.refresh();
 			}
+		} else if (keyData === "x") {
+			const row = rows[this.selectedIndex];
+			if (row) this.tryStop(row.node.id);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.close();
 		}
+	}
+
+	/** Stop (abort) one agent by id, if it's running and stoppable. */
+	private tryStop(nodeId: string): void {
+		if (this.onStop?.(nodeId)) this.refresh();
 	}
 
 	private close(): void {
