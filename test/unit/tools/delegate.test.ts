@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { runDelegate } from "../../../src/tools/delegate.ts";
+import { labelFor, runDelegate, shortModel } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -97,6 +97,20 @@ test("runDelegate clamps concurrency and caps the task count to the limits", asy
 	assert.equal(ran.length, 4, "task count capped to maxChildren");
 	assert.ok(maxInFlight <= 2, "concurrency clamped to maxConcurrency");
 	assert.match(r.text, /dropped/);
+});
+
+test("shortModel + labelFor produce a friendly 'name · model' label", () => {
+	assert.equal(shortModel("anthropic/claude-sonnet-4-6"), "sonnet-4-6");
+	assert.equal(shortModel("openrouter/openrouter/owl-alpha:high"), "owl-alpha");
+	assert.equal(labelFor({ agent: "operator", model: "anthropic/claude-sonnet-4-6" }, 0), "pippo · sonnet-4-6");
+	assert.equal(labelFor({ agent: "scout", model: "x/y" }, 0), "scout · y", "a fixed agent keeps its own name");
+	assert.equal(labelFor({ agent: "operator", name: "auditor", model: "p/claude-haiku" }, 3), "auditor · haiku");
+});
+
+test("runDelegate carries the display label in each view", async () => {
+	const engine = engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }));
+	const r = await runDelegate({ tasks: [{ agent: "operator", task: "t", model: "anthropic/claude-sonnet-4-6" }] }, engine);
+	assert.equal(r.views[0]?.label, "pippo · sonnet-4-6");
 });
 
 test("runDelegate rejects when neither single nor parallel params are given", async () => {

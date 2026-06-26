@@ -420,6 +420,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
+		name: Type.Optional(
+			Type.String({ description: "Short friendly name for this sub-agent (helps tell several apart in the UI)" }),
+		),
 		skills: Type.Optional(SkillsSchema),
 		model: Type.Optional(
 			Type.String({ description: "Model override (exact provider/id — call the `models` tool to find one)" }),
@@ -429,6 +432,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
+		name: Type.Optional(Type.String({ description: "Short friendly name for the sub-agent (single mode)" })),
 		skills: Type.Optional(SkillsSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode)" })),
@@ -518,7 +522,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const outcome = await runDelegate(params, buildEngine(signal), delegateLimits, (views) => {
 					views.forEach((v, i) => {
 						const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
-						const node: AddNodeInput = { id: `${delRoot}/${i}`, label: v.agent, parentId: delRoot, status };
+						const node: AddNodeInput = { id: `${delRoot}/${i}`, label: v.label, parentId: delRoot, status };
 						const usageStr = formatUsage(v.usage);
 						if (usageStr) node.detail = usageStr;
 						if (v.output) node.output = v.output;
@@ -578,7 +582,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const usageStr = formatUsage(v.usage);
 				const usage = usageStr ? theme.fg("dim", ` ${usageStr}`) : "";
 				container.addChild(new Spacer(1));
-				container.addChild(new Text(`${icon} ${theme.fg("accent", v.agent)}${usage}`, 0, 0));
+				container.addChild(new Text(`${icon} ${theme.fg("accent", v.label)}${usage}`, 0, 0));
 				const body = v.output || "(no output)";
 				const preview = expanded ? body : body.split("\n").slice(0, 4).join("\n");
 				container.addChild(new Text(theme.fg("toolOutput", preview), 0, 0));
