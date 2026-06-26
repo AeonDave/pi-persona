@@ -9,15 +9,17 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 - **Personas** — switch with **`f8`** or `/persona`. A persona is a system prompt plus a way of
   working: from opportunistic "delegate when it helps" to a mandatory multi-agent strategy to a
   deliberating **council** the supervisor consults before acting.
-- **Sub-agents** — real, isolated `pi` runs. The supervisor delegates one, or fans out many in
-  parallel, each with its own model, skills, and tool allowlist. A generic `operator` becomes a
-  specialist from the skills it loads.
+- **Sub-agents** — real, isolated `pi` runs, each shown by a friendly `name · model` (e.g.
+  "pippo · sonnet-4-6"). The supervisor delegates one, or fans out many in parallel, each with its
+  own model, skills, and tool allowlist. A generic `operator` becomes a specialist from the skills
+  it loads.
 - **Strategies** — orchestration defined in small files over a Strategy SDK: parallel fan-out, a
   generator↔critic loop, an ensemble **vote** (`magi`), and a **multi-round council**
   (`council-rounds`, best-of-X).
 - **Live view** — one **agent tree** sticks above the input and shows every sub-agent (strategy
-  cores, delegate legs, background runs) as it runs. **`f9`** (or `/agents`) opens a navigable
-  overlay — ↑↓ to move, ⏎ to drill into an agent and watch its output stream.
+  cores, delegate legs, background runs) as it runs. **`f9`** (or `/agents`) opens a bordered,
+  navigable overlay — ↑↓ to move, ⏎ to drill into an agent and watch its output stream live, and
+  **`x` to stop** one.
 
 ## How it works
 
@@ -31,6 +33,9 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 - **Decide, then do.** A council persona consults its ensemble through the `council` tool, gets a
   ruling (winner + tally + recorded dissent), then **executes** it with its own tools and
   re-convenes when execution raises a new decision — state → decision → execution.
+- **Model-aware.** A sub-agent `model` can be a loose name ("sonnet"): it resolves to your own
+  session provider's id (not a look-alike you're not logged into). `/models [query]` searches the
+  installed models; an ensemble runs its cores on *different* models for diverse blind spots.
 
 ## Concepts
 
@@ -82,8 +87,8 @@ deliberation shape? Drop a strategy file in `src/orchestration/strategies/` — 
 
 ## Keys & commands
 
-- **`f8`** cycle persona · **`f9`** / `/agents` agent overlay
-- `/persona [name\|off\|list]` · `/orchestrate <task>` · `/peek [id]` · `/doctor`
+- **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · esc)
+- `/persona [name\|off\|list]` · `/models [query]` · `/orchestrate <task>` · `/peek [id]` · `/doctor`
 
 ## Develop
 
