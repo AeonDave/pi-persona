@@ -231,22 +231,49 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
 		const label = resolveStrategyName(orch) ?? "strategy";
 		orchestrating = true;
+		// Live widget: seed with the roster so the user sees the cores by name immediately,
+		// then flip ⏳ → ✓/✗ as each finishes. The strategy path doesn't go through the
+		// `delegate` tool, so this is its only on-screen presence.
+		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
+		const statusOf = new Map<string, string>(roster.map((a) => [a, "⏳"]));
+		const renderOrchWidget = () => {
+			try {
+				const lines = [`🧠 ${label}: ${statusOf.size} agents deliberating in parallel`];
+				for (const [a, s] of statusOf) lines.push(`   ${s} ${a}`);
+				ctx.ui.setWidget("persona-orch", lines, { placement: "aboveEditor" });
+			} catch {
+				/* cosmetic */
+			}
+		};
+		renderOrchWidget();
 		try {
-			const n = orch.roster ? (teams[orch.roster]?.length ?? 0) : 0;
 			ctx.ui.notify(
-				`⏳ ${label}: orchestrating${n ? ` ${n} agents` : ""} in parallel — real model calls, this can take ~30–60s. The result is woven into the answer below.`,
+				`⏳ ${label}: orchestrating${roster.length ? ` ${roster.length} agents` : ""} in parallel — real model calls, this can take ~30–60s. The result is woven into the answer below.`,
 				"info",
 			);
 		} catch {
 			/* cosmetic */
 		}
 		try {
-			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(), teams, limits: RUN_LIMITS });
+			const result = await runPersonaStrategy(orch, task, {
+				engine: buildEngine(),
+				teams,
+				limits: RUN_LIMITS,
+				onAgentStatus: (agent, st) => {
+					statusOf.set(agent, st === "done" ? "✓" : st === "failed" ? "✗" : "⏳");
+					renderOrchWidget();
+				},
+			});
 			pendingOrchestration = { label, output: result ? result.output : "(the orchestration returned no result)" };
 		} catch (err) {
 			pendingOrchestration = { label, output: `orchestration failed: ${err instanceof Error ? err.message : String(err)}` };
 		} finally {
 			orchestrating = false;
+			try {
+				ctx.ui.setWidget("persona-orch", undefined);
+			} catch {
+				/* cosmetic */
+			}
 		}
 		// Let the user's original prompt proceed; the ruling is injected (hidden) into the
 		// turn's system prompt via before_agent_start — no internal plumbing in the chat.
