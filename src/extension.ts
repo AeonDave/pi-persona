@@ -321,6 +321,20 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 	}
 
+	// Search/list available models (provider/id), session provider first (★).
+	function searchModels(ctx: ExtensionContext, query?: string): { lines: string[]; total: number; capped: boolean } {
+		const session = ctx.model?.provider;
+		const isSession = (ref: string): boolean => session !== undefined && ref.startsWith(`${session}/`);
+		const all = ctx.modelRegistry.getAll().map((m) => `${m.provider}/${m.id}`);
+		const q = query?.trim().toLowerCase();
+		const filtered = (q ? all.filter((r) => r.toLowerCase().includes(q)) : all).sort(
+			(a, b) => Number(!isSession(a)) - Number(!isSession(b)) || a.localeCompare(b),
+		);
+		const cap = 40;
+		const lines = filtered.slice(0, cap).map((r) => `${isSession(r) ? "★ " : "  "}${r}`);
+		return { lines, total: filtered.length, capped: filtered.length > cap };
+	}
+
 	function doctorReport(): string {
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
@@ -401,7 +415,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
 		skills: Type.Optional(SkillsSchema),
-		model: Type.Optional(Type.String({ description: "Model override for this sub-agent" })),
+		model: Type.Optional(
+			Type.String({ description: "Model override (exact provider/id — call the `models` tool to find one)" }),
+		),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent" })),
 	});
 	const DelegateParams = Type.Object({
@@ -692,6 +708,45 @@ export default function piPersona(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			ctx.ui.notify(doctorReport(), "info");
+		},
+	});
+
+	// ── /models + a `models` tool — discover/search model ids ─────────────────────
+	pi.registerCommand("models", {
+		description: "List or search available models (provider/id): /models [query]",
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const { lines, total, capped } = searchModels(ctx, args);
+			if (lines.length === 0) {
+				ctx.ui.notify(`models: no match for "${args.trim()}"`, "warning");
+				return;
+			}
+			const head = `models (${total}${capped ? ", showing 40" : ""})${ctx.model ? ` · session ★ ${ctx.model.provider}/${ctx.model.id}` : ""}`;
+			ctx.ui.notify(`${head}\n${lines.join("\n")}${capped ? "\n…refine with /models <query>" : ""}`, "info");
+		},
+	});
+
+	pi.registerTool({
+		name: "models",
+		label: "Models",
+		description: [
+			"List or search the available model ids (provider/id). The same name exists under several",
+			"providers — use an EXACT id from here as a delegate task's `model`. ★ marks your session",
+			"provider; prefer it (it's the authenticated one).",
+		].join(" "),
+		parameters: Type.Object({
+			query: Type.Optional(Type.String({ description: "Filter by substring (provider or id), e.g. 'sonnet'" })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			lastCtx = ctx;
+			const { lines, total, capped } = searchModels(ctx, params.query);
+			const text = lines.length
+				? `${total} model(s)${capped ? " (showing 40 — refine with a query)" : ""}; ★ = session provider:\n${lines.join("\n")}`
+				: `no models match "${params.query ?? ""}"`;
+			return { content: [{ type: "text", text }], details: { total }, isError: false };
+		},
+		renderCall(args, theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("models "))}${theme.fg("dim", args.query ?? "(all)")}`, 0, 0);
 		},
 	});
 
