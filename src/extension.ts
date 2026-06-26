@@ -19,6 +19,8 @@ import { resolveConfig } from "./core/config.ts";
 import { DEFAULT_CONTRACT } from "./core/contract.ts";
 import type { RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
+import { AsyncRunTracker, buildPeekDigest } from "./engine/async.ts";
+import type { ProgressSnapshot } from "./engine/stream.ts";
 import { loadDefinitions, loadTeams, type ScopedDir } from "./loader.ts";
 import type { StrategyEngine } from "./orchestration/sdk.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
@@ -134,13 +136,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	const controller = new PersonaController(host, config.delegateDefaultAllow);
 
-	function buildEngine(signal?: AbortSignal): StrategyEngine {
+	// Async runs outlive the turn that launched them; on completion we surface the
+	// result back to the supervisor as a follow-up (which triggers a fresh turn).
+	const tracker = new AsyncRunTracker();
+	tracker.onComplete((run) => {
+		try {
+			const body = run.status === "done" ? (run.result?.output ?? "(no output)") : `failed: ${run.error ?? "(no detail)"}`;
+			pi.sendUserMessage(`[pi-persona] async run ${run.id} (${run.agent}) ${run.status}:\n\n${body}`, {
+				deliverAs: "followUp",
+			});
+		} catch {
+			/* ignore */
+		}
+	});
+
+	function buildEngine(signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void): StrategyEngine {
 		const deps: EngineAdapterDeps = {
 			resolveAgent: (n) => agents.find((a) => a.name === n),
 			contracts: (n) => (n === "default" ? DEFAULT_CONTRACT : undefined),
 		};
 		if (signal) deps.signal = signal;
 		if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
+		if (onProgress) deps.childOptions = { onProgress };
 		return makeEngine(deps);
 	}
 
@@ -219,6 +236,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			}),
 		),
 		concurrency: Type.Optional(Type.Number({ description: "Max children to run at once (default 4)" })),
+		async: Type.Optional(
+			Type.Boolean({ description: "Run in the background (single mode): returns a run id and notifies you on completion" }),
+		),
 	});
 
 	pi.registerTool({
@@ -232,6 +252,21 @@ export default function piPersona(pi: ExtensionAPI): void {
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			lastCtx = ctx;
+			if (params.async && params.agent && params.task) {
+				const agent = params.agent;
+				const task = params.task;
+				const id = tracker.launch({ agent, task }, (onProgress) => buildEngine(undefined, onProgress).run({ agent, task }));
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Launched async run ${id} (agent "${agent}"). It runs in the background — you'll be notified on completion; peek with /peek ${id}.`,
+						},
+					],
+					details: { runId: id },
+					isError: false,
+				};
+			}
 			const outcome = await runDelegate(params, buildEngine(signal), RUN_LIMITS.maxConcurrency);
 			return {
 				content: [{ type: "text", text: outcome.text }],
@@ -297,6 +332,21 @@ export default function piPersona(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			ctx.ui.notify(doctorReport(), "info");
+		},
+	});
+
+	// ── /peek (async run progress) ───────────────────────────────────────────────
+	pi.registerCommand("peek", {
+		description: "Show background async runs and their progress: /peek [runId]",
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const id = args.trim();
+			if (id) {
+				const run = tracker.peek(id);
+				ctx.ui.notify(run ? buildPeekDigest([run]) : `peek: no run "${id}"`, run ? "info" : "warning");
+			} else {
+				ctx.ui.notify(buildPeekDigest(tracker.list()), "info");
+			}
 		},
 	});
 

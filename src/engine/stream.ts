@@ -80,6 +80,17 @@ export function applyEvent(state: StreamState, event: unknown): void {
 	if (typeof msg.errorMessage === "string") state.errorMessage = msg.errorMessage;
 }
 
+/** A compact live progress view of a running agent (for peek / ProgressView). */
+export interface ProgressSnapshot {
+	output: string;
+	turns: number;
+	tokens: number;
+}
+
+export function snapshot(state: StreamState): ProgressSnapshot {
+	return { output: state.output, turns: state.usage.turns, tokens: state.usage.input + state.usage.output };
+}
+
 /** Buffer a stdout chunk into complete lines, returning the partial remainder. */
 export function feedLines(buffer: string, chunk: string): { lines: string[]; rest: string } {
 	const parts = (buffer + chunk).split("\n");

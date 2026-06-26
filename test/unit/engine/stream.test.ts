@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyEvent, createStreamState, feedLines } from "../../../src/engine/stream.ts";
+import { applyEvent, createStreamState, feedLines, snapshot } from "../../../src/engine/stream.ts";
 
 test("feedLines buffers partial lines across chunks", () => {
 	assert.deepEqual(feedLines("", "a\nb\nc"), { lines: ["a", "b"], rest: "c" });
@@ -73,6 +73,18 @@ test("applyEvent captures error stop reason and message", () => {
 	});
 	assert.equal(s.stopReason, "error");
 	assert.equal(s.errorMessage, "boom");
+});
+
+test("snapshot exposes a compact progress view of the accumulating state", () => {
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text: "partial" }], usage: { input: 4, output: 2 } },
+	});
+	const snap = snapshot(s);
+	assert.equal(snap.output, "partial");
+	assert.equal(snap.turns, 1);
+	assert.equal(snap.tokens, 6);
 });
 
 test("applyEvent ignores non-message_end events, non-assistant roles, and malformed input", () => {

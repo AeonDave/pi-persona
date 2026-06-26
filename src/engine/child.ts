@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { applyEvent, type ChildUsage, createStreamState, feedLines } from "./stream.ts";
+import { applyEvent, type ChildUsage, createStreamState, feedLines, type ProgressSnapshot, snapshot } from "./stream.ts";
 
 export interface ChildRunSpec {
 	task: string;
@@ -37,6 +37,8 @@ export interface ChildEngineOptions {
 	resolveInvocation?: (args: string[]) => { command: string; args: string[] };
 	/** Grace period before escalating SIGTERM → SIGKILL on abort. */
 	killGraceMs?: number;
+	/** Live progress callback (for async peek / supervision). */
+	onProgress?: (snapshot: ProgressSnapshot) => void;
 }
 
 /** Resolve how to re-invoke `pi` on any OS (script vs generic runtime vs PATH). */
@@ -116,6 +118,7 @@ export async function runChildAgent(
 				const { lines, rest } = feedLines(buffer, d.toString());
 				buffer = rest;
 				for (const l of lines) onLine(l);
+				opts.onProgress?.(snapshot(state));
 			});
 			proc.stderr?.on("data", (d: Buffer) => {
 				stderr += d.toString();

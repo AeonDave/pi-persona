@@ -56,12 +56,16 @@ rewrite on Pi-native primitives (`@earendil-works/pi-*`) — no third-party fork
 - **v0.2** — voting reducers (status union + bias guards), `magi` (+ MELCHIOR/BALTHASAR/CASPER
   cores), persona `params` + numeric YAML + 2-level nesting, **mandatory turn-interception**
   (the `input` hook auto-runs a strategy persona's orchestration), `/orchestrate`.
-- **v0.3 foundation** — in-process `Bus` seam (`bus/inproc`).
+- **v0.3** — async run **execution + tracker + peek + completion-notify** (`engine/async`,
+  child `onProgress`) + the in-process `Bus` seam (`bus/inproc`). `delegate { async: true }`
+  launches a background child; completion surfaces back as a follow-up turn; `/peek [id]`
+  shows live progress.
 
 **Remaining (seam-ready; some need a live Pi to verify — do NOT build blind):**
-- v0.3 async coaching: async child execution + tracker; `intercom`/`contact_supervisor` tools
-  over the Bus; idle + periodic-peek supervision (§4.9). Real coaching of *child-process*
-  agents needs the cross-process broker (v0.5) **or** the InProcessEngine (v0.4).
+- v0.3 live **steering**: redirect/resume a running child + child→supervisor
+  `intercom`/`contact_supervisor` + periodic-peek auto-wake. For *child-process* agents this
+  needs a control channel — the cross-process broker (port comtac, v0.5) or the
+  InProcessEngine (v0.4). Launch + peek + completion-notify already work.
 - v0.4 `InProcessEngine`: a second `StrategyEngine` backend on Pi's `AgentHarness` /
   `createAgentSession`. Drops in behind the existing seam; **needs real-Pi wiring + tests**.
 - v0.5 flows: declarative DAG over strategies (needs a YAML list-of-maps parser extension, or
