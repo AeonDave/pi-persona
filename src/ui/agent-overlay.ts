@@ -119,7 +119,11 @@ export class AgentOverlay extends Container {
 		if (node.detail) this.addChild(new Text(t.fg("dim", node.detail), 1, 0));
 		this.addChild(new Spacer(1));
 
-		const raw = node.output?.trim() ? node.output : live ? "(running… waiting for output)" : "(no output)";
+		const raw = node.output?.trim()
+			? node.output
+			: live
+				? "(working… the report appears here when the agent writes text — see its current tool above)"
+				: "(no output)";
 		const all = raw.split("\n");
 		const maxScroll = Math.max(0, all.length - VIEWPORT);
 		if (this.detailScroll > maxScroll) this.detailScroll = maxScroll;

@@ -27,6 +27,8 @@ export interface StreamState {
 	stopReason?: string;
 	errorMessage?: string;
 	sawAssistant: boolean;
+	/** The tool the child is currently running (e.g. "grep src/…"), or undefined. */
+	activity?: string;
 }
 
 export function emptyUsage(): ChildUsage {
@@ -53,12 +55,37 @@ function firstText(content: unknown): string | undefined {
 	return undefined;
 }
 
+/** A short "toolName arg" activity label from a tool_execution_start event. */
+function toolActivity(toolName: string, args: unknown): string {
+	if (isObject(args)) {
+		const hint = args.path ?? args.pattern ?? args.command ?? args.file ?? args.query ?? args.url;
+		if (typeof hint === "string" && hint.trim()) {
+			return `${toolName} ${hint.length > 40 ? `${hint.slice(0, 40)}…` : hint}`;
+		}
+	}
+	return toolName;
+}
+
 /** Fold one parsed stream event into the accumulating state (in place). */
 export function applyEvent(state: StreamState, event: unknown): void {
-	if (!isObject(event) || event.type !== "message_end" || !isObject(event.message)) return;
+	if (!isObject(event)) return;
+
+	// Track the current tool so the UI can show "running: grep src/…" while a
+	// tool-heavy agent reads before it has written any text.
+	if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
+		state.activity = toolActivity(event.toolName, event.args);
+		return;
+	}
+	if (event.type === "tool_execution_end") {
+		delete state.activity;
+		return;
+	}
+
+	if (event.type !== "message_end" || !isObject(event.message)) return;
 	const msg = event.message;
 	if (msg.role !== "assistant") return;
 
+	delete state.activity; // a message means it's reasoning, not mid-tool
 	state.sawAssistant = true;
 	state.usage.turns++;
 
@@ -89,10 +116,18 @@ export interface ProgressSnapshot {
 	output: string;
 	turns: number;
 	tokens: number;
+	/** The tool currently running (e.g. "grep src/…"), if any. */
+	activity?: string;
 }
 
 export function snapshot(state: StreamState): ProgressSnapshot {
-	return { output: state.output, turns: state.usage.turns, tokens: state.usage.input + state.usage.output };
+	const snap: ProgressSnapshot = {
+		output: state.output,
+		turns: state.usage.turns,
+		tokens: state.usage.input + state.usage.output,
+	};
+	if (state.activity !== undefined) snap.activity = state.activity;
+	return snap;
 }
 
 /** Buffer a stdout chunk into complete lines, returning the partial remainder. */

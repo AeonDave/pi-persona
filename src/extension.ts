@@ -330,12 +330,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 					agentTree.update(id, patch);
 				},
 				onAgentProgress: (agent, p) => {
-					// Live streaming: update the core's output buffer + a token counter as it runs.
+					// Live streaming: rolling output + a detail line showing the current tool
+					// (so a reading agent isn't a mute "waiting"), or the token count between tools.
 					const id = `${rootId}/${agent}`;
-					const patch: { output?: string; detail?: string } = {};
+					const patch: { output?: string; detail?: string } = {
+						detail: p.activity || (p.tokens ? `${p.tokens} tok` : ""),
+					};
 					if (p.output) patch.output = p.output;
-					if (p.tokens) patch.detail = `${p.tokens} tok`;
-					if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(id, patch);
+					agentTree.update(id, patch);
 				},
 			});
 		} finally {
@@ -516,6 +518,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"benefits from a focused specialist — it runs them and returns their structured results to you.",
 			"A sub-agent `model` may be a loose name (e.g. 'sonnet'): it auto-resolves to YOUR provider's",
 			"matching id. If a name is ambiguous you get the candidates back — pick one, or call `models`.",
+			"If the user may want to keep interacting (coach, ask, redirect) while this runs, prefer",
+			"`async: true` so you stay free — results come back as follow-ups; sync only when you must have",
+			"them before your very next step.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -578,8 +583,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 							if (!v.running) stopRegistry.delete(id);
 							const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
 							const node: AddNodeInput = { id, label: v.label, parentId: delRoot, status };
-							const usageStr = formatUsage(v.usage);
-							if (usageStr) node.detail = usageStr;
+								node.detail = v.running ? v.activity : formatUsage(v.usage);
 							if (v.output) node.output = v.output;
 							agentTree.add(node);
 						});

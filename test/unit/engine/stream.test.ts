@@ -10,6 +10,15 @@ test("feedLines buffers partial lines across chunks", () => {
 	assert.deepEqual(feedLines("", "a\n"), { lines: ["a"], rest: "" });
 });
 
+test("applyEvent captures the current tool as activity, and clears it when the tool ends", () => {
+	const st = createStreamState();
+	applyEvent(st, { type: "tool_execution_start", toolName: "grep", args: { pattern: "TODO", path: "src/" } });
+	assert.match(st.activity ?? "", /grep/);
+	assert.match(snapshot(st).activity ?? "", /grep/);
+	applyEvent(st, { type: "tool_execution_end", toolName: "grep", result: {}, isError: false });
+	assert.equal(st.activity, undefined, "activity clears when the tool ends");
+});
+
 test("applyEvent accumulates assistant text, usage, model, and stop reason", () => {
 	const s = createStreamState();
 	applyEvent(s, {
