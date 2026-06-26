@@ -26,11 +26,25 @@ export interface OrchestrationGrammar {
 	params?: Record<string, unknown>;
 }
 
+/**
+ * A tool-driven council: which strategy + roster + params the `council` tool runs
+ * on demand. Unlike `orchestration` it does NOT trigger the mandatory input-hook —
+ * the supervisor calls the council, then executes the ruling. Fully data-driven: a
+ * new ensemble (more members, a different vote, a multi-round strategy) is just a
+ * new team + (optional) strategy + a persona declaring them here.
+ */
+export interface CouncilSpec {
+	strategy: string;
+	roster?: string;
+	params?: Record<string, unknown>;
+}
+
 export interface Persona {
 	name: string;
 	label: string;
 	/** `persona: true` marks a file as a switchable supervisor persona. */
 	isPersona: boolean;
+	description?: string;
 	model?: string;
 	thinking?: string;
 	systemPromptMode: SystemPromptMode;
@@ -39,6 +53,8 @@ export interface Persona {
 	skills?: Permission;
 	/** Absent ⇒ L0 opportunistic delegation. */
 	orchestration?: OrchestrationGrammar;
+	/** Tool-driven council the `council` tool runs (no mandatory firing). */
+	council?: CouncilSpec;
 	/** The Markdown body — the supervisor system prompt. */
 	body: string;
 	/** Where it was loaded from (for diagnostics / `/doctor`). */
@@ -82,6 +98,7 @@ export function parsePersona(content: string, source: string): Persona | null {
 		body,
 		source,
 	};
+	if (typeof fm.description === "string" && fm.description.trim()) persona.description = fm.description.trim();
 	if (typeof fm.model === "string" && fm.model.trim()) persona.model = fm.model.trim();
 	if (typeof fm.thinking === "string" && fm.thinking.trim()) persona.thinking = fm.thinking.trim();
 
@@ -94,8 +111,24 @@ export function parsePersona(content: string, source: string): Persona | null {
 
 	const orchestration = parseOrchestration(fm.orchestration);
 	if (orchestration) persona.orchestration = orchestration;
+	const council = parseCouncil(fm.council);
+	if (council) persona.council = council;
 
 	return persona;
+}
+
+/** Parse a persona's `council:` block (strategy + roster + params). */
+function parseCouncil(value: unknown): CouncilSpec | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const o = value as Record<string, unknown>;
+	const strategy = typeof o.strategy === "string" && o.strategy.trim() ? o.strategy.trim() : "";
+	if (!strategy) return undefined;
+	const spec: CouncilSpec = { strategy };
+	if (typeof o.roster === "string" && o.roster.trim()) spec.roster = o.roster.trim();
+	if (o.params && typeof o.params === "object" && !Array.isArray(o.params)) {
+		spec.params = o.params as Record<string, unknown>;
+	}
+	return spec;
 }
 
 /** Compose the turn's system prompt from the base prompt and a persona. */
