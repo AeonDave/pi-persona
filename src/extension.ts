@@ -38,7 +38,7 @@ import {
 } from "./persona/config-store.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
+import { type AddNodeInput, AgentTree, type AgentNodeStatus, GLYPH, renderAgentTree } from "./ui/agent-tree.ts";
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -70,14 +70,32 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
+
+	// A compact one-line summary of the live agents (cores/legs by name + glyph),
+	// for a custom UI (e.g. pi-1337's frame) to render via the status channel.
+	function agentSummary(): string {
+		const nodes = agentTree.snapshot();
+		const leaves = nodes.filter((n) => n.parentId !== undefined);
+		const list = leaves.length > 0 ? leaves : nodes;
+		const shown = list.slice(0, 5).map((n) => `${GLYPH[n.status]} ${n.label}`).join("  ");
+		const more = list.length - Math.min(5, list.length);
+		return more > 0 ? `${shown}  +${more}` : shown;
+	}
+
 	function renderAgentWidget(): void {
 		if (!lastCtx) return;
+		const empty = agentTree.isEmpty();
 		try {
-			lastCtx.ui.setWidget("persona-agents", agentTree.isEmpty() ? undefined : renderAgentTree(agentTree.snapshot()), {
+			lastCtx.ui.setWidget("persona-agents", empty ? undefined : renderAgentTree(agentTree.snapshot()), {
 				placement: "aboveEditor",
 			});
 		} catch {
 			/* cosmetic — the widget is best-effort */
+		}
+		try {
+			lastCtx.ui.setStatus("persona-agents", empty ? undefined : agentSummary());
+		} catch {
+			/* cosmetic */
 		}
 	}
 	agentTree.onChange(renderAgentWidget);
