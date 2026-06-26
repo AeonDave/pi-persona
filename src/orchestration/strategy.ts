@@ -1,7 +1,7 @@
 /**
- * Built-in strategy registry. In v0.1 the built-ins are TS modules conforming
- * to the `Strategy` interface; v0.2 adds a jiti loader for user-authored
- * `strategies/*.js` files using the same SDK (trusted code, project-trust gated).
+ * Built-in strategy registry — TS modules conforming to the `Strategy` interface.
+ * A future loader for user-authored `strategies/*.js` (same SDK, trusted/project-
+ * gated code) would register through the same map.
  */
 
 import type { Strategy } from "./sdk.ts";
@@ -17,8 +17,4 @@ const BUILTINS: Record<string, Strategy> = {
 
 export function getStrategy(name: string): Strategy | undefined {
 	return BUILTINS[name];
-}
-
-export function builtinStrategyNames(): string[] {
-	return Object.keys(BUILTINS);
 }

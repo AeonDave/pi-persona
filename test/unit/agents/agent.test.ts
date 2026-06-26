@@ -18,7 +18,6 @@ test("parseAgent reads frontmatter and uses the body as the system prompt", () =
 	assert.equal(a.name, "scout");
 	assert.equal(a.description, "Fast read-only explorer");
 	assert.equal(a.model, "anthropic/claude-x");
-	assert.equal(a.thinking, "low");
 	assert.deepEqual(a.tools, ["read", "grep", "find"]);
 	assert.equal(a.systemPrompt, "You are scout. Explore and report.");
 	assert.equal(a.systemPromptMode, "replace");

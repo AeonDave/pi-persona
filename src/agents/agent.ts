@@ -13,7 +13,6 @@ export interface AgentConfig {
 	name: string;
 	description?: string;
 	model?: string;
-	thinking?: string;
 	tools?: string[];
 	systemPrompt: string;
 	systemPromptMode: SystemPromptMode;
@@ -34,7 +33,6 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	};
 	if (typeof fm.description === "string" && fm.description.trim()) agent.description = fm.description.trim();
 	if (typeof fm.model === "string" && fm.model.trim()) agent.model = fm.model.trim();
-	if (typeof fm.thinking === "string" && fm.thinking.trim()) agent.thinking = fm.thinking.trim();
 	const tools = asStringArray(fm.tools);
 	if (tools) agent.tools = tools;
 

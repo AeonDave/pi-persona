@@ -1,11 +1,14 @@
 /**
- * In-process coordination bus (v0.3) — the default Bus backend. Handle-based
- * mailbox: participants register by name; `send` is one-way, `ask` blocks for a
- * reply to that message id. No IPC, no naming contract — cross-OS for free. The
- * cross-process broker (v0.5) implements the same surface for separate processes.
+ * In-process coordination bus — the semantic communication plane (Bus messages),
+ * kept distinct from engine runtime events and the derived progress view
+ * (guardrails §4.2). Handle-based mailbox: participants register by name; `send`
+ * is one-way, `ask` blocks for a reply to that message id. No IPC, no naming
+ * contract — cross-OS for free; the cross-process broker would implement the same
+ * surface for separate processes.
  *
- * This is the *semantic* communication plane (Bus messages), kept distinct from
- * engine runtime events and the derived progress view (guardrails §4.2).
+ * SCAFFOLDING (v0.4): the seam is built and unit-tested, but not yet wired into a
+ * live run — async completion is currently surfaced via `sendUserMessage`
+ * follow-ups, not the bus. Kept as the ready seam for the InProcessEngine.
  */
 
 export interface Envelope {
