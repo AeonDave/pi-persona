@@ -38,7 +38,7 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import { type DelegateView, runDelegate } from "./tools/delegate.ts";
+import { type DelegateView, labelFor, runDelegate } from "./tools/delegate.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
 import { formatUsage } from "./ui/usage.ts";
@@ -458,7 +458,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 		),
 		concurrency: Type.Optional(Type.Number({ description: "Max children to run at once (default 4)" })),
 		async: Type.Optional(
-			Type.Boolean({ description: "Run in the background (single mode): returns a run id and notifies you on completion" }),
+			Type.Boolean({
+				description:
+					"Run in the background (single OR parallel) so YOU stay free to keep working / answer the user. Returns run ids immediately; each result arrives as a follow-up, /peek to watch.",
+			}),
 		),
 	});
 
@@ -486,6 +489,24 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return undefined;
 	}
 
+	// Launch one agent in the background (tracked) and add its live async node to the tree.
+	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string): string {
+		let nodeId = "";
+		const id = tracker.launch({ agent, task }, (onProgress) =>
+			buildEngine(undefined, (snap) => {
+				onProgress(snap);
+				if (!nodeId) return;
+				const patch: { output?: string; detail?: string } = {};
+				if (snap.output) patch.output = snap.output;
+				if (snap.tokens) patch.detail = `${snap.tokens} tok`;
+				if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
+			}).run(runSpec),
+		);
+		nodeId = `async:${id}`;
+		agentTree.add({ id: nodeId, label: `${label} (async)`, status: "running" });
+		return id;
+	}
+
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
@@ -501,6 +522,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 			lastCtx = ctx;
 			const modelErr = resolveDelegateModels(params, ctx);
 			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: {}, isError: true };
+			// Async (single OR parallel): run in the background so YOU stay free to keep
+			// working / answer the user — results arrive later as follow-ups; /peek to watch.
+			if (params.async && params.tasks && params.tasks.length > 0) {
+				const tasks = params.tasks.slice(0, RUN_LIMITS.maxChildren);
+				const ids = tasks.map((t, i) => {
+					const spec: AgentRunSpec = { agent: t.agent, task: t.task };
+					if (t.model) spec.model = t.model;
+					if (t.tools && t.tools.length > 0) spec.tools = t.tools;
+					if (t.skills && t.skills.length > 0) spec.skills = t.skills;
+					return launchAsyncRun(t.agent, t.task, spec, labelFor(t, i));
+				});
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Launched ${ids.length} async runs in the background (${ids.join(", ")}) — keep working; each notifies on completion. /peek to watch.`,
+						},
+					],
+					details: { runIds: ids },
+					isError: false,
+				};
+			}
 			if (params.async && params.agent && params.task) {
 				const agent = params.agent;
 				const task = params.task;
@@ -508,24 +551,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 				if (params.model) runSpec.model = params.model;
 				if (params.tools && params.tools.length > 0) runSpec.tools = params.tools;
 				if (params.skills && params.skills.length > 0) runSpec.skills = params.skills;
-				let nodeId = "";
-				const id = tracker.launch({ agent, task }, (onProgress) =>
-					buildEngine(undefined, (snap) => {
-						onProgress(snap);
-						if (!nodeId) return;
-						const patch: { output?: string; detail?: string } = {};
-						if (snap.output) patch.output = snap.output;
-						if (snap.tokens) patch.detail = `${snap.tokens} tok`;
-						if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
-					}).run(runSpec),
-				);
-				nodeId = `async:${id}`;
-				agentTree.add({ id: nodeId, label: `${agent} (async)`, status: "running" });
+				const labelArg = { agent, ...(params.name ? { name: params.name } : {}), ...(params.model ? { model: params.model } : {}) };
+				const id = launchAsyncRun(agent, task, runSpec, labelFor(labelArg, 0));
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Launched async run ${id} (agent "${agent}"). It runs in the background — you'll be notified on completion; peek with /peek ${id}.`,
+							text: `Launched async run ${id} (${agent}) — runs in the background; you'll be notified on completion. /peek ${id} to watch.`,
 						},
 					],
 					details: { runId: id },
