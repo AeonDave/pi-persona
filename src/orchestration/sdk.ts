@@ -62,8 +62,9 @@ export interface SDKDeps {
 	limits: RunLimits;
 	signal?: AbortSignal;
 	log?: (message: string) => void;
-	/** Per-agent lifecycle, for live UI (which agent is running/done). */
-	onAgentStatus?: (agent: string, status: AgentStatus) => void;
+	/** Per-agent lifecycle, for live UI. The result is passed on done/failed so the
+	 *  UI can capture each agent's output/usage. */
+	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
@@ -72,7 +73,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 			deps.onAgentStatus?.(spec.agent, "running");
 			try {
 				const result = await deps.engine.run(spec);
-				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed");
+				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result);
 				return result;
 			} catch (err) {
 				deps.onAgentStatus?.(spec.agent, "failed");

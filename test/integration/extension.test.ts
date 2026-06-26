@@ -91,12 +91,12 @@ function projectCwdWithLockedPersona(): string {
 	return cwd;
 }
 
-test("piPersona registers the delegate tool, an f8 shortcut, and persona/doctor/orchestrate commands", () => {
+test("piPersona registers the delegate tool, f8/f9 shortcuts, and agents/doctor/orchestrate/peek/persona commands", () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
 	assert.ok(m.toolNames().includes("delegate"));
-	assert.deepEqual(m.commandNames().sort(), ["doctor", "orchestrate", "peek", "persona"]);
-	assert.equal(m.shortcutCount(), 1);
+	assert.deepEqual(m.commandNames().sort(), ["agents", "doctor", "orchestrate", "peek", "persona"]);
+	assert.equal(m.shortcutCount(), 2); // f8 (cycle persona) + f9 (agent overlay)
 });
 
 test("/peek reports no async runs initially", async () => {

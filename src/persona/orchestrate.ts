@@ -24,8 +24,8 @@ export interface RunStrategyDeps {
 	limits: RunLimits;
 	signal?: AbortSignal;
 	log?: (message: string) => void;
-	/** Per-agent lifecycle, for live UI (which roster agent is running/done). */
-	onAgentStatus?: (agent: string, status: AgentStatus) => void;
+	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result). */
+	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
 }
 
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */

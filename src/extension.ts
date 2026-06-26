@@ -30,6 +30,7 @@ import type { OrchestrationGrammar, Persona } from "./persona/persona.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
 import { type PersonaConfigStore, readPersonaConfigs, withPersonaModels, writePersonaConfigs } from "./persona/config-store.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
+import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
 import { formatUsage } from "./ui/usage.ts";
 
@@ -71,6 +72,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 	}
 	agentTree.onChange(renderAgentWidget);
+
+	// The navigable agent overlay (f9 / /agents): ↑↓ navigate, ⏎ drill into an
+	// agent's output, esc back/close. Live — it re-renders as the tree changes.
+	async function openAgentOverlay(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI || ctx.mode !== "tui") {
+			ctx.ui.notify("agents: the navigable overlay needs the interactive TUI", "warning");
+			return;
+		}
+		await ctx.ui.custom<void>(
+			(tui, theme, _kb, done) => new AgentOverlay(agentTree, tui, theme, () => done(undefined)),
+			{ overlay: true },
+		);
+	}
 	let personas: Persona[] = [];
 	let agents: AgentConfig[] = [];
 	let teams: Record<string, string[]> = {};
@@ -243,10 +257,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 				engine: buildEngine(),
 				teams,
 				limits: RUN_LIMITS,
-				onAgentStatus: (agent, st) => {
+				onAgentStatus: (agent, st, result) => {
 					const id = `${rootId}/${agent}`;
-					if (st === "running") agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
-					else agentTree.update(id, { status: st });
+					if (st === "running") {
+						agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
+						return;
+					}
+					const patch: { status: AgentNodeStatus; detail?: string; output?: string } = { status: st };
+					if (result) {
+						const u = formatUsage(result.usage);
+						if (u) patch.detail = u;
+						if (result.output) patch.output = result.output;
+					}
+					agentTree.update(id, patch);
 				},
 			});
 		} finally {
@@ -387,6 +410,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 						const node: AddNodeInput = { id: `${delRoot}/${i}`, label: v.agent, parentId: delRoot, status };
 						const usageStr = formatUsage(v.usage);
 						if (usageStr) node.detail = usageStr;
+						if (v.output) node.output = v.output;
 						agentTree.add(node);
 					});
 					const done = views.filter((v) => !v.running).length;
@@ -462,6 +486,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 				await controller.activate(personas[next]!);
 				persist(personas[next]!.name);
 			}
+		},
+	});
+
+	// ── f9: navigable agent overlay ──────────────────────────────────────────────
+	pi.registerShortcut("f9" as Parameters<ExtensionAPI["registerShortcut"]>[0], {
+		description: "Open the navigable agent tree (pi-persona)",
+		handler: async (ctx) => {
+			lastCtx = ctx;
+			await openAgentOverlay(ctx);
+		},
+	});
+	pi.registerCommand("agents", {
+		description: "Open the navigable agent tree overlay (↑↓ navigate, ⏎ open, esc close)",
+		handler: async (_args, ctx) => {
+			lastCtx = ctx;
+			await openAgentOverlay(ctx);
 		},
 	});
 

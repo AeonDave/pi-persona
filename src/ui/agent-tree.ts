@@ -15,6 +15,26 @@ export interface AgentNode {
 	status: AgentNodeStatus;
 	/** A short trailing annotation (usage, current activity), shown after the label. */
 	detail: string | undefined;
+	/** The agent's output buffer, shown when the user drills into the node. */
+	output?: string;
+}
+
+export interface FlatRow {
+	node: AgentNode;
+	depth: number;
+}
+
+/** Flatten the tree into display order (root, then its children…) with depth. Pure. */
+export function flattenTree(nodes: AgentNode[]): FlatRow[] {
+	const rows: FlatRow[] = [];
+	const walk = (parentId: string | undefined, depth: number): void => {
+		for (const node of nodes.filter((n) => n.parentId === parentId)) {
+			rows.push({ node, depth });
+			walk(node.id, depth + 1);
+		}
+	};
+	walk(undefined, 0);
+	return rows;
 }
 
 const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗" };
@@ -47,6 +67,7 @@ export interface AddNodeInput {
 	parentId?: string;
 	status?: AgentNodeStatus;
 	detail?: string;
+	output?: string;
 }
 
 /** A small mutable registry with change notification. The extension owns one. */
@@ -61,23 +82,27 @@ export class AgentTree {
 			existing.label = input.label;
 			if (input.status) existing.status = input.status;
 			if (input.detail !== undefined) existing.detail = input.detail;
+			if (input.output !== undefined) existing.output = input.output;
 		} else {
-			this.nodes.push({
+			const node: AgentNode = {
 				id: input.id,
 				label: input.label,
 				parentId: input.parentId,
 				status: input.status ?? "running",
 				detail: input.detail,
-			});
+			};
+			if (input.output !== undefined) node.output = input.output;
+			this.nodes.push(node);
 		}
 		this.emit();
 	}
 
-	update(id: string, patch: { status?: AgentNodeStatus; detail?: string }): void {
+	update(id: string, patch: { status?: AgentNodeStatus; detail?: string; output?: string }): void {
 		const node = this.nodes.find((n) => n.id === id);
 		if (!node) return;
 		if (patch.status) node.status = patch.status;
 		if (patch.detail !== undefined) node.detail = patch.detail;
+		if (patch.output !== undefined) node.output = patch.output;
 		this.emit();
 	}
 
