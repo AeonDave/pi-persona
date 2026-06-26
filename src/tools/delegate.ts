@@ -128,7 +128,15 @@ export async function runDelegate(
 		const results = await mapWithConcurrency(tasks, concurrency, async (t, i) => {
 			const ac = new AbortController();
 			onLegStart?.(i, () => ac.abort());
-			const r = await engine.run(specOf(t), undefined, ac.signal);
+			const r = await engine.run(
+				specOf(t),
+				(p) => {
+					// Stream the leg's rolling output so the overlay shows it live.
+					if (p.output) views[i] = { ...(views[i] as DelegateView), output: p.output };
+					onProgress?.(views.map((v) => ({ ...v })));
+				},
+				ac.signal,
+			);
 			views[i] = viewOf(t.agent, labels[i] as string, r);
 			onProgress?.(views.map((v) => ({ ...v })));
 			return r;
@@ -147,11 +155,21 @@ export async function runDelegate(
 		if (params.skills && params.skills.length > 0) single.skills = params.skills;
 		if (params.model) single.model = params.model;
 		if (params.tools && params.tools.length > 0) single.tools = params.tools;
+		const label = labelFor(single, 0);
+		const view: DelegateView = { agent: params.agent, label, running: true, ok: false, output: "", usage: emptyUsage() };
+		onProgress?.([{ ...view }]);
 		const ac = new AbortController();
 		onLegStart?.(0, () => ac.abort());
-		const r = await engine.run(specOf(single), undefined, ac.signal);
+		const r = await engine.run(
+			specOf(single),
+			(p) => {
+				if (p.output) view.output = p.output;
+				onProgress?.([{ ...view }]);
+			},
+			ac.signal,
+		);
 		const text = r.ok ? r.output || "(no output)" : `Agent "${params.agent}" failed: ${r.error ?? "(no detail)"}`;
-		return { text, results: [r], views: [viewOf(params.agent, labelFor(single, 0), r)], ok: r.ok };
+		return { text, results: [r], views: [viewOf(params.agent, label, r)], ok: r.ok };
 	}
 
 	return { text: "delegate: provide either { agent, task } or { tasks: [{ agent, task }, ...] }", results: [], views: [], ok: false };

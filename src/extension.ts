@@ -438,7 +438,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
 		name: Type.Optional(
-			Type.String({ description: "Short friendly name for this sub-agent (helps tell several apart in the UI)" }),
+			Type.String({ description: "Short HUMAN codename for this sub-agent (e.g. 'pippo', 'luna', 'kilo') — not a task description; tells several apart in the UI" }),
 		),
 		skills: Type.Optional(SkillsSchema),
 		model: Type.Optional(
@@ -449,7 +449,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
-		name: Type.Optional(Type.String({ description: "Short friendly name for the sub-agent (single mode)" })),
+		name: Type.Optional(Type.String({ description: "Short HUMAN codename for the sub-agent (e.g. 'pippo') — not a task description (single mode)" })),
 		skills: Type.Optional(SkillsSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode)" })),

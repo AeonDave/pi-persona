@@ -1,17 +1,28 @@
 /**
  * A focusable overlay over the unified agent tree, opened with ctx.ui.custom
- * (overlay: true). ↑↓ navigate the flattened tree, ⏎ drills into the selected
- * agent (its captured output + usage), esc backs out of detail or closes the
- * overlay. It subscribes to the tree, so it re-renders live as agents progress.
+ * (overlay: true). ↑↓ navigate the *agents* (leaf rows; a parent like "delegate"
+ * is a non-selectable header), ⏎ drills into one — its live output in a bounded,
+ * auto-scrolling viewport — `x` stops it, esc backs out / closes. Subscribes to the
+ * tree, so it re-renders live as agents stream.
  *
- * The pure parts (flatten/render order, status glyphs) live in agent-tree.ts and
- * are unit-tested; this file is the thin pi-tui glue (focus + keyboard).
+ * The pure parts (flatten/order, glyphs) live in agent-tree.ts and are unit-tested;
+ * this file is the thin pi-tui glue (focus + keyboard + framing).
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Container, getKeybindings, Spacer, Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	Container,
+	getKeybindings,
+	Spacer,
+	Text,
+	truncateToWidth,
+	type TUI,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 
-import { type AgentTree, flattenTree, GLYPH } from "./agent-tree.ts";
+import { type AgentTree, type FlatRow, flattenTree, GLYPH } from "./agent-tree.ts";
+
+const VIEWPORT = 14; // detail output rows shown at once (the rest scrolls)
 
 export class AgentOverlay extends Container {
 	private tree: AgentTree;
@@ -20,8 +31,10 @@ export class AgentOverlay extends Container {
 	private done: () => void;
 	private onStop: ((nodeId: string) => boolean) | undefined;
 	private unsubscribe: () => void;
-	private selectedIndex = 0;
+	private selectedLeaf = 0; // index into the leaf rows
 	private detailId: string | undefined;
+	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
+	private lastWidth = 100;
 
 	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void, onStop?: (nodeId: string) => boolean) {
 		super();
@@ -41,7 +54,8 @@ export class AgentOverlay extends Container {
 
 	/** Frame the panel in a box so it stands out from the chat background. */
 	override render(width: number): string[] {
-		const inner = Math.max(24, Math.min(width - 4, 100));
+		this.lastWidth = width;
+		const inner = this.inner();
 		const t = this.theme;
 		const b = (s: string): string => t.fg("accent", s);
 		const framed = super.render(inner).map((line) => {
@@ -49,6 +63,16 @@ export class AgentOverlay extends Container {
 			return `${b("│")} ${line}${pad} ${b("│")}`;
 		});
 		return [b(`┌${"─".repeat(inner + 2)}┐`), ...framed, b(`└${"─".repeat(inner + 2)}┘`)];
+	}
+
+	private inner(): number {
+		return Math.max(24, Math.min(this.lastWidth - 4, 100));
+	}
+
+	private leafRows(): FlatRow[] {
+		const snap = this.tree.snapshot();
+		const parents = new Set(snap.map((n) => n.parentId).filter((p): p is string => p !== undefined));
+		return flattenTree(snap).filter((r) => !parents.has(r.node.id));
 	}
 
 	private rebuild(): void {
@@ -60,19 +84,21 @@ export class AgentOverlay extends Container {
 	private renderList(): void {
 		const t = this.theme;
 		const rows = flattenTree(this.tree.snapshot());
-		if (this.selectedIndex >= rows.length) this.selectedIndex = Math.max(0, rows.length - 1);
+		const leaves = this.leafRows();
+		if (this.selectedLeaf >= leaves.length) this.selectedLeaf = Math.max(0, leaves.length - 1);
+		const selectedId = leaves[this.selectedLeaf]?.node.id;
 		this.addChild(new Text(t.fg("accent", t.bold("Agents")), 1, 0));
 		this.addChild(new Spacer(1));
 		if (rows.length === 0) {
 			this.addChild(new Text(t.fg("dim", "(no agents running)"), 1, 0));
 		} else {
-			rows.forEach((row, i) => {
+			for (const row of rows) {
 				const indent = "  ".repeat(row.depth);
 				const detail = row.node.detail ? t.fg("dim", `  ${row.node.detail}`) : "";
 				const label = `${indent}${GLYPH[row.node.status]} ${row.node.label}`;
-				const line = i === this.selectedIndex ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
+				const line = row.node.id === selectedId ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
 				this.addChild(new Text(`${line}${detail}`, 1, 0));
-			});
+			}
 		}
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(t.fg("dim", "↑↓ navigate   ⏎ open   x stop   esc close"), 1, 0));
@@ -92,43 +118,55 @@ export class AgentOverlay extends Container {
 		);
 		if (node.detail) this.addChild(new Text(t.fg("dim", node.detail), 1, 0));
 		this.addChild(new Spacer(1));
+
 		const raw = node.output?.trim() ? node.output : live ? "(running… waiting for output)" : "(no output)";
 		const all = raw.split("\n");
-		const tail = all.slice(-28); // show the latest output (live tail)
-		if (all.length > tail.length) {
-			this.addChild(new Text(t.fg("dim", `…(${all.length - tail.length} earlier lines)`), 1, 0));
-		}
-		for (const line of tail) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
+		const maxScroll = Math.max(0, all.length - VIEWPORT);
+		if (this.detailScroll > maxScroll) this.detailScroll = maxScroll;
+		const end = all.length - this.detailScroll;
+		const start = Math.max(0, end - VIEWPORT);
+		const w = this.inner() - 1;
+		if (start > 0) this.addChild(new Text(t.fg("dim", `▲ ${start} earlier`), 1, 0));
+		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", truncateToWidth(line, w)), 1, 0));
+		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
+
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(t.fg("dim", live ? "esc back   ·   x stop" : "esc back"), 1, 0));
+		this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${live ? "   ·   x stop" : ""}`), 1, 0));
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (this.detailId) {
 			if (keyData === "x") this.tryStop(this.detailId);
-			else if (kb.matches(keyData, "tui.select.cancel")) {
+			else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
+				this.detailScroll += 1;
+				this.refresh();
+			} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
+				this.detailScroll = Math.max(0, this.detailScroll - 1);
+				this.refresh();
+			} else if (kb.matches(keyData, "tui.select.cancel")) {
 				this.detailId = undefined;
 				this.refresh();
 			}
 			return;
 		}
-		const rows = flattenTree(this.tree.snapshot());
+		const leaves = this.leafRows();
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.selectedLeaf = Math.max(0, this.selectedLeaf - 1);
 			this.refresh();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(Math.max(0, rows.length - 1), this.selectedIndex + 1);
+			this.selectedLeaf = Math.min(Math.max(0, leaves.length - 1), this.selectedLeaf + 1);
 			this.refresh();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
-			const row = rows[this.selectedIndex];
-			if (row) {
-				this.detailId = row.node.id;
+			const leaf = leaves[this.selectedLeaf];
+			if (leaf) {
+				this.detailId = leaf.node.id;
+				this.detailScroll = 0; // open at the latest output (auto-scroll to bottom)
 				this.refresh();
 			}
 		} else if (keyData === "x") {
-			const row = rows[this.selectedIndex];
-			if (row) this.tryStop(row.node.id);
+			const leaf = leaves[this.selectedLeaf];
+			if (leaf) this.tryStop(leaf.node.id);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.close();
 		}
