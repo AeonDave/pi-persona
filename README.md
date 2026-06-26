@@ -14,8 +14,10 @@ opportunistic delegation ("plan this, solve that") to mandatory multi-agent stra
 
 ## Status
 
-Architecture-first. **v0.1 in development** (vertical slice: persona → delegate → child
-agent → structured result). Binding design lives in
+**v0.1 vertical built and green** — the full path works: `persona.md` → `f8`/`/persona` →
+`delegate` (or `/orchestrate`) → **real `pi` child processes** → structured result. ~107
+tests (`node --test`), strict `tsc --noEmit` clean. Loadable in Pi (the extension
+typechecks against the real `@earendil-works` ExtensionAPI). Binding design lives in
 [`docs/superpowers/specs/`](docs/superpowers/specs/):
 
 - [Architecture](docs/superpowers/specs/2026-06-25-pi-persona-architecture.md)
