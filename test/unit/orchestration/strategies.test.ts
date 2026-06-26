@@ -24,6 +24,18 @@ test("fanout runs every roster agent in parallel and aggregates the results", as
 	assert.match(r.output, /out:a/);
 });
 
+test("the SDK reports per-agent status (running → done) via onAgentStatus", async () => {
+	const events: string[] = [];
+	const sdk = makeSDK({
+		engine: { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) },
+		roster: { team: () => [] },
+		limits: LIMITS,
+		onAgentStatus: (a, st) => events.push(`${a}:${st}`),
+	});
+	await sdk.agent({ agent: "melchior", task: "t" });
+	assert.deepEqual(events, ["melchior:running", "melchior:done"]);
+});
+
 test("fanout throws when no roster is provided", async () => {
 	const engine: StrategyEngine = { run: async () => ({ agent: "x", output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: LIMITS });
