@@ -17,9 +17,17 @@ test("majority vote picks the plurality winner and records tally + dissent", () 
 	const r = voteReduce([c("m1", "A"), c("m2", "A"), c("m3", "B")], { aggregate: "majority" });
 	assert.equal(r.status, "winner");
 	assert.equal(r.winner?.structured?.vote, "A");
-	assert.equal(r.tally.A, 2);
-	assert.equal(r.tally.B, 1);
+	assert.equal(r.tally.a, 2); // tally keys are normalised (lowercase)
+	assert.equal(r.tally.b, 1);
 	assert.equal(r.dissent?.length, 1);
+});
+
+test("vote keys are normalised (case/separators) so equivalent votes tally together", () => {
+	const r = voteReduce([c("m1", "json-first"), c("m2", "JSON_First"), c("m3", "yaml")], { aggregate: "majority" });
+	assert.equal(r.status, "winner");
+	assert.equal(r.tally["json-first"], 2);
+	assert.equal(r.tally.yaml, 1);
+	assert.equal(r.winner?.structured?.vote, "json-first");
 });
 
 test("unanimity requires every valid candidate to agree", () => {

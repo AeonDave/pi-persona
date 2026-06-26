@@ -29,7 +29,7 @@ test("magi runs the roster, votes by majority, and reports the ruling + tally", 
 	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
 	assert.equal(r.ok, true);
 	assert.equal(r.structured?.status, "winner");
-	assert.match(r.output, /A=2/);
+	assert.match(r.output, /a=2/);
 	assert.match(r.output, /dissent/i);
 });
 
