@@ -9,7 +9,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, getKeybindings, Spacer, Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 
 import { type AgentTree, flattenTree, GLYPH } from "./agent-tree.ts";
 
@@ -35,6 +35,18 @@ export class AgentOverlay extends Container {
 	private refresh(): void {
 		this.rebuild();
 		this.tui.requestRender();
+	}
+
+	/** Frame the panel in a box so it stands out from the chat background. */
+	override render(width: number): string[] {
+		const inner = Math.max(24, Math.min(width - 4, 100));
+		const t = this.theme;
+		const b = (s: string): string => t.fg("accent", s);
+		const framed = super.render(inner).map((line) => {
+			const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));
+			return `${b("│")} ${line}${pad} ${b("│")}`;
+		});
+		return [b(`┌${"─".repeat(inner + 2)}┐`), ...framed, b(`└${"─".repeat(inner + 2)}┘`)];
 	}
 
 	private rebuild(): void {
@@ -72,12 +84,19 @@ export class AgentOverlay extends Container {
 			this.renderList();
 			return;
 		}
-		this.addChild(new Text(`${t.fg("accent", t.bold(node.label))}  ${GLYPH[node.status]}`, 1, 0));
+		const live = node.status === "running";
+		this.addChild(
+			new Text(`${GLYPH[node.status]} ${t.fg("accent", t.bold(node.label))}${live ? t.fg("success", "  ● live") : ""}`, 1, 0),
+		);
 		if (node.detail) this.addChild(new Text(t.fg("dim", node.detail), 1, 0));
 		this.addChild(new Spacer(1));
-		const body =
-			node.output && node.output.trim() ? node.output : node.status === "running" ? "(running…)" : "(no output)";
-		for (const line of body.split("\n")) this.addChild(new Text(line, 1, 0));
+		const raw = node.output?.trim() ? node.output : live ? "(running… waiting for output)" : "(no output)";
+		const all = raw.split("\n");
+		const tail = all.slice(-28); // show the latest output (live tail)
+		if (all.length > tail.length) {
+			this.addChild(new Text(t.fg("dim", `…(${all.length - tail.length} earlier lines)`), 1, 0));
+		}
+		for (const line of tail) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(t.fg("dim", "esc back"), 1, 0));
 	}
