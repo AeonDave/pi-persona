@@ -140,6 +140,23 @@ test("critic-loop revises while the critic rejects, then stops on approve", asyn
 	assert.equal(r.output, "gen#2");
 });
 
+test("critic-loop takes generator + critic from the roster's two entities by default", async () => {
+	const seen: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			seen.push(spec.agent);
+			if (spec.agent === "skeptic") {
+				return { agent: "skeptic", output: "c", structured: { stance: "approve" }, usage: usage(), ok: true };
+			}
+			return { agent: spec.agent, output: "draft", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["builder", "skeptic"] }, limits: LIMITS });
+	await criticLoop.run({ task: "T", roster: "antagonist", params: {} }, sdk);
+	assert.ok(seen.includes("builder"), "generator = roster[0]");
+	assert.ok(seen.includes("skeptic"), "critic = roster[1]");
+});
+
 test("critic-loop stops at maxRounds even if the critic keeps rejecting", async () => {
 	let genCalls = 0;
 	const engine: StrategyEngine = {

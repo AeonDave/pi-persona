@@ -1,5 +1,7 @@
 # Rosters: a team name → an ordered list of agent names.
-# Referenced by a persona's `orchestration.roster`. Project/user copies override.
+# Referenced by a persona's `orchestration.roster` or `council.roster`.
+# Project/user copies override. A roster's members are the ensemble's cores — each
+# is offered its own model on first run (the supervisor keeps the session model).
 review: [security, performance, tests]
-antagonist: [builder]
+antagonist: [builder, skeptic]
 magi: [melchior, balthasar, casper]
