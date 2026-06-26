@@ -6,7 +6,7 @@
  */
 
 import type { AgentConfig } from "../agents/agent.ts";
-import { type ContractDef, validateAgainst, type ValidationResult } from "../core/contract.ts";
+import { type ContractDef, pinContract, type PinnedContract, validateAgainst, type ValidationResult } from "../core/contract.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
@@ -25,6 +25,20 @@ export interface EngineAdapterDeps {
 }
 
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
+	// Per-run contract pinning (I3): an engine instance is created per run, so the first
+	// time a contract is used we pin `name@hash` and reuse that frozen snapshot for the
+	// rest of the run — hot-reloading a contract file can't change an in-flight run.
+	const pinned = new Map<string, PinnedContract>();
+	const pinnedDef = (name: string): ContractDef | undefined => {
+		const cached = pinned.get(name);
+		if (cached) return cached.def;
+		const def = deps.contracts?.(name);
+		if (!def) return undefined;
+		const fresh = pinContract(def);
+		pinned.set(name, fresh);
+		return fresh.def;
+	};
+
 	return {
 		async run(spec: AgentRunSpec, onProgress?: (p: { output: string; tokens?: number }) => void): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
@@ -53,7 +67,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			else if (!child.ok) result.error = child.stderr.trim() || `agent failed (exit ${child.exitCode})`;
 
 			if (spec.outputContract && deps.contracts) {
-				const def = deps.contracts(spec.outputContract);
+				const def = pinnedDef(spec.outputContract);
 				if (def) {
 					let parsed: unknown;
 					try {
