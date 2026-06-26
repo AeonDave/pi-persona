@@ -9,10 +9,23 @@
  * no override and no restore; tools are restored from the FULL registry.
  */
 
-import { isAllowed } from "../core/permissions.ts";
+import {
+	type CapabilityPermissions,
+	type EffectiveCapabilities,
+	resolveCapabilities,
+	type RunLimits,
+} from "../core/capabilities.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { type GateResult, gateToolCall } from "./gating.ts";
 import { composeSystemPrompt, type Persona } from "./persona.ts";
+
+const DEFAULT_LIMITS: RunLimits = {
+	maxChildren: 8,
+	maxDepth: 2,
+	maxConcurrency: 4,
+	timeoutMs: 120_000,
+	budgetTokens: 1_000_000,
+};
 
 /** Opaque model handle — the controller does not care about its internals. */
 export interface ModelHandle {
@@ -23,6 +36,7 @@ export interface ModelHandle {
 /** The minimal host surface the controller drives (a subset of ExtensionAPI). */
 export interface PersonaHost {
 	allToolNames(): string[];
+	knownAgents(): string[];
 	setActiveTools(names: string[]): void;
 	getThinkingLevel(): ThinkingLevel;
 	setThinkingLevel(level: ThinkingLevel): void;
@@ -42,10 +56,13 @@ export class PersonaController {
 
 	private readonly host: PersonaHost;
 	private readonly delegateDefaultAllow: boolean;
+	private readonly limits: RunLimits;
+	private caps: EffectiveCapabilities | undefined;
 
-	constructor(host: PersonaHost, delegateDefaultAllow = true) {
+	constructor(host: PersonaHost, delegateDefaultAllow = true, limits: RunLimits = DEFAULT_LIMITS) {
 		this.host = host;
 		this.delegateDefaultAllow = delegateDefaultAllow;
+		this.limits = limits;
 	}
 
 	get activePersona(): Persona | undefined {
@@ -54,6 +71,7 @@ export class PersonaController {
 
 	async activate(persona: Persona): Promise<void> {
 		this.active = persona;
+		this.caps = this.resolveCaps(persona);
 		this.host.setStatus(persona.label);
 		await this.applyModel(persona);
 		this.applyThinking(persona);
@@ -62,6 +80,7 @@ export class PersonaController {
 
 	async deactivate(): Promise<void> {
 		this.active = undefined;
+		this.caps = undefined;
 		this.host.setStatus(undefined);
 		this.restoreTools();
 		await this.restoreModel();
@@ -75,7 +94,26 @@ export class PersonaController {
 
 	/** For the `tool_call` hook: a block result, or undefined to allow. */
 	gate(toolName: string, input: unknown): GateResult | undefined {
-		return this.active ? gateToolCall(this.active, toolName, input, this.delegateDefaultAllow) : undefined;
+		return this.active && this.caps ? gateToolCall(this.caps, this.active.label, toolName, input) : undefined;
+	}
+
+	/** The active persona's resolved capabilities (for diagnostics / `/doctor`). */
+	get capabilities(): EffectiveCapabilities | undefined {
+		return this.caps;
+	}
+
+	private resolveCaps(persona: Persona): EffectiveCapabilities {
+		const permissions: CapabilityPermissions = {};
+		if (persona.tools) permissions.tools = persona.tools;
+		if (persona.delegate) permissions.delegate = persona.delegate;
+		if (persona.skills) permissions.skills = persona.skills;
+		return resolveCapabilities({
+			allToolNames: this.host.allToolNames(),
+			knownAgents: this.host.knownAgents(),
+			permissions,
+			limits: this.limits,
+			delegateDefaultAllow: this.delegateDefaultAllow,
+		});
 	}
 
 	private async applyModel(persona: Persona): Promise<void> {
@@ -127,8 +165,9 @@ export class PersonaController {
 
 	private applyTools(persona: Persona): void {
 		if (persona.tools) {
-			const allowed = this.host.allToolNames().filter((n) => isAllowed(n, persona.tools));
-			this.host.setActiveTools(allowed);
+			// Use the resolved capability set so a tools-restricted persona still keeps
+			// `delegate` active (unless it explicitly denied it) — delegation is preserved.
+			this.host.setActiveTools([...(this.caps?.tools ?? new Set<string>())]);
 			this.toolsRestricted = true;
 		} else {
 			this.restoreTools();

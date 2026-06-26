@@ -78,12 +78,25 @@ export interface SDKDeps {
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
+	// Run-scoped enforcement of the declared limits — applied here so NO strategy can
+	// exceed them, however it calls agent() (I2: safety from runtime limits, not isolation).
+	let childrenSpawned = 0;
+	let tokensSpent = 0;
+
 	return {
 		agent: async (spec) => {
+			if (childrenSpawned >= deps.limits.maxChildren) {
+				throw new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`);
+			}
+			if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
+				throw new Error(`run exceeded token budget (${deps.limits.budgetTokens})`);
+			}
+			childrenSpawned += 1;
 			deps.onAgentStatus?.(spec.agent, "running");
 			const onProgress = deps.onAgentProgress;
 			try {
 				const result = await deps.engine.run(spec, onProgress ? (p) => onProgress(spec.agent, p) : undefined);
+				tokensSpent += result.usage.input + result.usage.output;
 				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result);
 				return result;
 			} catch (err) {
