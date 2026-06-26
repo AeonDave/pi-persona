@@ -466,6 +466,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"Delegate work to a specialized sub-agent (single) or fan out across several in parallel.",
 			"Reach for this whenever a task has independent parts, needs a fresh/isolated context, or",
 			"benefits from a focused specialist — it runs them and returns their structured results to you.",
+			"A sub-agent `model` may be a loose name (e.g. 'sonnet'): it auto-resolves to YOUR provider's",
+			"matching id. If a name is ambiguous you get the candidates back — pick one, or call `models`.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
