@@ -13,6 +13,8 @@ export interface PiPersonaConfig {
 	persist: boolean;
 	delegateDefaultAllow: boolean;
 	seed: boolean;
+	/** Explicit override for the persisted-state file (else a global default). */
+	stateFile?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -38,5 +40,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() !== "off",
 	};
 	if (def) config.defaultPersona = def;
+	const stateFile = env.PI_PERSONA_STATE_FILE?.trim();
+	if (stateFile) config.stateFile = stateFile;
 	return config;
 }

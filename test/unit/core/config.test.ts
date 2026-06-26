@@ -30,10 +30,16 @@ test("env flips keybinding, persist, delegate-default, seed, and default persona
 		PI_PERSONA_DELEGATE_DEFAULT: "deny",
 		PI_PERSONA_SEED: "off",
 		PI_PERSONA_DEFAULT: "magi",
+		PI_PERSONA_STATE_FILE: "/custom/state.json",
 	});
 	assert.equal(c.keybinding, "alt+p");
 	assert.equal(c.persist, false);
 	assert.equal(c.delegateDefaultAllow, false);
 	assert.equal(c.seed, false);
 	assert.equal(c.defaultPersona, "magi");
+	assert.equal(c.stateFile, "/custom/state.json");
+});
+
+test("stateFile is undefined by default (resolved to a global default by the extension)", () => {
+	assert.equal(resolveConfig({}).stateFile, undefined);
 });
