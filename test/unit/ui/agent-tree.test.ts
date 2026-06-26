@@ -1,0 +1,46 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { AgentTree, type AgentNode, renderAgentTree } from "../../../src/ui/agent-tree.ts";
+
+test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
+	const nodes: AgentNode[] = [
+		{ id: "magi", label: "magi", parentId: undefined, status: "running", detail: undefined },
+		{ id: "magi/melchior", label: "Melchior", parentId: "magi", status: "running", detail: undefined },
+		{ id: "magi/balthasar", label: "Balthasar", parentId: "magi", status: "done", detail: "↑12k ↓3k" },
+		{ id: "magi/casper", label: "Casper", parentId: "magi", status: "failed", detail: undefined },
+	];
+	const text = renderAgentTree(nodes).join("\n");
+	assert.match(text, /⏳ magi/);
+	assert.match(text, /├─ ⏳ Melchior/);
+	assert.match(text, /├─ ✓ Balthasar {2}↑12k ↓3k/);
+	assert.match(text, /└─ ✗ Casper/);
+});
+
+test("AgentTree.add is idempotent on id and update mutates status/detail + notifies", () => {
+	const tree = new AgentTree();
+	let changes = 0;
+	tree.onChange(() => changes++);
+	tree.add({ id: "a", label: "A" }); // defaults to running
+	tree.add({ id: "a", label: "A (relabeled)" }); // same id → upsert, not duplicate
+	tree.update("a", { status: "done", detail: "$0.01" });
+	const snap = tree.snapshot();
+	assert.equal(snap.length, 1);
+	assert.equal(snap[0]?.label, "A (relabeled)");
+	assert.equal(snap[0]?.status, "done");
+	assert.equal(snap[0]?.detail, "$0.01");
+	assert.ok(changes >= 3, "every mutation notifies listeners");
+});
+
+test("removing a parent removes its descendants; isEmpty + hasRunning reflect state", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "p", label: "P" });
+	tree.add({ id: "p/c1", label: "C1", parentId: "p" });
+	tree.add({ id: "p/c2", label: "C2", parentId: "p", status: "done" });
+	assert.equal(tree.hasRunning(), true);
+	tree.update("p/c1", { status: "done" });
+	tree.update("p", { status: "done" }); // the parent stays running until the whole run ends
+	assert.equal(tree.hasRunning(), false);
+	tree.remove("p");
+	assert.equal(tree.isEmpty(), true);
+});

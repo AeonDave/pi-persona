@@ -29,6 +29,7 @@ import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.t
 import type { Persona } from "./persona/persona.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
+import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -54,6 +55,21 @@ export default function piPersona(pi: ExtensionAPI): void {
 	let orchestrating = false; // re-entrancy guard for the mandatory input hook
 	// A finished mandatory orchestration, injected (hidden) into the next turn's system prompt.
 	let pendingOrchestration: { label: string; output: string } | undefined;
+
+	// The unified live tree of every in-flight agent — strategy cores, delegate
+	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
+	const agentTree = new AgentTree();
+	function renderAgentWidget(): void {
+		if (!lastCtx) return;
+		try {
+			lastCtx.ui.setWidget("persona-agents", agentTree.isEmpty() ? undefined : renderAgentTree(agentTree.snapshot()), {
+				placement: "aboveEditor",
+			});
+		} catch {
+			/* cosmetic — the widget is best-effort */
+		}
+	}
+	agentTree.onChange(renderAgentWidget);
 	let personas: Persona[] = [];
 	let agents: AgentConfig[] = [];
 	let teams: Record<string, string[]> = {};
@@ -231,37 +247,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
 		const label = resolveStrategyName(orch) ?? "strategy";
 		orchestrating = true;
-		// Live widget: seed with the roster so the user sees the cores by name immediately,
-		// then flip ⏳ → ✓/✗ as each finishes. The strategy path doesn't go through the
-		// `delegate` tool, so this is its only on-screen presence.
+		// Register the run in the unified agent tree (sticky widget above the input),
+		// seeded with the roster so the cores show by name immediately, then flip
+		// ⏳ → ✓/✗ as each finishes. Non-roster agents (e.g. a critic) appear on first run.
+		const rootId = `strategy:${label}`;
 		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
-		const statusOf = new Map<string, string>(roster.map((a) => [a, "⏳"]));
-		const renderOrchWidget = () => {
-			try {
-				const lines = [`🧠 ${label}: ${statusOf.size} agents deliberating in parallel`];
-				for (const [a, s] of statusOf) lines.push(`   ${s} ${a}`);
-				ctx.ui.setWidget("persona-orch", lines, { placement: "aboveEditor" });
-			} catch {
-				/* cosmetic */
-			}
-		};
-		renderOrchWidget();
-		try {
-			ctx.ui.notify(
-				`⏳ ${label}: orchestrating${roster.length ? ` ${roster.length} agents` : ""} in parallel — real model calls, this can take ~30–60s. The result is woven into the answer below.`,
-				"info",
-			);
-		} catch {
-			/* cosmetic */
-		}
+		agentTree.add({ id: rootId, label, status: "running" });
+		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: a, parentId: rootId, status: "running" });
 		try {
 			const result = await runPersonaStrategy(orch, task, {
 				engine: buildEngine(),
 				teams,
 				limits: RUN_LIMITS,
 				onAgentStatus: (agent, st) => {
-					statusOf.set(agent, st === "done" ? "✓" : st === "failed" ? "✗" : "⏳");
-					renderOrchWidget();
+					const id = `${rootId}/${agent}`;
+					if (st === "running") agentTree.add({ id, label: agent, parentId: rootId, status: "running" });
+					else agentTree.update(id, { status: st });
 				},
 			});
 			pendingOrchestration = { label, output: result ? result.output : "(the orchestration returned no result)" };
@@ -269,11 +270,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			pendingOrchestration = { label, output: `orchestration failed: ${err instanceof Error ? err.message : String(err)}` };
 		} finally {
 			orchestrating = false;
-			try {
-				ctx.ui.setWidget("persona-orch", undefined);
-			} catch {
-				/* cosmetic */
-			}
+			agentTree.remove(rootId);
 		}
 		// Let the user's original prompt proceed; the ruling is injected (hidden) into the
 		// turn's system prompt via before_agent_start — no internal plumbing in the chat.
@@ -332,15 +329,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 					isError: false,
 				};
 			}
-			const outcome = await runDelegate(params, buildEngine(signal), RUN_LIMITS.maxConcurrency, (views) => {
-				const done = views.filter((v) => !v.running).length;
-				onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
-			});
-			return {
-				content: [{ type: "text", text: outcome.text }],
-				details: { views: outcome.views },
-				isError: !outcome.ok,
-			};
+			const delRoot = `delegate:${_toolCallId}`;
+			agentTree.add({ id: delRoot, label: "delegate", status: "running" });
+			try {
+				const outcome = await runDelegate(params, buildEngine(signal), RUN_LIMITS.maxConcurrency, (views) => {
+					views.forEach((v, i) => {
+						const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
+						const node: AddNodeInput = { id: `${delRoot}/${i}`, label: v.agent, parentId: delRoot, status };
+						const usageStr = formatUsage(v.usage);
+						if (usageStr) node.detail = usageStr;
+						agentTree.add(node);
+					});
+					const done = views.filter((v) => !v.running).length;
+					onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
+				});
+				return {
+					content: [{ type: "text", text: outcome.text }],
+					details: { views: outcome.views },
+					isError: !outcome.ok,
+				};
+			} finally {
+				agentTree.remove(delRoot);
+			}
 		},
 
 		renderCall(args, theme) {
