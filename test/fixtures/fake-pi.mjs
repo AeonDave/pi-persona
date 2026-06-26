@@ -9,6 +9,22 @@ const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
 if (task.includes("[sleep]")) {
 	setInterval(() => {}, 1000); // keep the process alive until killed
+} else if (task.includes("[ignore-term]")) {
+	process.on("SIGTERM", () => {}); // refuse graceful termination → forces the SIGKILL escalation
+	setInterval(() => {}, 1000);
+} else if (task.includes("[spew-stderr]")) {
+	process.stderr.write("E".repeat(500000)); // flood stderr to exercise the retention cap
+	emit({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "done" }],
+			model: "stub/model",
+			stopReason: "end",
+			usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },
+		},
+	});
+	process.exit(0);
 } else if (task.includes("[fail]")) {
 	emit({
 		type: "message_end",
