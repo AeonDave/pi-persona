@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import type { AgentConfig } from "./agents/agent.ts";
@@ -26,7 +27,7 @@ import type { StrategyEngine } from "./orchestration/sdk.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import type { Persona } from "./persona/persona.ts";
-import { runDelegate } from "./tools/delegate.ts";
+import { type DelegateView, runDelegate } from "./tools/delegate.ts";
 
 const RUN_LIMITS: RunLimits = {
 	maxChildren: 8,
@@ -250,7 +251,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"benefits from a focused specialist — it runs them and returns their structured results to you.",
 		].join(" "),
 		parameters: DelegateParams,
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			lastCtx = ctx;
 			if (params.async && params.agent && params.task) {
 				const agent = params.agent;
@@ -267,12 +268,57 @@ export default function piPersona(pi: ExtensionAPI): void {
 					isError: false,
 				};
 			}
-			const outcome = await runDelegate(params, buildEngine(signal), RUN_LIMITS.maxConcurrency);
+			const outcome = await runDelegate(params, buildEngine(signal), RUN_LIMITS.maxConcurrency, (views) => {
+				const done = views.filter((v) => !v.running).length;
+				onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
+			});
 			return {
 				content: [{ type: "text", text: outcome.text }],
-				details: { results: outcome.results },
+				details: { views: outcome.views },
 				isError: !outcome.ok,
 			};
+		},
+
+		renderCall(args, theme) {
+			const title = theme.fg("toolTitle", theme.bold("delegate "));
+			if (args.tasks && args.tasks.length > 0) {
+				const names = args.tasks.map((t) => t.agent).join(", ");
+				return new Text(
+					`${title}${theme.fg("accent", `parallel (${args.tasks.length})`)}${theme.fg("dim", ` → ${names}`)}`,
+					0,
+					0,
+				);
+			}
+			const agent = args.agent ?? "?";
+			const task = args.task ?? "";
+			const preview = task.length > 60 ? `${task.slice(0, 60)}…` : task;
+			const asyncTag = args.async ? theme.fg("warning", " async") : "";
+			return new Text(`${title}${theme.fg("accent", agent)}${asyncTag}${theme.fg("dim", ` ${preview}`)}`, 0, 0);
+		},
+
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as unknown as { views?: DelegateView[]; runId?: string } | undefined;
+			const views = details?.views ?? [];
+			if (views.length === 0) {
+				const first = result.content[0];
+				const text = first?.type === "text" ? first.text : details?.runId ? `async run ${details.runId}` : "(no output)";
+				return new Text(text, 0, 0);
+			}
+			const done = views.filter((v) => !v.running).length;
+			const okCount = views.filter((v) => !v.running && v.ok).length;
+			const head = done < views.length ? `${done}/${views.length} done` : `${okCount}/${views.length} ok`;
+			const container = new Container();
+			container.addChild(new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", head)}`, 0, 0));
+			for (const v of views) {
+				const icon = v.running ? theme.fg("warning", "⏳") : v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const usage = v.usage.input || v.usage.output ? theme.fg("dim", ` ↑${v.usage.input} ↓${v.usage.output}`) : "";
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(`${icon} ${theme.fg("accent", v.agent)}${usage}`, 0, 0));
+				const body = v.running ? "(running…)" : v.output || "(no output)";
+				const preview = expanded ? body : body.split("\n").slice(0, 4).join("\n");
+				container.addChild(new Text(theme.fg("toolOutput", preview), 0, 0));
+			}
+			return container;
 		},
 	});
 
