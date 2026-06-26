@@ -51,6 +51,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	if (config.disabled) return;
 
 	let lastCtx: ExtensionContext | undefined;
+	let orchestrating = false; // re-entrancy guard for the mandatory input hook
 	let personas: Persona[] = [];
 	let agents: AgentConfig[] = [];
 	let teams: Record<string, string[]> = {};
@@ -219,11 +220,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// into the prompt. Opportunistic personas (no strategy) take the normal turn.
 	pi.on("input", async (event, ctx) => {
 		lastCtx = ctx;
-		if (event.source === "extension") return undefined;
+		if (event.source === "extension" || orchestrating) return undefined;
 		const orch = controller.activePersona?.orchestration;
 		const task = event.text?.trim();
 		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
 		const label = resolveStrategyName(orch);
+		orchestrating = true;
 		try {
 			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(), teams, limits: RUN_LIMITS });
 			if (!result) return undefined;
@@ -234,6 +236,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			return { action: "transform", text: `${event.text}\n\n[pi-persona] "${label}" orchestration failed: ${message}` };
+		} finally {
+			orchestrating = false;
 		}
 	});
 

@@ -104,6 +104,11 @@ export async function runChildAgent(
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				// CRITICAL: disable pi-persona inside the child so it is a pure executor
+				// (no persona restore, no input-hook orchestration, no `delegate` tool).
+				// Without this, a globally-installed pi-persona makes every child a
+				// supervisor that re-spawns → exponential fork bomb.
+				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1" },
 			});
 			let buffer = "";
 			const onLine = (line: string) => {

@@ -34,6 +34,13 @@ test("runChildAgent passes model/tools flags through to the child", async () => 
 	assert.ok(seen.includes("--no-session"));
 });
 
+test("runChildAgent disables pi-persona in the spawned child (prevents fork-bomb recursion)", async () => {
+	const r = await runChildAgent({ task: "check [env]" }, undefined, { resolveInvocation: resolveFake });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /PI_PERSONA_DISABLE=1/);
+	assert.match(r.output, /PI_PERSONA_CHILD=1/);
+});
+
 test("runChildAgent reports live progress via onProgress", async () => {
 	const snaps: Array<{ output: string; turns: number; tokens: number }> = [];
 	const r = await runChildAgent({ task: "do it" }, undefined, {
