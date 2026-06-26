@@ -1,8 +1,8 @@
 /**
- * Reducers fold many `AgentResult`s into one. v0.1 ships the two non-voting
- * reducers the first strategies need: usage summation and labeled aggregation
- * (for fanout). The voting reducers with the richer status union
- * (winner|tie|no_consensus|invalid) land in v0.2 with `magi`.
+ * Reducers fold many `AgentResult`s into one. This module holds the two non-voting
+ * reducers — usage summation and labeled aggregation (for fanout); the voting
+ * reducer with the richer status union (winner|tie|no_consensus|invalid_outputs)
+ * lives in `voting.ts`.
  */
 
 import { type ChildUsage, emptyUsage } from "../engine/stream.ts";
