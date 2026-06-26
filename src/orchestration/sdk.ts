@@ -54,17 +54,31 @@ export interface Strategy {
 	run(input: StrategyInput, sdk: StrategySDK): Promise<AgentResult>;
 }
 
+export type AgentStatus = "running" | "done" | "failed";
+
 export interface SDKDeps {
 	engine: StrategyEngine;
 	roster: Roster;
 	limits: RunLimits;
 	signal?: AbortSignal;
 	log?: (message: string) => void;
+	/** Per-agent lifecycle, for live UI (which agent is running/done). */
+	onAgentStatus?: (agent: string, status: AgentStatus) => void;
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
 	return {
-		agent: (spec) => deps.engine.run(spec),
+		agent: async (spec) => {
+			deps.onAgentStatus?.(spec.agent, "running");
+			try {
+				const result = await deps.engine.run(spec);
+				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed");
+				return result;
+			} catch (err) {
+				deps.onAgentStatus?.(spec.agent, "failed");
+				throw err;
+			}
+		},
 		parallel: (thunks, opts) =>
 			mapWithConcurrency(thunks, opts?.concurrency ?? deps.limits.maxConcurrency, (thunk) => thunk()),
 		reduce: { aggregate: aggregateResults, vote: voteReduce },
