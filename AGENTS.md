@@ -48,26 +48,37 @@ rewrite on Pi-native primitives (`@earendil-works/pi-*`) — no third-party fork
 
 ## Status & roadmap
 
-**Shipped & tested** (127 tests via `node --test`, strict `tsc --noEmit` clean):
-- **v0.1 vertical** — `core/*`, `ChildProcessEngine` (+ stream parser, adapter), persona
-  controller + gating, `delegate` tool, `loader`, `extension.ts` wiring, bundled
-  coder/review/antagonist personas + agents + `teams.yaml`. Loadable in Pi (typechecks
-  against the real ExtensionAPI; mock-pi integration tested).
-- **v0.2** — voting reducers (status union + bias guards), `magi` (+ MELCHIOR/BALTHASAR/CASPER
-  cores), persona `params` + numeric YAML + 2-level nesting, **mandatory turn-interception**
-  (the `input` hook auto-runs a strategy persona's orchestration), `/orchestrate`.
-- **v0.3** — async run **execution + tracker + peek + completion-notify** (`engine/async`,
-  child `onProgress`) + the in-process `Bus` seam (`bus/inproc`). `delegate { async: true }`
-  launches a background child; completion surfaces back as a follow-up turn; `/peek [id]`
-  shows live progress.
+**Shipped & tested** (165 tests via `node --test`, strict `tsc --noEmit` clean):
+- **v0.1** — `core/*`, `ChildProcessEngine` (stream parser, adapter, UTF-8 streaming, hard
+  per-child timeout + abort), persona controller + gating, `delegate` tool, `loader`,
+  `extension.ts`. Loadable in real Pi (mock-pi integration tested).
+- **v0.2** — voting reducers (status union + bias guards + normalised vote keys + dissent
+  preserved on the fallback path), `magi`, persona `params`, mandatory turn-interception (the
+  `input` hook auto-runs a strategy persona), `/orchestrate`.
+- **v0.3** — async **execution + tracker + peek + completion-notify** (`engine/async`); the
+  in-process `Bus` seam (`bus/inproc`, scaffolding); the **unified agent tree + navigable
+  overlay** (`ui/agent-tree`, `ui/agent-overlay`, `f9` / `/agents`) with live per-core
+  streaming, spanning strategy cores + delegate legs + async runs.
+- **Invariants wired & tested:** I2 limits (the Strategy SDK enforces maxChildren + token
+  budget; `delegate` clamps concurrency/children; child timeout) · I3 per-run contract pinning
+  (`makeEngine` pins `contract@hash` on first use) · I4 one `EffectiveCapabilities` resolved on
+  activation, consulted by the gate **and** the active-tool set (delegation is preserved under a
+  tools allowlist).
+- **MAGI redesign (supersedes the I6 mandatory example):** the three cores carry complementary
+  biases (Propulsore / Conservatore / Catalizzatore) and run via a **`council` tool** the MAGI
+  persona (an executor) consults per decision, then *applies* the ruling and re-convenes —
+  state → decision → execution. Per-persona model config (`persona/config-store` →
+  `~/.pi/agent/persona/config.json`) runs each ensemble's cores on different models (asked on
+  first run). Bundled personas: coder, review, antagonist, magi, elite, planner, researcher,
+  reviewer; agents incl. the dynamic skill-driven `operator`.
 
-**Remaining (seam-ready; some need a live Pi to verify — do NOT build blind):**
-- v0.3 live **steering**: redirect/resume a running child + child→supervisor
-  `intercom`/`contact_supervisor` + periodic-peek auto-wake. For *child-process* agents this
-  needs a control channel — the cross-process broker (port comtac, v0.5) or the
-  InProcessEngine (v0.4). Launch + peek + completion-notify already work.
-- v0.4 `InProcessEngine`: a second `StrategyEngine` backend on Pi's `AgentHarness` /
-  `createAgentSession`. Drops in behind the existing seam; **needs real-Pi wiring + tests**.
-- v0.5 flows: declarative DAG over strategies (needs a YAML list-of-maps parser extension, or
-  JSON flow files) + journaled resume; cross-process broker (port `pi-subagents-comtac`).
-- niceties: strategy-file jiti loader, inline-map `{…}` YAML, effort tiers.
+**Remaining (seam-ready; some need a live Pi — do NOT build blind):**
+- v0.3 live **steering** (redirect/resume a running child; child→supervisor channel): needs the
+  broker (v0.5) or the InProcessEngine (v0.4). Launch + peek + completion-notify work.
+- v0.4 `InProcessEngine`: a second `StrategyEngine` backend on Pi's `AgentHarness`. Drops in
+  behind the seam; needs real-Pi wiring + tests (the `bus/inproc` seam is ready).
+- v0.5 flows: declarative DAG over strategies (**JSON-first**: `*.flow.json`) + journaled
+  resume; cross-process broker (port `pi-subagents-comtac`).
+- niceties: strategy-file loader, the **sequential MAGI deliberation pipeline** (Melchior→
+  Balthasar→Casper in chain, vs the parallel vote), a guaranteed first-consult for magi,
+  surfacing async runs via the bus (not just follow-up turns).

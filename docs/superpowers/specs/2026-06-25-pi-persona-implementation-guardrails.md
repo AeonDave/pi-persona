@@ -29,6 +29,41 @@ These three sentences are the review's headline corrections and are now law:
 
 ---
 
+## 1.1 Implementation status (v0.3) — wired vs deferred
+
+The invariants are now wired and tested (165 tests; `tsc --noEmit` clean):
+
+- **I2** — the Strategy SDK enforces `maxChildren` + token budget on every `agent()` call;
+  `delegate` clamps requested concurrency/children to the limits; the child engine enforces a
+  hard per-child timeout (+abort). *Depth* is enforced structurally: children run with
+  `PI_PERSONA_DISABLE=1`, so they cannot spawn at all.
+- **I3** — `makeEngine` pins `contract@hash` on first use and reuses that frozen snapshot for
+  the rest of the run (one engine instance per run). `strategy@version`/`reducer@version`
+  pinning is not yet needed (built-in strategies/reducers only, no hot-reload) — **deferred**.
+- **I4** — the controller resolves one `EffectiveCapabilities` on activation; both the
+  `tool_call` gate and the active-tool set consult it (so a tools-restricted persona keeps
+  `delegate` unless it explicitly denied it). `canUseBus`/process-transport gating is part of
+  the object but unused until the bus/broker land — **deferred**.
+
+**Design change since the spec — MAGI (supersedes the I6 *mandatory* example):** magi is no
+longer a mandatory `strategy` persona that runs once and presents. It is an **executor** persona
+(`mode: solo`) that consults a globally-registered **`council` tool** (runs the biased
+melchior/balthasar/casper roster via the `magi` strategy → vote + tally + dissent), then
+*applies* the ruling with its own tools and re-convenes when execution surfaces a new decision
+(state → decision → execution). The mandatory `input`-hook mechanism still exists for personas
+that declare a `strategy`/`parallel` mode (e.g. antagonist → critic-loop, review → parallel
+fanout). The three cores now carry **complementary biases** (Propulsore / Conservatore /
+Catalizzatore) so their errors are uncorrelated.
+
+**New surfaces (data-driven / UI, consistent with §4.2, §7.1):** per-persona config
+(`persona/config-store` → `~/.pi/agent/persona/config.json`; model-per-core asked on first run),
+and the unified live agent tree + navigable overlay (`ui/agent-tree`, `ui/agent-overlay`, `f9` /
+`/agents`) spanning strategy cores + delegate legs + async runs. The `bus/inproc` seam is built +
+tested but not yet wired into a live run (v0.4 scaffolding); async completion currently surfaces
+via a `sendUserMessage` follow-up.
+
+---
+
 ## 2. Critical response to the external evaluation
 
 Verdicts: ✅ adopt · 🔧 adopt-with-change · 🟰 already in Spec, now hardened · ❌ reject.

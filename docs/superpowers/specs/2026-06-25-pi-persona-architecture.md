@@ -1,7 +1,10 @@
 # pi-persona — Architecture Design Spec
 
 - **Date:** 2026-06-25
-- **Status:** Draft for review (architecture-first; no implementation yet)
+- **Status:** Implemented through **v0.3**. This doc captures the founding design; for what is
+  actually wired vs deferred and the deltas since (MAGI→council-executor, the agent tree/overlay,
+  per-persona model config), see the guardrails doc **§1.1** and `AGENTS.md` "Status & roadmap" —
+  the prose below is not rewritten section-by-section.
 - **Author:** Dave (AeonDave) + Claude
 - **Supersedes:** `pi-subagents` (fork of nicobailon — fully cut), `pi-subagents-comtac`, `pi-subagents-persona`
 - **Targets:** Pi coding agent (`@earendil-works/pi-*`), monorepo at `D:\Sources\pi` v0.80.2
