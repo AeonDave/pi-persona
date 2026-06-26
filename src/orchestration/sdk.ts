@@ -21,9 +21,17 @@ export interface AgentRunSpec {
 	outputContract?: string;
 }
 
+/** A live snapshot of an agent's progress (for streaming UI). */
+export interface AgentProgress {
+	/** The agent's rolling output so far. */
+	output: string;
+	/** Tokens consumed so far (best-effort). */
+	tokens?: number;
+}
+
 /** The engine seam the SDK runs agents through (real child engine or a stub). */
 export interface StrategyEngine {
-	run(spec: AgentRunSpec): Promise<AgentResult>;
+	run(spec: AgentRunSpec, onProgress?: (progress: AgentProgress) => void): Promise<AgentResult>;
 }
 
 export interface Roster {
@@ -65,14 +73,17 @@ export interface SDKDeps {
 	/** Per-agent lifecycle, for live UI. The result is passed on done/failed so the
 	 *  UI can capture each agent's output/usage. */
 	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
+	/** Per-agent streaming progress (rolling output), for live UI. */
+	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
 	return {
 		agent: async (spec) => {
 			deps.onAgentStatus?.(spec.agent, "running");
+			const onProgress = deps.onAgentProgress;
 			try {
-				const result = await deps.engine.run(spec);
+				const result = await deps.engine.run(spec, onProgress ? (p) => onProgress(spec.agent, p) : undefined);
 				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result);
 				return result;
 			} catch (err) {

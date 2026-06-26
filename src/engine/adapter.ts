@@ -26,7 +26,7 @@ export interface EngineAdapterDeps {
 
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	return {
-		async run(spec: AgentRunSpec): Promise<AgentResult> {
+		async run(spec: AgentRunSpec, onProgress?: (p: { output: string; tokens?: number }) => void): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `unknown agent: ${spec.agent}` };
@@ -44,7 +44,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (cfg.systemPrompt) childSpec.systemPrompt = cfg.systemPrompt;
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
-			const child = await runChildAgent(childSpec, deps.signal, deps.childOptions);
+			const childOptions: ChildEngineOptions = { ...deps.childOptions };
+			if (onProgress) childOptions.onProgress = (snap) => onProgress({ output: snap.output, tokens: snap.tokens });
+			const child = await runChildAgent(childSpec, deps.signal, childOptions);
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
 			if (child.errorMessage) result.error = child.errorMessage;
