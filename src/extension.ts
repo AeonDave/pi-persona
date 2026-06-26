@@ -38,7 +38,7 @@ import {
 } from "./persona/config-store.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, AgentTree, type AgentNodeStatus, GLYPH, renderAgentTree } from "./ui/agent-tree.ts";
+import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -71,29 +71,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
 
-	// A compact one-line summary of the live agents (cores/legs by name + glyph),
-	// for a custom UI (e.g. pi-1337's frame) to render via the status channel.
-	function agentSummary(): string {
+	// The live count of agents in flight (leaf cores/legs), published as a status so a
+	// custom UI (e.g. pi-1337's frame) can show "N agents" — covers strategy/council
+	// cores too, which pi-1337's own delegate-only counter misses.
+	function agentCount(): number {
 		const nodes = agentTree.snapshot();
 		const leaves = nodes.filter((n) => n.parentId !== undefined);
-		const list = leaves.length > 0 ? leaves : nodes;
-		const shown = list.slice(0, 5).map((n) => `${GLYPH[n.status]} ${n.label}`).join("  ");
-		const more = list.length - Math.min(5, list.length);
-		return more > 0 ? `${shown}  +${more}` : shown;
+		return (leaves.length > 0 ? leaves : nodes).length;
 	}
 
 	function renderAgentWidget(): void {
 		if (!lastCtx) return;
 		const empty = agentTree.isEmpty();
 		try {
-			lastCtx.ui.setWidget("persona-agents", empty ? undefined : renderAgentTree(agentTree.snapshot()), {
-				placement: "aboveEditor",
-			});
+			const lines = empty
+				? undefined
+				: [...renderAgentTree(agentTree.snapshot()), agentTree.hasRunning() ? "  f9: navigate · drill in" : ""];
+			lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
 		} catch {
 			/* cosmetic — the widget is best-effort */
 		}
 		try {
-			lastCtx.ui.setStatus("persona-agents", empty ? undefined : agentSummary());
+			lastCtx.ui.setStatus("persona-agents", empty ? undefined : String(agentCount()));
 		} catch {
 			/* cosmetic */
 		}
@@ -486,12 +485,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		renderCall(args, theme) {
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			if (args.tasks && args.tasks.length > 0) {
-				const names = args.tasks.map((t) => t.agent).join(", ");
-				return new Text(
-					`${title}${theme.fg("accent", `parallel (${args.tasks.length})`)}${theme.fg("dim", ` → ${names}`)}`,
-					0,
-					0,
-				);
+				// Names live in the tree / final card — keep the call line itself minimal.
+				return new Text(`${title}${theme.fg("accent", `parallel (${args.tasks.length})`)}`, 0, 0);
 			}
 			const agent = args.agent ?? "?";
 			const task = args.task ?? "";
@@ -508,18 +503,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const text = first?.type === "text" ? first.text : details?.runId ? `async run ${details.runId}` : "(no output)";
 				return new Text(text, 0, 0);
 			}
-			const done = views.filter((v) => !v.running).length;
-			const okCount = views.filter((v) => !v.running && v.ok).length;
-			const head = done < views.length ? `${done}/${views.length} done` : `${okCount}/${views.length} ok`;
+			const title = theme.fg("toolTitle", theme.bold("delegate "));
+			const running = views.filter((v) => v.running).length;
+			// While running, stay one compact line — the live per-agent detail is the agent
+			// tree (press f9 to navigate). Show the full per-leg cards only once complete.
+			if (running > 0) {
+				const done = views.length - running;
+				return new Text(
+					`${title}${theme.fg("warning", "⏳ ")}${theme.fg("accent", `${done}/${views.length}`)}${theme.fg("dim", " · f9 to watch")}`,
+					0,
+					0,
+				);
+			}
+			const okCount = views.filter((v) => v.ok).length;
 			const container = new Container();
-			container.addChild(new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", head)}`, 0, 0));
+			container.addChild(new Text(`${title}${theme.fg("accent", `${okCount}/${views.length} ok`)}`, 0, 0));
 			for (const v of views) {
-				const icon = v.running ? theme.fg("warning", "⏳") : v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const icon = v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
 				const usageStr = formatUsage(v.usage);
 				const usage = usageStr ? theme.fg("dim", ` ${usageStr}`) : "";
 				container.addChild(new Spacer(1));
 				container.addChild(new Text(`${icon} ${theme.fg("accent", v.agent)}${usage}`, 0, 0));
-				const body = v.running ? "(running…)" : v.output || "(no output)";
+				const body = v.output || "(no output)";
 				const preview = expanded ? body : body.split("\n").slice(0, 4).join("\n");
 				container.addChild(new Text(theme.fg("toolOutput", preview), 0, 0));
 			}
