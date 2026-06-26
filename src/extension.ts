@@ -489,6 +489,43 @@ export default function piPersona(pi: ExtensionAPI): void {
 		},
 	});
 
+	// ── council tool (deliberate → vote → ruling; the executor then applies it) ───
+	const CouncilParams = Type.Object({
+		question: Type.String({ description: "The decision or problem to deliberate — specific and self-contained" }),
+		roster: Type.Optional(Type.String({ description: "Council to convene (default: the active persona's, e.g. magi)" })),
+	});
+	pi.registerTool({
+		name: "council",
+		label: "Council",
+		description: [
+			"Convene a council of specialists with controlled, complementary biases to deliberate a",
+			"decision and vote — returns the ruling (winner, tally, each member's view, recorded dissent).",
+			"Use it before any significant choice; then EXECUTE the ruling yourself and re-convene when",
+			"execution surfaces a new decision.",
+		].join(" "),
+		parameters: CouncilParams,
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			lastCtx = ctx;
+			const roster = params.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
+			const orch: OrchestrationGrammar = { mode: "strategy", strategy: "magi", roster, params: {} };
+			const result = await runStrategyVisible(ctx, orch, params.question, "council");
+			return {
+				content: [{ type: "text", text: result?.output ?? "(the council returned no ruling)" }],
+				details: { ruling: result?.output ?? "", status: result?.structured?.status },
+				isError: !(result?.ok ?? false),
+			};
+		},
+		renderCall(args, theme) {
+			const q = args.question ?? "";
+			const preview = q.length > 60 ? `${q.slice(0, 60)}…` : q;
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", args.roster ?? "magi")}${theme.fg("dim", ` ${preview}`)}`,
+				0,
+				0,
+			);
+		},
+	});
+
 	// ── f9: navigable agent overlay ──────────────────────────────────────────────
 	pi.registerShortcut("f9" as Parameters<ExtensionAPI["registerShortcut"]>[0], {
 		description: "Open the navigable agent tree (pi-persona)",

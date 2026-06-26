@@ -95,6 +95,7 @@ test("piPersona registers the delegate tool, f8/f9 shortcuts, and agents/doctor/
 	const m = makeMockPi();
 	piPersona(m.pi);
 	assert.ok(m.toolNames().includes("delegate"));
+	assert.ok(m.toolNames().includes("council"));
 	assert.deepEqual(m.commandNames().sort(), ["agents", "doctor", "orchestrate", "peek", "persona"]);
 	assert.equal(m.shortcutCount(), 2); // f8 (cycle persona) + f9 (agent overlay)
 });
