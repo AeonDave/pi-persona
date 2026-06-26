@@ -29,6 +29,18 @@ test("loadDefinitions splits personas (persona:true) from agents and records sha
 	assert.equal(r.shadowed.length, 1, "the user magi is shadowed by the project magi");
 });
 
+test("a persona and an agent may share a name (separate namespaces, no shadowing)", () => {
+	const personasDir = tmp({ "reviewer.md": "---\nname: reviewer\npersona: true\n---\nReviewer supervisor" });
+	const agentsDir = tmp({ "reviewer.md": "---\nname: reviewer\ntools: read\n---\nReviewer agent" });
+	const r = loadDefinitions([
+		{ path: personasDir, scope: "personas" },
+		{ path: agentsDir, scope: "agents" },
+	]);
+	assert.equal(r.personas.find((p) => p.name === "reviewer")?.isPersona, true);
+	assert.equal(r.agents.find((a) => a.name === "reviewer")?.name, "reviewer");
+	assert.equal(r.shadowed.length, 0);
+});
+
 test("loadTeams merges teams.yaml files (later wins)", () => {
 	const dir = tmp({ "teams.yaml": "review: [a, b]\nmagi: [m, b, c]" });
 	const teams = loadTeams([path.join(dir, "teams.yaml")]);
