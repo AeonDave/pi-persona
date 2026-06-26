@@ -5,6 +5,8 @@
  * canonical PI_PERSONA_* names are defined here once.
  */
 
+import { isThinkingLevel } from "./types.ts";
+
 export interface PiPersonaConfig {
 	disabled: boolean;
 	extraDirs: string[];
@@ -15,6 +17,10 @@ export interface PiPersonaConfig {
 	seed: boolean;
 	/** Explicit override for the persisted-state file (else a global default). */
 	stateFile?: string;
+	/** Thinking level forced on delegated children (else the supervisor's level).
+	 *  Spawned children must carry an *explicit* level or they fall into the model's
+	 *  default mode ("adaptive"), which some models reject. */
+	childThinking?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -42,5 +48,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 	if (def) config.defaultPersona = def;
 	const stateFile = env.PI_PERSONA_STATE_FILE?.trim();
 	if (stateFile) config.stateFile = stateFile;
+	const childThinking = env.PI_PERSONA_CHILD_THINKING?.trim().toLowerCase();
+	if (childThinking && isThinkingLevel(childThinking)) config.childThinking = childThinking;
 	return config;
 }

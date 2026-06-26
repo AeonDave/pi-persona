@@ -19,6 +19,9 @@ export interface EngineAdapterDeps {
 	/** Per-agent model override (e.g. a persona's configured ensemble models).
 	 *  Precedence: explicit spec.model > modelFor(agent) > the agent's own default. */
 	modelFor?: (agent: string) => string | undefined;
+	/** Explicit thinking level appended to the child model (`model:level`) so it can't
+	 *  fall into a model's default "adaptive" mode, which some models reject. */
+	childThinking?: string;
 	/** Forwarded to the child engine (e.g. a test invocation resolver). */
 	childOptions?: ChildEngineOptions;
 	cwd?: string;
@@ -51,7 +54,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`
 					: spec.task;
 			const childSpec: ChildRunSpec = { task };
-			const model = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model;
+			let model = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model;
+			// Append an explicit thinking level (model:level) unless one is already present —
+			// a child without it defaults to "adaptive", which some models reject.
+			if (model && deps.childThinking && !model.includes(":")) model = `${model}:${deps.childThinking}`;
 			if (model) childSpec.model = model;
 			const tools = spec.tools ?? cfg.tools;
 			if (tools) childSpec.tools = tools;
