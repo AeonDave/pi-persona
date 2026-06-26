@@ -29,6 +29,7 @@ import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.t
 import type { Persona } from "./persona/persona.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
 import { type DelegateView, runDelegate } from "./tools/delegate.ts";
+import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
 	maxChildren: 8,
@@ -331,7 +332,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 			container.addChild(new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", head)}`, 0, 0));
 			for (const v of views) {
 				const icon = v.running ? theme.fg("warning", "⏳") : v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
-				const usage = v.usage.input || v.usage.output ? theme.fg("dim", ` ↑${v.usage.input} ↓${v.usage.output}`) : "";
+				const usageStr = formatUsage(v.usage);
+				const usage = usageStr ? theme.fg("dim", ` ${usageStr}`) : "";
 				container.addChild(new Spacer(1));
 				container.addChild(new Text(`${icon} ${theme.fg("accent", v.agent)}${usage}`, 0, 0));
 				const body = v.running ? "(running…)" : v.output || "(no output)";
