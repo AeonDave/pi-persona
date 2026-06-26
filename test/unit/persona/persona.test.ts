@@ -54,6 +54,15 @@ test("a file without `persona: true` parses but is not a switchable persona", ()
 	assert.equal(p.orchestration, undefined);
 });
 
+test("a persona parses orchestration params (numbers + nested)", () => {
+	const p = parsePersona(
+		"---\nname: m\npersona: true\norchestration:\n  mode: strategy\n  strategy: magi\n  roster: magi\n  params:\n    aggregate: unanimity\n    rounds: 3\n---\nbody",
+		"/s",
+	);
+	assert.equal(p?.orchestration?.strategy, "magi");
+	assert.deepEqual(p?.orchestration?.params, { aggregate: "unanimity", rounds: 3 });
+});
+
 test("an L1 declarative persona (mode: parallel, roster) parses its grammar", () => {
 	const p = parsePersona(
 		"---\nname: review\npersona: true\norchestration:\n  mode: parallel\n  roster: review\n---\nReview supervisor.",

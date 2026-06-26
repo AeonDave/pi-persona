@@ -38,6 +38,20 @@ test("parseYamlSubset reads booleans", () => {
 	assert.deepEqual(parseYamlSubset("disabled: false"), { disabled: false });
 });
 
+test("parseYamlSubset coerces bare numbers but leaves quoted/mixed strings alone", () => {
+	assert.deepEqual(parseYamlSubset("rounds: 3"), { rounds: 3 });
+	assert.deepEqual(parseYamlSubset("ratio: 0.5"), { ratio: 0.5 });
+	assert.deepEqual(parseYamlSubset('id: "3"'), { id: "3" });
+	assert.deepEqual(parseYamlSubset("model: claude-4-8"), { model: "claude-4-8" });
+});
+
+test("parseYamlSubset reads two levels of nested maps (orchestration.params)", () => {
+	const fm = parseYamlSubset("orchestration:\n  mode: strategy\n  params:\n    rounds: 3\n    aggregate: unanimity");
+	assert.deepEqual(fm, {
+		orchestration: { mode: "strategy", params: { rounds: 3, aggregate: "unanimity" } },
+	});
+});
+
 test("parseYamlSubset reads inline lists, including quoted items and empty lists", () => {
 	assert.deepEqual(parseYamlSubset("tools: [read, grep, bash]"), { tools: ["read", "grep", "bash"] });
 	assert.deepEqual(parseYamlSubset('a: [x, "y z", w]'), { a: ["x", "y z", "w"] });

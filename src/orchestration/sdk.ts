@@ -9,6 +9,7 @@ import type { RunLimits } from "../core/capabilities.ts";
 import { mapWithConcurrency } from "./parallel.ts";
 import { aggregateResults } from "./reducers.ts";
 import type { AgentResult } from "./types.ts";
+import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 
 export interface AgentRunSpec {
 	agent: string;
@@ -30,7 +31,10 @@ export interface Roster {
 export interface StrategySDK {
 	agent(spec: AgentRunSpec): Promise<AgentResult>;
 	parallel<T>(thunks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;
-	reduce: { aggregate(results: AgentResult[]): AgentResult };
+	reduce: {
+		aggregate(results: AgentResult[]): AgentResult;
+		vote(candidates: AgentResult[], opts: VoteOpts): ReducerResult;
+	};
 	roster: Roster;
 	signal: AbortSignal | undefined;
 	log(message: string): void;
@@ -61,7 +65,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 		agent: (spec) => deps.engine.run(spec),
 		parallel: (thunks, opts) =>
 			mapWithConcurrency(thunks, opts?.concurrency ?? deps.limits.maxConcurrency, (thunk) => thunk()),
-		reduce: { aggregate: aggregateResults },
+		reduce: { aggregate: aggregateResults, vote: voteReduce },
 		roster: deps.roster,
 		signal: deps.signal,
 		log: deps.log ?? (() => {}),

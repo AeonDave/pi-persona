@@ -20,10 +20,9 @@ import { DEFAULT_CONTRACT } from "./core/contract.ts";
 import type { RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { loadDefinitions, loadTeams, type ScopedDir } from "./loader.ts";
-import { makeRoster } from "./orchestration/roster.ts";
-import { makeSDK, type StrategyEngine, type StrategyInput } from "./orchestration/sdk.ts";
-import { getStrategy } from "./orchestration/strategy.ts";
+import type { StrategyEngine } from "./orchestration/sdk.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
+import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import type { Persona } from "./persona/persona.ts";
 import { runDelegate } from "./tools/delegate.ts";
 
@@ -187,6 +186,29 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return controller.gate(event.toolName, event.input);
 	});
 
+	// Mandatory orchestration: when the active persona declares a strategy/parallel
+	// mode, run it on the user's turn (the LLM cannot skip it) and fold the result
+	// into the prompt. Opportunistic personas (no strategy) take the normal turn.
+	pi.on("input", async (event, ctx) => {
+		lastCtx = ctx;
+		if (event.source === "extension") return undefined;
+		const orch = controller.activePersona?.orchestration;
+		const task = event.text?.trim();
+		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
+		const label = resolveStrategyName(orch);
+		try {
+			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(), teams, limits: RUN_LIMITS });
+			if (!result) return undefined;
+			return {
+				action: "transform",
+				text: `${event.text}\n\n[pi-persona] The mandated "${label}" orchestration ran on this request and produced:\n\n${result.output}\n\nPresent and build on this result.`,
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return { action: "transform", text: `${event.text}\n\n[pi-persona] "${label}" orchestration failed: ${message}` };
+		}
+	});
+
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
@@ -284,28 +306,18 @@ export default function piPersona(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			const task = args.trim();
-			const persona = controller.activePersona;
+			const orch = controller.activePersona?.orchestration;
 			if (!task) {
 				ctx.ui.notify("orchestrate: provide a task — /orchestrate <task>", "warning");
 				return;
 			}
-			const orch = persona?.orchestration;
-			const stratName = orch?.strategy ?? (orch?.mode === "parallel" ? "fanout" : undefined);
-			if (!orch || !stratName) {
+			if (!orch || !resolveStrategyName(orch)) {
 				ctx.ui.notify("orchestrate: the active persona declares no runnable strategy/mode", "warning");
 				return;
 			}
-			const strategy = getStrategy(stratName);
-			if (!strategy) {
-				ctx.ui.notify(`orchestrate: unknown strategy "${stratName}"`, "error");
-				return;
-			}
-			const sdk = makeSDK({ engine: buildEngine(), roster: makeRoster(teams), limits: RUN_LIMITS });
-			const input: StrategyInput = { task, params: {} };
-			if (orch.roster) input.roster = orch.roster;
 			try {
-				const result = await strategy.run(input, sdk);
-				ctx.ui.notify(result.output || "(no output)", result.ok ? "info" : "warning");
+				const result = await runPersonaStrategy(orch, task, { engine: buildEngine(), teams, limits: RUN_LIMITS });
+				ctx.ui.notify(result?.output || "(no output)", result?.ok ? "info" : "warning");
 			} catch (err) {
 				ctx.ui.notify(`orchestrate failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
