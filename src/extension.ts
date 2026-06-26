@@ -425,13 +425,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 	function resolveDelegateModels(params: Static<typeof DelegateParams>, ctx: ExtensionContext): string | undefined {
 		const models = ctx.modelRegistry.getAll().map((m) => ({ provider: m.provider, id: m.id }));
 		if (models.length === 0) return undefined;
+		const preferProvider = ctx.model?.provider; // the loader/session provider (the authenticated one)
 		const slots: Array<{ ref: string; set: (v: string) => void; who: string }> = [];
 		if (params.model) slots.push({ ref: params.model, set: (v) => { params.model = v; }, who: "the sub-agent" });
 		params.tasks?.forEach((t, i) => {
 			if (t.model) slots.push({ ref: t.model, set: (v) => { t.model = v; }, who: `task ${i + 1} (${t.agent})` });
 		});
 		for (const s of slots) {
-			const r = resolveModelRef(s.ref, models);
+			const r = resolveModelRef(s.ref, models, preferProvider);
 			if (r.ok) {
 				s.set(r.ref);
 				continue;
