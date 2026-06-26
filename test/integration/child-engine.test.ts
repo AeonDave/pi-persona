@@ -34,6 +34,17 @@ test("runChildAgent passes model/tools flags through to the child", async () => 
 	assert.ok(seen.includes("--no-session"));
 });
 
+test("runChildAgent reports live progress via onProgress", async () => {
+	const snaps: Array<{ output: string; turns: number; tokens: number }> = [];
+	const r = await runChildAgent({ task: "do it" }, undefined, {
+		resolveInvocation: resolveFake,
+		onProgress: (s) => snaps.push(s),
+	});
+	assert.equal(r.ok, true);
+	assert.ok(snaps.length >= 1, "onProgress called at least once");
+	assert.match(snaps[snaps.length - 1]!.output, /echo: Task: do it/);
+});
+
 test("runChildAgent surfaces an error stop reason as a failure", async () => {
 	const r = await runChildAgent({ task: "boom [fail]" }, undefined, { resolveInvocation: resolveFake });
 	assert.equal(r.ok, false);
