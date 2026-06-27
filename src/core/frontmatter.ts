@@ -49,16 +49,44 @@ function unquote(value: string): string {
 	return v;
 }
 
-/** Parse a scalar or inline list (`[a, "b", c]`) → string | string[] | boolean | number. */
-function parseValue(raw: string): string | string[] | boolean | number {
+/** Split on top-level commas only — commas inside `[...]`/`{...}` are left intact. */
+function splitTopLevel(s: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let start = 0;
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i];
+		if (c === "[" || c === "{") depth++;
+		else if (c === "]" || c === "}") depth--;
+		else if (c === "," && depth === 0) {
+			out.push(s.slice(start, i));
+			start = i + 1;
+		}
+	}
+	out.push(s.slice(start));
+	return out.map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+/** Parse a scalar, inline list (`[a, b]`), or inline flow map (`{ k: v }`). */
+function parseValue(raw: string): string | string[] | boolean | number | Record<string, unknown> {
 	const v = raw.trim();
 	if (v.startsWith("[") && v.endsWith("]")) {
 		const inner = v.slice(1, -1).trim();
 		if (inner === "") return [];
-		return inner
-			.split(",")
+		return splitTopLevel(inner)
 			.map((s) => unquote(s))
 			.filter((s) => s.length > 0);
+	}
+	if (v.startsWith("{") && v.endsWith("}")) {
+		const inner = v.slice(1, -1).trim();
+		const obj: Record<string, unknown> = {};
+		if (inner === "") return obj;
+		for (const pair of splitTopLevel(inner)) {
+			const ci = pair.indexOf(":");
+			if (ci < 0) continue;
+			obj[unquote(pair.slice(0, ci).trim())] = parseValue(pair.slice(ci + 1).trim());
+		}
+		return obj;
 	}
 	if (v === "true") return true;
 	if (v === "false") return false;

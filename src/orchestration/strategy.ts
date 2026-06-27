@@ -26,3 +26,8 @@ const BUILTINS: Record<string, Strategy> = {
 export function getStrategy(name: string): Strategy | undefined {
 	return BUILTINS[name];
 }
+
+/** The registered built-in strategy names, sorted — for error messages and discovery. */
+export function strategyNames(): string[] {
+	return Object.keys(BUILTINS).sort();
+}

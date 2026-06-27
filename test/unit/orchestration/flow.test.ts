@@ -129,6 +129,22 @@ test("runFlow blocks dependents when an upstream phase fails", async () => {
 	assert.match(outcome.results.b?.error ?? "", /blocked/);
 });
 
+test("runFlow treats a throwing runPhase as a failed phase (not a crashed DAG)", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }, { id: "b", strategy: "s", needs: ["a"] }]));
+	assert.ok(r.ok);
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async ({ phase }) => {
+			if (phase.id === "a") throw new Error('unknown strategy "nope"');
+			return ok(phase.id, "out");
+		},
+	});
+	assert.equal(outcome.ok, false, "the flow is not ok");
+	assert.equal(outcome.results.a?.ok, false, "the throwing phase is marked failed");
+	assert.match(outcome.results.a?.error ?? "", /unknown strategy "nope"/, "the throw message is preserved");
+	assert.match(outcome.results.b?.error ?? "", /blocked/, "its dependent is blocked, not run");
+});
+
 test("flowHash is stable across key order and changes with content", () => {
 	const a = parseFlow(flow([{ id: "a", strategy: "s", params: { x: 1, y: 2 } }]));
 	const b = parseFlow(flow([{ id: "a", strategy: "s", params: { y: 2, x: 1 } }]));
