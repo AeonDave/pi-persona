@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { composeSystemPrompt, parsePersona } from "../../../src/persona/persona.ts";
+import { composeSystemPrompt, expandCouncilPreset, parsePersona } from "../../../src/persona/persona.ts";
 
 const MAGI = `---
 name: magi
@@ -51,6 +51,34 @@ test("a file without `persona: true` parses but is not a switchable persona", ()
 	assert.equal(p.label, "plain");
 	assert.equal(p.systemPromptMode, "append");
 	assert.equal(p.orchestration, undefined);
+});
+
+test("a council block may carry just a preset (strategy filled in by expansion)", () => {
+	const p = parsePersona("---\nname: q\npersona: true\ncouncil:\n  preset: magi-rounds\n  params: { rounds: 5 }\n---\nbody", "/s");
+	assert.equal(p?.council?.preset, "magi-rounds");
+	assert.deepEqual(p?.council?.params, { rounds: 5 });
+});
+
+test("expandCouncilPreset merges a preset under authored fields (authored wins, params shallow-merge)", () => {
+	const presets = { "magi-rounds": { strategy: "council-rounds", roster: "magi", params: { rounds: 3, bestOf: 3 } } };
+	const expanded = expandCouncilPreset({ preset: "magi-rounds", params: { rounds: 5 } }, presets);
+	assert.equal(expanded?.strategy, "council-rounds");
+	assert.equal(expanded?.roster, "magi");
+	assert.deepEqual(expanded?.params, { rounds: 5, bestOf: 3 }, "authored rounds override; bestOf inherited");
+	assert.equal((expanded as { preset?: string }).preset, undefined, "the preset key is consumed");
+});
+
+test("expandCouncilPreset leaves a preset-less spec unchanged and drops an unknown preset", () => {
+	assert.deepEqual(expandCouncilPreset({ strategy: "magi", roster: "magi" }, {}), { strategy: "magi", roster: "magi" });
+	// unknown preset → keep authored fields, drop the dangling preset key
+	assert.deepEqual(expandCouncilPreset({ preset: "ghost", strategy: "magi" }, {}), { strategy: "magi" });
+});
+
+test("a persona parses coaching: true (opts into the contact_supervisor comm plane)", () => {
+	const on = parsePersona("---\nname: c\npersona: true\ncoaching: true\n---\nbody", "/s");
+	assert.equal(on?.coaching, true);
+	const off = parsePersona("---\nname: c\npersona: true\n---\nbody", "/s");
+	assert.equal(off?.coaching, undefined, "absent ⇒ no coaching (opt-in)");
 });
 
 test("a persona parses orchestration params (numbers + nested)", () => {

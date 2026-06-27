@@ -96,6 +96,7 @@ test("piPersona registers the delegate tool, f8/f9 shortcuts, and agents/doctor/
 	piPersona(m.pi);
 	assert.ok(m.toolNames().includes("delegate"));
 	assert.ok(m.toolNames().includes("council"));
+	assert.ok(m.toolNames().includes("intercom"));
 	assert.ok(m.toolNames().includes("models"));
 	assert.deepEqual(m.commandNames().sort(), ["agents", "doctor", "flow", "models", "orchestrate", "peek", "persona"]);
 	assert.equal(m.shortcutCount(), 2); // f8 (cycle persona) + f9 (agent overlay)

@@ -1,7 +1,33 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type ContractDef, DEFAULT_CONTRACT, extractJsonCandidate, parseAndValidate, pinContract, validateAgainst } from "../../../src/core/contract.ts";
+import { type ContractDef, DEFAULT_CONTRACT, extractJsonCandidate, parseAndValidate, parseContract, pinContract, validateAgainst } from "../../../src/core/contract.ts";
+
+test("parseContract reads a contracts/*.contract.json into a ContractDef", () => {
+	const r = parseContract(
+		JSON.stringify({
+			name: "review-verdict",
+			fields: { vote: { type: "string", required: true }, confidence: { type: "number", min: 0, max: 1 }, stance: { type: "enum", values: ["approve", "reject"] } },
+		}),
+	);
+	assert.ok(r.ok);
+	if (r.ok) {
+		assert.equal(r.def.name, "review-verdict");
+		assert.equal(r.def.fields.vote?.required, true);
+		assert.equal(r.def.fields.confidence?.max, 1);
+		assert.deepEqual(r.def.fields.stance?.values, ["approve", "reject"]);
+		// round-trips through validation
+		assert.equal(parseAndValidate('{"vote":"approve","stance":"approve"}', r.def).ok, true);
+	}
+});
+
+test("parseContract rejects malformed files (bad JSON, missing name/fields, bad type)", () => {
+	assert.equal(parseContract("not json").ok, false);
+	assert.equal(parseContract(JSON.stringify({ fields: {} })).ok, false, "missing name");
+	assert.equal(parseContract(JSON.stringify({ name: "x" })).ok, false, "missing fields");
+	assert.equal(parseContract(JSON.stringify({ name: "x", fields: { a: { type: "wat" } } })).ok, false, "bad field type");
+	assert.equal(parseContract(JSON.stringify({ name: "x", fields: { a: { type: "enum" } } })).ok, false, "enum needs values");
+});
 
 test("parseAndValidate unwraps fences, validates, and reports a contract error on failure", () => {
 	const def: ContractDef = { name: "v", fields: { result: { type: "string", required: true } } };

@@ -24,6 +24,9 @@ export interface PiPersonaConfig {
 	/** Engine backend for sub-agents: "inproc" (run in-process via `createAgentSession`,
 	 *  the default) or "child" (spawn `pi -p`, the baseline). */
 	engine?: "child" | "inproc";
+	/** Opt-in periodic-peek interval (ms) for the idle supervisor while async children run:
+	 *  0 = off (default). Each tick surfaces a compact digest as a follow-up (§4.9). */
+	peekEveryMs: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -47,7 +50,10 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		persist: env.PI_PERSONA_PERSIST?.trim().toLowerCase() !== "off",
 		delegateDefaultAllow: env.PI_PERSONA_DELEGATE_DEFAULT?.trim().toLowerCase() !== "deny",
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() !== "off",
+		peekEveryMs: 0,
 	};
+	const peek = Number(env.PI_PERSONA_PEEK_MS?.trim());
+	if (Number.isFinite(peek) && peek > 0) config.peekEveryMs = peek;
 	if (def) config.defaultPersona = def;
 	const stateFile = env.PI_PERSONA_STATE_FILE?.trim();
 	if (stateFile) config.stateFile = stateFile;

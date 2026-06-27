@@ -15,6 +15,8 @@ export interface FlowPhase {
 	roster?: string;
 	needs?: string[];
 	params?: Record<string, unknown>;
+	/** A checkpoint: after this phase completes, require approval before its dependents run. */
+	gate?: boolean;
 }
 
 export interface FlowSpec {
@@ -91,6 +93,7 @@ export function parseFlow(content: string): FlowParse {
 			phase.needs = p.needs;
 		}
 		if (isObject(p.params)) phase.params = p.params;
+		if (p.gate === true) phase.gate = true;
 		phases.push(phase);
 	}
 

@@ -77,7 +77,12 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
 		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", detached: true, windowsHide: true });
+			const tk = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", detached: true, windowsHide: true });
+			// An async spawn 'error' (e.g. taskkill missing, EACCES across a session boundary) is
+			// emitted on the ChildProcess — with no listener Node re-throws it as an UNCAUGHT
+			// exception that crashes the host. The try/catch only covers a synchronous throw.
+			tk.on("error", () => {});
+			tk.unref();
 		} catch {
 			/* ignore — best effort */
 		}
@@ -186,6 +191,14 @@ export async function runChildAgent(
 				killing = true;
 				if (timer) clearTimeout(timer);
 				const pid = proc.pid;
+				// On Windows, proc.kill("SIGTERM") maps to TerminateProcess: it kills ONLY the root
+				// and fires `close` synchronously, which clears the grace timer before it can run —
+				// so the tree-kill never fires and the child's own tool subprocesses are orphaned.
+				// Go straight to the force tree-kill (taskkill /F /T) there.
+				if (process.platform === "win32") {
+					if (pid !== undefined) forceKillTree(pid);
+					return;
+				}
 				try {
 					proc.kill("SIGTERM");
 				} catch {

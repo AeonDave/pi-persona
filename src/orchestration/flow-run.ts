@@ -29,7 +29,12 @@ export interface FlowJournalEntry {
 	hash: string;
 	ok: boolean;
 	output: string;
+	/** A gated phase whose checkpoint was approved — so a resume doesn't re-prompt. */
+	gateApproved?: boolean;
 }
+
+/** A resume map value: a phase result plus whether its checkpoint gate was already approved. */
+export type ResumedResult = AgentResult & { gateApproved?: boolean };
 
 export interface FlowRunDeps {
 	/** Run one phase's strategy → its result (wraps `runPersonaStrategy` in prod). */
@@ -40,9 +45,12 @@ export interface FlowRunDeps {
 	/** Append one entry as each phase completes. */
 	journal?: (entry: FlowJournalEntry) => void;
 	/** Phases already completed (from a prior run's journal) — skipped, output reused. */
-	resume?: Record<string, AgentResult>;
+	resume?: Record<string, ResumedResult>;
 	/** Live UI: phase lifecycle. */
 	onPhase?: (id: string, status: PhaseStatus, result?: AgentResult) => void;
+	/** A gated phase's checkpoint: after it completes, approve before its dependents run.
+	 *  Absent ⇒ gates auto-approve (informational only — headless runs aren't blocked). */
+	approveGate?: (phase: FlowPhase, result: AgentResult) => Promise<boolean>;
 }
 
 export interface FlowOutcome {
@@ -64,18 +72,36 @@ function buildPhaseTask(baseTask: string, spec: FlowSpec, phase: FlowPhase, upst
 }
 
 export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDeps): Promise<FlowOutcome> {
-	const done = new Map<string, AgentResult>(Object.entries(deps.resume ?? {}));
+	const byId = new Map(spec.phases.map((p) => [p.id, p]));
+	// A gated phase only satisfies its dependents once its checkpoint is "passed" (or it blocks
+	// them once "rejected"). Resume pre-seeds gates the journal already recorded as approved.
+	const gateState = new Map<string, "passed" | "rejected">();
+	const done = new Map<string, AgentResult>();
+	for (const [id, r] of Object.entries(deps.resume ?? {})) {
+		const gated = byId.get(id)?.gate === true;
+		// A gated phase resumed as ok but WITHOUT a recorded approval (the process died between
+		// journaling its completion and its gate decision) must RE-RUN, not be treated as done —
+		// otherwise it sits in `done` with an unresolved gate and its dependents can never run.
+		if (gated && r.ok && !(r as ResumedResult).gateApproved) continue;
+		done.set(id, r);
+		if (gated && (r as ResumedResult).gateApproved) gateState.set(id, "passed");
+	}
+	const gateResolved = (id: string): boolean => !byId.get(id)?.gate || gateState.has(id);
+	const needFailed = (n: string): boolean => (done.has(n) && !done.get(n)?.ok) || gateState.get(n) === "rejected";
 	let remaining = spec.phases.filter((p) => !done.has(p.id));
 
 	while (remaining.length > 0) {
 		if (deps.signal?.aborted) break;
-		const ready = remaining.filter((p) => (p.needs ?? []).every((n) => done.has(n)));
+		// A phase can be considered once every need is done AND any gated need is resolved.
+		const ready = remaining.filter((p) => (p.needs ?? []).every((n) => done.has(n) && gateResolved(n)));
 		if (ready.length === 0) break; // acyclic + progress guarantees this can't happen
 
-		// A phase whose any need FAILED is blocked — record it failed without running.
-		const blocked = ready.filter((p) => (p.needs ?? []).some((n) => !done.get(n)?.ok));
+		// A phase whose any need FAILED or whose gate was REJECTED is blocked — record, don't run.
+		const blocked = ready.filter((p) => (p.needs ?? []).some((n) => needFailed(n)));
 		for (const p of blocked) {
-			const r: AgentResult = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error: "blocked: an upstream phase failed" };
+			const gateReject = (p.needs ?? []).some((n) => gateState.get(n) === "rejected");
+			const error = gateReject ? "blocked: a checkpoint gate was not approved" : "blocked: an upstream phase failed";
+			const r: AgentResult = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error };
 			done.set(p.id, r);
 			deps.onPhase?.(p.id, "failed", r);
 			deps.journal?.({ phase: p.id, hash: deps.hash, ok: false, output: "" });
@@ -106,6 +132,16 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 			}),
 		);
 		for (const [id, r] of results) done.set(id, r);
+
+		// Resolve checkpoint gates for phases that just completed OK — sequentially, so the
+		// next readiness pass sees each gate's verdict (a rejected gate blocks its dependents).
+		for (const [id, r] of results) {
+			const phase = byId.get(id);
+			if (!phase?.gate || !r.ok || gateState.has(id)) continue;
+			const approved = deps.approveGate ? await deps.approveGate(phase, r) : true;
+			gateState.set(id, approved ? "passed" : "rejected");
+			if (approved) deps.journal?.({ phase: id, hash: deps.hash, ok: true, output: r.output, gateApproved: true });
+		}
 		remaining = remaining.filter((p) => !done.has(p.id));
 	}
 

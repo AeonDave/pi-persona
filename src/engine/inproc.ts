@@ -18,9 +18,11 @@
  * `ChildProcessEngine`. It drops in behind the seam without touching strategies/UI.
  */
 
-import { createAgentSession, DefaultResourceLoader, type ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, type ModelRegistry, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../agents/agent.ts";
+import type { InProcessBus } from "../bus/inproc.ts";
+import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
@@ -45,6 +47,8 @@ export interface CreateSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** The agent's persona (its .md) — appended to the base system prompt. */
 	systemPrompt?: string;
+	/** Extra tools injected into the child session (e.g. `contact_supervisor`). */
+	customTools?: ToolDefinition[];
 }
 
 export type CreateInProcSession = (opts: CreateSessionOptions) => Promise<InProcSession>;
@@ -70,6 +74,16 @@ export interface InProcessDeps {
 	onProgress?: (snap: ProgressSnapshot) => void;
 	/** Session factory — defaults to a real `createAgentSession`; injected in tests. */
 	createSession?: CreateInProcSession;
+	/** The semantic comm plane: when present + `coaching`, each child gets a
+	 *  `contact_supervisor` tool bound to this bus so it can reach the supervisor mid-run. */
+	bus?: InProcessBus;
+	/** The supervisor's bus handle (default `"supervisor"`). */
+	supervisorHandle?: string;
+	/** Inject `contact_supervisor` into children (persona `coaching: on`). Default off. */
+	coaching?: boolean;
+	/** Allow a child's `decision`/`interview` to BLOCK for a reply — async runs only.
+	 *  Sync runs hold the supervisor's turn, so blocking would deadlock: keep this false. */
+	allowBlocking?: boolean;
 }
 
 // The sub-agent must never re-enter the supervisor's orchestration surface.
@@ -87,6 +101,10 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		...(opts.systemPrompt ? { appendSystemPrompt: [opts.systemPrompt] } : {}),
 	});
 	await loader.reload();
+	// If a `tools` allowlist is set, the injected custom tools must be allowed too,
+	// otherwise the allowlist would filter them out of the child's active set.
+	const customNames = (opts.customTools ?? []).map((t) => t.name);
+	const tools = opts.tools && opts.tools.length > 0 ? [...opts.tools, ...customNames] : undefined;
 	const { session } = await createAgentSession({
 		model: opts.model as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["model"]>,
 		modelRegistry: opts.modelRegistry,
@@ -94,7 +112,8 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		resourceLoader: loader,
 		cwd: opts.cwd,
 		excludeTools: ORCHESTRATION_TOOLS,
-		...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
+		...(tools ? { tools } : {}),
+		...(opts.customTools && opts.customTools.length > 0 ? { customTools: opts.customTools } : {}),
 		...(opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {}),
 	});
 	return {
@@ -129,8 +148,32 @@ function resolveModel(reg: ModelRegistry, ref: string | undefined): unknown {
 	return reg.getAll().find((m) => m.id === ref);
 }
 
+// Module-level (NOT per-engine) so concurrent engine instances and parallel sub-agent builds
+// share them. `buildEngine` makes a fresh engine per delegate/council/flow-phase/async-launch,
+// so a per-closure counter would restart at 0 and collide bus handles across concurrent runs.
+let globalChildSeq = 0;
+// Ref-counted fork-bomb guard: PI_PERSONA_DISABLE stays "1" while ANY sub-session is being
+// built (a parallel strategy builds several at once), restored only when the LAST one finishes.
+// A per-call save/restore around the async `createSession` races: it can clear the guard
+// mid-build (fork-bomb window) or leave it stuck. Increment/decrement never cross the await.
+let disableDepth = 0;
+let savedDisable: string | undefined;
+function pushDisableGuard(): void {
+	if (disableDepth === 0) savedDisable = process.env.PI_PERSONA_DISABLE;
+	disableDepth += 1;
+	process.env.PI_PERSONA_DISABLE = "1";
+}
+function popDisableGuard(): void {
+	disableDepth -= 1;
+	if (disableDepth === 0) {
+		if (savedDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
+		else process.env.PI_PERSONA_DISABLE = savedDisable;
+	}
+}
+
 export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 	const createSession = deps.createSession ?? createPiSession;
+	const supervisorHandle = deps.supervisorHandle ?? "supervisor";
 	// Per-run contract pinning (I3), mirroring the child adapter.
 	const pinned = new Map<string, PinnedContract>();
 	const pinnedDef = (name: string): ContractDef | undefined => {
@@ -171,15 +214,27 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
 			if (cfg.systemPrompt?.trim()) sessionOpts.systemPrompt = cfg.systemPrompt.trim();
 
-			// Fork-bomb guard: disable pi-persona inside the sub-session while it's built.
-			const prevDisable = process.env.PI_PERSONA_DISABLE;
-			process.env.PI_PERSONA_DISABLE = "1";
+			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle,
+			// so its progress/decisions reach the supervisor over the bus while it runs (§4.9).
+			let childHandle: string | undefined;
+			if (deps.bus && deps.coaching) {
+				globalChildSeq += 1;
+				childHandle = `${spec.agent}#${globalChildSeq}`;
+				deps.bus.register(supervisorHandle);
+				deps.bus.register(childHandle);
+				sessionOpts.customTools = [
+					makeContactSupervisorTool(deps.bus, childHandle, supervisorHandle, { allowBlocking: deps.allowBlocking ?? false }),
+				];
+			}
+
+			// Fork-bomb guard (ref-counted, concurrency-safe): disable pi-persona inside the
+			// sub-session while it's built; the guard survives concurrent parallel builds.
+			pushDisableGuard();
 			let session: InProcSession;
 			try {
 				session = await createSession(sessionOpts);
 			} finally {
-				if (prevDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
-				else process.env.PI_PERSONA_DISABLE = prevDisable;
+				popDisableGuard();
 			}
 
 			const unsub = session.subscribe((ev) => {
@@ -221,6 +276,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				/* the run failed mid-flight; state carries any errorMessage/stopReason */
 			} finally {
 				if (signal) signal.removeEventListener("abort", onAbort);
+				if (childHandle) deps.bus?.unregister(childHandle);
 				unsub();
 				session.dispose();
 			}

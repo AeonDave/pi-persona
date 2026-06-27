@@ -24,6 +24,8 @@ export interface DelegateTask {
 	model?: string;
 	/** Tool allowlist override for this sub-agent. */
 	tools?: string[];
+	/** Run this task in an isolated git worktree (edits never touch the main tree). */
+	isolation?: "none" | "worktree";
 }
 
 export interface DelegateParams {
@@ -33,6 +35,7 @@ export interface DelegateParams {
 	skills?: string[];
 	model?: string;
 	tools?: string[];
+	isolation?: "none" | "worktree";
 	tasks?: DelegateTask[];
 	concurrency?: number;
 }
@@ -89,6 +92,7 @@ function specOf(t: DelegateTask): AgentRunSpec {
 	if (t.skills && t.skills.length > 0) spec.skills = t.skills;
 	if (t.model) spec.model = t.model;
 	if (t.tools && t.tools.length > 0) spec.tools = t.tools;
+	if (t.isolation === "worktree") spec.isolation = "worktree";
 	return spec;
 }
 
@@ -162,6 +166,7 @@ export async function runDelegate(
 		if (params.skills && params.skills.length > 0) single.skills = params.skills;
 		if (params.model) single.model = params.model;
 		if (params.tools && params.tools.length > 0) single.tools = params.tools;
+		if (params.isolation === "worktree") single.isolation = "worktree";
 		const label = labelFor(single, 0);
 		const view: DelegateView = {
 			agent: params.agent,

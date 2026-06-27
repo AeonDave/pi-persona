@@ -11,16 +11,24 @@ export interface Permission {
 	deny?: string[];
 }
 
+// Patterns are fixed (a persona's allow/deny lists), but `isAllowed` runs on every `tool_call`
+// and across the whole tool registry on each persona switch — so compile each glob once.
+const globCache = new Map<string, RegExp>();
+
 /** Compile a glob (`*`, `?`) into a full-string-anchored RegExp; all other
- *  characters are matched literally (regex metacharacters are escaped). */
+ *  characters are matched literally (regex metacharacters are escaped). Memoised. */
 function globToRegExp(pattern: string): RegExp {
+	const cached = globCache.get(pattern);
+	if (cached) return cached;
 	let body = "";
 	for (const ch of pattern) {
 		if (ch === "*") body += ".*";
 		else if (ch === "?") body += ".";
 		else body += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	}
-	return new RegExp(`^${body}$`);
+	const re = new RegExp(`^${body}$`);
+	globCache.set(pattern, re);
+	return re;
 }
 
 function matchesAny(name: string, patterns: string[]): boolean {
