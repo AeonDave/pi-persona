@@ -53,7 +53,7 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 | **Agent** | a sub-agent the supervisor runs (prompt + model + tools) | `agents/*.md` |
 | **Team** | a named roster of agents | `teams.yaml` |
 | **Strategy** | how a roster is orchestrated (vote, loop, rounds…) | `src/orchestration/strategies/*.ts` |
-| **Contract** | the structured shape a sub-agent returns (so votes tally) | `contracts/*.yaml` |
+| **Contract** | the structured shape a sub-agent returns (so votes tally) | `contracts/*.contract.json` |
 
 ## Building blocks — the core API
 
@@ -82,8 +82,13 @@ core needed**.
 |---|---|
 | `delegate` tool | spawn sub-agent(s): **single or parallel** × **sync** (blocks the turn) or **async** (background; result returns as a follow-up) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
-| `flow` tool · `/flow` | run a **DAG** of strategies (`*.flow.json`), journaled so an interrupted flow resumes |
+| `intercom` tool | the **comm plane**: `list`/`inbox`/`reply`/`send` to talk to running sub-agents (pairs with each child's `contact_supervisor`) |
+| `flow` tool · `/flow` | run a **DAG** of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a **checkpoint** (approve before its dependents run) |
 | persona `mode:` | `solo` (opportunistic — the LLM delegates by judgement) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
+| persona `coaching:` | opt into the comm plane — a `coaching: on` persona gives its children a `contact_supervisor` tool so they report progress / ask blocking decisions while they run (async) |
+| `isolation: worktree` | an agent (frontmatter) or a `delegate` task runs in a throwaway **git worktree** — its edits/tests never touch the main tree, and it's force-removed after |
+| `council: { preset: <name> }` | expand a `presets/<name>.preset.json` (strategy/roster/params) so persona files stay light — authored fields override |
+| `contracts/<name>.contract.json` | a hot-editable structured-return contract, requested by name via `outputContract`, **pinned per run** so a mid-run edit can't change behaviour |
 
 **Built-in strategies** (files on the SDK above):
 
@@ -104,6 +109,20 @@ core needed**.
 
 Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper) — everything else is a file or persona on top of it.
 
+**Talking to running sub-agents (the comm plane).** A `coaching: on` persona (e.g. `coach`) gives
+each in-process child a **`contact_supervisor`** tool; the supervisor reads/answers with
+**`intercom`**. The two are wired over a handle-based in-process **bus** — a distinct plane from
+engine runtime events and the agent-tree progress view (they never collide).
+
+| Child calls `contact_supervisor` | Supervisor sees it via |
+|---|---|
+| `progress` (one-way) | the `delegate`/`council` result (sync) or `intercom inbox` / the opt-in periodic peek (async) |
+| `decision` / `interview` (waits) | an **event-wake follow-up** → answer with `intercom { action: "reply", askId, message }`. Honoured for **async** runs only; a sync run downgrades it to one-way (no deadlock) |
+
+Idle supervision is cost-aware: while async children run, the supervisor spends nothing until a
+child wakes it (a blocking ask) — or, if `PI_PERSONA_PEEK_MS` is set, a periodic peek surfaces a
+compact digest. Steering a running child still goes through the f9 overlay (`s`).
+
 A persona declares how it works:
 
 - **nothing** → *opportunistic*: it uses the `delegate` tool when a task has independent parts —
@@ -114,33 +133,131 @@ A persona declares how it works:
 - `council: { strategy, roster, params }` → *tool-driven*: the supervisor consults the council on
   demand, then executes the ruling and re-convenes.
 
-## Add an ensemble — no code
+## Examples
 
-A nine-member, best-of-7, multi-round council is three files:
+Everything below is **data** — drop the files in (discovery: builtin < `~/.pi/agent/` < project
+`.pi/`) and switch persona with **`f8`**. Code is needed only to add a brand-new strategy *shape* (last example).
+
+**1 · Opportunistic delegation** — the simplest persona, no orchestration block. The supervisor
+delegates by judgement; "research X, Y and Z" fans out one sub-agent per item in a single call.
+
+```markdown
+<!-- personas/researcher.md -->
+---
+name: researcher
+persona: true
+---
+You research thoroughly. For independent sub-questions, fan out `scout` sub-agents in ONE
+`delegate` call (`tasks: [...]`), each with a disjoint scope, then synthesize their findings.
+```
+
+**2 · A review council** — convene biased cores in parallel through the `council` tool, then act
+on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `antagonist`) or
+`council-rounds` (multi-round vote) without touching code.
 
 ```yaml
 # teams.yaml
-magiv2: [a1, a2, a3, a4, a5, a6, a7, a8, a9]
+review: [security, performance, tests]
 ```
+```markdown
+<!-- personas/review.md -->
+---
+name: review
+persona: true
+council: { strategy: fanout, roster: review }
+---
+Convene the council before sign-off, then apply its findings yourself.
+```
+
+**3 · Coaching** — talk to sub-agents *while they run*. A `coaching: on` persona gives its
+children a `contact_supervisor` tool; the supervisor reads/answers with `intercom`.
 
 ```markdown
-<!-- personas/magiv2.md -->
+<!-- personas/coach.md -->
 ---
-name: magiv2
-label: "🧠 MAGI v2"
+name: coach
 persona: true
-council:
-  strategy: council-rounds      # built-in multi-round deliberation
-  roster: magiv2
-  params: { rounds: 3, bestOf: 7 }
+coaching: true
 ---
-You are the supervisor of a nine-core council. Consult it for each decision, then execute the
-ruling with your tools and re-convene when a new decision arises.
+Delegate with `async: true` and tell each sub-agent to report progress and ask blocking
+`decision`s via `contact_supervisor`; use `intercom inbox` to read and `intercom reply` to answer.
 ```
 
-Each `agents/aN.md` gives a core its bias and a JSON vote. Want a different vote rule or a new
-deliberation shape? Drop a strategy file in `src/orchestration/strategies/` — it uses the same
-`agent` / `parallel` / `reduce.vote` SDK — and name it in the `council:` block.
+**4 · A flow with a human checkpoint** — a DAG over strategies; `gate: true` pauses for your
+approval before dependents run. Journaled, so an interrupted run resumes. Run `/flow gated-build "<task>"`.
+
+```json
+// flows/gated-build.flow.json
+{
+  "name": "gated-build",
+  "phases": [
+    { "id": "plan",   "strategy": "magi",     "roster": "magi",   "gate": true },
+    { "id": "build",  "strategy": "pipeline", "roster": "repair", "needs": ["plan"] },
+    { "id": "verify", "strategy": "fanout",   "roster": "review", "needs": ["build"] }
+  ]
+}
+```
+
+**5 · A structured-return contract** — so votes/judges tally mechanically. Drop a JSON file; a
+strategy requests it by name via `outputContract`, and it's pinned per run.
+
+```json
+// contracts/review-verdict.contract.json
+{ "name": "review-verdict",
+  "fields": {
+    "vote":       { "type": "string", "required": true },
+    "severity":   { "type": "enum",   "values": ["low", "medium", "high", "critical"] },
+    "confidence": { "type": "number", "min": 0, "max": 1 }
+  } }
+```
+
+**6 · Isolated work in a throwaway git worktree** — edits/tests never touch your tree; the
+worktree is force-removed after. Per agent (frontmatter) or per `delegate` call:
+
+```markdown
+<!-- agents/sandbox.md -->
+---
+name: sandbox
+isolation: worktree
+tools: [read, write, bash]
+---
+```
+```js
+// …or ad-hoc, in a delegate tool call:
+{ agent: "operator", isolation: "worktree", task: "try the risky refactor and report if tests pass" }
+```
+
+**7 · A preset keeps persona files to one line** — it expands a `*.preset.json`; authored fields override.
+
+```json
+// presets/magi-rounds.preset.json
+{ "strategy": "council-rounds", "roster": "magi", "params": { "rounds": 3, "bestOf": 3 } }
+```
+```yaml
+# personas/magiv2.md frontmatter:
+council: { preset: magi-rounds }
+```
+
+**8 · A brand-new ensemble** — a nine-member, best-of-7, multi-round council is two data files
+pointing at the built-in `council-rounds` strategy (no code):
+
+```yaml
+# teams.yaml
+bigcouncil: [a1, a2, a3, a4, a5, a6, a7, a8, a9]
+```
+```markdown
+<!-- personas/bigcouncil.md -->
+---
+name: bigcouncil
+persona: true
+council: { strategy: council-rounds, roster: bigcouncil, params: { rounds: 3, bestOf: 7 } }
+---
+Consult the council per decision, then execute the ruling and re-convene on a new decision.
+```
+
+Each `agents/aN.md` gives a core its bias + a JSON vote. Want a *different vote rule*? Drop a
+`src/orchestration/strategies/<name>.ts` using the same `agent` / `parallel` / `reduce.vote` SDK
+and name it in the `council:` block — **that** is the only case that touches code.
 
 ## Keys & commands
 

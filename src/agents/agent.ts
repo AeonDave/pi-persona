@@ -14,6 +14,9 @@ export interface AgentConfig {
 	description?: string;
 	model?: string;
 	tools?: string[];
+	/** `worktree` runs this agent in an isolated git worktree (its edits never touch the
+	 *  main tree); `none` (default) shares the working tree. */
+	isolation?: "none" | "worktree";
 	systemPrompt: string;
 	systemPromptMode: SystemPromptMode;
 	source: string;
@@ -35,6 +38,7 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	if (typeof fm.model === "string" && fm.model.trim()) agent.model = fm.model.trim();
 	const tools = asStringArray(fm.tools);
 	if (tools) agent.tools = tools;
+	if (fm.isolation === "worktree") agent.isolation = "worktree";
 
 	return agent;
 }

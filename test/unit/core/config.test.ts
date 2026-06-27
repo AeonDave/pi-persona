@@ -21,6 +21,13 @@ test("PI_PERSONA_ENGINE selects the sub-agent backend; in-process is the default
 	assert.equal(resolveConfig({ PI_PERSONA_ENGINE: "bogus" }).engine, "inproc", "unknown value falls back to the default");
 });
 
+test("PI_PERSONA_PEEK_MS sets the opt-in periodic peek interval (default off = 0)", () => {
+	assert.equal(resolveConfig({}).peekEveryMs, 0, "off by default");
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "30000" }).peekEveryMs, 30000);
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "abc" }).peekEveryMs, 0, "non-numeric ⇒ off");
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "-5" }).peekEveryMs, 0, "negative ⇒ off");
+});
+
 test("PI_PERSONA_DISABLE (any non-empty value) disables the extension", () => {
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "1" }).disabled, true);
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "" }).disabled, false);

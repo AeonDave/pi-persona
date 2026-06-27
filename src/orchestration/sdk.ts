@@ -20,6 +20,8 @@ export interface AgentRunSpec {
 	/** Skills the sub-agent must load first (dynamic specialisation). */
 	skills?: string[];
 	outputContract?: string;
+	/** Run this leg in an isolated git worktree (overrides the agent's own setting). */
+	isolation?: "none" | "worktree";
 }
 
 /** A live snapshot of an agent's progress (for streaming UI). */

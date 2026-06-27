@@ -36,6 +36,98 @@ test("parseFlow rejects malformed JSON, empty/duplicate/dangling phases", () => 
 	assert.equal(parseFlow(JSON.stringify({ phases: [{ id: "a", strategy: "s" }] })).ok, false, "missing name");
 });
 
+test("parseFlow reads a phase's gate: true (checkpoint before dependents)", () => {
+	const r = parseFlow(flow([{ id: "plan", strategy: "magi", gate: true }, { id: "do", strategy: "fanout", needs: ["plan"] }]));
+	assert.ok(r.ok);
+	if (r.ok) assert.equal(r.flow.phases[0]?.gate, true);
+});
+
+test("runFlow pauses a gated phase for approval; approval lets dependents run", async () => {
+	const r = parseFlow(flow([{ id: "plan", strategy: "s", gate: true }, { id: "do", strategy: "s", needs: ["plan"] }]));
+	assert.ok(r.ok);
+	const ran: string[] = [];
+	const gated: string[] = [];
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async ({ phase }) => {
+			ran.push(phase.id);
+			return ok(phase.id, `out:${phase.id}`);
+		},
+		approveGate: async (phase) => {
+			gated.push(phase.id);
+			return true; // approve
+		},
+	});
+	assert.deepEqual(gated, ["plan"], "the gate was presented for approval");
+	assert.deepEqual(ran, ["plan", "do"], "dependents run after approval");
+	assert.equal(outcome.ok, true);
+});
+
+test("runFlow blocks dependents when a gate is rejected; the flow is not ok", async () => {
+	const r = parseFlow(flow([{ id: "plan", strategy: "s", gate: true }, { id: "do", strategy: "s", needs: ["plan"] }]));
+	assert.ok(r.ok);
+	const ran: string[] = [];
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async ({ phase }) => {
+			ran.push(phase.id);
+			return ok(phase.id, "out");
+		},
+		approveGate: async () => false, // reject
+	});
+	assert.deepEqual(ran, ["plan"], "the gated phase ran but its dependent did not");
+	assert.equal(outcome.ok, false);
+	assert.match(outcome.results.do?.error ?? "", /gate|blocked/i);
+});
+
+test("runFlow re-runs a resumed gated phase whose approval was never journaled (no deadlock)", async () => {
+	// Crash window: the phase completed (journaled ok) but the process died before its
+	// gate approval was journaled. On resume the phase is 'done' but its gate is unresolved —
+	// without recovery its dependents can never become ready and the flow stalls.
+	const r = parseFlow(flow([{ id: "plan", strategy: "s", gate: true }, { id: "do", strategy: "s", needs: ["plan"] }]));
+	assert.ok(r.ok);
+	const ran: string[] = [];
+	let approvals = 0;
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		resume: { plan: ok("plan", "out:plan") }, // done+ok but NO gateApproved
+		runPhase: async ({ phase }) => {
+			ran.push(phase.id);
+			return ok(phase.id, `out:${phase.id}`);
+		},
+		approveGate: async () => {
+			approvals++;
+			return true;
+		},
+	});
+	assert.ok(ran.includes("plan"), "the un-approved gated phase re-ran instead of stalling");
+	assert.ok(ran.includes("do"), "its dependent ran after re-approval");
+	assert.equal(approvals, 1, "the gate was (re)approved once");
+	assert.equal(outcome.ok, true);
+});
+
+test("runFlow does not re-prompt a gate already approved in the resume journal", async () => {
+	const r = parseFlow(flow([{ id: "plan", strategy: "s", gate: true }, { id: "do", strategy: "s", needs: ["plan"] }]));
+	assert.ok(r.ok);
+	let prompts = 0;
+	const ran: string[] = [];
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		resume: { plan: { ...ok("plan", "out:plan"), gateApproved: true } as AgentResult & { gateApproved: boolean } },
+		runPhase: async ({ phase }) => {
+			ran.push(phase.id);
+			return ok(phase.id, "out");
+		},
+		approveGate: async () => {
+			prompts++;
+			return true;
+		},
+	});
+	assert.equal(prompts, 0, "an approved gate from the journal is not re-prompted");
+	assert.deepEqual(ran, ["do"], "plan was resumed; only do ran");
+	assert.equal(outcome.ok, true);
+});
+
 test("parseFlow rejects a cyclic DAG", () => {
 	const r = parseFlow(
 		flow([

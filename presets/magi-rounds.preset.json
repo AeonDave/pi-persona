@@ -1,0 +1,5 @@
+{
+  "strategy": "council-rounds",
+  "roster": "magi",
+  "params": { "rounds": 3, "bestOf": 3 }
+}

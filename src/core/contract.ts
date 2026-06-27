@@ -54,6 +54,47 @@ export const DEFAULT_CONTRACT: ContractDef = {
 	},
 };
 
+const FIELD_TYPES: readonly FieldType[] = ["string", "number", "boolean", "enum"];
+
+export type ContractParse = { ok: true; def: ContractDef } | { ok: false; error: string };
+
+/** Parse a `contracts/<name>.contract.json` file into a validated {@link ContractDef}.
+ *  Data-driven authoring surface (spec §4.6): drop a JSON file, reference it by name via a
+ *  persona/strategy `outputContract`. Reducers then read its fields generically. */
+export function parseContract(content: string): ContractParse {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(content);
+	} catch {
+		return { ok: false, error: "contract is not valid JSON" };
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, error: "contract must be a JSON object" };
+	const o = raw as Record<string, unknown>;
+	if (typeof o.name !== "string" || !o.name.trim()) return { ok: false, error: "contract.name is required" };
+	if (typeof o.fields !== "object" || o.fields === null || Array.isArray(o.fields)) return { ok: false, error: "contract.fields must be an object" };
+
+	const fields: Record<string, FieldSpec> = {};
+	for (const [fname, rawSpec] of Object.entries(o.fields as Record<string, unknown>)) {
+		if (typeof rawSpec !== "object" || rawSpec === null || Array.isArray(rawSpec)) return { ok: false, error: `field "${fname}" must be an object` };
+		const s = rawSpec as Record<string, unknown>;
+		if (typeof s.type !== "string" || !(FIELD_TYPES as readonly string[]).includes(s.type)) {
+			return { ok: false, error: `field "${fname}" has an invalid type (string|number|boolean|enum)` };
+		}
+		const spec: FieldSpec = { type: s.type as FieldType };
+		if (s.required === true) spec.required = true;
+		if (spec.type === "enum") {
+			if (!Array.isArray(s.values) || !s.values.every((v): v is string => typeof v === "string") || s.values.length === 0) {
+				return { ok: false, error: `enum field "${fname}" needs a non-empty string "values" list` };
+			}
+			spec.values = s.values;
+		}
+		if (typeof s.min === "number") spec.min = s.min;
+		if (typeof s.max === "number") spec.max = s.max;
+		fields[fname] = spec;
+	}
+	return { ok: true, def: { name: o.name, fields } };
+}
+
 /**
  * Pull a JSON candidate out of an LLM reply before parsing. Models very often wrap
  * structured output in a ```json fence or surround it with prose ("Here you go: {…}"),

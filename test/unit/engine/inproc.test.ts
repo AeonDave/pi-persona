@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
+import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
-import { type CreateInProcSession, type InProcSession, makeInProcessEngine } from "../../../src/engine/inproc.ts";
+import { type CreateInProcSession, type CreateSessionOptions, type InProcSession, makeInProcessEngine } from "../../../src/engine/inproc.ts";
 
 // A stub registry: one model, resolvable by provider/id or bare id.
 const stubModel = { provider: "stub", id: "m" };
@@ -21,34 +22,43 @@ interface Spy {
 	aborted?: boolean;
 	disableDuringCreate?: string | undefined;
 	steered?: unknown[];
+	opts?: CreateSessionOptions;
 }
 
-/** A fake in-process session that replays scripted events when prompted. */
+/** Build a fake in-process session that replays scripted events when prompted. */
+function fakeSession(events: unknown[], spy?: Spy): InProcSession {
+	let listener: ((e: unknown) => void) | undefined;
+	return {
+		subscribe: (l) => {
+			listener = l;
+			return () => {
+				listener = undefined;
+			};
+		},
+		prompt: async () => {
+			for (const e of events) listener?.(e);
+		},
+		agent: {
+			abort: () => {
+				if (spy) spy.aborted = true;
+			},
+			waitForIdle: async () => {},
+			steer: (m) => {
+				if (spy) (spy.steered ??= []).push(m);
+			},
+		},
+		dispose: () => {},
+	};
+}
+
+/** A session factory replaying scripted events; records the create-time spy state. */
 function fakeSessions(events: unknown[], spy?: Spy): CreateInProcSession {
-	return async () => {
-		if (spy) spy.disableDuringCreate = process.env.PI_PERSONA_DISABLE;
-		let listener: ((e: unknown) => void) | undefined;
-		const session: InProcSession = {
-			subscribe: (l) => {
-				listener = l;
-				return () => {
-					listener = undefined;
-				};
-			},
-			prompt: async () => {
-				for (const e of events) listener?.(e);
-			},
-			agent: {
-				abort: () => {
-					if (spy) spy.aborted = true;
-				},
-				waitForIdle: async () => {},
-				steer: (m) => {
-					if (spy) (spy.steered ??= []).push(m);
-				},
-			},
-			dispose: () => {},
-		};
+	return async (opts) => {
+		if (spy) {
+			spy.disableDuringCreate = process.env.PI_PERSONA_DISABLE;
+			spy.opts = opts;
+		}
+		const session = fakeSession(events, spy);
 		return session;
 	};
 }
@@ -81,6 +91,45 @@ test("inproc engine restores PI_PERSONA_DISABLE after the sub-session is built",
 	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")]) });
 	await engine.run({ agent: "a", task: "t" });
 	assert.equal(process.env.PI_PERSONA_DISABLE, before, "env restored to its prior value");
+});
+
+test("concurrent sub-session builds keep the fork-bomb guard set and never leak PI_PERSONA_DISABLE", async () => {
+	const prior = process.env.PI_PERSONA_DISABLE;
+	delete process.env.PI_PERSONA_DISABLE; // start from unset, like a fresh host
+	try {
+		const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")]) });
+		// Two builds racing (as a parallel fanout/judge does): the guard must stay "1" until BOTH
+		// finish, then restore to unset — a per-call save/restore would leak "1" or clear it mid-build.
+		await Promise.all([engine.run({ agent: "a", task: "t" }), engine.run({ agent: "a", task: "t" })]);
+		assert.equal(process.env.PI_PERSONA_DISABLE, undefined, "restored to unset; not leaked as '1'");
+	} finally {
+		if (prior === undefined) delete process.env.PI_PERSONA_DISABLE;
+		else process.env.PI_PERSONA_DISABLE = prior;
+	}
+});
+
+test("concurrent engines produce globally-unique child bus handles (no collision)", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const seen: string[] = [];
+	const mk = () =>
+		makeInProcessEngine({
+			resolveAgent,
+			contracts,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			bus,
+			coaching: true,
+			createSession: async (opts) => {
+				const contact = (opts.customTools ?? []).find((t) => t.name === "contact_supervisor");
+				if (contact) await contact.execute("c", { kind: "progress", message: "hi" }, undefined, undefined, undefined as never);
+				return fakeSession([msgEnd("x")]);
+			},
+		});
+	await Promise.all([mk().run({ agent: "a", task: "t" }), mk().run({ agent: "a", task: "t" })]);
+	for (const m of bus.take("supervisor")) seen.push(m.from);
+	assert.equal(seen.length, 2, "both children reached the supervisor");
+	assert.equal(new Set(seen).size, 2, `handles must be unique across engines, got ${seen.join(", ")}`);
 });
 
 test("inproc engine validates the output contract in-process (fenced JSON parses)", async () => {
@@ -136,6 +185,40 @@ test("inproc engine exposes a steer handle that injects a user message into the 
 	assert.equal(gotHandle, true, "onSteerable fired with a steer handle");
 	assert.equal(spy.steered?.length, 1, "the steer reached session.agent.steer");
 	assert.match(JSON.stringify(spy.steered?.[0]), /redirect: focus on errors/);
+});
+
+test("inproc engine injects contact_supervisor when a bus + coaching are provided", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		supervisorHandle: "supervisor",
+		coaching: true,
+		createSession: fakeSessions([msgEnd("done")], spy),
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	const contact = (spy.opts?.customTools ?? []).find((t) => t.name === "contact_supervisor");
+	assert.ok(contact, "contact_supervisor was injected as a custom tool");
+	// The child uses it → the message lands in the supervisor's inbox tagged with a unique handle.
+	await contact!.execute("c1", { kind: "progress", message: "halfway" }, undefined, undefined, undefined as never);
+	const inbox = bus.take("supervisor");
+	assert.equal(inbox[0]?.text, "halfway");
+	assert.match(inbox[0]?.from ?? "", /^a#/, "from = a unique per-run child handle");
+	assert.equal(bus.participants().includes(inbox[0]!.from), false, "the child handle is unregistered after the run");
+});
+
+test("inproc engine does NOT inject contact_supervisor without coaching", async () => {
+	const bus = new InProcessBus();
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", bus, createSession: fakeSessions([msgEnd("x")], spy) });
+	await engine.run({ agent: "a", task: "t" });
+	assert.equal((spy.opts?.customTools ?? []).some((t) => t.name === "contact_supervisor"), false);
 });
 
 test("inproc engine streams the rolling partial via per-call onProgress", async () => {

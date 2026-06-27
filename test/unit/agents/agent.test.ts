@@ -29,6 +29,12 @@ test("parseAgent accepts tools written as an inline list", () => {
 	assert.deepEqual(a?.tools, ["read", "web_search"]);
 });
 
+test("parseAgent reads isolation: worktree (else undefined)", () => {
+	assert.equal(parseAgent("---\nname: s\nisolation: worktree\n---\nbody", "/s")?.isolation, "worktree");
+	assert.equal(parseAgent("---\nname: s\n---\nbody", "/s")?.isolation, undefined);
+	assert.equal(parseAgent("---\nname: s\nisolation: none\n---\nbody", "/s")?.isolation, undefined, "none ⇒ unset");
+});
+
 test("parseAgent returns null when name is missing", () => {
 	assert.equal(parseAgent("---\ndescription: no name\n---\nbody", "/s"), null);
 });

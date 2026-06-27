@@ -8,9 +8,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type AgentConfig, parseAgent } from "./agents/agent.ts";
+import { type ContractDef, parseContract } from "./core/contract.ts";
 import { type DiscoveredFile, mergeByPrecedence } from "./core/discovery.ts";
 import { parseTeams } from "./orchestration/roster.ts";
-import { type Persona, parsePersona } from "./persona/persona.ts";
+import { type CouncilSpec, type Persona, parsePersona } from "./persona/persona.ts";
 
 export interface ScopedDir {
 	path: string;
@@ -85,6 +86,60 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 	}
 
 	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed] };
+}
+
+/** Discover `*.contract.json` files across dirs into a name→ContractDef map (later dirs win,
+ *  so project overrides user overrides builtin). Malformed files are skipped (never crash). */
+export function loadContracts(dirs: ScopedDir[]): Record<string, ContractDef> {
+	const merged: Record<string, ContractDef> = {};
+	for (const d of dirs) {
+		let entries: string[];
+		try {
+			entries = fs.readdirSync(d.path);
+		} catch {
+			continue;
+		}
+		for (const f of entries.filter((e) => e.toLowerCase().endsWith(".contract.json"))) {
+			const text = readSafe(path.join(d.path, f));
+			if (text === undefined) continue;
+			const parsed = parseContract(text);
+			if (parsed.ok) merged[parsed.def.name] = parsed.def;
+		}
+	}
+	return merged;
+}
+
+/** Discover `*.preset.json` files (council presets) across dirs into a name→partial-spec map
+ *  (later dirs win). A preset file is `{ strategy?, roster?, params? }`; bad files are skipped. */
+export function loadPresets(dirs: ScopedDir[]): Record<string, Partial<CouncilSpec>> {
+	const merged: Record<string, Partial<CouncilSpec>> = {};
+	for (const d of dirs) {
+		let entries: string[];
+		try {
+			entries = fs.readdirSync(d.path);
+		} catch {
+			continue;
+		}
+		for (const f of entries.filter((e) => e.toLowerCase().endsWith(".preset.json"))) {
+			const text = readSafe(path.join(d.path, f));
+			if (text === undefined) continue;
+			let raw: unknown;
+			try {
+				raw = JSON.parse(text);
+			} catch {
+				continue;
+			}
+			if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+			const o = raw as Record<string, unknown>;
+			const spec: Partial<CouncilSpec> = {};
+			if (typeof o.strategy === "string" && o.strategy.trim()) spec.strategy = o.strategy.trim();
+			if (typeof o.roster === "string" && o.roster.trim()) spec.roster = o.roster.trim();
+			if (o.params && typeof o.params === "object" && !Array.isArray(o.params)) spec.params = o.params as Record<string, unknown>;
+			const name = f.slice(0, -".preset.json".length);
+			merged[name] = spec;
+		}
+	}
+	return merged;
 }
 
 /** Merge `teams.yaml` files (later files win). */

@@ -7,7 +7,7 @@
  * `orchestration:` block is the control surface; absent ⇒ L0 (opportunistic).
  */
 
-import { asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { asBoolean, asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
 import type { Permission } from "../core/permissions.ts";
 import { asSystemPromptMode, type SystemPromptMode } from "../core/types.ts";
 
@@ -37,6 +37,15 @@ export interface CouncilSpec {
 	params?: Record<string, unknown>;
 }
 
+/** A council block as authored — `strategy` may be supplied by a `preset` (expanded at load). */
+export interface CouncilDraft {
+	strategy?: string;
+	roster?: string;
+	params?: Record<string, unknown>;
+	/** A named preset (presets/<name>.preset.json) providing defaults; authored fields override. */
+	preset?: string;
+}
+
 export interface Persona {
 	name: string;
 	label: string;
@@ -50,8 +59,11 @@ export interface Persona {
 	tools?: Permission;
 	/** Absent ⇒ L0 opportunistic delegation. */
 	orchestration?: OrchestrationGrammar;
-	/** Tool-driven council the `council` tool runs (no mandatory firing). */
-	council?: CouncilSpec;
+	/** Tool-driven council the `council` tool runs (no mandatory firing). After load, any
+	 *  `preset` is expanded so `strategy`/`roster`/`params` are concrete. */
+	council?: CouncilDraft;
+	/** Opt into the comm plane: give async children a `contact_supervisor` tool (§4.9). */
+	coaching?: boolean;
 	/** The Markdown body — the supervisor system prompt. */
 	body: string;
 	/** Where it was loaded from (for diagnostics / `/doctor`). */
@@ -107,22 +119,39 @@ export function parsePersona(content: string, source: string): Persona | null {
 	if (orchestration) persona.orchestration = orchestration;
 	const council = parseCouncil(fm.council);
 	if (council) persona.council = council;
+	if (asBoolean(fm.coaching) === true) persona.coaching = true;
 
 	return persona;
 }
 
-/** Parse a persona's `council:` block (strategy + roster + params). */
-function parseCouncil(value: unknown): CouncilSpec | undefined {
+/** Parse a persona's `council:` block (strategy + roster + params, or just a `preset`). */
+function parseCouncil(value: unknown): CouncilDraft | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const o = value as Record<string, unknown>;
 	const strategy = typeof o.strategy === "string" && o.strategy.trim() ? o.strategy.trim() : "";
-	if (!strategy) return undefined;
-	const spec: CouncilSpec = { strategy };
+	const preset = typeof o.preset === "string" && o.preset.trim() ? o.preset.trim() : "";
+	if (!strategy && !preset) return undefined; // a council needs at least a strategy or a preset
+	const spec: CouncilDraft = {};
+	if (strategy) spec.strategy = strategy;
+	if (preset) spec.preset = preset;
 	if (typeof o.roster === "string" && o.roster.trim()) spec.roster = o.roster.trim();
 	if (o.params && typeof o.params === "object" && !Array.isArray(o.params)) {
 		spec.params = o.params as Record<string, unknown>;
 	}
 	return spec;
+}
+
+/** Expand a council `preset` (presets/<name>.preset.json) into concrete fields: the preset
+ *  supplies defaults, authored fields win, and `params` shallow-merge (authored over preset).
+ *  The `preset` key is consumed. An unknown preset just drops the key (authored fields kept). */
+export function expandCouncilPreset(draft: CouncilDraft, presets: Record<string, Partial<CouncilSpec>>): CouncilDraft {
+	if (!draft.preset) return draft;
+	const base = presets[draft.preset];
+	const { preset: _consumed, ...authored } = draft;
+	if (!base) return authored;
+	const merged: CouncilDraft = { ...base, ...authored };
+	if (base.params || authored.params) merged.params = { ...base.params, ...authored.params };
+	return merged;
 }
 
 /** Compose the turn's system prompt from the base prompt and a persona. */
