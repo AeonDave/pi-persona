@@ -10,7 +10,7 @@
 import { type ChildUsage, emptyUsage } from "../engine/stream.ts";
 import { mapWithConcurrency } from "../orchestration/parallel.ts";
 import { aggregateResults } from "../orchestration/reducers.ts";
-import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
+import type { AgentRunSpec, SteerFn, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 
 export interface DelegateTask {
@@ -110,6 +110,7 @@ export async function runDelegate(
 	limits: DelegateLimits = { maxConcurrency: 4, maxChildren: 8 },
 	onProgress?: (views: DelegateView[]) => void,
 	onLegStart?: (index: number, abort: () => void) => void,
+	onLegSteerable?: (index: number, steer: SteerFn) => void,
 ): Promise<DelegateOutcome> {
 	if (params.tasks && params.tasks.length > 0) {
 		// Enforce the hard ceilings: cap the fan-out and clamp the concurrency the
@@ -141,6 +142,7 @@ export async function runDelegate(
 					onProgress?.(views.map((v) => ({ ...v })));
 				},
 				ac.signal,
+				(steer) => onLegSteerable?.(i, steer),
 			);
 			views[i] = viewOf(t.agent, labels[i] as string, r);
 			onProgress?.(views.map((v) => ({ ...v })));
@@ -181,6 +183,7 @@ export async function runDelegate(
 				onProgress?.([{ ...view }]);
 			},
 			ac.signal,
+				(steer) => onLegSteerable?.(0, steer),
 		);
 		const text = r.ok ? r.output || "(no output)" : `Agent "${params.agent}" failed: ${r.error ?? "(no detail)"}`;
 		return { text, results: [r], views: [viewOf(params.agent, label, r)], ok: r.ok };

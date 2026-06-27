@@ -13,20 +13,28 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
   "pippo · sonnet-4-6"). The supervisor delegates one, or fans out many in parallel, each with its
   own model, skills, and tool allowlist. A generic `operator` becomes a specialist from the skills
   it loads.
-- **Strategies** — orchestration defined in small files over a Strategy SDK: parallel fan-out, a
-  generator↔critic loop, an ensemble **vote** (`magi`), and a **multi-round council**
-  (`council-rounds`, best-of-X).
+- **Strategies** — orchestration defined in small files over a Strategy SDK: parallel **fan-out**,
+  a sequential **pipeline** (chain / debate), a **map** (per-item fan-out over a runtime list), a
+  generator↔critic **loop**, an ensemble **vote** (`magi`) / **multi-round council** (`council-rounds`),
+  and an impartial **judge**.
+- **Flows** — a declarative **DAG over strategies** in a `*.flow.json` file: each phase runs a
+  strategy over a roster, wired by `needs`; independent phases fan out in parallel and each
+  phase's output feeds its dependents. Pinned by hash and **journaled** so an interrupted flow
+  **resumes** where it left off. Run with `/flow <name> <task>`.
 - **Live view** — one **agent tree** sticks above the input and shows every sub-agent (strategy
   cores, delegate legs, background runs) as it runs. **`f9`** (or `/agents`) opens a bordered,
-  navigable overlay — ↑↓ to move, ⏎ to drill into an agent and watch its output stream live, and
-  **`x` to stop** one.
+  navigable overlay — ↑↓ to move, ⏎ to drill into an agent and watch its output (reasoning + answer)
+  stream live, **`x` to stop** one, and **`s` to steer** a running in-process sub-agent (inject a
+  redirect mid-run).
 
 ## How it works
 
-- **Child-process engine.** Every sub-agent is a `pi --mode json -p` child — isolated, cross-OS,
-  and prevented from re-spawning supervisors (no fork bombs). The engine enforces hard limits
-  (per-child timeout, token budget, concurrency, max children) and cooperative abort, and pins
-  each run's output `contract@hash` so a hot reload can't change a run mid-flight.
+- **Two engines, one seam.** Sub-agents run **in-process** by default (a `createAgentSession`
+  per agent — fast, and **steerable**: you can inject a message into a running sub-agent). Set
+  `PI_PERSONA_ENGINE=child` to spawn each as an isolated `pi --mode json -p` process instead.
+  Either way pi-persona never re-spawns supervisors (no fork bombs), the same hard limits apply
+  (timeout, token budget, concurrency, max children) with cooperative abort, and each run's
+  output `contract@hash` is pinned so a hot reload can't change a run mid-flight.
 - **Everything is data.** Personas and agents are Markdown + YAML frontmatter; teams are a
   `teams.yaml`; strategies are small TypeScript files registered by name. A persona's
   capabilities (which tools, which delegate targets) resolve once and are enforced on every call.
@@ -46,6 +54,55 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 | **Team** | a named roster of agents | `teams.yaml` |
 | **Strategy** | how a roster is orchestrated (vote, loop, rounds…) | `src/orchestration/strategies/*.ts` |
 | **Contract** | the structured shape a sub-agent returns (so votes tally) | `contracts/*.yaml` |
+
+## Building blocks — the core API
+
+Everything above is composed from a small, fixed set of primitives. A **strategy** is just a
+TypeScript file composing the **Strategy SDK**; a **persona** picks whether and how those run.
+`magi` is nothing more than a `.md` persona + a file that calls `parallel` + `reduce.vote` — and
+`judge`, `self-repair`, `map`, … would be exactly the same: new *files* on this API, **no new
+core needed**.
+
+**Strategy SDK** — what a strategy file composes (`src/orchestration/sdk.ts`):
+
+| Primitive | Does |
+|---|---|
+| `agent(spec)` | run **one** sub-agent → structured `AgentResult`. `spec` may carry model / tools / skills / `outputContract` |
+| `parallel(thunks, {concurrency})` | run **many at once**, bounded by the run limits. Also the basis of "map": `parallel(items.map(…))` |
+| `reduce.aggregate(results)` | merge N results into one (used by fan-out) |
+| `reduce.vote(candidates, opts)` | tally the candidates' **own** votes → `winner / tie / no_consensus / invalid_outputs`, dissent preserved |
+| `reduce.judge(candidates, order?)` | anonymise + label N candidates for an **impartial judge** (§4.3): run `agent(judge, {task: ballot})`, then map the verdict back with `pick(label)` |
+| `roster.team(name)` | the agents of a named team |
+| `signal` · `limits` · `log` | cooperative abort · the hard ceilings (children/concurrency/budget/timeout) · progress |
+| *series & loops* | plain `await` / `for` — strategies are TS, so they sequence and iterate natively (that is all `pipeline` and `critic-loop` are) |
+
+**Supervisor surface** — what a persona / the LLM drives:
+
+| Surface | Does |
+|---|---|
+| `delegate` tool | spawn sub-agent(s): **single or parallel** × **sync** (blocks the turn) or **async** (background; result returns as a follow-up) |
+| `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
+| `flow` tool · `/flow` | run a **DAG** of strategies (`*.flow.json`), journaled so an interrupted flow resumes |
+| persona `mode:` | `solo` (opportunistic — the LLM delegates by judgement) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
+
+**Built-in strategies** (files on the SDK above):
+
+| Strategy | Shape |
+|---|---|
+| `fanout` | parallel — every roster agent on the same task, aggregated |
+| `pipeline` | series / chain — each agent builds on the previous one's output |
+| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated |
+| `critic-loop` | generator → critic → revise, until the critic stops rejecting |
+| `magi` | parallel panel → **self-vote** → ruling + tally + dissent |
+| `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) |
+| `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) |
+
+**Where a new shape lives** (core vs file vs config — nothing hidden):
+- `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
+- `self-repair` → **persona config**: it's `critic-loop` whose critic is a **`verifier` agent** that *runs* the build/tests (`personas/self-repair.md` + `agents/verifier.md`, team `repair: [builder, verifier]`). Ground truth gates acceptance, not an opinion.
+- `debate` → **persona config**: the `pipeline` strategy + a deliberation roster (the cores in a chain instead of a parallel vote).
+
+Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper) — everything else is a file or persona on top of it.
 
 A persona declares how it works:
 
@@ -87,8 +144,9 @@ deliberation shape? Drop a strategy file in `src/orchestration/strategies/` — 
 
 ## Keys & commands
 
-- **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · esc)
-- `/persona [name\|off\|list]` · `/models [query]` · `/orchestrate <task>` · `/peek [id]` · `/doctor`
+- **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
+- `/persona [name\|off\|list]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>`
 
 ## Develop
 

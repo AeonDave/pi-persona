@@ -9,23 +9,10 @@
  * no override and no restore; tools are restored from the FULL registry.
  */
 
-import {
-	type CapabilityPermissions,
-	type EffectiveCapabilities,
-	resolveCapabilities,
-	type RunLimits,
-} from "../core/capabilities.ts";
+import { type CapabilityPermissions, type EffectiveCapabilities, resolveCapabilities } from "../core/capabilities.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { type GateResult, gateToolCall } from "./gating.ts";
 import { composeSystemPrompt, type Persona } from "./persona.ts";
-
-const DEFAULT_LIMITS: RunLimits = {
-	maxChildren: 64,
-	maxDepth: 2,
-	maxConcurrency: 4,
-	timeoutMs: 180_000,
-	budgetTokens: 1_000_000,
-};
 
 /** Opaque model handle — the controller does not care about its internals. */
 export interface ModelHandle {
@@ -56,13 +43,11 @@ export class PersonaController {
 
 	private readonly host: PersonaHost;
 	private readonly delegateDefaultAllow: boolean;
-	private readonly limits: RunLimits;
 	private caps: EffectiveCapabilities | undefined;
 
-	constructor(host: PersonaHost, delegateDefaultAllow = true, limits: RunLimits = DEFAULT_LIMITS) {
+	constructor(host: PersonaHost, delegateDefaultAllow = true) {
 		this.host = host;
 		this.delegateDefaultAllow = delegateDefaultAllow;
-		this.limits = limits;
 	}
 
 	get activePersona(): Persona | undefined {
@@ -106,12 +91,10 @@ export class PersonaController {
 		const permissions: CapabilityPermissions = {};
 		if (persona.tools) permissions.tools = persona.tools;
 		if (persona.delegate) permissions.delegate = persona.delegate;
-		if (persona.skills) permissions.skills = persona.skills;
 		return resolveCapabilities({
 			allToolNames: this.host.allToolNames(),
 			knownAgents: this.host.knownAgents(),
 			permissions,
-			limits: this.limits,
 			delegateDefaultAllow: this.delegateDefaultAllow,
 		});
 	}

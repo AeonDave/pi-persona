@@ -1,0 +1,9 @@
+{
+  "name": "deep-review",
+  "description": "Gather findings in parallel, critique them across rounds, then decide with the MAGI council — a DAG over strategies.",
+  "phases": [
+    { "id": "gather", "strategy": "fanout", "roster": "review" },
+    { "id": "critique", "strategy": "council-rounds", "roster": "review", "needs": ["gather"], "params": { "rounds": 2 } },
+    { "id": "decide", "strategy": "magi", "roster": "magi", "needs": ["critique"] }
+  ]
+}

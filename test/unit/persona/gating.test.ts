@@ -1,11 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type CapabilityPermissions, resolveCapabilities, type RunLimits } from "../../../src/core/capabilities.ts";
+import { type CapabilityPermissions, resolveCapabilities } from "../../../src/core/capabilities.ts";
 import { extractDelegateTargets, gateToolCall } from "../../../src/persona/gating.ts";
 import { type Persona, parsePersona } from "../../../src/persona/persona.ts";
 
-const LIMITS: RunLimits = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const ALL_TOOLS = ["read", "write", "grep", "delegate", "anything"];
 const KNOWN = ["scout", "ghost", "x", "y"];
 
@@ -19,8 +18,7 @@ const capsFor = (persona: Persona, delegateDefaultAllow = true) => {
 	const permissions: CapabilityPermissions = {};
 	if (persona.tools) permissions.tools = persona.tools;
 	if (persona.delegate) permissions.delegate = persona.delegate;
-	if (persona.skills) permissions.skills = persona.skills;
-	return resolveCapabilities({ allToolNames: ALL_TOOLS, knownAgents: KNOWN, permissions, limits: LIMITS, delegateDefaultAllow });
+	return resolveCapabilities({ allToolNames: ALL_TOOLS, knownAgents: KNOWN, permissions, delegateDefaultAllow });
 };
 
 test("extractDelegateTargets reads single agent and tasks[].agent from tool input", () => {
