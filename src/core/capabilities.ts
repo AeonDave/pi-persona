@@ -1,9 +1,10 @@
 /**
  * EffectiveCapabilities — the single, runtime-enforced capability gate.
  *
- * Pure module. Unifies the persona/agent/settings glob layers into one resolved
- * object that every tool call, delegate, and bus/transport action must pass
- * (guardrails I4: capabilities enforced at call time, never prompt-only).
+ * Pure module. Unifies the persona/agent glob layers into one resolved object that
+ * every tool call and delegate must pass (guardrails I4: capabilities enforced at call
+ * time, never prompt-only). Run *limits* are a separate concern, enforced by the
+ * engine/SDK via {@link RunLimits} — not part of this call-time tool/delegate gate.
  */
 
 import { isAllowed, type Permission } from "./permissions.ts";
@@ -19,31 +20,21 @@ export interface RunLimits {
 export interface CapabilityPermissions {
 	tools?: Permission;
 	delegate?: Permission;
-	skills?: Permission;
 }
 
 export interface CapabilityInputs {
 	allToolNames: string[];
 	knownAgents: string[];
-	knownSkills?: string[];
 	permissions: CapabilityPermissions;
-	limits: RunLimits;
 	/** The tool name used to delegate (default `delegate`). */
 	delegateTool?: string;
 	/** Meaning of an absent `delegate` block (default `true` = sees everyone). */
 	delegateDefaultAllow?: boolean;
-	canUseBus?: boolean;
-	canUseProcessTransport?: boolean;
 }
 
 export interface EffectiveCapabilities {
 	tools: ReadonlySet<string>;
 	delegateTargets: ReadonlySet<string>;
-	skills: ReadonlySet<string>;
-	canSpawn: boolean;
-	canUseBus: boolean;
-	canUseProcessTransport: boolean;
-	limits: RunLimits;
 }
 
 const DEFAULT_DELEGATE_TOOL = "delegate";
@@ -65,24 +56,19 @@ export function resolveCapabilities(input: CapabilityInputs): EffectiveCapabilit
 		tools.add(delegateTool);
 	}
 
+	// Fan-out authorization is structural: a persona can spawn iff it holds the delegate
+	// tool. Its delegate targets are only meaningful when it can.
 	const canSpawn = tools.has(delegateTool);
 	const delegateTargets = new Set(
-		canSpawn
-			? input.knownAgents.filter((a) => isAllowed(a, input.permissions.delegate, delegateDefaultAllow))
-			: [],
+		canSpawn ? input.knownAgents.filter((a) => isAllowed(a, input.permissions.delegate, delegateDefaultAllow)) : [],
 	);
 
-	const skills = new Set((input.knownSkills ?? []).filter((s) => isAllowed(s, input.permissions.skills, true)));
+	return { tools, delegateTargets };
+}
 
-	return {
-		tools,
-		delegateTargets,
-		skills,
-		canSpawn,
-		canUseBus: input.canUseBus ?? false,
-		canUseProcessTransport: input.canUseProcessTransport ?? true,
-		limits: input.limits,
-	};
+/** Whether the persona may fan out — derived from holding the delegate tool. */
+export function canFanOut(caps: EffectiveCapabilities, delegateTool = DEFAULT_DELEGATE_TOOL): boolean {
+	return caps.tools.has(delegateTool);
 }
 
 export function canCallTool(caps: EffectiveCapabilities, toolName: string): boolean {

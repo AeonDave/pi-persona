@@ -33,7 +33,6 @@ test("parsePersona reads identity, permissions, orchestration grammar, and body"
 	assert.equal(p.systemPromptMode, "append");
 	assert.deepEqual(p.tools, { allow: ["*"] });
 	assert.deepEqual(p.delegate, { allow: ["melchior", "balthasar", "casper"] });
-	assert.deepEqual(p.skills, { allow: ["code-review"] });
 	assert.equal(p.orchestration?.mode, "strategy");
 	assert.equal(p.orchestration?.strategy, "magi");
 	assert.equal(p.orchestration?.roster, "magi");

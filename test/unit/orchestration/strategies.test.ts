@@ -5,6 +5,9 @@ import { type AgentRunSpec, makeSDK, type StrategyEngine } from "../../../src/or
 import { councilRounds } from "../../../src/orchestration/strategies/council-rounds.ts";
 import { criticLoop } from "../../../src/orchestration/strategies/critic-loop.ts";
 import { fanout } from "../../../src/orchestration/strategies/fanout.ts";
+import { judge } from "../../../src/orchestration/strategies/judge.ts";
+import { map } from "../../../src/orchestration/strategies/map.ts";
+import { pipeline } from "../../../src/orchestration/strategies/pipeline.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
 const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
@@ -188,4 +191,102 @@ test("critic-loop stops at maxRounds even if the critic keeps rejecting", async 
 	const sdk = makeSDK({ engine, roster: { team: () => ["writer"] }, limits: LIMITS });
 	await criticLoop.run({ task: "T", roster: "team", params: { critic: "skeptic", generator: "writer", rounds: 2 } }, sdk);
 	assert.equal(genCalls, 3, "initial generation + 2 revisions");
+});
+
+test("pipeline runs roster agents in sequence, each building on the previous output", async () => {
+	const seen: Array<{ agent: string; sawUpstream: boolean }> = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			seen.push({ agent: spec.agent, sawUpstream: spec.task.includes("previous step") });
+			return { agent: spec.agent, output: `out:${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "chain" ? ["a", "b", "c"] : []) }, limits: LIMITS });
+	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
+	assert.deepEqual(seen.map((s) => s.agent), ["a", "b", "c"], "runs in roster order");
+	assert.equal(seen[0]?.sawUpstream, false, "first step sees only the task");
+	assert.equal(seen[1]?.sawUpstream, true, "second step sees the first's output");
+	assert.equal(r.output, "out:c", "the pipeline's answer is the last step's output");
+	assert.equal(r.ok, true);
+});
+
+test("pipeline stops the chain when a step fails", async () => {
+	const seen: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			seen.push(spec.agent);
+			return spec.agent === "b"
+				? { agent: "b", output: "", usage: usage(), ok: false, error: "boom" }
+				: { agent: spec.agent, output: `out:${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS });
+	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
+	assert.deepEqual(seen, ["a", "b"], "stopped after b failed; c never ran");
+	assert.equal(r.ok, false);
+});
+
+test("pipeline throws when no roster is provided", async () => {
+	const sdk = makeSDK({ engine: { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) }, roster: { team: () => [] }, limits: LIMITS });
+	await assert.rejects(() => pipeline.run({ task: "T", params: {} }, sdk));
+});
+
+test("judge runs the panel in parallel, then an impartial arbiter picks one (anonymised)", async () => {
+	const ran: string[] = [];
+	const answers: Record<string, string> = { p1: "use-json", p2: "use-yaml", p3: "use-toml" };
+	let arbiterSawIdentities = false;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			ran.push(spec.agent);
+			if (spec.agent === "arbiter") {
+				if (/\bp1\b|\bp2\b|\bp3\b/.test(spec.task)) arbiterSawIdentities = true; // agent identities must not leak
+				assert.match(spec.task, /\[A\]/, "the ballot is label-anonymised");
+				return { agent: "arbiter", output: "A wins", structured: { vote: "A", output: "A is best" }, usage: usage(), ok: true };
+			}
+			return { agent: spec.agent, output: answers[spec.agent] ?? "?", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "panel" ? ["p1", "p2", "p3"] : []) }, limits: LIMITS });
+	const r = await judge.run({ task: "decide", roster: "panel", params: { judge: "arbiter" } }, sdk);
+	assert.ok(["p1", "p2", "p3"].every((a) => ran.includes(a)), "all panelists answered");
+	assert.ok(ran.includes("arbiter"), "the arbiter judged");
+	assert.equal(arbiterSawIdentities, false, "the arbiter never saw candidate agent identities");
+	assert.equal(r.ok, true);
+	assert.match(r.output, /use-(json|yaml|toml)/, "the winner is a panelist's answer (position A, shuffled)");
+});
+
+test("judge requires a panel roster and a params.judge arbiter", async () => {
+	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) };
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	await assert.rejects(() => judge.run({ task: "t", roster: "panel", params: {} }, sdk), /judge/);
+});
+
+test("map splits into a runtime list, works each item in parallel, and aggregates", async () => {
+	const worked: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") {
+				return { agent: "splitter", output: '["alpha","beta","gamma"]', usage: usage(), ok: true };
+			}
+			worked.push(spec.task.split("sub-item: ")[1] ?? "");
+			return { agent: spec.agent, output: `did:${spec.task.split("sub-item: ")[1]}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "m" ? ["splitter", "worker"] : []) }, limits: LIMITS });
+	const r = await map.run({ task: "process everything", roster: "m", params: {} }, sdk);
+	assert.deepEqual(worked.sort(), ["alpha", "beta", "gamma"], "one worker per item");
+	assert.equal(r.structured?.count, 3, "aggregated all three");
+	assert.equal(r.ok, true);
+});
+
+test("map caps the fan-out at params.maxItems and stops cleanly on an empty split", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: "not a list", usage: usage(), ok: true };
+			return { agent: spec.agent, output: "x", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: { maxItems: 2 } }, sdk);
+	assert.equal(r.ok, false, "no items → not ok");
 });

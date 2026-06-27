@@ -14,6 +14,13 @@ test("defaults apply when no env vars are set", () => {
 	assert.equal(c.defaultPersona, undefined);
 });
 
+test("PI_PERSONA_ENGINE selects the sub-agent backend; in-process is the default", () => {
+	assert.equal(resolveConfig({}).engine, "inproc", "in-process by default");
+	assert.equal(resolveConfig({ PI_PERSONA_ENGINE: "inproc" }).engine, "inproc");
+	assert.equal(resolveConfig({ PI_PERSONA_ENGINE: " CHILD " }).engine, "child", "opt out with child");
+	assert.equal(resolveConfig({ PI_PERSONA_ENGINE: "bogus" }).engine, "inproc", "unknown value falls back to the default");
+});
+
 test("PI_PERSONA_DISABLE (any non-empty value) disables the extension", () => {
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "1" }).disabled, true);
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "" }).disabled, false);

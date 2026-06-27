@@ -6,6 +6,7 @@
  */
 
 import type { RunLimits } from "../core/capabilities.ts";
+import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { mapWithConcurrency } from "./parallel.ts";
 import { aggregateResults } from "./reducers.ts";
 import type { AgentResult } from "./types.ts";
@@ -31,9 +32,18 @@ export interface AgentProgress {
 	activity?: string;
 }
 
+/** Inject a steering message into a running agent (in-process engine only). */
+export type SteerFn = (text: string) => void;
+
 /** The engine seam the SDK runs agents through (real child engine or a stub). */
 export interface StrategyEngine {
-	run(spec: AgentRunSpec, onProgress?: (progress: AgentProgress) => void, signal?: AbortSignal): Promise<AgentResult>;
+	run(
+		spec: AgentRunSpec,
+		onProgress?: (progress: AgentProgress) => void,
+		signal?: AbortSignal,
+		/** Called once the agent is live with a handle to steer it (in-process only). */
+		onSteerable?: (steer: SteerFn) => void,
+	): Promise<AgentResult>;
 }
 
 export interface Roster {
@@ -46,6 +56,9 @@ export interface StrategySDK {
 	reduce: {
 		aggregate(results: AgentResult[]): AgentResult;
 		vote(candidates: AgentResult[], opts: VoteOpts): ReducerResult;
+		/** Anonymise + label candidates for an impartial judge (run `agent(judge, …)` on
+		 *  the returned ballot, then map the verdict via `pick`). */
+		judge(candidates: AgentResult[], order?: number[]): JudgePrep;
 	};
 	roster: Roster;
 	signal: AbortSignal | undefined;
@@ -79,6 +92,8 @@ export interface SDKDeps {
 	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
 	/** Called as each agent starts with a handle to abort just that agent (for UI stop). */
 	onAgentStart?: (agent: string, abort: () => void) => void;
+	/** Called once an agent is live with a handle to steer it (in-process engine only). */
+	onAgentSteerable?: (agent: string, steer: SteerFn) => void;
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
@@ -105,6 +120,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					spec,
 					onProgress ? (p) => onProgress(spec.agent, p) : undefined,
 					ac.signal,
+					deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer) : undefined,
 				);
 				tokensSpent += result.usage.input + result.usage.output;
 				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result);
@@ -116,7 +132,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 		},
 		parallel: (thunks, opts) =>
 			mapWithConcurrency(thunks, opts?.concurrency ?? deps.limits.maxConcurrency, (thunk) => thunk()),
-		reduce: { aggregate: aggregateResults, vote: voteReduce },
+		reduce: { aggregate: aggregateResults, vote: voteReduce, judge: prepareJudge },
 		roster: deps.roster,
 		signal: deps.signal,
 		log: deps.log ?? (() => {}),

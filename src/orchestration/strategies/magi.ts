@@ -6,29 +6,8 @@
  */
 
 import { sumUsage } from "../reducers.ts";
+import { dissentLine, readableRuling as readable } from "../render.ts";
 import type { Strategy } from "../sdk.ts";
-import type { AgentResult } from "../types.ts";
-
-/** A member's human-readable position from its structured fields (result + output),
- *  NOT the raw JSON envelope — so the ruling/dissent read as prose, not as tool JSON. */
-function readable(r: AgentResult): string {
-	const s = r.structured;
-	if (s) {
-		const parts: string[] = [];
-		if (typeof s.result === "string" && s.result.trim()) parts.push(s.result.trim());
-		if (typeof s.output === "string" && s.output.trim()) parts.push(s.output.trim());
-		if (parts.length > 0) return parts.join("\n\n");
-	}
-	return r.output.trim();
-}
-
-/** A one-line dissent entry: who, how they voted, and their one-line position. */
-function dissentLine(r: AgentResult): string {
-	const s = r.structured;
-	const vote = s && typeof s.vote === "string" && s.vote.trim() ? s.vote.trim() : "?";
-	const summary = s && typeof s.result === "string" && s.result.trim() ? s.result.trim() : r.output.trim();
-	return `[${r.agent} · ${vote}] ${summary}`;
-}
 
 export const magi: Strategy = {
 	name: "magi",

@@ -11,6 +11,7 @@ import {
 	type AgentStatus,
 	makeSDK,
 	type SDKDeps,
+	type SteerFn,
 	type StrategyEngine,
 	type StrategyInput,
 } from "../orchestration/sdk.ts";
@@ -22,6 +23,7 @@ import type { OrchestrationGrammar } from "./persona.ts";
 export function resolveStrategyName(orch: OrchestrationGrammar): string | undefined {
 	if (orch.strategy) return orch.strategy;
 	if (orch.mode === "parallel") return "fanout";
+	if (orch.mode === "pipeline") return "pipeline";
 	return undefined;
 }
 
@@ -37,6 +39,8 @@ export interface RunStrategyDeps {
 	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
 	/** Called as each agent starts with a handle to abort just that agent (UI stop). */
 	onAgentStart?: (agent: string, abort: () => void) => void;
+	/** Called once an agent is live with a handle to steer it (in-process engine only). */
+	onAgentSteerable?: (agent: string, steer: SteerFn) => void;
 }
 
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */
@@ -56,6 +60,7 @@ export async function runPersonaStrategy(
 	if (deps.onAgentStatus) sdkDeps.onAgentStatus = deps.onAgentStatus;
 	if (deps.onAgentProgress) sdkDeps.onAgentProgress = deps.onAgentProgress;
 	if (deps.onAgentStart) sdkDeps.onAgentStart = deps.onAgentStart;
+	if (deps.onAgentSteerable) sdkDeps.onAgentSteerable = deps.onAgentSteerable;
 
 	const input: StrategyInput = { task, params: orch.params ?? {} };
 	if (orch.roster) input.roster = orch.roster;

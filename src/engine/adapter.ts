@@ -6,7 +6,7 @@
  */
 
 import type { AgentConfig } from "../agents/agent.ts";
-import { type ContractDef, extractJsonCandidate, pinContract, type PinnedContract, validateAgainst, type ValidationResult } from "../core/contract.ts";
+import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
@@ -92,21 +92,13 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (spec.outputContract && deps.contracts) {
 				const def = pinnedDef(spec.outputContract);
 				if (def) {
-					let parsed: unknown;
-					try {
-						// Strip ```json fences / surrounding prose first — models routinely wrap
-						// structured output, and a raw parse would fail every fenced member's vote.
-						parsed = JSON.parse(extractJsonCandidate(child.output));
-					} catch {
-						parsed = undefined;
-					}
-					const v: ValidationResult =
-						parsed === undefined ? { ok: false, errors: ["output was not valid JSON"] } : validateAgainst(def, parsed);
-					if (v.ok && v.value) {
-						result.structured = v.value;
-					} else {
+					// Shared parse+validate (unwraps ```json fences / prose first) — a member's
+					// fenced output must not void its structured result.
+					const v = parseAndValidate(child.output, def);
+					if (v.value) result.structured = v.value;
+					if (!v.ok) {
 						result.ok = false;
-						result.error = `contract ${spec.outputContract} failed: ${v.errors.join("; ")}`;
+						if (v.error) result.error = v.error;
 					}
 				}
 			}

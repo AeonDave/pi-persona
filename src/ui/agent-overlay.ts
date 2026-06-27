@@ -24,25 +24,46 @@ import { type AgentTree, type FlatRow, flattenTree, GLYPH } from "./agent-tree.t
 
 const VIEWPORT = 14; // detail output rows shown at once (the rest scrolls)
 
+/** Is this keystroke a single printable character (a steer-input keystroke)? */
+function isPrintable(key: string): boolean {
+	if (key.length !== 1) return false;
+	const c = key.charCodeAt(0);
+	return c >= 0x20 && c !== 0x7f;
+}
+
 export class AgentOverlay extends Container {
 	private tree: AgentTree;
 	private tui: TUI;
 	private theme: Theme;
 	private done: () => void;
 	private onStop: ((nodeId: string) => boolean) | undefined;
+	private onSteer: ((nodeId: string, text: string) => boolean) | undefined;
+	private canSteer: ((nodeId: string) => boolean) | undefined;
 	private unsubscribe: () => void;
 	private selectedLeaf = 0; // index into the leaf rows
 	private detailId: string | undefined;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
+	private steering = false; // typing a steer message into the drilled-in agent
+	private steerBuffer = "";
 	private lastWidth = 100;
 
-	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void, onStop?: (nodeId: string) => boolean) {
+	constructor(
+		tree: AgentTree,
+		tui: TUI,
+		theme: Theme,
+		done: () => void,
+		onStop?: (nodeId: string) => boolean,
+		onSteer?: (nodeId: string, text: string) => boolean,
+		canSteer?: (nodeId: string) => boolean,
+	) {
 		super();
 		this.tree = tree;
 		this.tui = tui;
 		this.theme = theme;
 		this.done = done;
 		this.onStop = onStop;
+		this.onSteer = onSteer;
+		this.canSteer = canSteer;
 		this.unsubscribe = tree.onChange(() => this.refresh());
 		this.rebuild();
 	}
@@ -140,14 +161,47 @@ export class AgentOverlay extends Container {
 		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
 
+		const steerable = live && (this.canSteer?.(node.id) ?? false);
+		if (this.steering && !steerable) this.steering = false; // agent finished mid-compose
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${live ? "   ·   x stop" : ""}`), 1, 0));
+		if (this.steering) {
+			this.addChild(new Text(`${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`, 1, 0));
+			this.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
+		} else {
+			const steerHint = steerable ? "   ·   s steer" : "";
+			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${live ? "   ·   x stop" : ""}${steerHint}`), 1, 0));
+		}
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (this.detailId) {
-			if (keyData === "x") this.tryStop(this.detailId);
+			// Steer mode: type a message into the running agent. Capture all printable keys
+			// (so j/k/x type normally); ⏎ sends, esc cancels.
+			if (this.steering) {
+				if (kb.matches(keyData, "tui.select.cancel")) {
+					this.steering = false;
+					this.steerBuffer = "";
+					this.refresh();
+				} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n" || keyData === "\r") {
+					const text = this.steerBuffer.trim();
+					this.steering = false;
+					this.steerBuffer = "";
+					if (text) this.onSteer?.(this.detailId, text);
+					this.refresh();
+				} else if (keyData === "\x7f" || keyData === "\b") {
+					this.steerBuffer = this.steerBuffer.slice(0, -1);
+					this.refresh();
+				} else if (isPrintable(keyData)) {
+					this.steerBuffer += keyData;
+					this.refresh();
+				}
+				return;
+			}
+			if (keyData === "s" && (this.canSteer?.(this.detailId) ?? false)) {
+				this.steering = true;
+				this.refresh();
+			} else if (keyData === "x") this.tryStop(this.detailId);
 			else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 				this.detailScroll += 1;
 				this.refresh();

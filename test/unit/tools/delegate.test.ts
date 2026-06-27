@@ -32,6 +32,21 @@ test("runDelegate parallel mode runs all tasks (bounded) and aggregates", async 
 	assert.equal(r.ok, true);
 });
 
+test("runDelegate threads a per-leg steer handle (onLegSteerable) from the engine", async () => {
+	const steered: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (s, _onProgress, _signal, onSteerable) => {
+			onSteerable?.((text) => steered.push(`${s.agent}:${text}`));
+			return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+		},
+	};
+	const handles: Array<(t: string) => void> = [];
+	await runDelegate({ agent: "scout", task: "t" }, engine, undefined, undefined, undefined, (_i, steer) => handles.push(steer));
+	assert.equal(handles.length, 1, "onLegSteerable fired for the leg");
+	handles[0]?.("redirect to errors");
+	assert.deepEqual(steered, ["scout:redirect to errors"], "the steer handle reaches the engine's steer fn");
+});
+
 test("runDelegate reports a single-agent failure with its error", async () => {
 	const engine = engineThat(() => ({ agent: "x", output: "", usage: usage(), ok: false, error: "boom" }));
 	const r = await runDelegate({ agent: "x", task: "t" }, engine);
