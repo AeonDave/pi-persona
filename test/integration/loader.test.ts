@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { loadDefinitions, loadTeams } from "../../src/loader.ts";
+import { loadContracts, loadDefinitions, loadTeams } from "../../src/loader.ts";
 
 function tmp(files: Record<string, string>): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-test-"));
@@ -46,6 +46,24 @@ test("loadTeams merges teams.yaml files (later wins)", () => {
 	const teams = loadTeams([path.join(dir, "teams.yaml")]);
 	assert.deepEqual(teams.review, ["a", "b"]);
 	assert.deepEqual(teams.magi, ["m", "b", "c"]);
+});
+
+test("loadContracts discovers *.contract.json across dirs (later wins, malformed skipped)", () => {
+	const builtin = tmp({
+		"v.contract.json": JSON.stringify({ name: "v", fields: { vote: { type: "string", required: true } } }),
+		"broken.contract.json": "{ not json",
+	});
+	const project = tmp({
+		"v.contract.json": JSON.stringify({ name: "v", fields: { vote: { type: "string" }, extra: { type: "number" } } }),
+	});
+	const contracts = loadContracts([
+		{ path: builtin, scope: "builtin" },
+		{ path: project, scope: "project" },
+	]);
+	assert.ok(contracts.v, "the valid contract loaded");
+	assert.equal(contracts.v?.fields.vote?.required, undefined, "project version (vote not required) won");
+	assert.ok(contracts.v?.fields.extra, "project added a field");
+	assert.equal(Object.keys(contracts).length, 1, "the malformed file was skipped");
 });
 
 test("loadDefinitions ignores unreadable dirs gracefully", () => {

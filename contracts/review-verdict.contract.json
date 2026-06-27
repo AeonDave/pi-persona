@@ -1,0 +1,10 @@
+{
+  "name": "review-verdict",
+  "fields": {
+    "result": { "type": "string", "required": true },
+    "vote": { "type": "string", "required": true },
+    "severity": { "type": "enum", "values": ["low", "medium", "high", "critical"] },
+    "confidence": { "type": "number", "min": 0, "max": 1 },
+    "evidence": { "type": "string" }
+  }
+}
