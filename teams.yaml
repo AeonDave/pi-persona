@@ -4,4 +4,5 @@
 # is offered its own model on first run (the supervisor keeps the session model).
 review: [security, performance, tests]
 antagonist: [builder, skeptic]
+repair: [builder, verifier]
 magi: [melchior, balthasar, casper]

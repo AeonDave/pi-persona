@@ -10,6 +10,7 @@
  */
 
 import { sumUsage } from "../reducers.ts";
+import { dissentLine, readableRuling } from "../render.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 import type { ReducerResult } from "../voting.ts";
@@ -22,11 +23,9 @@ function render(decision: ReducerResult, round: number, bestOf: number, usages: 
 		}`,
 	);
 	lines.push(`tally: ${Object.entries(decision.tally).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}`);
-	if (decision.winner) lines.push(`\n--- ruling ---\n${decision.winner.output}`);
+	if (decision.winner) lines.push(`\n--- ruling ---\n${readableRuling(decision.winner)}`);
 	if (decision.dissent && decision.dissent.length > 0) {
-		lines.push(
-			`\n--- dissent (minority report) ---\n${decision.dissent.map((d) => `[${d.agent}] ${d.output}`).join("\n")}`,
-		);
+		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 	}
 	return {
 		agent: "council",

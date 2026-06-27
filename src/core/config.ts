@@ -21,6 +21,9 @@ export interface PiPersonaConfig {
 	 *  Spawned children must carry an *explicit* level or they fall into the model's
 	 *  default mode ("adaptive"), which some models reject. */
 	childThinking?: string;
+	/** Engine backend for sub-agents: "inproc" (run in-process via `createAgentSession`,
+	 *  the default) or "child" (spawn `pi -p`, the baseline). */
+	engine?: "child" | "inproc";
 }
 
 type Env = Record<string, string | undefined>;
@@ -50,5 +53,9 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 	if (stateFile) config.stateFile = stateFile;
 	const childThinking = env.PI_PERSONA_CHILD_THINKING?.trim().toLowerCase();
 	if (childThinking && isThinkingLevel(childThinking)) config.childThinking = childThinking;
+	// In-process is the default backend; opt back to the spawn-based child engine with
+	// PI_PERSONA_ENGINE=child.
+	const engine = env.PI_PERSONA_ENGINE?.trim().toLowerCase();
+	config.engine = engine === "child" ? "child" : "inproc";
 	return config;
 }

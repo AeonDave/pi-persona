@@ -78,6 +78,28 @@ export function extractJsonCandidate(text: string): string {
 	return s;
 }
 
+export interface ParseResult {
+	ok: boolean;
+	/** The validated object (present only when `ok`). */
+	value?: Record<string, unknown>;
+	error?: string;
+}
+
+/** Unwrap (fences/prose), JSON-parse, and validate an agent's raw output against a
+ *  contract in one step — the shared path for every engine backend. */
+export function parseAndValidate(output: string, def: ContractDef): ParseResult {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(extractJsonCandidate(output));
+	} catch {
+		parsed = undefined;
+	}
+	const v: ValidationResult =
+		parsed === undefined ? { ok: false, errors: ["output was not valid JSON"] } : validateAgainst(def, parsed);
+	if (v.ok && v.value) return { ok: true, value: v.value };
+	return { ok: false, error: `contract ${def.name} failed: ${v.errors.join("; ")}` };
+}
+
 /** Deterministic, key-order-independent serialisation for hashing. */
 function stableStringify(v: unknown): string {
 	if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
@@ -87,10 +109,14 @@ function stableStringify(v: unknown): string {
 	return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 
+/** A stable sha256 over any JSON-ish value (key-order-independent) — the pinning hash. */
+export function stableHash(value: unknown): string {
+	return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
 /** Freeze a contract for a run: `name` + a stable sha256 over its definition. */
 export function pinContract(def: ContractDef): PinnedContract {
-	const hash = createHash("sha256").update(stableStringify(def)).digest("hex");
-	return { name: def.name, hash, def };
+	return { name: def.name, hash: stableHash(def), def };
 }
 
 /** Validate a structured value against a contract. Unknown extra fields are kept. */

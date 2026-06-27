@@ -11,8 +11,8 @@ const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0
 test("resolveStrategyName resolves an explicit strategy, or parallel → fanout", () => {
 	assert.equal(resolveStrategyName({ mode: "strategy", strategy: "magi" }), "magi");
 	assert.equal(resolveStrategyName({ mode: "parallel" }), "fanout");
+	assert.equal(resolveStrategyName({ mode: "pipeline" }), "pipeline");
 	assert.equal(resolveStrategyName({ mode: "solo" }), undefined);
-	assert.equal(resolveStrategyName({ mode: "pipeline" }), undefined);
 });
 
 test("runPersonaStrategy runs the persona's strategy with its roster + params", async () => {

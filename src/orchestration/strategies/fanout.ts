@@ -12,6 +12,6 @@ export const fanout: Strategy = {
 		if (team.length === 0) throw new Error("fanout: a non-empty roster is required");
 		sdk.log(`fanout: ${team.length} agents on "${input.task.slice(0, 40)}"`);
 		const results = await sdk.parallel(team.map((agent) => () => sdk.agent({ agent, task: input.task })));
-		return sdk.reduce.aggregate(results);
+		return { ...sdk.reduce.aggregate(results), agent: "fanout" };
 	},
 };

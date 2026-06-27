@@ -9,6 +9,7 @@
  * ChildProcessEngine (the only engine backend so far).
  */
 
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,13 +21,18 @@ import type { AgentConfig } from "./agents/agent.ts";
 import { resolveConfig } from "./core/config.ts";
 import { resolveModelRef } from "./core/models.ts";
 import { isThinkingLevel } from "./core/types.ts";
-import { DEFAULT_CONTRACT } from "./core/contract.ts";
-import type { RunLimits } from "./core/capabilities.ts";
+import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
+import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
+import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
 import { AsyncRunTracker, buildPeekDigest } from "./engine/async.ts";
-import type { ProgressSnapshot } from "./engine/stream.ts";
+import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { loadDefinitions, loadTeams, type ScopedDir } from "./loader.ts";
-import type { AgentRunSpec, StrategyEngine } from "./orchestration/sdk.ts";
+import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
+import { journalWriter, readJournal } from "./orchestration/flow-journal.ts";
+import { runFlow } from "./orchestration/flow-run.ts";
+import type { AgentProgress, AgentRunSpec, AgentStatus, SteerFn, StrategyEngine } from "./orchestration/sdk.ts";
+import type { AgentResult } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import type { OrchestrationGrammar, Persona } from "./persona/persona.ts";
@@ -86,6 +92,18 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return true;
 	}
 
+	// node id → steer that one agent (in-process engine only): inject a live user message.
+	const steerRegistry = new Map<string, SteerFn>();
+	const clearSteers = (prefix: string): void => {
+		for (const k of [...steerRegistry.keys()]) if (k === prefix || k.startsWith(`${prefix}/`)) steerRegistry.delete(k);
+	};
+	function steerAgent(nodeId: string, text: string): boolean {
+		const fn = steerRegistry.get(nodeId);
+		if (!fn || !text.trim()) return false;
+		fn(text);
+		return true;
+	}
+
 	// The live count of agents in flight (leaf cores/legs), published as a status so a
 	// custom UI (e.g. pi-1337's frame) can show "N agents" — covers strategy/council
 	// cores too, which pi-1337's own delegate-only counter misses.
@@ -120,7 +138,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 			return;
 		}
 		await ctx.ui.custom<void>(
-			(tui, theme, _kb, done) => new AgentOverlay(agentTree, tui, theme, () => done(undefined), stopAgent),
+			(tui, theme, _kb, done) =>
+				new AgentOverlay(agentTree, tui, theme, () => done(undefined), stopAgent, steerAgent, (id) => steerRegistry.has(id)),
 			{ overlay: true },
 		);
 	}
@@ -222,7 +241,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		},
 	};
 
-	const controller = new PersonaController(host, config.delegateDefaultAllow, RUN_LIMITS);
+	const controller = new PersonaController(host, config.delegateDefaultAllow);
 
 	// Async runs outlive the turn that launched them; on completion we surface the
 	// result back to the supervisor as a follow-up (which triggers a fresh turn).
@@ -240,21 +259,32 @@ export default function piPersona(pi: ExtensionAPI): void {
 	});
 
 	function buildEngine(signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void): StrategyEngine {
-		const deps: EngineAdapterDeps = {
-			resolveAgent: (n) => agents.find((a) => a.name === n),
-			contracts: (n) => (n === "default" ? DEFAULT_CONTRACT : undefined),
-			modelFor: (agent) => {
-				const persona = controller.activePersona?.name;
-				return persona ? personaModels(personaConfigs, persona)[agent] : undefined;
-			},
+		const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
+		const contracts = (n: string): ContractDef | undefined => (n === "default" ? DEFAULT_CONTRACT : undefined);
+		const modelFor = (agent: string): string | undefined => {
+			const persona = controller.activePersona?.name;
+			return persona ? personaModels(personaConfigs, persona)[agent] : undefined;
 		};
-		if (signal) deps.signal = signal;
-		if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
 		// The main model thinks adaptively (it picks effort by difficulty); a spawned child
 		// can't inherit "adaptive" if its model doesn't support it, so give children an
 		// explicit level — the supervisor's (if concrete) or a sane default, overridable.
 		const supLevel = host.getThinkingLevel();
-		deps.childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
+		const childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
+
+		// v0.4: run sub-agents in-process (createAgentSession) instead of spawning `pi -p`.
+		if (config.engine === "inproc" && lastCtx) {
+			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
+			const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
+			if (signal) ideps.signal = signal;
+			if (onProgress) ideps.onProgress = onProgress;
+			if (lastCtx.model) ideps.defaultModel = `${lastCtx.model.provider}/${lastCtx.model.id}`;
+			return makeInProcessEngine(ideps);
+		}
+		if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=child\n");
+
+		const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
+		if (signal) deps.signal = signal;
+		if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
 		deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs }; // hard wall-clock cap on every child
 		if (onProgress) deps.childOptions.onProgress = onProgress;
 		return makeEngine(deps);
@@ -318,6 +348,54 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 	}
 
+	// Each core's model beside its name: per-persona assignment → agent default → session.
+	function coreLabel(ctx: ExtensionContext, agent: string): string {
+		const persona = controller.activePersona?.name;
+		const configured = persona ? personaModels(personaConfigs, persona) : {};
+		const model =
+			configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+		const short = shortModel(model);
+		return short ? `${agent} · ${short}` : agent;
+	}
+
+	// The SDK lifecycle callbacks that drive the unified tree for one strategy run rooted at
+	// `rootId` — shared by /orchestrate, the council tool, and each flow phase. Seeds running
+	// cores, flips ⏳ → ✓/✗ with usage, streams progress, and registers stop/steer handles.
+	function strategyTreeDeps(ctx: ExtensionContext, rootId: string) {
+		return {
+			onAgentStart: (agent: string, abort: () => void) => {
+				stopRegistry.set(`${rootId}/${agent}`, abort);
+			},
+			onAgentSteerable: (agent: string, steer: SteerFn) => {
+				steerRegistry.set(`${rootId}/${agent}`, steer);
+			},
+			onAgentStatus: (agent: string, st: AgentStatus, result?: AgentResult) => {
+				const id = `${rootId}/${agent}`;
+				if (st === "running") {
+					agentTree.add({ id, label: coreLabel(ctx, agent), parentId: rootId, status: "running" });
+					return;
+				}
+				stopRegistry.delete(id);
+				steerRegistry.delete(id);
+				const patch: { status: AgentNodeStatus; detail?: string; output?: string } = { status: st };
+				if (result) {
+					const u = formatUsage(result.usage);
+					if (u) patch.detail = u;
+					if (result.output) patch.output = result.output;
+				}
+				agentTree.update(id, patch);
+			},
+			onAgentProgress: (agent: string, p: AgentProgress) => {
+				const id = `${rootId}/${agent}`;
+				const patch: { output?: string; detail?: string } = {
+					detail: p.activity || (p.tokens ? `${p.tokens} tok` : ""),
+				};
+				if (p.output) patch.output = p.output;
+				agentTree.update(id, patch);
+			},
+		};
+	}
+
 	// Run a persona strategy with the unified tree wired in: assign models on first run,
 	// seed the roster (cores show by name at once), flip ⏳ → ✓/✗ live, clear when done.
 	async function runStrategyVisible(
@@ -330,56 +408,120 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
 		await ensurePersonaModels(ctx, roster);
-		// Show each core's model next to its name (e.g. "melchior · sonnet-4-6"): the
-		// per-persona assignment, else the agent's own default, else the session model.
-		const persona = controller.activePersona?.name;
-		const configured = persona ? personaModels(personaConfigs, persona) : {};
-		const labelOf = (agent: string): string => {
-			const model =
-				configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
-			const short = shortModel(model);
-			return short ? `${agent} · ${short}` : agent;
-		};
 		const rootId = `${idPrefix}:${label}`;
 		agentTree.add({ id: rootId, label, status: "running" });
-		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: labelOf(a), parentId: rootId, status: "running" });
+		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: coreLabel(ctx, a), parentId: rootId, status: "running" });
 		try {
-			return await runPersonaStrategy(orch, task, {
-				engine: buildEngine(signal),
-				teams,
-				limits: RUN_LIMITS,
-				onAgentStart: (agent, abort) => {
-					stopRegistry.set(`${rootId}/${agent}`, abort);
-				},
-				onAgentStatus: (agent, st, result) => {
-					const id = `${rootId}/${agent}`;
-					if (st === "running") {
-						agentTree.add({ id, label: labelOf(agent), parentId: rootId, status: "running" });
-						return;
-					}
-					stopRegistry.delete(id);
-					const patch: { status: AgentNodeStatus; detail?: string; output?: string } = { status: st };
-					if (result) {
-						const u = formatUsage(result.usage);
-						if (u) patch.detail = u;
-						if (result.output) patch.output = result.output;
-					}
-					agentTree.update(id, patch);
-				},
-				onAgentProgress: (agent, p) => {
-					// Live streaming: rolling output + a detail line showing the current tool
-					// (so a reading agent isn't a mute "waiting"), or the token count between tools.
-					const id = `${rootId}/${agent}`;
-					const patch: { output?: string; detail?: string } = {
-						detail: p.activity || (p.tokens ? `${p.tokens} tok` : ""),
-					};
-					if (p.output) patch.output = p.output;
-					agentTree.update(id, patch);
-				},
-			});
+			return await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...strategyTreeDeps(ctx, rootId) });
 		} finally {
 			clearStops(rootId);
+			clearSteers(rootId);
 			agentTree.remove(rootId);
+		}
+	}
+
+	// ── flows (v0.5): a DAG over strategies, discovered as *.flow.json ────────────
+	const flowDirs = (cwd: string): string[] => [
+		join(BUNDLED_DIR, "flows"),
+		join(userAgentDir(), "flows"),
+		join(cwd, ".pi", "flows"),
+	];
+	function listFlows(cwd: string): string[] {
+		const names = new Set<string>();
+		for (const dir of flowDirs(cwd)) {
+			try {
+				for (const f of readdirSync(dir)) if (f.endsWith(".flow.json")) names.add(f.replace(/\.flow\.json$/, ""));
+			} catch {
+				/* dir absent */
+			}
+		}
+		return [...names].sort();
+	}
+	function loadFlow(cwd: string, name: string): ReturnType<typeof parseFlow> | undefined {
+		// Later dirs win (project > user > builtin).
+		let found: string | undefined;
+		for (const dir of flowDirs(cwd)) {
+			const p = join(dir, `${name}.flow.json`);
+			try {
+				readFileSync(p);
+				found = p;
+			} catch {
+				/* not here */
+			}
+		}
+		if (!found) return undefined;
+		try {
+			return parseFlow(readFileSync(found, "utf8"));
+		} catch {
+			return { ok: false, error: "could not read flow file" };
+		}
+	}
+
+	// Run a flow's DAG with the unified tree (phases as nodes, cores beneath) + journaled
+	// resume: a prior run's journal (keyed by flow@hash) skips already-done phases; the
+	// journal is cleared on a fully-successful run.
+	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, signal?: AbortSignal) {
+		const hash = flowHash(spec);
+		const journalDir = join(userAgentDir(), "flows");
+		try {
+			mkdirSync(journalDir, { recursive: true });
+		} catch {
+			/* best effort */
+		}
+		const journalPath = join(journalDir, `${spec.name}.${hash.slice(0, 8)}.journal.jsonl`);
+		const resume = readJournal(journalPath, hash);
+
+		const rosterAgents = [...new Set(spec.phases.flatMap((p) => (p.roster ? (teams[p.roster] ?? []) : [])))];
+		await ensurePersonaModels(ctx, rosterAgents);
+
+		const flowRoot = `flow:${spec.name}`;
+		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running" });
+		for (const p of spec.phases) {
+			const pid = `${flowRoot}/${p.id}`;
+			const node: AddNodeInput = { id: pid, label: `${p.id} · ${p.strategy}`, parentId: flowRoot, status: resume[p.id] ? "done" : "running" };
+			if (resume[p.id]) node.detail = "resumed";
+			agentTree.add(node);
+		}
+		try {
+			const outcome = await runFlow(spec, baseTask, {
+				hash,
+				resume,
+				...(signal ? { signal } : {}),
+				journal: journalWriter(journalPath),
+				onPhase: (id, status, result) => {
+					const patch: { status: AgentNodeStatus; output?: string } = {
+						status: status === "running" ? "running" : status === "done" ? "done" : "failed",
+					};
+					if (result?.output) patch.output = result.output;
+					agentTree.update(`${flowRoot}/${id}`, patch);
+				},
+				runPhase: async ({ phase, task }) => {
+					const pid = `${flowRoot}/${phase.id}`;
+					const roster = phase.roster ? (teams[phase.roster] ?? []) : [];
+					for (const a of roster) agentTree.add({ id: `${pid}/${a}`, label: coreLabel(ctx, a), parentId: pid, status: "running" });
+					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
+					if (phase.roster) orch.roster = phase.roster;
+					const r = await runPersonaStrategy(orch, task, {
+						engine: buildEngine(signal),
+						teams,
+						limits: RUN_LIMITS,
+						...strategyTreeDeps(ctx, pid),
+					});
+					return r ?? { agent: phase.id, output: `unknown strategy: ${phase.strategy}`, usage: emptyUsage(), ok: false, error: "unknown strategy" };
+				},
+			});
+			if (outcome.ok) {
+				try {
+					rmSync(journalPath, { force: true }); // clean journal once the whole flow succeeds
+				} catch {
+					/* ignore */
+				}
+			}
+			return outcome;
+		} finally {
+			clearStops(flowRoot);
+			clearSteers(flowRoot);
+			agentTree.remove(flowRoot);
 		}
 	}
 
@@ -397,16 +539,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 	function doctorReport(): string {
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
-		lines.push(`engine backend: child-process`);
+		lines.push(`engine backend: ${config.engine === "child" ? "child-process" : "in-process"}`);
 		lines.push(`personas (${personas.length}): ${personas.map((p) => p.name).join(", ") || "—"}`);
 		lines.push(`agents (${agents.length}): ${agents.map((a) => a.name).join(", ") || "—"}`);
 		const teamNames = Object.keys(teams);
 		lines.push(`teams (${teamNames.length}): ${teamNames.join(", ") || "—"}`);
+		const flows = lastCtx ? listFlows(lastCtx.cwd) : [];
+		lines.push(`flows (${flows.length}): ${flows.join(", ") || "—"}`);
 		if (shadowed.length > 0) {
 			lines.push("shadowed (lower-precedence, overridden):");
 			for (const s of shadowed) lines.push(`  - ${s.name} [${s.scope}] ${s.path}`);
 		}
-		lines.push(`run limits: children≤${RUN_LIMITS.maxChildren}, concurrency≤${RUN_LIMITS.maxConcurrency}`);
+		const caps = controller.capabilities;
+		if (caps) {
+			lines.push(`effective-capabilities: tools=${caps.tools.size}, delegate-targets=${caps.delegateTargets.size}, canFanOut=${canFanOut(caps)}`);
+		}
+		lines.push(`run limits: children≤${RUN_LIMITS.maxChildren}, concurrency≤${RUN_LIMITS.maxConcurrency}, timeout=${RUN_LIMITS.timeoutMs}ms`);
 		return lines.join("\n");
 	}
 
@@ -442,20 +590,32 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return controller.gate(event.toolName, event.input);
 	});
 
-	// Mandatory orchestration: when the active persona declares a strategy/parallel
-	// mode, run it on the user's turn (the LLM cannot skip it) and fold the result
-	// into the prompt. Opportunistic personas (no strategy) take the normal turn.
+	// Mandatory orchestration: when the active persona declares a strategy/parallel/
+	// pipeline mode (or a flow), run it on the user's turn (the LLM cannot skip it) and
+	// fold the result into the prompt. Opportunistic personas (no orchestration) take the
+	// normal turn.
 	pi.on("input", async (event, ctx) => {
 		lastCtx = ctx;
 		if (event.source === "extension" || orchestrating) return undefined;
 		const orch = controller.activePersona?.orchestration;
 		const task = event.text?.trim();
-		if (!orch || !resolveStrategyName(orch) || !task) return undefined;
-		const label = resolveStrategyName(orch) ?? "strategy";
+		if (!orch || !task) return undefined;
+		const flowName = orch.mode === "flow" ? orch.flow : undefined;
+		if (!flowName && !resolveStrategyName(orch)) return undefined;
+		const label = flowName ? `flow ${flowName}` : (resolveStrategyName(orch) ?? "strategy");
 		orchestrating = true;
 		try {
-			const result = await runStrategyVisible(ctx, orch, task, "strategy");
-			pendingOrchestration = { label, output: result ? result.output : "(the orchestration returned no result)" };
+			let output: string;
+			if (flowName) {
+				const parsed = loadFlow(ctx.cwd, flowName);
+				if (!parsed) output = `no flow named "${flowName}"`;
+				else if (!parsed.ok) output = `flow "${flowName}" is invalid: ${parsed.error}`;
+				else output = (await runFlowVisible(ctx, parsed.flow, task)).output || "(the flow returned no output)";
+			} else {
+				const result = await runStrategyVisible(ctx, orch, task, "strategy");
+				output = result ? result.output : "(the orchestration returned no result)";
+			}
+			pendingOrchestration = { label, output };
 		} catch (err) {
 			pendingOrchestration = { label, output: `orchestration failed: ${err instanceof Error ? err.message : String(err)}` };
 		} finally {
@@ -614,7 +774,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 					(views) => {
 						views.forEach((v, i) => {
 							const id = `${delRoot}/${i}`;
-							if (!v.running) stopRegistry.delete(id);
+							if (!v.running) {
+								stopRegistry.delete(id);
+								steerRegistry.delete(id);
+							}
 							const status: AgentNodeStatus = v.running ? "running" : v.ok ? "done" : "failed";
 							const node: AddNodeInput = { id, label: v.label, parentId: delRoot, status };
 								node.detail = v.running ? v.activity : formatUsage(v.usage);
@@ -625,6 +788,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 						onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
 					},
 					(i, abort) => stopRegistry.set(`${delRoot}/${i}`, abort),
+					(i, steer) => steerRegistry.set(`${delRoot}/${i}`, steer),
 				);
 				return {
 					content: [{ type: "text", text: outcome.text }],
@@ -633,6 +797,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				};
 			} finally {
 				clearStops(delRoot);
+				clearSteers(delRoot);
 				agentTree.remove(delRoot);
 			}
 		},
@@ -769,6 +934,44 @@ export default function piPersona(pi: ExtensionAPI): void {
 			c.addChild(new Text(`${head}${tag}`, 0, 0));
 			c.addChild(new Text(theme.fg("toolOutput", body), 0, 0));
 			return c;
+		},
+	});
+
+	// ── flow tool (run a *.flow.json DAG over strategies; the supervisor self-launches) ──
+	const FlowToolParams = Type.Object({
+		name: Type.String({ description: "The flow to run — a *.flow.json by name (see /doctor for the list)" }),
+		task: Type.String({ description: "The objective to run the flow on" }),
+	});
+	pi.registerTool({
+		name: "flow",
+		label: "Flow",
+		description: [
+			"Run a named flow — a declarative DAG over strategies (`*.flow.json`): phases each run a",
+			"strategy over a roster, wired by `needs`, fanning out where independent and threading each",
+			"phase's output into its dependents. Journaled, so an interrupted flow resumes. Reach for it",
+			"when a task has a fixed multi-stage shape (e.g. gather → critique → decide) you want run",
+			"deterministically, end to end, rather than deciding each step yourself.",
+		].join(" "),
+		parameters: FlowToolParams,
+		async execute(_id, params, signal, _onUpdate, ctx) {
+			lastCtx = ctx;
+			const parsed = loadFlow(ctx.cwd, params.name);
+			if (!parsed) {
+				return { content: [{ type: "text", text: `no flow named "${params.name}" (see /doctor for the list)` }], details: {}, isError: true };
+			}
+			if (!parsed.ok) {
+				return { content: [{ type: "text", text: `flow "${params.name}" is invalid: ${parsed.error}` }], details: {}, isError: true };
+			}
+			try {
+				const outcome = await runFlowVisible(ctx, parsed.flow, params.task, signal);
+				return { content: [{ type: "text", text: outcome.output || "(flow produced no output)" }], details: { ok: outcome.ok }, isError: !outcome.ok };
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				return { content: [{ type: "text", text: `flow failed: ${message}` }], details: { error: message }, isError: true };
+			}
+		},
+		renderCall(args, theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", args.name ?? "?")}`, 0, 0);
 		},
 	});
 
@@ -909,6 +1112,45 @@ export default function piPersona(pi: ExtensionAPI): void {
 				ctx.ui.notify(result?.output || "(no output)", result?.ok ? "info" : "warning");
 			} catch (err) {
 				ctx.ui.notify(`orchestrate failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
+		},
+	});
+
+	// ── /flow (run a *.flow.json DAG over strategies; journaled resume) ───────────
+	pi.registerCommand("flow", {
+		description: "Run a flow (DAG over strategies): /flow <name> <task> — or /flow to list",
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const trimmed = args.trim();
+			if (!trimmed || trimmed === "list") {
+				const flows = listFlows(ctx.cwd);
+				ctx.ui.notify(
+					flows.length ? `flows: ${flows.join(", ")}  ·  /flow <name> <task>` : "no flows — add a *.flow.json under .pi/flows/",
+					"info",
+				);
+				return;
+			}
+			const sp = trimmed.search(/\s/);
+			const name = sp < 0 ? trimmed : trimmed.slice(0, sp);
+			const task = sp < 0 ? "" : trimmed.slice(sp + 1).trim();
+			if (!task) {
+				ctx.ui.notify(`flow: provide a task — /flow ${name} <task>`, "warning");
+				return;
+			}
+			const parsed = loadFlow(ctx.cwd, name);
+			if (!parsed) {
+				ctx.ui.notify(`flow: no flow named "${name}" (try /flow to list)`, "warning");
+				return;
+			}
+			if (!parsed.ok) {
+				ctx.ui.notify(`flow "${name}" is invalid: ${parsed.error}`, "error");
+				return;
+			}
+			try {
+				const outcome = await runFlowVisible(ctx, parsed.flow, task);
+				ctx.ui.notify(outcome.output || "(flow produced no output)", outcome.ok ? "info" : "warning");
+			} catch (err) {
+				ctx.ui.notify(`flow failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
 		},
 	});

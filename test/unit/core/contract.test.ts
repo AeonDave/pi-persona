@@ -1,7 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_CONTRACT, extractJsonCandidate, pinContract, validateAgainst } from "../../../src/core/contract.ts";
+import { type ContractDef, DEFAULT_CONTRACT, extractJsonCandidate, parseAndValidate, pinContract, validateAgainst } from "../../../src/core/contract.ts";
+
+test("parseAndValidate unwraps fences, validates, and reports a contract error on failure", () => {
+	const def: ContractDef = { name: "v", fields: { result: { type: "string", required: true } } };
+	const ok = parseAndValidate('```json\n{"result":"hi"}\n```', def);
+	assert.equal(ok.ok, true);
+	assert.deepEqual(ok.value, { result: "hi" });
+	const notJson = parseAndValidate("definitely not json", def);
+	assert.equal(notJson.ok, false);
+	assert.match(notJson.error ?? "", /contract v failed/);
+	const missing = parseAndValidate('{"x":1}', def);
+	assert.equal(missing.ok, false);
+	assert.match(missing.error ?? "", /result/);
+});
 
 test("extractJsonCandidate unwraps fenced / prose-wrapped JSON so JSON.parse survives", () => {
 	// The actual magi bug: a member wraps its JSON in a ```json fence → raw JSON.parse throws.

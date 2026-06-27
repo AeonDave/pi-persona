@@ -20,8 +20,6 @@ export interface OrchestrationGrammar {
 	strategy?: string;
 	flow?: string;
 	roster?: string;
-	/** A structured field to fan out one child per item (L1). */
-	per?: string;
 	/** Strategy parameters (e.g. rounds, aggregate, critic). */
 	params?: Record<string, unknown>;
 }
@@ -50,7 +48,6 @@ export interface Persona {
 	systemPromptMode: SystemPromptMode;
 	delegate?: Permission;
 	tools?: Permission;
-	skills?: Permission;
 	/** Absent ⇒ L0 opportunistic delegation. */
 	orchestration?: OrchestrationGrammar;
 	/** Tool-driven council the `council` tool runs (no mandatory firing). */
@@ -72,7 +69,6 @@ function parseOrchestration(raw: unknown): OrchestrationGrammar | undefined {
 	if (typeof o.strategy === "string" && o.strategy.trim()) grammar.strategy = o.strategy.trim();
 	if (typeof o.flow === "string" && o.flow.trim()) grammar.flow = o.flow.trim();
 	if (typeof o.roster === "string" && o.roster.trim()) grammar.roster = o.roster.trim();
-	if (typeof o.per === "string" && o.per.trim()) grammar.per = o.per.trim();
 	if (o.params && typeof o.params === "object" && !Array.isArray(o.params)) {
 		grammar.params = o.params as Record<string, unknown>;
 	}
@@ -106,8 +102,6 @@ export function parsePersona(content: string, source: string): Persona | null {
 	if (delegate) persona.delegate = delegate;
 	const tools = asPermission(fm.tools);
 	if (tools) persona.tools = tools;
-	const skills = asPermission(fm.skills);
-	if (skills) persona.skills = skills;
 
 	const orchestration = parseOrchestration(fm.orchestration);
 	if (orchestration) persona.orchestration = orchestration;
