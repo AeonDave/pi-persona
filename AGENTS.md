@@ -28,11 +28,11 @@ rewrite on Pi-native primitives (`@earendil-works/pi-*`) — no third-party fork
 
 ## Build order (law)
 
-`core → child engine → persona/delegate → strategy SDK → inproc bus → inproc engine → broker/flows`
+`core → child engine → persona/delegate → strategy SDK → inproc engine → flows`
 
 ## Layout (target)
 
-`src/core` · `src/engine` · `src/bus` · `src/orchestration` · `src/persona` · `src/tools`
+`src/core` · `src/engine` · `src/orchestration` · `src/persona` · `src/tools`
 · `src/commands` · `src/ui` · `src/extension.ts` (single ExtensionFactory).
 
 ## Conventions
@@ -63,7 +63,7 @@ reads & judges results; verification is composable as an explicit flow phase); *
 checkpoints** — the journal already enables stop/resume, add the schema field when a real flow
 needs it.
 
-**Shipped & tested** (236 tests via `node --test`, strict `tsc --noEmit --noUnusedLocals
+**Shipped & tested** (239 tests via `node --test`, strict `tsc --noEmit --noUnusedLocals
 --noUnusedParameters` clean):
 - **v0.1** — `core/*`, `ChildProcessEngine` (stream parser, adapter, UTF-8 streaming, hard
   per-child timeout + abort), persona controller + gating, `delegate` tool, `loader`,
@@ -116,7 +116,8 @@ needs it.
   session model. Unlocks live **steering** — `agent.steer()` threaded engine → SDK/delegate → a
   per-node registry → the f9 overlay (`s` to type a message into a running sub-agent). Validated
   live with free models: delegate + magi council in-process, and steer redirecting a running
-  agent mid-run. Harnesses: `scripts/drive.ts` (headless log mode) and `scripts/steer-test.ts`.
+  agent mid-run. Harnesses: `scripts/drive.ts` (headless `pi -p` log mode) and
+  `scripts/control-test.mjs` (STEER/STOP/RESUME via the in-process engine).
 - **v0.5 flows (`orchestration/flow*`, `/flow`):** a declarative DAG over strategies, JSON-first
   (`*.flow.json`, the magi council's ruling). Phases each run a strategy over a roster, wired by
   `needs`; ready phases fan out in parallel and each upstream output threads into its dependents'

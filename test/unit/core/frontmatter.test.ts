@@ -33,6 +33,14 @@ test("parseYamlSubset reads scalar strings and quoted values", () => {
 	assert.deepEqual(parseYamlSubset("label: 'single quoted'"), { label: "single quoted" });
 });
 
+test("parseYamlSubset reads an inline flow map (params: { k: v }) as an object", () => {
+	assert.deepEqual(parseYamlSubset("params: { rounds: 3, bestOf: 3 }"), { params: { rounds: 3, bestOf: 3 } });
+	assert.deepEqual(parseYamlSubset("params: { judge: reviewer }"), { params: { judge: "reviewer" } });
+	assert.deepEqual(parseYamlSubset("params: {}"), { params: {} });
+	// a nested inline list inside the map is not split on its inner comma
+	assert.deepEqual(parseYamlSubset("params: { tools: [a, b], n: 2 }"), { params: { tools: ["a", "b"], n: 2 } });
+});
+
 test("parseYamlSubset reads booleans", () => {
 	assert.deepEqual(parseYamlSubset("persona: true"), { persona: true });
 	assert.deepEqual(parseYamlSubset("disabled: false"), { disabled: false });

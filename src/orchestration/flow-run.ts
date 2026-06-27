@@ -91,7 +91,15 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 					if (u) upstream[n] = u;
 				}
 				const task = buildPhaseTask(baseTask, spec, p, upstream);
-				const r = await deps.runPhase({ phase: p, task, upstream });
+				// A throwing phase (e.g. a misconfigured strategy) is a phase FAILURE, not a
+				// crashed DAG — record it failed so its dependents block and the flow finishes.
+				let r: AgentResult;
+				try {
+					r = await deps.runPhase({ phase: p, task, upstream });
+				} catch (err) {
+					const error = err instanceof Error ? err.message : String(err);
+					r = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error };
+				}
 				deps.onPhase?.(p.id, r.ok ? "done" : "failed", r);
 				deps.journal?.({ phase: p.id, hash: deps.hash, ok: r.ok, output: r.output });
 				return [p.id, r];

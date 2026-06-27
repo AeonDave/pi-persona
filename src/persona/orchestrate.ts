@@ -15,7 +15,7 @@ import {
 	type StrategyEngine,
 	type StrategyInput,
 } from "../orchestration/sdk.ts";
-import { getStrategy } from "../orchestration/strategy.ts";
+import { getStrategy, strategyNames } from "../orchestration/strategy.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import type { OrchestrationGrammar } from "./persona.ts";
 
@@ -50,9 +50,11 @@ export async function runPersonaStrategy(
 	deps: RunStrategyDeps,
 ): Promise<AgentResult | null> {
 	const name = resolveStrategyName(orch);
-	if (!name) return null;
+	if (!name) return null; // no mode/strategy → nothing to run (e.g. a solo persona); caller runs normally
 	const strategy = getStrategy(name);
-	if (!strategy) return null;
+	// A NAMED-but-unknown strategy is a misconfiguration, not "nothing to run" — fail loudly
+	// so the council/flow surfaces it instead of an opaque "no ruling".
+	if (!strategy) throw new Error(`unknown strategy "${name}" (available: ${strategyNames().join(", ")})`);
 
 	const sdkDeps: SDKDeps = { engine: deps.engine, roster: makeRoster(deps.teams), limits: deps.limits };
 	if (deps.signal) sdkDeps.signal = deps.signal;
