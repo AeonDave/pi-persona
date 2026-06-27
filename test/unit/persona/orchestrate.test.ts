@@ -39,3 +39,11 @@ test("runPersonaStrategy returns null for a non-runnable (solo) persona", async 
 	const r = await runPersonaStrategy({ mode: "solo" }, "t", { engine, teams: {}, limits: LIMITS });
 	assert.equal(r, null);
 });
+
+test("runPersonaStrategy throws a clear error for a named-but-unknown strategy (not a silent null)", async () => {
+	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
+	await assert.rejects(
+		() => runPersonaStrategy({ mode: "strategy", strategy: "nope", roster: "magi" }, "t", { engine, teams: { magi: ["a"] }, limits: LIMITS }),
+		/unknown strategy "nope".*fanout|judge|magi|pipeline/s,
+	);
+});
