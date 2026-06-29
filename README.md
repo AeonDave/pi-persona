@@ -64,13 +64,12 @@ All of these are seeded into `~/.pi/agent/` on first run so you can edit them or
 
 | Persona | What it's for |
 |---|---|
-| `elite` | Generalist player-coach orchestrator (coding · offensive security · research · infra). Domain comes from the skills it injects per task; delegates the heavy/parallel/long work. |
-| `coder` | Software engineer — tests-first flow, loads the right coding skills, delegates large/parallel work. |
-| `researcher` | Source-driven investigator — fans one search out per sub-question, returns sourced, synthesized findings. |
-| `reviewer` | Evidence-driven code reviewer — inspects and cites `file:line`, delegates bounded fixes. |
-| `planner` | Decomposes a goal into bounded, verifiable steps and orchestrates the fleet to execute them. |
+| `elite` | Offensive-security player-coach — lead operator for pentest / red-team / lab-CTF; loads the right attack skill per kill-chain phase, owns tunnels/pivots/shells, delegates heavy/parallel/long work. |
+| `dev` | Software engineer **and** reviewer — tests-first flow, loads the right coding skills, reviews its own/others' changes with cited `file:line` evidence, delegates large/parallel work. |
+| `researcher` | Deep-research supervisor — fans one deep-dive agent out per sub-question, follows links recursively, consolidates sourced findings into a `.research/<topic>/` folder. |
+| `planner` | Planning-first orchestrator — decomposes goals into bounded, verifiable steps and writes plan/design/architecture docs; never edits code, hands implementation to `dev` and investigation to `researcher`. |
 | `magi` | MAGI triarchy — three deliberately-biased cores vote → ruling + tally + recorded dissent. |
-| `review` | Parallel review council — security + performance + tests fan out, findings aggregated. |
+| `audit` | Parallel audit council — security + performance + tests fan out on different models, findings aggregated. |
 | `judge` | A panel answers independently; an impartial, anonymised arbiter picks the single best. |
 | `self-repair` | Generate↔verify loop — a `verifier` *runs* the build/tests and approves only on green. |
 
@@ -80,6 +79,7 @@ All of these are seeded into `~/.pi/agent/` on first run so you can edit them or
 |---|---|---|
 | `operator` | Generic executor — becomes a specialist from the skills it's told to load | all |
 | `scout` | Read-only explorer — gathers context, reports answer-first with evidence | read/grep/find/ls |
+| `research` | Deep-dive research worker — recursive link-following over the best available fetch tools, writes cited findings to `.research/` | no `edit` (web/fetch/write) |
 | `code-reviewer` | Correctness/clarity reviewer (and the `judge` arbiter) | read/grep/find |
 | `security` · `performance` · `tests` | Review workers — one lens each (vulns · hot-path cost · coverage) | read/grep/find |
 | `builder` | Generator in the critic-loop — first solution, then precise revisions | read/grep/find |
@@ -90,7 +90,7 @@ All of these are seeded into `~/.pi/agent/` on first run so you can edit them or
 
 | Team | Members | Used by |
 |---|---|---|
-| `review` | security, performance, tests | the `review` council, the `judge` panel |
+| `review` | security, performance, tests | the `audit` council, the `judge` panel |
 | `repair` | builder, verifier | `self-repair` |
 | `magi` | melchior, balthasar, casper | `magi` |
 
@@ -210,9 +210,9 @@ on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `self
 review: [security, performance, tests]
 ```
 ```markdown
-<!-- personas/review.md -->
+<!-- personas/myaudit.md  (the bundled `audit` persona is exactly this shape) -->
 ---
-name: review
+name: myaudit
 persona: true
 council: { strategy: fanout, roster: review }
 ---
@@ -220,7 +220,7 @@ Convene the council before sign-off, then apply its findings yourself.
 ```
 
 **3 · Coaching** — talk to sub-agents *while they run*. The bundled delegating supervisors
-(`elite`, `coder`, …) already have it; add `coaching: true` to any persona of your own to give its
+(`elite`, `dev`, …) already have it; add `coaching: true` to any persona of your own to give its
 children a `contact_supervisor` tool, then read/answer with `intercom`.
 
 ```markdown
