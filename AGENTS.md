@@ -53,7 +53,12 @@ no build step. Design specs (binding on any conflict, guardrails first):
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
 - `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent` < project `.pi/`):
-  `personas/*.md`, `agents/*.md`, `teams.yaml`, `flows/*.flow.json`, `contracts/*.contract.json`, `presets/*.preset.json`.
+  `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
+  persona and an agent must NOT share a name; `reviewer` is the persona, `code-reviewer` the agent),
+  `teams.yaml`, `flows/*.flow.json`, `contracts/*.contract.json`, `presets/*.preset.json`.
+- First run copies the bundled assets into `~/.pi/agent/` (`src/core/seed.ts`, marker
+  `.pi-persona-seeded`) so the user's copies (which shadow builtin) are what runs; `/persona seed`
+  pulls new defaults, `/persona restore` force-restores originals. `PI_PERSONA_SEED=off` skips it.
 - `scripts/` — `drive.ts` (headless `pi -p` log), `control-test.mjs`, `flow-test.ts`. `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)

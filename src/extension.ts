@@ -9,7 +9,7 @@
  * ChildProcessEngine (the only engine backend so far).
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,11 +22,12 @@ import { resolveConfig } from "./core/config.ts";
 import { resolveModelRef } from "./core/models.ts";
 import { isThinkingLevel } from "./core/types.ts";
 import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
+import { seedDefaults, type SeedResult } from "./core/seed.ts";
 import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { AsyncRunTracker, buildPeekDigest } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildPeekDigest } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
@@ -197,6 +198,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 		contractDefs = loadContracts(contractDirs(cwd));
 	}
 
+	// Copy the bundled defaults into the user's agent dir so they can be edited/extended and the
+	// supervisor runs the USER's copies (they shadow the builtin). A marker file makes first-run
+	// seeding happen once; `/persona seed` pulls in any new defaults, `/persona restore` force-
+	// overwrites them back to the originals. Best-effort — never block startup on a write error.
+	const seedMarker = (): string => join(userAgentDir(), ".pi-persona-seeded");
+	function runSeed(force: boolean): SeedResult {
+		const result = seedDefaults(BUNDLED_DIR, userAgentDir(), force);
+		try {
+			mkdirSync(userAgentDir(), { recursive: true });
+			writeFileSync(seedMarker(), "pi-persona: bundled defaults seeded. Delete this file to re-seed on next start.\n");
+		} catch {
+			/* marker is best-effort */
+		}
+		return result;
+	}
+
 	const host: PersonaHost = {
 		allToolNames: () => {
 			try {
@@ -283,6 +300,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const tracker = new AsyncRunTracker();
 	tracker.onComplete((run) => {
 		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
+		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
+		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
 		try {
 			const body = run.status === "done" ? (run.result?.output ?? "(no output)") : `failed: ${run.error ?? "(no detail)"}`;
 			pi.sendUserMessage(`[pi-persona] async run ${run.id} (${run.agent}) ${run.status}:\n\n${fenceUntrusted(body)}`, {
@@ -699,6 +718,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
+		// First run: copy the bundled defaults into the user dir (once), so they are editable.
+		if (config.seed && !existsSync(seedMarker())) {
+			const r = runSeed(false);
+			if (ctx.hasUI && r.copied.length > 0) {
+				ctx.ui.notify(`pi-persona: seeded ${r.copied.length} default(s) to ${userAgentDir()} — edit them freely; /persona restore brings back the originals.`, "info");
+			}
+		}
 		reload(ctx.cwd);
 		personaConfigs = readPersonaConfigs(configFile);
 		// Restore order: env pin > remembered-on-disk. Read-only — never writes here.
@@ -832,22 +858,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	// Launch one agent in the background (tracked) and add its live async node to the tree.
 	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string): string {
-		let nodeId = "";
-		const id = tracker.launch({ agent, task }, (onProgress) =>
-			buildEngine(
+		const id = tracker.launch({ agent, task }, (onProgress, runId) => {
+			const nodeId = `async:${runId}`;
+			// A real, HARD stop for the async run (a steer is only a soft request the child may
+			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
+			const ac = new AbortController();
+			stopRegistry.set(nodeId, () => ac.abort());
+			return buildEngine(
 				undefined,
 				(snap) => {
 					onProgress(snap);
-					if (!nodeId) return;
 					const patch: { output?: string; detail?: string } = {};
 					if (snap.output) patch.output = snap.output;
 					if (snap.tokens) patch.detail = `${snap.tokens} tok`;
 					if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
 				},
 				{ async: true },
-			).run(runSpec),
-		);
-		nodeId = `async:${id}`;
+				// STOP via `ac.signal` (hard abort) and STEER via the run-id key (soft redirect) —
+				// both work for the supervisor (intercom `stop`/`steer`) and the f9 overlay (`x`/`s`),
+				// for ANY persona (these are supervisor→child controls, not child tools).
+			).run(runSpec, undefined, ac.signal, (steer) => steerRegistry.set(nodeId, steer));
+		});
+		const nodeId = `async:${id}`;
 		agentTree.add({ id: nodeId, label: `${label} (async)`, status: "running" });
 		startPeek(); // arm the opt-in idle peek while this run is in flight (no-op if disabled)
 		return id;
@@ -1035,27 +1067,81 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── intercom tool (supervisor side of the comm plane: read/answer children) ───
 	const IntercomToolParams = Type.Object({
 		action: Type.Union(
-			[Type.Literal("list"), Type.Literal("inbox"), Type.Literal("reply"), Type.Literal("send")],
-			{ description: "list = who's reachable · inbox = read children's messages · reply = answer a blocking ask by id · send = note a running child" },
+			[
+				Type.Literal("peek"),
+				Type.Literal("steer"),
+				Type.Literal("stop"),
+				Type.Literal("list"),
+				Type.Literal("inbox"),
+				Type.Literal("reply"),
+				Type.Literal("send"),
+			],
+			{
+				description:
+					"peek = watch your running async sub-agents · steer = soft redirect into one by run id (it may ignore it) · stop = HARD-abort one by run id · (all three for any persona, in-process) · list/inbox/reply/send = the coaching message bus (needs a coaching persona)",
+			},
 		),
-		to: Type.Optional(Type.String({ description: "send: the child handle to message (from intercom list)" })),
+		to: Type.Optional(Type.String({ description: "steer/stop/peek: the async run id (e.g. 'run-1') · send: the child bus handle (from `list`)" })),
 		askId: Type.Optional(Type.String({ description: "reply: the message id of the child's pending question" })),
-		message: Type.Optional(Type.String({ description: "reply/send: the text to deliver" })),
+		message: Type.Optional(Type.String({ description: "steer/reply/send: the text to deliver" })),
 	});
 	pi.registerTool({
 		name: "intercom",
 		label: "Intercom",
 		description: [
-			"Talk to your running sub-agents (the comm plane). While async children work, use",
-			"`inbox` to read what they reported or asked, `reply` to answer a blocking question by its",
-			"id, `send` to nudge one, and `list` to see who is reachable. Pairs with each child's",
-			"`contact_supervisor` tool — only meaningful for a coaching persona running async children.",
+			"See, steer, and message your running sub-agents.",
+			"`peek` watches what your async sub-agents are doing and `steer` injects a course-correction",
+			"into one (by run id) mid-run — both work for ANY persona on in-process async runs.",
+			"`list`/`inbox`/`reply`/`send` are the message bus (a child reaching you via `contact_supervisor`)",
+			"and need a `coaching: on` persona.",
 		].join(" "),
 		parameters: IntercomToolParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
+			// peek + steer are supervisor→child controls over the async tracker / steer handles —
+			// available to EVERY persona (no dependency on the coaching message bus).
+			if (params.action === "peek") {
+				const runs = params.to ? [tracker.peek(params.to)].filter((r): r is AsyncRun => !!r) : tracker.running();
+				return { content: [{ type: "text", text: buildPeekDigest(runs) }], details: { action: "peek", ok: true }, isError: false };
+			}
+			if (params.action === "steer") {
+				if (!params.to || params.message === undefined) {
+					return { content: [{ type: "text", text: "intercom steer needs { to: <run id>, message }." }], details: { action: "steer", ok: false }, isError: true };
+				}
+				const steer = steerRegistry.get(`async:${params.to}`);
+				if (!steer) {
+					return {
+						content: [{ type: "text", text: `Cannot steer "${params.to}" — no steerable in-process async run by that id (it may have finished; the child engine can't be steered).` }],
+						details: { action: "steer", ok: false },
+						isError: true,
+					};
+				}
+				steer(params.message);
+				return { content: [{ type: "text", text: `Steered ${params.to}: "${params.message}" (note: steer is a soft request — use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false };
+			}
+			if (params.action === "stop") {
+				if (!params.to) {
+					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: { action: "stop", ok: false }, isError: true };
+				}
+				// HARD stop: aborts the run's signal → the engine calls the sub-agent's agent.abort().
+				const stopped = stopAgent(`async:${params.to}`);
+				return stopped
+					? { content: [{ type: "text", text: `Aborting ${params.to} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false }
+					: {
+							content: [{ type: "text", text: `Cannot stop "${params.to}" — no running async run by that id (it may have already finished).` }],
+							details: { action: "stop", ok: false },
+							isError: true,
+						};
+			}
+
+			// The message bus (coaching): list / inbox / reply / send.
 			const out = runIntercom(params as IntercomParams, bus, SUPERVISOR);
-			return { content: [{ type: "text", text: out.text }], details: out.details, isError: !out.details.ok };
+			let text = out.text;
+			if ((params.action === "list" || params.action === "inbox") && !controller.activePersona?.coaching) {
+				const who = controller.activePersona?.name ?? "default";
+				text += `\n\n(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
+			}
+			return { content: [{ type: "text", text }], details: out.details, isError: !out.details.ok };
 		},
 	});
 
@@ -1188,7 +1274,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	// ── /persona ─────────────────────────────────────────────────────────────────
 	pi.registerCommand("persona", {
-		description: "Switch the active supervisor persona: /persona [name|off|list|reload]",
+		description: "Switch the active supervisor persona: /persona [name|off|list|reload|seed|restore]",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			const arg = args.trim();
@@ -1201,6 +1287,20 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (arg === "reload") {
 				reload(ctx.cwd);
 				ctx.ui.notify(`persona: reloaded ${personas.length} personas, ${agents.length} agents`, "info");
+				return;
+			}
+			// seed = copy any MISSING bundled defaults into the user dir (pull new ones);
+			// restore = force-overwrite them back to the bundled originals (discards your edits).
+			if (arg === "seed" || arg === "restore") {
+				const force = arg === "restore";
+				const r = runSeed(force);
+				reload(ctx.cwd);
+				// Re-apply the active persona so a restored definition takes effect immediately.
+				const active = controller.activePersona?.name;
+				const fresh = active ? personas.find((p) => p.name === active) : undefined;
+				if (fresh) await controller.activate(fresh);
+				const kept = r.skipped.length > 0 ? `, kept ${r.skipped.length} existing` : "";
+				ctx.ui.notify(`persona: ${force ? "restored" : "seeded"} ${r.copied.length} default(s) to ${userAgentDir()}${kept}.`, "info");
 				return;
 			}
 			if (arg === "" || arg === "list") {

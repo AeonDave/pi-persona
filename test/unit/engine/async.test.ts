@@ -30,6 +30,17 @@ test("launch tracks a run and exposes its result on completion", async () => {
 	assert.equal(run?.result?.output, "done");
 });
 
+test("launch passes the run id to the thunk (so the launcher can key a steer handle by it)", async () => {
+	const tracker = new AsyncRunTracker();
+	let seen: string | undefined;
+	const id = tracker.launch({ agent: "a", task: "t" }, async (_onProgress, runId) => {
+		seen = runId;
+		return { agent: "a", output: "x", usage: usage(), ok: true };
+	});
+	await tick();
+	assert.equal(seen, id, "the thunk receives the same id launch() returned");
+});
+
 test("onComplete fires when a run settles", async () => {
 	const tracker = new AsyncRunTracker();
 	const completed: string[] = [];
