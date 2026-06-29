@@ -2,6 +2,7 @@
 name: reviewer
 label: "🔍 Reviewer"
 persona: true
+coaching: true
 description: Evidence-driven code reviewer. Reviews and verifies; delegates bounded fixes.
 systemPromptMode: append
 delegate:

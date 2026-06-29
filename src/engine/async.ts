@@ -22,7 +22,8 @@ export interface AsyncRun {
 	error?: string;
 }
 
-export type RunThunk = (onProgress: (snapshot: ProgressSnapshot) => void) => Promise<AgentResult>;
+/** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
+export type RunThunk = (onProgress: (snapshot: ProgressSnapshot) => void, runId: string) => Promise<AgentResult>;
 
 export class AsyncRunTracker {
 	private readonly runs = new Map<string, AsyncRun>();
@@ -44,7 +45,7 @@ export class AsyncRunTracker {
 
 		run((s) => {
 			entry.progress = s;
-		})
+		}, id)
 			.then((result) => {
 				entry.status = result.ok ? "done" : "failed";
 				entry.result = result;
