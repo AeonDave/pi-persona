@@ -120,7 +120,7 @@ test("session_start loads the bundled personas and agents", async () => {
 	const listing = notes.join("\n");
 	assert.match(listing, /coder/);
 	assert.match(listing, /review/);
-	assert.match(listing, /antagonist/);
+	assert.match(listing, /self-repair/);
 	assert.match(listing, /magi/);
 });
 
