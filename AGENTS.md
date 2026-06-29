@@ -54,7 +54,7 @@ no build step. Design specs (binding on any conflict, guardrails first):
 - `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
-  persona and an agent must NOT share a name; `reviewer` is the persona, `code-reviewer` the agent),
+  persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),
   `teams.yaml`, `flows/*.flow.json`, `contracts/*.contract.json`, `presets/*.preset.json`.
 - First run copies the bundled assets into `~/.pi/agent/` (`src/core/seed.ts`, marker
   `.pi-persona-seeded`) so the user's copies (which shadow builtin) are what runs; `/persona seed`

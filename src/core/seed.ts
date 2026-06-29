@@ -6,8 +6,8 @@
  *
  * Layout mirrors discovery: personas + agents live together under `<user>/agents` (classified
  * by `persona: true`), teams in `<user>/teams.yaml`, and flows/contracts/presets in their own
- * `<user>/<kind>` dirs. A persona and an agent may share a name (e.g. `reviewer`); in one folder
- * only one file can win, so the PERSONA owns it and the colliding builtin agent still loads.
+ * `<user>/<kind>` dirs. Should a persona and an agent ever share a name, in one folder only one
+ * file can win, so the PERSONA owns it and the colliding builtin agent still loads.
  *
  * Pure over node:fs (no Pi imports), so the copy/skip logic is unit-tested with temp dirs.
  */
