@@ -118,8 +118,8 @@ test("session_start loads the bundled personas and agents", async () => {
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "list", ctx);
 	const listing = notes.join("\n");
-	assert.match(listing, /coder/);
-	assert.match(listing, /review/);
+	assert.match(listing, /dev/);
+	assert.match(listing, /audit/);
 	assert.match(listing, /self-repair/);
 	assert.match(listing, /magi/);
 });
@@ -132,7 +132,7 @@ test("the input hook leaves opportunistic personas (and no persona) to a normal 
 
 	assert.equal(await m.fire("input", { source: "interactive", text: "hi" }, ctx), undefined, "no persona ⇒ normal turn");
 
-	await m.cmd("persona", "coder", ctx); // coder has no orchestration block ⇒ opportunistic
+	await m.cmd("persona", "dev", ctx); // dev has no orchestration block ⇒ opportunistic
 	assert.equal(await m.fire("input", { source: "interactive", text: "hi" }, ctx), undefined, "opportunistic ⇒ normal turn");
 });
 
@@ -144,7 +144,7 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 
 	assert.equal(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined, "no persona ⇒ no change");
 
-	await m.cmd("persona", "coder", ctx);
+	await m.cmd("persona", "dev", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
 	assert.match(injected.systemPrompt, /decisive software engineer/);
