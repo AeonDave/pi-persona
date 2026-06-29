@@ -55,6 +55,45 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 | **Strategy** | how a roster is orchestrated (vote, loop, rounds…) | `src/orchestration/strategies/*.ts` |
 | **Contract** | the structured shape a sub-agent returns (so votes tally) | `contracts/*.contract.json` |
 
+## Bundled personas, agents & teams
+
+All of these are seeded into `~/.pi/agent/` on first run so you can edit them or add your own
+(see [Keys & commands](#keys--commands)). Switch persona with **`f8`**.
+
+**Personas** — the supervisor you become:
+
+| Persona | What it's for |
+|---|---|
+| `elite` | Generalist player-coach orchestrator (coding · offensive security · research · infra). Domain comes from the skills it injects per task; delegates the heavy/parallel/long work. |
+| `coder` | Software engineer — tests-first flow, loads the right coding skills, delegates large/parallel work. |
+| `researcher` | Source-driven investigator — fans one search out per sub-question, returns sourced, synthesized findings. |
+| `reviewer` | Evidence-driven code reviewer — inspects and cites `file:line`, delegates bounded fixes. |
+| `planner` | Decomposes a goal into bounded, verifiable steps and orchestrates the fleet to execute them. |
+| `magi` | MAGI triarchy — three deliberately-biased cores vote → ruling + tally + recorded dissent. |
+| `review` | Parallel review council — security + performance + tests fan out, findings aggregated. |
+| `judge` | A panel answers independently; an impartial, anonymised arbiter picks the single best. |
+| `self-repair` | Generate↔verify loop — a `verifier` *runs* the build/tests and approves only on green. |
+
+**Agents** — the workers a supervisor delegates to:
+
+| Agent | Role | Tools |
+|---|---|---|
+| `operator` | Generic executor — becomes a specialist from the skills it's told to load | all |
+| `scout` | Read-only explorer — gathers context, reports answer-first with evidence | read/grep/find/ls |
+| `code-reviewer` | Correctness/clarity reviewer (and the `judge` arbiter) | read/grep/find |
+| `security` · `performance` · `tests` | Review workers — one lens each (vulns · hot-path cost · coverage) | read/grep/find |
+| `builder` | Generator in the critic-loop — first solution, then precise revisions | read/grep/find |
+| `verifier` | Runs the project's build/tests; approves only when they pass green | read/bash |
+| `melchior` · `balthasar` · `casper` | The MAGI cores — Propulsore · Conservatore · Catalizzatore | read/grep/find |
+
+**Teams** (`teams.yaml`) — named rosters a strategy runs over:
+
+| Team | Members | Used by |
+|---|---|---|
+| `review` | security, performance, tests | the `review` council, the `judge` panel |
+| `repair` | builder, verifier | `self-repair` |
+| `magi` | melchior, balthasar, casper | `magi` |
+
 ## Building blocks — the core API
 
 Everything above is composed from a small, fixed set of primitives. A **strategy** is just a
@@ -82,7 +121,7 @@ core needed**.
 |---|---|
 | `delegate` tool | spawn sub-agent(s): **single or parallel** × **sync** (blocks the turn) or **async** (background; result returns as a follow-up) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
-| `intercom` tool | the **comm plane**: `list`/`inbox`/`reply`/`send` to talk to running sub-agents (pairs with each child's `contact_supervisor`) |
+| `intercom` tool | interact with running sub-agents: **`peek`** (watch) · **`steer`** (soft redirect) · **`stop`** (hard-abort) work for **any** persona on async runs; **`list`/`inbox`/`reply`/`send`** are the coaching message bus (paired with each child's `contact_supervisor`) |
 | `flow` tool · `/flow` | run a **DAG** of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a **checkpoint** (approve before its dependents run) |
 | persona `mode:` | `solo` (opportunistic — the LLM delegates by judgement) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
 | persona `coaching:` | opt into the comm plane — a `coaching: on` persona gives its children a `contact_supervisor` tool so they report progress / ask blocking decisions while they run (async) |
@@ -105,38 +144,49 @@ core needed**.
 **Where a new shape lives** (core vs file vs config — nothing hidden):
 - `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
 - `self-repair` → **persona config**: it's `critic-loop` whose critic is a **`verifier` agent** that *runs* the build/tests (`personas/self-repair.md` + `agents/verifier.md`, team `repair: [builder, verifier]`). Ground truth gates acceptance, not an opinion.
-- `debate` → **persona config**: the `pipeline` strategy + a deliberation roster (the cores in a chain instead of a parallel vote).
+- a **chain/debate** persona → just point a persona's `council` at the `pipeline` strategy over a roster (the cores build on each other instead of voting in parallel) — no code.
 
 Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper) — everything else is a file or persona on top of it.
 
-**Talking to running sub-agents (the comm plane).** A `coaching: on` persona (e.g. `coach`) gives
-each in-process child a **`contact_supervisor`** tool; the supervisor reads/answers with
-**`intercom`**. The two are wired over a handle-based in-process **bus** — a distinct plane from
-engine runtime events and the agent-tree progress view (they never collide).
+**Watching, steering, and talking to running sub-agents.** Two layers, deliberately separate:
 
-| Child calls `contact_supervisor` | Supervisor sees it via |
-|---|---|
-| `progress` (one-way) | the `delegate`/`council` result (sync) or `intercom inbox` / the opt-in periodic peek (async) |
-| `decision` / `interview` (waits) | an **event-wake follow-up** → answer with `intercom { action: "reply", askId, message }`. Honoured for **async** runs only; a sync run downgrades it to one-way (no deadlock) |
+- **Observe / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }` watches
+  your async sub-agents; `steer` injects a soft course-correction; `stop` **hard-aborts** one (a steer is
+  only a request the child may ignore). The `f9` overlay does the same by hand (`s` steer, `x` stop the selected agent).
+- **Message bus — needs `coaching: on`** (every delegating supervisor has it). Children get a
+  **`contact_supervisor`** tool to *reach you*: `progress` updates surface in the result / `intercom inbox`,
+  and a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision is
+  cost-aware — the supervisor spends nothing until a child wakes it (or a periodic peek, if `PI_PERSONA_PEEK_MS` is set).
 
-Idle supervision is cost-aware: while async children run, the supervisor spends nothing until a
-child wakes it (a blocking ask) — or, if `PI_PERSONA_PEEK_MS` is set, a periodic peek surfaces a
-compact digest. Steering a running child still goes through the f9 overlay (`s`).
+## Write your own
 
-A persona declares how it works:
+Copy a bundled file from `~/.pi/agent/agents/` and edit it, or drop a new `.md`: it's a **persona**
+if its frontmatter has `persona: true`, otherwise an **agent**. Project (`.pi/`) overrides user
+overrides builtin, so your copy always wins.
 
-- **nothing** → *opportunistic*: it uses the `delegate` tool when a task has independent parts —
-  the simple case stays simple ("research X, Y, Z" spawns one sub-agent per search).
-- `orchestration: { mode: parallel \| strategy, strategy, roster }` → *mandatory*: the strategy
-  runs automatically on the turn (e.g. `review` fans out security/perf/tests; `antagonist` runs a
-  critic loop).
-- `council: { strategy, roster, params }` → *tool-driven*: the supervisor consults the council on
-  demand, then executes the ruling and re-convenes.
+**A persona** (the supervisor you become) — `name`, `label`, `persona: true`, `description`, and a
+body (the supervisor system prompt). Choose *how it works*:
+
+- **nothing** → *opportunistic*: the LLM delegates by judgement when a task has independent parts
+  ("research X, Y, Z" spawns one sub-agent per search).
+- `council: { strategy, roster, params }` → *tool-driven*: convene the council on demand, then
+  execute the ruling and re-convene.
+- `orchestration: { mode: parallel|pipeline|strategy, strategy, roster }` → *mandatory*: the strategy
+  runs automatically every turn.
+
+`strategy` is one of the **built-in strategies** (table above). Optional fields: `coaching: true`,
+`model`, `thinking`, `delegate: { allow|deny: [...] }`, `systemPromptMode: append|replace`,
+`council: { preset: <name> }`.
+
+**An agent** (a worker you delegate to) — `name`, `description` (the routing signal that says when to
+use it), `tools: [read, grep, …]` (least-privilege; omit to inherit all), optional `model` and
+`isolation: worktree`, and a body (the agent's prompt). Reference it from a `teams.yaml` roster, or
+delegate to it directly. The recipes below show each shape end-to-end.
 
 ## Examples
 
 Everything below is **data** — drop the files in (discovery: builtin < `~/.pi/agent/` < project
-`.pi/`) and switch persona with **`f8`**. Code is needed only to add a brand-new strategy *shape* (last example).
+`.pi/`) and switch persona with **`f8`**. Code is needed only to add a brand-new strategy *shape* (last note).
 
 **1 · Opportunistic delegation** — the simplest persona, no orchestration block. The supervisor
 delegates by judgement; "research X, Y and Z" fans out one sub-agent per item in a single call.
@@ -152,7 +202,7 @@ You research thoroughly. For independent sub-questions, fan out `scout` sub-agen
 ```
 
 **2 · A review council** — convene biased cores in parallel through the `council` tool, then act
-on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `antagonist`) or
+on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `self-repair`) or
 `council-rounds` (multi-round vote) without touching code.
 
 ```yaml
@@ -169,18 +219,20 @@ council: { strategy: fanout, roster: review }
 Convene the council before sign-off, then apply its findings yourself.
 ```
 
-**3 · Coaching** — talk to sub-agents *while they run*. A `coaching: on` persona gives its
-children a `contact_supervisor` tool; the supervisor reads/answers with `intercom`.
+**3 · Coaching** — talk to sub-agents *while they run*. The bundled delegating supervisors
+(`elite`, `coder`, …) already have it; add `coaching: true` to any persona of your own to give its
+children a `contact_supervisor` tool, then read/answer with `intercom`.
 
 ```markdown
-<!-- personas/coach.md -->
+<!-- personas/mylead.md -->
 ---
-name: coach
+name: mylead
 persona: true
 coaching: true
 ---
 Delegate with `async: true` and tell each sub-agent to report progress and ask blocking
 `decision`s via `contact_supervisor`; use `intercom inbox` to read and `intercom reply` to answer.
+(`peek`/`steer`/`stop` work for any persona — coaching only adds the message bus.)
 ```
 
 **4 · A flow with a human checkpoint** — a DAG over strategies; `gate: true` pauses for your
@@ -234,36 +286,24 @@ tools: [read, write, bash]
 { "strategy": "council-rounds", "roster": "magi", "params": { "rounds": 3, "bestOf": 3 } }
 ```
 ```yaml
-# personas/magiv2.md frontmatter:
+# any persona's frontmatter — a full multi-round MAGI council in one line:
 council: { preset: magi-rounds }
 ```
 
-**8 · A brand-new ensemble** — a nine-member, best-of-7, multi-round council is two data files
-pointing at the built-in `council-rounds` strategy (no code):
-
-```yaml
-# teams.yaml
-bigcouncil: [a1, a2, a3, a4, a5, a6, a7, a8, a9]
-```
-```markdown
-<!-- personas/bigcouncil.md -->
----
-name: bigcouncil
-persona: true
-council: { strategy: council-rounds, roster: bigcouncil, params: { rounds: 3, bestOf: 7 } }
----
-Consult the council per decision, then execute the ruling and re-convene on a new decision.
-```
-
-Each `agents/aN.md` gives a core its bias + a JSON vote. Want a *different vote rule*? Drop a
-`src/orchestration/strategies/<name>.ts` using the same `agent` / `parallel` / `reduce.vote` SDK
-and name it in the `council:` block — **that** is the only case that touches code.
+**The only case that touches code:** a brand-new strategy *shape* (a new vote rule, a custom loop).
+Drop a `src/orchestration/strategies/<name>.ts` using the same `agent` / `parallel` / `reduce.*` SDK,
+register it, and name it in any persona's `council:` block. Everything else above is data.
 
 ## Keys & commands
 
 - **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
-- `/persona [name\|off\|list]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>`
+- `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=off` (skip first-run seeding)
+
+**Your copies win.** On first run the bundled personas/agents/teams/flows/contracts/presets are
+copied into `~/.pi/agent/` so you can **edit them and add your own** — the supervisor always runs
+your copies (they shadow the builtin). `/persona seed` pulls in any new defaults (non-destructive);
+`/persona restore` force-overwrites them back to the bundled originals.
 
 ## Develop
 
