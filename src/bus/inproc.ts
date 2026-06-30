@@ -129,6 +129,17 @@ export class InProcessBus {
 		return box;
 	}
 
+	/** Drain and return only the messages matching `pred`, leaving the rest in the inbox. */
+	takeWhere(name: string, pred: (env: Envelope) => boolean): Envelope[] {
+		const box = this.inboxes.get(name);
+		if (!box || box.length === 0) return [];
+		const taken: Envelope[] = [];
+		const kept: Envelope[] = [];
+		for (const env of box) (pred(env) ? taken : kept).push(env);
+		this.inboxes.set(name, kept);
+		return taken;
+	}
+
 	/** Peek at a participant's inbox without draining it. */
 	pending(name: string): Envelope[] {
 		return [...(this.inboxes.get(name) ?? [])];

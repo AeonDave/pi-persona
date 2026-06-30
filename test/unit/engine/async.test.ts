@@ -90,6 +90,19 @@ test("onComplete fires when a run settles", async () => {
 	assert.deepEqual(completed, [id]);
 });
 
+test("a thunk that throws synchronously still settles the run as failed (onComplete fires)", async () => {
+	const tracker = new AsyncRunTracker();
+	const completed: string[] = [];
+	tracker.onComplete((r) => completed.push(r.id));
+	const id = tracker.launch({ agent: "a", task: "t" }, () => {
+		throw new Error("engine blew up before returning a promise");
+	});
+	await tick();
+	assert.deepEqual(completed, [id], "onComplete fires even on a synchronous thunk throw");
+	assert.equal(tracker.peek(id)?.status, "failed");
+	assert.match(tracker.peek(id)?.error ?? "", /engine blew up/);
+});
+
 test("a failing run is marked failed with its error", async () => {
 	const tracker = new AsyncRunTracker();
 	const id = tracker.launch({ agent: "a", task: "t" }, async () => ({
