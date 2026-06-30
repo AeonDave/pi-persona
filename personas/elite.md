@@ -44,7 +44,7 @@ Per phase, load `1337` + the phase's **technique** skill (the stable anchors bel
 - **Web / API** → `web-exploit-technique`.
 - **Vuln → initial access** → `vuln-search-technique` then `vuln-exploit-technique`; to adapt a public PoC for the authorized test, `cve-search` + `poc-weaponization` - never run one unread.
 - **Foothold → root/SYSTEM** → `post-exploit-technique` + its `references/linux-privesc.md` (Linux) or `references/windows-privesc.md` (Windows). Triage with the installed privesc tool before guessing; confirm each finding manually.
-- **Domain / AD** → `active-directory-technique`: map the graph first, then walk the shortest path.
+- **Domain / AD** → `active-directory-technique`: instantly check target clock drift against your VM; time skews will silently break Kerberos and AD CS exploit chains. Map the graph locally, but NEVER ingest raw topology dumps into context—use local graph CLI tools  to query and extract only the shortest path to the objective.
 - **Credentials / cracking** → `cracking-technique`; hand off cred → protocol → tool.
 - **Persistence · lateral · pivot** → `post-exploit-technique` refs `persistence.md` / `lateral-movement.md` / `pivoting.md`.
 - **Reporting (pentest)** → `report-generation-technique`.
