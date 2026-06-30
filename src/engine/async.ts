@@ -101,3 +101,111 @@ export function buildPeekDigest(runs: AsyncRun[]): string {
 	});
 	return [`Async runs: ${runs.length} (${running} running)`, ...lines].join("\n");
 }
+
+/**
+ * Build ONE consolidated supervisor notice for a batch of settled async runs. Coalescing a
+ * burst into a single message is what keeps completions from piling up as separate queued
+ * follow-ups (pi renders one sticky line per queued message); the explicit guidance keeps the
+ * supervisor from blindly re-issuing a delegation that just failed. `fence` wraps untrusted
+ * sub-agent text so the supervisor treats it as data, never as instructions.
+ */
+export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) => string): string {
+	const done = runs.filter((r) => r.status === "done");
+	const failed = runs.filter((r) => r.status === "failed");
+	// First line stays short and informative — pi's queued-message UI shows only this line, truncated.
+	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed`;
+	const blocks: string[] = [head];
+	for (const r of done) {
+		blocks.push(`\n✅ ${r.id} (${r.agent}) done:\n${fence(r.result?.output ?? "(no output)")}`);
+	}
+	if (failed.length > 0) {
+		const reasons = failed.map((r) => `• ${r.id} (${r.agent}): ${r.error ?? "(no detail)"}`).join("\n");
+		blocks.push(
+			`\n❌ ${failed.length} failed:\n${fence(reasons)}\n\n` +
+				"Handle each failure deliberately: retry ONCE with a different model or approach, or report it to the user. " +
+				"Do not re-issue the same failing delegation repeatedly.",
+		);
+	}
+	return blocks.join("\n");
+}
+
+export interface CompletionNotifierDeps {
+	/** Whether the supervisor is idle (not streaming a turn). */
+	isIdle: () => boolean;
+	/** Whether the supervisor already has queued messages waiting. */
+	hasPending: () => boolean;
+	/** Deliver the report (e.g. pi.sendUserMessage); may throw if it races a just-started turn. */
+	deliver: (report: string) => void;
+	/** Wrap untrusted sub-agent text as data. */
+	fence: (text: string) => string;
+	/** Schedule a callback; returns a handle. Injected so the clock is controllable in tests. */
+	setTimer: (fn: () => void, ms: number) => unknown;
+	/** Cancel a scheduled callback. */
+	clearTimer: (handle: unknown) => void;
+	/** Coalesce window for a burst of completions (default 150ms). */
+	debounceMs?: number;
+	/** Re-poll cadence while the supervisor is busy (default 400ms). */
+	retryMs?: number;
+}
+
+/**
+ * Coalesces settled async runs into a single supervisor notice, delivered ONLY while the
+ * supervisor is idle and unqueued. Rationale: pi drains its follow-up queue only from an active
+ * turn (one-at-a-time, and an errored/aborted turn skips the drain), so a follow-up injected
+ * mid-stream can strand as an orphaned "sticky" queued message. An idle delivery always starts a
+ * fresh turn, so the notice both reaches the supervisor (it can react — e.g. pick another model)
+ * and never piles up. Self-healing: while busy it re-arms; on a delivery race it requeues.
+ */
+export class CompletionNotifier {
+	private readonly deps: CompletionNotifierDeps;
+	private readonly pending: AsyncRun[] = [];
+	private handle: unknown;
+	private readonly debounceMs: number;
+	private readonly retryMs: number;
+
+	constructor(deps: CompletionNotifierDeps) {
+		this.deps = deps;
+		this.debounceMs = deps.debounceMs ?? 150;
+		this.retryMs = deps.retryMs ?? 400;
+	}
+
+	/** Buffer a settled run and arm a coalesced flush. */
+	notify(run: AsyncRun): void {
+		this.pending.push(run);
+		this.arm(this.debounceMs);
+	}
+
+	/** Cancel any armed flush (reload hygiene — never leak a timer across sessions). */
+	cancel(): void {
+		if (this.handle !== undefined) {
+			this.deps.clearTimer(this.handle);
+			this.handle = undefined;
+		}
+	}
+
+	private arm(ms: number): void {
+		if (this.handle !== undefined) return; // a flush is already pending; the new run rides it
+		this.handle = this.deps.setTimer(() => {
+			this.handle = undefined;
+			this.flush();
+		}, ms);
+	}
+
+	private flush(): void {
+		if (this.pending.length === 0) return;
+		// Only deliver to an idle, unqueued supervisor: an idle delivery always triggers a turn (so
+		// the notice can't strand) and we never inject into a streaming window (which is what left
+		// the orphaned sticky follow-ups). Otherwise wait and re-check.
+		if (!this.deps.isIdle() || this.deps.hasPending()) {
+			this.arm(this.retryMs);
+			return;
+		}
+		const batch = this.pending.splice(0, this.pending.length);
+		try {
+			this.deps.deliver(buildCompletionReport(batch, this.deps.fence));
+		} catch {
+			this.pending.unshift(...batch); // raced a just-started turn — retry when idle
+			this.arm(this.retryMs);
+		}
+	}
+}
