@@ -27,7 +27,7 @@ import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildPeekDigest } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildPeekDigest, CompletionNotifier } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
@@ -295,21 +295,34 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return msgs.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(msgs))}` : "";
 	};
 
-	// Async runs outlive the turn that launched them; on completion we surface the
-	// result back to the supervisor as a follow-up (which triggers a fresh turn).
+	// Async runs outlive the turn that launched them. On completion we surface the result(s) back
+	// to the supervisor as ONE coalesced notice, delivered only while the supervisor is idle so it
+	// always starts a fresh turn (it can then react — e.g. retry a failure with another model)
+	// instead of stranding as an orphaned "sticky" follow-up in pi's queue. See CompletionNotifier.
+	const notifier = new CompletionNotifier({
+		isIdle: () => lastCtx?.isIdle?.() === true,
+		hasPending: () => lastCtx?.hasPendingMessages?.() === true,
+		deliver: (report) => pi.sendUserMessage(report),
+		fence: fenceUntrusted,
+		setTimer: (fn, ms) => {
+			const h = setTimeout(fn, ms);
+			h.unref?.();
+			return h;
+		},
+		clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+	});
 	const tracker = new AsyncRunTracker();
 	tracker.onComplete((run) => {
 		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
-		try {
-			const body = run.status === "done" ? (run.result?.output ?? "(no output)") : `failed: ${run.error ?? "(no detail)"}`;
-			pi.sendUserMessage(`[pi-persona] async run ${run.id} (${run.agent}) ${run.status}:\n\n${fenceUntrusted(body)}`, {
-				deliverAs: "followUp",
-			});
-		} catch {
-			/* ignore */
+		// Immediate, human-facing feedback — independent of the supervisor's LLM turn.
+		if (run.status === "failed") {
+			lastCtx?.ui.notify(`async run ${run.id} (${run.agent}) failed: ${run.error ?? "(no detail)"}`, "error");
+		} else {
+			lastCtx?.ui.notify(`async run ${run.id} (${run.agent}) done`, "info");
 		}
+		notifier.notify(run); // coalesced, idle-gated delivery to the supervisor (no sticky pile-up)
 		if (tracker.running().length === 0) stopPeek(); // no live runs → stop the idle peek
 	});
 
@@ -737,6 +750,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		lastCtx = ctx;
 		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
+		notifier.cancel(); // …nor the coalesced-notice flush timer
 		host.setStatus(undefined);
 	});
 
