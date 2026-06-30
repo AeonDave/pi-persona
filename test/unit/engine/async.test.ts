@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCompletionReport, CompletionNotifier, buildPeekDigest } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCompletionReport, IdleCoalescingNotifier, buildPeekDigest } from "../../../src/engine/async.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
@@ -157,108 +157,108 @@ test("buildCompletionReport fences untrusted sub-agent text (output and reasons)
 	assert.match(report, /<F>.*run-2 \(op\): ERR.*<\/F>/s);
 });
 
-test("CompletionNotifier coalesces a burst into a single idle delivery", () => {
-	const clock = fakeClock();
-	const sent: string[] = [];
-	const n = new CompletionNotifier({
-		isIdle: () => true,
-		hasPending: () => false,
-		deliver: (r) => sent.push(r),
-		fence: (t) => t,
+/** A string-rendering notifier (render = join with "|") for exercising the generic mechanism. */
+function makeStrNotifier(
+	clock: ReturnType<typeof fakeClock>,
+	deps: { isIdle: () => boolean; hasPending?: () => boolean; deliver: (m: string) => void },
+): IdleCoalescingNotifier<string> {
+	return new IdleCoalescingNotifier<string>({
+		isIdle: deps.isIdle,
+		hasPending: deps.hasPending ?? (() => false),
+		deliver: deps.deliver,
+		render: (xs) => xs.join("|"),
 		setTimer: clock.setTimer,
 		clearTimer: clock.clearTimer,
 	});
-	n.notify(doneRun("run-1", "a", "x"));
-	n.notify(failedRun("run-2", "b", "boom"));
-	n.notify(doneRun("run-3", "c", "y"));
+}
+
+test("IdleCoalescingNotifier coalesces a burst into a single idle delivery", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	n.notify("a");
+	n.notify("b");
+	n.notify("c");
 	assert.equal(clock.armed(), 1, "a burst arms exactly one (debounced) flush");
 	clock.tick();
-	assert.equal(sent.length, 1, "the whole burst is delivered as one message");
-	assert.match(sent[0] ?? "", /3 async runs settled — 2 done, 1 failed/);
+	assert.deepEqual(sent, ["a|b|c"], "the whole burst is rendered and delivered once");
 });
 
-test("CompletionNotifier defers while the supervisor is busy, then delivers when idle", () => {
+test("IdleCoalescingNotifier defers while the supervisor is busy, then delivers when idle", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
 	let idle = false;
-	const n = new CompletionNotifier({
-		isIdle: () => idle,
-		hasPending: () => false,
-		deliver: (r) => sent.push(r),
-		fence: (t) => t,
-		setTimer: clock.setTimer,
-		clearTimer: clock.clearTimer,
-	});
-	n.notify(failedRun("run-1", "op", "boom"));
+	const n = makeStrNotifier(clock, { isIdle: () => idle, deliver: (m) => sent.push(m) });
+	n.notify("q");
 	clock.tick(); // busy → re-arms, delivers nothing
 	assert.equal(sent.length, 0);
 	assert.equal(clock.armed(), 1, "it keeps a retry armed while busy");
 	idle = true;
 	clock.tick();
-	assert.equal(sent.length, 1, "delivered once the supervisor goes idle");
+	assert.deepEqual(sent, ["q"], "delivered once the supervisor goes idle");
 });
 
-test("CompletionNotifier treats a queued supervisor as busy (avoids piling onto the queue)", () => {
+test("IdleCoalescingNotifier treats a queued supervisor as busy (avoids piling onto the queue)", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
 	let pending = true;
-	const n = new CompletionNotifier({
-		isIdle: () => true,
-		hasPending: () => pending,
-		deliver: (r) => sent.push(r),
-		fence: (t) => t,
-		setTimer: clock.setTimer,
-		clearTimer: clock.clearTimer,
-	});
-	n.notify(doneRun("run-1", "a", "x"));
+	const n = makeStrNotifier(clock, { isIdle: () => true, hasPending: () => pending, deliver: (m) => sent.push(m) });
+	n.notify("q");
 	clock.tick();
 	assert.equal(sent.length, 0, "does not deliver while messages are already queued");
 	pending = false;
 	clock.tick();
-	assert.equal(sent.length, 1);
+	assert.deepEqual(sent, ["q"]);
 });
 
-test("CompletionNotifier requeues and retries when a delivery races a just-started turn", () => {
+test("IdleCoalescingNotifier requeues and retries when a delivery races a just-started turn", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
 	let failNext = true;
-	const n = new CompletionNotifier({
+	const n = makeStrNotifier(clock, {
 		isIdle: () => true,
-		hasPending: () => false,
-		deliver: (r) => {
+		deliver: (m) => {
 			if (failNext) {
 				failNext = false;
 				throw new Error("Agent is already processing a prompt");
 			}
-			sent.push(r);
+			sent.push(m);
 		},
-		fence: (t) => t,
-		setTimer: clock.setTimer,
-		clearTimer: clock.clearTimer,
 	});
-	n.notify(failedRun("run-1", "op", "boom"));
+	n.notify("q");
 	clock.tick(); // deliver throws → requeue + re-arm
 	assert.equal(sent.length, 0);
 	assert.equal(clock.armed(), 1);
 	clock.tick(); // retry succeeds, nothing was lost
-	assert.equal(sent.length, 1);
-	assert.match(sent[0] ?? "", /run-1 \(op\): boom/);
+	assert.deepEqual(sent, ["q"]);
 });
 
-test("CompletionNotifier.cancel() drops the armed flush (reload hygiene)", () => {
+test("IdleCoalescingNotifier.cancel() drops the armed flush (reload hygiene)", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
-	const n = new CompletionNotifier({
-		isIdle: () => true,
-		hasPending: () => false,
-		deliver: (r) => sent.push(r),
-		fence: (t) => t,
-		setTimer: clock.setTimer,
-		clearTimer: clock.clearTimer,
-	});
-	n.notify(doneRun("run-1", "a", "x"));
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	n.notify("q");
 	n.cancel();
 	assert.equal(clock.armed(), 0, "the timer is cleared");
 	clock.tick();
 	assert.equal(sent.length, 0, "nothing is delivered after cancel");
+});
+
+test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	const n = new IdleCoalescingNotifier<AsyncRun>({
+		isIdle: () => true,
+		hasPending: () => false,
+		deliver: (m) => sent.push(m),
+		render: (runs) => buildCompletionReport(runs, (t) => t),
+		setTimer: clock.setTimer,
+		clearTimer: clock.clearTimer,
+	});
+	n.notify(doneRun("run-1", "scout", "ok"));
+	n.notify(failedRun("run-2", "operator", "boom"));
+	clock.tick();
+	assert.equal(sent.length, 1, "both settled runs arrive as one report");
+	assert.match(sent[0] ?? "", /2 async runs settled — 1 done, 1 failed/);
+	assert.match(sent[0] ?? "", /run-2 \(operator\): boom/);
 });

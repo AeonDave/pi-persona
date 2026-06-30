@@ -27,7 +27,7 @@ import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildPeekDigest, CompletionNotifier } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCompletionReport, buildPeekDigest, IdleCoalescingNotifier } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
@@ -295,21 +295,32 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return msgs.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(msgs))}` : "";
 	};
 
-	// Async runs outlive the turn that launched them. On completion we surface the result(s) back
-	// to the supervisor as ONE coalesced notice, delivered only while the supervisor is idle so it
-	// always starts a fresh turn (it can then react — e.g. retry a failure with another model)
-	// instead of stranding as an orphaned "sticky" follow-up in pi's queue. See CompletionNotifier.
-	const notifier = new CompletionNotifier({
+	// Shared "deliver to the supervisor only when it is idle" plumbing (see IdleCoalescingNotifier).
+	// Both async-run completions and a child's blocking intercom ask flow through it so they reach
+	// the supervisor as a fresh turn instead of stranding as orphaned "sticky" follow-ups in pi's
+	// queue (pi only drains that queue from an active turn, one-at-a-time, skipping errored turns).
+	const idleDelivery = {
 		isIdle: () => lastCtx?.isIdle?.() === true,
 		hasPending: () => lastCtx?.hasPendingMessages?.() === true,
-		deliver: (report) => pi.sendUserMessage(report),
-		fence: fenceUntrusted,
-		setTimer: (fn, ms) => {
+		deliver: (message: string) => pi.sendUserMessage(message),
+		setTimer: (fn: () => void, ms: number) => {
 			const h = setTimeout(fn, ms);
 			h.unref?.();
 			return h;
 		},
-		clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+		clearTimer: (h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>),
+	};
+	// Async runs outlive the turn that launched them; on completion we surface the result(s) back as
+	// ONE coalesced notice so the (idle) supervisor can react — e.g. retry a failure with another model.
+	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
+		...idleDelivery,
+		render: (runs) => buildCompletionReport(runs, fenceUntrusted),
+	});
+	// A child's blocking ask (decision/interview) — coalesced and idle-gated so it can't strand and
+	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
+	const intercomNotifier = new IdleCoalescingNotifier<string>({
+		...idleDelivery,
+		render: (asks) => asks.join("\n\n"),
 	});
 	const tracker = new AsyncRunTracker();
 	tracker.onComplete((run) => {
@@ -322,7 +333,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		} else {
 			lastCtx?.ui.notify(`async run ${run.id} (${run.agent}) done`, "info");
 		}
-		notifier.notify(run); // coalesced, idle-gated delivery to the supervisor (no sticky pile-up)
+		completionNotifier.notify(run); // coalesced, idle-gated delivery (no sticky pile-up)
 		if (tracker.running().length === 0) stopPeek(); // no live runs → stop the idle peek
 	});
 
@@ -330,14 +341,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// as a follow-up so the free (async) supervisor can answer it via the `intercom` tool.
 	bus.onMessage((env) => {
 		if (env.to !== SUPERVISOR || !env.expectsReply) return;
-		try {
-			pi.sendUserMessage(
-				`[pi-persona] sub-agent ${env.from} needs a ${env.kind}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${env.id}", message: "…" }`,
-				{ deliverAs: "followUp" },
-			);
-		} catch {
-			/* ignore */
-		}
+		// Idle-gated so the ask reaches the (free) supervisor as a turn it can answer via the
+		// intercom tool, rather than stranding mid-stream as a sticky follow-up.
+		intercomNotifier.notify(
+			`[pi-persona] sub-agent ${env.from} needs a ${env.kind}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${env.id}", message: "…" }`,
+		);
 	});
 
 	// Periodic peek (opt-in, off unless PI_PERSONA_PEEK_MS > 0): while async children run, the
@@ -358,11 +366,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 				stopPeek();
 				return;
 			}
+			// Only peek a free, unqueued supervisor: an idle delivery triggers a clean turn, while a
+			// busy one would pile up as a sticky follow-up. Skipping is safe — the next tick re-surfaces.
+			if (lastCtx?.isIdle?.() !== true || lastCtx?.hasPendingMessages?.() === true) return;
 			const unread = bus.take(SUPERVISOR);
 			try {
 				pi.sendUserMessage(
 					`[pi-persona] peek — ${buildPeekDigest(runs)}${unread.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}` : ""}`,
-					{ deliverAs: "followUp" },
 				);
 			} catch {
 				/* ignore */
@@ -750,7 +760,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		lastCtx = ctx;
 		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
-		notifier.cancel(); // …nor the coalesced-notice flush timer
+		completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
+		intercomNotifier.cancel();
 		host.setStatus(undefined);
 	});
 
