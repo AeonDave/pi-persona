@@ -34,6 +34,30 @@ test("take drains the inbox; pending peeks without draining", () => {
 	assert.equal(bus.take("a").length, 0, "take drained it");
 });
 
+test("takeWhere drains only matching messages, leaving the rest in the inbox", () => {
+	const bus = new InProcessBus();
+	bus.register("sup");
+	bus.send("child", "sup", "progress 1"); // expectsReply: false
+	void bus.ask("child", "sup", "decide?", { kind: "decision" }); // expectsReply: true
+	bus.send("child", "sup", "progress 2");
+	const progress = bus.takeWhere("sup", (e) => !e.expectsReply);
+	assert.deepEqual(
+		progress.map((e) => e.text),
+		["progress 1", "progress 2"],
+		"only the non-blocking messages are drained",
+	);
+	const left = bus.pending("sup");
+	assert.equal(left.length, 1, "the blocking ask is left in the inbox");
+	assert.equal(left[0]?.expectsReply, true);
+});
+
+test("takeWhere on an empty/absent inbox returns []", () => {
+	const bus = new InProcessBus();
+	bus.register("sup");
+	assert.deepEqual(bus.takeWhere("sup", () => true), []);
+	assert.deepEqual(bus.takeWhere("ghost", () => true), []);
+});
+
 test("ask blocks until the recipient replies to that message id, carrying its kind", async () => {
 	const bus = new InProcessBus();
 	bus.register("sup");
