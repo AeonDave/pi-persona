@@ -43,22 +43,35 @@ export class AsyncRunTracker {
 		};
 		this.runs.set(id, entry);
 
-		run((s) => {
-			entry.progress = s;
-		}, id)
-			.then((result) => {
-				entry.status = result.ok ? "done" : "failed";
-				entry.result = result;
-				if (!result.ok && result.error) entry.error = result.error;
-			})
-			.catch((err: unknown) => {
-				entry.status = "failed";
-				entry.error = err instanceof Error ? err.message : String(err);
-			})
-			.finally(() => {
-				this.prune();
-				for (const cb of this.completeListeners) cb(entry);
-			});
+		const settle = (): void => {
+			this.prune();
+			for (const cb of this.completeListeners) cb(entry);
+		};
+		// `Promise.resolve(run(...))` routes BOTH a returned rejection AND a SYNCHRONOUS throw from
+		// the thunk (e.g. the engine throwing before it returns its promise) through the same failure
+		// path, so onComplete always fires — otherwise the entry would be stuck "running" forever and
+		// its stop/steer handle would leak.
+		try {
+			Promise.resolve(
+				run((s) => {
+					entry.progress = s;
+				}, id),
+			)
+				.then((result) => {
+					entry.status = result.ok ? "done" : "failed";
+					entry.result = result;
+					if (!result.ok && result.error) entry.error = result.error;
+				})
+				.catch((err: unknown) => {
+					entry.status = "failed";
+					entry.error = err instanceof Error ? err.message : String(err);
+				})
+				.finally(settle);
+		} catch (err) {
+			entry.status = "failed";
+			entry.error = err instanceof Error ? err.message : String(err);
+			settle();
+		}
 
 		return id;
 	}

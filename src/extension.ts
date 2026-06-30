@@ -76,6 +76,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	if (config.disabled) return;
 
 	let lastCtx: ExtensionContext | undefined;
+	let disposed = false; // set on session_shutdown; gates late async-run callbacks of a torn-down instance
 	let orchestrating = false; // re-entrancy guard for the mandatory input hook
 	// A finished mandatory orchestration, injected (hidden) into the next turn's system prompt.
 	let pendingOrchestration: { label: string; output: string } | undefined;
@@ -93,6 +94,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (!fn) return false;
 		fn();
 		stopRegistry.delete(nodeId);
+		steerRegistry.delete(nodeId); // a hard-stopped agent is no longer steerable (mirror the strategy path)
 		return true;
 	}
 
@@ -104,7 +106,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 	function steerAgent(nodeId: string, text: string): boolean {
 		const fn = steerRegistry.get(nodeId);
 		if (!fn || !text.trim()) return false;
-		fn(text);
+		try {
+			fn(text);
+		} catch {
+			// the handle may point at a just-finished/disposed session — treat as "not steerable"
+			return false;
+		}
 		return true;
 	}
 
@@ -327,6 +334,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
+		if (disposed) return; // instance torn down — don't notify the next session or re-arm a cancelled timer
 		// Immediate, human-facing feedback — independent of the supervisor's LLM turn.
 		if (run.status === "failed") {
 			lastCtx?.ui.notify(`async run ${run.id} (${run.agent}) failed: ${run.error ?? "(no detail)"}`, "error");
@@ -340,7 +348,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// Event wake (default on): a child's BLOCKING question (decision/interview) surfaces at once
 	// as a follow-up so the free (async) supervisor can answer it via the `intercom` tool.
 	bus.onMessage((env) => {
-		if (env.to !== SUPERVISOR || !env.expectsReply) return;
+		if (disposed || env.to !== SUPERVISOR || !env.expectsReply) return;
 		// Idle-gated so the ask reaches the (free) supervisor as a turn it can answer via the
 		// intercom tool, rather than stranding mid-stream as a sticky follow-up.
 		intercomNotifier.notify(
@@ -369,7 +377,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// Only peek a free, unqueued supervisor: an idle delivery triggers a clean turn, while a
 			// busy one would pile up as a sticky follow-up. Skipping is safe — the next tick re-surfaces.
 			if (lastCtx?.isIdle?.() !== true || lastCtx?.hasPendingMessages?.() === true) return;
-			const unread = bus.take(SUPERVISOR);
+			// Drain only progress messages; blocking asks (expectsReply) are surfaced by the intercom
+			// notifier and left for the `intercom inbox` tool — so peek never double-shows them.
+			const unread = bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply);
 			try {
 				pi.sendUserMessage(
 					`[pi-persona] peek — ${buildPeekDigest(runs)}${unread.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}` : ""}`,
@@ -759,9 +769,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		lastCtx = ctx;
+		disposed = true; // gate any late async-run onComplete from touching the next session's instance
 		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
 		completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
 		intercomNotifier.cancel();
+		// This instance is being torn down (a reload/new/resume rebinds a fresh one); abort in-flight
+		// sub-agents and reset control state so nothing is left orphaned or rendered stale.
+		for (const abort of [...stopRegistry.values()]) {
+			try {
+				abort();
+			} catch {
+				/* ignore */
+			}
+		}
+		stopRegistry.clear();
+		steerRegistry.clear();
+		agentTree.clear();
 		host.setStatus(undefined);
 	});
 
@@ -1133,16 +1156,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 				if (!params.to || params.message === undefined) {
 					return { content: [{ type: "text", text: "intercom steer needs { to: <run id>, message }." }], details: { action: "steer", ok: false }, isError: true };
 				}
-				const steer = steerRegistry.get(`async:${params.to}`);
-				if (!steer) {
+				const nodeId = `async:${params.to}`;
+				if (!steerRegistry.has(nodeId)) {
 					return {
 						content: [{ type: "text", text: `Cannot steer "${params.to}" — no steerable in-process async run by that id (it may have finished; the child engine can't be steered).` }],
 						details: { action: "steer", ok: false },
 						isError: true,
 					};
 				}
-				steer(params.message);
-				return { content: [{ type: "text", text: `Steered ${params.to}: "${params.message}" (note: steer is a soft request — use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false };
+				// Routed through the guarded steerAgent so a just-finished/disposed handle can't throw.
+				const steered = steerAgent(nodeId, params.message);
+				return steered
+					? { content: [{ type: "text", text: `Steered ${params.to}: "${params.message}" (note: steer is a soft request — use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false }
+					: { content: [{ type: "text", text: `Could not steer "${params.to}" — it may have just finished, or the message was empty.` }], details: { action: "steer", ok: false }, isError: true };
 			}
 			if (params.action === "stop") {
 				if (!params.to) {
