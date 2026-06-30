@@ -129,49 +129,49 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 	return blocks.join("\n");
 }
 
-export interface CompletionNotifierDeps {
+export interface IdleNotifierDeps<T> {
 	/** Whether the supervisor is idle (not streaming a turn). */
 	isIdle: () => boolean;
 	/** Whether the supervisor already has queued messages waiting. */
 	hasPending: () => boolean;
-	/** Deliver the report (e.g. pi.sendUserMessage); may throw if it races a just-started turn. */
-	deliver: (report: string) => void;
-	/** Wrap untrusted sub-agent text as data. */
-	fence: (text: string) => string;
+	/** Deliver the coalesced message (e.g. pi.sendUserMessage); may throw if it races a turn. */
+	deliver: (message: string) => void;
+	/** Render a batch of buffered items into one message. */
+	render: (items: T[]) => string;
 	/** Schedule a callback; returns a handle. Injected so the clock is controllable in tests. */
 	setTimer: (fn: () => void, ms: number) => unknown;
 	/** Cancel a scheduled callback. */
 	clearTimer: (handle: unknown) => void;
-	/** Coalesce window for a burst of completions (default 150ms). */
+	/** Coalesce window for a burst of items (default 150ms). */
 	debounceMs?: number;
 	/** Re-poll cadence while the supervisor is busy (default 400ms). */
 	retryMs?: number;
 }
 
 /**
- * Coalesces settled async runs into a single supervisor notice, delivered ONLY while the
- * supervisor is idle and unqueued. Rationale: pi drains its follow-up queue only from an active
- * turn (one-at-a-time, and an errored/aborted turn skips the drain), so a follow-up injected
- * mid-stream can strand as an orphaned "sticky" queued message. An idle delivery always starts a
- * fresh turn, so the notice both reaches the supervisor (it can react — e.g. pick another model)
- * and never piles up. Self-healing: while busy it re-arms; on a delivery race it requeues.
+ * Coalesces items into a single supervisor message, delivered ONLY while the supervisor is idle
+ * and unqueued. Rationale: pi drains its follow-up queue only from an active turn (one-at-a-time,
+ * and an errored/aborted turn skips the drain), so a message injected mid-stream can strand as an
+ * orphaned "sticky" queued message. An idle delivery always starts a fresh turn, so the message
+ * both reaches the supervisor (it can react) and never piles up. Self-healing: while busy it
+ * re-arms; on a delivery race it requeues. Used for async-run completions and child intercom asks.
  */
-export class CompletionNotifier {
-	private readonly deps: CompletionNotifierDeps;
-	private readonly pending: AsyncRun[] = [];
+export class IdleCoalescingNotifier<T> {
+	private readonly deps: IdleNotifierDeps<T>;
+	private readonly pending: T[] = [];
 	private handle: unknown;
 	private readonly debounceMs: number;
 	private readonly retryMs: number;
 
-	constructor(deps: CompletionNotifierDeps) {
+	constructor(deps: IdleNotifierDeps<T>) {
 		this.deps = deps;
 		this.debounceMs = deps.debounceMs ?? 150;
 		this.retryMs = deps.retryMs ?? 400;
 	}
 
-	/** Buffer a settled run and arm a coalesced flush. */
-	notify(run: AsyncRun): void {
-		this.pending.push(run);
+	/** Buffer an item and arm a coalesced flush. */
+	notify(item: T): void {
+		this.pending.push(item);
 		this.arm(this.debounceMs);
 	}
 
@@ -184,7 +184,7 @@ export class CompletionNotifier {
 	}
 
 	private arm(ms: number): void {
-		if (this.handle !== undefined) return; // a flush is already pending; the new run rides it
+		if (this.handle !== undefined) return; // a flush is already pending; the new item rides it
 		this.handle = this.deps.setTimer(() => {
 			this.handle = undefined;
 			this.flush();
@@ -194,7 +194,7 @@ export class CompletionNotifier {
 	private flush(): void {
 		if (this.pending.length === 0) return;
 		// Only deliver to an idle, unqueued supervisor: an idle delivery always triggers a turn (so
-		// the notice can't strand) and we never inject into a streaming window (which is what left
+		// the message can't strand) and we never inject into a streaming window (which is what left
 		// the orphaned sticky follow-ups). Otherwise wait and re-check.
 		if (!this.deps.isIdle() || this.deps.hasPending()) {
 			this.arm(this.retryMs);
@@ -202,7 +202,7 @@ export class CompletionNotifier {
 		}
 		const batch = this.pending.splice(0, this.pending.length);
 		try {
-			this.deps.deliver(buildCompletionReport(batch, this.deps.fence));
+			this.deps.deliver(this.deps.render(batch));
 		} catch {
 			this.pending.unshift(...batch); // raced a just-started turn — retry when idle
 			this.arm(this.retryMs);
