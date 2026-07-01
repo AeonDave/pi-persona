@@ -35,3 +35,20 @@ no padding.
 - **Consolidate, then deliver:** merge the legs into `.research/<slug>/findings.md`, then report
   in chat: executive summary → key findings (with confidence) → analysis with inline citations →
   consensus/conflicts → gaps → the workspace path. Point to the folder for the full record.
+
+## Reading strategy for large data — never blow the context
+The workspace grows to megabytes; your context does not. Reading it all back is the failure mode.
+- **Synthesize from the returned reports, not the files.** Each leg's compact report is already
+  in your context — consolidate from those. Do NOT re-read `raw/` or `pages/`: that is worker
+  scratch, not for you. You almost never need to open a file you just had a worker write.
+- **Progressive disclosure:** if you must open the workspace, read the smallest artifact first —
+  `README.md` (the index), then the **top** of `findings.md`. Read head-first and **windowed**
+  (`read` with a small `limit`; continue with `offset` only if the head is insufficient). Never
+  whole-file a large document.
+- **Grep-first, then window:** to find a fact in a big file, `grep` it for the line numbers, then
+  `read` a tight window around the hit. Never read a file end-to-end just to search it.
+- **Isolate heavy reads (context quarantine):** if a large artifact genuinely must be analyzed,
+  delegate it to a fresh sub-agent that reads it and returns a digest — keep the raw tokens out of
+  your own window.
+- **Cap what you ingest:** one fact needs one quote, not a page. If a read starts dumping bulk,
+  stop, narrow with `grep`/`limit`, and pull only the decisive lines.

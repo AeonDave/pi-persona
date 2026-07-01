@@ -9,7 +9,7 @@ test("defaults apply when no env vars are set", () => {
 	assert.equal(c.keybinding, "f8");
 	assert.equal(c.persist, true);
 	assert.equal(c.delegateDefaultAllow, true);
-	assert.equal(c.seed, true);
+	assert.equal(c.seed, false); // auto-install is opt-in (PI_PERSONA_SEED=on); default off
 	assert.deepEqual(c.extraDirs, []);
 	assert.equal(c.defaultPersona, undefined);
 });
@@ -42,14 +42,14 @@ test("env flips keybinding, persist, delegate-default, seed, and default persona
 		PI_PERSONA_KEY: "alt+p",
 		PI_PERSONA_PERSIST: "off",
 		PI_PERSONA_DELEGATE_DEFAULT: "deny",
-		PI_PERSONA_SEED: "off",
+		PI_PERSONA_SEED: "on",
 		PI_PERSONA_DEFAULT: "magi",
 		PI_PERSONA_STATE_FILE: "/custom/state.json",
 	});
 	assert.equal(c.keybinding, "alt+p");
 	assert.equal(c.persist, false);
 	assert.equal(c.delegateDefaultAllow, false);
-	assert.equal(c.seed, false);
+	assert.equal(c.seed, true); // PI_PERSONA_SEED=on enables opt-in auto-install
 	assert.equal(c.defaultPersona, "magi");
 	assert.equal(c.stateFile, "/custom/state.json");
 });

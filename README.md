@@ -57,8 +57,10 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 
 ## Bundled personas, agents & teams
 
-All of these are seeded into `~/.pi/agent/` on first run so you can edit them or add your own
-(see [Keys & commands](#keys--commands)). Switch persona with **`f8`**.
+None of these are installed automatically. Run **`/persona restore`** (or `/persona seed`) once to
+copy them into `~/.pi/agent/` so you can edit them or add your own (see
+[Keys & commands](#keys--commands)) — a fresh install has no personas until you opt in. Switch
+persona with **`f8`**.
 
 **Personas** — the supervisor you become:
 
@@ -298,12 +300,14 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=off` (skip first-run seeding)
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (opt in to first-run auto-install; off by default)
 
-**Your copies win.** On first run the bundled personas/agents/teams/flows/contracts/presets are
-copied into `~/.pi/agent/` so you can **edit them and add your own** — the supervisor always runs
-your copies (they shadow the builtin). `/persona seed` pulls in any new defaults (non-destructive);
-`/persona restore` force-overwrites them back to the bundled originals.
+**Opt-in, and your copies win.** Personas/agents are **not installed automatically** — a fresh
+install shows none. Run `/persona seed` to copy the bundled defaults into `~/.pi/agent/` (or
+`/persona restore` to force-overwrite them back to the originals); the bundled dir is only the
+seed source, so nothing loads until you install it. Once installed you **edit them and add your
+own** — the supervisor runs your copies (project `.pi/agents` and your user dir; set
+`PI_PERSONA_SEED=on` if you want the first-run auto-install instead).
 
 ## Develop
 

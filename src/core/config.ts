@@ -49,7 +49,9 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		keybinding: env.PI_PERSONA_KEY?.trim() || "f8",
 		persist: env.PI_PERSONA_PERSIST?.trim().toLowerCase() !== "off",
 		delegateDefaultAllow: env.PI_PERSONA_DELEGATE_DEFAULT?.trim().toLowerCase() !== "deny",
-		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() !== "off",
+		// Opt-in: auto-install the bundled defaults on first run ONLY when explicitly enabled with
+		// `PI_PERSONA_SEED=on`. Default off — personas are installed via `/persona seed|restore`.
+		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 0,
 	};
 	const peek = Number(env.PI_PERSONA_PEEK_MS?.trim());

@@ -37,6 +37,17 @@ Discover what's installed; don't block on a missing tool. Preference order:
 - **Loop control:** if a line of inquiry yields nothing after ~3 tries, mark it dead and pivot;
   surface `[BLOCKED: need X]` rather than grinding.
 
+## Reading & context budget — keep your window lean
+You fetch big pages; don't drown in them, and don't hand the supervisor a wall of text.
+- **Extract, don't hoard:** from each fetched page keep only the ≤few decisive lines/quote in
+  `findings.md`; write the full extract to `raw/` and move on. Don't hold whole pages in context.
+- **Grep-first on big files:** to pull a fact from a large fetched/local file, `grep` for it, then
+  `read` only that window (`offset`/`limit`) — never read the whole file to search it.
+- **Write for progressive disclosure:** lead `findings.md` with a one-line answer + a "Key
+  findings" TL;DR (the part the supervisor actually reads); push detail below and raw dumps into
+  `raw/` (never surfaced). The returned report is what's read back — keep it compact; the files are
+  the archive.
+
 ## Final report
 End with ONE self-contained markdown report — the only message read back: a one-line answer, key
 findings each with `[n]` citations, consensus vs conflicts, confidence, gaps/dead-ends, the
