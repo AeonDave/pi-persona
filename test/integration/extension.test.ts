@@ -4,12 +4,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { fileURLToPath } from "node:url";
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
+import { seedDefaults } from "../../src/core/seed.ts";
 
-// Hermetic: point the "user" agent dir at an empty temp dir so the real
-// ~/.pi/agent/agents (seeded by other tools) cannot shadow the bundled assets.
+// Hermetic: point the "user" agent dir at an empty temp dir. pi-persona no longer auto-loads the
+// bundled personas/agents (the bundled dir is only a seed SOURCE), so seed this dir up front —
+// the equivalent of the user running `/persona restore` — to give the persona-dependent tests
+// their personas. The opt-in test below uses its own fresh dir to prove the empty-by-default case.
 process.env.PI_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-userdir-"));
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+seedDefaults(REPO_ROOT, process.env.PI_AGENT_DIR, true);
 // Hermetic by default: general tests must not persist/restore the last persona.
 // The persistence test re-enables it explicitly with its own state file.
 process.env.PI_PERSONA_PERSIST = "off";
@@ -111,7 +118,7 @@ test("/peek reports no async runs initially", async () => {
 	assert.match(notes.join("\n"), /No async runs/);
 });
 
-test("session_start loads the bundled personas and agents", async () => {
+test("session_start loads the installed (seeded) personas and agents", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
 	const { ctx, notes } = makeCtx(os.tmpdir());
@@ -122,6 +129,29 @@ test("session_start loads the bundled personas and agents", async () => {
 	assert.match(listing, /audit/);
 	assert.match(listing, /self-repair/);
 	assert.match(listing, /magi/);
+});
+
+test("opt-in: a fresh install loads NO personas until /persona restore installs them", async () => {
+	const fresh = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-fresh-"));
+	const prev = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi); // PI_PERSONA_SEED unset ⇒ no auto-install
+		const { ctx, notes } = makeCtx(os.tmpdir());
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "list", ctx);
+		assert.doesNotMatch(notes.join("\n"), /\bdev\b|\baudit\b|\bmagi\b/, "fresh install shows no personas");
+		notes.length = 0;
+		await m.cmd("persona", "restore", ctx); // explicit install
+		await m.cmd("persona", "list", ctx);
+		const listing = notes.join("\n");
+		assert.match(listing, /dev/);
+		assert.match(listing, /magi/);
+	} finally {
+		if (prev) process.env.PI_AGENT_DIR = prev;
+		else delete process.env.PI_AGENT_DIR;
+	}
 });
 
 test("the input hook leaves opportunistic personas (and no persona) to a normal turn", async () => {

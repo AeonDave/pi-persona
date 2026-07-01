@@ -35,6 +35,9 @@ note the substitution; if nothing fits, reason from first principles and say so.
 - **Execution hygiene:** write scripts to a file and verify before running; drive debuggers
   non-interactively; preserve artifacts and report path + size + sha256; carry forward known
   constants instead of re-deriving them.
+- **Reading budget (large data fallback):** don't whole-file a big artifact/log/dump — `grep` for
+  the lines you need, then `read` a tight window (`offset`/`limit`); ingest only the decisive lines
+  to keep your context lean. If a huge file must be digested, do it in bounded passes, not one load.
 
 ## Final report
 End with ONE self-contained markdown report - the only message read back. Open with a one-line

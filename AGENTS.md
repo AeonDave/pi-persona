@@ -56,9 +56,12 @@ no build step. Design specs (binding on any conflict, guardrails first):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
   persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),
   `teams.yaml`, `flows/*.flow.json`, `contracts/*.contract.json`, `presets/*.preset.json`.
-- First run copies the bundled assets into `~/.pi/agent/` (`src/core/seed.ts`, marker
-  `.pi-persona-seeded`) so the user's copies (which shadow builtin) are what runs; `/persona seed`
-  pulls new defaults, `/persona restore` force-restores originals. `PI_PERSONA_SEED=off` skips it.
+- Personas/agents load ONLY from the user dir (`~/.pi/agent/agents`) and project `.pi/agents` —
+  the bundled `personas/`+`agents/` are a **seed source, not a live discovery layer**, so a fresh
+  install shows NO personas until the user installs them. `/persona seed` copies missing defaults
+  in, `/persona restore` force-restores originals (`src/core/seed.ts`). First-run auto-install is
+  **opt-in**: off by default, enable with `PI_PERSONA_SEED=on` (guarded once by marker
+  `.pi-persona-seeded`). Contracts/presets/teams keep a builtin layer (they aren't personas).
 - `scripts/` — `drive.ts` (headless `pi -p` log), `control-test.mjs`, `flow-test.ts`. `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
