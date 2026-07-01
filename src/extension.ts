@@ -171,9 +171,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 	let personaConfigs: PersonaConfigStore = {};
 	const modelsPrompted = new Set<string>(); // ask-once-per-session guard
 
+	// Personas/agents load ONLY from the user dir (populated by `/persona seed|restore`) and the
+	// project `.pi/agents`. The bundled defaults are a *seed source*, NOT a live discovery layer,
+	// so a fresh install shows no personas until the user opts in — if you don't want them, or want
+	// only your own, they simply aren't there. (Contracts/presets/teams keep a builtin layer below:
+	// they aren't "personas" and are needed by strategies once personas are installed.)
 	const defDirs = (cwd: string): ScopedDir[] => [
-		{ path: join(BUNDLED_DIR, "personas"), scope: "builtin" },
-		{ path: join(BUNDLED_DIR, "agents"), scope: "builtin" },
 		{ path: join(userAgentDir(), "agents"), scope: "user" },
 		{ path: join(cwd, ".pi", "agents"), scope: "project" },
 		...config.extraDirs.map((p) => ({ path: p, scope: "env" })),
@@ -205,10 +208,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 		contractDefs = loadContracts(contractDirs(cwd));
 	}
 
-	// Copy the bundled defaults into the user's agent dir so they can be edited/extended and the
-	// supervisor runs the USER's copies (they shadow the builtin). A marker file makes first-run
-	// seeding happen once; `/persona seed` pulls in any new defaults, `/persona restore` force-
-	// overwrites them back to the originals. Best-effort — never block startup on a write error.
+	// Install the bundled defaults into the user's agent dir — this is the ONLY way personas/agents
+	// become active (they are not a live builtin layer). `/persona seed` pulls in missing defaults,
+	// `/persona restore` force-overwrites them back to the originals. First-run auto-install is
+	// OPT-IN (PI_PERSONA_SEED=on) and happens once (guarded by the marker); by default nothing is
+	// installed. Best-effort — never block startup on a write error.
 	const seedMarker = (): string => join(userAgentDir(), ".pi-persona-seeded");
 	function runSeed(force: boolean): SeedResult {
 		const result = seedDefaults(BUNDLED_DIR, userAgentDir(), force);
@@ -751,7 +755,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
-		// First run: copy the bundled defaults into the user dir (once), so they are editable.
+		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
+		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
 		if (config.seed && !existsSync(seedMarker())) {
 			const r = runSeed(false);
 			if (ctx.hasUI && r.copied.length > 0) {
