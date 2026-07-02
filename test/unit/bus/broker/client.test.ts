@@ -306,6 +306,33 @@ test("close during a pending register (connected, awaiting registered) rejects i
 	await assert.rejects(() => registerPromise, /closed/);
 });
 
+test("close during an in-flight initial connect rejects register() and destroys the dialing socket instead of completing the handshake", async () => {
+	// Unlike `fakeNet()`, capture the client-side socket directly so we can assert it was
+	// destroyed rather than left connected — this is the race from the review finding:
+	// `close()` runs while `connectOnce()`'s "connect" event is still only queued, i.e.
+	// BEFORE `register()` has assigned `socket` or `registerSettle`, so close()'s own
+	// teardown (lines ~296-311) has nothing to act on.
+	const [clientSocket, hostSide] = socketPair();
+	const host = wireHost(hostSide);
+	const net = {
+		connect: (_path: string) => {
+			queueMicrotask(() => clientSocket.emit("connect"));
+			return clientSocket as unknown as import("node:net").Socket;
+		},
+	} as unknown as typeof import("node:net");
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+
+	const registerPromise = client.register();
+	client.close(); // synchronous — runs before the queued "connect" microtask fires
+
+	await assert.rejects(() => registerPromise, /closed/);
+	// Give the queued "connect" (and, if the bug were present, the subsequent
+	// register/registered handshake) a chance to play out.
+	await new Promise((r) => setTimeout(r, 5));
+	assert.equal(clientSocket.destroyed, true, "the dialing socket must be destroyed, not leaked live");
+	assert.ok(!host.frames.some((f) => f.t === "register"), "must not complete a register handshake on a closed client");
+});
+
 test("close is idempotent and rejects still-pending asks", async () => {
 	const { client } = await connectedClient();
 	const askPromise = client.ask("supervisor", "decision", "?");

@@ -193,6 +193,10 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 
 	async function register(): Promise<void> {
 		const s = await connectWithBackoff();
+		if (closed) {
+			s.destroy();
+			throw new Error("broker client closed");
+		}
 		socket = s;
 		s.on(
 			"data",
