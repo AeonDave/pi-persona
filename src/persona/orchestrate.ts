@@ -5,7 +5,7 @@
  */
 
 import type { RunLimits } from "../core/capabilities.ts";
-import { makeRoster } from "../orchestration/roster.ts";
+import { makeRoster, type RosterMember } from "../orchestration/roster.ts";
 import {
 	type AgentProgress,
 	type AgentStatus,
@@ -29,18 +29,19 @@ export function resolveStrategyName(orch: OrchestrationGrammar): string | undefi
 
 export interface RunStrategyDeps {
 	engine: StrategyEngine;
-	teams: Record<string, string[]>;
+	teams: Record<string, RosterMember[]>;
 	limits: RunLimits;
 	signal?: AbortSignal;
 	log?: (message: string) => void;
-	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result). */
-	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
+	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result).
+	 *  `key` is a run-unique display id (disambiguates same-agent roster-role members). */
+	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult, key?: string) => void;
 	/** Per-agent streaming progress (rolling output), for live UI. */
-	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
+	onAgentProgress?: (agent: string, progress: AgentProgress, key?: string) => void;
 	/** Called as each agent starts with a handle to abort just that agent (UI stop). */
-	onAgentStart?: (agent: string, abort: () => void) => void;
+	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
-	onAgentSteerable?: (agent: string, steer: SteerFn) => void;
+	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
 }
 
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */

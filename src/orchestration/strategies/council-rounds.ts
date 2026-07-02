@@ -11,6 +11,7 @@
 
 import { sumUsage } from "../reducers.ts";
 import { dissentLine, readableRuling } from "../render.ts";
+import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 import type { ReducerResult } from "../voting.ts";
@@ -55,7 +56,7 @@ export const councilRounds: Strategy = {
 					? input.task
 					: `${input.task}\n\n--- round ${round - 1} debate ---\n${debate}\n\nReconsider in light of the above and cast your vote again.`;
 			const candidates = await sdk.parallel(
-				team.map((agent) => () => sdk.agent({ agent, task, outputContract: "default" })),
+				team.map((m) => () => sdk.agent({ ...rosterSpec(m), task, outputContract: "default" })),
 			);
 			usages.push(...candidates.map((c) => c.usage));
 			const lastRound = round === maxRounds;

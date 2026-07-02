@@ -127,7 +127,7 @@ test("session_start loads the installed (seeded) personas and agents", async () 
 	const listing = notes.join("\n");
 	assert.match(listing, /dev/);
 	assert.match(listing, /audit/);
-	assert.match(listing, /self-repair/);
+	assert.match(listing, /verify/);
 	assert.match(listing, /magi/);
 });
 

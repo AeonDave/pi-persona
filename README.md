@@ -1,33 +1,49 @@
 # pi-persona
 
-A [Pi](https://github.com/earendil-works/pi) extension that turns the coding agent into a
-**supervisor of specialized sub-agents**. You pick a **persona** — a supervisor identity that
-decides *how* the agent works — and it delegates, fans out, deliberates, or executes accordingly.
+An **advanced multi-agent orchestration layer** for the [Pi](https://github.com/earendil-works/pi)
+coding agent. It turns one agent into a **supervisor** that runs specialized sub-agents —
+**synchronously or in the background**, one at a time or fanned out in parallel — coordinates them
+with a library of **composable strategies** (vote, judge, critic-loop, map, synthesize, DAG flows),
+and lets you **watch, steer, stop, and message** them while they work. Sub-agents are specialized
+**dynamically** (skills + an on-the-fly role + model + tools), so new behaviors need no new files.
+
+A **persona** is the top layer: a switchable *modus operandi* that wires all of the above into a
+coherent way of working — from "delegate opportunistically" to a mandatory deliberating council.
+Everything under it is data (Markdown + `teams.yaml` + small strategy files), so you customize the
+whole system without touching the core.
+
+> **The bundled personas are opt-in.** A fresh install ships **no** personas — run **`/persona seed`**
+> (or `/persona restore`) once to install the defaults into `~/.pi/agent/`, then edit them or add
+> your own. See [Bundled personas](#bundled-personas-agents--teams).
 
 ## What it does
 
-- **Personas** — switch with **`f8`** or `/persona`. A persona is a system prompt plus a way of
-  working: from opportunistic "delegate when it helps" to a mandatory multi-agent strategy to a
-  deliberating **council** the supervisor consults before acting.
-- **Sub-agents** — real, isolated `pi` runs, each shown by a friendly `name · model` (e.g.
-  "pippo · sonnet-4-6"). The supervisor delegates one, or fans out many in parallel, each with its
-  own model, skills, and tool allowlist. A generic `operator` becomes a specialist from the skills
-  it loads — or from an on-the-fly `role` (an extra system prompt written at delegation time), so
-  a new specialist needs no file.
-- **Strategies** — orchestration defined in small files over a Strategy SDK: parallel **fan-out**,
-  a sequential **pipeline** (chain / debate), a **map** (per-item fan-out over a runtime list), a
-  generator↔critic **loop**, an ensemble **vote** (`magi`) / **multi-round council** (`council-rounds`),
-  an impartial **judge**, and a gather→merge **synthesize**.
-- **Flows** — a declarative **DAG over strategies** in a `*.flow.json` file: each phase runs a
-  strategy over a roster, wired by `needs`; independent phases fan out in parallel and each
-  phase's output feeds its dependents. Pinned by hash and **journaled** so an interrupted flow
-  **resumes** where it left off. Run with `/flow <name> <task>`.
-- **Live view** — one **agent tree** sticks above the input and shows every sub-agent (strategy
-  cores, delegate legs, background runs) as it runs. **`f9`** (or `/agents`) opens a near-fullscreen,
-  navigable overlay — ↑↓ to move, ⏎ to drill into an agent and read its **full chronological log**
-  (reasoning, `⚙ tool` calls, and answers accumulate — nothing is overwritten), **`x` to stop** one,
-  and **`s` to steer** a running in-process sub-agent (from the list or the detail view — inject a
-  redirect mid-run). Cores waiting on the concurrency limit show as `queued`.
+- **Sub-agents, sync or async.** Delegate one, or fan out many in parallel — each an isolated `pi`
+  run with its own model, skills, tools, and optional **git-worktree isolation**, shown by a
+  friendly `name · model`. Run **synchronously** (block for the result) or **`async: true`** (in the
+  background so you keep working); collect async results with `/peek` or `intercom wait` (a join).
+- **Live supervision.** While sub-agents run: **peek** their progress, **steer** one mid-run (inject
+  a redirect), **stop** (hard-abort), and — with a `coaching` persona — a two-way **message bus**
+  where a child asks you a blocking `decision` via `contact_supervisor` and you `reply`. All bounded
+  by hard limits (timeout, token budget, concurrency, max children) with cooperative abort.
+- **Composable strategies.** Orchestration lives in small files over a Strategy SDK: parallel
+  **fan-out**, a sequential **pipeline** (chain/debate), a **map** (per-item fan-out over a runtime
+  list), a generator↔critic **loop**, an ensemble **vote** (`magi`, with a reflection round) /
+  **multi-round council**, an impartial **judge**, and a gather→merge **synthesize**. Adding one is
+  a new file — no core change.
+- **Dynamic specialization — no file per specialist.** A generic `operator` becomes a specialist
+  from the **skills** it loads plus an on-the-fly **`role`** (extra system prompt at delegation
+  time). A **team roster** can even specialise ONE agent into several perspectives inline
+  (`{ agent, role, model }`) — e.g. one `reviewer` run as three lens-focused passes.
+- **Flows.** A declarative **DAG over strategies** (`*.flow.json`): phases wired by `needs`,
+  independent ones fanning out in parallel, each feeding its dependents. Pinned by hash and
+  **journaled**, so an interrupted flow **resumes**; a phase `gate: true` pauses for your approval.
+- **Personas.** Switch with **`f8`** or `/persona` — the *modus operandi* layer: opportunistic
+  delegation, a mandatory multi-agent strategy, or a deliberating **council** consulted before acting.
+- **Live view.** One **agent tree** sticks above the input showing every sub-agent (strategy cores,
+  delegate legs, background runs). **`f9`** (or `/agents`) opens a near-fullscreen overlay — ↑↓ to
+  move, ⏎ to read an agent's **full chronological log** (reasoning, `⚙ tool` calls, answers
+  accumulate — nothing overwritten), **`x`** to stop, **`s`** to steer. Queued cores show as `queued`.
 
 ## How it works
 
@@ -68,42 +84,44 @@ persona with **`f8`**.
 
 | Persona | What it's for |
 |---|---|
-| `elite` | Offensive-security player-coach — lead operator for pentest / red-team / lab-CTF; loads the right attack skill per kill-chain phase, owns tunnels/pivots/shells, delegates heavy/parallel/long work. |
+| `elite` | Security player-coach — lead operator for pentest / red-team / lab-CTF; loads the right technique skill per engagement phase, owns tunnels/pivots/shells, delegates heavy/parallel/long work. |
 | `dev` | Software engineer **and** reviewer — tests-first flow, loads the right coding skills, reviews its own/others' changes with cited `file:line` evidence, delegates large/parallel work. |
 | `researcher` | Deep-research supervisor — fans one deep-dive agent out per sub-question, follows links recursively, consolidates sourced findings into a `.research/<topic>/` folder. |
 | `planner` | Planning-first orchestrator — decomposes goals into bounded, verifiable steps and writes plan/design/architecture docs; never edits code, hands implementation to `dev` and investigation to `researcher`. |
-| `magi` | MAGI triarchy — three deliberately-biased cores vote → ruling + tally + recorded dissent. |
-| `audit` | Parallel audit council — security + performance + tests fan out on different models, findings aggregated. |
-| `judge` | A panel answers independently; an impartial, anonymised arbiter picks the single best. |
-| `self-repair` | Generate↔verify loop — a `verifier` *runs* the build/tests and approves only on green. |
+| `magi` | MAGI triarchy — three deliberately-biased cores vote → ruling + tally + recorded dissent, with one anonymised **reflection** round so a core can catch a blind spot without groupthink. |
+| `audit` | Parallel audit council — one `reviewer` runs three lens-focused passes (security · performance · tests), then a `reviewer` **merges** them into one de-duplicated verdict (`synthesize`). |
+| `judge` | The three MAGI cores each argue a distinct complete position; an impartial, anonymised arbiter (`reviewer`) picks the single most convincing. |
+| `swarm` | Batch/sweep — auto-decomposes a "same operation across N items" task, runs one worker per item in parallel, consolidates (`map`). |
+| `verify` | Verify-to-passing loop — an `operator` changes the code, the `verifier` agent *runs* the build/tests and approves only when they pass, looping until the checks actually pass. |
 
 **Agents** — the workers a supervisor delegates to:
 
 | Agent | Role | Tools |
 |---|---|---|
-| `operator` | Generic executor — becomes a specialist from the skills it's told to load | all |
+| `operator` | Generic executor — becomes a specialist from the skills it loads; edits in place or returns an artifact, per its granted tools | all |
 | `scout` | Read-only explorer — gathers context, reports answer-first with evidence | read/grep/find/ls |
 | `research` | Deep-dive research worker — recursive link-following over the best available fetch tools, writes cited findings to `.research/` | no `edit` (web/fetch/write) |
-| `code-reviewer` | Correctness/clarity reviewer (and the `judge` arbiter) | read/grep/find |
-| `security` · `performance` · `tests` | Review workers — one lens each (vulns · hot-path cost · coverage) | read/grep/find |
-| `builder` | Generator in the critic-loop — first solution, then precise revisions | read/grep/find |
+| `reviewer` | One senior reviewer, parameterised by focus — correctness/security/performance/tests, full-spectrum or a single lens (also the `judge` arbiter) | read/grep/find |
 | `verifier` | Runs the project's build/tests; approves only when they pass green | read/bash |
 | `melchior` · `balthasar` · `casper` | The MAGI cores — Propulsore · Conservatore · Catalizzatore | read/grep/find |
 
-**Teams** (`teams.yaml`) — named rosters a strategy runs over:
+**Teams** (`teams.yaml`) — named rosters a strategy runs over. A member is a bare agent name **or**
+an inline `{ agent, role, model, skills }` map that specialises one agent (so `review` is one
+`reviewer` with three lens roles, not three files):
 
 | Team | Members | Used by |
 |---|---|---|
-| `review` | security, performance, tests | the `audit` council, the `judge` panel |
-| `repair` | builder, verifier | `self-repair` |
-| `magi` | melchior, balthasar, casper | `magi` |
+| `review` | `reviewer` × 3 lenses (security · performance · tests) | the `audit` council (synthesised) |
+| `repair` | operator, verifier | `verify` |
+| `magi` | melchior, balthasar, casper | `magi` (self-vote) and `judge` (arbiter picks) |
+| `swarm` | scout (splitter), operator (worker) | `swarm` (map) |
 
 ## Building blocks — the core API
 
 Everything above is composed from a small, fixed set of primitives. A **strategy** is just a
 TypeScript file composing the **Strategy SDK**; a **persona** picks whether and how those run.
 `magi` is nothing more than a `.md` persona + a file that calls `parallel` + `reduce.vote` — and
-`judge`, `self-repair`, `map`, … would be exactly the same: new *files* on this API, **no new
+`judge`, `verify`, `map`, … would be exactly the same: new *files* on this API, **no new
 core needed**.
 
 **Strategy SDK** — what a strategy file composes (`src/orchestration/sdk.ts`):
@@ -141,14 +159,14 @@ core needed**.
 | `pipeline` | series / chain — each agent builds on the previous one's output |
 | `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated |
 | `critic-loop` | generator → critic → revise, until the critic stops rejecting |
-| `magi` | parallel panel → **self-vote** → ruling + tally + dissent |
+| `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure independent poll) |
 | `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) |
 | `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) |
 | `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) |
 
 **Where a new shape lives** (core vs file vs config — nothing hidden):
 - `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
-- `self-repair` → **persona config**: it's `critic-loop` whose critic is a **`verifier` agent** that *runs* the build/tests (`personas/self-repair.md` + `agents/verifier.md`, team `repair: [builder, verifier]`). Ground truth gates acceptance, not an opinion.
+- `verify` → **persona config**: it's `critic-loop` whose critic is a **`verifier` agent** that *runs* the build/tests (`personas/verify.md` + `agents/verifier.md`, team `repair: [operator, verifier]`). Ground truth gates acceptance, not an opinion.
 - a **chain/debate** persona → just point a persona's `council` at the `pipeline` strategy over a roster (the cores build on each other instead of voting in parallel) — no code.
 
 Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper) — everything else is a file or persona on top of it.
@@ -209,21 +227,26 @@ You research thoroughly. For independent sub-questions, fan out `scout` sub-agen
 ```
 
 **2 · A review council** — convene biased cores in parallel through the `council` tool, then act
-on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `self-repair`) or
+on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `verify`) or
 `council-rounds` (multi-round vote) without touching code.
 
 ```yaml
-# teams.yaml
-review: [security, performance, tests]
+# teams.yaml — one `reviewer` agent, three lens roles (a member can specialise one agent inline)
+review:
+  - { agent: reviewer, role: "Focus ONLY on the SECURITY lens" }
+  - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens" }
+  - { agent: reviewer, role: "Focus ONLY on the TESTS lens" }
 ```
 ```markdown
 <!-- personas/myaudit.md  (the bundled `audit` persona is exactly this shape) -->
 ---
 name: myaudit
 persona: true
-council: { strategy: fanout, roster: review }
+# three lens-focused reviewer passes in parallel, then one synthesiser merges them into a
+# single de-duplicated verdict (fanout would only concatenate).
+council: { strategy: synthesize, roster: review, params: { synthesizer: reviewer } }
 ---
-Convene the council before sign-off, then apply its findings yourself.
+Convene the council before sign-off, then apply its merged findings yourself.
 ```
 
 **3 · Coaching** — talk to sub-agents *while they run*. The bundled delegating supervisors
@@ -250,9 +273,9 @@ approval before dependents run. Journaled, so an interrupted run resumes. Run `/
 {
   "name": "gated-build",
   "phases": [
-    { "id": "plan",   "strategy": "magi",     "roster": "magi",   "gate": true },
-    { "id": "build",  "strategy": "pipeline", "roster": "repair", "needs": ["plan"] },
-    { "id": "verify", "strategy": "fanout",   "roster": "review", "needs": ["build"] }
+    { "id": "plan",   "strategy": "magi",        "roster": "magi",   "gate": true },
+    { "id": "build",  "strategy": "critic-loop", "roster": "repair", "needs": ["plan"] },
+    { "id": "verify", "strategy": "fanout",      "roster": "review", "needs": ["build"] }
   ]
 }
 ```
@@ -261,8 +284,8 @@ approval before dependents run. Journaled, so an interrupted run resumes. Run `/
 strategy requests it by name via `outputContract`, and it's pinned per run.
 
 ```json
-// contracts/review-verdict.contract.json
-{ "name": "review-verdict",
+// contracts/ship-verdict.contract.json
+{ "name": "ship-verdict",
   "fields": {
     "vote":       { "type": "string", "required": true },
     "severity":   { "type": "enum",   "values": ["low", "medium", "high", "critical"] },

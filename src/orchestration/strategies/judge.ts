@@ -6,10 +6,16 @@
  * position can't sway the pick. Built entirely on the SDK — no new engine surface.
  *
  * roster  = the panel (the candidate generators)
- * params  = { judge: "<agent>" }  — the arbiter agent (separate from the panel)
+ * params  = { judge: "<agent>", contract?: "<name>" }
+ *   - judge:    the arbiter agent (separate from the panel)
+ *   - contract: optional — run the panel against this contract so its members emit
+ *     structured positions; the ballot then shows the readable field, not a raw JSON
+ *     blob. Lets voting cores (e.g. the MAGI triad) double as a judge panel cleanly.
+ *     Omit it for a prose panel (candidates shown verbatim, as before).
  */
 
 import { sumUsage } from "../reducers.ts";
+import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 
@@ -30,15 +36,31 @@ export const judge: Strategy = {
 		if (panel.length === 0) throw new Error("judge: a non-empty roster (the panel) is required");
 		const arbiter = typeof input.params.judge === "string" ? input.params.judge : undefined;
 		if (!arbiter) throw new Error("judge: params.judge (the arbiter agent) is required");
-		sdk.log(`judge: ${panel.length} candidates → arbiter ${arbiter}`);
+		const contract = typeof input.params.contract === "string" && input.params.contract.trim() ? input.params.contract.trim() : undefined;
+		sdk.log(`judge: ${panel.length} candidates → arbiter ${arbiter}${contract ? ` (contract ${contract})` : ""}`);
 
-		const candidates = await sdk.parallel(panel.map((agent) => () => sdk.agent({ agent, task: input.task })));
+		const candidates = await sdk.parallel(
+			panel.map((m) => () => sdk.agent({ ...rosterSpec(m), task: input.task, ...(contract ? { outputContract: contract } : {}) })),
+		);
 		const valid = candidates.filter((c) => c.ok && c.output.trim());
 		if (valid.length === 0) {
 			return { agent: "judge", output: "(no valid candidates to judge)", usage: sumUsage(candidates.map((c) => c.usage)), ok: false };
 		}
 
-		const prep = sdk.reduce.judge(valid, shuffleOrder(valid.length));
+		// The text a judge should read for each candidate: the structured position when a
+		// contract produced one (a JSON-emitting core), else the raw answer. `pick` returns
+		// the same display object, so the winning `output` is the readable text, not JSON.
+		const readable = (c: AgentResult): string => {
+			const s = c.structured;
+			if (s) {
+				if (typeof s.output === "string" && s.output.trim()) return s.output.trim();
+				if (typeof s.result === "string" && s.result.trim()) return s.result.trim();
+			}
+			return c.output.trim();
+		};
+		const display = valid.map((c) => ({ ...c, output: readable(c) }));
+
+		const prep = sdk.reduce.judge(display, shuffleOrder(display.length));
 		const verdict = await sdk.agent({
 			agent: arbiter,
 			task: `Judge these options for the task and pick the single best one. Be impartial — the options are anonymised.\n\nTask: ${input.task}\n\nOptions:\n${prep.ballot}\n\nReturn JSON ONLY: {"vote":"<the letter of your pick>","result":"<one-line verdict>","output":"<why it wins over the others>"}`,

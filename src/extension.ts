@@ -25,6 +25,7 @@ import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import { seedDefaults, type SeedResult } from "./core/seed.ts";
 import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
+import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
 import { type AsyncRun, AsyncRunTracker, buildCompletionReport, buildPeekDigest, IdleCoalescingNotifier } from "./engine/async.ts";
@@ -35,6 +36,7 @@ import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
 import { journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
 import { Semaphore } from "./orchestration/parallel.ts";
+import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
 import type { AgentProgress, AgentRunSpec, AgentStatus, SteerFn, StrategyEngine } from "./orchestration/sdk.ts";
 import type { AgentResult } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
@@ -158,7 +160,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	}
 	let personas: Persona[] = [];
 	let agents: AgentConfig[] = [];
-	let teams: Record<string, string[]> = {};
+	let teams: Record<string, RosterMember[]> = {};
 	let contractDefs: Record<string, ContractDef> = {};
 	let shadowed: Array<{ name: string; scope: string; path: string }> = [];
 
@@ -450,9 +452,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 		// Worktree isolation: an agent/leg marked `isolation: worktree` runs in a throwaway git
 		// worktree via the child engine (its edits never touch the main tree), regardless of the
 		// default backend. No repo / not requested ⇒ the base engine, unchanged.
+		// Provider fallback (outermost): a run whose model PROVIDER fails at call time (auth,
+		// outage, 5xx, model-not-supported) is retried on the same model id under another
+		// authenticated provider — "priority to the supervisor's provider, but try others and
+		// switch on error". No ctx (no registry) ⇒ pass through. Each attempt still runs through
+		// worktree isolation + steering below.
+		const wrapFallback = (eng: StrategyEngine): StrategyEngine => {
+			if (!lastCtx) return eng;
+			const prefer = lastCtx.model?.provider;
+			return withModelFallback(eng, { models: configuredModels(lastCtx), ...(prefer ? { preferProvider: prefer } : {}) });
+		};
 		const root = lastCtx?.cwd;
-		if (!root) return base;
-		return {
+		if (!root) return wrapFallback(base);
+		return wrapFallback({
 			async run(spec, perProgress, perSignal, perSteer) {
 				const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
 				if (iso === "worktree" && isGitRepo(root)) {
@@ -466,7 +478,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				}
 				return base.run(spec, perProgress, perSignal, perSteer);
 			},
-		};
+		});
 	}
 
 	// The models the user actually has configured (authenticated) — NOT every model in
@@ -489,12 +501,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// Ask-on-first-run: a parallel ensemble is pointless if every core runs the same
 	// model. The first time a persona runs one, prompt for a model per roster agent and
 	// persist it (per-persona config); later runs reuse the saved assignment.
-	async function ensurePersonaModels(ctx: ExtensionContext, roster: string[]): Promise<void> {
+	async function ensurePersonaModels(ctx: ExtensionContext, roster: RosterMember[]): Promise<void> {
 		const persona = controller.activePersona?.name;
-		if (!persona || !ctx.hasUI || roster.length < 2) return;
+		if (!persona || !ctx.hasUI) return;
+		// A member that carries its own inline model needs no picked one; dedupe by agent name.
+		const pickable = [...new Set(roster.map((m) => rosterSpec(m)).filter((s) => !s.model).map((s) => s.agent))];
+		if (pickable.length < 2) return; // an ensemble of one distinct core can't be diversified
 		if (modelsPrompted.has(persona)) return;
 		const configured = personaConfigs[persona]?.models ?? {};
-		const missing = roster.filter((a) => !configured[a]);
+		const missing = pickable.filter((a) => !configured[a]);
 		if (missing.length === 0) return;
 		modelsPrompted.add(persona);
 		const available = configuredModels(ctx);
@@ -528,13 +543,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 	}
 
 	// Each core's model beside its name: per-persona assignment → agent default → session.
-	function coreLabel(ctx: ExtensionContext, agent: string): string {
+	function coreLabel(ctx: ExtensionContext, agent: string, key: string = agent): string {
 		const persona = controller.activePersona?.name;
 		const configured = persona ? personaModels(personaConfigs, persona) : {};
 		const model =
 			configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
 		const short = shortModel(model);
-		return short ? `${agent} · ${short}` : agent;
+		// `key` is the disambiguated node id (`agent` for a solo member, `agent · HINT` for a
+		// roster-role one) — display that + the model, so three `reviewer` lenses read distinctly.
+		return short ? `${key} · ${short}` : key;
 	}
 
 	// The SDK lifecycle callbacks that drive the unified tree for one strategy run rooted at
@@ -542,17 +559,18 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// cores, flips ⏳ → ✓/✗ with usage, streams progress, and registers stop/steer handles.
 	function strategyTreeDeps(ctx: ExtensionContext, rootId: string) {
 		return {
-			onAgentStart: (agent: string, abort: () => void) => {
-				stopRegistry.set(`${rootId}/${agent}`, abort);
+			onAgentStart: (agent: string, abort: () => void, key?: string) => {
+				stopRegistry.set(`${rootId}/${key ?? agent}`, abort);
 			},
-			onAgentSteerable: (agent: string, steer: SteerFn) => {
-				steerRegistry.set(`${rootId}/${agent}`, steer);
+			onAgentSteerable: (agent: string, steer: SteerFn, key?: string) => {
+				steerRegistry.set(`${rootId}/${key ?? agent}`, steer);
 			},
-			onAgentStatus: (agent: string, st: AgentStatus, result?: AgentResult) => {
-				const id = `${rootId}/${agent}`;
+			onAgentStatus: (agent: string, st: AgentStatus, result?: AgentResult, key?: string) => {
+				const nodeKey = key ?? agent;
+				const id = `${rootId}/${nodeKey}`;
 				if (st === "running") {
 					// detail "" clears the seeded "queued" marker — this core is actually live now.
-					agentTree.add({ id, label: coreLabel(ctx, agent), parentId: rootId, status: "running", detail: "" });
+					agentTree.add({ id, label: coreLabel(ctx, agent, nodeKey), parentId: rootId, status: "running", detail: "" });
 					return;
 				}
 				stopRegistry.delete(id);
@@ -565,8 +583,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 				}
 				agentTree.update(id, patch);
 			},
-			onAgentProgress: (agent: string, p: AgentProgress) => {
-				const id = `${rootId}/${agent}`;
+			onAgentProgress: (agent: string, p: AgentProgress, key?: string) => {
+				const id = `${rootId}/${key ?? agent}`;
 				const patch: { output?: string; detail?: string } = {
 					detail: p.activity || (p.tokens ? `${p.tokens} tok` : ""),
 				};
@@ -592,7 +610,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 		agentTree.add({ id: rootId, label, status: "running" });
 		// Seed the whole roster at once (cores show by name immediately); "queued" until the
 		// engine actually starts each one — an honest view under the concurrency limit.
-		for (const a of roster) agentTree.add({ id: `${rootId}/${a}`, label: coreLabel(ctx, a), parentId: rootId, status: "running", detail: "queued" });
+		const seedKeys = rosterNodeKeys(roster);
+		roster.forEach((m, i) => {
+			const a = rosterSpec(m).agent;
+			const key = seedKeys[i] ?? a;
+			agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key), parentId: rootId, status: "running", detail: "queued" });
+		});
 		try {
 			return await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...strategyTreeDeps(ctx, rootId) });
 		} finally {
@@ -646,8 +669,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const journalPath = join(journalDir, `${spec.name}.${hash.slice(0, 8)}.journal.jsonl`);
 		const resume = readJournal(journalPath, hash);
 
-		const rosterAgents = [...new Set(spec.phases.flatMap((p) => (p.roster ? (teams[p.roster] ?? []) : [])))];
-		await ensurePersonaModels(ctx, rosterAgents);
+		const rosterMembers = spec.phases.flatMap((p) => (p.roster ? (teams[p.roster] ?? []) : []));
+		await ensurePersonaModels(ctx, rosterMembers);
 
 		const flowRoot = `flow:${spec.name}`;
 		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running" });
@@ -673,7 +696,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 				runPhase: async ({ phase, task }) => {
 					const pid = `${flowRoot}/${phase.id}`;
 					const roster = phase.roster ? (teams[phase.roster] ?? []) : [];
-					for (const a of roster) agentTree.add({ id: `${pid}/${a}`, label: coreLabel(ctx, a), parentId: pid, status: "running", detail: "queued" });
+					const seedKeys = rosterNodeKeys(roster);
+					roster.forEach((m, i) => {
+						const a = rosterSpec(m).agent;
+						const key = seedKeys[i] ?? a;
+						agentTree.add({ id: `${pid}/${key}`, label: coreLabel(ctx, a, key), parentId: pid, status: "running", detail: "queued" });
+					});
 					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
 					if (phase.roster) orch.roster = phase.roster;
 					const r = await runPersonaStrategy(orch, task, {
@@ -1294,6 +1322,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 			Type.String({ description: "Deliberation strategy (default: the persona's council strategy)" }),
 		),
 		roster: Type.Optional(Type.String({ description: "Council roster to convene (default: the persona's)" })),
+		params: Type.Optional(
+			Type.Record(Type.String(), Type.Unknown(), {
+				description:
+					'Strategy params, merged over the persona\'s (e.g. { "reflect": false } to skip magi\'s reflection round, { "aggregate": "unanimity" }, { "rounds": 3 }). Reach for it when the user asks for a variant of the persona\'s default council this one time.',
+			}),
+		),
 	});
 	pi.registerTool({
 		name: "council",
@@ -1302,7 +1336,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"Convene a council of specialists with controlled, complementary biases to deliberate a",
 			"decision and vote — returns the ruling (winner, tally, each member's view, recorded dissent).",
 			"Use it before any significant choice; then EXECUTE the ruling yourself and re-convene when",
-			"execution surfaces a new decision.",
+			"execution surfaces a new decision. Pass `params` to vary the persona's default council for",
+			'one call — e.g. { "reflect": false } to run magi as a pure independent poll (no reflection round).',
 		].join(" "),
 		parameters: CouncilParams,
 		async execute(_id, params, signal, _onUpdate, ctx) {
@@ -1314,7 +1349,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const council = controller.activePersona?.council;
 				const strategy = params.strategy ?? council?.strategy ?? "magi";
 				const roster = params.roster ?? council?.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
-				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: council?.params ?? {} };
+				// Per-call params override the persona's council defaults (e.g. reflect:false this once).
+				const mergedParams = { ...(council?.params ?? {}), ...((params.params as Record<string, unknown> | undefined) ?? {}) };
+				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: mergedParams };
 				const result = await runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
 				const s = (result?.structured ?? {}) as { headline?: string; status?: string; tally?: Record<string, number> };
 				const ruling = result?.output ?? "(the council returned no ruling)";
@@ -1448,6 +1485,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 				return;
 			}
 			if (arg === "" || arg === "list") {
+				// Empty by design on a fresh install: personas load only from the user dir, which the
+				// user populates on purpose. Point them at the install gesture rather than leaving a
+				// bare "(none)" that reads like something is broken.
+				if (personas.length === 0) {
+					ctx.ui.notify(
+						"No personas installed. pi-persona does not auto-install — run `/persona seed` to copy the bundled defaults into your agent dir (edit them freely; `/persona restore` re-installs the originals).",
+						"info",
+					);
+					return;
+				}
 				const lines = personas.map(
 					(p) => `${p.name === controller.activePersona?.name ? "▶ " : "  "}${p.label} (${p.name})`,
 				);

@@ -49,14 +49,21 @@ function unquote(value: string): string {
 	return v;
 }
 
-/** Split on top-level commas only — commas inside `[...]`/`{...}` are left intact. */
+/** Split on top-level commas only — commas inside `[...]`/`{...}` OR inside a quoted
+ *  string (`"a, b"` / `'a, b'`) are left intact. Quote-aware so an inline map value like
+ *  `role: "injection, authz, secrets"` isn't shredded at every comma. */
 function splitTopLevel(s: string): string[] {
 	const out: string[] = [];
 	let depth = 0;
 	let start = 0;
+	let inSingle = false;
+	let inDouble = false;
 	for (let i = 0; i < s.length; i++) {
 		const c = s[i];
-		if (c === "[" || c === "{") depth++;
+		if (c === "'" && !inDouble) inSingle = !inSingle;
+		else if (c === '"' && !inSingle) inDouble = !inDouble;
+		else if (inSingle || inDouble) continue; // inside a string: ignore brackets/commas
+		else if (c === "[" || c === "{") depth++;
 		else if (c === "]" || c === "}") depth--;
 		else if (c === "," && depth === 0) {
 			out.push(s.slice(start, i));

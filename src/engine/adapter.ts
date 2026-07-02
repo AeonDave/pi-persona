@@ -51,7 +51,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)` };
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)`, failureKind: "unknown-agent" };
 			}
 
 			const task =
@@ -81,6 +81,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const child = await runChildAgent(childSpec, signal, childOptions);
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
+			// The provider/id the child ran on (drop any `:thinking` suffix) — for the UI and
+			// as the seed of the provider-fallback chain on a provider failure.
+			const modelUsed = (childSpec.model ?? spec.model ?? cfg.model)?.split(":")[0];
+			if (modelUsed) result.modelUsed = modelUsed;
 			// Diagnostic tag: agent · model ref · dynamic overrides. Same shape as inproc engine,
 			// so failed follow-ups always say WHICH agent+model died and WHY.
 			const overrides: string[] = [];
@@ -93,6 +97,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
 			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
 
+			// Classify the failure so the fallback decorator reroutes ONLY provider errors
+			// (a stream `error`), never an abort/timeout/spawn-miss/agent failure.
+			if (!child.ok) result.failureKind = child.timedOut ? "timeout" : child.aborted ? "abort" : child.stopReason === "error" ? "provider" : "agent";
+
 			if (spec.outputContract && deps.contracts) {
 				const def = pinnedDef(spec.outputContract);
 				if (def) {
@@ -103,6 +111,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					if (!v.ok) {
 						result.ok = false;
 						if (v.error) result.error = v.error;
+						if (result.failureKind === undefined) result.failureKind = "contract";
 					}
 				}
 			}

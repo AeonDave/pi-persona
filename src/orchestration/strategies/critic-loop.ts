@@ -4,6 +4,7 @@
  */
 
 import { sumUsage } from "../reducers.ts";
+import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 
@@ -16,8 +17,8 @@ export const criticLoop: Strategy = {
 	async run(input, sdk) {
 		const rosterAgents = input.roster ? sdk.roster.team(input.roster) : [];
 		// generator + critic are the roster's two entities (params can still override).
-		const generator = str(input.params.generator, rosterAgents[0] ?? "builder");
-		const critic = str(input.params.critic, rosterAgents[1] ?? "skeptic");
+		const generator = str(input.params.generator, rosterAgents[0] ? rosterSpec(rosterAgents[0]).agent : "operator");
+		const critic = str(input.params.critic, rosterAgents[1] ? rosterSpec(rosterAgents[1]).agent : "verifier");
 		const maxRounds = typeof input.params.rounds === "number" ? input.params.rounds : 3;
 
 		const all: AgentResult[] = [];

@@ -1,7 +1,18 @@
-# Rosters: a team name → an ordered list of agent names.
-# Referenced by a persona's `orchestration.roster` or `council.roster`.
-# Project/user copies override. A roster's members are the ensemble's cores — each
-# is offered its own model on first run (the supervisor keeps the session model).
-review: [security, performance, tests]
-repair: [builder, verifier]
+# Rosters: a team name → an ordered list of members.
+# A member is a bare agent name, OR an inline `{ agent, role?, model?, skills? }` map that
+# specialises ONE agent (so an ensemble of perspectives comes from a single agent + roles,
+# not one .md per perspective). Referenced by a persona's `orchestration.roster` / `council.roster`.
+# Project/user copies override.
+
+# One `reviewer` agent, three complementary lenses — the role focuses each parallel pass
+# (skills load the rest). Add `model: <provider/id>` to a member for cross-model diversity.
+review:
+  - { agent: reviewer, role: "Focus ONLY on the SECURITY lens: injection, authz/access-control, secrets & token handling, unsafe sinks, input validation." }
+  - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens: algorithmic cost on hot paths, needless allocations/copies, repeated or N+1 I/O, unbounded work." }
+  - { agent: reviewer, role: "Focus ONLY on the TESTS lens: untested branches and edge/error cases, brittle or mock-asserting tests, missing regression pins." }
+
+repair: [operator, verifier]
 magi: [melchior, balthasar, casper]
+
+# swarm (map strategy): a splitter enumerates the batch's items, a worker runs each in parallel.
+swarm: [scout, operator]

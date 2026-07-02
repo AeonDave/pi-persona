@@ -31,7 +31,7 @@ test("runPersonaStrategy runs the persona's strategy with its roster + params", 
 		limits: LIMITS,
 	});
 	assert.ok(r);
-	assert.match(r.output, /— magi: winner · tally/);
+	assert.match(r.output, /— magi: winner.*· tally/);
 });
 
 test("runPersonaStrategy returns null for a non-runnable (solo) persona", async () => {

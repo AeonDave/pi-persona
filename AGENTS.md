@@ -33,6 +33,13 @@ no build step. Design specs (binding on any conflict, guardrails first):
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
   share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async
   fan-out can't open more concurrent sessions than a sync one.
+- **Provider fallback**: `buildEngine` wraps the engine in `withModelFallback` (`engine/fallback.ts`).
+  A run whose model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on
+  the SAME model id under another authenticated provider, walking the whole chain (session provider
+  first) until one responds — "priority to the supervisor's provider, but try others and switch on
+  error". Only `failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal.
+  Engines classify the cause on the `AgentResult` (`failureKind` + resolved `modelUsed`); keep those
+  set when you touch `inproc.ts`/`adapter.ts` or the fallback silently stops working.
 - **Fork-bomb guard**: children run with env `PI_PERSONA_DISABLE=1` so pi-persona self-disables inside
   them. NEVER pass `noExtensions` (it blocks the pi-claude auth provider). The guard is **ref-counted**
   in `inproc.ts` — keep it concurrency-safe (parallel strategies build several sessions at once).
@@ -61,7 +68,7 @@ no build step. Design specs (binding on any conflict, guardrails first):
 
 - `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
-- `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates).
+- `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool).
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
 - `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
@@ -82,7 +89,7 @@ no build step. Design specs (binding on any conflict, guardrails first):
 1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test.
 2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `coaching: true`.
 3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`.
-4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`).
+4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`), or per-member `- { agent, role, model?, skills? }` to build an ensemble of perspectives from ONE agent (e.g. `review` is one `reviewer` × 3 lens roles). Same-agent members are disambiguated in the live tree by a role hint (`reviewer · SECURITY`) via `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`), so three lenses show as three steerable nodes — keep the seeding loops and the SDK key derivation in lockstep if you touch either.
 5. **Flow**: `flows/<name>.flow.json` — phases + `needs`, optional `gate: true` (checkpoint).
 6. **Contract**: `contracts/<name>.contract.json` (request via `outputContract`). **Preset**: `presets/<name>.preset.json`.
 

@@ -24,7 +24,7 @@ commands, diffs, `file:line`).
   `file:line` for every finding. Hunt the real bug classes — wrong logic, off-by-one, races,
   null/undefined, unhandled errors, broken invariants, wrong API/contract usage — plus the edge
   cases the change misses. Correctness and risk over style. For a parallel multi-lens audit
-  (security + performance + tests on different models), switch to the `review` persona.
+  (security + performance + tests fanned out), switch to the `audit` persona.
 - **Do it yourself, or delegate (reflex — without being asked):** do small surgical edits you
   fully understand, one focused validation run, and the final synthesis directly. The moment the
   task has independent heavy/parallel/noisy parts (large refactors, broad search,
@@ -32,7 +32,7 @@ commands, diffs, `file:line`).
   `tasks: [{ agent, task, skills }, ...]` with disjoint files. Spawn a dynamic `operator` and
   brief it with a self-contained packet PLUS the coding `skills` it should load (you pick the
   best installed: the language-patterns skill + its testing skill, framework/debug as needed);
-  use a fixed specialist (`scout` to explore, `code-reviewer` to review) only when one already
+  use a fixed specialist (`scout` to explore, `reviewer` to review) only when one already
   fits. Never make the user spell out *how* to delegate.
 - **Verify, reject false passes:** no skipped/deleted tests, disabled mitigations, hardcoded
   answers, mocked-away bugs, or a harness widened past the real target. Re-run the check

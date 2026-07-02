@@ -78,6 +78,56 @@ test("magi honours unanimity and surfaces no_consensus when the 3 disagree", asy
 	assert.match(r.output, /no_consensus/);
 });
 
+test("magi runs a reflection round by default: cores see the others' positions and can converge", async () => {
+	// melchior/balthasar split 2-1 in round 1; casper is 'moved' by seeing the others in round 2.
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => {
+			calls++;
+			const reflected = /positions so far/.test(s.task);
+			// Round 1: melchior=A, balthasar=A, casper=B. Round 2: casper switches to A (converges).
+			const vote = s.agent === "casper" ? (reflected ? "A" : "B") : "A";
+			return { agent: s.agent, output: `${s.agent}:${vote}`, structured: { vote, confidence: 0.7 }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["melchior", "balthasar", "casper"] }, limits: LIMITS });
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
+	assert.equal(calls, 6, "two rounds of three cores ran");
+	assert.match(r.output, /reflection round/, "the ruling notes the reflection round happened");
+	assert.match(r.output, /a=3/i, "the final tally reflects the round-2 votes (casper moved to A)");
+	assert.equal(r.structured?.reflected, true);
+});
+
+test("magi with reflect:false is a single independent poll (no reflection round)", async () => {
+	let calls = 0;
+	const sdk = makeSDK({
+		engine: {
+			run: async (s): Promise<AgentResult> => {
+				calls++;
+				return { agent: s.agent, output: s.agent, structured: { vote: "A", confidence: 0.7 }, usage: usage(), ok: true };
+			},
+		},
+		roster: { team: () => ["melchior", "balthasar", "casper"] },
+		limits: LIMITS,
+	});
+	const r = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, sdk);
+	assert.equal(calls, 3, "exactly one round of three cores");
+	assert.equal(r.structured?.reflected, false);
+	assert.doesNotMatch(r.output, /reflection round/);
+});
+
+test("magi's reflection preserves dissent even when the panel does NOT converge", async () => {
+	// Cores hold their positions across both rounds → the minority report survives.
+	const sdk = makeSDK({
+		engine: votingEngine({ melchior: "A", balthasar: "A", casper: "B" }),
+		roster: { team: () => ["melchior", "balthasar", "casper"] },
+		limits: LIMITS,
+	});
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
+	assert.match(r.output, /dissent/i, "the held minority position is still reported");
+	assert.match(r.output, /a=2/);
+});
+
 test("magi requires a roster", async () => {
 	const sdk = makeSDK({ engine: votingEngine({}), roster: { team: () => [] }, limits: LIMITS });
 	await assert.rejects(() => magi.run({ task: "decide", params: {} }, sdk));

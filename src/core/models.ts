@@ -64,3 +64,29 @@ export function resolveModelRef(ref: string, models: ModelLite[], preferProvider
 		: candidates;
 	return { ok: false, reason: "ambiguous", candidates: ordered.map(full) };
 }
+
+/**
+ * The provider-fallback chain for a `provider/id` that failed at runtime: the SAME model
+ * id offered by OTHER (authenticated) providers, so a run can be retried by switching the
+ * route while keeping the model — "priority to the supervisor's provider, but try others
+ * and switch on error". Preferred provider first (most likely authenticated), the failed
+ * `ref` excluded. Empty when the model exists under only one provider. Pure.
+ */
+export function providerFallbacks(ref: string, models: ModelLite[], preferProvider?: string): string[] {
+	const slash = ref.indexOf("/");
+	const id = slash > 0 ? ref.slice(slash + 1) : ref;
+	const alts = dedupe(models.filter((m) => m.id === id && full(m) !== ref));
+	const ordered = preferProvider
+		? [...alts.filter((m) => m.provider === preferProvider), ...alts.filter((m) => m.provider !== preferProvider)]
+		: alts;
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const m of ordered) {
+		const r = full(m);
+		if (!seen.has(r)) {
+			seen.add(r);
+			out.push(r);
+		}
+	}
+	return out;
+}
