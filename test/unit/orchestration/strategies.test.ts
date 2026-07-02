@@ -769,6 +769,27 @@ test("magi returns the best prose ruling when no member emits a vote (all-invali
 	assert.equal(r.structured?.status, "invalid_outputs");
 });
 
+test("council-rounds degrades to the best prose ruling when no member votes", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `${spec.agent} says stuff`, structured: { confidence: spec.agent === "b" ? 0.8 : 0.1 }, usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS });
+	const r = await councilRounds.run({ task: "decide", roster: "t", params: { rounds: 1 } }, sdk);
+	assert.equal(r.ok, true, "a prose ruling, not an empty invalid_outputs");
+	assert.match(r.output, /b says stuff/, "the highest-confidence prose wins");
+	assert.doesNotMatch(r.output, /3 invalid excluded/, "the surfaced prose is not miscounted as excluded");
+});
+
+test("debate degrades to the best prose ruling when no member votes", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `${spec.agent} position`, structured: { confidence: spec.agent === "y" ? 0.9 : 0.2 }, usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["x", "y"] }, limits: LIMITS });
+	const r = await debate.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.equal(r.ok, true);
+	assert.match(r.output, /y position/, "the highest-confidence prose is the ruling");
+});
+
 test("debate honours params.aggregate = unanimity", async () => {
 	const engine: StrategyEngine = {
 		run: async (spec) => ({ agent: spec.agent, output: spec.agent, structured: { vote: spec.agent === "a" ? "x" : "y", confidence: 0.5 }, usage: usage(), ok: true }),
