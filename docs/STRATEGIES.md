@@ -79,9 +79,15 @@ council. They are enforced structurally, not by convention.
 - **Quarantine invalid outputs, then degrade — never strand.** A candidate that emits no parseable
   vote is quarantined from the tally (`voting.ts`). When EVERY member fails to vote (common on small
   models) and `keepBestFallback` is set, the reducer surfaces the highest-confidence PROSE answer
-  among the ok candidates instead of an empty ruling — so `magi`/`council-rounds`/`debate` degrade to
-  the strongest single response rather than returning `ok: false`. The "N invalid excluded" footer
-  counts only genuinely-dropped candidates, not the surfaced prose.
+  among the candidates that actually answered — ok ones AND contract-only failures (an engine marks
+  a member that answered in prose instead of the vote JSON as `failureKind: "contract"`; hard
+  failures stay excluded) — so `magi`/`council-rounds`/`debate` degrade to the strongest single
+  response rather than returning `ok: false`. The "N invalid excluded" footer counts only
+  genuinely-dropped candidates, not the surfaced prose.
+- **The contract instructs as well as validates.** An engine that receives `outputContract` appends
+  the format block (`contractInstructions`, derived from the same pinned def it validates against)
+  to the member's task — a bare generic agent votes as reliably as one whose `.md` spells the JSON
+  out by hand.
 
 ## The vote reducer status model
 

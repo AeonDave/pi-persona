@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { AgentConfig } from "../agents/agent.ts";
-import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
+import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -101,10 +101,14 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)`, failureKind: "unknown-agent" };
 			}
 
-			const task =
+			// Resolved (and pinned) up front: the SAME def both instructs the member and
+			// validates its output — an instruction/validation drift is impossible.
+			const contractDef = spec.outputContract && deps.contracts ? pinnedDef(spec.outputContract) : undefined;
+			const withSkills =
 				spec.skills && spec.skills.length > 0
 					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`
 					: spec.task;
+			const task = contractDef ? `${withSkills}\n\n${contractInstructions(contractDef)}` : withSkills;
 			const childSpec: ChildRunSpec = { task };
 			let model = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model;
 			// Append an explicit thinking level (model:level) unless one is already present —
@@ -179,18 +183,15 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// (a stream `error`), never an abort/timeout/spawn-miss/agent failure.
 			if (!child.ok) result.failureKind = child.timedOut ? "timeout" : child.aborted ? "abort" : child.stopReason === "error" ? "provider" : "agent";
 
-			if (spec.outputContract && deps.contracts) {
-				const def = pinnedDef(spec.outputContract);
-				if (def) {
-					// Shared parse+validate (unwraps ```json fences / prose first) — a member's
-					// fenced output must not void its structured result.
-					const v = parseAndValidate(child.output, def);
-					if (v.value) result.structured = v.value;
-					if (!v.ok) {
-						result.ok = false;
-						if (v.error) result.error = v.error;
-						if (result.failureKind === undefined) result.failureKind = "contract";
-					}
+			if (contractDef) {
+				// Shared parse+validate (unwraps ```json fences / prose first) — a member's
+				// fenced output must not void its structured result.
+				const v = parseAndValidate(child.output, contractDef);
+				if (v.value) result.structured = v.value;
+				if (!v.ok) {
+					result.ok = false;
+					if (v.error) result.error = v.error;
+					if (result.failureKind === undefined) result.failureKind = "contract";
 				}
 			}
 

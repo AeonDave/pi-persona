@@ -24,7 +24,7 @@ import type { AgentConfig } from "../agents/agent.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
 import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { makeContactPeerTool } from "../bus/peers.ts";
-import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
+import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
@@ -394,12 +394,16 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			}
 
 			// The agent's persona is now the session's appended system prompt (see the
-			// resource loader); the user turn carries just the task (+ any skills to load).
+			// resource loader); the user turn carries just the task (+ any skills to load,
+			// + the output-contract format when one is requested — resolved and pinned HERE
+			// so the def that instructs the member is the def that validates it below).
 			const skillsPreamble =
 				spec.skills && spec.skills.length > 0
 					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n`
 					: "";
-			const task = `${skillsPreamble}Task: ${spec.task}`;
+			const contractDef = spec.outputContract && deps.contracts ? pinnedDef(spec.outputContract) : undefined;
+			const contractTail = contractDef ? `\n\n${contractInstructions(contractDef)}` : "";
+			const task = `${skillsPreamble}Task: ${spec.task}${contractTail}`;
 
 			// Capture a thrown error (e.g. provider API 400 before any stream event fires,
 			// like model_not_supported) so it survives the finally-cleanup and can be
@@ -434,16 +438,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// (a thrown API rejection or a stream `error`), never an abort/timeout/agent miss.
 			if (!ok) result.failureKind = timedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
 
-			if (spec.outputContract && deps.contracts) {
-				const def = pinnedDef(spec.outputContract);
-				if (def) {
-					const v = parseAndValidate(state.output, def);
-					if (v.value) result.structured = v.value;
-					if (!v.ok) {
-						result.ok = false;
-						if (v.error) result.error = v.error;
-						if (result.failureKind === undefined) result.failureKind = "contract";
-					}
+			if (contractDef) {
+				const v = parseAndValidate(state.output, contractDef);
+				if (v.value) result.structured = v.value;
+				if (!v.ok) {
+					result.ok = false;
+					if (v.error) result.error = v.error;
+					if (result.failureKind === undefined) result.failureKind = "contract";
 				}
 			}
 			return result;

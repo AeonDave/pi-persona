@@ -126,3 +126,31 @@ test("all-invalid WITHOUT keepBestFallback → still empty (no rescue)", () => {
 	const r = voteReduce(cands, { aggregate: "majority" });
 	assert.equal(r.winner, undefined);
 });
+
+test("contract-only failures ARE rescued by keepBestFallback (the engine-produced shape)", () => {
+	// This is what an engine actually emits when a member answers in prose instead of the
+	// vote JSON: ok=false, failureKind="contract", output intact. The live-drive debate bug:
+	// requiring `ok` here left the ruling empty even though both members argued fine.
+	const cands: AgentResult[] = [
+		{ agent: "a", output: "CommonJS, because…", usage: u(), ok: false, failureKind: "contract" },
+		{ agent: "b", output: "ESM, because…", structured: { confidence: 0.7 }, usage: u(), ok: false, failureKind: "contract" },
+	];
+	const r = voteReduce(cands, { aggregate: "majority", keepBestFallback: true });
+	assert.equal(r.status, "invalid_outputs");
+	assert.equal(r.usedFallback, true);
+	assert.equal(r.winner?.agent, "b", "highest-confidence contract-failed prose is surfaced");
+	assert.equal(r.dissent?.length, 1);
+	assert.equal(r.invalid?.length, 0, "rescued prose is not double-counted as excluded");
+});
+
+test("hard failures (timeout/abort/provider/agent) are NEVER rescued as prose", () => {
+	const cands: AgentResult[] = [
+		{ agent: "a", output: "partial output before dying", usage: u(), ok: false, failureKind: "timeout" },
+		{ agent: "b", output: "also died", usage: u(), ok: false, failureKind: "provider" },
+	];
+	const r = voteReduce(cands, { aggregate: "majority", keepBestFallback: true });
+	assert.equal(r.status, "invalid_outputs");
+	assert.equal(r.usedFallback, false);
+	assert.equal(r.winner, undefined);
+	assert.equal(r.invalid?.length, 2);
+});
