@@ -363,10 +363,28 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				const deliver = (): void => {
 					for (const env of b.takeWhere(self, (e) => !e.expectsReply)) {
 						const from = env.from === supervisorHandle ? "your supervisor" : `peer ${peerLabels.get(env.from) ?? env.from}`;
-						session.agent.steer({ role: "user", content: [{ type: "text", text: `[message from ${from}]\n${fenceUntrusted(env.text)}` }] });
+						// deliver() runs on the initial flush (BEFORE the run's try/finally below) and
+						// inside the bus.onMessage listener (a SENDER's bus.send call stack) — an
+						// uncaught steer() throw here would leak the bus registration/observer, skip
+						// engine.run cleanup, or propagate into the sender's contact_peer call. Drop the
+						// envelope instead; it is lost, not redelivered (mirrors "gone" semantics).
+						try {
+							session.agent.steer({ role: "user", content: [{ type: "text", text: `[message from ${from}]\n${fenceUntrusted(env.text)}` }] });
+						} catch (e) {
+							if (process.env.PI_PERSONA_DEBUG) {
+								process.stderr.write(`[pi-persona] delivery bridge steer failed for ${self} (envelope from ${env.from} dropped): ${e instanceof Error ? e.message : String(e)}\n`);
+							}
+							continue;
+						}
 						// Transparency tick: surface the delivery on the run's progress line (agent tree).
+						// Mirrors the main subscription's fallback (line ~332): per-call onProgress wins
+						// (AgentProgress — no `turns`), else the construction-time deps.onProgress
+						// (ProgressSnapshot — built from snapshot(state), `turns` included) — the async
+						// launch path (extension.ts) only has the latter.
 						const snap = snapshot(state);
-						if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity: `✉ from ${env.from}` });
+						const activity = `✉ from ${env.from}`;
+						if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity });
+						else if (deps.onProgress) deps.onProgress({ ...snap, activity });
 					}
 				};
 				unsubBridge = b.onMessage((env) => {

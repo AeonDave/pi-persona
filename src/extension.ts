@@ -977,7 +977,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 							onProgress(snap);
 							const patch: { output?: string; detail?: string } = {};
 							if (snap.output) patch.output = snap.output;
-							if (snap.tokens) patch.detail = `${snap.tokens} tok`;
+							// Mirrors the main subscription's onAgentProgress fallback: activity (e.g. the
+							// "✉ from …" transparency tick) wins over a bare token count.
+							if (snap.activity) patch.detail = snap.activity;
+							else if (snap.tokens) patch.detail = `${snap.tokens} tok`;
 							if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
 						},
 						{ async: true },

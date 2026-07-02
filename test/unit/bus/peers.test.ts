@@ -41,6 +41,20 @@ test("contact_peer send to a finished peer reports 'gone', not an error", async 
 	assert.match(text(r), /gone|finalized/i);
 });
 
+test("contact_peer send is scoped: a handle registered on the bus but NOT among listPeers() is refused, not delivered", async () => {
+	const bus = new InProcessBus();
+	for (const h of ["supervisor", "a#1", "stranger#9"]) bus.register(h);
+	// "supervisor" and "stranger#9" both exist on the bus, but neither is in THIS run's peer
+	// list — this is the coaching-gate bypass the enforcement closes.
+	const tool = makeContactPeerTool(bus, "a#1", { listPeers: () => [] });
+	const r1 = await tool.execute("t8", { action: "send", to: "supervisor", message: "psst" }, undefined, undefined, CTX);
+	assert.match(text(r1), /gone|finalized/i);
+	assert.equal(bus.take("supervisor").length, 0, "out-of-scope send never reaches the bus inbox");
+	const r2 = await tool.execute("t9", { action: "send", to: "stranger#9", message: "psst" }, undefined, undefined, CTX);
+	assert.match(text(r2), /gone|finalized/i);
+	assert.equal(bus.take("stranger#9").length, 0, "a concurrent run's child is out of scope too");
+});
+
 test("contact_peer send without { to, message } explains the contract", async () => {
 	const bus = new InProcessBus();
 	bus.register("a#1");
