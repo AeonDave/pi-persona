@@ -78,6 +78,25 @@ function userAgentDir(): string {
 	return process.env.PI_AGENT_DIR || getAgentDir();
 }
 
+/** Cross-process `contact_peer` roster (spec B7): scopes `brokerPeers` — the process-wide,
+ *  pre-spawn registry keyed by handle (populated in `makeBrokerDeps`'s `register`, see
+ *  below) — to the SAME per-engine group as the caller `self`, mirroring `engine/inproc.ts`'s
+ *  per-engine-instance `peerLabels` map. `self`'s OWN recorded group is the source of truth
+ *  here, NOT the wire's `group` argument the host would otherwise pass: the child's env
+ *  carries no group (spec B6, the wire `register` frame stays minimal), so every wire group
+ *  is "" and scoping by it would either always come back empty (this scope) or leak every
+ *  concurrent run's peers into one flat list (the host's own default `group=""` scoping).
+ *  `self` not found (not registered with `peers: true`) ⇒ empty roster, never a leak.
+ *  Exported for direct unit/integration testing — `extension.ts`'s activation closure itself
+ *  isn't a testable unit. */
+export function listPeersForGroup(brokerPeers: ReadonlyMap<string, { label: string; group: string }>, self: string): Array<{ handle: string; label: string }> {
+	const g = brokerPeers.get(self)?.group;
+	if (g === undefined) return [];
+	return [...brokerPeers.entries()]
+		.filter(([handle, p]) => p.group === g && handle !== self)
+		.map(([handle, p]) => ({ handle, label: p.label }));
+}
+
 export default function piPersona(pi: ExtensionAPI): void {
 	// Cross-process broker (v0.5, spec B3): a child spawned with `PI_PERSONA_BUS` set is a
 	// broker-connected sub-agent, not a supervisor — load ONLY the bridge (comm-plane tools +
@@ -444,10 +463,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 			bus,
 			supervisorHandle: SUPERVISOR,
 			endpoint,
-			listPeersFor: (group, self) =>
-				[...brokerPeers.entries()]
-					.filter(([handle, p]) => p.group === group && handle !== self)
-					.map(([handle, p]) => ({ handle, label: p.label })),
+			// Ignore the wire-supplied `group` (always "" — the child's env carries no group,
+			// spec B6) — see `listPeersForGroup`'s header for why deriving scope from `self`'s
+			// own `brokerPeers` entry is required instead.
+			listPeersFor: (_group, self) => listPeersForGroup(brokerPeers, self),
 		});
 		brokerHostPromise.then(
 			(h) => {
