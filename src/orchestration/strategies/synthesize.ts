@@ -5,12 +5,22 @@
  * ensemble's value is a unified deliverable — research sweeps, multi-angle reviews,
  * gather-then-write — rather than a vote (`magi`) or a pick (`judge`).
  *
- * roster = the gatherers · params = { synthesizer?: "<agent>" (default: the first roster agent) }
+ * roster = the gatherers · params = { synthesizer?: "<agent>" (default: the first roster agent),
+ *          peers?: boolean (gatherers share contradictions/corroborations live — default off) }
  */
 
 import { rosterSpec } from "../roster.ts";
 import { sumUsage } from "../reducers.ts";
 import type { Strategy } from "../sdk.ts";
+
+// Cooperative cross-talk (params.peers): gatherers surface contradictions early instead of
+// leaving them all to the synthesizer. Task-text injection keeps UI tree keys stable.
+const CROSS_TALK = [
+	"You have sibling gatherers working OTHER angles of this same task. If you find something that",
+	"contradicts or strongly corroborates what another angle would see, share it once via",
+	"`contact_peer` (action `list`, then `send`) — short and factual. Incorporate any",
+	'"[message from peer …]" notes you receive. No chatter: only load-bearing findings.',
+].join(" ");
 
 export const synthesize: Strategy = {
 	name: "synthesize",
@@ -21,9 +31,18 @@ export const synthesize: Strategy = {
 			typeof input.params.synthesizer === "string" && input.params.synthesizer.trim()
 				? input.params.synthesizer.trim()
 				: rosterSpec(team[0]!).agent;
-		sdk.log(`synthesize: ${team.length} gatherers → ${synthesizer}`);
+		const peers = input.params.peers === true;
+		sdk.log(`synthesize: ${team.length} gatherers → ${synthesizer}${peers ? " (cross-talk on)" : ""}`);
 
-		const results = await sdk.parallel(team.map((m) => () => sdk.agent({ ...rosterSpec(m), task: input.task })));
+		const results = await sdk.parallel(
+			team.map((m) => () =>
+				sdk.agent({
+					...rosterSpec(m),
+					task: peers ? `${input.task}\n\n--- gatherer cross-talk ---\n${CROSS_TALK}` : input.task,
+					...(peers ? { peers: true } : {}),
+				}),
+			),
+		);
 		const usable = results.filter((r) => r.ok && r.output.trim());
 		if (usable.length === 0) {
 			const reasons = results.map((r) => `[${r.agent}] ${r.error ?? "(no output)"}`).join("; ");
