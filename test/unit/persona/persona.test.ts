@@ -121,3 +121,23 @@ test("composeSystemPrompt appends by default and replaces when asked", () => {
 	)!;
 	assert.equal(composeSystemPrompt("BASE", replace), "ONLY THIS.");
 });
+
+test("audit council params include peers: true (adoption example)", () => {
+	const audit = parsePersona(
+		"---\nname: audit\npersona: true\ncouncil:\n  strategy: synthesize\n  roster: review\n  params: { synthesizer: reviewer, peers: true }\n---\nAudit supervisor.",
+		"/p/audit.md",
+	)!;
+	assert.equal(audit.council?.strategy, "synthesize");
+	assert.equal(audit.council?.roster, "review");
+	assert.deepEqual(audit.council?.params, { synthesizer: "reviewer", peers: true });
+});
+
+test("dev persona includes a tool-driven pair council (adoption example)", () => {
+	const dev = parsePersona(
+		"---\nname: dev\npersona: true\ncouncil:\n  strategy: pair\n  roster: repair\n---\nDev engineer.",
+		"/p/dev.md",
+	)!;
+	assert.equal(dev.council?.strategy, "pair");
+	assert.equal(dev.council?.roster, "repair");
+	assert.equal(dev.council?.params, undefined);
+});

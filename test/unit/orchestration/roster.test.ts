@@ -72,3 +72,10 @@ test("rosterNodeKeys disambiguates same-agent roster-role members by lens (no #N
 test("rosterNodeKeys suffixes #N only when the base label repeats (degenerate identical members)", () => {
 	assert.deepEqual(rosterNodeKeys(["scout", "scout", "operator"]), ["scout", "scout#2", "operator"]);
 });
+
+test("parseTeams resolves build team for compete strategy (adoption example)", () => {
+	const yaml = "repair: [operator, verifier]\nbuild: [operator, operator]";
+	const t = parseTeams(yaml);
+	assert.deepEqual(t.build, ["operator", "operator"]);
+	assert.deepEqual(t.repair, ["operator", "verifier"]);
+});

@@ -14,5 +14,9 @@ review:
 repair: [operator, verifier]
 magi: [melchior, balthasar, casper]
 
+# compete: N implementers race the same task in isolated worktrees; a judge picks the winning diff.
+# Two operator instances; give them different models for real diversity, e.g. model: <provider/id>.
+build: [operator, operator]
+
 # swarm (map strategy): a splitter enumerates the batch's items, a worker runs each in parallel.
 swarm: [scout, operator]
