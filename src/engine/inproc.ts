@@ -23,8 +23,11 @@ import { createAgentSession, DefaultResourceLoader, type ModelRegistry, SessionM
 import type { AgentConfig } from "../agents/agent.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
 import { makeContactSupervisorTool } from "../bus/contact.ts";
+import { makeContactPeerTool } from "../bus/peers.ts";
 import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
+import { fenceUntrusted } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
+import { roleHint } from "../orchestration/roster.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { combineSignals } from "./signals.ts";
@@ -85,6 +88,9 @@ export interface InProcessDeps {
 	/** Allow a child's `decision`/`interview` to BLOCK for a reply — async runs only.
 	 *  Sync runs hold the supervisor's turn, so blocking would deadlock: keep this false. */
 	allowBlocking?: boolean;
+	/** Persona-level bus capability (`EffectiveCapabilities.canUseBus`). Default true.
+	 *  When false, a spec's `peers` request is ignored (no `contact_peer` tool is bound). */
+	canUseBus?: boolean;
 	/** IDLE window (ms): a session that emits NO events for this long is treated as hung
 	 *  and aborted (mirrors the child engine's idle kill). 0/absent = no watchdog.
 	 *  Ignored when `coaching` + `allowBlocking` — a child legitimately blocked on a
@@ -185,6 +191,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 		return fresh.def;
 	};
 
+	// Peer registry — PER ENGINE INSTANCE. buildEngine makes a fresh engine per
+	// delegate/council/flow-phase/async-launch, so this map naturally scopes `contact_peer`
+	// to the members of ONE run: concurrent runs on the same bus never see each other.
+	const peerLabels = new Map<string, string>();
+
 	return {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
@@ -249,17 +260,35 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const personaPrompt = [cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
 			if (personaPrompt) sessionOpts.systemPrompt = personaPrompt;
 
-			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle,
-			// so its progress/decisions reach the supervisor over the bus while it runs (§4.9).
+			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle
+			// (persona coaching, §4.9), and/or a `contact_peer` tool when the STRATEGY opted the
+			// run into sibling messaging (`spec.peers`, gated by the persona's `canUseBus`).
 			let childHandle: string | undefined;
-			if (deps.bus && deps.coaching) {
+			const wantsPeers = spec.peers === true && (deps.canUseBus ?? true) && deps.bus !== undefined;
+			if (spec.peers === true && !wantsPeers && process.env.PI_PERSONA_DEBUG) {
+				process.stderr.write(`[pi-persona] peers requested for ${spec.agent} but bus/capability unavailable — running without contact_peer\n`);
+			}
+			if (deps.bus && (deps.coaching || wantsPeers)) {
 				globalChildSeq += 1;
 				childHandle = `${spec.agent}#${globalChildSeq}`;
 				deps.bus.register(supervisorHandle);
 				deps.bus.register(childHandle);
-				sessionOpts.customTools = [
-					makeContactSupervisorTool(deps.bus, childHandle, supervisorHandle, { allowBlocking: deps.allowBlocking ?? false }),
-				];
+				const customTools: ToolDefinition[] = [];
+				if (deps.coaching) {
+					customTools.push(
+						makeContactSupervisorTool(deps.bus, childHandle, supervisorHandle, { allowBlocking: deps.allowBlocking ?? false }),
+					);
+				}
+				if (wantsPeers) {
+					peerLabels.set(childHandle, spec.role ? `${childHandle} (${roleHint(spec.role)})` : childHandle);
+					const self = childHandle;
+					customTools.push(
+						makeContactPeerTool(deps.bus, self, {
+							listPeers: () => [...peerLabels.entries()].filter(([h]) => h !== self).map(([h, l]) => ({ handle: h, label: l })),
+						}),
+					);
+				}
+				sessionOpts.customTools = customTools;
 			}
 
 			// Fork-bomb guard (ref-counted, concurrency-safe): disable pi-persona inside the
@@ -321,6 +350,31 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				if (trimmed) session.agent.steer({ role: "user", content: [{ type: "text", text: trimmed }] });
 			});
 
+			// Delivery bridge: bus messages addressed to this child are steered into its live
+			// session as fenced, attributed user turns — attribution stays OUTSIDE the fence so
+			// a malicious payload cannot spoof its sender. Serves sibling `contact_peer` sends
+			// AND the supervisor's `intercom send` (previously a dead letter: nothing ever
+			// drained a child inbox). Flush once on subscribe to catch a message that raced
+			// registration (the handle registers before the session finishes building).
+			let unsubBridge: (() => void) | undefined;
+			if (childHandle && deps.bus) {
+				const b = deps.bus;
+				const self = childHandle;
+				const deliver = (): void => {
+					for (const env of b.takeWhere(self, (e) => !e.expectsReply)) {
+						const from = env.from === supervisorHandle ? "your supervisor" : `peer ${peerLabels.get(env.from) ?? env.from}`;
+						session.agent.steer({ role: "user", content: [{ type: "text", text: `[message from ${from}]\n${fenceUntrusted(env.text)}` }] });
+						// Transparency tick: surface the delivery on the run's progress line (agent tree).
+						const snap = snapshot(state);
+						if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity: `✉ from ${env.from}` });
+					}
+				};
+				unsubBridge = b.onMessage((env) => {
+					if (env.to === self && !env.expectsReply) deliver();
+				});
+				deliver();
+			}
+
 			// The agent's persona is now the session's appended system prompt (see the
 			// resource loader); the user turn carries just the task (+ any skills to load).
 			const skillsPreamble =
@@ -343,6 +397,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			} finally {
 				disarmIdle();
 				if (signal) signal.removeEventListener("abort", onAbort);
+				unsubBridge?.();
+				if (childHandle) peerLabels.delete(childHandle);
 				if (childHandle) deps.bus?.unregister(childHandle);
 				unsub();
 				session.dispose();
