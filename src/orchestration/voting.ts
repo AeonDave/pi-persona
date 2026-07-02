@@ -74,6 +74,10 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 				res.winner = winner;
 				res.dissent = prose.filter((c) => c !== winner);
 				res.usedFallback = true;
+				// The rescued prose (winner + dissent) is SURFACED, not excluded — keep only the
+				// candidates that produced nothing usable in `invalid`, so an "N invalid excluded"
+				// footer counts what was actually dropped, not the ruling it sits above.
+				res.invalid = invalid.filter((c) => c !== winner && !res.dissent!.includes(c));
 			}
 		}
 		return res;

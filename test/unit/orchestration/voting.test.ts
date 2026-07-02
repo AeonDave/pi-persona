@@ -96,6 +96,21 @@ test("all-invalid + keepBestFallback + ok prose → best-confidence prose wins (
 	assert.equal(r.usedFallback, true);
 	assert.equal(r.winner?.agent, "b", "highest-confidence ok-prose candidate is surfaced");
 	assert.equal(r.dissent?.length, 1);
+	assert.equal(r.invalid?.length, 0, "surfaced prose (winner + dissent) is not double-counted as excluded");
+});
+
+test("all-invalid rescue counts only the genuinely-dropped candidates as invalid", () => {
+	// 2 ok-prose (winner + dissent) + 1 failed member: only the failed one is 'excluded'.
+	const cands = [
+		{ agent: "a", output: "strong", structured: { confidence: 0.9 }, usage: u(), ok: true },
+		{ agent: "b", output: "weak", structured: { confidence: 0.2 }, usage: u(), ok: true },
+		{ agent: "c", output: "", usage: u(), ok: false },
+	];
+	const r = voteReduce(cands, { aggregate: "majority", keepBestFallback: true });
+	assert.equal(r.winner?.agent, "a");
+	assert.equal(r.dissent?.length, 1, "b is the minority prose");
+	assert.equal(r.invalid?.length, 1, "only the failed member c is counted as excluded");
+	assert.equal(r.invalid?.[0]?.agent, "c");
 });
 
 test("all-invalid with NO ok prose → unchanged empty invalid_outputs", () => {
