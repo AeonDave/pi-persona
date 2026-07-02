@@ -224,3 +224,35 @@ test("persistence: /persona writes the selection and a fresh session restores it
 		process.env.PI_PERSONA_PERSIST = "off";
 	}
 });
+
+// ── cross-process broker (v0.5): flag wiring, lazy host, teardown ────────────────────
+
+test("PI_PERSONA_BROKER unset (default-OFF pin): /doctor shows no broker line, teardown is a no-op", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx, notes } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("doctor", "", ctx);
+	assert.doesNotMatch(notes.join("\n"), /broker:/, "no broker line when the flag is off");
+	await m.fire("session_shutdown", undefined, ctx); // must not throw / hang — nothing was ever started
+});
+
+test("PI_PERSONA_BROKER=1: /doctor reports the flag as on but the host stays unstarted until a child-engine build (lazy)", async () => {
+	const prev = process.env.PI_PERSONA_BROKER;
+	process.env.PI_PERSONA_BROKER = "1";
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx, notes } = makeCtx(os.tmpdir());
+		await m.fire("session_start", undefined, ctx);
+		// No delegate/orchestrate/worktree run happened yet (the default engine is in-process,
+		// which never touches `deps.broker`) — the host must not have been started.
+		await m.cmd("doctor", "", ctx);
+		const report = notes.join("\n");
+		assert.match(report, /broker: on — endpoint \(not started/);
+		await m.fire("session_shutdown", undefined, ctx); // idempotent no-op teardown (nothing to close)
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_BROKER;
+		else process.env.PI_PERSONA_BROKER = prev;
+	}
+});

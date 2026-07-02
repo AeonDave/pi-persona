@@ -33,6 +33,12 @@ test("PI_PERSONA_DISABLE (any non-empty value) disables the extension", () => {
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "" }).disabled, false);
 });
 
+test("PI_PERSONA_BROKER (any non-empty value) opts into the cross-process broker; unset ⇒ off", () => {
+	assert.equal(resolveConfig({}).broker, false, "off by default (default-OFF pin)");
+	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "1" }).broker, true);
+	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "" }).broker, false);
+});
+
 test("PI_PERSONA_DIRS splits on ';' and ',' and trims", () => {
 	assert.deepEqual(resolveConfig({ PI_PERSONA_DIRS: "/a;/b, /c " }).extraDirs, ["/a", "/b", "/c"]);
 });

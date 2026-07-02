@@ -39,6 +39,12 @@ export interface BrokerHost {
 	endpoint: string;
 	close(): Promise<void>;
 	connectedHandles(): string[];
+	/** Pushes a `steer` frame directly to a connected handle (spec B4) — the supervisor's own
+	 *  live voice, NOT a bus envelope (it bypasses `bus.send`/the outbound drain entirely, so
+	 *  it can't be mistaken for a peer/child message on the wire). Returns false (a harmless
+	 *  no-op, mirrors `InProcessBus.reply`'s unknown-id return) when the handle is not
+	 *  currently connected — e.g. the child hasn't dialed in yet, or already disconnected. */
+	steer(handle: string, text: string): boolean;
 }
 
 type PeerEntry = { handle: string; label: string };
@@ -288,6 +294,12 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 	return {
 		endpoint: deps.endpoint,
 		connectedHandles: () => [...connections.keys()],
+		steer(handle: string, text: string): boolean {
+			const conn = connections.get(handle);
+			if (!conn) return false;
+			conn.write({ t: "steer", text });
+			return true;
+		},
 		async close(): Promise<void> {
 			if (closed) return;
 			closed = true;

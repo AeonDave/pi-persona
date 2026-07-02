@@ -26,12 +26,14 @@ import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import { seedDefaults, type SeedResult } from "./core/seed.ts";
 import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
-import { type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
+import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
 import { type AsyncRun, AsyncRunTracker, buildCompletionReport, buildPeekDigest, IdleCoalescingNotifier } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
+import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
+import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
 import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
@@ -411,6 +413,79 @@ export default function piPersona(pi: ExtensionAPI): void {
 		peekTimer.unref?.();
 	}
 
+	// Cross-process broker (v0.5, spec B1-B7): opt-in (PI_PERSONA_BROKER), off by default — see
+	// `config.broker`. Off ⇒ none of the state below is ever touched, so `deps.broker` stays
+	// undefined and the child engine spawns byte-identical to pre-broker pi-persona.
+	let brokerHost: BrokerHost | undefined;
+	let brokerHostPromise: Promise<BrokerHost> | undefined;
+	// Pre-spawn peer registrations (handle → {label, group}): the child's env carries no group
+	// (the wire register frame stays minimal, spec B6), so the host's own client-populated
+	// registry can't scope `list` per engine instance. `EngineAdapterBroker.register` is called
+	// BEFORE spawn with the correct `group` (adapter.ts's per-engine-instance `peerGroup`) —
+	// recorded here and used to override the host's default peer lookup, mirroring
+	// `engine/inproc.ts`'s per-engine-instance `peerLabels` map (this one is process-wide since
+	// several engine instances share the ONE host, each contributing its own group).
+	const brokerPeers = new Map<string, { label: string; group: string }>();
+
+	// Lazily starts the host on the FIRST child-engine build (fire-and-forget — the child's own
+	// capped-backoff connect tolerates the brief startup race; `endpoint` is a pure function of
+	// the session id, so it's known and handed to the child immediately, without waiting on the
+	// listen to complete). Idempotent; a failed bind clears the promise so a later build retries.
+	function ensureBrokerHost(endpoint: string): void {
+		if (brokerHostPromise) return;
+		if (process.platform !== "win32") {
+			try {
+				mkdirSync(dirname(endpoint), { recursive: true }); // POSIX sockets are filesystem paths
+			} catch {
+				/* best-effort — a failed mkdir surfaces as a listen error below */
+			}
+		}
+		brokerHostPromise = startBrokerHost({
+			bus,
+			supervisorHandle: SUPERVISOR,
+			endpoint,
+			listPeersFor: (group, self) =>
+				[...brokerPeers.entries()]
+					.filter(([handle, p]) => p.group === group && handle !== self)
+					.map(([handle, p]) => ({ handle, label: p.label })),
+		});
+		brokerHostPromise.then(
+			(h) => {
+				brokerHost = h;
+			},
+			(err) => {
+				brokerHostPromise = undefined; // never started — a later build gets another chance
+				if (process.env.PI_PERSONA_DEBUG) {
+					process.stderr.write(`[pi-persona] broker: host failed to start on ${endpoint}: ${err instanceof Error ? err.message : String(err)}\n`);
+				}
+			},
+		);
+	}
+
+	// The `EngineAdapterBroker` handed to every child-engine build while the flag is on (spec
+	// B1-B7's supervisor-side face — register/unregister run directly against the LOCAL bus +
+	// peer map; a remote child is otherwise indistinguishable from an in-process one, by
+	// construction). `steerFrame` degrades to a silent no-op before the host has finished
+	// starting or after the target has disconnected — "sends report undelivered", never a throw.
+	function makeBrokerDeps(ctx: ExtensionContext): EngineAdapterBroker {
+		const endpoint = brokerEndpoint(ctx.sessionManager.getSessionId());
+		ensureBrokerHost(endpoint);
+		return {
+			endpoint,
+			register: (info) => {
+				bus.register(info.handle);
+				if (info.peers) brokerPeers.set(info.handle, { label: info.label ?? info.handle, group: info.group ?? "" });
+			},
+			unregister: (handle) => {
+				brokerPeers.delete(handle);
+				bus.unregister(handle);
+			},
+			steerFrame: (handle, text) => {
+				brokerHost?.steer(handle, text);
+			},
+		};
+	}
+
 	function buildEngine(signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, engOpts?: { async?: boolean }): StrategyEngine {
 		const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
 		// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
@@ -425,12 +500,31 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const supLevel = host.getThinkingLevel();
 		const childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
 
+		// Cross-process broker (spec B1-B7): lazily built on the FIRST actual child-engine
+		// construction below (worktree leg OR `PI_PERSONA_ENGINE=child`) — NOT on every
+		// `buildEngine` call, most of which build the (default) in-process engine and never
+		// touch a child at all; starting a host for those would be neither lazy nor needed.
+		// Memoized so both call sites below share ONE broker object (and its `peerGroup`
+		// registration) per `buildEngine` invocation. `config.broker` off (default) or no live
+		// `ctx` yet ⇒ stays undefined forever, so `deps.broker` is never set (the default-OFF pin).
+		let brokerDepsMemo: EngineAdapterBroker | undefined;
+		let brokerDepsBuilt = false;
+		const getBrokerDeps = (): EngineAdapterBroker | undefined => {
+			if (!brokerDepsBuilt) {
+				brokerDepsBuilt = true;
+				if (config.broker && lastCtx) brokerDepsMemo = makeBrokerDeps(lastCtx);
+			}
+			return brokerDepsMemo;
+		};
+
 		// A child-process engine pinned to a specific cwd — the seam worktree isolation runs
 		// through (a worktree needs its own working dir, i.e. a separate process).
 		const childEngineAt = (cwd: string): StrategyEngine => {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
 			if (signal) deps.signal = signal;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs };
+			const brokerDeps = getBrokerDeps();
+			if (brokerDeps) deps.broker = brokerDeps;
 			return makeEngine(deps);
 		};
 
@@ -461,6 +555,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs }; // hard wall-clock cap on every child
 			if (onProgress) deps.childOptions.onProgress = onProgress;
+			const brokerDeps = getBrokerDeps();
+			if (brokerDeps) deps.broker = brokerDeps;
 			base = makeEngine(deps);
 		}
 
@@ -791,6 +887,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const coaching = controller.activePersona?.coaching ?? false;
 		const peek = config.peekEveryMs > 0 ? `${config.peekEveryMs}ms` : "off";
 		lines.push(`comm plane: coaching=${coaching ? "on (children get contact_supervisor)" : "off"}, periodic-peek=${peek}, bus-peers=${bus.participants().length}`);
+		if (config.broker) {
+			const status = brokerHost ? brokerHost.endpoint : brokerHostPromise ? "(starting…)" : "(not started — no child-engine build yet)";
+			lines.push(`broker: on — endpoint ${status}, connected children: ${brokerHost?.connectedHandles().length ?? 0}`);
+		}
 		return lines.join("\n");
 	}
 
@@ -818,7 +918,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		else host.setStatus(controller.activePersona?.label);
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		lastCtx = ctx;
 		disposed = true; // gate any late async-run onComplete from touching the next session's instance
 		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
@@ -837,6 +937,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 		steerRegistry.clear();
 		agentTree.clear();
 		host.setStatus(undefined);
+		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
+		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
+		if (brokerHostPromise) {
+			try {
+				const h = await brokerHostPromise;
+				await h.close();
+			} catch {
+				/* best-effort — never block shutdown on a broker teardown error */
+			}
+			brokerHost = undefined;
+			brokerHostPromise = undefined;
+			brokerPeers.clear();
+		}
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {

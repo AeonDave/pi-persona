@@ -33,6 +33,17 @@ no build step. Design specs (binding on any conflict, guardrails first):
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
   share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async
   fan-out can't open more concurrent sessions than a sync one.
+- **Cross-process broker** (`src/bus/broker/{paths,framing,messages,host,client}.ts`, opt-in via
+  `PI_PERSONA_BROKER=1`, spec B1-B7): session-scoped (POSIX socket / Windows named pipe under the
+  session id), supervisor-hosted, lazily started on the FIRST actual child-engine build (a
+  `PI_PERSONA_ENGINE=child` run, or any `isolation: worktree` leg — worktree ALWAYS uses the child
+  engine). It is a RELAY into the local `InProcessBus`: a connected child is indistinguishable from
+  an in-process one, so the supervisor side (intercom, idle notifier, f9, peek) is unchanged BY
+  CONSTRUCTION. It gives child-process runs `contact_supervisor`/`contact_peer` AND **steer**
+  (closing the child-engine steer gap — `intercom steer`/f9 `s` now work on both engines; a child's
+  steer is follow-up-queued, not mid-turn injection). Off (default) ⇒ `deps.broker` is never built,
+  the host never starts, and the child spawns byte-identical to pre-broker pi-persona — see
+  `docs/superpowers/specs/2026-07-02-cross-process-broker-design.md`.
 - **Provider fallback**: `buildEngine` wraps the engine in `withModelFallback` (`engine/fallback.ts`).
   A run whose model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on
   the SAME model id under another authenticated provider, walking the whole chain (session provider
@@ -84,7 +95,7 @@ no build step. Design specs (binding on any conflict, guardrails first):
 - `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
-- `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped).
+- `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (opt-in cross-process relay: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
 - `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent` < project `.pi/`):
@@ -110,9 +121,9 @@ no build step. Design specs (binding on any conflict, guardrails first):
 
 ## Boundaries / deferred (do NOT rebuild as "missing")
 
-- The **cross-process bus broker** and **`context: fork`** are deliberately deferred: the in-process
-  bus covers the comm plane, process children are one-shot, and `fresh` is the right child default.
-  Do not ship a fragile cross-OS socket/named-pipe broker.
+- **`context: fork`** is deliberately deferred: `fresh` is the right child default. The
+  **cross-process bus broker** is NO LONGER deferred — see the engine bullet above and
+  `docs/superpowers/specs/2026-07-02-cross-process-broker-design.md`.
 - This repo is `D:\Sources\pi-persona`. The separate `D:\Sources\pi-subagents-persona` (flat
   `src/index.ts`, `VALID_THINKING`, …) is a **legacy** package — different project. Always use
   explicit `pi-persona` paths in shells and sub-agent prompts (the env default cwd is the legacy one).
@@ -120,3 +131,6 @@ no build step. Design specs (binding on any conflict, guardrails first):
 ## Accepted diagnostics
 
 - One skipped test: `test/integration/child-engine.test.ts` is skipped on Windows (spawn flakiness) — intentional, do not "fix".
+- `test/integration/broker.test.ts` (real socket/pipe round-trip) runs UNGATED on every platform,
+  Windows named pipes included — it proved reliable across repeated runs; do not add a skip to it
+  without first confirming genuine flakiness (see the v0.5 broker task report).
