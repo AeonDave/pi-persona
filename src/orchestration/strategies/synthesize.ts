@@ -33,6 +33,11 @@ export const synthesize: Strategy = {
 				: rosterSpec(team[0]!).agent;
 		const peers = input.params.peers === true;
 		sdk.log(`synthesize: ${team.length} gatherers → ${synthesizer}${peers ? " (cross-talk on)" : ""}`);
+		if (peers && team.length > sdk.limits.maxConcurrency) {
+			sdk.log(
+				`synthesize: ${team.length} gatherers exceeds maxConcurrency (${sdk.limits.maxConcurrency}) — the live exchange will be batched (gatherers beyond the concurrency window join late)`,
+			);
+		}
 
 		const results = await sdk.parallel(
 			team.map((m) => () =>

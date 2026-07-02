@@ -598,6 +598,25 @@ test("pair stays ok when the navigator fails — the driver's work is the delive
 	assert.equal(r.structured?.navigatorOk, false);
 });
 
+test("pair warns (without clamping) when maxConcurrency < 2 — the live exchange degrades to sequential runs", async () => {
+	const logs: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `${spec.agent} output`, usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({
+		engine,
+		roster: { team: () => ["operator", "verifier"] },
+		limits: { ...LIMITS, maxConcurrency: 1 },
+		log: (m) => logs.push(m),
+	});
+	const r = await pair.run({ task: "t", roster: "repair", params: {} }, sdk);
+	assert.ok(
+		logs.some((l) => /maxConcurrency < 2/.test(l) && /sequential/.test(l)),
+		`expected a sequential-degrade warning, got: ${JSON.stringify(logs)}`,
+	);
+	assert.equal(r.ok, true, "no clamping — both driver and navigator still ran");
+});
+
 test("compete isolates every competitor in a worktree and returns the winning diff in full", async () => {
 	const specs: AgentRunSpec[] = [];
 	const engine: StrategyEngine = {
@@ -690,6 +709,43 @@ test("compete extracts the TAIL ```diff fence, ignoring an earlier illustrative 
 	assert.match(r.output, /REAL-TAIL-MARKER/, "the tail fence is the extracted diff");
 	assert.doesNotMatch(r.output, /illustrative-only/, "the earlier fence is not part of the extracted diff");
 	assert.doesNotMatch(r.output, /Here's an example of the diff format/, "prose between fences is not folded into the diff");
+	assert.equal(r.structured?.valid, 2);
+});
+
+test("compete keeps the winner's diff intact when its CONTENT embeds a ```diff-looking line", async () => {
+	// The deliverable diff adds a markdown doc whose own content contains a fenced diff example —
+	// so the diff BODY has a line "+```diff" (a content line, always prefixed, never at column 0).
+	// A bare lastIndexOf("```diff\n") would anchor there (the substring occurs after the real fence
+	// open) and strip the real header; anchoring at a LINE START must skip it.
+	const diffBody = [
+		"diff --git a/docs/example.md b/docs/example.md",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/docs/example.md",
+		"@@ -0,0 +1,4 @@",
+		"+# Example",
+		"+Here's a diff fence inside the added file:",
+		"+```diff",
+		"+diff --git a/x b/x",
+		"+EMBEDDED-TAIL-MARKER",
+	].join("\n");
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			if (spec.agent === "arbiter") return { agent: "arbiter", output: "A", structured: { vote: "A" }, usage: usage(), ok: true };
+			return {
+				agent: spec.agent,
+				output: `my approach adds a doc with an embedded diff example\n\n\`\`\`diff\n${diffBody}\n\`\`\``,
+				usage: usage(),
+				ok: true,
+			};
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, true);
+	assert.match(r.output, /```diff\ndiff --git a\/docs\/example\.md/, "the real header survives intact at the start of the extracted diff");
+	assert.match(r.output, /\+```diff/, "the embedded fence-looking content line survives intact in the body");
+	assert.match(r.output, /EMBEDDED-TAIL-MARKER/, "the body isn't truncated at the embedded fence-looking line");
 	assert.equal(r.structured?.valid, 2);
 });
 

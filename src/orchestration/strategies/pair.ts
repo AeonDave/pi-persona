@@ -40,6 +40,7 @@ export const pair: Strategy = {
 		const driver = rosterSpec(team[0]!);
 		const navigator = rosterSpec(team[1]!);
 		sdk.log(`pair: ${driver.agent} drives, ${navigator.agent} navigates`);
+		if (sdk.limits.maxConcurrency < 2) sdk.log("pair: maxConcurrency < 2 — the live exchange degrades to sequential runs");
 
 		const results = await sdk.parallel([
 			() => sdk.agent({ ...driver, task: `${input.task}\n\n--- pair protocol (driver) ---\n${DRIVER_PROTOCOL}`, peers: true }),
