@@ -544,6 +544,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs };
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
+			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
+			// only for async runs — same guards as the inproc engine below (spec B7 / §4.9).
+			const caps = controller.capabilities;
+			if (caps) deps.canUseBus = caps.canUseBus;
+			if (engOpts?.async) deps.allowBlocking = true;
 			return makeEngine(deps);
 		};
 
@@ -576,6 +581,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (onProgress) deps.childOptions.onProgress = onProgress;
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
+			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
+			// only for async runs — same guards as the inproc engine above (spec B7 / §4.9).
+			const caps = controller.capabilities;
+			if (caps) deps.canUseBus = caps.canUseBus;
+			if (engOpts?.async) deps.allowBlocking = true;
 			base = makeEngine(deps);
 		}
 

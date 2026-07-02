@@ -50,6 +50,16 @@ export interface EngineAdapterDeps {
 	 *  (the default-OFF pin). Present ⇒ every spawn is registered with the host and
 	 *  gets a live handle for `onSteerable`. */
 	broker?: EngineAdapterBroker;
+	/** Persona-level bus capability (`EffectiveCapabilities.canUseBus`). Default true.
+	 *  When false, a spec's `peers` request is dropped (no peer registration, no
+	 *  `PI_PERSONA_PEERS` env) — mirrors `inproc.ts`'s `wantsPeers` gate so the same
+	 *  persona-capability restriction holds on both engines (spec B7). */
+	canUseBus?: boolean;
+	/** Allow the broker-connected child's `contact_supervisor` `decision`/`interview` to
+	 *  BLOCK for a reply — async runs only. Sync runs hold the supervisor's turn, so
+	 *  blocking would deadlock: default false, mirroring `inproc.ts`'s `allowBlocking`
+	 *  default. Forwarded to the child as `PI_PERSONA_ALLOW_BLOCKING` (bridge.ts). */
+	allowBlocking?: boolean;
 }
 
 // Module-level (NOT per-engine), mirroring `inproc.ts`'s `globalChildSeq`: `buildEngine`
@@ -124,10 +134,16 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.broker) {
 				globalChildSeq += 1;
 				handle = `${spec.agent}#${globalChildSeq}`;
-				const wantsPeers = spec.peers === true;
+				const wantsPeers = spec.peers === true && (deps.canUseBus ?? true);
 				const label = spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
 				deps.broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
-				childOptions.env = { ...childOptions.env, PI_PERSONA_BUS: deps.broker.endpoint, PI_PERSONA_HANDLE: handle, ...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}) };
+				childOptions.env = {
+					...childOptions.env,
+					PI_PERSONA_BUS: deps.broker.endpoint,
+					PI_PERSONA_HANDLE: handle,
+					...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
+					...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),
+				};
 				const broker = deps.broker;
 				const h = handle;
 				onSteerable?.((text) => broker.steerFrame(h, text));
