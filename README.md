@@ -27,7 +27,7 @@ whole system without touching the core.
   where a child asks you a blocking `decision` via `contact_supervisor` and you `reply`. All bounded
   by hard limits (timeout, token budget, concurrency, max children) with cooperative abort.
 - **Composable strategies.** Orchestration lives in small files over a Strategy SDK: parallel
-  **fan-out**, a sequential **pipeline** (chain/debate), a **map** (per-item fan-out over a runtime
+  **fan-out**, a sequential **pipeline** (chain), a **map** (per-item fan-out over a runtime
   list), a generator↔critic **loop**, an ensemble **vote** (`magi`, with a reflection round) /
   **multi-round council**, an impartial **judge**, and a gather→merge **synthesize**. Adding one is
   a new file — no core change.
@@ -168,7 +168,8 @@ core needed**.
 **Where a new shape lives** (core vs file vs config — nothing hidden):
 - `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
 - `verify` → **persona config**: it's `critic-loop` whose critic is a **`verifier` agent** that *runs* the build/tests (`personas/verify.md` + `agents/verifier.md`, team `repair: [operator, verifier]`). Ground truth gates acceptance, not an opinion.
-- a **chain/debate** persona → just point a persona's `council` at the `pipeline` strategy over a roster (the cores build on each other instead of voting in parallel) — no code.
+- a **chain** persona → just point a persona's `council` at the `pipeline` strategy over a roster (the cores build on each other instead of voting in parallel) — no code.
+- a **debate** persona → point `council` at the built-in `debate` strategy (2+ members exchange positions live, peer-to-peer, then a majority vote) — no code.
 
 Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper) — everything else is a file or persona on top of it.
 

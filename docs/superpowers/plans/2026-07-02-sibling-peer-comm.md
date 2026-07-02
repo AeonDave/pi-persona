@@ -10,11 +10,14 @@
 
 ## Global Constraints
 
-- Spec is binding: `docs/superpowers/specs/2026-07-02-sibling-peer-comm-design.md`. Three approved implementation-level simplifications (intent preserved):
+- Spec is binding: `docs/superpowers/specs/2026-07-02-sibling-peer-comm-design.md`. Approved implementation-level simplifications and deviations (intent preserved):
   1. Peer scoping = **per-engine-instance registry** (one engine is built per delegate/council/flow-phase/async-launch — `extension.ts` `buildEngine` call sites), NOT an SDK-minted group id. Same isolation guarantee, less plumbing.
   2. UI transparency tick rides the engine's existing per-run `onProgress` (`activity: "✉ from …"`), NOT a new extension bus-observer (no handle→tree-node map exists).
   3. Degraded-mode warning = protocol text tells members to proceed solo if `contact_peer` is missing, plus a `PI_PERSONA_DEBUG` stderr line in the engine (`sdk.log` is unreachable from the engine, where the decision is made).
   4. The spec's "no spurious supervisor wake" integration test is covered at UNIT level (peer delivery leaves the supervisor inbox empty — Task 4 test) + the live drive check: the notifier filter (`env.to !== SUPERVISOR`, `extension.ts` bus observer) is pre-existing code already exercised by the existing suite.
+  5. The debate render has no peer-traffic count line — `AgentResult` carries no message count; peer-traffic visibility rides the engine's `activity` tick (deviation 2) instead of a tally in the ruling text.
+  6. The shared fence keeps the existing `<subagent-output>` tag (`core/fence.ts`), not the spec's illustrative `<untrusted-subagent-message>` — one fence tag for all untrusted sub-agent content, not a peer-specific variant.
+  7. The debate `PROTOCOL` is delivered via the task text, not appended to `role` — keeps `roleHint`-derived UI tree keys consistent with `rosterNodeKeys` roster seeding (a bare roster member's role stays unset).
 - tsconfig is strict + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` + `noUnusedLocals` + `noUnusedParameters`. Never assign a possibly-`undefined` value to an optional property — use conditional spread (`...(x ? { k: x } : {})`) or a guarded assignment.
 - Erasable-syntax-only TS: no enums, no namespaces, no parameter properties.
 - `src/core/*` stays pure (no Pi imports). `src/bus/*` may import `typebox` + `defineTool` (like `bus/contact.ts`).
