@@ -6,3 +6,6 @@ dist/
 .env.*
 .DS_Store
 Thumbs.db
+
+# Agent working artifacts (task reports, review diffs, progress)
+.superpowers/
