@@ -38,9 +38,16 @@ const TAIL_DIFF_FENCE = /^```diff\n([\s\S]*?)```\s*$/;
  * at the last fence-open (not the first, and not a naive lazy-body match from the start of the
  * string) avoids swallowing an earlier illustrative fence plus intervening prose when a model's
  * answer contains more than one ```diff block.
+ *
+ * The fence search is anchored at a LINE START, not a bare substring search: a unified diff's
+ * content lines always carry a space/+/- prefix, so a column-0 ```diff can only be a real fence.
+ * Without this, a deliverable diff whose CONTENT embeds a fence-looking line (e.g. the diff adds
+ * a markdown doc with a diff example, so the diff body contains "+```diff") would let a bare
+ * `lastIndexOf` anchor INSIDE the deliverable, stripping its header.
  */
 function extractDiff(output: string): { summary: string; diff: string } | undefined {
-	const i = output.lastIndexOf(DIFF_FENCE_OPEN);
+	const j = output.lastIndexOf("\n" + DIFF_FENCE_OPEN);
+	const i = j >= 0 ? j + 1 : output.startsWith(DIFF_FENCE_OPEN) ? 0 : -1;
 	if (i < 0) return undefined;
 	const body = output.slice(i).match(TAIL_DIFF_FENCE)?.[1]?.trim();
 	return body ? { summary: output.slice(0, i).trim(), diff: body } : undefined;

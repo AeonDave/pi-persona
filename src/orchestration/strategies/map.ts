@@ -56,6 +56,11 @@ export const map: Strategy = {
 			return { agent: "map", output: split.output || "(splitter produced no items)", usage: split.usage, ok: false };
 		}
 		sdk.log(`map: ${items.length} items → ${worker.agent}${peers ? " (cross-talk on)" : ""}`);
+		if (peers && items.length > sdk.limits.maxConcurrency) {
+			sdk.log(
+				`map: ${items.length} items exceeds maxConcurrency (${sdk.limits.maxConcurrency}) — the live exchange will be batched (workers beyond the concurrency window join late)`,
+			);
+		}
 
 		const results = await sdk.parallel(
 			items.map((item) => () =>
