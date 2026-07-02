@@ -125,6 +125,10 @@ export function buildPeekDigest(runs: AsyncRun[]): string {
 export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) => string): string {
 	const done = runs.filter((r) => r.status === "done");
 	const failed = runs.filter((r) => r.status === "failed");
+	// All failed → no follow-up. The supervisor has nothing to work with, and a
+	// notice would just prod it into re-delegating (loop). The immediate ui.notify
+	// in the tracker's onComplete has already surfaced the failure to the user.
+	if (done.length === 0) return "";
 	// First line stays short and informative — pi's queued-message UI shows only this line, truncated.
 	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed`;
 	const blocks: string[] = [head];
@@ -214,8 +218,10 @@ export class IdleCoalescingNotifier<T> {
 			return;
 		}
 		const batch = this.pending.splice(0, this.pending.length);
+		const message = this.deps.render(batch);
+		if (!message) return; // render suppressed this batch (e.g. all failures) — nothing to deliver
 		try {
-			this.deps.deliver(this.deps.render(batch));
+			this.deps.deliver(message);
 		} catch {
 			this.pending.unshift(...batch); // raced a just-started turn — retry when idle
 			this.arm(this.retryMs);
