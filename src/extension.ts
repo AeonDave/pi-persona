@@ -436,6 +436,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			ideps.bus = bus;
 			ideps.supervisorHandle = SUPERVISOR;
 			if (controller.activePersona?.coaching) ideps.coaching = true;
+			// Peer messaging obeys the persona's bus capability (canUseBus; Task: sibling peer comm).
+			const caps = controller.capabilities;
+			if (caps) ideps.canUseBus = caps.canUseBus;
 			if (engOpts?.async) ideps.allowBlocking = true;
 			base = makeInProcessEngine(ideps);
 		} else {

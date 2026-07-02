@@ -26,6 +26,11 @@ export interface AgentRunSpec {
 	outputContract?: string;
 	/** Run this leg in an isolated git worktree (overrides the agent's own setting). */
 	isolation?: "none" | "worktree";
+	/** Opt this run into sibling messaging: the child gets a `contact_peer` tool (list/send,
+	 *  ONE-WAY) scoped to the other peers-enabled members of the SAME engine run. Set by
+	 *  strategies (e.g. `debate`). In-process engine only — the child engine ignores it;
+	 *  gated at bind time by the persona's `canUseBus` capability. */
+	peers?: boolean;
 }
 
 /** A live snapshot of an agent's progress (for streaming UI). */
