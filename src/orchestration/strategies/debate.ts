@@ -1,5 +1,5 @@
 /**
- * debate — the p2p reference strategy (design: 2026-07-02-sibling-peer-comm-design.md).
+ * debate — the p2p reference strategy (design: docs/STRATEGIES.md, docs/ARCHITECTURE.md).
  * 2+ members work the SAME task in parallel and talk to each other DIRECTLY while they
  * work (`contact_peer`, one-way notes): state a position, rebut or concede what arrives,
  * refine, then each finalizes on the contract and a majority vote settles it. Unlike

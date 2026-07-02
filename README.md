@@ -204,7 +204,7 @@ Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper)
 - **Cross-process broker (opt-in, `PI_PERSONA_BROKER=1`)** extends both of the above — steer and the
   comm plane (`contact_supervisor` / `contact_peer` / `intercom steer`) — to sub-agents that don't run
   in-process: `PI_PERSONA_ENGINE=child` runs and every `isolation: worktree` leg. Off by default;
-  design: [`docs/superpowers/specs/2026-07-02-cross-process-broker-design.md`](docs/superpowers/specs/2026-07-02-cross-process-broker-design.md).
+  design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 
 ## Write your own
 
@@ -455,8 +455,8 @@ npm run typecheck   # strict tsc --noEmit
 npm test            # node --test
 ```
 
-Design notes (binding) live in
-[`docs/superpowers/specs/`](docs/superpowers/specs/) — the guardrails doc wins on any conflict.
+Design notes (binding) live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the design contract)
+and [`docs/STRATEGIES.md`](docs/STRATEGIES.md) (the orchestration layer, in depth).
 
 ## License
 
