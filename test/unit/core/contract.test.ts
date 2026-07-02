@@ -108,8 +108,14 @@ test("contractInstructions renders one line per field with type/required/enum/bo
 	assert.match(text, /- confidence \(number, 0\.\.1\)/);
 	assert.match(text, /- stance \(enum, one of: approve \| reject \| revise\)/);
 	assert.match(text, /Include every required field/);
+	assert.match(text, /BARE option token/, "a contract with a vote field carries the vote-hygiene hint");
 	// A member's answer following these instructions round-trips through validation.
 	assert.equal(parseAndValidate('prose first…\n{"result":"ok","vote":"a","confidence":0.8}', DEFAULT_CONTRACT).ok, true);
+});
+
+test("contractInstructions omits the vote-hygiene hint when the contract has no vote field", () => {
+	const def: ContractDef = { name: "plain", fields: { result: { type: "string", required: true } } };
+	assert.ok(!contractInstructions(def).includes("BARE option token"));
 });
 
 test("contractInstructions renders one-sided bounds as >=/<=", () => {
