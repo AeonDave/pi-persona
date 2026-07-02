@@ -27,6 +27,12 @@ export interface PiPersonaConfig {
 	/** Opt-in periodic-peek interval (ms) for the idle supervisor while async children run:
 	 *  0 = off (default). Each tick surfaces a compact digest as a follow-up (§4.9). */
 	peekEveryMs: number;
+	/** Opt-in cross-process broker (spec B1-B7): off (default) ⇒ the child engine spawns
+	 *  exactly as today — no host, no extra env vars, zero behavior change. On ⇒ the
+	 *  extension lazily starts a session-scoped host on the first child-engine build,
+	 *  giving `PI_PERSONA_ENGINE=child` runs (and every worktree-isolated leg) the comm
+	 *  plane + steer that in-process runs already have. */
+	broker: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -53,6 +59,9 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// `PI_PERSONA_SEED=on`. Default off — personas are installed via `/persona seed|restore`.
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 0,
+		// Any non-empty value opts in (mirrors PI_PERSONA_DISABLE's own convention) — the
+		// live-drive doc/examples use PI_PERSONA_BROKER=1.
+		broker: !!env.PI_PERSONA_BROKER && env.PI_PERSONA_BROKER.trim().length > 0,
 	};
 	const peek = Number(env.PI_PERSONA_PEEK_MS?.trim());
 	if (Number.isFinite(peek) && peek > 0) config.peekEveryMs = peek;

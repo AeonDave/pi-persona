@@ -53,6 +53,11 @@ whole system without touching the core.
   Either way pi-persona never re-spawns supervisors (no fork bombs), the same hard limits apply
   (timeout, token budget, concurrency, max children) with cooperative abort, and each run's
   output `contract@hash` is pinned so a hot reload can't change a run mid-flight.
+- **Cross-process broker (opt-in, `PI_PERSONA_BROKER=1`).** Gives child-process sub-agents —
+  `PI_PERSONA_ENGINE=child` runs and every `isolation: worktree` leg (which always uses the child
+  engine) — the same comm plane AND **steer** in-process sub-agents already have: a session-scoped
+  relay (POSIX socket / Windows named pipe) connects the child straight into your `contact_supervisor`
+  / `contact_peer` / `intercom steer` surface. Off by default — nothing changes unless you set it.
 - **Everything is data.** Personas and agents are Markdown + YAML frontmatter; teams are a
   `teams.yaml`; strategies are small TypeScript files registered by name. A persona's
   capabilities (which tools, which delegate targets) resolve once and are enforced on every call.
@@ -335,7 +340,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (opt in to first-run auto-install; off by default)
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (opt in to first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (opt in to the cross-process comm plane + steer for child-process/worktree sub-agents; off by default)
 
 **Opt-in, and your copies win.** Personas/agents are **not installed automatically** — a fresh
 install shows none. Run `/persona seed` to copy the bundled defaults into `~/.pi/agent/` (or

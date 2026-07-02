@@ -235,6 +235,37 @@ test("a client cannot register as the reserved supervisor handle", async () => {
 	}
 });
 
+test("steer writes a steer frame directly to the connected handle (not via the bus)", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const { send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+
+		assert.equal(host.steer("child#1", "focus on the install section"), true);
+		await waitFor(() => frames.some((f) => f.t === "steer"));
+		const steer = frames.find((f) => f.t === "steer");
+		assert.ok(steer && steer.t === "steer");
+		assert.equal(steer.text, "focus on the install section");
+		assert.ok(!bus.hasPending("supervisor"), "steer bypasses the bus entirely");
+	} finally {
+		await host.close();
+	}
+});
+
+test("steer on an unconnected handle is a harmless no-op (returns false)", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host } = await startHost(bus);
+	try {
+		assert.equal(host.steer("nobody-here", "x"), false);
+	} finally {
+		await host.close();
+	}
+});
+
 test("close() is idempotent and unregisters all still-connected handles", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");
