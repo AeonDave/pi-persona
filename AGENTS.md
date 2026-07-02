@@ -64,6 +64,12 @@ no build step. Design specs (binding on any conflict, guardrails first):
   `intercom send` (previously a dead letter). Gated by `EffectiveCapabilities.canUseBus` (OFF iff
   the persona explicitly denies `intercom`). The child engine ignores `peers`.
   Design: `docs/superpowers/specs/2026-07-02-sibling-peer-comm-design.md`.
+  On the peer plane: `debate` and `pair` always; `map`/`synthesize` opt-in via `params.peers`.
+  `magi`/`judge`/`fanout` stay peer-less BY DESIGN — independence is their bias guard
+  (uncorrelated errors; an anonymised ballot cannot survive members who talked) — do not "fix"
+  this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a git repo; without
+  one the wrapper silently degrades to unisolated runs) and returns the winning diff for the
+  SUPERVISOR to apply.
 
 ## Testing
 

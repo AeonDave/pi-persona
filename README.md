@@ -157,13 +157,15 @@ core needed**.
 |---|---|
 | `fanout` | parallel — every roster agent on the same task, aggregated |
 | `pipeline` | series / chain — each agent builds on the previous one's output |
-| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated |
+| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated (opt-in live cross-talk between workers via `params: { peers: true }`) |
 | `critic-loop` | generator → critic → revise, until the critic stops rejecting |
 | `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure independent poll) |
 | `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) |
 | `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it |
 | `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) |
-| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) |
+| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) (opt-in live cross-talk between gatherers via `params: { peers: true }`) |
+| `pair` | driver executes while a navigator inspects the same ground live: risk checklist up front, corrections per milestone, final review attached (peer-to-peer) |
+| `compete` | N competitors implement the same task in isolated git worktrees; a blind judge picks; the winner is returned as a unified diff for the supervisor to apply (requires a git repo) |
 
 **Where a new shape lives** (core vs file vs config — nothing hidden):
 - `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
