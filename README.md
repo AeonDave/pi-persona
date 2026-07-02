@@ -158,19 +158,24 @@ core needed**.
 
 **Built-in strategies** (files on the SDK above):
 
-| Strategy | Shape |
-|---|---|
-| `fanout` | parallel — every roster agent on the same task, aggregated |
-| `pipeline` | series / chain — each agent builds on the previous one's output |
-| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated (opt-in live cross-talk between workers via `params: { peers: true }`) |
-| `critic-loop` | generator → critic → revise, until the critic stops rejecting |
-| `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure independent poll) |
-| `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) |
-| `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it |
-| `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) |
-| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) (opt-in live cross-talk between gatherers via `params: { peers: true }`) |
-| `pair` | driver executes while a navigator inspects the same ground live: risk checklist up front, corrections per milestone, final review attached (peer-to-peer) |
-| `compete` | N competitors implement the same task in isolated git worktrees; a blind judge picks; the winner is returned as a unified diff for the supervisor to apply (requires a git repo) |
+| Strategy | Shape | Params (name · default) |
+|---|---|---|
+| `fanout` | parallel — every roster agent on the same task, aggregated | *(none)* |
+| `pipeline` | series / chain — each agent builds on the previous one's output | *(none)* |
+| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated (opt-in live cross-talk between workers via `params: { peers: true }`) | `maxItems` · the run's `maxChildren` · `peers` · `false` |
+| `critic-loop` | generator → critic → revise, until the critic stops rejecting | `generator` · roster member 0 · `critic` · roster member 1 · `rounds` · `3` |
+| `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure independent poll) | `aggregate` · `"majority"` · `reflect` · `true` |
+| `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) | `rounds` · `3` · `bestOf` · majority of the roster · `aggregate` · `"majority"` |
+| `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it | `bestOf` · majority of the roster · `aggregate` · `"majority"` |
+| `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) | `judge` · *(required)* · `contract` · none |
+| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) (opt-in live cross-talk between gatherers via `params: { peers: true }`) | `synthesizer` · first roster agent · `peers` · `false` |
+| `pair` | driver executes while a navigator inspects the same ground live: risk checklist up front, corrections per milestone, final review attached (peer-to-peer) | *(none)* |
+| `compete` | N competitors implement the same task in isolated git worktrees; a blind judge picks; the winner is returned as a unified diff for the supervisor to apply (requires a git repo) | `judge` · *(required)* · `ballotDiffChars` · `6000` |
+
+Params are declared per strategy (`src/orchestration/strategies/*.ts`) and looked up by `knownParams()`
+so this table and the code can't drift; `/doctor` lists the same schema live. Unknown param keys only
+**warn**, never hard-fail — strategies are trusted project code, so a correct call is behaviourally
+unchanged.
 
 **Where a new shape lives** (core vs file vs config — nothing hidden):
 - `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
@@ -192,8 +197,14 @@ Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper)
   and a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision is
   cost-aware — the supervisor spends nothing until a child wakes it (or a periodic peek, if `PI_PERSONA_PEEK_MS` is set).
   Your own `intercom send` now reaches a still-running child too, steered into its session mid-turn.
-  Strategies can also opt a run into **sibling peer comm**: `debate`'s members get a `contact_peer`
-  tool to message each other directly (one-way, no cross-child blocking).
+  Strategies can also opt a run into **sibling peer comm**: `debate` and `pair` members always get
+  a `contact_peer` tool to message each other directly (one-way, no cross-child blocking); `map` and
+  `synthesize` add it only when convened with `params: { peers: true }` (workers/gatherers stay
+  independent by default).
+- **Cross-process broker (opt-in, `PI_PERSONA_BROKER=1`)** extends both of the above — steer and the
+  comm plane (`contact_supervisor` / `contact_peer` / `intercom steer`) — to sub-agents that don't run
+  in-process: `PI_PERSONA_ENGINE=child` runs and every `isolation: worktree` leg. Off by default;
+  design: [`docs/superpowers/specs/2026-07-02-cross-process-broker-design.md`](docs/superpowers/specs/2026-07-02-cross-process-broker-design.md).
 
 ## Write your own
 
@@ -335,6 +346,93 @@ council: { preset: magi-rounds }
 **The only case that touches code:** a brand-new strategy *shape* (a new vote rule, a custom loop).
 Drop a `src/orchestration/strategies/<name>.ts` using the same `agent` / `parallel` / `reduce.*` SDK,
 register it, and name it in any persona's `council:` block. Everything else above is data.
+
+## Authoring
+
+More copy-paste recipes, one shape each. All still just files under `~/.pi/agent/` (or project `.pi/`).
+
+**A new agent** — `tools`, `model`, and `isolation: worktree` in the frontmatter; the body is the
+agent's prompt. `name`/`description` are what a supervisor's `delegate` sees when picking it.
+
+```markdown
+<!-- agents/hardener.md -->
+---
+name: hardener
+description: Locks down a change's security posture — authz, input validation, secrets handling.
+tools: [read, grep, edit, bash]
+model: opus
+isolation: worktree
+---
+You are the Hardener. Given a diff or area, find and FIX authz/access-control gaps, injection and
+unsafe-sink risks, secrets/token mishandling, and missing input validation. Edit in place, then
+report what you changed and why — cite `file:line` for each fix.
+```
+
+**A council persona, plus a per-call override** — `council: { strategy, roster, params }` picks the
+persona's *default* deliberation; the `council` tool's own `strategy` / `roster` / `params` args
+override it for one call without touching the file (see [per-call params](#write-your-own)).
+
+```markdown
+<!-- personas/mycouncil.md -->
+---
+name: mycouncil
+persona: true
+council: { strategy: magi, roster: magi, params: { reflect: false } }
+---
+Convene the council before any significant choice, then execute the ruling yourself.
+```
+
+```js
+// one-off: run THIS decision as a `debate` over the `review` roster, best-of-2, instead of the
+// persona's default magi/magi — no file edit needed.
+council({ question: "should we cache this or recompute?", strategy: "debate", roster: "review", params: { bestOf: 2 } })
+```
+
+**A mandatory-orchestration persona** — `orchestration: { mode: strategy, strategy, roster, params }`
+runs the strategy **automatically on every turn** (the LLM can't opt out), and its result is folded
+into the prompt before the supervisor answers. Use `council:` instead when the strategy should run
+only on demand.
+
+```markdown
+<!-- personas/myguard.md -->
+---
+name: myguard
+persona: true
+orchestration: { mode: strategy, strategy: magi, roster: magi, params: { reflect: false } }
+---
+Every turn is decided by the MAGI triarchy first (no reflection round); you present and act on
+its ruling.
+```
+
+**A `teams.yaml` roster** — a bare agent name, or the inline ensemble form
+`{ agent, role, model, skills }` that specialises ONE agent into several perspectives:
+
+```yaml
+# teams.yaml
+hardening:
+  - hardener
+  - { agent: reviewer, role: "Focus ONLY on the SECURITY lens", model: "sonnet" }
+```
+
+**Each new strategy, one runnable line** — point any council-driven persona's `council` tool call
+(or a persona's `council:` block) at these:
+
+```js
+// debate — 2+ members exchange positions live, then a majority vote settles it
+council({ question: "adopt library X or hand-roll it?", strategy: "debate", roster: "review" })
+
+// pair — a driver executes while a navigator inspects the same ground live
+council({ question: "implement the rate limiter", strategy: "pair", roster: "repair" })
+
+// compete — N competitors race the same task in isolated worktrees; a blind judge picks the diff
+council({ question: "optimize this hot loop", strategy: "compete", roster: "build", params: { judge: "reviewer" } })
+
+// map — splitter + parallel workers, with live cross-talk between them (off by default)
+council({ question: "port every module in src/legacy to the new SDK", strategy: "map", roster: "swarm", params: { peers: true } })
+
+// synthesize — parallel gatherers merged by one synthesiser, with live cross-talk (off by default)
+council({ question: "audit this change", strategy: "synthesize", roster: "review", params: { synthesizer: "reviewer", peers: true } })
+```
 
 ## Keys & commands
 
