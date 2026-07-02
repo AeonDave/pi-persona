@@ -32,6 +32,17 @@ test("AgentTree.add is idempotent on id and update mutates status/detail + notif
 	assert.ok(changes >= 3, "every mutation notifies listeners");
 });
 
+test("AgentTree.add re-parents an existing node when parentId is provided (upsert moves it)", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "root-a", label: "A" });
+	tree.add({ id: "root-b", label: "B" });
+	tree.add({ id: "kid", label: "K", parentId: "root-a" });
+	tree.add({ id: "kid", label: "K", parentId: "root-b" }); // upsert with a new parent
+	assert.equal(tree.snapshot().find((n) => n.id === "kid")?.parentId, "root-b");
+	tree.add({ id: "kid", label: "K2" }); // parentId omitted → keep the current parent
+	assert.equal(tree.snapshot().find((n) => n.id === "kid")?.parentId, "root-b");
+});
+
 test("flattenTree yields rows in display order with depth; update can set a node's output", () => {
 	const tree = new AgentTree();
 	tree.add({ id: "magi", label: "magi" });

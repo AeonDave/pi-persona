@@ -1,6 +1,6 @@
 ---
 name: judge
-label: "⚖️ Judge"
+label: "🏛️ Judge"
 persona: true
 council:
   strategy: judge

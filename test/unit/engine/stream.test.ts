@@ -118,6 +118,50 @@ test("message_update keeps reasoning AND answer visible together — new text do
 	assert.match(out, /the answer is json/, "answer is visible too");
 });
 
+test("the transcript keeps a completed message's REASONING too — message_end must not wipe it", () => {
+	// The f9 'overwrites itself' bug: partial (thinking) cleared on message_end and only
+	// the text was folded, so a tool/thinking-heavy agent's view kept losing content.
+	const s = createStreamState();
+	applyEvent(s, {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "let me check the parser first" },
+				{ type: "text", text: "found it in parse()" },
+			],
+		},
+	});
+	const out = snapshot(s).output;
+	assert.match(out, /let me check the parser first/, "the reasoning survives the message end");
+	assert.match(out, /found it in parse\(\)/);
+	assert.equal(s.output, "found it in parse()", "the returned answer is still just the text");
+});
+
+test("the transcript logs tool calls chronologically (⚙ lines) so tool-heavy stretches stay visible", () => {
+	const s = createStreamState();
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "scan the sources" }] } });
+	applyEvent(s, { type: "tool_execution_start", toolName: "grep", args: { pattern: "TODO" } });
+	applyEvent(s, { type: "tool_execution_end", toolName: "grep", result: {}, isError: false });
+	applyEvent(s, { type: "tool_execution_start", toolName: "read", args: { path: "src/x.ts" } });
+	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "3 TODOs found" }] } });
+	const out = snapshot(s).output;
+	const order = [out.indexOf("scan the sources"), out.indexOf("⚙ grep TODO"), out.indexOf("⚙ read src/x.ts"), out.indexOf("3 TODOs found")];
+	assert.ok(order.every((i) => i >= 0), `all steps present in: ${out}`);
+	assert.deepEqual([...order].sort((a, b) => a - b), order, "the log reads in chronological order");
+});
+
+test("the transcript is bounded — a very long run trims the OLD head, keeping the live tail", () => {
+	const s = createStreamState();
+	for (let i = 0; i < 300; i++) {
+		applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `msg ${i} ${"x".repeat(1000)}` }] } });
+	}
+	assert.ok(s.transcript.length < 250_000, `transcript stays bounded (got ${s.transcript.length})`);
+	assert.match(s.transcript, /earlier output trimmed/);
+	assert.match(s.transcript, /msg 299/, "the newest content is kept");
+	assert.doesNotMatch(s.transcript, /msg 0 /, "the oldest content was trimmed");
+});
+
 test("snapshot accumulates a transcript of assistant messages (live view), while state.output stays the last", () => {
 	const s = createStreamState();
 	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "first message" }] } });

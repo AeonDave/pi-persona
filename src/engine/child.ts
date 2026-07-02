@@ -142,7 +142,10 @@ export async function runChildAgent(
 		prompt = await writeTempPrompt(spec.systemPrompt);
 		args.push("--append-system-prompt", prompt.path);
 	}
-	args.push(`Task: ${spec.task}`);
+	// The task goes over STDIN, not argv: `pi -p` prepends piped stdin to the initial
+	// message, and a flow-phase task (base task + every upstream phase's output) easily
+	// exceeds Windows' ~32 KiB command-line cap — as argv it would fail to spawn.
+	const taskInput = `Task: ${spec.task}`;
 
 	const state = createStreamState();
 	let stderr = "";
@@ -157,7 +160,7 @@ export async function runChildAgent(
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 				// POSIX: give the child its own process group so an escalated
 				// force-kill reaches its grandchildren too.
 				detached: process.platform !== "win32",
@@ -241,6 +244,12 @@ export async function runChildAgent(
 				}, opts.timeoutMs);
 				timer.unref?.();
 			};
+
+			// Deliver the task and close stdin (pi waits for EOF before starting). A child
+			// that dies before reading (spawn failure, early exit) emits an async 'error'
+			// (EPIPE) on stdin — tolerate it, the exit path reports the real cause.
+			proc.stdin?.on("error", () => {});
+			proc.stdin?.end(taskInput);
 
 			proc.stdout?.setEncoding("utf8");
 			proc.stdout?.on("data", (d: string) => {

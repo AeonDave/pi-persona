@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../../src/agents/agent.ts";
@@ -81,6 +82,25 @@ test("makeEngine does not double a thinking suffix already on the model", async 
 	const r = await eng.run({ agent: "scout", task: "do [args]", model: "prov/x:low" });
 	assert.match(r.output, /--model prov\/x:low/);
 	assert.doesNotMatch(r.output, /:low:high/);
+});
+
+test("makeEngine appends an on-the-fly `role` to the agent's prompt file (child path)", async () => {
+	let promptFile = "";
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		childOptions: {
+			resolveInvocation: (args) => {
+				// Capture the --append-system-prompt file content while it still exists.
+				const i = args.indexOf("--append-system-prompt");
+				if (i >= 0) promptFile = fs.readFileSync(args[i + 1] as string, "utf8");
+				return resolveFake(args);
+			},
+		},
+	});
+	const r = await eng.run({ agent: "scout", task: "t", role: "You are a CSS wizard." });
+	assert.equal(r.ok, true);
+	assert.match(promptFile, /You are scout\./, "the agent's own persona is kept");
+	assert.match(promptFile, /CSS wizard/, "the role is appended");
 });
 
 test("makeEngine aborts the child when the per-call (UI stop) signal fires", async () => {

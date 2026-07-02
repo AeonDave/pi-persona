@@ -108,6 +108,15 @@ test("the timeout is idle-based — a child that keeps emitting is NOT killed (t
 	assert.equal(r.ok, true);
 });
 
+test("runChildAgent delivers a HUGE task intact over stdin (beyond any argv length cap)", async () => {
+	// Flow phases embed upstream outputs in the task — far beyond Windows' ~32 KiB
+	// command-line limit. The stdin path must carry it byte-for-byte.
+	const big = `count me [len] ${"x".repeat(200_000)}`;
+	const r = await runChildAgent({ task: big }, undefined, { resolveInvocation: resolveFake });
+	assert.equal(r.ok, true);
+	assert.equal(r.output, `len: ${`Task: ${big}`.length}`, "the child received the full task");
+});
+
 test("runChildAgent surfaces a spawn failure (ENOENT) in errorMessage instead of swallowing it", async () => {
 	const r = await runChildAgent({ task: "x" }, undefined, {
 		resolveInvocation: () => ({ command: "definitely-not-a-real-binary-xyz", args: [] }),

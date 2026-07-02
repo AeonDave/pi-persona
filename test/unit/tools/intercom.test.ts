@@ -36,6 +36,14 @@ test("intercom reply answers a child's blocking ask by id", async () => {
 	assert.equal(await waiting, "OFF", "the child's ask resolves with the reply");
 });
 
+test("intercom reply to an unknown/expired ask id reports failure (not a false 'Replied')", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const r = runIntercom({ action: "reply", askId: "m999", message: "OFF" }, bus, "supervisor");
+	assert.equal(r.details.ok, false);
+	assert.match(r.text, /no pending ask/i);
+});
+
 test("intercom send delivers a one-way message to a child", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

@@ -168,6 +168,37 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	assert.match(r.error ?? "", /from spec/);
 });
 
+test("inproc engine's model-not-found error names real registry candidates (self-correcting retry)", async () => {
+	const registry = {
+		find: () => undefined,
+		getAll: () => [
+			{ provider: "prov", id: "claude-sonnet-4-6" },
+			{ provider: "prov", id: "claude-haiku-4-5" },
+			{ provider: "other", id: "gpt-x" },
+		],
+	} as unknown as ModelRegistry;
+	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: registry, cwd: ".", createSession: fakeSessions([]) });
+	const r = await engine.run({ agent: "a", task: "t", model: "sonnet" });
+	assert.equal(r.ok, false);
+	// Nearest matches first: the requested fragment ("sonnet") filters the candidates.
+	assert.match(r.error ?? "", /try e\.g\.: prov\/claude-sonnet-4-6/);
+	assert.doesNotMatch(r.error ?? "", /gpt-x/, "non-matching refs are not suggested when a near match exists");
+});
+
+test("inproc engine appends an on-the-fly `role` to the agent's own system prompt", async () => {
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("ok")], spy),
+	});
+	await engine.run({ agent: "a", task: "t", role: "You are a Rust unsafe-code auditor." });
+	assert.match(spy.opts?.systemPrompt ?? "", /You are a\./, "the agent's own persona is kept");
+	assert.match(spy.opts?.systemPrompt ?? "", /Rust unsafe-code auditor/, "the role is appended");
+});
+
 test("inproc engine tags failed runs with agent · model + dynamic overrides so failures are actionable", async () => {
 	// Simulate a mid-flight failure: pi emits a message_end assistant event carrying
 	// stopReason=error + a provider errorMessage (e.g. a 400 rejected by the API).
@@ -196,15 +227,130 @@ test("inproc engine tags failed runs with agent · model + dynamic overrides so 
 	assert.match(r.error ?? "", /400 model_not_supported/);
 });
 
-test("inproc engine aborts via signal → agent.abort() and a /abort/ error", async () => {
-	const spy: Spy = {};
+test("inproc engine settles a PRE-aborted signal without building a session (no wasted model call)", async () => {
+	let built = 0;
 	const ac = new AbortController();
 	ac.abort();
-	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")], spy) });
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async (opts) => {
+			built += 1;
+			return fakeSession([msgEnd("x")], { opts });
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t" }, undefined, ac.signal);
+	assert.equal(built, 0, "no session is created for a signal that was already aborted");
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /abort/);
+});
+
+test("inproc engine aborts a RUNNING session via signal → agent.abort() and a /abort/ error", async () => {
+	const spy: Spy = {};
+	const ac = new AbortController();
+	const session = fakeSession([msgEnd("x")], spy);
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => ({
+			...session,
+			prompt: async (input) => {
+				ac.abort(); // the signal fires mid-run
+				await session.prompt(input);
+			},
+		}),
+	});
 	const r = await engine.run({ agent: "a", task: "t" }, undefined, ac.signal);
 	assert.equal(spy.aborted, true, "agent.abort() called on abort");
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /abort/);
+});
+
+test("inproc engine idle-kills a session that emits NO events after timeoutMs (the run settles)", async () => {
+	// Without the watchdog this run would await waitForIdle() forever (e.g. a stuck
+	// provider stream) — the DEFAULT engine must settle hung children like the child
+	// engine's idle kill does.
+	let abortCalled = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 40,
+		createSession: async () => {
+			let release!: () => void;
+			const idle = new Promise<void>((r) => {
+				release = r;
+			});
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => {
+						abortCalled = true;
+						release(); // aborting unblocks waitForIdle, like the real session
+					},
+					waitForIdle: () => idle,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(abortCalled, true, "the watchdog aborted the hung session");
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /timed out/);
+	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
+});
+
+test("inproc engine does NOT time out a fast run (the watchdog is disarmed on completion)", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 5_000,
+		createSession: fakeSessions([msgEnd("quick")]),
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	assert.equal(r.output, "quick");
+});
+
+test("inproc engine disables the idle watchdog for coaching children that may block on a reply", async () => {
+	// A child blocked on contact_supervisor's decision ask emits no events while it
+	// waits — with coaching + allowBlocking the watchdog must NOT kill it.
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		coaching: true,
+		allowBlocking: true,
+		timeoutMs: 20,
+		createSession: async () => ({
+			subscribe: () => () => {},
+			prompt: async () => {},
+			agent: {
+				abort: () => {
+					throw new Error("the watchdog must not fire for a blocking-capable child");
+				},
+				waitForIdle: () => new Promise((r) => setTimeout(r, 60)), // longer than timeoutMs
+				steer: () => {},
+			},
+			dispose: () => {},
+		}),
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true, "the silent-but-legitimately-waiting child survived");
 });
 
 test("inproc engine exposes a steer handle that injects a user message into the running agent", async () => {

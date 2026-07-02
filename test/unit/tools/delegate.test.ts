@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { labelFor, runDelegate, shortModel } from "../../../src/tools/delegate.ts";
+import { DelegationLedger, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -45,6 +45,48 @@ test("runDelegate threads a per-leg steer handle (onLegSteerable) from the engin
 	assert.equal(handles.length, 1, "onLegSteerable fired for the leg");
 	handles[0]?.("redirect to errors");
 	assert.deepEqual(steered, ["scout:redirect to errors"], "the steer handle reaches the engine's steer fn");
+});
+
+test("runDelegate passes an on-the-fly `role` through to the engine spec (single + parallel)", async () => {
+	const roles: Array<string | undefined> = [];
+	const engine = engineThat((s) => {
+		roles.push(s.role);
+		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+	});
+	await runDelegate({ agent: "operator", task: "t", role: "You are a Rust auditor." }, engine);
+	await runDelegate({ tasks: [{ agent: "operator", task: "t", role: "You are a CSS wizard." }, { agent: "scout", task: "t" }] }, engine);
+	assert.deepEqual(roles, ["You are a Rust auditor.", "You are a CSS wizard.", undefined]);
+});
+
+test("DelegationLedger vetoes only after MAX identical failures; model/task changes are new keys", () => {
+	const ledger = new DelegationLedger();
+	const t = { agent: "op", model: "p/m", task: "do X" };
+	assert.equal(ledger.vet([t]), undefined, "clean key → allowed");
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) ledger.record(t, false);
+	assert.match(ledger.vet([t]) ?? "", /already failed/, "identical retry is vetoed");
+	assert.equal(ledger.vet([{ ...t, model: "p/other" }]), undefined, "a different model is a fresh attempt");
+	assert.equal(ledger.vet([{ ...t, task: "do X, but smaller" }]), undefined, "a reworded task is a fresh attempt");
+});
+
+test("DelegationLedger clears the key on success (a later identical delegation is allowed again)", () => {
+	const ledger = new DelegationLedger();
+	const t = { agent: "op", task: "do X" };
+	ledger.record(t, false);
+	ledger.record(t, false);
+	assert.notEqual(ledger.vet([t]), undefined);
+	ledger.record(t, true); // it eventually worked (e.g. after a steer)
+	assert.equal(ledger.vet([t]), undefined, "success resets the failure count");
+});
+
+test("DelegationLedger stays bounded (old keys are evicted, no unbounded growth)", () => {
+	const ledger = new DelegationLedger();
+	for (let i = 0; i < 500; i++) {
+		ledger.record({ agent: "op", task: `task ${i}` }, false);
+		ledger.record({ agent: "op", task: `task ${i}` }, false);
+	}
+	// The earliest keys were evicted — no veto for them anymore; the newest still veto.
+	assert.equal(ledger.vet([{ agent: "op", task: "task 0" }]), undefined);
+	assert.notEqual(ledger.vet([{ agent: "op", task: "task 499" }]), undefined);
 });
 
 test("runDelegate reports a single-agent failure with its error", async () => {

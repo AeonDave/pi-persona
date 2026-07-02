@@ -12,6 +12,7 @@ import { judge } from "./strategies/judge.ts";
 import { magi } from "./strategies/magi.ts";
 import { map } from "./strategies/map.ts";
 import { pipeline } from "./strategies/pipeline.ts";
+import { synthesize } from "./strategies/synthesize.ts";
 
 const BUILTINS: Record<string, Strategy> = {
 	fanout,
@@ -21,6 +22,7 @@ const BUILTINS: Record<string, Strategy> = {
 	"council-rounds": councilRounds,
 	magi,
 	judge,
+	synthesize,
 };
 
 export function getStrategy(name: string): Strategy | undefined {

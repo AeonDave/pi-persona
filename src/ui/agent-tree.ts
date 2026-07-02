@@ -76,11 +76,12 @@ export class AgentTree {
 	private nodes: AgentNode[] = [];
 	private listeners = new Set<() => void>();
 
-	/** Insert a node, or upsert (relabel / restatus) when the id already exists. */
+	/** Insert a node, or upsert (relabel / restatus / reparent) when the id already exists. */
 	add(input: AddNodeInput): void {
 		const existing = this.nodes.find((n) => n.id === input.id);
 		if (existing) {
 			existing.label = input.label;
+			if (input.parentId !== undefined) existing.parentId = input.parentId;
 			if (input.status) existing.status = input.status;
 			if (input.detail !== undefined) existing.detail = input.detail;
 			if (input.output !== undefined) existing.output = input.output;

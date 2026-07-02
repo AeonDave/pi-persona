@@ -19,6 +19,9 @@ export interface AgentRunSpec {
 	tools?: string[];
 	/** Skills the sub-agent must load first (dynamic specialisation). */
 	skills?: string[];
+	/** Extra system-prompt text appended to the agent's own prompt — an on-the-fly
+	 *  specialist persona. Prompt-level only; capabilities remain the enforced gate. */
+	role?: string;
 	outputContract?: string;
 	/** Run this leg in an isolated git worktree (overrides the agent's own setting). */
 	isolation?: "none" | "worktree";

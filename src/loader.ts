@@ -55,6 +55,9 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 	const personaLayers: DiscoveredFile[][] = [];
 	const agentLayers: DiscoveredFile[][] = [];
 	const content = new Map<string, string>();
+	// Classification already parses each file as a persona — cache the result so the
+	// winners are not parsed a second time below.
+	const parsedPersonas = new Map<string, Persona | null>();
 
 	for (const d of dirs) {
 		const personaFiles: DiscoveredFile[] = [];
@@ -64,7 +67,9 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 			if (text === undefined) continue;
 			content.set(f.path, text);
 			const entry: DiscoveredFile = { name: f.name, path: f.path, scope: d.scope };
-			if (parsePersona(text, f.path)?.isPersona) personaFiles.push(entry);
+			const persona = parsePersona(text, f.path);
+			parsedPersonas.set(f.path, persona);
+			if (persona?.isPersona) personaFiles.push(entry);
 			else agentFiles.push(entry);
 		}
 		personaLayers.push(personaFiles);
@@ -76,7 +81,7 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 
 	const personas: Persona[] = [];
 	for (const f of personaMerge.resolved) {
-		const persona = parsePersona(content.get(f.path) ?? "", f.path);
+		const persona = parsedPersonas.get(f.path);
 		if (persona) personas.push(persona);
 	}
 	const agents: AgentConfig[] = [];

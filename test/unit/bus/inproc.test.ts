@@ -67,7 +67,7 @@ test("ask blocks until the recipient replies to that message id, carrying its ki
 	assert.equal(inbox.length, 1);
 	assert.equal(inbox[0]?.expectsReply, true);
 	assert.equal(inbox[0]?.kind, "decision");
-	bus.reply(inbox[0]!.id, "OFF");
+	assert.equal(bus.reply(inbox[0]!.id, "OFF"), true, "a live ask reports the reply as delivered");
 	assert.equal(await answer, "OFF");
 });
 
@@ -102,9 +102,20 @@ test("ask throws for an unknown peer", () => {
 	assert.throws(() => void bus.ask("child", "nobody", "?"));
 });
 
-test("reply to an unknown/expired id is a harmless no-op", () => {
+test("reply to an unknown/expired id is a harmless no-op that reports false", () => {
 	const bus = new InProcessBus();
-	assert.doesNotThrow(() => bus.reply("nope", "anything"));
+	assert.equal(bus.reply("nope", "anything"), false, "the caller can tell nobody received it");
+});
+
+test("an undrained inbox is bounded, evicting old progress notes but keeping blocking asks", () => {
+	const bus = new InProcessBus();
+	bus.register("sup");
+	void bus.ask("child", "sup", "decide?", { kind: "decision", timeoutMs: 60_000 }).catch(() => {});
+	for (let i = 0; i < 400; i++) bus.send("child", "sup", `progress ${i}`);
+	const box = bus.pending("sup");
+	assert.ok(box.length <= 200, `inbox stays bounded (got ${box.length})`);
+	assert.ok(box.some((e) => e.expectsReply), "the blocking ask survived the eviction");
+	assert.equal(box[box.length - 1]?.text, "progress 399", "newest messages are kept");
 });
 
 test("participants lists registered peers; unregister removes one", () => {

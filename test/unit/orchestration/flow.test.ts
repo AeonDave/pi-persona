@@ -80,6 +80,30 @@ test("runFlow blocks dependents when a gate is rejected; the flow is not ok", as
 	assert.match(outcome.results.do?.error ?? "", /gate|blocked/i);
 });
 
+test("runFlow blocks (not strands) dependents when a GATED phase fails", async () => {
+	// A failed gated phase has no checkpoint to approve — its dependents must still be
+	// recorded "blocked" (like any failed need), not silently skipped with their UI nodes
+	// stuck ⏳ and missing from the results.
+	const r = parseFlow(flow([{ id: "plan", strategy: "s", gate: true }, { id: "do", strategy: "s", needs: ["plan"] }]));
+	assert.ok(r.ok);
+	const statuses: Array<[string, string]> = [];
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async ({ phase }) => ({ agent: phase.id, output: "", usage: usage(), ok: false, error: "boom" }),
+		onPhase: (id, st) => statuses.push([id, st]),
+		approveGate: async () => {
+			throw new Error("a FAILED phase's gate must never be prompted");
+		},
+	});
+	assert.equal(outcome.ok, false);
+	assert.equal(outcome.results.do?.ok, false, "the dependent is present in the results");
+	assert.match(outcome.results.do?.error ?? "", /blocked/i);
+	assert.ok(
+		statuses.some(([id, st]) => id === "do" && st === "failed"),
+		"the dependent's lifecycle reported failed (so the UI can settle its node)",
+	);
+});
+
 test("runFlow re-runs a resumed gated phase whose approval was never journaled (no deadlock)", async () => {
 	// Crash window: the phase completed (journaled ok) but the process died before its
 	// gate approval was journaled. On resume the phase is 'done' but its gate is unresolved —
