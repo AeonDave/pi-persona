@@ -62,7 +62,22 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 	const tally: Record<string, number> = {};
 	for (const v of valid) tally[v.key] = (tally[v.key] ?? 0) + 1;
 
-	if (valid.length === 0) return { status: "invalid_outputs", invalid, tally, usedFallback: false };
+	if (valid.length === 0) {
+		// Nobody emitted a parseable vote. With keepBestFallback, don't strand the caller with an
+		// empty ruling (small models often drop the vote JSON) — surface the strongest single PROSE
+		// answer among the ok candidates. No ok prose ⇒ genuinely nothing to show.
+		const res: ReducerResult = { status: "invalid_outputs", invalid, tally, usedFallback: false };
+		if (opts.keepBestFallback) {
+			const prose = candidates.filter((c) => c.ok && c.output.trim());
+			const winner = [...prose].sort((a, b) => confidence(b) - confidence(a))[0];
+			if (winner) {
+				res.winner = winner;
+				res.dissent = prose.filter((c) => c !== winner);
+				res.usedFallback = true;
+			}
+		}
+		return res;
+	}
 
 	const bestByConfidence = (): AgentResult =>
 		[...valid].sort((a, b) => confidence(b.result) - confidence(a.result))[0]!.result;
