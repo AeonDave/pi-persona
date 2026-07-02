@@ -55,6 +55,15 @@ no build step. Design specs (binding on any conflict, guardrails first):
   the pending completion follow-up so they are never double-reported).
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
+- **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
+  (`AgentRunSpec.peers` — the `debate` strategy does). The child gets a `contact_peer` tool
+  (`bus/peers.ts`): `list`/`send`, ONE-WAY only (blocking stays supervisor-only, so peers can
+  never deadlock), peer list scoped per engine instance (never the whole bus), send budget 20.
+  Delivery: the in-process engine's bridge steers incoming bus messages into the child session,
+  fenced with the sender attributed OUTSIDE the fence — the same bridge delivers the supervisor's
+  `intercom send` (previously a dead letter). Gated by `EffectiveCapabilities.canUseBus` (OFF iff
+  the persona explicitly denies `intercom`). The child engine ignores `peers`.
+  Design: `docs/superpowers/specs/2026-07-02-sibling-peer-comm-design.md`.
 
 ## Testing
 
@@ -66,10 +75,10 @@ no build step. Design specs (binding on any conflict, guardrails first):
 
 ## Project structure
 
-- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, types.
+- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
-- `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool).
+- `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped).
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
 - `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent` < project `.pi/`):
