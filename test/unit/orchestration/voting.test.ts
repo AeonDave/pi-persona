@@ -83,3 +83,31 @@ test("candidates that failed or have no usable vote are invalid", () => {
 	assert.equal(r.status, "invalid_outputs");
 	assert.equal(r.invalid?.length, 2);
 });
+
+const u = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 });
+
+test("all-invalid + keepBestFallback + ok prose → best-confidence prose wins (usedFallback)", () => {
+	const cands = [
+		{ agent: "a", output: "weak take", structured: { confidence: 0.3 }, usage: u(), ok: true },
+		{ agent: "b", output: "strong take", structured: { confidence: 0.9 }, usage: u(), ok: true },
+	];
+	const r = voteReduce(cands, { aggregate: "majority", keepBestFallback: true });
+	assert.equal(r.status, "invalid_outputs");
+	assert.equal(r.usedFallback, true);
+	assert.equal(r.winner?.agent, "b", "highest-confidence ok-prose candidate is surfaced");
+	assert.equal(r.dissent?.length, 1);
+});
+
+test("all-invalid with NO ok prose → unchanged empty invalid_outputs", () => {
+	const cands = [{ agent: "a", output: "", usage: u(), ok: false }];
+	const r = voteReduce(cands, { aggregate: "majority", keepBestFallback: true });
+	assert.equal(r.status, "invalid_outputs");
+	assert.equal(r.usedFallback, false);
+	assert.equal(r.winner, undefined);
+});
+
+test("all-invalid WITHOUT keepBestFallback → still empty (no rescue)", () => {
+	const cands = [{ agent: "a", output: "prose", usage: u(), ok: true }];
+	const r = voteReduce(cands, { aggregate: "majority" });
+	assert.equal(r.winner, undefined);
+});

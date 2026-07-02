@@ -6,7 +6,7 @@
  * `council-rounds` (supervisor-mediated debate BETWEEN rounds), the exchange here is
  * live and mid-flight — no supervisor in the loop.
  *
- * params: { bestOf?: number (default = majority of the roster) }
+ * params: { bestOf?: number (default = majority of the roster), aggregate? }
  */
 
 import { sumUsage } from "../reducers.ts";
@@ -34,6 +34,8 @@ function render(decision: ReducerResult, members: number, bestOf: number, usages
 		}`,
 	);
 	lines.push(`tally: ${Object.entries(decision.tally).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}`);
+	const nInvalid = decision.invalid?.length ?? 0;
+	if (nInvalid > 0) lines.push(`(${nInvalid} invalid excluded)`);
 	if (decision.winner) lines.push(`\n--- ruling ---\n${readableRuling(decision.winner)}`);
 	if (decision.dissent && decision.dissent.length > 0) {
 		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
@@ -53,6 +55,7 @@ export const debate: Strategy = {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length < 2) throw new Error("debate: a roster of at least 2 members is required");
 		const bestOf = typeof input.params.bestOf === "number" ? input.params.bestOf : Math.floor(team.length / 2) + 1;
+		const aggregate = input.params.aggregate === "unanimity" ? "unanimity" : "majority";
 		sdk.log(`debate: ${team.length} members, live peer exchange, best of ${bestOf}`);
 		if (team.length > sdk.limits.maxConcurrency) {
 			sdk.log(
@@ -73,7 +76,7 @@ export const debate: Strategy = {
 				});
 			}),
 		);
-		const decision = sdk.reduce.vote(candidates, { aggregate: "majority", threshold: bestOf, keepBestFallback: true });
+		const decision = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: true });
 		return render(decision, team.length, bestOf, candidates.map((c) => c.usage));
 	},
 };

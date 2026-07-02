@@ -8,6 +8,7 @@ import { criticLoop } from "../../../src/orchestration/strategies/critic-loop.ts
 import { debate } from "../../../src/orchestration/strategies/debate.ts";
 import { fanout } from "../../../src/orchestration/strategies/fanout.ts";
 import { judge } from "../../../src/orchestration/strategies/judge.ts";
+import { magi } from "../../../src/orchestration/strategies/magi.ts";
 import { map } from "../../../src/orchestration/strategies/map.ts";
 import { pair } from "../../../src/orchestration/strategies/pair.ts";
 import { pipeline } from "../../../src/orchestration/strategies/pipeline.ts";
@@ -755,4 +756,24 @@ test("compete requires 2+ competitors and params.judge", async () => {
 	await assert.rejects(() => compete.run({ task: "t", roster: "c", params: {} }, sdk), /params\.judge/);
 	const sdk1 = makeSDK({ engine, roster: { team: () => ["solo"] }, limits: LIMITS });
 	await assert.rejects(() => compete.run({ task: "t", roster: "c", params: { judge: "j" } }, sdk1), /at least 2/);
+});
+
+test("magi returns the best prose ruling when no member emits a vote (all-invalid fallback)", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `${spec.agent} prose`, structured: { confidence: spec.agent === "casper" ? 0.9 : 0.2 }, usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "magi" ? ["melchior", "balthasar", "casper"] : []) }, limits: LIMITS });
+	const r = await magi.run({ task: "t", roster: "magi", params: {} }, sdk);
+	assert.equal(r.ok, true, "degrades to a prose ruling instead of ok:false");
+	assert.match(r.output, /casper prose/, "the highest-confidence prose is the ruling");
+	assert.equal(r.structured?.status, "invalid_outputs");
+});
+
+test("debate honours params.aggregate = unanimity", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: spec.agent, structured: { vote: spec.agent === "a" ? "x" : "y", confidence: 0.5 }, usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	const r = await debate.run({ task: "t", roster: "t", params: { aggregate: "unanimity" } }, sdk);
+	assert.equal(r.structured?.usedFallback, true, "split vote under unanimity → fallback, not a winner-by-plurality");
 });
