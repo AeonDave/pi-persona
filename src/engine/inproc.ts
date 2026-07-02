@@ -25,7 +25,7 @@ import type { InProcessBus } from "../bus/inproc.ts";
 import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { makeContactPeerTool } from "../bus/peers.ts";
 import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
-import { fenceUntrusted } from "../core/fence.ts";
+import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
@@ -369,7 +369,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 						// engine.run cleanup, or propagate into the sender's contact_peer call. Drop the
 						// envelope instead; it is lost, not redelivered (mirrors "gone" semantics).
 						try {
-							session.agent.steer({ role: "user", content: [{ type: "text", text: `[message from ${from}]\n${fenceUntrusted(env.text)}` }] });
+							session.agent.steer({ role: "user", content: [{ type: "text", text: attributeInbound(from, env.text) }] });
 						} catch (e) {
 							if (process.env.PI_PERSONA_DEBUG) {
 								process.stderr.write(`[pi-persona] delivery bridge steer failed for ${self} (envelope from ${env.from} dropped): ${e instanceof Error ? e.message : String(e)}\n`);

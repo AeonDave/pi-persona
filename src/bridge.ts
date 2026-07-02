@@ -22,7 +22,7 @@ import { type BrokerClient, type DeliverEvent, makeBrokerClient, type MakeBroker
 import { makeContactSupervisorTool } from "./bus/contact.ts";
 import { InProcessBus, type MsgKind } from "./bus/inproc.ts";
 import { makeContactPeerTool, type PeerInfo } from "./bus/peers.ts";
-import { fenceUntrusted } from "./core/fence.ts";
+import { attributeInbound } from "./core/fence.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -138,7 +138,7 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	// exactly the in-process delivery bridge's rule (`engine/inproc.ts`).
 	client.onDeliver((evt: DeliverEvent) => {
 		const from = evt.from === SUPERVISOR_HANDLE ? "your supervisor" : `peer ${evt.fromLabel ?? evt.from}`;
-		sendFollowUp(pi, `[message from ${from}]\n${fenceUntrusted(evt.text)}`);
+		sendFollowUp(pi, attributeInbound(from, evt.text));
 	});
 
 	// Inbound `steer` — the supervisor's own live redirect (`intercom steer` / f9 `s`), queued

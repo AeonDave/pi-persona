@@ -12,6 +12,9 @@
  *     structured positions; the ballot then shows the readable field, not a raw JSON
  *     blob. Lets voting cores (e.g. the MAGI triad) double as a judge panel cleanly.
  *     Omit it for a prose panel (candidates shown verbatim, as before).
+ *
+ * No peers: the panel must answer INDEPENDENTLY so the anonymised ballot is meaningful
+ * (a member who talked to peers breaks the bias guard).
  */
 
 import { shuffleOrder } from "../judge.ts";
