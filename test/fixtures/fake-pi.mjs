@@ -21,8 +21,11 @@ function run(task) {
 		process.on("SIGTERM", () => {}); // refuse graceful termination → forces the SIGKILL escalation
 		setInterval(() => {}, 1000);
 	} else if (task.includes("[drip]")) {
-		// Emit an event every 40ms a few times (total > a short idle window, each gap < it),
-		// then finish — exercises the idle-timeout reset (an active child must NOT be killed).
+		// Emit an event IMMEDIATELY (so node's boot latency can't eat the caller's idle
+		// window under parallel-suite load), then every 150ms a few times (total > a short
+		// idle window, each gap < it), then finish — exercises the idle-timeout reset (an
+		// active child must NOT be killed).
+		emit({ type: "turn_start" });
 		let n = 0;
 		const iv = setInterval(() => {
 			n += 1;
@@ -41,7 +44,7 @@ function run(task) {
 				});
 				process.exit(0);
 			}
-		}, 40);
+		}, 150);
 	} else if (task.includes("[spew-stderr]")) {
 		process.stderr.write("E".repeat(500000)); // flood stderr to exercise the retention cap
 		emit({

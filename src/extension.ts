@@ -5,8 +5,10 @@
  * model/thinking/tools) and gates delegation via the PersonaController; registers
  * the `delegate` and `council` tools, the unified agent tree + navigable overlay
  * (`f9` / `/agents`), the `f8` persona cycle, and the `/persona`, `/doctor`,
- * `/orchestrate`, `/peek` commands. Orchestration runs through the Strategy SDK +
- * ChildProcessEngine (the only engine backend so far).
+ * `/orchestrate`, `/peek` commands. Orchestration runs through the Strategy SDK on
+ * one of two engine backends: InProcessEngine (the runtime default — steerable,
+ * shares the session) or ChildProcessEngine (the correctness baseline — worktree
+ * isolation; see docs/ARCHITECTURE.md).
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

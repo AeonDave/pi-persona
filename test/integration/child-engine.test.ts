@@ -103,7 +103,10 @@ test("runChildAgent caps retained stderr and marks it truncated", async () => {
 });
 
 test("the timeout is idle-based — a child that keeps emitting is NOT killed (total runtime > the window)", async () => {
-	const r = await runChildAgent({ task: "busy [drip]" }, undefined, { resolveInvocation: resolveFake, timeoutMs: 100 });
+	// Window vs fixture: [drip] emits at 0ms then every 150ms until ~600ms — each gap
+	// (150ms) sits well under the 500ms window while the total run exceeds it. The
+	// slack absorbs node.exe boot latency under parallel-suite load (flaked at 100ms).
+	const r = await runChildAgent({ task: "busy [drip]" }, undefined, { resolveInvocation: resolveFake, timeoutMs: 500 });
 	assert.equal(r.timedOut, false, "output (re)arms the idle clock, so an active child survives");
 	assert.equal(r.ok, true);
 });
