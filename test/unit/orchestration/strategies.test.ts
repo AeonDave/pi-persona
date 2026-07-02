@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { type AgentRunSpec, makeSDK, type StrategyEngine } from "../../../src/orchestration/sdk.ts";
+import { compete } from "../../../src/orchestration/strategies/compete.ts";
 import { councilRounds } from "../../../src/orchestration/strategies/council-rounds.ts";
 import { criticLoop } from "../../../src/orchestration/strategies/critic-loop.ts";
 import { debate } from "../../../src/orchestration/strategies/debate.ts";
@@ -595,4 +596,82 @@ test("pair stays ok when the navigator fails — the driver's work is the delive
 	assert.match(r.output, /solo work/);
 	assert.doesNotMatch(r.output, /navigator review/);
 	assert.equal(r.structured?.navigatorOk, false);
+});
+
+test("compete isolates every competitor in a worktree and returns the winning diff in full", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			if (spec.agent === "arbiter") {
+				assert.match(spec.task, /\[A\]/, "the ballot is label-anonymised");
+				return { agent: "arbiter", output: "A", structured: { vote: "A", output: "A is cleanest" }, usage: usage(), ok: true };
+			}
+			const diff = `diff --git a/${spec.agent}.txt b/${spec.agent}.txt\n+x\nEND-${spec.agent}`;
+			return { agent: spec.agent, output: `my approach\n\n\`\`\`diff\n${diff}\n\`\`\``, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, true);
+	const comps = specs.filter((s) => s.agent !== "arbiter");
+	assert.equal(comps.length, 2);
+	for (const c of comps) {
+		assert.equal(c.isolation, "worktree", "every competitor runs isolated");
+		assert.match(c.task, /competition protocol/);
+	}
+	assert.equal(specs.find((s) => s.agent === "arbiter")?.isolation, undefined, "the judge is not isolated");
+	assert.match(r.output, /COMPETE winner: (one|two)/, "the shuffle is real — either can sit at A");
+	assert.match(r.output, /END-(one|two)/, "the winner's FULL diff is in the result");
+	assert.equal(r.structured?.entered, 2);
+	assert.equal(r.structured?.valid, 2);
+});
+
+test("compete excludes a competitor without a tail diff fence; all excluded ⇒ not ok", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			if (spec.agent === "arbiter") return { agent: "arbiter", output: "A", structured: { vote: "A" }, usage: usage(), ok: true };
+			if (spec.agent === "forgetful") return { agent: spec.agent, output: "did stuff, no diff", usage: usage(), ok: true };
+			return { agent: spec.agent, output: "sum\n\n```diff\ndiff --git a/w.txt b/w.txt\n+w\n```", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["forgetful", "worker"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(r.structured?.winner, "worker", "only the fenced candidate could win");
+	assert.equal(r.structured?.valid, 1);
+
+	const noneEngine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "no fence", usage: usage(), ok: true }) };
+	const sdk2 = makeSDK({ engine: noneEngine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	const r2 = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk2);
+	assert.equal(r2.ok, false);
+	assert.match(r2.output, /no competitor delivered a diff/);
+});
+
+test("compete clips diffs in the ballot but returns the winner untruncated", async () => {
+	let judgeTask = "";
+	const long = `diff --git a/big.txt b/big.txt\n${"+x\n".repeat(3000)}TAIL-MARKER`;
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			if (spec.agent === "arbiter") {
+				judgeTask = spec.task;
+				return { agent: "arbiter", output: "A", structured: { vote: "A" }, usage: usage(), ok: true };
+			}
+			return { agent: spec.agent, output: `sum\n\n\`\`\`diff\n${long}\n\`\`\``, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter", ballotDiffChars: 500 } }, sdk);
+	assert.match(judgeTask, /\[diff clipped for the ballot/);
+	assert.doesNotMatch(judgeTask, /TAIL-MARKER/, "the tail never reaches the ballot");
+	assert.match(r.output, /TAIL-MARKER/, "the winner's diff is full in the result");
+	assert.equal(r.ok, true);
+});
+
+test("compete requires 2+ competitors and params.judge", async () => {
+	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	await assert.rejects(() => compete.run({ task: "t", roster: "c", params: {} }, sdk), /params\.judge/);
+	const sdk1 = makeSDK({ engine, roster: { team: () => ["solo"] }, limits: LIMITS });
+	await assert.rejects(() => compete.run({ task: "t", roster: "c", params: { judge: "j" } }, sdk1), /at least 2/);
 });

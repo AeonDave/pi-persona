@@ -14,20 +14,11 @@
  *     Omit it for a prose panel (candidates shown verbatim, as before).
  */
 
+import { shuffleOrder } from "../judge.ts";
 import { sumUsage } from "../reducers.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
-
-/** A random permutation of [0..n) — so the judge can't be biased by candidate order. */
-function shuffleOrder(n: number): number[] {
-	const a = Array.from({ length: n }, (_, i) => i);
-	for (let i = n - 1; i > 0; i--) {
-		const j = Math.floor(Math.random() * (i + 1));
-		[a[i], a[j]] = [a[j] as number, a[i] as number];
-	}
-	return a;
-}
 
 export const judge: Strategy = {
 	name: "judge",

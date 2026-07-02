@@ -5,6 +5,7 @@
  */
 
 import type { Strategy } from "./sdk.ts";
+import { compete } from "./strategies/compete.ts";
 import { councilRounds } from "./strategies/council-rounds.ts";
 import { criticLoop } from "./strategies/critic-loop.ts";
 import { debate } from "./strategies/debate.ts";
@@ -27,6 +28,7 @@ const BUILTINS: Record<string, Strategy> = {
 	judge,
 	pair,
 	synthesize,
+	compete,
 };
 
 export function getStrategy(name: string): Strategy | undefined {
