@@ -139,12 +139,20 @@ function fieldLine(name: string, spec: FieldSpec): string {
  * verified: debate over two bare `operator`s fails exactly that way without it.
  */
 export function contractInstructions(def: ContractDef): string {
-	return [
+	const lines = [
 		`--- output contract (${def.name}) ---`,
 		"End your FINAL answer with a single JSON object (prose before it is fine, nothing after it) with these fields:",
 		...Object.entries(def.fields).map(([n, s]) => fieldLine(n, s)),
 		"The object is parsed mechanically. Include every required field; omit fields you have nothing for.",
-	].join("\n");
+	];
+	if (def.fields.vote) {
+		// Vote hygiene (the MAGI cores hand-write this in their .md; a generic agent needs it
+		// here): qualifiers make equivalent votes tally apart ("esm" vs "esm (but only if…)").
+		lines.push(
+			'For "vote": the BARE option token only — for "X or Y?" vote "x" or "y", no qualifiers or conditions (put nuance in result/output) so equivalent votes tally together.',
+		);
+	}
+	return lines.join("\n");
 }
 
 export interface ParseResult {
