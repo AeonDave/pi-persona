@@ -12,6 +12,11 @@ import type { AgentResult } from "../types.ts";
 
 export const criticLoop: Strategy = {
 	name: "critic-loop",
+	params: {
+		generator: { type: "string", doc: "optional — overrides roster member 0" },
+		critic: { type: "string", doc: "optional — overrides roster member 1" },
+		rounds: { type: "number", default: 3, doc: "max generate/critique rounds" },
+	},
 	async run(input, sdk) {
 		const rosterAgents = input.roster ? sdk.roster.team(input.roster) : [];
 		// generator + critic are the roster's two members; a params NAME override selects a bare agent.

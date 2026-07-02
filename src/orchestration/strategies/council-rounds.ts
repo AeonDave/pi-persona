@@ -41,6 +41,11 @@ function render(decision: ReducerResult, round: number, bestOf: number, usages: 
 
 export const councilRounds: Strategy = {
 	name: "council-rounds",
+	params: {
+		rounds: { type: "number", default: 3, doc: "max deliberation rounds" },
+		bestOf: { type: "number", doc: "default: majority of the roster" },
+		aggregate: { type: "string", default: "majority", doc: '"majority" | "unanimity"' },
+	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("council-rounds: a roster is required");

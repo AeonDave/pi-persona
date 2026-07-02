@@ -38,6 +38,10 @@ function parseItems(output: string): string[] {
 
 export const map: Strategy = {
 	name: "map",
+	params: {
+		maxItems: { type: "number", doc: "default: the run's maxChildren" },
+		peers: { type: "boolean", default: false, doc: "workers share load-bearing cross-item discoveries live" },
+	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		const splitterMember = team[0];

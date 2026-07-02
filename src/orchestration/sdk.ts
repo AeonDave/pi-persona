@@ -85,8 +85,20 @@ export interface StrategyInput {
 	params: Record<string, unknown>;
 }
 
+/** A declared strategy param — name/type/default/doc, for discovery (`/doctor`) and the
+ *  council tool's lenient unknown-key warning (I2: strategies are trusted project code —
+ *  this schema documents and warns, it never validates or blocks a run). */
+export interface StrategyParam {
+	type: "string" | "number" | "boolean";
+	default?: string | number | boolean;
+	doc: string;
+}
+
 export interface Strategy {
 	name: string;
+	/** Declared, discoverable params (name → type/default/doc). Consumed by the council tool
+	 *  (warn on unknown keys) and `/doctor`. A strategy with no params omits this. */
+	params?: Record<string, StrategyParam>;
 	run(input: StrategyInput, sdk: StrategySDK): Promise<AgentResult>;
 }
 
