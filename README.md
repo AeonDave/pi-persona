@@ -161,6 +161,7 @@ core needed**.
 | `critic-loop` | generator → critic → revise, until the critic stops rejecting |
 | `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure independent poll) |
 | `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) |
+| `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it |
 | `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) |
 | `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) |
 
@@ -182,6 +183,9 @@ Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper)
   **`contact_supervisor`** tool to *reach you*: `progress` updates surface in the result / `intercom inbox`,
   and a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision is
   cost-aware — the supervisor spends nothing until a child wakes it (or a periodic peek, if `PI_PERSONA_PEEK_MS` is set).
+  Your own `intercom send` now reaches a still-running child too, steered into its session mid-turn.
+  Strategies can also opt a run into **sibling peer comm**: `debate`'s members get a `contact_peer`
+  tool to message each other directly (one-way, no cross-child blocking).
 
 ## Write your own
 
