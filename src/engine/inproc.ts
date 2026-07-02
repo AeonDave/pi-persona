@@ -190,13 +190,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `unknown agent: ${spec.agent}` };
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)` };
 			}
 
 			const ref = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model ?? deps.defaultModel;
 			const model = resolveModel(deps.modelRegistry, ref);
 			if (!model) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `model not found: ${ref ?? "(none)"}` };
+				const src = spec.model ? "spec" : deps.modelFor?.(spec.agent) ? "agent picker" : cfg.model ? "agent config" : "default";
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent} · ${ref ?? "(no model)"}] model not found in registry (from ${src})` };
 			}
 			const thinkingLevel = isThinkingLevel(deps.childThinking) ? deps.childThinking : undefined;
 			const tools = spec.tools ?? cfg.tools;
@@ -269,11 +270,16 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					: "";
 			const task = `${skillsPreamble}Task: ${spec.task}`;
 
+			// Capture a thrown error (e.g. provider API 400 before any stream event fires,
+			// like model_not_supported) so it survives the finally-cleanup and can be
+			// folded into the AgentResult below. Otherwise the stream state stays empty
+			// and the user sees an opaque "agent failed (unknown)".
+			let thrownError: string | undefined;
 			try {
 				await session.prompt(task);
 				await session.agent.waitForIdle();
-			} catch {
-				/* the run failed mid-flight; state carries any errorMessage/stopReason */
+			} catch (e) {
+				thrownError = e instanceof Error ? e.message : String(e);
 			} finally {
 				if (signal) signal.removeEventListener("abort", onAbort);
 				if (childHandle) deps.bus?.unregister(childHandle);
@@ -281,11 +287,21 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				session.dispose();
 			}
 
-			const ok = !aborted && state.stopReason !== "error" && state.stopReason !== "aborted";
+			const ok = !aborted && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok };
-			if (aborted) result.error = "agent aborted";
-			else if (state.errorMessage) result.error = state.errorMessage;
-			else if (!ok) result.error = `agent failed (${state.stopReason ?? "unknown"})`;
+			// Diagnostic tag: which agent + which model ref + whether it was dynamically
+			// specialised (skills / model / tools override on the spec). Users need this
+			// to tell "the delegate typo'd the model" from "the provider rejected it".
+			const overrides: string[] = [];
+			if (spec.model) overrides.push("model");
+			if (spec.skills && spec.skills.length > 0) overrides.push("skills");
+			if (spec.tools && spec.tools.length > 0) overrides.push("tools");
+			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
+			const tag = `[${spec.agent} · ${ref ?? "(no model)"}${dyn}]`;
+			if (aborted) result.error = `${tag} agent aborted`;
+			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
+			else if (thrownError) result.error = `${tag} ${thrownError}`;
+			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
 
 			if (spec.outputContract && deps.contracts) {
 				const def = pinnedDef(spec.outputContract);

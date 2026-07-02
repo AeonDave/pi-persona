@@ -154,13 +154,20 @@ test("buildCompletionReport summarises a mixed batch with one tidy first line", 
 	assert.match(report, /run-2 \(operator\): context length exceeded/);
 });
 
-test("buildCompletionReport includes anti-loop guidance only when something failed", () => {
-	const withFailure = buildCompletionReport([failedRun("run-1", "operator", "boom")], (t) => t);
-	assert.match(withFailure, /Do not re-issue the same failing delegation repeatedly/);
-	assert.match(withFailure, /retry ONCE with a different model/);
+test("buildCompletionReport suppresses the follow-up when every run failed", () => {
+	// All failed → empty string → no supervisor follow-up (prevents retry loops).
+	// The user-facing ui.notify in tracker.onComplete surfaces the failure instead.
+	const allFailed = buildCompletionReport([failedRun("run-1", "operator", "boom")], (t) => t);
+	assert.equal(allFailed, "");
 	const allDone = buildCompletionReport([doneRun("run-1", "scout", "ok")], (t) => t);
 	assert.doesNotMatch(allDone, /Do not re-issue/);
 	assert.match(allDone, /1 async run settled — 1 done, 0 failed/); // singular, no plural "s"
+});
+
+test("buildCompletionReport still includes anti-loop guidance on mixed batches (some done, some failed)", () => {
+	const mixed = buildCompletionReport([doneRun("run-1", "scout", "ok"), failedRun("run-2", "operator", "boom")], (t) => t);
+	assert.match(mixed, /Do not re-issue the same failing delegation repeatedly/);
+	assert.match(mixed, /retry ONCE with a different model/);
 });
 
 test("buildCompletionReport fences untrusted sub-agent text (output and reasons)", () => {

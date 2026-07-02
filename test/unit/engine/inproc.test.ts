@@ -150,6 +150,8 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	const unknown = await engine.run({ agent: "nope", task: "t" });
 	assert.equal(unknown.ok, false);
 	assert.match(unknown.error ?? "", /unknown agent/);
+	// Diagnostic tag identifies the agent so a failed-run notice is actionable.
+	assert.match(unknown.error ?? "", /\[nope\]/);
 
 	const noModel = makeInProcessEngine({
 		resolveAgent,
@@ -161,6 +163,37 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	const r = await noModel.run({ agent: "a", task: "t", model: "ghost/model" });
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /model not found/);
+	// Tag includes the model ref that was tried + where it came from.
+	assert.match(r.error ?? "", /\[a · ghost\/model.*\]/);
+	assert.match(r.error ?? "", /from spec/);
+});
+
+test("inproc engine tags failed runs with agent · model + dynamic overrides so failures are actionable", async () => {
+	// Simulate a mid-flight failure: pi emits a message_end assistant event carrying
+	// stopReason=error + a provider errorMessage (e.g. a 400 rejected by the API).
+	const events = [
+		{
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				stopReason: "error",
+				errorMessage: "400 model_not_supported",
+			},
+		},
+	];
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions(events),
+	});
+	const r = await engine.run({ agent: "a", task: "t", model: "stub/m", skills: ["asm-patterns"] });
+	assert.equal(r.ok, false);
+	// Agent + model ref appear in the tag, and skills/model overrides are flagged as +dyn.
+	assert.match(r.error ?? "", /\[a · stub\/m \+dyn\(model,skills\)\]/);
+	assert.match(r.error ?? "", /400 model_not_supported/);
 });
 
 test("inproc engine aborts via signal → agent.abort() and a /abort/ error", async () => {

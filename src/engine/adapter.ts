@@ -58,7 +58,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `unknown agent: ${spec.agent}` };
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)` };
 			}
 
 			const task =
@@ -86,8 +86,17 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const child = await runChildAgent(childSpec, signal, childOptions);
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
-			if (child.errorMessage) result.error = child.errorMessage;
-			else if (!child.ok) result.error = child.stderr.trim() || `agent failed (exit ${child.exitCode})`;
+			// Diagnostic tag: agent · model ref · dynamic overrides. Same shape as inproc engine,
+			// so failed follow-ups always say WHICH agent+model died and WHY.
+			const overrides: string[] = [];
+			if (spec.model) overrides.push("model");
+			if (spec.skills && spec.skills.length > 0) overrides.push("skills");
+			if (spec.tools && spec.tools.length > 0) overrides.push("tools");
+			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
+			const modelRef = childSpec.model ?? "(no model)";
+			const tag = `[${spec.agent} · ${modelRef}${dyn}]`;
+			if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
+			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
 
 			if (spec.outputContract && deps.contracts) {
 				const def = pinnedDef(spec.outputContract);
