@@ -1,6 +1,8 @@
 /**
  * fanout — run every agent in the roster on the same task, in parallel, and
  * aggregate the results. The built-in behind L1 `mode: parallel`.
+ *
+ * No peers: fanout is deliberately independent parallel work — use `debate` for a live exchange.
  */
 
 import { rosterSpec } from "../roster.ts";
