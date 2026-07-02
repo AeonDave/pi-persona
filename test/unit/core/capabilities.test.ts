@@ -48,3 +48,21 @@ test("delegateDefaultAllow=false locks down delegation when no allow block is gi
 	const caps = resolveCapabilities(base({ delegateDefaultAllow: false }));
 	assert.equal(caps.delegateTargets.size, 0);
 });
+
+test("canUseBus is ON by default and survives a tools allowlist that omits intercom", () => {
+	const caps = resolveCapabilities({
+		allToolNames: ["read", "intercom", "delegate"],
+		knownAgents: [],
+		permissions: { tools: { allow: ["read"] } },
+	});
+	assert.equal(caps.canUseBus, true, "an allowlist restricts the SUPERVISOR tool set; it is not a bus denial");
+});
+
+test("canUseBus is OFF only when the persona explicitly denies `intercom`", () => {
+	const caps = resolveCapabilities({
+		allToolNames: ["read", "intercom", "delegate"],
+		knownAgents: [],
+		permissions: { tools: { deny: ["intercom"] } },
+	});
+	assert.equal(caps.canUseBus, false);
+});
