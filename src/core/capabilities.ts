@@ -35,6 +35,10 @@ export interface CapabilityInputs {
 export interface EffectiveCapabilities {
 	tools: ReadonlySet<string>;
 	delegateTargets: ReadonlySet<string>;
+	/** The semantic bus (intercom / contact_peer). ON unless the persona EXPLICITLY denies
+	 *  the `intercom` tool — a persona that opted out of the bus also opts its children out
+	 *  of sibling peer messaging. An allowlist that merely omits intercom is NOT a denial. */
+	canUseBus: boolean;
 }
 
 const DEFAULT_DELEGATE_TOOL = "delegate";
@@ -63,7 +67,7 @@ export function resolveCapabilities(input: CapabilityInputs): EffectiveCapabilit
 		canSpawn ? input.knownAgents.filter((a) => isAllowed(a, input.permissions.delegate, delegateDefaultAllow)) : [],
 	);
 
-	return { tools, delegateTargets };
+	return { tools, delegateTargets, canUseBus: !explicitlyDenied("intercom", toolsPerm) };
 }
 
 /** Whether the persona may fan out — derived from holding the delegate tool. */
