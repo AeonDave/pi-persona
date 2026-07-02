@@ -22,8 +22,10 @@ export interface ChildUsage {
 export interface StreamState {
 	/** The last assistant text content seen (the agent's answer — the returned result). */
 	output: string;
-	/** All assistant texts so far, accumulated — the live transcript shown in the f9
-	 *  detail view so the user reads the whole progression, not just the latest message. */
+	/** The chronological live log shown in the f9 detail view: every completed message's
+	 *  reasoning AND text, plus one `⚙ tool` line per tool call — the whole progression,
+	 *  never just the latest message. Bounded (old head trimmed) so a long run can't
+	 *  grow supervisor memory without limit. */
 	transcript: string;
 	/** The current in-progress message's visible content (streamed text, or reasoning
 	 *  while there's no answer text yet). Cleared on message_end (folded into transcript). */
@@ -86,14 +88,29 @@ function toolActivity(toolName: string, args: unknown): string {
 	return toolName;
 }
 
+// Bound the live transcript: a long tool-heavy run must not grow memory without limit.
+// When the cap is hit, the OLD head is trimmed (the user watches the tail live).
+const TRANSCRIPT_MAX = 200_000;
+const TRANSCRIPT_KEEP = 150_000;
+
+function appendTranscript(state: StreamState, chunk: string, sep: string): void {
+	state.transcript += (state.transcript ? sep : "") + chunk;
+	if (state.transcript.length > TRANSCRIPT_MAX) {
+		state.transcript = `…[earlier output trimmed]\n${state.transcript.slice(state.transcript.length - TRANSCRIPT_KEEP)}`;
+	}
+}
+
 /** Fold one parsed stream event into the accumulating state (in place). */
 export function applyEvent(state: StreamState, event: unknown): void {
 	if (!isObject(event)) return;
 
 	// Track the current tool so the UI can show "running: grep src/…" while a
-	// tool-heavy agent reads before it has written any text.
+	// tool-heavy agent reads before it has written any text. The tool line also goes
+	// into the transcript, so the live log reads chronologically (think → tools → text)
+	// instead of tool-heavy stretches leaving the view apparently frozen.
 	if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
 		state.activity = toolActivity(event.toolName, event.args);
+		appendTranscript(state, `⚙ ${state.activity}`, "\n");
 		return;
 	}
 	if (event.type === "tool_execution_end") {
@@ -122,11 +139,12 @@ export function applyEvent(state: StreamState, event: unknown): void {
 	state.usage.turns++;
 
 	const text = firstText(msg.content);
-	if (text !== undefined) {
-		state.output = text;
-		// Append (don't replace) so the live view keeps the full progression of messages.
-		if (text) state.transcript += (state.transcript ? "\n\n" : "") + text;
-	}
+	if (text !== undefined) state.output = text;
+	// Fold the WHOLE completed message (reasoning + text) into the transcript — not just
+	// the text. Otherwise each message_end wipes the thinking the user was reading
+	// (`partial` clears) and a tool-heavy agent's view looks like it "overwrites itself".
+	const live = liveContent(msg.content);
+	if (live) appendTranscript(state, live, "\n\n");
 
 	const usage = msg.usage;
 	if (isObject(usage)) {

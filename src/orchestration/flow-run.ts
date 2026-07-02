@@ -86,7 +86,10 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		done.set(id, r);
 		if (gated && (r as ResumedResult).gateApproved) gateState.set(id, "passed");
 	}
-	const gateResolved = (id: string): boolean => !byId.get(id)?.gate || gateState.has(id);
+	// A FAILED gated phase has no checkpoint to resolve — its gate must not keep dependents
+	// from being considered (needFailed then records them "blocked", exactly like a failed
+	// non-gated need; otherwise they'd never become ready and silently vanish, stuck ⏳).
+	const gateResolved = (id: string): boolean => !byId.get(id)?.gate || gateState.has(id) || done.get(id)?.ok === false;
 	const needFailed = (n: string): boolean => (done.has(n) && !done.get(n)?.ok) || gateState.get(n) === "rejected";
 	let remaining = spec.phases.filter((p) => !done.has(p.id));
 

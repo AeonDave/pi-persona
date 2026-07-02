@@ -12,20 +12,22 @@ decides *how* the agent works — and it delegates, fans out, deliberates, or ex
 - **Sub-agents** — real, isolated `pi` runs, each shown by a friendly `name · model` (e.g.
   "pippo · sonnet-4-6"). The supervisor delegates one, or fans out many in parallel, each with its
   own model, skills, and tool allowlist. A generic `operator` becomes a specialist from the skills
-  it loads.
+  it loads — or from an on-the-fly `role` (an extra system prompt written at delegation time), so
+  a new specialist needs no file.
 - **Strategies** — orchestration defined in small files over a Strategy SDK: parallel **fan-out**,
   a sequential **pipeline** (chain / debate), a **map** (per-item fan-out over a runtime list), a
   generator↔critic **loop**, an ensemble **vote** (`magi`) / **multi-round council** (`council-rounds`),
-  and an impartial **judge**.
+  an impartial **judge**, and a gather→merge **synthesize**.
 - **Flows** — a declarative **DAG over strategies** in a `*.flow.json` file: each phase runs a
   strategy over a roster, wired by `needs`; independent phases fan out in parallel and each
   phase's output feeds its dependents. Pinned by hash and **journaled** so an interrupted flow
   **resumes** where it left off. Run with `/flow <name> <task>`.
 - **Live view** — one **agent tree** sticks above the input and shows every sub-agent (strategy
-  cores, delegate legs, background runs) as it runs. **`f9`** (or `/agents`) opens a bordered,
-  navigable overlay — ↑↓ to move, ⏎ to drill into an agent and watch its output (reasoning + answer)
-  stream live, **`x` to stop** one, and **`s` to steer** a running in-process sub-agent (inject a
-  redirect mid-run).
+  cores, delegate legs, background runs) as it runs. **`f9`** (or `/agents`) opens a near-fullscreen,
+  navigable overlay — ↑↓ to move, ⏎ to drill into an agent and read its **full chronological log**
+  (reasoning, `⚙ tool` calls, and answers accumulate — nothing is overwritten), **`x` to stop** one,
+  and **`s` to steer** a running in-process sub-agent (from the list or the detail view — inject a
+  redirect mid-run). Cores waiting on the concurrency limit show as `queued`.
 
 ## How it works
 
@@ -123,7 +125,7 @@ core needed**.
 |---|---|
 | `delegate` tool | spawn sub-agent(s): **single or parallel** × **sync** (blocks the turn) or **async** (background; result returns as a follow-up) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
-| `intercom` tool | interact with running sub-agents: **`peek`** (watch) · **`steer`** (soft redirect) · **`stop`** (hard-abort) work for **any** persona on async runs; **`list`/`inbox`/`reply`/`send`** are the coaching message bus (paired with each child's `contact_supervisor`) |
+| `intercom` tool | interact with running sub-agents: **`peek`** (watch) · **`wait`** (join — block until async run(s) settle and collect the results) · **`steer`** (soft redirect) · **`stop`** (hard-abort) work for **any** persona on async runs; **`list`/`inbox`/`reply`/`send`** are the coaching message bus (paired with each child's `contact_supervisor`) |
 | `flow` tool · `/flow` | run a **DAG** of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a **checkpoint** (approve before its dependents run) |
 | persona `mode:` | `solo` (opportunistic — the LLM delegates by judgement) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
 | persona `coaching:` | opt into the comm plane — a `coaching: on` persona gives its children a `contact_supervisor` tool so they report progress / ask blocking decisions while they run (async) |
@@ -142,6 +144,7 @@ core needed**.
 | `magi` | parallel panel → **self-vote** → ruling + tally + dissent |
 | `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) |
 | `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) |
+| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) |
 
 **Where a new shape lives** (core vs file vs config — nothing hidden):
 - `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
@@ -152,9 +155,11 @@ Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper)
 
 **Watching, steering, and talking to running sub-agents.** Two layers, deliberately separate:
 
-- **Observe / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }` watches
-  your async sub-agents; `steer` injects a soft course-correction; `stop` **hard-aborts** one (a steer is
-  only a request the child may ignore). The `f9` overlay does the same by hand (`s` steer, `x` stop the selected agent).
+- **Observe / join / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }` watches
+  your async sub-agents; `wait` **joins** them (blocks until they settle and returns their results — for when
+  an async result is now needed before the next step); `steer` injects a soft course-correction; `stop`
+  **hard-aborts** one (a steer is only a request the child may ignore). The `f9` overlay does the same by
+  hand (`s` steer, `x` stop the selected agent).
 - **Message bus — needs `coaching: on`** (every delegating supervisor has it). Children get a
   **`contact_supervisor`** tool to *reach you*: `progress` updates surface in the result / `intercom inbox`,
   and a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision is

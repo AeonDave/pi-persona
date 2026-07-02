@@ -43,7 +43,17 @@ export class InProcessBus {
 		return () => this.observers.delete(listener);
 	}
 
+	/** Cap on unread messages per inbox — a chatty child must not grow supervisor
+	 *  memory without bound when nobody drains. */
+	private static readonly MAX_INBOX = 200;
+
 	private deliver(box: Envelope[], env: Envelope): void {
+		if (box.length >= InProcessBus.MAX_INBOX) {
+			// Evict the oldest ONE-WAY note first; a blocking ask is kept whenever possible
+			// (silently dropping it would strand its sender until the ask timeout).
+			const idx = box.findIndex((e) => !e.expectsReply);
+			box.splice(idx >= 0 ? idx : 0, 1);
+		}
 		box.push(env);
 		for (const fn of this.observers) fn(env);
 	}
@@ -113,13 +123,14 @@ export class InProcessBus {
 		});
 	}
 
-	/** Answer a pending ask by its message id. Unknown/expired ids are a no-op. */
-	reply(askId: string, text: string): void {
+	/** Answer a pending ask by its message id. Returns false (a harmless no-op) for an
+	 *  unknown/expired id — so the caller can tell the child actually got the answer. */
+	reply(askId: string, text: string): boolean {
 		const resolver = this.pendingAsks.get(askId);
-		if (resolver) {
-			this.pendingAsks.delete(askId);
-			resolver(text);
-		}
+		if (!resolver) return false;
+		this.pendingAsks.delete(askId);
+		resolver(text);
+		return true;
 	}
 
 	/** Drain and return a participant's inbox. */

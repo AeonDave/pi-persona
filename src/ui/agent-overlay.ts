@@ -1,12 +1,14 @@
 /**
  * A focusable overlay over the unified agent tree, opened with ctx.ui.custom
  * (overlay: true). ↑↓ navigate the *agents* (leaf rows; a parent like "delegate"
- * is a non-selectable header), ⏎ drills into one — its live output in a bounded,
- * auto-scrolling viewport — `x` stops it, esc backs out / closes. Subscribes to the
- * tree, so it re-renders live as agents stream.
+ * is a non-selectable header), ⏎ drills into one — its live output in an
+ * auto-scrolling viewport sized to the terminal — `x` stops it, `s` steers it
+ * (from the list too), esc backs out / closes. Subscribes to the tree, so it
+ * re-renders live as agents stream.
  *
- * The pure parts (flatten/order, glyphs) live in agent-tree.ts and are unit-tested;
- * this file is the thin pi-tui glue (focus + keyboard + framing).
+ * The pure parts (flatten/order, glyphs, scroll window) live in agent-tree.ts /
+ * model-picker.ts and are unit-tested; this file is the thin pi-tui glue
+ * (focus + keyboard + framing).
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -21,8 +23,12 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { type AgentTree, type FlatRow, flattenTree, GLYPH } from "./agent-tree.ts";
+import { visibleWindow } from "./model-picker.ts";
 
-const VIEWPORT = 14; // detail output rows shown at once (the rest scrolls)
+/** Rows the terminal has (fallback for exotic hosts). */
+function termRows(): number {
+	return process.stdout.rows && process.stdout.rows > 0 ? process.stdout.rows : 24;
+}
 
 /** Is this keystroke a single printable character (a steer-input keystroke)? */
 function isPrintable(key: string): boolean {
@@ -41,6 +47,7 @@ export class AgentOverlay extends Container {
 	private canSteer: ((nodeId: string) => boolean) | undefined;
 	private unsubscribe: () => void;
 	private selectedLeaf = 0; // index into the leaf rows
+	private listScroll = 0; // list rows scrolled off the top (keeps the selection visible)
 	private detailId: string | undefined;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
 	private steering = false; // typing a steer message into the drilled-in agent
@@ -87,7 +94,19 @@ export class AgentOverlay extends Container {
 	}
 
 	private inner(): number {
-		return Math.max(24, Math.min(this.lastWidth - 4, 100));
+		// Use the whole width the host gives us (the overlay itself is sized ~90% of the
+		// terminal) — a hard 100-column cap made wide terminals waste most of the screen.
+		return Math.max(24, this.lastWidth - 4);
+	}
+
+	/** Detail-output rows that fit: terminal height minus the overlay chrome. */
+	private detailViewport(): number {
+		return Math.max(8, termRows() - 12);
+	}
+
+	/** List rows that fit: terminal height minus the overlay chrome. */
+	private listViewport(): number {
+		return Math.max(6, termRows() - 10);
 	}
 
 	private leafRows(): FlatRow[] {
@@ -107,22 +126,31 @@ export class AgentOverlay extends Container {
 		const rows = flattenTree(this.tree.snapshot());
 		const leaves = this.leafRows();
 		if (this.selectedLeaf >= leaves.length) this.selectedLeaf = Math.max(0, leaves.length - 1);
-		const selectedId = leaves[this.selectedLeaf]?.node.id;
+		const selected = leaves[this.selectedLeaf]?.node;
 		this.addChild(new Text(t.fg("accent", t.bold("Agents")), 1, 0));
 		this.addChild(new Spacer(1));
 		if (rows.length === 0) {
 			this.addChild(new Text(t.fg("dim", "(no agents running)"), 1, 0));
 		} else {
-			for (const row of rows) {
+			// Scroll window over the rows (a big fan-out must not overflow the screen);
+			// the window follows the selection, ▲/▼ markers show what's off-screen.
+			const vp = this.listViewport();
+			const selIdx = Math.max(0, rows.findIndex((r) => r.node.id === selected?.id));
+			this.listScroll = visibleWindow(selIdx, vp, rows.length, this.listScroll);
+			const end = Math.min(rows.length, this.listScroll + vp);
+			if (this.listScroll > 0) this.addChild(new Text(t.fg("dim", `▲ ${this.listScroll} above`), 1, 0));
+			for (const row of rows.slice(this.listScroll, end)) {
 				const indent = "  ".repeat(row.depth);
 				const detail = row.node.detail ? t.fg("dim", `  ${row.node.detail}`) : "";
 				const label = `${indent}${GLYPH[row.node.status]} ${row.node.label}`;
-				const line = row.node.id === selectedId ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
+				const line = row.node.id === selected?.id ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
 				this.addChild(new Text(`${line}${detail}`, 1, 0));
 			}
+			if (end < rows.length) this.addChild(new Text(t.fg("dim", `▼ ${rows.length - end} below`), 1, 0));
 		}
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(t.fg("dim", "↑↓ navigate   ⏎ open   x stop   esc close"), 1, 0));
+		const steerHint = selected && selected.status === "running" && (this.canSteer?.(selected.id) ?? false) ? "   s steer" : "";
+		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open   x stop${steerHint}   esc close`), 1, 0));
 	}
 
 	private renderDetail(): void {
@@ -153,10 +181,11 @@ export class AgentOverlay extends Container {
 			const wrapped = wrapTextWithAnsi(line, w);
 			return wrapped.length > 0 ? wrapped : [""]; // keep blank lines (paragraph spacing)
 		});
-		const maxScroll = Math.max(0, all.length - VIEWPORT);
+		const viewport = this.detailViewport();
+		const maxScroll = Math.max(0, all.length - viewport);
 		if (this.detailScroll > maxScroll) this.detailScroll = maxScroll;
 		const end = all.length - this.detailScroll;
-		const start = Math.max(0, end - VIEWPORT);
+		const start = Math.max(0, end - viewport);
 		if (start > 0) this.addChild(new Text(t.fg("dim", `▲ ${start} earlier`), 1, 0));
 		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
@@ -165,11 +194,16 @@ export class AgentOverlay extends Container {
 		if (this.steering && !steerable) this.steering = false; // agent finished mid-compose
 		this.addChild(new Spacer(1));
 		if (this.steering) {
-			this.addChild(new Text(`${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`, 1, 0));
+			// Wrap the input so a long steer message stays fully visible while typing.
+			const composed = `${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`;
+			for (const line of wrapTextWithAnsi(composed, w)) this.addChild(new Text(line, 1, 0));
 			this.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
 		} else {
 			const steerHint = steerable ? "   ·   s steer" : "";
 			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${live ? "   ·   x stop" : ""}${steerHint}`), 1, 0));
+			if (live && !steerable) {
+				this.addChild(new Text(t.fg("dim", "(steer unavailable: child-process/worktree run, or not started yet)"), 1, 0));
+			}
 		}
 	}
 
@@ -226,6 +260,17 @@ export class AgentOverlay extends Container {
 			if (leaf) {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0; // open at the latest output (auto-scroll to bottom)
+				this.refresh();
+			}
+		} else if (keyData === "s") {
+			// Steer straight from the list: drill into the selected agent with the
+			// compose line already open (same gate as the detail view's `s`).
+			const leaf = leaves[this.selectedLeaf];
+			if (leaf && leaf.node.status === "running" && (this.canSteer?.(leaf.node.id) ?? false)) {
+				this.detailId = leaf.node.id;
+				this.detailScroll = 0;
+				this.steering = true;
+				this.steerBuffer = "";
 				this.refresh();
 			}
 		} else if (keyData === "x") {

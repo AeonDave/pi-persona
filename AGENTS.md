@@ -27,12 +27,25 @@ no build step. Design specs (binding on any conflict, guardrails first):
 - Two engines behind the `StrategyEngine` seam: **InProcessEngine** (`engine/inproc`,
   `createAgentSession`, DEFAULT) and **ChildProcessEngine** (`engine/child`, spawns `pi --mode json -p`,
   the correctness baseline + the path worktree isolation uses). Opt out with `PI_PERSONA_ENGINE=child`.
+  BOTH enforce `RUN_LIMITS.timeoutMs` as an **idle window** (no events/output ⇒ abort; the inproc
+  watchdog is disabled for coaching children that may legitimately block on a supervisor reply).
+  The child engine delivers the task over **stdin** (`pi -p` prepends piped stdin) — never argv,
+  which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
+  share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async
+  fan-out can't open more concurrent sessions than a sync one.
 - **Fork-bomb guard**: children run with env `PI_PERSONA_DISABLE=1` so pi-persona self-disables inside
   them. NEVER pass `noExtensions` (it blocks the pi-claude auth provider). The guard is **ref-counted**
   in `inproc.ts` — keep it concurrency-safe (parallel strategies build several sessions at once).
 - Three disjoint comm planes: **EngineEvent** (runtime) / **Bus Msg** (semantic, `src/bus`) /
   **ProgressView** (derived UI, never a source of truth). Capabilities are enforced at call time via
   one `EffectiveCapabilities`, never prompt-only. Per-run pinning: `contract@hash` is frozen at start.
+  Same principle for retries: async failures are ALWAYS reported to the supervisor (never suppressed);
+  blind retry loops are stopped by the runtime `DelegationLedger` (an identical agent+model+task
+  delegation that failed twice is vetoed before it spawns).
+- Dynamic sub-agents: `delegate` shapes an on-the-fly specialist with `role` (extra system prompt,
+  appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate. Async runs
+  are joined with intercom `wait` (bounded ≤ the bus-ask timeout; collected results are discarded from
+  the pending completion follow-up so they are never double-reported).
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
 

@@ -24,3 +24,42 @@ export async function mapWithConcurrency<TIn, TOut>(
 	await Promise.all(Array.from({ length: limit }, () => worker()));
 	return results;
 }
+
+/**
+ * A counting semaphore for concurrency across INDEPENDENT launches (where
+ * `mapWithConcurrency` can't apply because the jobs don't arrive as one batch) —
+ * e.g. async delegate runs launched across several tool calls. FIFO, throw-safe:
+ * the slot is released even when the job rejects.
+ */
+export class Semaphore {
+	private available: number;
+	private readonly waiters: Array<() => void> = [];
+
+	constructor(slots: number) {
+		this.available = Math.max(1, slots);
+	}
+
+	/** Run `fn` once a slot is free; the slot is released when it settles. */
+	async with<T>(fn: () => Promise<T>): Promise<T> {
+		await this.acquire();
+		try {
+			return await fn();
+		} finally {
+			this.release();
+		}
+	}
+
+	private acquire(): Promise<void> {
+		if (this.available > 0) {
+			this.available -= 1;
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => this.waiters.push(resolve));
+	}
+
+	private release(): void {
+		const next = this.waiters.shift();
+		if (next) next(); // hand the slot straight to the next waiter
+		else this.available += 1;
+	}
+}

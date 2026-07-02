@@ -8,6 +8,7 @@ import { fanout } from "../../../src/orchestration/strategies/fanout.ts";
 import { judge } from "../../../src/orchestration/strategies/judge.ts";
 import { map } from "../../../src/orchestration/strategies/map.ts";
 import { pipeline } from "../../../src/orchestration/strategies/pipeline.ts";
+import { synthesize } from "../../../src/orchestration/strategies/synthesize.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
 const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
@@ -259,6 +260,55 @@ test("judge requires a panel roster and a params.judge arbiter", async () => {
 	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
 	await assert.rejects(() => judge.run({ task: "t", roster: "panel", params: {} }, sdk), /judge/);
+});
+
+test("synthesize fans the roster out, then one synthesiser merges the labeled findings", async () => {
+	const ran: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			ran.push(spec.agent);
+			if (spec.agent === "writer") {
+				assert.match(spec.task, /--- \[g1\] ---/, "the synthesiser sees each gatherer's labeled findings");
+				assert.match(spec.task, /finding-from-g2/);
+				return { agent: "writer", output: "the merged answer", usage: usage(), ok: true };
+			}
+			return { agent: spec.agent, output: `finding-from-${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "g" ? ["g1", "g2"] : []) }, limits: LIMITS });
+	const r = await synthesize.run({ task: "research X", roster: "g", params: { synthesizer: "writer" } }, sdk);
+	assert.deepEqual(ran.slice(0, 2).sort(), ["g1", "g2"], "gatherers ran first, in parallel");
+	assert.equal(ran[2], "writer", "the synthesiser ran last");
+	assert.equal(r.output, "the merged answer");
+	assert.equal(r.structured?.gatherers, 2);
+	assert.equal(r.ok, true);
+});
+
+test("synthesize defaults the synthesiser to the first roster agent and skips failed gatherers", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.task.includes("Findings:")) {
+				assert.doesNotMatch(spec.task, /\[broken\]/, "a failed gatherer's section is excluded");
+				return { agent: spec.agent, output: "merged", usage: usage(), ok: true };
+			}
+			if (spec.agent === "broken") return { agent: "broken", output: "", usage: usage(), ok: false, error: "boom" };
+			return { agent: spec.agent, output: `ok:${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["lead", "broken"] }, limits: LIMITS });
+	const r = await synthesize.run({ task: "T", roster: "g", params: {} }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(r.structured?.gatherers, 1, "only the usable gatherer counted");
+});
+
+test("synthesize fails cleanly when no gatherer produced output", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => ({ agent: spec.agent, output: "", usage: usage(), ok: false, error: "dead" }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	const r = await synthesize.run({ task: "T", roster: "g", params: {} }, sdk);
+	assert.equal(r.ok, false);
+	assert.match(r.output, /no gatherer produced output/);
 });
 
 test("map splits into a runtime list, works each item in parallel, and aggregates", async () => {

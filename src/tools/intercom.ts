@@ -63,8 +63,13 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 			if (!params.askId || params.message === undefined) {
 				return { text: "intercom reply needs { askId, message }.", details: { action: "reply", ok: false } };
 			}
-			bus.reply(params.askId, params.message);
-			return { text: `Replied to ${params.askId}.`, details: { action: "reply", ok: true } };
+			const replied = bus.reply(params.askId, params.message);
+			return replied
+				? { text: `Replied to ${params.askId}.`, details: { action: "reply", ok: true } }
+				: {
+						text: `No pending ask with id "${params.askId}" — it may have timed out or already been answered (check "inbox").`,
+						details: { action: "reply", ok: false },
+					};
 		}
 		case "send": {
 			if (!params.to || params.message === undefined) {

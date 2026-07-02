@@ -10,6 +10,7 @@ import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } 
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
+import { combineSignals } from "./signals.ts";
 import { emptyUsage } from "./stream.ts";
 
 export interface EngineAdapterDeps {
@@ -25,14 +26,6 @@ export interface EngineAdapterDeps {
 	/** Forwarded to the child engine (e.g. a test invocation resolver). */
 	childOptions?: ChildEngineOptions;
 	cwd?: string;
-}
-
-/** One signal that fires when any of the given signals fires (ignores undefined). */
-function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
-	const live = signals.filter((s): s is AbortSignal => s !== undefined);
-	if (live.length === 0) return undefined;
-	if (live.length === 1) return live[0];
-	return AbortSignal.any(live);
 }
 
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
@@ -73,7 +66,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (model) childSpec.model = model;
 			const tools = spec.tools ?? cfg.tools;
 			if (tools) childSpec.tools = tools;
-			if (cfg.systemPrompt) childSpec.systemPrompt = cfg.systemPrompt;
+			// The agent's own persona + any on-the-fly `role` specialisation from the spec.
+			const personaPrompt = [cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
+			if (personaPrompt) childSpec.systemPrompt = personaPrompt;
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };

@@ -27,6 +27,7 @@ import { type ContractDef, parseAndValidate, pinContract, type PinnedContract } 
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
+import { combineSignals } from "./signals.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
 
 /** The minimal slice of Pi's AgentSession the engine drives — also the test seam. */
@@ -84,6 +85,11 @@ export interface InProcessDeps {
 	/** Allow a child's `decision`/`interview` to BLOCK for a reply — async runs only.
 	 *  Sync runs hold the supervisor's turn, so blocking would deadlock: keep this false. */
 	allowBlocking?: boolean;
+	/** IDLE window (ms): a session that emits NO events for this long is treated as hung
+	 *  and aborted (mirrors the child engine's idle kill). 0/absent = no watchdog.
+	 *  Ignored when `coaching` + `allowBlocking` — a child legitimately blocked on a
+	 *  supervisor reply (bus ask, 10-minute timeout) emits nothing and must not be killed. */
+	timeoutMs?: number;
 }
 
 // The sub-agent must never re-enter the supervisor's orchestration surface.
@@ -129,13 +135,6 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		dispose: () => session.dispose(),
 	};
 };
-
-function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
-	const live = signals.filter((s): s is AbortSignal => s !== undefined);
-	if (live.length === 0) return undefined;
-	if (live.length === 1) return live[0];
-	return AbortSignal.any(live);
-}
 
 /** Resolve a model ref (`provider/id`, or a bare id) to a registry Model. */
 function resolveModel(reg: ModelRegistry, ref: string | undefined): unknown {
@@ -197,13 +196,41 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const model = resolveModel(deps.modelRegistry, ref);
 			if (!model) {
 				const src = spec.model ? "spec" : deps.modelFor?.(spec.agent) ? "agent picker" : cfg.model ? "agent config" : "default";
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent} · ${ref ?? "(no model)"}] model not found in registry (from ${src})` };
+				// Make the failure self-correcting: name a few real registry refs (nearest
+				// matches first) so the supervisor's retry can pick a valid model at once.
+				const all = deps.modelRegistry.getAll().map((m) => `${m.provider}/${m.id}`);
+				const frag = (ref ?? "").split("/").pop()?.split(":")[0]?.toLowerCase() ?? "";
+				const near = frag ? all.filter((r) => r.toLowerCase().includes(frag)) : [];
+				const hint = (near.length > 0 ? near : all).slice(0, 5);
+				return {
+					agent: spec.agent,
+					output: "",
+					usage: emptyUsage(),
+					ok: false,
+					error: `[${spec.agent} · ${ref ?? "(no model)"}] model not found in registry (from ${src})${hint.length > 0 ? ` — try e.g.: ${hint.join(", ")}` : ""}`,
+				};
 			}
 			const thinkingLevel = isThinkingLevel(deps.childThinking) ? deps.childThinking : undefined;
 			const tools = spec.tools ?? cfg.tools;
 
+			// Diagnostic tag: which agent + which model ref + whether it was dynamically
+			// specialised (skills / model / tools override on the spec). Users need this
+			// to tell "the delegate typo'd the model" from "the provider rejected it".
+			const overrides: string[] = [];
+			if (spec.model) overrides.push("model");
+			if (spec.skills && spec.skills.length > 0) overrides.push("skills");
+			if (spec.tools && spec.tools.length > 0) overrides.push("tools");
+			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
+			const tag = `[${spec.agent} · ${ref ?? "(no model)"}${dyn}]`;
+
 			const state = createStreamState();
 			const signal = combineSignals(deps.signal, callSignal);
+
+			// Already cancelled (e.g. a queued async run stopped before its slot came up):
+			// don't build a session or burn a model call — settle as aborted right away.
+			if (signal?.aborted) {
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted` };
+			}
 
 			const sessionOpts: CreateSessionOptions = {
 				model,
@@ -213,7 +240,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			};
 			if (tools && tools.length > 0) sessionOpts.tools = tools;
 			if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
-			if (cfg.systemPrompt?.trim()) sessionOpts.systemPrompt = cfg.systemPrompt.trim();
+			// The agent's own persona + any on-the-fly `role` specialisation from the spec.
+			const personaPrompt = [cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
+			if (personaPrompt) sessionOpts.systemPrompt = personaPrompt;
 
 			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle,
 			// so its progress/decisions reach the supervisor over the bus while it runs (§4.9).
@@ -238,7 +267,32 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				popDisableGuard();
 			}
 
+			// Idle watchdog (mirrors the child engine's idle kill): a session that emits no
+			// events for `timeoutMs` is hung (e.g. a stuck provider stream) — without this the
+			// DEFAULT engine would await `waitForIdle()` forever and the run would never settle.
+			// Any event re-arms the clock, so a long-but-active agent is never killed. Disabled
+			// for coaching children that may block on a supervisor reply (see InProcessDeps).
+			const watchdogMs = deps.coaching && (deps.allowBlocking ?? false) ? 0 : (deps.timeoutMs ?? 0);
+			let timedOut = false;
+			let idleTimer: ReturnType<typeof setTimeout> | undefined;
+			const disarmIdle = (): void => {
+				if (idleTimer) {
+					clearTimeout(idleTimer);
+					idleTimer = undefined;
+				}
+			};
+			const armIdle = (): void => {
+				if (watchdogMs <= 0) return;
+				disarmIdle();
+				idleTimer = setTimeout(() => {
+					timedOut = true;
+					session.agent.abort();
+				}, watchdogMs);
+				idleTimer.unref?.();
+			};
+
 			const unsub = session.subscribe((ev) => {
+				armIdle(); // any event = activity → reset the idle clock
 				applyEvent(state, ev);
 				const snap = snapshot(state);
 				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
@@ -276,29 +330,24 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// and the user sees an opaque "agent failed (unknown)".
 			let thrownError: string | undefined;
 			try {
+				armIdle(); // start the idle clock (reset on every session event)
 				await session.prompt(task);
 				await session.agent.waitForIdle();
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
 			} finally {
+				disarmIdle();
 				if (signal) signal.removeEventListener("abort", onAbort);
 				if (childHandle) deps.bus?.unregister(childHandle);
 				unsub();
 				session.dispose();
 			}
 
-			const ok = !aborted && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
+			const ok = !aborted && !timedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok };
-			// Diagnostic tag: which agent + which model ref + whether it was dynamically
-			// specialised (skills / model / tools override on the spec). Users need this
-			// to tell "the delegate typo'd the model" from "the provider rejected it".
-			const overrides: string[] = [];
-			if (spec.model) overrides.push("model");
-			if (spec.skills && spec.skills.length > 0) overrides.push("skills");
-			if (spec.tools && spec.tools.length > 0) overrides.push("tools");
-			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
-			const tag = `[${spec.agent} · ${ref ?? "(no model)"}${dyn}]`;
-			if (aborted) result.error = `${tag} agent aborted`;
+			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
+			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+			else if (aborted) result.error = `${tag} agent aborted`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;

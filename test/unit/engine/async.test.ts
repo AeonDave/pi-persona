@@ -144,6 +144,22 @@ test("buildPeekDigest summarises runs (counts, ids, statuses)", () => {
 	assert.match(digest, /all good/);
 });
 
+test("buildPeekDigest shows a failed run's ERROR, not its (empty) output", () => {
+	// A failed engine run still carries a result (ok:false, output "") — the digest must
+	// surface WHY it failed, or /peek shows a bare "failed:" with nothing after it.
+	const failedWithResult: AsyncRun = {
+		id: "run-9",
+		agent: "operator",
+		task: "t",
+		status: "failed",
+		progress: { output: "", turns: 1, tokens: 1 },
+		result: { agent: "operator", output: "", usage: usage(), ok: false, error: "model not found" },
+		error: "model not found",
+	};
+	const digest = buildPeekDigest([failedWithResult]);
+	assert.match(digest, /run-9.*failed: model not found/);
+});
+
 test("buildCompletionReport summarises a mixed batch with one tidy first line", () => {
 	const report = buildCompletionReport([doneRun("run-1", "scout", "found it"), failedRun("run-2", "operator", "context length exceeded")], (t) => t);
 	const firstLine = report.split("\n")[0];
@@ -154,20 +170,94 @@ test("buildCompletionReport summarises a mixed batch with one tidy first line", 
 	assert.match(report, /run-2 \(operator\): context length exceeded/);
 });
 
-test("buildCompletionReport suppresses the follow-up when every run failed", () => {
-	// All failed → empty string → no supervisor follow-up (prevents retry loops).
-	// The user-facing ui.notify in tracker.onComplete surfaces the failure instead.
+test("buildCompletionReport reports an ALL-FAILED batch too — the supervisor must know", () => {
+	// Failures are information, not noise: hiding them would leave the supervisor
+	// waiting forever for a result that never comes. Retry loops are prevented at
+	// runtime by the DelegationLedger, not by suppressing the report.
 	const allFailed = buildCompletionReport([failedRun("run-1", "operator", "boom")], (t) => t);
-	assert.equal(allFailed, "");
+	assert.match(allFailed, /1 async run settled — 0 done, 1 failed/);
+	assert.match(allFailed, /run-1 \(operator\): boom/);
+	assert.match(allFailed, /Do not re-issue the same failing delegation repeatedly/);
 	const allDone = buildCompletionReport([doneRun("run-1", "scout", "ok")], (t) => t);
 	assert.doesNotMatch(allDone, /Do not re-issue/);
 	assert.match(allDone, /1 async run settled — 1 done, 0 failed/); // singular, no plural "s"
 });
 
-test("buildCompletionReport still includes anti-loop guidance on mixed batches (some done, some failed)", () => {
+test("buildCompletionReport includes anti-loop guidance on mixed batches (some done, some failed)", () => {
 	const mixed = buildCompletionReport([doneRun("run-1", "scout", "ok"), failedRun("run-2", "operator", "boom")], (t) => t);
 	assert.match(mixed, /Do not re-issue the same failing delegation repeatedly/);
 	assert.match(mixed, /retry ONCE with a different model/);
+});
+
+test("tracker.waitFor resolves once every listed run settles (a join on async runs)", async () => {
+	const tracker = new AsyncRunTracker();
+	let releaseA: () => void = () => {};
+	let releaseB: () => void = () => {};
+	const a = tracker.launch({ agent: "a", task: "t" }, async () => {
+		await new Promise<void>((r) => {
+			releaseA = r;
+		});
+		return { agent: "a", output: "A", usage: usage(), ok: true };
+	});
+	const b = tracker.launch({ agent: "b", task: "t" }, async () => {
+		await new Promise<void>((r) => {
+			releaseB = r;
+		});
+		return { agent: "b", output: "B", usage: usage(), ok: true };
+	});
+	const wait = tracker.waitFor([a, b], 5_000);
+	releaseA();
+	releaseB();
+	const runs = await wait;
+	assert.deepEqual(runs.map((r) => r.status).sort(), ["done", "done"]);
+	assert.deepEqual(runs.map((r) => r.result?.output).sort(), ["A", "B"]);
+});
+
+test("tracker.waitFor resolves with CURRENT states on timeout (never rejects, never hangs)", async () => {
+	const tracker = new AsyncRunTracker();
+	let release: () => void = () => {};
+	const id = tracker.launch({ agent: "slow", task: "t" }, async () => {
+		await new Promise<void>((r) => {
+			release = r;
+		});
+		return { agent: "slow", output: "late", usage: usage(), ok: true };
+	});
+	const runs = await tracker.waitFor([id], 20);
+	assert.equal(runs[0]?.status, "running", "the unsettled run is reported as still running");
+	release(); // clean up
+	await tick();
+});
+
+test("tracker.waitFor with already-settled and unknown ids resolves immediately", async () => {
+	const tracker = new AsyncRunTracker();
+	const id = tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "x", usage: usage(), ok: true }));
+	await tick();
+	const runs = await tracker.waitFor([id, "run-ghost"], 1_000);
+	assert.equal(runs.length, 1, "unknown ids are ignored");
+	assert.equal(runs[0]?.status, "done");
+});
+
+test("onComplete returns an unsubscribe (waitFor never leaks listeners)", async () => {
+	const tracker = new AsyncRunTracker();
+	let calls = 0;
+	const off = tracker.onComplete(() => calls++);
+	tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "x", usage: usage(), ok: true }));
+	await tick();
+	off();
+	tracker.launch({ agent: "b", task: "t" }, async () => ({ agent: "b", output: "y", usage: usage(), ok: true }));
+	await tick();
+	assert.equal(calls, 1, "no callbacks after unsubscribe");
+});
+
+test("IdleCoalescingNotifier.discard drops buffered items (results already collected via wait)", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	n.notify("keep");
+	n.notify("collected");
+	n.discard((x) => x === "collected");
+	clock.tick();
+	assert.deepEqual(sent, ["keep"], "the discarded item was not re-delivered");
 });
 
 test("buildCompletionReport fences untrusted sub-agent text (output and reasons)", () => {

@@ -97,8 +97,42 @@ export class AsyncRunTracker {
 		return this.list().filter((r) => r.status === "running");
 	}
 
-	onComplete(cb: (run: AsyncRun) => void): void {
+	onComplete(cb: (run: AsyncRun) => void): () => void {
 		this.completeListeners.push(cb);
+		return () => {
+			const i = this.completeListeners.indexOf(cb);
+			if (i >= 0) this.completeListeners.splice(i, 1);
+		};
+	}
+
+	/**
+	 * Wait (join) until every listed run settles, or `timeoutMs` elapses — never rejects:
+	 * it resolves with the runs' CURRENT states, so the caller reports what settled and
+	 * what is still going. Backs the `intercom wait` action (the supervisor holds its turn
+	 * to collect async results it now needs before its next step).
+	 */
+	waitFor(ids: string[], timeoutMs: number, signal?: AbortSignal): Promise<AsyncRun[]> {
+		const targets = ids.map((id) => this.runs.get(id)).filter((r): r is AsyncRun => r !== undefined);
+		if (targets.every((r) => r.status !== "running")) return Promise.resolve(targets);
+		return new Promise((resolve) => {
+			let off = (): void => {};
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (): void => {
+				off();
+				if (timer) clearTimeout(timer);
+				signal?.removeEventListener("abort", finish);
+				resolve(targets);
+			};
+			off = this.onComplete(() => {
+				if (targets.every((r) => r.status !== "running")) finish();
+			});
+			timer = setTimeout(finish, timeoutMs);
+			timer.unref?.();
+			if (signal) {
+				if (signal.aborted) finish();
+				else signal.addEventListener("abort", finish, { once: true });
+			}
+		});
 	}
 }
 
@@ -109,8 +143,10 @@ export function buildPeekDigest(runs: AsyncRun[]): string {
 	const lines = runs.map((r) => {
 		const head = `[${r.id}] ${r.agent} — ${r.status}`;
 		if (r.status === "running") return `${head} (${r.progress.turns} turns, ${r.progress.tokens} tok)`;
+		// A failed run's WHY is its error, not its (usually empty) output.
+		if (r.status === "failed") return `${head}${r.error ? `: ${r.error}` : ""}`;
 		if (r.result) return `${head}: ${r.result.output.slice(0, 80).replace(/\s+/g, " ")}`;
-		return `${head}${r.error ? `: ${r.error}` : ""}`;
+		return head;
 	});
 	return [`Async runs: ${runs.length} (${running} running)`, ...lines].join("\n");
 }
@@ -125,10 +161,10 @@ export function buildPeekDigest(runs: AsyncRun[]): string {
 export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) => string): string {
 	const done = runs.filter((r) => r.status === "done");
 	const failed = runs.filter((r) => r.status === "failed");
-	// All failed → no follow-up. The supervisor has nothing to work with, and a
-	// notice would just prod it into re-delegating (loop). The immediate ui.notify
-	// in the tracker's onComplete has already surfaced the failure to the user.
-	if (done.length === 0) return "";
+	// Failures are always reported — the supervisor must know so it can adjust or tell
+	// the user. Blind retry loops are prevented at RUNTIME by the DelegationLedger
+	// (an identical delegation that failed twice is vetoed before it spawns), not by
+	// hiding information.
 	// First line stays short and informative — pi's queued-message UI shows only this line, truncated.
 	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed`;
 	const blocks: string[] = [head];
@@ -197,6 +233,14 @@ export class IdleCoalescingNotifier<T> {
 		if (this.handle !== undefined) {
 			this.deps.clearTimer(this.handle);
 			this.handle = undefined;
+		}
+	}
+
+	/** Drop buffered items matching `pred` — e.g. results the supervisor already collected
+	 *  synchronously (intercom `wait`), which must not be re-delivered as a follow-up. */
+	discard(pred: (item: T) => boolean): void {
+		for (let i = this.pending.length - 1; i >= 0; i--) {
+			if (pred(this.pending[i] as T)) this.pending.splice(i, 1);
 		}
 	}
 
