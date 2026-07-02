@@ -1,6 +1,6 @@
 /**
  * `contact_peer` — the CHILD-side sibling-messaging tool of the communication plane
- * (design: docs/superpowers/specs/2026-07-02-sibling-peer-comm-design.md). Bound by the
+ * (design: docs/ARCHITECTURE.md § "The comm plane in practice"). Bound by the
  * in-process engine ONLY when the strategy opted the run into peer comm (`spec.peers`,
  * gated by the persona's `canUseBus`).
  *

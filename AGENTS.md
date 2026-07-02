@@ -2,8 +2,8 @@
 
 A single Pi coding-agent extension (`@earendil-works/pi-*`) that makes the agent a **supervisor**
 of switchable **personas** + file-based **orchestration strategies**. Loaded by Pi via tsx/jiti —
-no build step. Design specs (binding on any conflict, guardrails first):
-`docs/superpowers/specs/2026-06-25-pi-persona-implementation-guardrails.md` then the architecture spec beside it.
+no build step. Design contract (binding on any conflict): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
+the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
 
 ## Commands
 
@@ -43,7 +43,7 @@ no build step. Design specs (binding on any conflict, guardrails first):
   (closing the child-engine steer gap — `intercom steer`/f9 `s` now work on both engines; a child's
   steer is follow-up-queued, not mid-turn injection). Off (default) ⇒ `deps.broker` is never built,
   the host never starts, and the child spawns byte-identical to pre-broker pi-persona — see
-  `docs/superpowers/specs/2026-07-02-cross-process-broker-design.md`.
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 - **Provider fallback**: `buildEngine` wraps the engine in `withModelFallback` (`engine/fallback.ts`).
   A run whose model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on
   the SAME model id under another authenticated provider, walking the whole chain (session provider
@@ -74,7 +74,7 @@ no build step. Design specs (binding on any conflict, guardrails first):
   fenced with the sender attributed OUTSIDE the fence — the same bridge delivers the supervisor's
   `intercom send` (previously a dead letter). Gated by `EffectiveCapabilities.canUseBus` (OFF iff
   the persona explicitly denies `intercom`). The child engine ignores `peers`.
-  Design: `docs/superpowers/specs/2026-07-02-sibling-peer-comm-design.md`.
+  Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice) + [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   On the peer plane: `debate` and `pair` always; `map`/`synthesize` opt-in via `params.peers`.
   `magi`/`judge`/`fanout` stay peer-less BY DESIGN — independence is their bias guard
   (uncorrelated errors; an anonymised ballot cannot survive members who talked) — do not "fix"
@@ -122,8 +122,8 @@ no build step. Design specs (binding on any conflict, guardrails first):
 ## Boundaries / deferred (do NOT rebuild as "missing")
 
 - **`context: fork`** is deliberately deferred: `fresh` is the right child default. The
-  **cross-process bus broker** is NO LONGER deferred — see the engine bullet above and
-  `docs/superpowers/specs/2026-07-02-cross-process-broker-design.md`.
+  **cross-process bus broker** is NO LONGER deferred — see the engine/broker bullet above and
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - This repo is `D:\Sources\pi-persona`. The separate `D:\Sources\pi-subagents-persona` (flat
   `src/index.ts`, `VALID_THINKING`, …) is a **legacy** package — different project. Always use
   explicit `pi-persona` paths in shells and sub-agent prompts (the env default cwd is the legacy one).
