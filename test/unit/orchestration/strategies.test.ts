@@ -469,6 +469,69 @@ test("debate warns (without clamping) when the roster exceeds maxConcurrency", a
 	assert.equal(r.ok, true, "no clamping — every member still ran");
 });
 
+test("map with params.peers gives WORKERS peer messaging + cross-talk protocol (splitter stays solo)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["a","b"]', usage: usage(), ok: true };
+			return { agent: spec.agent, output: "done", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { peers: true } }, sdk);
+	assert.equal(r.ok, true);
+	const split = specs.find((s) => s.agent === "splitter");
+	const workers = specs.filter((s) => s.agent === "worker");
+	assert.equal(split?.peers, undefined, "the splitter runs alone — no peers");
+	assert.equal(workers.length, 2);
+	for (const w of workers) {
+		assert.equal(w.peers, true);
+		assert.match(w.task, /contact_peer/, "cross-talk protocol lives in the task text");
+	}
+});
+
+test("map and synthesize without params.peers leave peers unset (default unchanged)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["a"]', usage: usage(), ok: true };
+			return { agent: spec.agent, output: "x", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	await map.run({ task: "T", roster: "m", params: {} }, sdk);
+	const sdk2 = makeSDK({ engine, roster: { team: () => ["g1", "g2"] }, limits: LIMITS });
+	await synthesize.run({ task: "T", roster: "g", params: {} }, sdk2);
+	assert.ok(
+		specs.every((s) => s.peers === undefined && !s.task.includes("cross-talk")),
+		"no peers flag, no protocol by default",
+	);
+});
+
+test("synthesize with params.peers gives GATHERERS cross-talk but never the synthesizer", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			if (spec.agent === "writer") return { agent: "writer", output: "merged", usage: usage(), ok: true };
+			return { agent: spec.agent, output: `finding-${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["g1", "g2"] }, limits: LIMITS });
+	const r = await synthesize.run({ task: "T", roster: "g", params: { synthesizer: "writer", peers: true } }, sdk);
+	assert.equal(r.ok, true);
+	const gatherers = specs.filter((s) => s.agent === "g1" || s.agent === "g2");
+	const writer = specs.find((s) => s.agent === "writer");
+	assert.equal(gatherers.length, 2);
+	for (const g of gatherers) {
+		assert.equal(g.peers, true);
+		assert.match(g.task, /contact_peer/);
+	}
+	assert.equal(writer?.peers, undefined, "the synthesizer runs after the gatherers — no peers");
+});
+
 test("debate honours bestOf and falls back to best-by-confidence without consensus", async () => {
 	const engine: StrategyEngine = {
 		run: async (spec) => {
