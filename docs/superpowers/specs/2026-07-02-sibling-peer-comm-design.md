@@ -151,3 +151,15 @@ supervisor council(strategy: debate, roster: review, task)
   that spec lands, not now.
 - Blocking peer asks, broadcast primitives, persona-level (`communication:`) opt-in grammar —
   YAGNI until a strategy needs them.
+
+## Errata (post-implementation)
+
+- The debate render has no peer-traffic count line: `AgentResult` carries no message count, so
+  peer-traffic visibility rides the engine's `activity` "✉ from …" tick (§ simplification 2)
+  instead of a tally in the ruling text.
+- The shared fence keeps the existing `<subagent-output>` tag (`core/fence.ts`), not this doc's
+  illustrative `<untrusted-subagent-message>` — one fence tag serves all untrusted sub-agent
+  content, not a peer-specific variant.
+- `debate`'s `PROTOCOL` is delivered via the task text, not appended to `role`, so a member's
+  `roleHint`-derived UI tree key stays identical to the `rosterNodeKeys` roster seeding (a bare
+  roster member's `role` stays unset).
