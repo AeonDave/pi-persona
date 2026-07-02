@@ -24,6 +24,10 @@ const CROSS_TALK = [
 
 export const synthesize: Strategy = {
 	name: "synthesize",
+	params: {
+		synthesizer: { type: "string", doc: "default: the first roster agent" },
+		peers: { type: "boolean", default: false, doc: "gatherers share contradictions/corroborations live" },
+	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("synthesize: a non-empty roster (the gatherers) is required");

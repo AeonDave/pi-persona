@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { getStrategy } from "../../../src/orchestration/strategy.ts";
+import { getStrategy, knownParams } from "../../../src/orchestration/strategy.ts";
 
 // Registry completeness: every built-in strategy MUST be reachable by name (so a new
 // strategy file can't be silently unregistered), and each must declare a matching name.
@@ -18,4 +18,12 @@ test("getStrategy resolves every built-in strategy by name", () => {
 
 test("getStrategy returns undefined for an unknown strategy", () => {
 	assert.equal(getStrategy("does-not-exist"), undefined);
+});
+
+test("knownParams exposes a strategy's declared params; magi has reflect + aggregate", () => {
+	const p = knownParams("magi");
+	assert.ok(p && "reflect" in p && "aggregate" in p);
+	assert.equal(p.reflect?.type, "boolean");
+	assert.equal(knownParams("fanout"), undefined, "a param-less strategy has no schema");
+	assert.equal(knownParams("nope"), undefined);
 });

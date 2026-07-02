@@ -42,6 +42,7 @@ import { runFlow } from "./orchestration/flow-run.ts";
 import { Semaphore } from "./orchestration/parallel.ts";
 import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
 import type { AgentProgress, AgentRunSpec, AgentStatus, SteerFn, StrategyEngine } from "./orchestration/sdk.ts";
+import { knownParams, strategyNames } from "./orchestration/strategy.ts";
 import type { AgentResult } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
@@ -913,6 +914,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 			lines.push(`effective-capabilities: tools=${caps.tools.size}, delegate-targets=${caps.delegateTargets.size}, canFanOut=${canFanOut(caps)}`);
 		}
 		lines.push(`run limits: children≤${RUN_LIMITS.maxChildren}, concurrency≤${RUN_LIMITS.maxConcurrency}, timeout=${RUN_LIMITS.timeoutMs}ms`);
+		lines.push("strategies:");
+		for (const name of strategyNames()) {
+			const schema = knownParams(name);
+			const params = schema
+				? Object.entries(schema)
+						.map(([k, p]) => `${k} (${p.type}${p.default !== undefined ? `, default ${JSON.stringify(p.default)}` : ""})`)
+						.join(", ")
+				: "(no params)";
+			lines.push(`  - ${name}: ${params}`);
+		}
 		const coaching = controller.activePersona?.coaching ?? false;
 		const peek = config.peekEveryMs > 0 ? `${config.peekEveryMs}ms` : "off";
 		lines.push(`comm plane: coaching=${coaching ? "on (children get contact_supervisor)" : "off"}, periodic-peek=${peek}, bus-peers=${bus.participants().length}`);
@@ -1511,6 +1522,17 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const roster = params.roster ?? council?.roster ?? controller.activePersona?.orchestration?.roster ?? "magi";
 				// Per-call params override the persona's council defaults (e.g. reflect:false this once).
 				const mergedParams = { ...(council?.params ?? {}), ...((params.params as Record<string, unknown> | undefined) ?? {}) };
+				// Lenient by design (I2: strategies are trusted project code) — an unknown param key
+				// only warns, it never blocks or alters the run. A correct call is untouched.
+				const schema = knownParams(strategy);
+				if (schema) {
+					const unknown = Object.keys(mergedParams).filter((k) => !(k in schema));
+					if (unknown.length > 0) {
+						const note = `council: ignoring unknown param(s) [${unknown.join(", ")}] for "${strategy}" — known: ${Object.keys(schema).join(", ") || "(none)"}`;
+						if (process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] ${note}\n`);
+						ctx.ui.notify(note, "warning");
+					}
+				}
 				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: mergedParams };
 				const result = await runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
 				const s = (result?.structured ?? {}) as { headline?: string; status?: string; tally?: Record<string, number> };

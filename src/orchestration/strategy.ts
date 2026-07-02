@@ -4,7 +4,7 @@
  * gated code) would register through the same map.
  */
 
-import type { Strategy } from "./sdk.ts";
+import type { Strategy, StrategyParam } from "./sdk.ts";
 import { compete } from "./strategies/compete.ts";
 import { councilRounds } from "./strategies/council-rounds.ts";
 import { criticLoop } from "./strategies/critic-loop.ts";
@@ -38,4 +38,10 @@ export function getStrategy(name: string): Strategy | undefined {
 /** The registered built-in strategy names, sorted — for error messages and discovery. */
 export function strategyNames(): string[] {
 	return Object.keys(BUILTINS).sort();
+}
+
+/** A strategy's declared param schema, for discovery (`/doctor`) and the council tool's
+ *  lenient unknown-key warning. `undefined` for an unknown strategy OR one that declares no params. */
+export function knownParams(name: string): Record<string, StrategyParam> | undefined {
+	return BUILTINS[name]?.params;
 }

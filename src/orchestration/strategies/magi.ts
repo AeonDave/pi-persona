@@ -23,6 +23,10 @@ const LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 export const magi: Strategy = {
 	name: "magi",
+	params: {
+		aggregate: { type: "string", default: "majority", doc: '"majority" | "unanimity"' },
+		reflect: { type: "boolean", default: true, doc: "one anonymised reflection round" },
+	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("magi: a roster of voting personas is required");

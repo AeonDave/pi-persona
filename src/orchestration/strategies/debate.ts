@@ -51,6 +51,10 @@ function render(decision: ReducerResult, members: number, bestOf: number, usages
 
 export const debate: Strategy = {
 	name: "debate",
+	params: {
+		bestOf: { type: "number", doc: "default: majority of the roster" },
+		aggregate: { type: "string", default: "majority", doc: '"majority" | "unanimity"' },
+	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length < 2) throw new Error("debate: a roster of at least 2 members is required");

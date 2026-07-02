@@ -25,6 +25,10 @@ import type { AgentResult } from "../types.ts";
 
 export const judge: Strategy = {
 	name: "judge",
+	params: {
+		judge: { type: "string", doc: "(required) the arbiter agent" },
+		contract: { type: "string", doc: "optional output contract the panel runs against" },
+	},
 	async run(input, sdk) {
 		const panel = input.roster ? sdk.roster.team(input.roster) : [];
 		if (panel.length === 0) throw new Error("judge: a non-empty roster (the panel) is required");

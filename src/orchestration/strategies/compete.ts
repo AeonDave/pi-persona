@@ -61,6 +61,10 @@ function clip(diff: string, max: number): string {
 
 export const compete: Strategy = {
 	name: "compete",
+	params: {
+		judge: { type: "string", doc: "(required) the arbiter agent" },
+		ballotDiffChars: { type: "number", default: 6000, doc: "ballot-only diff clip length; the winner's diff is always full" },
+	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length < 2) throw new Error("compete: a roster of at least 2 competitors is required");

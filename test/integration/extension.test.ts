@@ -54,6 +54,7 @@ function makeMockPi() {
 	return {
 		pi: pi as unknown as ExtensionAPI,
 		toolNames: () => Object.keys(tools),
+		tool: (name: string) => tools[name],
 		commandNames: () => Object.keys(commands),
 		shortcutCount: () => shortcuts.length,
 		fire: (ev: string, ...args: unknown[]) => {
@@ -235,6 +236,40 @@ test("PI_PERSONA_BROKER unset (default-OFF pin): /doctor shows no broker line, t
 	await m.cmd("doctor", "", ctx);
 	assert.doesNotMatch(notes.join("\n"), /broker:/, "no broker line when the flag is off");
 	await m.fire("session_shutdown", undefined, ctx); // must not throw / hang — nothing was ever started
+});
+
+// ── param schema (Task 4): lenient council warn + /doctor discovery ──────────────
+
+test("council: an unknown param key warns via ui.notify but does not block the run (lenient — I2)", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx, notes } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const council = m.tool("council") as { execute: AnyFn };
+	// An unknown roster makes `magi` fail fast (no team ⇒ throw) INSIDE its run() — reaching
+	// that strategy-specific error (rather than never running at all) proves the unknown param
+	// only warned; it did not strip/mutate `mergedParams` or block the run before it started.
+	const result = await council.execute(
+		"t1",
+		{ question: "test", strategy: "magi", roster: "no-such-roster-xyz", params: { bogus: true } },
+		undefined,
+		undefined,
+		ctx,
+	);
+	assert.match(notes.join("\n"), /ignoring unknown param\(s\) \[bogus\] for "magi" — known: aggregate, reflect/);
+	assert.match(String(result.content?.[0]?.text ?? ""), /a roster of voting personas is required/);
+});
+
+test("/doctor lists each strategy's declared params (or \"no params\")", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx, notes } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("doctor", "", ctx);
+	const report = notes.join("\n");
+	assert.match(report, /strategies:/);
+	assert.match(report, /magi: .*reflect \(boolean, default true\)/);
+	assert.match(report, /fanout: \(no params\)/);
 });
 
 test("PI_PERSONA_BROKER=1: /doctor reports the flag as on but the host stays unstarted until a child-engine build (lazy)", async () => {
