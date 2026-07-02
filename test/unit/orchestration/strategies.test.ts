@@ -777,3 +777,20 @@ test("debate honours params.aggregate = unanimity", async () => {
 	const r = await debate.run({ task: "t", roster: "t", params: { aggregate: "unanimity" } }, sdk);
 	assert.equal(r.structured?.usedFallback, true, "split vote under unanimity → fallback, not a winner-by-plurality");
 });
+
+test("critic-loop passes roster role/model/skills to the generator (not just the agent name)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			if (spec.agent === "critic") return { agent: "critic", output: "ok", structured: { stance: "approve" }, usage: usage(), ok: true };
+			return { agent: spec.agent, output: "work", usage: usage(), ok: true };
+		},
+	};
+	const team = [{ agent: "maker", role: "Write it the FUNCTIONAL way", model: "prov/fast" }, "critic"];
+	const sdk = makeSDK({ engine, roster: { team: () => team }, limits: LIMITS });
+	await criticLoop.run({ task: "build", roster: "x", params: {} }, sdk);
+	const gen = specs.find((s) => s.agent === "maker");
+	assert.match(gen?.role ?? "", /FUNCTIONAL/, "the generator's role specialisation is preserved");
+	assert.equal(gen?.model, "prov/fast", "and its model");
+});
