@@ -495,6 +495,39 @@ test("the delivery bridge steers an incoming peer note into the session, fenced 
 	assert.equal(bus.pending("supervisor").length, 0, "peer traffic never lands in the supervisor inbox");
 });
 
+test("the delivery bridge drops an envelope when session.agent.steer throws — no exception escapes, cleanup still runs", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		createSession: async () => {
+			// deliver()'s flush-on-subscribe runs BEFORE the run's try/finally (see inproc.ts) —
+			// an uncaught throw here would leak the bus registration/observer and skip cleanup.
+			const child = bus.participants().find((p) => p !== "supervisor");
+			bus.send("elsewhere#7", child ?? "?", "hello");
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort() {},
+					async waitForIdle() {},
+					steer: () => {
+						throw new Error("steer boom");
+					},
+				},
+				dispose() {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t", peers: true });
+	assert.equal(r.ok, true, "the run still completes ok despite the steer throw");
+	assert.deepEqual(bus.participants(), ["supervisor"], "cleanup ran — the child handle/observer did not leak");
+});
+
 test("a supervisor intercom send now reaches the running child (dead-letter regression)", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

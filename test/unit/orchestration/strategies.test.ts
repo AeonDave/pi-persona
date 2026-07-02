@@ -413,7 +413,7 @@ test("debate requires a roster of at least 2", async () => {
 	await assert.rejects(() => debate.run({ task: "T", roster: "x", params: {} }, sdk), /at least 2/);
 });
 
-test("debate runs every member with live peer exchange and the protocol appended to its role", async () => {
+test("debate runs every member with live peer exchange and the protocol delivered via the task", async () => {
 	const specs: AgentRunSpec[] = [];
 	const engine: StrategyEngine = {
 		run: async (spec) => {
@@ -430,14 +430,43 @@ test("debate runs every member with live peer exchange and the protocol appended
 	assert.equal(specs.length, 2);
 	for (const s of specs) {
 		assert.equal(s.peers, true, "peer messaging enabled for every member");
-		assert.match(s.role ?? "", /contact_peer/, "the protocol references the peer tool");
-		assert.match(s.role ?? "", /Focus ONLY on the (SECURITY|PERFORMANCE) lens/, "the member's own lens is preserved");
+		assert.match(s.task, /contact_peer/, "the protocol (referencing the peer tool) rides the task, not the role");
+		assert.match(s.role ?? "", /Focus ONLY on the (SECURITY|PERFORMANCE) lens/, "the member's own lens is preserved on role");
 		assert.equal(s.outputContract, "default");
-		assert.equal(s.task, "decide", "ONE parallel pass — the task is not rewritten between rounds");
+		assert.ok(s.task.startsWith("decide"), "ONE parallel pass — the original task text leads");
+		assert.match(s.task, /--- debate protocol ---/, "the task carries the debate protocol");
 	}
 	assert.equal(r.structured?.status, "winner");
 	assert.match(r.output, /DEBATE ruling/);
 	assert.equal(r.ok, true);
+});
+
+test("debate keeps role UNSET for bare (unspecialised) roster members — the protocol lives in the task", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			return { agent: spec.agent, output: spec.agent, structured: { vote: "x", confidence: 0.8 }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	await debate.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.equal(specs.length, 2);
+	for (const s of specs) {
+		assert.equal(s.role, undefined, "a bare member gets no role — matches rosterNodeKeys' base-label seeding");
+	}
+});
+
+test("debate warns (without clamping) when the roster exceeds maxConcurrency", async () => {
+	const logs: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: spec.agent, structured: { vote: "x", confidence: 0.8 }, usage: usage(), ok: true }),
+	};
+	const team = ["a", "b", "c", "d", "e"];
+	const sdk = makeSDK({ engine, roster: { team: () => team }, limits: { ...LIMITS, maxConcurrency: 2 }, log: (m) => logs.push(m) });
+	const r = await debate.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.ok(logs.some((l) => /batched/.test(l) && /5/.test(l) && /2/.test(l)), `expected a batching warning, got: ${JSON.stringify(logs)}`);
+	assert.equal(r.ok, true, "no clamping — every member still ran");
 });
 
 test("debate honours bestOf and falls back to best-by-confidence without consensus", async () => {

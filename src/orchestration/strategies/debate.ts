@@ -54,13 +54,20 @@ export const debate: Strategy = {
 		if (team.length < 2) throw new Error("debate: a roster of at least 2 members is required");
 		const bestOf = typeof input.params.bestOf === "number" ? input.params.bestOf : Math.floor(team.length / 2) + 1;
 		sdk.log(`debate: ${team.length} members, live peer exchange, best of ${bestOf}`);
+		if (team.length > sdk.limits.maxConcurrency) {
+			sdk.log(
+				`debate: roster of ${team.length} exceeds maxConcurrency (${sdk.limits.maxConcurrency}) — the live exchange will be batched (members beyond the concurrency window join late)`,
+			);
+		}
 		const candidates = await sdk.parallel(
 			team.map((m) => () => {
 				const s = rosterSpec(m);
+				// PROTOCOL travels in the TASK text, not appended to role (mirrors how `magi` injects
+				// per-round instructions via the task) — a bare roster member keeps role UNSET, so its
+				// `roleHint`-derived UI key stays identical to the `rosterNodeKeys` seeding.
 				return sdk.agent({
 					...s,
-					role: [s.role, PROTOCOL].filter(Boolean).join("\n\n"),
-					task: input.task,
+					task: `${input.task}\n\n--- debate protocol ---\n${PROTOCOL}`,
 					outputContract: "default",
 					peers: true,
 				});

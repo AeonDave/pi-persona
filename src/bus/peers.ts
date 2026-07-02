@@ -90,7 +90,12 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 				);
 			}
 			sent += 1;
-			const delivered = bus.send(selfHandle, params.to, params.message, "progress");
+			// Enforce the run-isolation boundary (previously only convention): a handle that is
+			// not one of THIS run's peers (e.g. "supervisor", or another run's child) never gets
+			// bus.send called at all — same "gone" wording as an actually-finished peer, so the
+			// tool result gives no signal either way about what exists outside this run's scope.
+			const inScope = deps.listPeers().some((p) => p.handle === params.to);
+			const delivered = inScope && bus.send(selfHandle, params.to, params.message, "progress");
 			return result(
 				delivered
 					? `Sent to ${params.to}.`
