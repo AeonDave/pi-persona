@@ -668,6 +668,31 @@ test("compete clips diffs in the ballot but returns the winner untruncated", asy
 	assert.equal(r.ok, true);
 });
 
+test("compete extracts the TAIL ```diff fence, ignoring an earlier illustrative fence", async () => {
+	const illustrative = "diff --git a/example.txt b/example.txt\n+illustrative-only, not the deliverable";
+	const real = "diff --git a/real.txt b/real.txt\n+REAL-TAIL-MARKER";
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			if (spec.agent === "arbiter") return { agent: "arbiter", output: "A", structured: { vote: "A" }, usage: usage(), ok: true };
+			return {
+				agent: spec.agent,
+				output:
+					`Here's an example of the diff format:\n\n\`\`\`diff\n${illustrative}\n\`\`\`\n\n` +
+					`Now my actual approach and deliverable:\n\n\`\`\`diff\n${real}\n\`\`\``,
+				usage: usage(),
+				ok: true,
+			};
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, true);
+	assert.match(r.output, /REAL-TAIL-MARKER/, "the tail fence is the extracted diff");
+	assert.doesNotMatch(r.output, /illustrative-only/, "the earlier fence is not part of the extracted diff");
+	assert.doesNotMatch(r.output, /Here's an example of the diff format/, "prose between fences is not folded into the diff");
+	assert.equal(r.structured?.valid, 2);
+});
+
 test("compete requires 2+ competitors and params.judge", async () => {
 	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });

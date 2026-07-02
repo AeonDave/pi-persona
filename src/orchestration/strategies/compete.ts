@@ -30,12 +30,20 @@ const DIFF_PROTOCOL = [
 ].join(" ");
 
 const BALLOT_DIFF_CHARS = 6000;
-const TAIL_DIFF_FENCE = /```diff\n([\s\S]*?)```\s*$/;
+const DIFF_FENCE_OPEN = "```diff\n";
+const TAIL_DIFF_FENCE = /^```diff\n([\s\S]*?)```\s*$/;
 
-/** The tail ```diff fence of a competitor's answer (its deliverable), or undefined. */
-function extractDiff(output: string): string | undefined {
-	const body = output.match(TAIL_DIFF_FENCE)?.[1]?.trim();
-	return body ? body : undefined;
+/**
+ * The LAST ```diff fence of a competitor's answer (its deliverable), or undefined. Anchoring
+ * at the last fence-open (not the first, and not a naive lazy-body match from the start of the
+ * string) avoids swallowing an earlier illustrative fence plus intervening prose when a model's
+ * answer contains more than one ```diff block.
+ */
+function extractDiff(output: string): { summary: string; diff: string } | undefined {
+	const i = output.lastIndexOf(DIFF_FENCE_OPEN);
+	if (i < 0) return undefined;
+	const body = output.slice(i).match(TAIL_DIFF_FENCE)?.[1]?.trim();
+	return body ? { summary: output.slice(0, i).trim(), diff: body } : undefined;
 }
 
 /** Clip a diff for the ballot only — the winner's diff is always returned in full. */
@@ -66,10 +74,10 @@ export const compete: Strategy = {
 				}),
 			),
 		);
-		const valid: Array<{ result: AgentResult; diff: string }> = [];
+		const valid: Array<{ result: AgentResult; diff: string; summary: string }> = [];
 		for (const c of candidates) {
-			const diff = c.ok ? extractDiff(c.output) : undefined;
-			if (diff) valid.push({ result: c, diff });
+			const extracted = c.ok ? extractDiff(c.output) : undefined;
+			if (extracted) valid.push({ result: c, diff: extracted.diff, summary: extracted.summary });
 		}
 		if (valid.length === 0) {
 			const reasons = candidates.map((c) => `[${c.agent}] ${c.ok ? "no tail ```diff fence" : (c.error ?? "failed")}`).join("; ");
@@ -81,11 +89,11 @@ export const compete: Strategy = {
 			};
 		}
 
-		// Blind ballot: each candidate is its approach summary (the answer minus the diff fence)
+		// Blind ballot: each candidate is its approach summary (the answer minus the tail diff fence)
 		// + a clipped diff — anonymised and shuffled by the shared judge prep (§4.3 bias guards).
-		const display = valid.map(({ result, diff }) => ({
+		const display = valid.map(({ result, diff, summary }) => ({
 			...result,
-			output: `${result.output.replace(TAIL_DIFF_FENCE, "").trim()}\n\n${clip(diff, ballotChars)}`,
+			output: `${summary}\n\n${clip(diff, ballotChars)}`,
 		}));
 		const prep = sdk.reduce.judge(display, shuffleOrder(display.length));
 		const verdict = await sdk.agent({
