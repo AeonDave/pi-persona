@@ -153,3 +153,94 @@ test("makeEngine marks a contract failure when output is not valid JSON", async 
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /contract/);
 });
+
+// --- broker wiring (Task 6): default-OFF pin + broker-on env/handle/steer-frame plumbing ---
+
+function makeSpyBroker(endpoint = "fake-broker-endpoint") {
+	const calls: string[] = [];
+	const registered: Array<{ handle: string; label?: string; group?: string; peers?: boolean }> = [];
+	const unregistered: string[] = [];
+	const steered: Array<{ handle: string; text: string }> = [];
+	return {
+		endpoint,
+		calls,
+		registered,
+		unregistered,
+		steered,
+		register: (info: { handle: string; label?: string; group?: string; peers?: boolean }) => {
+			calls.push("register");
+			registered.push(info);
+		},
+		unregister: (handle: string) => {
+			calls.push("unregister");
+			unregistered.push(handle);
+		},
+		steerFrame: (handle: string, text: string) => {
+			calls.push("steerFrame");
+			steered.push({ handle, text });
+		},
+	};
+}
+
+test("makeEngine (broker absent): child env carries NO PI_PERSONA_BUS/PI_PERSONA_HANDLE (default-OFF pin)", async () => {
+	const r = await engine().run({ agent: "scout", task: "check [env]" });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /PI_PERSONA_BUS=unset/);
+	assert.match(r.output, /PI_PERSONA_HANDLE=unset/);
+	assert.match(r.output, /PI_PERSONA_PEERS=unset/);
+});
+
+test("makeEngine (broker present): child env carries PI_PERSONA_BUS/PI_PERSONA_HANDLE, register runs before spawn, unregister runs on settle", async () => {
+	const broker = makeSpyBroker();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		broker,
+		childOptions: {
+			resolveInvocation: (args) => {
+				broker.calls.push("spawn");
+				return resolveFake(args);
+			},
+		},
+	});
+	const r = await eng.run({ agent: "scout", task: "check [env]" });
+	assert.equal(r.ok, true);
+	assert.ok(r.output.includes(`PI_PERSONA_BUS=${broker.endpoint}`), "child env carries the broker endpoint");
+	assert.match(r.output, /PI_PERSONA_HANDLE=scout#\d+/);
+	assert.match(r.output, /PI_PERSONA_PEERS=unset/, "peers env is only set when spec.peers is true");
+
+	assert.equal(broker.registered.length, 1);
+	assert.match(broker.registered[0]!.handle, /^scout#\d+$/);
+	assert.equal(broker.calls.indexOf("register") < broker.calls.indexOf("spawn"), true, "register runs before spawn");
+
+	assert.deepEqual(broker.unregistered, [broker.registered[0]!.handle], "unregister runs on settle, with the minted handle");
+});
+
+test("makeEngine (broker present, spec.peers): child env carries PI_PERSONA_PEERS=1", async () => {
+	const broker = makeSpyBroker();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		broker,
+		childOptions: { resolveInvocation: resolveFake },
+	});
+	const r = await eng.run({ agent: "scout", task: "check [env]", peers: true });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /PI_PERSONA_PEERS=1/);
+	assert.equal(broker.registered[0]?.peers, true);
+});
+
+test("makeEngine (broker present): onSteerable routes steer text to broker.steerFrame with the minted handle", async () => {
+	const broker = makeSpyBroker();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		broker,
+		childOptions: { resolveInvocation: resolveFake },
+	});
+	let steer: ((text: string) => void) | undefined;
+	const r = await eng.run({ agent: "scout", task: "explore" }, undefined, undefined, (fn) => {
+		steer = fn;
+	});
+	assert.equal(r.ok, true);
+	assert.ok(steer, "onSteerable was called with a steer function");
+	steer?.("hello from supervisor");
+	assert.deepEqual(broker.steered, [{ handle: broker.registered[0]!.handle, text: "hello from supervisor" }]);
+});

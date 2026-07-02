@@ -50,6 +50,10 @@ export interface ChildEngineOptions {
 	/** Cap on retained stderr bytes (default 256 KiB) — a verbose child must not
 	 *  inflate supervisor memory without bound. */
 	maxStderrBytes?: number;
+	/** Extra env vars merged into the child's environment on top of the defaults
+	 *  (e.g. the broker wiring `PI_PERSONA_BUS`/`PI_PERSONA_HANDLE` — adapter.ts's job,
+	 *  this file only plumbs them through). Absent ⇒ env is exactly today's. */
+	env?: Record<string, string>;
 }
 
 /** Resolve how to re-invoke `pi` on any OS (script vs generic runtime vs PATH). */
@@ -168,7 +172,7 @@ export async function runChildAgent(
 				// (no persona restore, no input-hook orchestration, no `delegate` tool).
 				// Without this, a globally-installed pi-persona makes every child a
 				// supervisor that re-spawns → exponential fork bomb.
-				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1" },
+				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1", ...opts.env },
 			});
 
 			let settled = false;
