@@ -119,6 +119,34 @@ export function extractJsonCandidate(text: string): string {
 	return s;
 }
 
+/** One human-readable ballot line for a field: `- vote (string, required, one of: a | b)`. */
+function fieldLine(name: string, spec: FieldSpec): string {
+	const parts: string[] = [spec.type];
+	if (spec.required) parts.push("required");
+	if (spec.type === "enum" && spec.values) parts.push(`one of: ${spec.values.join(" | ")}`);
+	if (spec.min !== undefined && spec.max !== undefined) parts.push(`${spec.min}..${spec.max}`);
+	else if (spec.min !== undefined) parts.push(`>= ${spec.min}`);
+	else if (spec.max !== undefined) parts.push(`<= ${spec.max}`);
+	return `- ${name} (${parts.join(", ")})`;
+}
+
+/**
+ * The task preamble that tells a member HOW to satisfy `outputContract` — derived
+ * mechanically from the (pinned) def and appended by BOTH engine backends whenever a
+ * spec carries a contract. Without this, only agents whose own .md hand-writes the JSON
+ * format (e.g. the MAGI cores) could be convened by a voting strategy; a generic
+ * executor would answer in prose and be quarantined as an invalid output. Live-drive
+ * verified: debate over two bare `operator`s fails exactly that way without it.
+ */
+export function contractInstructions(def: ContractDef): string {
+	return [
+		`--- output contract (${def.name}) ---`,
+		"End your FINAL answer with a single JSON object (prose before it is fine, nothing after it) with these fields:",
+		...Object.entries(def.fields).map(([n, s]) => fieldLine(n, s)),
+		"The object is parsed mechanically. Include every required field; omit fields you have nothing for.",
+	].join("\n");
+}
+
 export interface ParseResult {
 	ok: boolean;
 	/** The validated object (present only when `ok`). */

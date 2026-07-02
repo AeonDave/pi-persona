@@ -23,6 +23,7 @@ interface Spy {
 	disableDuringCreate?: string | undefined;
 	steered?: unknown[];
 	opts?: CreateSessionOptions;
+	promptText?: string;
 }
 
 /** Build a fake in-process session that replays scripted events when prompted. */
@@ -35,7 +36,8 @@ function fakeSession(events: unknown[], spy?: Spy): InProcSession {
 				listener = undefined;
 			};
 		},
-		prompt: async () => {
+		prompt: async (text: string) => {
+			if (spy) spy.promptText = text;
 			for (const e of events) listener?.(e);
 		},
 		agent: {
@@ -144,6 +146,37 @@ test("inproc engine validates the output contract in-process (fenced JSON parses
 	const r = await engine.run({ agent: "a", task: "decide", outputContract: "default" });
 	assert.equal(r.ok, true);
 	assert.equal(r.structured?.vote, "json");
+});
+
+test("inproc engine appends the contract format to the task (and only when one is requested)", async () => {
+	// A generic agent (no JSON format in its .md) must still learn HOW to satisfy the
+	// contract — the engine derives the instructions from the SAME pinned def it validates
+	// against. Live-drive verified: without this, debate over bare operators returns an
+	// empty invalid_outputs ruling.
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("prose, no JSON")], spy),
+	});
+	const r = await engine.run({ agent: "a", task: "decide", outputContract: "default" });
+	assert.ok(spy.promptText?.includes("--- output contract (default) ---"), "task carries the contract block");
+	assert.ok(spy.promptText?.includes("- result (string, required)"), "field lines derived from the def");
+	assert.equal(r.ok, false, "prose output still fails validation");
+	assert.equal(r.failureKind, "contract");
+
+	const spy2: Spy = {};
+	const plain = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("x")], spy2),
+	});
+	await plain.run({ agent: "a", task: "decide" });
+	assert.ok(!spy2.promptText?.includes("output contract"), "no contract requested → no block injected");
 });
 
 test("inproc engine reports an unknown agent and an unresolvable model", async () => {

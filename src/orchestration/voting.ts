@@ -65,10 +65,15 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 	if (valid.length === 0) {
 		// Nobody emitted a parseable vote. With keepBestFallback, don't strand the caller with an
 		// empty ruling (small models often drop the vote JSON) — surface the strongest single PROSE
-		// answer among the ok candidates. No ok prose ⇒ genuinely nothing to show.
+		// answer among the candidates that actually ANSWERED. That means ok candidates AND
+		// contract-only failures: an engine marks a member that answered in prose instead of the
+		// vote JSON as `ok:false, failureKind:"contract"`, which is precisely the case this rescue
+		// exists for (requiring `ok` here would make it unreachable — live-drive verified: a debate
+		// over generic agents returned an empty ruling). Hard failures (timeout/abort/provider/
+		// agent) stay excluded. No usable prose ⇒ genuinely nothing to show.
 		const res: ReducerResult = { status: "invalid_outputs", invalid, tally, usedFallback: false };
 		if (opts.keepBestFallback) {
-			const prose = candidates.filter((c) => c.ok && c.output.trim());
+			const prose = candidates.filter((c) => c.output.trim() && (c.ok || c.failureKind === "contract"));
 			const winner = [...prose].sort((a, b) => confidence(b) - confidence(a))[0];
 			if (winner) {
 				res.winner = winner;

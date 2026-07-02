@@ -97,7 +97,11 @@ These are the guardrails a contributor must not violate. They are enforced in co
   fragile per-OS code lives in strategies.
 - **D7 — Contracts are schema-defined and hot-editable.** The return contract lives in an editable
   `contracts/*.contract.json`; reducers read fields generically. Add/remove fields without
-  recompiling. Hardened by I3 (hot-reload for new runs only).
+  recompiling. Hardened by I3 (hot-reload for new runs only). The contract both **instructs and
+  validates**: when a spec carries `outputContract`, each engine appends `contractInstructions(def)`
+  (the format, derived mechanically from the same pinned def it validates against) to the member's
+  task — so ANY agent can be convened by a voting strategy, not just those whose `.md` hand-writes
+  the JSON format.
 
 ## Module layout
 

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type ContractDef, DEFAULT_CONTRACT, extractJsonCandidate, parseAndValidate, parseContract, pinContract, validateAgainst } from "../../../src/core/contract.ts";
+import { type ContractDef, contractInstructions, DEFAULT_CONTRACT, extractJsonCandidate, parseAndValidate, parseContract, pinContract, validateAgainst } from "../../../src/core/contract.ts";
 
 test("parseContract reads a contracts/*.contract.json into a ContractDef", () => {
 	const r = parseContract(
@@ -99,4 +99,22 @@ test("validateAgainst enforces types, enums, and number bounds", () => {
 	assert.equal(validateAgainst(DEFAULT_CONTRACT, { result: "x", confidence: 0.5 }).ok, true);
 	assert.equal(validateAgainst(DEFAULT_CONTRACT, { result: "x", confidence: 2 }).ok, false);
 	assert.equal(validateAgainst(DEFAULT_CONTRACT, { result: "x", confidence: "high" }).ok, false);
+});
+
+test("contractInstructions renders one line per field with type/required/enum/bounds", () => {
+	const text = contractInstructions(DEFAULT_CONTRACT);
+	assert.match(text, /^--- output contract \(default\) ---/);
+	assert.match(text, /- result \(string, required\)/);
+	assert.match(text, /- confidence \(number, 0\.\.1\)/);
+	assert.match(text, /- stance \(enum, one of: approve \| reject \| revise\)/);
+	assert.match(text, /Include every required field/);
+	// A member's answer following these instructions round-trips through validation.
+	assert.equal(parseAndValidate('prose first…\n{"result":"ok","vote":"a","confidence":0.8}', DEFAULT_CONTRACT).ok, true);
+});
+
+test("contractInstructions renders one-sided bounds as >=/<=", () => {
+	const def: ContractDef = { name: "b", fields: { score: { type: "number", min: 0 }, cap: { type: "number", max: 10 } } };
+	const text = contractInstructions(def);
+	assert.match(text, /- score \(number, >= 0\)/);
+	assert.match(text, /- cap \(number, <= 10\)/);
 });
