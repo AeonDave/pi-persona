@@ -12,6 +12,7 @@ import { fanout } from "./strategies/fanout.ts";
 import { judge } from "./strategies/judge.ts";
 import { magi } from "./strategies/magi.ts";
 import { map } from "./strategies/map.ts";
+import { pair } from "./strategies/pair.ts";
 import { pipeline } from "./strategies/pipeline.ts";
 import { synthesize } from "./strategies/synthesize.ts";
 
@@ -24,6 +25,7 @@ const BUILTINS: Record<string, Strategy> = {
 	debate,
 	magi,
 	judge,
+	pair,
 	synthesize,
 };
 
