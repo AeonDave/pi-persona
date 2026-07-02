@@ -18,6 +18,7 @@ import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 
 import type { AgentConfig } from "./agents/agent.ts";
+import { installBridge, isBridgeMode } from "./bridge.ts";
 import { resolveConfig } from "./core/config.ts";
 import { resolveModelRef } from "./core/models.ts";
 import { isThinkingLevel } from "./core/types.ts";
@@ -76,6 +77,18 @@ function userAgentDir(): string {
 }
 
 export default function piPersona(pi: ExtensionAPI): void {
+	// Cross-process broker (v0.5, spec B3): a child spawned with `PI_PERSONA_BUS` set is a
+	// broker-connected sub-agent, not a supervisor — load ONLY the bridge (comm-plane tools +
+	// inbound follow-ups) and skip the entire persona/delegate/orchestration surface. Checked
+	// before anything else (even config resolution) so bridge mode can never be shadowed by
+	// the fork-bomb guard's `PI_PERSONA_DISABLE=1` short-circuit below, or by any other early
+	// return. `PI_PERSONA_BUS` unset (the default, and every existing test) ⇒ this branch never
+	// runs — zero behavior change.
+	if (isBridgeMode()) {
+		pi.on("session_start", (_event, ctx) => installBridge(pi, ctx));
+		return;
+	}
+
 	const config = resolveConfig(process.env);
 	if (config.disabled) return;
 
