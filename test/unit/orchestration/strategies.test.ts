@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { type AgentRunSpec, makeSDK, type StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import { councilRounds } from "../../../src/orchestration/strategies/council-rounds.ts";
 import { criticLoop } from "../../../src/orchestration/strategies/critic-loop.ts";
+import { debate } from "../../../src/orchestration/strategies/debate.ts";
 import { fanout } from "../../../src/orchestration/strategies/fanout.ts";
 import { judge } from "../../../src/orchestration/strategies/judge.ts";
 import { map } from "../../../src/orchestration/strategies/map.ts";
@@ -404,4 +405,52 @@ test("map caps the fan-out at params.maxItems and stops cleanly on an empty spli
 	const sdk = makeSDK({ engine, roster: { team: () => ["splitter"] }, limits: LIMITS });
 	const r = await map.run({ task: "t", roster: "m", params: { maxItems: 2 } }, sdk);
 	assert.equal(r.ok, false, "no items → not ok");
+});
+
+test("debate requires a roster of at least 2", async () => {
+	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
+	const sdk = makeSDK({ engine, roster: { team: () => ["solo"] }, limits: LIMITS });
+	await assert.rejects(() => debate.run({ task: "T", roster: "x", params: {} }, sdk), /at least 2/);
+});
+
+test("debate runs every member with live peer exchange and the protocol appended to its role", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			return { agent: spec.agent, output: spec.agent, structured: { vote: "x", confidence: 0.8 }, usage: usage(), ok: true };
+		},
+	};
+	const team = [
+		{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens" },
+		{ agent: "reviewer", role: "Focus ONLY on the PERFORMANCE lens" },
+	];
+	const sdk = makeSDK({ engine, roster: { team: () => team }, limits: LIMITS });
+	const r = await debate.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.equal(specs.length, 2);
+	for (const s of specs) {
+		assert.equal(s.peers, true, "peer messaging enabled for every member");
+		assert.match(s.role ?? "", /contact_peer/, "the protocol references the peer tool");
+		assert.match(s.role ?? "", /Focus ONLY on the (SECURITY|PERFORMANCE) lens/, "the member's own lens is preserved");
+		assert.equal(s.outputContract, "default");
+		assert.equal(s.task, "decide", "ONE parallel pass — the task is not rewritten between rounds");
+	}
+	assert.equal(r.structured?.status, "winner");
+	assert.match(r.output, /DEBATE ruling/);
+	assert.equal(r.ok, true);
+});
+
+test("debate honours bestOf and falls back to best-by-confidence without consensus", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			const vote = spec.agent === "a" ? "x" : spec.agent === "b" ? "y" : "z";
+			const confidence = spec.agent === "b" ? 0.9 : 0.3;
+			return { agent: spec.agent, output: spec.agent, structured: { vote, confidence }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS });
+	const r = await debate.run({ task: "decide", roster: "t", params: { bestOf: 3 } }, sdk);
+	assert.equal(r.structured?.usedFallback, true);
+	assert.match(r.output, /best-of-3/);
+	assert.equal(r.ok, true, "keepBestFallback yields a winner");
 });
