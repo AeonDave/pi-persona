@@ -39,6 +39,11 @@ test("parseYamlSubset reads an inline flow map (params: { k: v }) as an object",
 	assert.deepEqual(parseYamlSubset("params: {}"), { params: {} });
 	// a nested inline list inside the map is not split on its inner comma
 	assert.deepEqual(parseYamlSubset("params: { tools: [a, b], n: 2 }"), { params: { tools: ["a", "b"], n: 2 } });
+	// a quoted value with COMMAS must not be shredded — the map splits on top-level commas only
+	assert.deepEqual(parseYamlSubset('m: { agent: reviewer, role: "injection, authz, secrets" }'), {
+		m: { agent: "reviewer", role: "injection, authz, secrets" },
+	});
+	assert.deepEqual(parseYamlSubset("m: { a: 'x, y', b: z }"), { m: { a: "x, y", b: "z" } });
 });
 
 test("parseYamlSubset reads booleans", () => {

@@ -11,6 +11,7 @@
 
 import { extractJsonCandidate } from "../../core/contract.ts";
 import { sumUsage } from "../reducers.ts";
+import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 
 /** Parse a splitter's output into a list of short item strings (tolerant of fences/prose). */
@@ -29,23 +30,24 @@ export const map: Strategy = {
 	name: "map",
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
-		const splitter = team[0];
-		if (!splitter) throw new Error("map: a roster with at least a splitter agent is required");
-		const worker = team[1] ?? splitter;
+		const splitterMember = team[0];
+		if (!splitterMember) throw new Error("map: a roster with at least a splitter agent is required");
+		const splitter = rosterSpec(splitterMember);
+		const worker = team[1] ? rosterSpec(team[1]) : splitter;
 		const maxItems = typeof input.params.maxItems === "number" ? input.params.maxItems : sdk.limits.maxChildren;
 
 		const split = await sdk.agent({
-			agent: splitter,
+			...splitter,
 			task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${input.task}`,
 		});
 		const items = parseItems(split.output).slice(0, Math.max(0, maxItems));
 		if (items.length === 0) {
 			return { agent: "map", output: split.output || "(splitter produced no items)", usage: split.usage, ok: false };
 		}
-		sdk.log(`map: ${items.length} items → ${worker}`);
+		sdk.log(`map: ${items.length} items → ${worker.agent}`);
 
 		const results = await sdk.parallel(
-			items.map((item) => () => sdk.agent({ agent: worker, task: `${input.task}\n\n— Your single sub-item: ${item}` })),
+			items.map((item) => () => sdk.agent({ ...worker, task: `${input.task}\n\n— Your single sub-item: ${item}` })),
 		);
 		const agg = sdk.reduce.aggregate(results);
 		return { ...agg, agent: "map", usage: sumUsage([split, ...results].map((r) => r.usage)) };

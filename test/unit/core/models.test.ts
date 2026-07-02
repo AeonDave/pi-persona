@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type ModelLite, resolveModelRef } from "../../../src/core/models.ts";
+import { type ModelLite, providerFallbacks, resolveModelRef } from "../../../src/core/models.ts";
 
 const MODELS: ModelLite[] = [
 	{ provider: "anthropic", id: "claude-sonnet-4-6" },
@@ -59,4 +59,25 @@ test("an unknown name fails 'unknown' with the full list", () => {
 		assert.equal(r.reason, "unknown");
 		assert.equal(r.candidates.length, 4);
 	}
+});
+
+test("providerFallbacks lists the SAME id under other providers, excluding the failed ref", () => {
+	// anthropic failed → the same sonnet id is also on bedrock → reroute there.
+	assert.deepEqual(providerFallbacks("anthropic/claude-sonnet-4-6", MODELS), ["amazon-bedrock/claude-sonnet-4-6"]);
+	// bedrock failed → anthropic is the alternate.
+	assert.deepEqual(providerFallbacks("amazon-bedrock/claude-sonnet-4-6", MODELS), ["anthropic/claude-sonnet-4-6"]);
+});
+
+test("providerFallbacks is empty when the id exists under only one provider", () => {
+	assert.deepEqual(providerFallbacks("openrouter/owl-alpha", MODELS), []);
+});
+
+test("providerFallbacks puts the preferred provider first among alternates", () => {
+	const models: ModelLite[] = [
+		{ provider: "amazon-bedrock", id: "m" },
+		{ provider: "copilot", id: "m" },
+		{ provider: "anthropic", id: "m" },
+	];
+	// the failed one is copilot; prefer anthropic → it leads, bedrock follows.
+	assert.deepEqual(providerFallbacks("copilot/m", models, "anthropic"), ["anthropic/m", "amazon-bedrock/m"]);
 });

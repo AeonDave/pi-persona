@@ -7,6 +7,7 @@
 
 import { emptyUsage } from "../../engine/stream.ts";
 import { sumUsage } from "../reducers.ts";
+import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 
@@ -19,9 +20,9 @@ export const pipeline: Strategy = {
 
 		const results: AgentResult[] = [];
 		let upstream = "";
-		for (const agent of team) {
+		for (const member of team) {
 			const task = upstream ? `${input.task}\n\n--- previous step's output (build on it) ---\n${upstream}` : input.task;
-			const r = await sdk.agent({ agent, task });
+			const r = await sdk.agent({ ...rosterSpec(member), task });
 			results.push(r);
 			if (!r.ok) break; // a failed step stops the chain — its dependents can't build on nothing
 			if (r.output) upstream = r.output;

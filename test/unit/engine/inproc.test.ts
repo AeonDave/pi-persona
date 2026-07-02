@@ -83,6 +83,7 @@ test("inproc engine folds the session event stream into output + usage (no live 
 	assert.equal(r.output, "final answer");
 	assert.equal(r.usage.input, 10);
 	assert.equal(r.usage.output, 5);
+	assert.equal(r.modelUsed, "stub/m", "the resolved provider/id is reported for the UI + fallback");
 	assert.equal(spy.disableDuringCreate, "1", "PI_PERSONA_DISABLE set while the sub-session is built (fork-bomb guard)");
 });
 
@@ -149,6 +150,7 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([]) });
 	const unknown = await engine.run({ agent: "nope", task: "t" });
 	assert.equal(unknown.ok, false);
+	assert.equal(unknown.failureKind, "unknown-agent", "not a provider failure — must not trigger fallback");
 	assert.match(unknown.error ?? "", /unknown agent/);
 	// Diagnostic tag identifies the agent so a failed-run notice is actionable.
 	assert.match(unknown.error ?? "", /\[nope\]/);
@@ -162,6 +164,7 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	});
 	const r = await noModel.run({ agent: "a", task: "t", model: "ghost/model" });
 	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "unknown-model", "an unresolvable model is terminal, not a provider reroute");
 	assert.match(r.error ?? "", /model not found/);
 	// Tag includes the model ref that was tried + where it came from.
 	assert.match(r.error ?? "", /\[a · ghost\/model.*\]/);
@@ -222,6 +225,10 @@ test("inproc engine tags failed runs with agent · model + dynamic overrides so 
 	});
 	const r = await engine.run({ agent: "a", task: "t", model: "stub/m", skills: ["asm-patterns"] });
 	assert.equal(r.ok, false);
+	// A stream `error` is a PROVIDER failure — the fallback decorator may reroute it — and the
+	// resolved model is reported as the seed of that reroute.
+	assert.equal(r.failureKind, "provider");
+	assert.equal(r.modelUsed, "stub/m");
 	// Agent + model ref appear in the tag, and skills/model overrides are flagged as +dyn.
 	assert.match(r.error ?? "", /\[a · stub\/m \+dyn\(model,skills\)\]/);
 	assert.match(r.error ?? "", /400 model_not_supported/);

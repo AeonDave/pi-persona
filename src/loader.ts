@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { type AgentConfig, parseAgent } from "./agents/agent.ts";
 import { type ContractDef, parseContract } from "./core/contract.ts";
 import { type DiscoveredFile, mergeByPrecedence } from "./core/discovery.ts";
-import { parseTeams } from "./orchestration/roster.ts";
+import { parseTeams, type RosterMember } from "./orchestration/roster.ts";
 import { type CouncilSpec, type Persona, parsePersona } from "./persona/persona.ts";
 
 export interface ScopedDir {
@@ -148,8 +148,8 @@ export function loadPresets(dirs: ScopedDir[]): Record<string, Partial<CouncilSp
 }
 
 /** Merge `teams.yaml` files (later files win). */
-export function loadTeams(files: string[]): Record<string, string[]> {
-	const merged: Record<string, string[]> = {};
+export function loadTeams(files: string[]): Record<string, RosterMember[]> {
+	const merged: Record<string, RosterMember[]> = {};
 	for (const file of files) {
 		let content: string;
 		try {

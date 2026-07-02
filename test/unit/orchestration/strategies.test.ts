@@ -41,6 +41,38 @@ test("the SDK reports per-agent status (running → done) via onAgentStatus", as
 	assert.deepEqual(events, ["melchior:running", "melchior:done"]);
 });
 
+test("the SDK hands the UI a role-disambiguated key so same-agent members are distinct nodes", async () => {
+	const keys: string[] = [];
+	const sdk = makeSDK({
+		engine: { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) },
+		roster: { team: () => [] },
+		limits: LIMITS,
+		onAgentStatus: (_a, st, _r, key) => {
+			if (st === "running" && key) keys.push(key);
+		},
+	});
+	// The `review` team pattern: one `reviewer`, three lenses via role.
+	await sdk.agent({ agent: "reviewer", task: "t", role: "Focus ONLY on the SECURITY lens" });
+	await sdk.agent({ agent: "reviewer", task: "t", role: "Focus ONLY on the PERFORMANCE lens" });
+	await sdk.agent({ agent: "reviewer", task: "t", role: "Focus ONLY on the TESTS lens" });
+	assert.deepEqual(keys, ["reviewer · SECURITY", "reviewer · PERFORMANCE", "reviewer · TESTS"]);
+});
+
+test("the SDK suffixes #N when the same base key repeats (identical members stay distinct nodes)", async () => {
+	const keys: string[] = [];
+	const sdk = makeSDK({
+		engine: { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) },
+		roster: { team: () => [] },
+		limits: LIMITS,
+		onAgentStart: (_a, _abort, key) => {
+			if (key) keys.push(key);
+		},
+	});
+	await sdk.agent({ agent: "scout", task: "t" });
+	await sdk.agent({ agent: "scout", task: "t" });
+	assert.deepEqual(keys, ["scout", "scout#2"]);
+});
+
 test("the SDK enforces maxChildren regardless of strategy code", async () => {
 	const sdk = makeSDK({
 		engine: { run: async (s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }) },
@@ -254,6 +286,39 @@ test("judge runs the panel in parallel, then an impartial arbiter picks one (ano
 	assert.equal(arbiterSawIdentities, false, "the arbiter never saw candidate agent identities");
 	assert.equal(r.ok, true);
 	assert.match(r.output, /use-(json|yaml|toml)/, "the winner is a panelist's answer (position A, shuffled)");
+});
+
+test("judge with params.contract shows each core's structured position (not raw JSON) and picks cleanly", async () => {
+	// The Judge persona shape: voting cores (MAGI) emit JSON; with a contract the ballot must
+	// carry the readable `output` field, and the winner's output must be that text, not the blob.
+	let ballotHadCandidateBlob = false;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "arbiter") {
+				// The candidates' RAW output is `{"result":"<core> ruling",...}` — that blob must
+				// not appear in the ballot; only the readable `output` field should. (The arbiter's
+				// own "Return JSON ONLY" instruction legitimately contains JSON, so match the blob.)
+				if (/\{"result":"\w+ ruling"/.test(spec.task)) ballotHadCandidateBlob = true;
+				assert.match(spec.task, /\[A\]/, "ballot is label-anonymised");
+				return { agent: "arbiter", output: "A", structured: { vote: "A", output: "A argued it best" }, usage: usage(), ok: true };
+			}
+			// A voting core: raw output is a JSON blob, structured carries the readable position.
+			const pos = `${spec.agent} position`;
+			return {
+				agent: spec.agent,
+				output: JSON.stringify({ result: `${spec.agent} ruling`, vote: "x", output: pos }),
+				structured: { result: `${spec.agent} ruling`, vote: "x", output: pos },
+				usage: usage(),
+				ok: true,
+			};
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "magi" ? ["melchior", "balthasar", "casper"] : []) }, limits: LIMITS });
+	const r = await judge.run({ task: "decide", roster: "magi", params: { judge: "arbiter", contract: "default" } }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(ballotHadCandidateBlob, false, "the arbiter reads readable positions, not candidate JSON blobs");
+	assert.match(r.output, /position/, "the winning candidate's output is the readable position text");
+	assert.doesNotMatch(r.output.split("— chosen by")[0] ?? "", /\{"result"/, "no JSON blob leaks into the winner");
 });
 
 test("judge requires a panel roster and a params.judge arbiter", async () => {

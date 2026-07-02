@@ -189,7 +189,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)` };
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)`, failureKind: "unknown-agent" };
 			}
 
 			const ref = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model ?? deps.defaultModel;
@@ -208,8 +208,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					usage: emptyUsage(),
 					ok: false,
 					error: `[${spec.agent} · ${ref ?? "(no model)"}] model not found in registry (from ${src})${hint.length > 0 ? ` — try e.g.: ${hint.join(", ")}` : ""}`,
+						failureKind: "unknown-model",
 				};
 			}
+			// The canonical provider/id this run resolved to — surfaced on every result (for the
+			// UI/cost) and, on a provider failure, used as the seed of the fallback chain.
+			const rm = model as { provider?: string; id?: string };
+			const resolvedRef = rm.provider && rm.id ? `${rm.provider}/${rm.id}` : ref;
 			const thinkingLevel = isThinkingLevel(deps.childThinking) ? deps.childThinking : undefined;
 			const tools = spec.tools ?? cfg.tools;
 
@@ -229,7 +234,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// Already cancelled (e.g. a queued async run stopped before its slot came up):
 			// don't build a session or burn a model call — settle as aborted right away.
 			if (signal?.aborted) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted` };
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted`, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), failureKind: "abort" };
 			}
 
 			const sessionOpts: CreateSessionOptions = {
@@ -344,13 +349,16 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			}
 
 			const ok = !aborted && !timedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
-			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok };
+			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
 			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
+			// Classify the failure so the fallback decorator can reroute ONLY provider errors
+			// (a thrown API rejection or a stream `error`), never an abort/timeout/agent miss.
+			if (!ok) result.failureKind = timedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
 
 			if (spec.outputContract && deps.contracts) {
 				const def = pinnedDef(spec.outputContract);
@@ -360,6 +368,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					if (!v.ok) {
 						result.ok = false;
 						if (v.error) result.error = v.error;
+						if (result.failureKind === undefined) result.failureKind = "contract";
 					}
 				}
 			}

@@ -3,7 +3,7 @@
   "description": "Plan a change, PAUSE at a checkpoint for approval, then implement and verify only if approved — a DAG with a human gate.",
   "phases": [
     { "id": "plan", "strategy": "magi", "roster": "magi", "gate": true },
-    { "id": "build", "strategy": "pipeline", "roster": "repair", "needs": ["plan"] },
+    { "id": "build", "strategy": "critic-loop", "roster": "repair", "needs": ["plan"], "params": { "rounds": 4 } },
     { "id": "verify", "strategy": "fanout", "roster": "review", "needs": ["build"] }
   ]
 }

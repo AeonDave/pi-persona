@@ -9,6 +9,7 @@ import type { RunLimits } from "../core/capabilities.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { mapWithConcurrency } from "./parallel.ts";
 import { aggregateResults } from "./reducers.ts";
+import { roleHint, type RosterMember } from "./roster.ts";
 import type { AgentResult } from "./types.ts";
 import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 
@@ -52,7 +53,9 @@ export interface StrategyEngine {
 }
 
 export interface Roster {
-	team(name: string): string[];
+	/** A team's ordered members — bare agent names, or inline `{ agent, role, … }`
+	 *  specialisations (see roster.ts). Normalise each with `rosterSpec`. */
+	team(name: string): RosterMember[];
 }
 
 export interface StrategySDK {
@@ -91,14 +94,17 @@ export interface SDKDeps {
 	signal?: AbortSignal;
 	log?: (message: string) => void;
 	/** Per-agent lifecycle, for live UI. The result is passed on done/failed so the
-	 *  UI can capture each agent's output/usage. */
-	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult) => void;
-	/** Per-agent streaming progress (rolling output), for live UI. */
-	onAgentProgress?: (agent: string, progress: AgentProgress) => void;
+	 *  UI can capture each agent's output/usage. `key` is a run-unique display id (the
+	 *  `agent` name for a solo member, disambiguated by role/occurrence when the same agent
+	 *  runs several times in one roster) — key the UI node by it, not by `agent`, or three
+	 *  same-agent roster-role members collapse into one node. Falls back to `agent`. */
+	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult, key?: string) => void;
+	/** Per-agent streaming progress (rolling output), for live UI. See `onAgentStatus.key`. */
+	onAgentProgress?: (agent: string, progress: AgentProgress, key?: string) => void;
 	/** Called as each agent starts with a handle to abort just that agent (for UI stop). */
-	onAgentStart?: (agent: string, abort: () => void) => void;
+	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
-	onAgentSteerable?: (agent: string, steer: SteerFn) => void;
+	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
 }
 
 export function makeSDK(deps: SDKDeps): StrategySDK {
@@ -106,6 +112,17 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 	// exceed them, however it calls agent() (I2: safety from runtime limits, not isolation).
 	let childrenSpawned = 0;
 	let tokensSpent = 0;
+	// Run-unique UI keys: the base is the agent name, or `agent · HINT` when the member
+	// carries a role — so an ensemble of one agent under several roles shows as distinct
+	// nodes. A `#N` suffix guards the degenerate case of an identical base twice. This
+	// mirrors `rosterNodeKeys`, so the seeded "queued" nodes line up with the live ones.
+	const uiSeen = new Map<string, number>();
+	const uiKeyFor = (spec: AgentRunSpec): string => {
+		const base = spec.role ? `${spec.agent} · ${roleHint(spec.role)}` : spec.agent;
+		const n = (uiSeen.get(base) ?? 0) + 1;
+		uiSeen.set(base, n);
+		return n === 1 ? base : `${base}#${n}`;
+	};
 
 	return {
 		agent: async (spec) => {
@@ -116,22 +133,23 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				throw new Error(`run exceeded token budget (${deps.limits.budgetTokens})`);
 			}
 			childrenSpawned += 1;
+			const key = uiKeyFor(spec);
 			const ac = new AbortController();
-			deps.onAgentStart?.(spec.agent, () => ac.abort());
-			deps.onAgentStatus?.(spec.agent, "running");
+			deps.onAgentStart?.(spec.agent, () => ac.abort(), key);
+			deps.onAgentStatus?.(spec.agent, "running", undefined, key);
 			const onProgress = deps.onAgentProgress;
 			try {
 				const result = await deps.engine.run(
 					spec,
-					onProgress ? (p) => onProgress(spec.agent, p) : undefined,
+					onProgress ? (p) => onProgress(spec.agent, p, key) : undefined,
 					ac.signal,
-					deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer) : undefined,
+					deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer, key) : undefined,
 				);
 				tokensSpent += result.usage.input + result.usage.output;
-				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result);
+				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result, key);
 				return result;
 			} catch (err) {
-				deps.onAgentStatus?.(spec.agent, "failed");
+				deps.onAgentStatus?.(spec.agent, "failed", undefined, key);
 				throw err;
 			}
 		},
