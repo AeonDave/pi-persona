@@ -8,6 +8,7 @@ import { debate } from "../../../src/orchestration/strategies/debate.ts";
 import { fanout } from "../../../src/orchestration/strategies/fanout.ts";
 import { judge } from "../../../src/orchestration/strategies/judge.ts";
 import { map } from "../../../src/orchestration/strategies/map.ts";
+import { pair } from "../../../src/orchestration/strategies/pair.ts";
 import { pipeline } from "../../../src/orchestration/strategies/pipeline.ts";
 import { synthesize } from "../../../src/orchestration/strategies/synthesize.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
@@ -545,4 +546,53 @@ test("debate honours bestOf and falls back to best-by-confidence without consens
 	assert.equal(r.structured?.usedFallback, true);
 	assert.match(r.output, /best-of-3/);
 	assert.equal(r.ok, true, "keepBestFallback yields a winner");
+});
+
+test("pair runs driver and navigator in parallel with peer messaging and distinct protocols", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			const out = spec.agent === "operator" ? "the implemented work" : "verdict: solid; residual risks: none";
+			return { agent: spec.agent, output: out, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["operator", "verifier"] }, limits: LIMITS });
+	const r = await pair.run({ task: "build it", roster: "repair", params: {} }, sdk);
+	assert.equal(specs.length, 2);
+	const drv = specs.find((s) => s.agent === "operator");
+	const nav = specs.find((s) => s.agent === "verifier");
+	assert.equal(drv?.peers, true);
+	assert.equal(nav?.peers, true);
+	assert.match(drv?.task ?? "", /DRIVER/);
+	assert.match(drv?.task ?? "", /milestone/);
+	assert.match(nav?.task ?? "", /NAVIGATOR/);
+	assert.match(nav?.task ?? "", /risk checklist/);
+	assert.equal(r.ok, true);
+	assert.match(r.output, /the implemented work/);
+	assert.match(r.output, /--- navigator review \(verifier\) ---/);
+	assert.match(r.output, /verdict: solid/);
+	assert.equal(r.structured?.driverOk, true);
+	assert.equal(r.structured?.navigatorOk, true);
+});
+
+test("pair requires a roster of at least 2", async () => {
+	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
+	const sdk = makeSDK({ engine, roster: { team: () => ["solo"] }, limits: LIMITS });
+	await assert.rejects(() => pair.run({ task: "t", roster: "x", params: {} }, sdk), /driver, navigator/);
+});
+
+test("pair stays ok when the navigator fails — the driver's work is the deliverable", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) =>
+			spec.agent === "verifier"
+				? { agent: spec.agent, output: "", usage: usage(), ok: false, error: "died" }
+				: { agent: spec.agent, output: "solo work", usage: usage(), ok: true },
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["operator", "verifier"] }, limits: LIMITS });
+	const r = await pair.run({ task: "t", roster: "repair", params: {} }, sdk);
+	assert.equal(r.ok, true);
+	assert.match(r.output, /solo work/);
+	assert.doesNotMatch(r.output, /navigator review/);
+	assert.equal(r.structured?.navigatorOk, false);
 });
