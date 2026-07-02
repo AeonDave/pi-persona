@@ -228,6 +228,45 @@ test("makeEngine (broker present, spec.peers): child env carries PI_PERSONA_PEER
 	assert.equal(broker.registered[0]?.peers, true);
 });
 
+test("makeEngine (broker present, canUseBus: false): a spec.peers request is dropped — no peer registration, no PI_PERSONA_PEERS env (spec B7)", async () => {
+	const broker = makeSpyBroker();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		broker,
+		canUseBus: false,
+		childOptions: { resolveInvocation: resolveFake },
+	});
+	const r = await eng.run({ agent: "scout", task: "check [env]", peers: true });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /PI_PERSONA_PEERS=unset/, "capability denied → no peers env, even though spec.peers is true");
+	assert.equal(broker.registered[0]?.peers, undefined, "capability denied → no peers flag on registration");
+});
+
+test("makeEngine (broker present, allowBlocking absent/false): child env carries NO PI_PERSONA_ALLOW_BLOCKING (sync-safe default)", async () => {
+	const broker = makeSpyBroker();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		broker,
+		childOptions: { resolveInvocation: resolveFake },
+	});
+	const r = await eng.run({ agent: "scout", task: "check [env]" });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /PI_PERSONA_ALLOW_BLOCKING=unset/);
+});
+
+test("makeEngine (broker present, allowBlocking: true): child env carries PI_PERSONA_ALLOW_BLOCKING=1 (async runs only)", async () => {
+	const broker = makeSpyBroker();
+	const eng = makeEngine({
+		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
+		broker,
+		allowBlocking: true,
+		childOptions: { resolveInvocation: resolveFake },
+	});
+	const r = await eng.run({ agent: "scout", task: "check [env]" });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /PI_PERSONA_ALLOW_BLOCKING=1/);
+});
+
 test("makeEngine (broker present): onSteerable routes steer text to broker.steerFrame with the minted handle", async () => {
 	const broker = makeSpyBroker();
 	const eng = makeEngine({

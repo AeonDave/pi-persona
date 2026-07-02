@@ -101,8 +101,13 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	const clientDeps: MakeBrokerClientDeps = { endpoint, handle, ...(wantsPeers ? { peers: true } : {}) };
 	const client = (deps.makeClient ?? makeBrokerClient)(clientDeps);
 
+	// Blocking asks are honoured only when the spawning run is async (`PI_PERSONA_ALLOW_BLOCKING`,
+	// set by adapter.ts from the strategy's `allowBlocking`) — a sync delegate/council/orchestrate
+	// turn holds the supervisor's turn, so a blocking `decision`/`interview` here would deadlock it
+	// (the same safety default the in-process engine applies; see contact.ts / spec §4.9).
+	const allowBlocking = env.PI_PERSONA_ALLOW_BLOCKING === "1";
 	const bus = new BrokerBus(client);
-	pi.registerTool(makeContactSupervisorTool(bus, handle, SUPERVISOR_HANDLE));
+	pi.registerTool(makeContactSupervisorTool(bus, handle, SUPERVISOR_HANDLE, { allowBlocking }));
 
 	// The engine-scoped peer roster (B7): fetched from the host's `list` frame and cached —
 	// `contact_peer`'s `listPeers` is synchronous, a wire round-trip is not, so each call

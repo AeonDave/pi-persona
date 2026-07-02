@@ -177,6 +177,39 @@ test("contact_supervisor progress relays over the wire once the broker has conne
 	assert.match(text, /reported/i);
 });
 
+test("contact_supervisor (PI_PERSONA_ALLOW_BLOCKING unset): a decision does NOT block — posts one-way, matching the in-process sync-safe default", async () => {
+	const pi = makeFakePi();
+	const fake = makeFakeClient();
+	installBridge(pi.pi, FAKE_CTX, {
+		env: { PI_PERSONA_BUS: "/tmp/x.sock", PI_PERSONA_HANDLE: "scout#1" },
+		makeClient: () => fake.client,
+	});
+	await Promise.resolve();
+	await Promise.resolve();
+	const tool = pi.tool("contact_supervisor")!;
+	const r = await tool.execute("t1", { kind: "decision", message: "which approach?" }, undefined, undefined, FAKE_CTX);
+	assert.equal(fake.sends.length, 1, "posted one-way (bus.send), never called client.ask");
+	assert.deepEqual(fake.sends[0], { to: "supervisor", kind: "decision", text: "which approach?" });
+	const text = r.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /busy right now|proceed using your best judgement/i);
+});
+
+test("contact_supervisor (PI_PERSONA_ALLOW_BLOCKING=1): a decision blocks for the supervisor's reply (async runs only)", async () => {
+	const pi = makeFakePi();
+	const fake = makeFakeClient();
+	installBridge(pi.pi, FAKE_CTX, {
+		env: { PI_PERSONA_BUS: "/tmp/x.sock", PI_PERSONA_HANDLE: "scout#1", PI_PERSONA_ALLOW_BLOCKING: "1" },
+		makeClient: () => fake.client,
+	});
+	await Promise.resolve();
+	await Promise.resolve();
+	const tool = pi.tool("contact_supervisor")!;
+	const r = await tool.execute("t1", { kind: "decision", message: "which approach?" }, undefined, undefined, FAKE_CTX);
+	assert.equal(fake.sends.length, 0, "blocking path uses client.ask, not bus.send");
+	const text = r.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /supervisor answer/i);
+});
+
 test("contact_supervisor degrades cleanly (no hang, no crash) when the broker never connects", async () => {
 	const pi = makeFakePi();
 	const fake = makeFakeClient({ registerNeverSettles: true });
