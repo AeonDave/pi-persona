@@ -5,7 +5,7 @@ import { getStrategy } from "../../../src/orchestration/strategy.ts";
 
 // Registry completeness: every built-in strategy MUST be reachable by name (so a new
 // strategy file can't be silently unregistered), and each must declare a matching name.
-const BUILTIN_NAMES = ["fanout", "pipeline", "map", "critic-loop", "council-rounds", "debate", "magi", "judge", "pair", "synthesize"];
+const BUILTIN_NAMES = ["fanout", "pipeline", "map", "critic-loop", "council-rounds", "debate", "magi", "judge", "pair", "synthesize", "compete"];
 
 test("getStrategy resolves every built-in strategy by name", () => {
 	for (const name of BUILTIN_NAMES) {
