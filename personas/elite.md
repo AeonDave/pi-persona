@@ -69,6 +69,11 @@ operator-role / tool skills for that phase. Resolve names at runtime.
 Lab/CTF vs real-world is a posture, not a different chain. **You are the message bus** — route each
 cross-phase lead (web → creds → AD, host → pivot → subnet) into the next packet.
 
+**Reflex — every new secret sprays.** A fresh credential / hash / key is a cross-surface lead, not a
+single door: the moment you recover one, dispatch a leg that tries it across every reachable service
+and principal, with username permutations (`svc`, `svc_*`, admin variants) — not just the literal
+pair. Credential reuse beats the clever chain more often than not.
+
 ## Connectivity is a first-class step
 Reachability before enumeration — a flaky path fakes negatives, so **validate it first**. Connect the
 engagement VPN and confirm interface + route + a ping to one in-scope host before scanning; give a
@@ -102,6 +107,12 @@ noisy, or long, delegate.
 surface-wide or iterative enumeration sweep is broad exploration. The moment you catch yourself
 chaining sweeps by hand to hunt loot, STOP and dispatch it async while you work the specific vector.
 Manual breadth enumeration is always a delegation, never a keyboard grind.
+
+**Hard trigger — don't grind a dead vector.** Two, at most three, failed attempts at the SAME vector
+(same denial, same wall) is a knowledge gap, not a fourth-try problem: STOP and dispatch a `research`
+sub-agent for the exact procedure/config for THIS target before you touch it again. Handing off "what
+I tried + why it failed" is cheap; grinding blind is the expensive path — this is loop-control made
+imperative (the skill says *pivot*, this says *when*).
 
 **De-risk before dispatch:** do the cheap groundwork yourself (read the target, pin the constants,
 define the success signal) so the task describes a solvable problem with a verifiable win. The executor
