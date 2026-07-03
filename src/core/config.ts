@@ -33,6 +33,10 @@ export interface PiPersonaConfig {
 	 *  busy-but-non-converging child the idle watchdog (reset on every event) never catches.
 	 *  600000 by default; PI_PERSONA_AGENT_MAX_MS=0 disables it. */
 	agentHardTimeoutMs: number;
+	/** Delegation nudge: when a delegating supervisor grinds heavy work by hand (burns context
+	 *  without a hand-off), append a reminder to the offending tool's result. On by default;
+	 *  PI_PERSONA_NUDGE=off opts out. */
+	nudge: boolean;
 	/** Opt-in cross-process broker (spec B1-B7): off (default) ⇒ the child engine spawns
 	 *  exactly as today — no host, no extra env vars, zero behavior change. On ⇒ the
 	 *  extension lazily starts a session-scoped host on the first child-engine build,
@@ -66,6 +70,8 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 30_000,
 		agentHardTimeoutMs: 600_000,
+		// On unless explicitly turned off (mirrors PI_PERSONA_PERSIST's `!== "off"` convention).
+		nudge: env.PI_PERSONA_NUDGE?.trim().toLowerCase() !== "off",
 		// Any non-empty value opts in (mirrors PI_PERSONA_DISABLE's own convention) — the
 		// live-drive doc/examples use PI_PERSONA_BROKER=1.
 		broker: !!env.PI_PERSONA_BROKER && env.PI_PERSONA_BROKER.trim().length > 0,

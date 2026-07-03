@@ -226,6 +226,14 @@ Steering is always a Bus action; the peek digest is always a read-only ProgressV
   the runtime `DelegationLedger` vetoes a blind retry loop (an identical agent+model+task delegation
   that failed twice is stopped before it spawns). Coaching is gated by `coaching: on` AND `canUseBus`.
 
+The **delegation nudge** (`core/nudge.ts`, `config.nudge`, on by default; `PI_PERSONA_NUDGE=off`) is the
+mirror: a `tool_result` hook watches the *supervisor's own* tool stream and, when a delegating persona
+grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold),
+**appends** a one-line reminder to that command's result. Rationale: a persona directive lives at the
+TOP of the prompt and its pull decays as recent tool output balloons; the nudge lands in RECENT context,
+on the very command that burned it — runtime reinforcement the static prompt can't give. Sub-agents run
+in their own sessions, so the hook only ever sees the supervisor's tools; a hand-off resets the streak.
+
 ## Discovery & seeding
 
 - **Precedence (all file kinds):** `builtin < user (~/.pi/agent/…) < project (<root>/.pi/…)`; project
