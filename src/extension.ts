@@ -1396,7 +1396,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		to: Type.Optional(Type.String({ description: "steer/stop/peek/wait: the async run id (e.g. 'run-1'; wait without it = all running) · send: the child bus handle (from `list`)" })),
 		askId: Type.Optional(Type.String({ description: "reply: the message id of the child's pending question" })),
 		message: Type.Optional(Type.String({ description: "steer/reply/send: the text to deliver" })),
-		timeoutMs: Type.Optional(Type.Number({ description: "wait: max ms to hold your turn (default 180000, cap 600000) — on timeout you get what settled + what's still running" })),
+		timeoutMs: Type.Optional(Type.Number({ description: "wait: max ms to hold your turn (default 600000, cap 600000) — on timeout you get what settled + what's still running" })),
 	});
 	pi.registerTool({
 		name: "intercom",
@@ -1424,9 +1424,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 				if (ids.length === 0) {
 					return { content: [{ type: "text", text: "No async runs to wait for." }], details: { action: "wait", ok: true }, isError: false };
 				}
-				// Bounded join: never longer than a child's ask timeout, so a coaching child
-				// blocking on OUR reply can't deadlock us past its own timeout.
-				const timeoutMs = Math.min(Math.max(params.timeoutMs ?? 180_000, 1_000), 600_000);
+				// Bounded join: never longer than a child's ask timeout (bus `ask` default 600s),
+				// so a coaching child blocking on OUR reply can't deadlock us past its own timeout.
+				// Default matches that ceiling — heavy sub-agents (30+ turns) routinely outlast a
+				// short window, and a premature "still running" forces a needless re-wait.
+				const timeoutMs = Math.min(Math.max(params.timeoutMs ?? 600_000, 1_000), 600_000);
 				const runs = await tracker.waitFor(ids, timeoutMs, _signal);
 				const settled = runs.filter((r) => r.status !== "running");
 				const still = runs.filter((r) => r.status === "running");

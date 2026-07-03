@@ -148,6 +148,33 @@ id under another authenticated provider, walking the whole chain (session provid
 `failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal — engines
 classify the cause on the `AgentResult`.
 
+### MCP (and other `session_start`-scoped extensions) in sub-agents
+
+**A sub-agent does NOT share the supervisor's MCP session, and an in-process sub-agent gets NO MCP at
+all.** MCP servers in Pi are provided by a separate extension (`pi-mcp-adapter`), which opens its
+connections inside a `session_start` hook. Two consequences of the seam:
+
+- The **in-process engine** builds a fresh `createAgentSession` and only ever calls `session.prompt()`
+  — it never fires the session's `session_start` lifecycle (that requires `AgentSession.bindExtensions`).
+  So `pi-mcp-adapter` registers its `mcp*`/direct tools at load (they *appear* in the sub-agent) but
+  never initializes the connection: calls come back **"MCP not initialized"**. The tools are present
+  but dead.
+- The **child engine** spawns a real `pi -p`, whose normal startup DOES fire `session_start`, so
+  `pi-mcp-adapter` initializes — but as that child's **own** connection (its own `npx`/stdio servers,
+  its own HTTP clients). It is a *separate* MCP session, not the supervisor's: it does not see the
+  supervisor's MCP workspace/interactive-shell state.
+
+Firing `session_start` for every in-process sub-agent is deliberately NOT done: each would spin up the
+full MCP fleet (every stdio server spawned, every HTTP server reconnected) N times per fan-out, and the
+adapter's OAuth/UI/consent machinery assumes an interactive session. There is no cheap way to *share*
+one live MCP connection across sessions through the current seam.
+
+**Guidance.** Treat MCP as a **supervisor capability**, not a sub-agent one. Do the MCP-dependent work
+in the supervisor and hand sub-agents the resulting **artifacts** (files, findings, targets) to reason
+over — the offensive/parallel legs corroborate and analyse; they don't drive the tools. When a
+sub-agent genuinely needs to run MCP tools itself (its own independent session, no shared state), route
+it through the child engine (`PI_PERSONA_ENGINE=child`, or an agent that runs there).
+
 ## The three communication planes
 
 Three planes with **disjoint vocabularies** — a concept name lives in exactly one, so "progress" is
