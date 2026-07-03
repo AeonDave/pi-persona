@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { type AsyncRun, AsyncRunTracker, buildCompletionReport, IdleCoalescingNotifier, buildPeekDigest } from "../../../src/engine/async.ts";
+import type { ProgressSnapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
@@ -142,6 +143,49 @@ test("buildPeekDigest summarises runs (counts, ids, statuses)", () => {
 	assert.match(digest, /run-1/);
 	assert.match(digest, /run-2/);
 	assert.match(digest, /all good/);
+});
+
+test("the tracker resets the stall clock only when progress actually advances (injected clock)", async () => {
+	// Stall detection needs a per-run 'last advanced' stamp: a worker looping without making
+	// headway (identical snapshot) must NOT keep its clock alive, or it never reads as stuck.
+	let clock = 100;
+	const tracker = new AsyncRunTracker({ now: () => clock });
+	let onProg!: (s: ProgressSnapshot) => void;
+	let release!: () => void;
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	const id = tracker.launch({ agent: "a", task: "t" }, async (onProgress) => {
+		onProg = onProgress; // the thunk runs synchronously up to this await, so onProg is set now
+		await gate;
+		return { agent: "a", output: "done", usage: usage(), ok: true };
+	});
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, 100, "stamped at launch");
+	clock = 200;
+	onProg({ output: "aa", turns: 1, tokens: 5 }); // output grew → real progress
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, 200, "an advance resets the stall clock");
+	clock = 300;
+	onProg({ output: "aa", turns: 1, tokens: 5 }); // identical snapshot → no headway
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, 200, "unchanged progress does NOT reset the stall clock");
+	release();
+	await tick();
+});
+
+test("buildPeekDigest flags a running run stalled past stallMs (fresh runs are not flagged)", () => {
+	const now = 1_000_000;
+	const fresh: AsyncRun = { id: "run-1", agent: "a", task: "t", status: "running", progress: { output: "", turns: 1, tokens: 5 }, lastAdvanceAt: now - 5_000 };
+	const stuck: AsyncRun = { id: "run-2", agent: "b", task: "t", status: "running", progress: { output: "", turns: 1, tokens: 5 }, lastAdvanceAt: now - 90_000 };
+	const digest = buildPeekDigest([fresh, stuck], { now, stallMs: 45_000 });
+	const lines = digest.split("\n");
+	const l1 = lines.find((l) => l.includes("run-1")) ?? "";
+	const l2 = lines.find((l) => l.includes("run-2")) ?? "";
+	assert.doesNotMatch(l1, /stuck/, "a run that advanced recently is not flagged");
+	assert.match(l2, /possibly stuck/, "a run stalled past the window is flagged");
+});
+
+test("buildPeekDigest without stall opts flags nothing (back-compat)", () => {
+	const running: AsyncRun = { id: "run-1", agent: "a", task: "t", status: "running", progress: { output: "", turns: 1, tokens: 5 }, lastAdvanceAt: 0 };
+	assert.doesNotMatch(buildPeekDigest([running]), /stuck/, "no stall window supplied ⇒ no flagging");
 });
 
 test("buildPeekDigest shows a failed run's ERROR, not its (empty) output", () => {

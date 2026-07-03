@@ -21,11 +21,20 @@ test("PI_PERSONA_ENGINE selects the sub-agent backend; in-process is the default
 	assert.equal(resolveConfig({ PI_PERSONA_ENGINE: "bogus" }).engine, "inproc", "unknown value falls back to the default");
 });
 
-test("PI_PERSONA_PEEK_MS sets the opt-in periodic peek interval (default off = 0)", () => {
-	assert.equal(resolveConfig({}).peekEveryMs, 0, "off by default");
-	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "30000" }).peekEveryMs, 30000);
-	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "abc" }).peekEveryMs, 0, "non-numeric ⇒ off");
-	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "-5" }).peekEveryMs, 0, "negative ⇒ off");
+test("PI_PERSONA_PEEK_MS sets the periodic peek interval (default ON; explicit 0 disables)", () => {
+	assert.equal(resolveConfig({}).peekEveryMs, 30_000, "the timed supervisor wakeup is on by default");
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "15000" }).peekEveryMs, 15000);
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "0" }).peekEveryMs, 0, "explicit 0 opts out");
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "abc" }).peekEveryMs, 30_000, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "-5" }).peekEveryMs, 30_000, "negative ⇒ default");
+});
+
+test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 600000; explicit 0 disables)", () => {
+	assert.equal(resolveConfig({}).agentHardTimeoutMs, 600_000, "a generous lifetime ceiling by default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "120000" }).agentHardTimeoutMs, 120000);
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "0" }).agentHardTimeoutMs, 0, "explicit 0 disables the cap");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "abc" }).agentHardTimeoutMs, 600_000, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "-5" }).agentHardTimeoutMs, 600_000, "negative ⇒ default");
 });
 
 test("PI_PERSONA_DISABLE (any non-empty value) disables the extension", () => {

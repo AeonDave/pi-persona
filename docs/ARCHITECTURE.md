@@ -132,9 +132,12 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
 ## The two engines
 
 Both backends sit behind the `StrategyEngine` seam (`run(spec, onProgress?, signal?, onSteerable?) →
-AgentResult`) and enforce `RUN_LIMITS.timeoutMs` as an **idle window** (no events for that long ⇒
-abort; the inproc watchdog is disabled for coaching children that legitimately block on a supervisor
-reply).
+AgentResult`) and enforce two independent deadlines: `RUN_LIMITS.timeoutMs` as an **idle window** (no
+events for that long ⇒ abort; the inproc idle watchdog is disabled for coaching children that
+legitimately block on a supervisor reply), and `PI_PERSONA_AGENT_MAX_MS` as a **hard wall-clock cap**
+— a lifetime ceiling armed once and never reset, so it settles a busy-but-non-converging child (a loop
+that keeps emitting) the idle window never catches. Both classify as `failureKind: "timeout"` (never a
+provider reroute).
 
 - **InProcessEngine** (default) — a `createAgentSession` per sub-agent: cheaper, shares the host's
   auth/model registry, and **steerable** (inject a live user message into a running sub-agent).
@@ -215,8 +218,11 @@ Steering is always a Bus action; the peek digest is always a read-only ProgressV
   idle/peek/steer.
 - **async** — the supervisor returns control and goes **idle, spending no tokens**, until woken by an
   **event** (a child's `contact_supervisor`: a `decision`/`interview` blocks for a reply, `progress` is
-  one-way) or an **opt-in periodic peek** (`PI_PERSONA_PEEK_MS`, off by default, carrying a compact
-  ProgressView digest — never full transcripts). Async failures are ALWAYS reported (never suppressed);
+  one-way) or the **timed wakeup**: a periodic peek (`PI_PERSONA_PEEK_MS`, on by default ~30s, `0`
+  disables) that fires while async children run, carrying a compact ProgressView digest — never full
+  transcripts — with any child that hasn't advanced within `STALL_FLAG_MS` (45s) flagged *possibly
+  stuck*. The wakeup is what lets an idle supervisor notice and steer/stop a wedged child even when NO
+  completion has fired (the enforcing backstop is the engines' hard wall-clock cap, above). Async failures are ALWAYS reported (never suppressed);
   the runtime `DelegationLedger` vetoes a blind retry loop (an identical agent+model+task delegation
   that failed twice is stopped before it spawns). Coaching is gated by `coaching: on` AND `canUseBus`.
 

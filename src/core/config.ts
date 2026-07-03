@@ -24,9 +24,15 @@ export interface PiPersonaConfig {
 	/** Engine backend for sub-agents: "inproc" (run in-process via `createAgentSession`,
 	 *  the default) or "child" (spawn `pi -p`, the baseline). */
 	engine?: "child" | "inproc";
-	/** Opt-in periodic-peek interval (ms) for the idle supervisor while async children run:
-	 *  0 = off (default). Each tick surfaces a compact digest as a follow-up (§4.9). */
+	/** Periodic-peek interval (ms): the timed supervisor wakeup. While async children run, each
+	 *  tick wakes the idle supervisor with a compact digest (stalled children flagged) so it can
+	 *  coach/steer/stop even when no completion has fired. On by default (30000); explicit
+	 *  PI_PERSONA_PEEK_MS=0 opts out. */
 	peekEveryMs: number;
+	/** Per-agent hard wall-clock cap (ms): a definite lifetime ceiling that settles even a
+	 *  busy-but-non-converging child the idle watchdog (reset on every event) never catches.
+	 *  600000 by default; PI_PERSONA_AGENT_MAX_MS=0 disables it. */
+	agentHardTimeoutMs: number;
 	/** Opt-in cross-process broker (spec B1-B7): off (default) ⇒ the child engine spawns
 	 *  exactly as today — no host, no extra env vars, zero behavior change. On ⇒ the
 	 *  extension lazily starts a session-scoped host on the first child-engine build,
@@ -58,13 +64,23 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// Opt-in: auto-install the bundled defaults on first run ONLY when explicitly enabled with
 		// `PI_PERSONA_SEED=on`. Default off — personas are installed via `/persona seed|restore`.
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
-		peekEveryMs: 0,
+		peekEveryMs: 30_000,
+		agentHardTimeoutMs: 600_000,
 		// Any non-empty value opts in (mirrors PI_PERSONA_DISABLE's own convention) — the
 		// live-drive doc/examples use PI_PERSONA_BROKER=1.
 		broker: !!env.PI_PERSONA_BROKER && env.PI_PERSONA_BROKER.trim().length > 0,
 	};
-	const peek = Number(env.PI_PERSONA_PEEK_MS?.trim());
-	if (Number.isFinite(peek) && peek > 0) config.peekEveryMs = peek;
+	// A valid finite value >= 0 sets the interval (0 opts out); junk/negative keeps the default.
+	const peekRaw = env.PI_PERSONA_PEEK_MS?.trim();
+	if (peekRaw !== undefined && peekRaw !== "") {
+		const peek = Number(peekRaw);
+		if (Number.isFinite(peek) && peek >= 0) config.peekEveryMs = peek;
+	}
+	const hardRaw = env.PI_PERSONA_AGENT_MAX_MS?.trim();
+	if (hardRaw !== undefined && hardRaw !== "") {
+		const hard = Number(hardRaw);
+		if (Number.isFinite(hard) && hard >= 0) config.agentHardTimeoutMs = hard;
+	}
 	if (def) config.defaultPersona = def;
 	const stateFile = env.PI_PERSONA_STATE_FILE?.trim();
 	if (stateFile) config.stateFile = stateFile;

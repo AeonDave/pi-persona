@@ -348,6 +348,58 @@ test("inproc engine idle-kills a session that emits NO events after timeoutMs (t
 	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
 });
 
+test("inproc engine hard-caps a busy session the idle watchdog would never catch", async () => {
+	// The idle watchdog resets on every event, so a busy-but-non-converging child never trips it.
+	// The hard wall-clock cap is a definite lifetime ceiling that settles it regardless of activity.
+	let abortCalled = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 5_000, // idle watchdog: long → would NOT fire in this window
+		hardTimeoutMs: 40, // total lifetime cap → fires anyway
+		createSession: async () => {
+			let release!: () => void;
+			const idle = new Promise<void>((r) => {
+				release = r;
+			});
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => {
+						abortCalled = true;
+						release(); // aborting unblocks waitForIdle, like the real session
+					},
+					waitForIdle: () => idle,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(abortCalled, true, "the hard cap aborted the session");
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /hard cap/);
+	assert.equal(r.failureKind, "timeout", "a hard-cap kill is timeout-class, never a provider reroute");
+});
+
+test("inproc engine does NOT hard-cap a fast run (the cap is disarmed on completion)", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		hardTimeoutMs: 5_000,
+		createSession: fakeSessions([msgEnd("quick")]),
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	assert.equal(r.output, "quick");
+});
+
 test("inproc engine does NOT time out a fast run (the watchdog is disarmed on completion)", async () => {
 	const engine = makeInProcessEngine({
 		resolveAgent,

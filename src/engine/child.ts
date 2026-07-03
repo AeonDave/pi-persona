@@ -28,7 +28,7 @@ export interface ChildRunResult {
 	stderr: string;
 	/** True only when an external AbortSignal cancelled the run. */
 	aborted: boolean;
-	/** True only when the wall-clock `timeoutMs` cap fired. Disjoint from `aborted`. */
+	/** True when the idle watchdog OR the hard wall-clock cap fired. Disjoint from `aborted`. */
 	timedOut: boolean;
 	model?: string;
 	stopReason?: string;
@@ -42,8 +42,13 @@ export interface ChildEngineOptions {
 	killGraceMs?: number;
 	/** Live progress callback (for async peek / supervision). */
 	onProgress?: (snapshot: ProgressSnapshot) => void;
-	/** Hard wall-clock cap; a child exceeding it is killed (SIGTERM→tree-kill). */
+	/** IDLE window (ms): a child that emits NOTHING for this long is killed (SIGTERM→tree-kill).
+	 *  Any output re-arms it, so a long-but-active child survives. 0/absent = no idle watchdog. */
 	timeoutMs?: number;
+	/** HARD wall-clock cap (ms): a definite lifetime ceiling, armed ONCE and never re-armed by
+	 *  output — so it kills a busy-but-non-converging child (a loop that keeps emitting) that the
+	 *  idle window above never catches. 0/absent = no cap. */
+	hardTimeoutMs?: number;
 	/** Override the cross-OS force tree-kill (used in tests). Defaults to
 	 *  {@link killProcessTree}. */
 	killProcessTree?: (pid: number) => void;
@@ -156,6 +161,7 @@ export async function runChildAgent(
 	let stderrTruncated = false;
 	let aborted = false;
 	let timedOut = false;
+	let hardTimedOut = false;
 	let spawnError: Error | undefined;
 
 	try {
@@ -180,6 +186,7 @@ export async function runChildAgent(
 			let killing = false;
 			let buffer = "";
 			let timer: ReturnType<typeof setTimeout> | undefined;
+			let hardTimer: ReturnType<typeof setTimeout> | undefined;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
 			const onLine = (line: string) => {
@@ -197,6 +204,7 @@ export async function runChildAgent(
 				if (killing) return;
 				killing = true;
 				if (timer) clearTimeout(timer);
+				if (hardTimer) clearTimeout(hardTimer);
 				const pid = proc.pid;
 				// On Windows, proc.kill("SIGTERM") maps to TerminateProcess: it kills ONLY the root
 				// and fires `close` synchronously, which clears the grace timer before it can run —
@@ -229,6 +237,7 @@ export async function runChildAgent(
 				if (settled) return;
 				settled = true;
 				if (timer) clearTimeout(timer);
+				if (hardTimer) clearTimeout(hardTimer);
 				if (graceTimer) clearTimeout(graceTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
 				if (buffer.trim()) onLine(buffer);
@@ -239,6 +248,16 @@ export async function runChildAgent(
 			// Idle timeout: a child that emits NOTHING for `timeoutMs` is treated as hung
 			// and killed — but any output (re)arms the timer, so a long-but-*active* agent
 			// (streaming turn/tool events) keeps running.
+			// Hard wall-clock cap: armed ONCE, never re-armed by output — a definite lifetime ceiling
+			// that kills a busy-but-non-converging child the idle window above never catches.
+			const armHardCap = () => {
+				if (!opts.hardTimeoutMs || opts.hardTimeoutMs <= 0 || settled || killing) return;
+				hardTimer = setTimeout(() => {
+					hardTimedOut = true;
+					kill();
+				}, opts.hardTimeoutMs);
+				hardTimer.unref?.();
+			};
 			const armTimeout = () => {
 				if (!opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
 				if (timer) clearTimeout(timer);
@@ -296,6 +315,7 @@ export async function runChildAgent(
 			});
 
 			armTimeout(); // start the idle clock (reset on every chunk of output)
+			armHardCap(); // start the lifetime ceiling (never reset)
 			if (signal) {
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
@@ -303,7 +323,7 @@ export async function runChildAgent(
 		});
 
 		const ok =
-			!aborted && !timedOut && exitCode === 0 && state.stopReason !== "error" && state.stopReason !== "aborted";
+			!aborted && !timedOut && !hardTimedOut && exitCode === 0 && state.stopReason !== "error" && state.stopReason !== "aborted";
 		const result: ChildRunResult = {
 			ok,
 			output: state.output,
@@ -311,7 +331,9 @@ export async function runChildAgent(
 			exitCode,
 			stderr,
 			aborted,
-			timedOut,
+			// A hard-cap kill is a timeout-class death (never a provider reroute) — surface it via
+			// the same flag the idle timeout uses; the errorMessage below says WHICH cap fired.
+			timedOut: timedOut || hardTimedOut,
 		};
 		if (state.model !== undefined) result.model = state.model;
 		if (state.stopReason !== undefined) result.stopReason = state.stopReason;
@@ -319,7 +341,9 @@ export async function runChildAgent(
 		// it explicitly and fold in any stream-level error rather than letting the
 		// stream message hide why the child actually stopped.
 		const streamErr = state.errorMessage;
-		if (timedOut) {
+		if (hardTimedOut) {
+			result.errorMessage = `agent exceeded the ${opts.hardTimeoutMs}ms hard cap${streamErr ? ` (last error: ${streamErr})` : ""}`;
+		} else if (timedOut) {
 			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (aborted) {
 			result.errorMessage = `agent aborted${streamErr ? ` (last error: ${streamErr})` : ""}`;

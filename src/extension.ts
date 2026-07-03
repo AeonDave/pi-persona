@@ -74,6 +74,11 @@ const RUN_LIMITS: RunLimits = {
 	budgetTokens: 1_000_000,
 };
 
+// A running async child that hasn't ADVANCED (output/turns/tokens) for this long is flagged
+// "possibly stuck" in the peek digest — the heartbeat's soft stall signal, so the supervisor can
+// coach/steer/stop it. Purely advisory (no auto-abort); the hard cap is the enforcing backstop.
+const STALL_FLAG_MS = 45_000;
+
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The Pi global agent dir, overridable via PI_AGENT_DIR (handy for tests/sandboxes). */
@@ -400,9 +405,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 		);
 	});
 
-	// Periodic peek (opt-in, off unless PI_PERSONA_PEEK_MS > 0): while async children run, the
-	// idle supervisor is woken every interval with a compact ProgressView digest + unread
-	// messages, so it can choose to steer/reply. Bounded: unref'd, self-stops when no runs remain.
+	// Periodic peek (the timed supervisor wakeup, on by default — PI_PERSONA_PEEK_MS=0 opts out):
+	// while async children run, the idle supervisor is woken every interval with a compact
+	// ProgressView digest (stalled children flagged "possibly stuck") + unread messages, so it can
+	// coach/steer/stop even when NO completion has fired. Bounded: unref'd, self-stops when no runs remain.
 	let peekTimer: ReturnType<typeof setInterval> | undefined;
 	function stopPeek(): void {
 		if (peekTimer) {
@@ -426,7 +432,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const unread = bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply);
 			try {
 				pi.sendUserMessage(
-					`[pi-persona] peek — ${buildPeekDigest(runs)}${unread.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}` : ""}`,
+					`[pi-persona] peek — ${buildPeekDigest(runs, { now: Date.now(), stallMs: STALL_FLAG_MS })}${unread.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}` : ""}`,
 				);
 			} catch {
 				/* ignore */
@@ -544,7 +550,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const childEngineAt = (cwd: string): StrategyEngine => {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
 			if (signal) deps.signal = signal;
-			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs };
+			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs };
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
 			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
@@ -561,6 +567,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
 			const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
 			ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
+			ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
 			if (signal) ideps.signal = signal;
 			if (onProgress) ideps.onProgress = onProgress;
 			if (lastCtx.model) ideps.defaultModel = `${lastCtx.model.provider}/${lastCtx.model.id}`;
@@ -580,7 +587,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
 			if (signal) deps.signal = signal;
 			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
-			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs }; // hard wall-clock cap on every child
+			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs }; // idle watchdog + hard lifetime ceiling on every child
 			if (onProgress) deps.childOptions.onProgress = onProgress;
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
@@ -1168,7 +1175,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const nodeId = `async:${id}`;
 		// "queued" until the semaphore grants a slot and the engine reports it steerable.
 		agentTree.add({ id: nodeId, label: `${label} (async)`, status: "running", detail: "queued" });
-		startPeek(); // arm the opt-in idle peek while this run is in flight (no-op if disabled)
+		startPeek(); // arm the timed supervisor wakeup while this run is in flight (no-op if PI_PERSONA_PEEK_MS=0)
 		return id;
 	}
 
@@ -1417,7 +1424,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
 				const runs = params.to ? [tracker.peek(params.to)].filter((r): r is AsyncRun => !!r) : tracker.running();
-				return { content: [{ type: "text", text: buildPeekDigest(runs) }], details: { action: "peek", ok: true }, isError: false };
+				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: STALL_FLAG_MS }) }], details: { action: "peek", ok: true }, isError: false };
 			}
 			if (params.action === "wait") {
 				const ids = params.to ? [params.to] : tracker.running().map((r) => r.id);
@@ -1757,9 +1764,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const id = args.trim();
 			if (id) {
 				const run = tracker.peek(id);
-				ctx.ui.notify(run ? buildPeekDigest([run]) : `peek: no run "${id}"`, run ? "info" : "warning");
+				ctx.ui.notify(run ? buildPeekDigest([run], { now: Date.now(), stallMs: STALL_FLAG_MS }) : `peek: no run "${id}"`, run ? "info" : "warning");
 			} else {
-				ctx.ui.notify(buildPeekDigest(tracker.list()), "info");
+				ctx.ui.notify(buildPeekDigest(tracker.list(), { now: Date.now(), stallMs: STALL_FLAG_MS }), "info");
 			}
 		},
 	});

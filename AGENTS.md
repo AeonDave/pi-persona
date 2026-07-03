@@ -28,7 +28,9 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   `createAgentSession`, DEFAULT) and **ChildProcessEngine** (`engine/child`, spawns `pi --mode json -p`,
   the correctness baseline + the path worktree isolation uses). Opt out with `PI_PERSONA_ENGINE=child`.
   BOTH enforce `RUN_LIMITS.timeoutMs` as an **idle window** (no events/output ⇒ abort; the inproc
-  watchdog is disabled for coaching children that may legitimately block on a supervisor reply).
+  watchdog is disabled for coaching children that may legitimately block on a supervisor reply) AND
+  `PI_PERSONA_AGENT_MAX_MS` as a **hard wall-clock cap** (lifetime ceiling armed once, never reset —
+  catches a busy loop the idle window never does; default 600000, `0` disables).
   The child engine delivers the task over **stdin** (`pi -p` prepends piped stdin) — never argv,
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
   share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async

@@ -25,9 +25,11 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 | series & loops | Plain `await` / `for` — a strategy is TypeScript, so `pipeline` and `critic-loop` are just native control flow. |
 
 Run limits (`RUN_LIMITS`) are enforced inside `makeSDK` regardless of how a strategy calls `agent()`:
-`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window), `maxDepth`. Safety comes
-from these runtime limits, not from sandboxing the strategy (see the I2 invariant in
-[ARCHITECTURE.md](ARCHITECTURE.md)).
+`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window), `maxDepth`. On top of the
+idle window, every agent also carries a **hard wall-clock cap** (`PI_PERSONA_AGENT_MAX_MS`, default
+600000) — a lifetime ceiling that settles a busy-but-non-converging worker the idle window never
+catches, so a wedged item can't hang a whole sweep. Safety comes from these runtime limits, not from
+sandboxing the strategy (see the I2 invariant in [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ## Roster-role ensembles
 
