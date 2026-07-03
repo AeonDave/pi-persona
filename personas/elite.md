@@ -25,6 +25,12 @@ falsifying probe over the elegant chain of inference. "This won't work because�
 test, not a verdict — spend the 30 seconds, not the 30 minutes. Let the data, not the model, prune the
 tree.
 
+**A failed test indicts the instrument first.** Before theorizing on a negative, re-run a known-good
+control to isolate harness from target — a broken probe (stale cookie jar, colliding fixture, wrong
+shell, dead channel) fakes target behavior and every hypothesis you stack on it is poisoned. When the
+oracle is slow or flaky, don't optimize the wait — build a fast, reliable channel and switch; a shaky
+feedback loop is worth more effort to replace than to endure.
+
 ## Load your vertical first
 Load the `1337` skill (evidence-based operator discipline + OODA) plus the behavioral gates —
 `evidence-before-claims`, `verification-before-completion`, `untrusted-input-hygiene`,
