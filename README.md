@@ -1,72 +1,42 @@
+<p align="center">
+  <img src="assets/banner.png" alt="pi-persona — advanced multi-agent orchestration layer for Pi">
+</p>
+
 # pi-persona
 
-An **advanced multi-agent orchestration layer** for the [Pi](https://github.com/earendil-works/pi)
-coding agent. It turns one agent into a **supervisor** that runs specialized sub-agents —
-**synchronously or in the background**, one at a time or fanned out in parallel — coordinates them
-with a library of **composable strategies** (vote, judge, critic-loop, map, synthesize, DAG flows),
-and lets you **watch, steer, stop, and message** them while they work. Sub-agents are specialized
-**dynamically** (skills + an on-the-fly role + model + tools), so new behaviors need no new files.
+A multi-agent orchestration layer for the [Pi](https://github.com/earendil-works/pi) coding agent.
+It turns one agent into a **supervisor** that runs specialized sub-agents — synchronously or in the
+background, one at a time or fanned out in parallel — coordinates them with composable strategies
+(vote, judge, critic-loop, map, synthesize, DAG flows), and lets you watch, steer, stop, and message
+them mid-run. Sub-agents specialize *dynamically* (skills + an on-the-fly role + model + tools), so
+new behavior needs no new files.
 
-A **persona** is the top layer: a switchable *modus operandi* that wires all of the above into a
-coherent way of working — from "delegate opportunistically" to a mandatory deliberating council.
-Everything under it is data (Markdown + `teams.yaml` + small strategy files), so you customize the
-whole system without touching the core.
+A **persona** is the top layer: a switchable *modus operandi* — from "delegate opportunistically" to
+a mandatory deliberating council. Everything under it is data (Markdown + `teams.yaml` + small
+strategy files), so you reshape the whole system without touching the core.
 
-> **The bundled personas are opt-in.** A fresh install ships **no** personas — run **`/persona seed`**
-> (or `/persona restore`) once to install the defaults into `~/.pi/agent/`, then edit them or add
-> your own. See [Bundled personas](#bundled-personas-agents--teams).
+> **Bundled personas are opt-in.** A fresh install ships none — run `/persona seed` (or
+> `/persona restore`) once to install the defaults into `~/.pi/agent/`, then edit them or add your
+> own. Project (`.pi/`) overrides user overrides builtin, so your copy always wins.
 
 ## What it does
 
-- **Sub-agents, sync or async.** Delegate one, or fan out many in parallel — each an isolated `pi`
-  run with its own model, skills, tools, and optional **git-worktree isolation**, shown by a
-  friendly `name · model`. Run **synchronously** (block for the result) or **`async: true`** (in the
-  background so you keep working); collect async results with `/peek` or `intercom wait` (a join).
-- **Live supervision.** While sub-agents run: **peek** their progress, **steer** one mid-run (inject
-  a redirect), **stop** (hard-abort), and — with a `coaching` persona — a two-way **message bus**
-  where a child asks you a blocking `decision` via `contact_supervisor` and you `reply`. All bounded
-  by hard limits (timeout, token budget, concurrency, max children) with cooperative abort.
-- **Composable strategies.** Orchestration lives in small files over a Strategy SDK: parallel
-  **fan-out**, a sequential **pipeline** (chain), a **map** (per-item fan-out over a runtime
-  list), a generator↔critic **loop**, an ensemble **vote** (`magi`, with a reflection round) /
-  **multi-round council**, an impartial **judge**, and a gather→merge **synthesize**. Adding one is
-  a new file — no core change.
-- **Dynamic specialization — no file per specialist.** A generic `operator` becomes a specialist
-  from the **skills** it loads plus an on-the-fly **`role`** (extra system prompt at delegation
-  time). A **team roster** can even specialise ONE agent into several perspectives inline
-  (`{ agent, role, model }`) — e.g. one `reviewer` run as three lens-focused passes.
-- **Flows.** A declarative **DAG over strategies** (`*.flow.json`): phases wired by `needs`,
-  independent ones fanning out in parallel, each feeding its dependents. Pinned by hash and
-  **journaled**, so an interrupted flow **resumes**; a phase `gate: true` pauses for your approval.
-- **Personas.** Switch with **`f8`** or `/persona` — the *modus operandi* layer: opportunistic
-  delegation, a mandatory multi-agent strategy, or a deliberating **council** consulted before acting.
-- **Live view.** One **agent tree** sticks above the input showing every sub-agent (strategy cores,
-  delegate legs, background runs). **`f9`** (or `/agents`) opens a near-fullscreen overlay — ↑↓ to
-  move, ⏎ to read an agent's **full chronological log** (reasoning, `⚙ tool` calls, answers
-  accumulate — nothing overwritten), **`x`** to stop, **`s`** to steer. Queued cores show as `queued`.
-
-## How it works
-
-- **Two engines, one seam.** Sub-agents run **in-process** by default (a `createAgentSession`
-  per agent — fast, and **steerable**: you can inject a message into a running sub-agent). Set
-  `PI_PERSONA_ENGINE=child` to spawn each as an isolated `pi --mode json -p` process instead.
-  Either way pi-persona never re-spawns supervisors (no fork bombs), the same hard limits apply
-  (timeout, token budget, concurrency, max children) with cooperative abort, and each run's
-  output `contract@hash` is pinned so a hot reload can't change a run mid-flight.
-- **Cross-process broker (opt-in, `PI_PERSONA_BROKER=1`).** Gives child-process sub-agents —
-  `PI_PERSONA_ENGINE=child` runs and every `isolation: worktree` leg (which always uses the child
-  engine) — the same comm plane AND **steer** in-process sub-agents already have: a session-scoped
-  relay (POSIX socket / Windows named pipe) connects the child straight into your `contact_supervisor`
-  / `contact_peer` / `intercom steer` surface. Off by default — nothing changes unless you set it.
-- **Everything is data.** Personas and agents are Markdown + YAML frontmatter; teams are a
-  `teams.yaml`; strategies are small TypeScript files registered by name. A persona's
-  capabilities (which tools, which delegate targets) resolve once and are enforced on every call.
-- **Decide, then do.** A council persona consults its ensemble through the `council` tool, gets a
-  ruling (winner + tally + recorded dissent), then **executes** it with its own tools and
-  re-convenes when execution raises a new decision — state → decision → execution.
-- **Model-aware.** A sub-agent `model` can be a loose name ("sonnet"): it resolves to your own
-  session provider's id (not a look-alike you're not logged into). `/models [query]` searches the
-  installed models; an ensemble runs its cores on *different* models for diverse blind spots.
+- **Sub-agents, sync or async** — delegate one or fan out many, each an isolated run with its own
+  model, skills, tools, and optional git-worktree isolation. Block for the result, or run
+  `async: true` in the background and collect later with `/peek` or `intercom wait`.
+- **Live supervision** — peek progress, steer a run mid-flight, hard-stop it; a `coaching` persona
+  adds a two-way bus where a child asks you a blocking `decision` and you reply. All under hard
+  limits (timeout, token budget, concurrency, max children) with cooperative abort.
+- **Composable strategies** — orchestration is small files over a Strategy SDK: fan-out, pipeline,
+  map, critic-loop, vote (`magi`), multi-round council, judge, synthesize, debate, pair, compete.
+  Adding one is a new file, not a core change.
+- **Dynamic specialization** — a generic `operator` becomes a specialist from the skills it loads
+  plus an on-the-fly `role` (extra system prompt at delegation time). A roster can specialize one
+  agent into several perspectives inline (`{ agent, role, model }`).
+- **Flows** — a declarative DAG over strategies (`*.flow.json`): phases wired by `needs`, fanning
+  out where independent, journaled so an interrupted flow resumes; `gate: true` pauses for approval.
+- **Live view** — one agent tree sticks above the input. `f9` (or `/agents`) opens an overlay: ↑↓
+  move, ⏎ read an agent's full chronological log, `x` stop, `s` steer.
 
 ## Concepts
 
@@ -78,12 +48,26 @@ whole system without touching the core.
 | **Strategy** | how a roster is orchestrated (vote, loop, rounds…) | `src/orchestration/strategies/*.ts` |
 | **Contract** | the structured shape a sub-agent returns (so votes tally) | `contracts/*.contract.json` |
 
+## How it works
+
+- **Two engines, one seam.** Sub-agents run in-process by default (a `createAgentSession` per
+  agent — fast, and steerable: you can inject a message into a running sub-agent). Set
+  `PI_PERSONA_ENGINE=child` to spawn each as an isolated `pi --mode json -p` process instead. Either
+  way pi-persona never re-spawns supervisors (no fork bombs), the same hard limits apply, and each
+  run's output `contract@hash` is pinned so a hot reload can't change a run mid-flight.
+- **Everything is data.** Personas and agents are Markdown + YAML frontmatter; teams are a
+  `teams.yaml`; strategies are small TypeScript files registered by name. A persona's capabilities
+  (which tools, which delegate targets) resolve once and are enforced on every call.
+- **Decide, then do.** A council persona consults its ensemble through the `council` tool, gets a
+  ruling (winner + tally + recorded dissent), then executes it with its own tools and re-convenes
+  when execution raises a new decision — state → decision → execution.
+- **Model-aware.** A loose `model` name ("sonnet") resolves to your own session provider's id (not a
+  look-alike you're not logged into); an ensemble runs its cores on *different* models for diverse
+  blind spots. `/models [query]` searches the installed models.
+
 ## Bundled personas, agents & teams
 
-None of these are installed automatically. Run **`/persona restore`** (or `/persona seed`) once to
-copy them into `~/.pi/agent/` so you can edit them or add your own (see
-[Keys & commands](#keys--commands)) — a fresh install has no personas until you opt in. Switch
-persona with **`f8`**.
+Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch persona with `f8`.
 
 **Personas** — the supervisor you become:
 
@@ -110,8 +94,8 @@ persona with **`f8`**.
 | `verifier` | Runs the project's build/tests; approves only when they pass green | read/bash |
 | `melchior` · `balthasar` · `casper` | The MAGI cores — Propulsore · Conservatore · Catalizzatore | read/grep/find |
 
-**Teams** (`teams.yaml`) — named rosters a strategy runs over. A member is a bare agent name **or**
-an inline `{ agent, role, model, skills }` map that specialises one agent (so `review` is one
+**Teams** (`teams.yaml`) — named rosters a strategy runs over. A member is a bare agent name or an
+inline `{ agent, role, model, skills }` map that specialises one agent (so `review` is one
 `reviewer` with three lens roles, not three files):
 
 | Team | Members | Used by |
@@ -121,15 +105,14 @@ an inline `{ agent, role, model, skills }` map that specialises one agent (so `r
 | `magi` | melchior, balthasar, casper | `magi` (self-vote) and `judge` (arbiter picks) |
 | `swarm` | scout (splitter), operator (worker) | `swarm` (map) |
 
-## Building blocks — the core API
+## Core API
 
-Everything above is composed from a small, fixed set of primitives. A **strategy** is just a
-TypeScript file composing the **Strategy SDK**; a **persona** picks whether and how those run.
-`magi` is nothing more than a `.md` persona + a file that calls `parallel` + `reduce.vote` — and
-`judge`, `verify`, `map`, … would be exactly the same: new *files* on this API, **no new
-core needed**.
+Everything above is composed from a small, fixed set of primitives. A strategy is a TypeScript file
+composing the **Strategy SDK**; a persona picks whether and how those run. `magi` is nothing more
+than a `.md` persona + a file that calls `parallel` + `reduce.vote` — and `judge`, `map`, … are the
+same: new *files* on this API, no new core.
 
-**Strategy SDK** — what a strategy file composes (`src/orchestration/sdk.ts`):
+**Strategy SDK** (`src/orchestration/sdk.ts`) — what a strategy file composes:
 
 | Primitive | Does |
 |---|---|
@@ -137,7 +120,7 @@ core needed**.
 | `parallel(thunks, {concurrency})` | run **many at once**, bounded by the run limits. Also the basis of "map": `parallel(items.map(…))` |
 | `reduce.aggregate(results)` | merge N results into one (used by fan-out) |
 | `reduce.vote(candidates, opts)` | tally the candidates' **own** votes → `winner / tie / no_consensus / invalid_outputs`, dissent preserved |
-| `reduce.judge(candidates, order?)` | anonymise + label N candidates for an **impartial judge** (§4.3): run `agent(judge, {task: ballot})`, then map the verdict back with `pick(label)` |
+| `reduce.judge(candidates, order?)` | anonymise + label N candidates for an **impartial judge**: run `agent(judge, {task: ballot})`, then map the verdict back with `pick(label)` |
 | `roster.team(name)` | the agents of a named team |
 | `signal` · `limits` · `log` | cooperative abort · the hard ceilings (children/concurrency/budget/timeout) · progress |
 | *series & loops* | plain `await` / `for` — strategies are TS, so they sequence and iterate natively (that is all `pipeline` and `critic-loop` are) |
@@ -146,15 +129,15 @@ core needed**.
 
 | Surface | Does |
 |---|---|
-| `delegate` tool | spawn sub-agent(s): **single or parallel** × **sync** (blocks the turn) or **async** (background; result returns as a follow-up) |
+| `delegate` tool | spawn sub-agent(s): single or parallel × sync (blocks the turn) or async (background; result returns as a follow-up) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
-| `intercom` tool | interact with running sub-agents: **`peek`** (watch) · **`wait`** (join — block until async run(s) settle and collect the results) · **`steer`** (soft redirect) · **`stop`** (hard-abort) work for **any** persona on async runs; **`list`/`inbox`/`reply`/`send`** are the coaching message bus (paired with each child's `contact_supervisor`) |
-| `flow` tool · `/flow` | run a **DAG** of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a **checkpoint** (approve before its dependents run) |
-| persona `mode:` | `solo` (opportunistic — the LLM delegates by judgement) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
-| persona `coaching:` | opt into the comm plane — a `coaching: on` persona gives its children a `contact_supervisor` tool so they report progress / ask blocking decisions while they run (async) |
-| `isolation: worktree` | an agent (frontmatter) or a `delegate` task runs in a throwaway **git worktree** — its edits/tests never touch the main tree, and it's force-removed after |
+| `intercom` tool | interact with running sub-agents: `peek` (watch) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (hard-abort) work for **any** persona; `list`/`inbox`/`reply`/`send` are the coaching message bus |
+| `flow` tool · `/flow` | run a DAG of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a checkpoint (approve before its dependents run) |
+| persona `mode:` | `solo` (opportunistic) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
+| persona `coaching:` | opt into the comm plane — children get a `contact_supervisor` tool to report progress / ask blocking decisions while they run (async) |
+| `isolation: worktree` | an agent (frontmatter) or a `delegate` task runs in a throwaway git worktree — edits/tests never touch the main tree, force-removed after |
 | `council: { preset: <name> }` | expand a `presets/<name>.preset.json` (strategy/roster/params) so persona files stay light — authored fields override |
-| `contracts/<name>.contract.json` | a hot-editable structured-return contract, requested by name via `outputContract`, **pinned per run** so a mid-run edit can't change behaviour |
+| `contracts/<name>.contract.json` | a hot-editable structured-return contract, requested by name via `outputContract`, pinned per run |
 
 **Built-in strategies** (files on the SDK above):
 
@@ -162,81 +145,51 @@ core needed**.
 |---|---|---|
 | `fanout` | parallel — every roster agent on the same task, aggregated | *(none)* |
 | `pipeline` | series / chain — each agent builds on the previous one's output | *(none)* |
-| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated (opt-in live cross-talk between workers via `params: { peers: true }`) | `maxItems` · the run's `maxChildren` · `peers` · `false` |
-| `critic-loop` | generator → critic → revise, until the critic stops rejecting | `generator` · roster member 0 · `critic` · roster member 1 · `rounds` · `3` |
-| `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure independent poll) | `aggregate` · `"majority"` · `reflect` · `true` |
-| `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) | `rounds` · `3` · `bestOf` · majority of the roster · `aggregate` · `"majority"` |
-| `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it | `bestOf` · majority of the roster · `aggregate` · `"majority"` |
+| `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated (opt-in live cross-talk via `params: { peers: true }`) | `maxItems` · the run's `maxChildren` · `peers` · `false` |
+| `critic-loop` | generator → critic → revise, until the critic stops rejecting | `generator` · roster[0] · `critic` · roster[1] · `rounds` · `3` |
+| `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure poll) | `aggregate` · `"majority"` · `reflect` · `true` |
+| `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) | `rounds` · `3` · `bestOf` · majority of roster · `aggregate` · `"majority"` |
+| `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it | `bestOf` · majority of roster · `aggregate` · `"majority"` |
 | `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) | `judge` · *(required)* · `contract` · none |
-| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks) (opt-in live cross-talk between gatherers via `params: { peers: true }`) | `synthesizer` · first roster agent · `peers` · `false` |
-| `pair` | driver executes while a navigator inspects the same ground live: risk checklist up front, corrections per milestone, final review attached (peer-to-peer) | *(none)* |
-| `compete` | N competitors implement the same task in isolated git worktrees; a blind judge picks; the winner is returned as a unified diff for the supervisor to apply (requires a git repo) | `judge` · *(required)* · `ballotDiffChars` · `6000` |
+| `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into one coherent answer (opt-in live cross-talk via `params: { peers: true }`) | `synthesizer` · first roster agent · `peers` · `false` |
+| `pair` | driver executes while a navigator inspects the same ground live: risk checklist up front, corrections per milestone, final review (peer-to-peer) | *(none)* |
+| `compete` | N competitors implement the same task in isolated git worktrees; a blind judge picks; the winner returns as a unified diff to apply (requires a git repo) | `judge` · *(required)* · `ballotDiffChars` · `6000` |
 
-Params are declared per strategy (`src/orchestration/strategies/*.ts`) and looked up by `knownParams()`
-so this table and the code can't drift; `/doctor` lists the same schema live. Unknown param keys only
-**warn**, never hard-fail — strategies are trusted project code, so a correct call is behaviourally
-unchanged.
+Params are declared per strategy and looked up by `knownParams()` so this table and the code can't
+drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, never hard-fail.
 
-**Where a new shape lives** (core vs file vs config — nothing hidden):
-- `judge`, `map`, `pipeline`, `critic-loop`, … → **strategy files** on the SDK. Adding one needs no core change.
-- `verify` → **persona config**: it's `critic-loop` whose critic is a **`verifier` agent** that *runs* the build/tests (`personas/verify.md` + `agents/verifier.md`, team `repair: [operator, verifier]`). Ground truth gates acceptance, not an opinion.
-- a **chain** persona → just point a persona's `council` at the `pipeline` strategy over a roster (the cores build on each other instead of voting in parallel) — no code.
-- a **debate** persona → point `council` at the built-in `debate` strategy (2+ members exchange positions live, peer-to-peer, then a majority vote) — no code.
+**Supervising running sub-agents** — two layers, deliberately separate:
 
-Only `reduce.judge` extended the **core** (the §4.3 anonymise-for-judge helper) — everything else is a file or persona on top of it.
-
-**Watching, steering, and talking to running sub-agents.** Two layers, deliberately separate:
-
-- **Observe / join / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }` watches
-  your async sub-agents; `wait` **joins** them (blocks until they settle and returns their results — for when
-  an async result is now needed before the next step); `steer` injects a soft course-correction; `stop`
-  **hard-aborts** one (a steer is only a request the child may ignore). The `f9` overlay does the same by
-  hand (`s` steer, `x` stop the selected agent).
+- **Observe / join / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }`
+  watches your async sub-agents; `wait` **joins** them (blocks until they settle, returns results);
+  `steer` injects a soft course-correction; `stop` **hard-aborts** one (a steer is only a request the
+  child may ignore). The `f9` overlay does the same by hand (`s` steer, `x` stop).
 - **Message bus — needs `coaching: on`** (every delegating supervisor has it). Children get a
-  **`contact_supervisor`** tool to *reach you*: `progress` updates surface in the result / `intercom inbox`,
-  and a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision is
-  cost-aware — the supervisor spends nothing until a child wakes it (or a periodic peek, if `PI_PERSONA_PEEK_MS` is set).
-  Your own `intercom send` now reaches a still-running child too, steered into its session mid-turn.
-  Strategies can also opt a run into **sibling peer comm**: `debate` and `pair` members always get
-  a `contact_peer` tool to message each other directly (one-way, no cross-child blocking); `map` and
-  `synthesize` add it only when convened with `params: { peers: true }` (workers/gatherers stay
-  independent by default).
-- **Cross-process broker (opt-in, `PI_PERSONA_BROKER=1`)** extends both of the above — steer and the
-  comm plane (`contact_supervisor` / `contact_peer` / `intercom steer`) — to sub-agents that don't run
-  in-process: `PI_PERSONA_ENGINE=child` runs and every `isolation: worktree` leg. Off by default;
-  design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
+  `contact_supervisor` tool to *reach you*: `progress` surfaces in the result / `intercom inbox`, and
+  a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision
+  is cost-aware — nothing is spent until a child wakes you (or a periodic peek, if
+  `PI_PERSONA_PEEK_MS` is set). Strategies can also opt a run into **sibling peer comm**: `debate`
+  and `pair` members always get a `contact_peer` tool to message each other (one-way, no cross-child
+  blocking); `map` and `synthesize` add it only with `params: { peers: true }`.
+- **Cross-process broker — opt-in, `PI_PERSONA_BROKER=1`.** Extends both layers (steer + the comm
+  plane) to sub-agents that don't run in-process: `PI_PERSONA_ENGINE=child` runs and every
+  `isolation: worktree` leg (which always uses the child engine). A session-scoped relay (POSIX
+  socket / Windows named pipe) connects the child straight into your supervisor surface. Off by
+  default — nothing changes unless you set it. Design:
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 
-## Write your own
+> **MCP in sub-agents.** A sub-agent runs its own fresh session and does **not** share the
+> supervisor's MCP connection — an in-process sub-agent gets no MCP at all (its `mcp*` tools appear
+> but return "not initialized"). Treat MCP as a supervisor capability: do the MCP work up top and
+> hand sub-agents the resulting artifacts, or route an MCP-driving leg through the child engine
+> (its own separate MCP session). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Copy a bundled file from `~/.pi/agent/agents/` and edit it, or drop a new `.md`: it's a **persona**
-if its frontmatter has `persona: true`, otherwise an **agent**. Project (`.pi/`) overrides user
-overrides builtin, so your copy always wins.
+## Recipes
 
-**A persona** (the supervisor you become) — `name`, `label`, `persona: true`, `description`, and a
-body (the supervisor system prompt). Choose *how it works*:
+Everything below is data — drop the files in (discovery: builtin < `~/.pi/agent/` < project `.pi/`)
+and switch persona with `f8`. Only a brand-new strategy *shape* touches code (last note).
 
-- **nothing** → *opportunistic*: the LLM delegates by judgement when a task has independent parts
-  ("research X, Y, Z" spawns one sub-agent per search).
-- `council: { strategy, roster, params }` → *tool-driven*: convene the council on demand, then
-  execute the ruling and re-convene.
-- `orchestration: { mode: parallel|pipeline|strategy, strategy, roster }` → *mandatory*: the strategy
-  runs automatically every turn.
-
-`strategy` is one of the **built-in strategies** (table above). Optional fields: `coaching: true`,
-`model`, `thinking`, `delegate: { allow|deny: [...] }`, `systemPromptMode: append|replace`,
-`council: { preset: <name> }`.
-
-**An agent** (a worker you delegate to) — `name`, `description` (the routing signal that says when to
-use it), `tools: [read, grep, …]` (least-privilege; omit to inherit all), optional `model` and
-`isolation: worktree`, and a body (the agent's prompt). Reference it from a `teams.yaml` roster, or
-delegate to it directly. The recipes below show each shape end-to-end.
-
-## Examples
-
-Everything below is **data** — drop the files in (discovery: builtin < `~/.pi/agent/` < project
-`.pi/`) and switch persona with **`f8`**. Code is needed only to add a brand-new strategy *shape* (last note).
-
-**1 · Opportunistic delegation** — the simplest persona, no orchestration block. The supervisor
+**Opportunistic delegation** — the simplest persona, no orchestration block. The supervisor
 delegates by judgement; "research X, Y and Z" fans out one sub-agent per item in a single call.
 
 ```markdown
@@ -249,32 +202,48 @@ You research thoroughly. For independent sub-questions, fan out `scout` sub-agen
 `delegate` call (`tasks: [...]`), each with a disjoint scope, then synthesize their findings.
 ```
 
-**2 · A review council** — convene biased cores in parallel through the `council` tool, then act
-on the ruling. Swap `strategy` for `critic-loop` (generator↔critic, like `verify`) or
-`council-rounds` (multi-round vote) without touching code.
+**A review council + a per-call override** — `council: { strategy, roster, params }` is the
+persona's *default* deliberation; the `council` tool's own args override it for one call, no file
+edit. Swap `strategy` for `critic-loop`, `council-rounds`, `debate`, … without touching code.
 
 ```yaml
-# teams.yaml — one `reviewer` agent, three lens roles (a member can specialise one agent inline)
+# teams.yaml — one `reviewer` agent, three lens roles (a member specialises one agent inline)
 review:
   - { agent: reviewer, role: "Focus ONLY on the SECURITY lens" }
   - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens" }
   - { agent: reviewer, role: "Focus ONLY on the TESTS lens" }
 ```
 ```markdown
-<!-- personas/myaudit.md  (the bundled `audit` persona is exactly this shape) -->
+<!-- personas/myaudit.md  (the bundled `audit` persona is exactly this) -->
 ---
 name: myaudit
 persona: true
-# three lens-focused reviewer passes in parallel, then one synthesiser merges them into a
-# single de-duplicated verdict (fanout would only concatenate).
+# three lens passes in parallel, then one synthesiser merges them into a de-duplicated verdict
 council: { strategy: synthesize, roster: review, params: { synthesizer: reviewer } }
 ---
 Convene the council before sign-off, then apply its merged findings yourself.
 ```
+```js
+// one-off: run THIS decision as a debate over the review roster, best-of-2 — no file edit.
+council({ question: "cache this or recompute?", strategy: "debate", roster: "review", params: { bestOf: 2 } })
+```
 
-**3 · Coaching** — talk to sub-agents *while they run*. The bundled delegating supervisors
-(`elite`, `dev`, …) already have it; add `coaching: true` to any persona of your own to give its
-children a `contact_supervisor` tool, then read/answer with `intercom`.
+**A mandatory-orchestration persona** — `orchestration: { mode: strategy, … }` runs the strategy
+automatically every turn (the LLM can't opt out) and folds the result into the prompt. Use
+`council:` instead when it should run only on demand.
+
+```markdown
+<!-- personas/myguard.md -->
+---
+name: myguard
+persona: true
+orchestration: { mode: strategy, strategy: magi, roster: magi, params: { reflect: false } }
+---
+Every turn is decided by the MAGI triarchy first (no reflection round); you present and act on it.
+```
+
+**Coaching** — talk to sub-agents *while they run*. The bundled supervisors already have it; add
+`coaching: true` to give children a `contact_supervisor` tool, then read/answer with `intercom`.
 
 ```markdown
 <!-- personas/mylead.md -->
@@ -285,11 +254,27 @@ coaching: true
 ---
 Delegate with `async: true` and tell each sub-agent to report progress and ask blocking
 `decision`s via `contact_supervisor`; use `intercom inbox` to read and `intercom reply` to answer.
-(`peek`/`steer`/`stop` work for any persona — coaching only adds the message bus.)
 ```
 
-**4 · A flow with a human checkpoint** — a DAG over strategies; `gate: true` pauses for your
-approval before dependents run. Journaled, so an interrupted run resumes. Run `/flow gated-build "<task>"`.
+**A custom agent** — `tools` (least-privilege; omit to inherit all), `model`, `isolation: worktree`
+in the frontmatter; the body is the prompt. `name`/`description` are what a supervisor's `delegate`
+sees when picking it.
+
+```markdown
+<!-- agents/hardener.md -->
+---
+name: hardener
+description: Locks down a change's security posture — authz, input validation, secrets handling.
+tools: [read, grep, edit, bash]
+model: opus
+isolation: worktree
+---
+You are the Hardener. Given a diff or area, find and FIX authz/access-control gaps, injection and
+unsafe-sink risks, secrets/token mishandling, and missing input validation. Cite `file:line`.
+```
+
+**A flow with a human checkpoint** — a DAG over strategies; `gate: true` pauses for approval before
+dependents run. Journaled, so an interrupted run resumes. Run `/flow gated-build "<task>"`.
 
 ```json
 // flows/gated-build.flow.json
@@ -303,8 +288,8 @@ approval before dependents run. Journaled, so an interrupted run resumes. Run `/
 }
 ```
 
-**5 · A structured-return contract** — so votes/judges tally mechanically. Drop a JSON file; a
-strategy requests it by name via `outputContract`, and it's pinned per run.
+**A structured-return contract** — so votes/judges tally mechanically. Drop a JSON file; a strategy
+requests it by name via `outputContract`, and it's pinned per run.
 
 ```json
 // contracts/ship-verdict.contract.json
@@ -316,23 +301,7 @@ strategy requests it by name via `outputContract`, and it's pinned per run.
   } }
 ```
 
-**6 · Isolated work in a throwaway git worktree** — edits/tests never touch your tree; the
-worktree is force-removed after. Per agent (frontmatter) or per `delegate` call:
-
-```markdown
-<!-- agents/sandbox.md -->
----
-name: sandbox
-isolation: worktree
-tools: [read, write, bash]
----
-```
-```js
-// …or ad-hoc, in a delegate tool call:
-{ agent: "operator", isolation: "worktree", task: "try the risky refactor and report if tests pass" }
-```
-
-**7 · A preset keeps persona files to one line** — it expands a `*.preset.json`; authored fields override.
+**A preset keeps persona files to one line** — it expands a `*.preset.json`; authored fields override.
 
 ```json
 // presets/magi-rounds.preset.json
@@ -343,109 +312,25 @@ tools: [read, write, bash]
 council: { preset: magi-rounds }
 ```
 
-**The only case that touches code:** a brand-new strategy *shape* (a new vote rule, a custom loop).
+**Each strategy in one runnable line** — point any council-driven persona's `council` call at these:
+
+```js
+council({ question: "adopt library X or hand-roll it?", strategy: "debate",  roster: "review" })
+council({ question: "implement the rate limiter",       strategy: "pair",    roster: "repair" })
+council({ question: "optimize this hot loop",           strategy: "compete", roster: "build",  params: { judge: "reviewer" } })
+council({ question: "port src/legacy to the new SDK",   strategy: "map",     roster: "swarm",  params: { peers: true } })
+council({ question: "audit this change",                strategy: "synthesize", roster: "review", params: { synthesizer: "reviewer", peers: true } })
+```
+
+**The only case that touches code** — a brand-new strategy *shape* (a new vote rule, a custom loop).
 Drop a `src/orchestration/strategies/<name>.ts` using the same `agent` / `parallel` / `reduce.*` SDK,
 register it, and name it in any persona's `council:` block. Everything else above is data.
 
-## Authoring
-
-More copy-paste recipes, one shape each. All still just files under `~/.pi/agent/` (or project `.pi/`).
-
-**A new agent** — `tools`, `model`, and `isolation: worktree` in the frontmatter; the body is the
-agent's prompt. `name`/`description` are what a supervisor's `delegate` sees when picking it.
-
-```markdown
-<!-- agents/hardener.md -->
----
-name: hardener
-description: Locks down a change's security posture — authz, input validation, secrets handling.
-tools: [read, grep, edit, bash]
-model: opus
-isolation: worktree
----
-You are the Hardener. Given a diff or area, find and FIX authz/access-control gaps, injection and
-unsafe-sink risks, secrets/token mishandling, and missing input validation. Edit in place, then
-report what you changed and why — cite `file:line` for each fix.
-```
-
-**A council persona, plus a per-call override** — `council: { strategy, roster, params }` picks the
-persona's *default* deliberation; the `council` tool's own `strategy` / `roster` / `params` args
-override it for one call without touching the file (see [per-call params](#write-your-own)).
-
-```markdown
-<!-- personas/mycouncil.md -->
----
-name: mycouncil
-persona: true
-council: { strategy: magi, roster: magi, params: { reflect: false } }
----
-Convene the council before any significant choice, then execute the ruling yourself.
-```
-
-```js
-// one-off: run THIS decision as a `debate` over the `review` roster, best-of-2, instead of the
-// persona's default magi/magi — no file edit needed.
-council({ question: "should we cache this or recompute?", strategy: "debate", roster: "review", params: { bestOf: 2 } })
-```
-
-**A mandatory-orchestration persona** — `orchestration: { mode: strategy, strategy, roster, params }`
-runs the strategy **automatically on every turn** (the LLM can't opt out), and its result is folded
-into the prompt before the supervisor answers. Use `council:` instead when the strategy should run
-only on demand.
-
-```markdown
-<!-- personas/myguard.md -->
----
-name: myguard
-persona: true
-orchestration: { mode: strategy, strategy: magi, roster: magi, params: { reflect: false } }
----
-Every turn is decided by the MAGI triarchy first (no reflection round); you present and act on
-its ruling.
-```
-
-**A `teams.yaml` roster** — a bare agent name, or the inline ensemble form
-`{ agent, role, model, skills }` that specialises ONE agent into several perspectives:
-
-```yaml
-# teams.yaml
-hardening:
-  - hardener
-  - { agent: reviewer, role: "Focus ONLY on the SECURITY lens", model: "sonnet" }
-```
-
-**Each new strategy, one runnable line** — point any council-driven persona's `council` tool call
-(or a persona's `council:` block) at these:
-
-```js
-// debate — 2+ members exchange positions live, then a majority vote settles it
-council({ question: "adopt library X or hand-roll it?", strategy: "debate", roster: "review" })
-
-// pair — a driver executes while a navigator inspects the same ground live
-council({ question: "implement the rate limiter", strategy: "pair", roster: "repair" })
-
-// compete — N competitors race the same task in isolated worktrees; a blind judge picks the diff
-council({ question: "optimize this hot loop", strategy: "compete", roster: "build", params: { judge: "reviewer" } })
-
-// map — splitter + parallel workers, with live cross-talk between them (off by default)
-council({ question: "port every module in src/legacy to the new SDK", strategy: "map", roster: "swarm", params: { peers: true } })
-
-// synthesize — parallel gatherers merged by one synthesiser, with live cross-talk (off by default)
-council({ question: "audit this change", strategy: "synthesize", roster: "review", params: { synthesizer: "reviewer", peers: true } })
-```
-
 ## Keys & commands
 
-- **`f8`** cycle persona · **`f9`** / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
+- `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (opt in to first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (opt in to the cross-process comm plane + steer for child-process/worktree sub-agents; off by default)
-
-**Opt-in, and your copies win.** Personas/agents are **not installed automatically** — a fresh
-install shows none. Run `/persona seed` to copy the bundled defaults into `~/.pi/agent/` (or
-`/persona restore` to force-overwrite them back to the originals); the bundled dir is only the
-seed source, so nothing loads until you install it. Once installed you **edit them and add your
-own** — the supervisor runs your copies (project `.pi/agents` and your user dir; set
-`PI_PERSONA_SEED=on` if you want the first-run auto-install instead).
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (periodic idle peek)
 
 ## Develop
 
@@ -455,7 +340,7 @@ npm run typecheck   # strict tsc --noEmit
 npm test            # node --test
 ```
 
-Design notes (binding) live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the design contract)
+Binding design notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the design contract)
 and [`docs/STRATEGIES.md`](docs/STRATEGIES.md) (the orchestration layer, in depth).
 
 ## License
