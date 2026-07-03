@@ -102,6 +102,21 @@ test("runChildAgent caps retained stderr and marks it truncated", async () => {
 	assert.match(r.stderr, /\[stderr truncated\]/);
 });
 
+test("runChildAgent hard-caps an actively-emitting child the idle window would never catch", async () => {
+	// [drip] emits every 150ms, (re)arming the idle clock forever — so a long idle timeoutMs
+	// never fires. Only the total-lifetime hard cap can stop a busy-but-non-converging child.
+	const r = await runChildAgent({ task: "busy [drip]" }, undefined, {
+		resolveInvocation: resolveFake,
+		killGraceMs: 200,
+		timeoutMs: 5_000, // idle window: long → does NOT fire here
+		hardTimeoutMs: 250, // total lifetime cap → fires despite the drip
+	});
+	assert.equal(r.timedOut, true, "the hard cap is reported as a timeout-class death");
+	assert.equal(r.aborted, false, "a hard cap is NOT an external abort");
+	assert.equal(r.ok, false);
+	assert.match(r.errorMessage ?? "", /hard cap/);
+});
+
 test("the timeout is idle-based — a child that keeps emitting is NOT killed (total runtime > the window)", async () => {
 	// Window vs fixture: [drip] emits at 0ms then every 150ms until ~600ms — each gap
 	// (150ms) sits well under the 500ms window while the total run exceeds it. The

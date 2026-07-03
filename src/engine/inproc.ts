@@ -96,6 +96,11 @@ export interface InProcessDeps {
 	 *  Ignored when `coaching` + `allowBlocking` — a child legitimately blocked on a
 	 *  supervisor reply (bus ask, 10-minute timeout) emits nothing and must not be killed. */
 	timeoutMs?: number;
+	/** HARD wall-clock cap (ms): a definite lifetime ceiling, armed ONCE and never reset by
+	 *  events — so it catches a busy-but-non-converging child (a loop that keeps emitting) that
+	 *  the idle watchdog, which any event re-arms, never would. 0/absent = no cap. Also skipped
+	 *  for a `coaching` + `allowBlocking` child (it may legitimately block a long time on a reply). */
+	hardTimeoutMs?: number;
 }
 
 // The sub-agent must never re-enter the supervisor's orchestration surface.
@@ -306,7 +311,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// DEFAULT engine would await `waitForIdle()` forever and the run would never settle.
 			// Any event re-arms the clock, so a long-but-active agent is never killed. Disabled
 			// for coaching children that may block on a supervisor reply (see InProcessDeps).
-			const watchdogMs = deps.coaching && (deps.allowBlocking ?? false) ? 0 : (deps.timeoutMs ?? 0);
+			const blockingChild = deps.coaching && (deps.allowBlocking ?? false);
+			const watchdogMs = blockingChild ? 0 : (deps.timeoutMs ?? 0);
 			let timedOut = false;
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
 			const disarmIdle = (): void => {
@@ -323,6 +329,29 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					session.agent.abort();
 				}, watchdogMs);
 				idleTimer.unref?.();
+			};
+
+			// Hard wall-clock cap: armed ONCE, never reset by events — a definite lifetime ceiling
+			// that settles a busy-but-non-converging child (a loop that keeps emitting) the idle
+			// watchdog above never catches. Unlike the idle watchdog it is NOT exempted for a
+			// blocking child: it caps total lifetime, not silence, so a child that never returns
+			// (even one stuck waiting on a reply that never comes) still settles by a known deadline.
+			const hardMs = deps.hardTimeoutMs ?? 0;
+			let hardTimedOut = false;
+			let hardTimer: ReturnType<typeof setTimeout> | undefined;
+			const armHard = (): void => {
+				if (hardMs <= 0) return;
+				hardTimer = setTimeout(() => {
+					hardTimedOut = true;
+					session.agent.abort();
+				}, hardMs);
+				hardTimer.unref?.();
+			};
+			const disarmHard = (): void => {
+				if (hardTimer) {
+					clearTimeout(hardTimer);
+					hardTimer = undefined;
+				}
 			};
 
 			const unsub = session.subscribe((ev) => {
@@ -412,12 +441,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let thrownError: string | undefined;
 			try {
 				armIdle(); // start the idle clock (reset on every session event)
+				armHard(); // start the lifetime ceiling (never reset)
 				await session.prompt(task);
 				await session.agent.waitForIdle();
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
 			} finally {
 				disarmIdle();
+				disarmHard();
 				if (signal) signal.removeEventListener("abort", onAbort);
 				unsubBridge?.();
 				if (childHandle) peerLabels.delete(childHandle);
@@ -426,17 +457,18 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				session.dispose();
 			}
 
-			const ok = !aborted && !timedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
+			const ok = !aborted && !timedOut && !hardTimedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
 			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+			else if (hardTimedOut) result.error = `${tag} agent exceeded the ${hardMs}ms hard cap${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
 			// Classify the failure so the fallback decorator can reroute ONLY provider errors
-			// (a thrown API rejection or a stream `error`), never an abort/timeout/agent miss.
-			if (!ok) result.failureKind = timedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
+			// (a thrown API rejection or a stream `error`), never an abort/timeout/hard-cap/agent miss.
+			if (!ok) result.failureKind = timedOut || hardTimedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
 
 			if (contractDef) {
 				const v = parseAndValidate(state.output, contractDef);

@@ -20,6 +20,10 @@ export interface AsyncRun {
 	progress: ProgressSnapshot;
 	result?: AgentResult;
 	error?: string;
+	/** Clock (ms) of the last time `progress` actually *advanced* (output grew, or turns/tokens
+	 *  rose) — NOT merely the last event. A worker looping without headway keeps emitting but
+	 *  never bumps this, so `now - lastAdvanceAt` is what tells "working" from "stuck". */
+	lastAdvanceAt?: number;
 }
 
 /** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
@@ -30,6 +34,12 @@ export class AsyncRunTracker {
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
 	private seq = 0;
 	private readonly maxRetained = 25;
+	private readonly now: () => number;
+
+	/** `now` is injected so the stall clock is deterministic under test (real time by default). */
+	constructor(opts?: { now?: () => number }) {
+		this.now = opts?.now ?? ((): number => Date.now());
+	}
 
 	launch(meta: { agent: string; task: string }, run: RunThunk): string {
 		this.seq += 1;
@@ -40,6 +50,7 @@ export class AsyncRunTracker {
 			task: meta.task,
 			status: "running",
 			progress: { output: "", turns: 0, tokens: 0 },
+			lastAdvanceAt: this.now(),
 		};
 		this.runs.set(id, entry);
 
@@ -54,6 +65,12 @@ export class AsyncRunTracker {
 		try {
 			Promise.resolve(
 				run((s) => {
+					// Only a REAL advance (more output, or a higher turn/token count) resets the stall
+					// clock — a repeated identical snapshot from a spinning worker must not mask a stall.
+					const prev = entry.progress;
+					if (s.output.length > prev.output.length || s.tokens > prev.tokens || s.turns > prev.turns) {
+						entry.lastAdvanceAt = this.now();
+					}
 					entry.progress = s;
 				}, id),
 			)
@@ -136,13 +153,27 @@ export class AsyncRunTracker {
 	}
 }
 
-/** A compact ProgressView digest of async runs (for /peek and the periodic peek). */
-export function buildPeekDigest(runs: AsyncRun[]): string {
+/**
+ * A compact ProgressView digest of async runs (for /peek and the periodic peek). When `opts`
+ * carries the current clock + a stall window, a RUNNING run that hasn't advanced within that
+ * window is flagged "possibly stuck" — the signal the heartbeat surfaces so the (idle) supervisor
+ * can coach/steer/stop a wedged worker instead of waiting forever for a completion that won't come.
+ */
+export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
+	const now = opts?.now;
+	const stallMs = opts?.stallMs;
 	const lines = runs.map((r) => {
 		const head = `[${r.id}] ${r.agent} — ${r.status}`;
-		if (r.status === "running") return `${head} (${r.progress.turns} turns, ${r.progress.tokens} tok)`;
+		if (r.status === "running") {
+			let line = `${head} (${r.progress.turns} turns, ${r.progress.tokens} tok)`;
+			if (now !== undefined && stallMs !== undefined && stallMs > 0 && r.lastAdvanceAt !== undefined) {
+				const stalledFor = now - r.lastAdvanceAt;
+				if (stalledFor >= stallMs) line += ` ⚠ possibly stuck (no progress for ${Math.round(stalledFor / 1000)}s)`;
+			}
+			return line;
+		}
 		// A failed run's WHY is its error, not its (usually empty) output.
 		if (r.status === "failed") return `${head}${r.error ? `: ${r.error}` : ""}`;
 		if (r.result) return `${head}: ${r.result.output.slice(0, 80).replace(/\s+/g, " ")}`;
