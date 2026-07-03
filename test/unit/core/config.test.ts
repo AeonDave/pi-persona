@@ -37,6 +37,13 @@ test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 60
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "-5" }).agentHardTimeoutMs, 600_000, "negative ⇒ default");
 });
 
+test("PI_PERSONA_NUDGE=off disables the delegation nudge (default on)", () => {
+	assert.equal(resolveConfig({}).nudge, true, "the delegation nudge is on by default");
+	assert.equal(resolveConfig({ PI_PERSONA_NUDGE: "off" }).nudge, false, "explicit off opts out");
+	assert.equal(resolveConfig({ PI_PERSONA_NUDGE: "OFF" }).nudge, false, "case-insensitive");
+	assert.equal(resolveConfig({ PI_PERSONA_NUDGE: "on" }).nudge, true);
+});
+
 test("PI_PERSONA_DISABLE (any non-empty value) disables the extension", () => {
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "1" }).disabled, true);
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "" }).disabled, false);

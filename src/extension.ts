@@ -28,6 +28,7 @@ import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import { seedDefaults, type SeedResult } from "./core/seed.ts";
 import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
+import { DelegationNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
@@ -130,6 +131,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
+	// Delegation nudge: watches the supervisor's OWN tool-result stream and reminds it to hand off
+	// when it grinds heavy work by hand (config.nudge; gated to delegating personas at the hook).
+	const delegationNudge = new DelegationNudge();
 	// node id → abort that one agent (so the overlay can STOP a single sub-agent).
 	const stopRegistry = new Map<string, () => void>();
 	const clearStops = (prefix: string): void => {
@@ -946,6 +950,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
+		delegationNudge.reset(); // a fresh session starts with a clean hand-grinding streak
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
 		if (config.seed && !existsSync(seedMarker())) {
@@ -1016,6 +1021,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event, ctx) => {
 		lastCtx = ctx;
 		return controller.gate(event.toolName, event.input);
+	});
+
+	// Delegation nudge (config.nudge; delegating personas only): when the supervisor grinds heavy
+	// work by hand — burning context without a hand-off — append a reminder to the offending tool's
+	// result. It lands in RECENT context, on the very command that burned it, where a top-of-prompt
+	// persona directive has already lost its pull. Sub-agents run in their own sessions, so this hook
+	// only ever sees the SUPERVISOR's own tools. A `delegate`/`council` result resets the streak.
+	pi.on("tool_result", (event, ctx) => {
+		lastCtx = ctx;
+		if (!config.nudge) return undefined;
+		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
+		if (!controller.capabilities?.tools.has("delegate")) return undefined;
+		const size = event.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0);
+		const note = delegationNudge.observe(event.toolName, size);
+		if (!note) return undefined;
+		return { content: [...event.content, { type: "text", text: note }] };
 	});
 
 	// Mandatory orchestration: when the active persona declares a strategy/parallel/

@@ -68,6 +68,12 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   the pending completion follow-up so they are never double-reported).
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
+- **Delegation nudge** (`core/nudge.ts`, `config.nudge`, on unless `PI_PERSONA_NUDGE=off`): a
+  `tool_result` hook watches the supervisor's OWN tool stream and, when a delegating persona grinds
+  heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold), APPENDS a
+  reminder to that command's result — runtime reinforcement in recent context, where a top-of-prompt
+  persona directive has decayed. Pure state machine (`DelegationNudge`); gated to personas holding the
+  `delegate` tool; sub-agents run in separate sessions so the hook only sees the supervisor.
 - **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
   (`AgentRunSpec.peers` — the `debate` strategy does). The child gets a `contact_peer` tool
   (`bus/peers.ts`): `list`/`send`, ONE-WAY only (blocking stays supervisor-only, so peers can

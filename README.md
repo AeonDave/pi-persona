@@ -171,6 +171,11 @@ drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, n
   can steer/stop it even when no completion has fired. Strategies can also opt a run into **sibling peer comm**: `debate`
   and `pair` members always get a `contact_peer` tool to message each other (one-way, no cross-child
   blocking); `map` and `synthesize` add it only with `params: { peers: true }`.
+- **Delegation nudge — on by default.** The mirror of the wakeup: it watches the *supervisor's own*
+  tool stream and, when a delegating persona grinds heavy work by hand (burns context without a
+  hand-off), appends a one-line reminder to that command's result — where it lands in recent context,
+  unlike a top-of-prompt persona directive that has lost its pull. A `delegate`/`council` resets the
+  streak; `PI_PERSONA_NUDGE=off` silences it.
 - **Cross-process broker — opt-in, `PI_PERSONA_BROKER=1`.** Extends both layers (steer + the comm
   plane) to sub-agents that don't run in-process: `PI_PERSONA_ENGINE=child` runs and every
   `isolation: worktree` leg (which always uses the child engine). A session-scoped relay (POSIX
@@ -330,7 +335,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (timed supervisor wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; default 600000, `0` disables)
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (timed supervisor wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; default 600000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable the delegation nudge; on by default)
 
 ## Develop
 
