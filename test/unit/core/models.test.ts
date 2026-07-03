@@ -38,18 +38,43 @@ test("an ambiguous name resolves to the loader/session provider when one is give
 	});
 });
 
-test("the preferred provider's matches are listed first when still ambiguous", () => {
+test("same model line, several versions on the session provider → newest wins (no models lookup)", () => {
 	const models = [
 		{ provider: "amazon-bedrock", id: "claude-sonnet-4-6" },
 		{ provider: "anthropic", id: "claude-sonnet-4-5" },
 		{ provider: "anthropic", id: "claude-sonnet-4-6" },
+		{ provider: "anthropic", id: "claude-sonnet-4" },
 	];
-	const r = resolveModelRef("sonnet", models, "anthropic"); // two anthropic sonnets → ambiguous, anthropic-only
+	// "sonnet" is three anthropic versions differing only by version → the newest is the
+	// natural pick, not an ambiguous rejection that forces a `models` call.
+	assert.deepEqual(resolveModelRef("sonnet", models, "anthropic"), { ok: true, ref: "anthropic/claude-sonnet-4-6" });
+});
+
+test("distinct model lines on the session provider STAY ambiguous (no silent cross-family pick)", () => {
+	const models = [
+		{ provider: "anthropic", id: "claude-sonnet-4-6" },
+		{ provider: "anthropic", id: "claude-opus-4-8" },
+	];
+	// "claude" matches both families on the same provider — different lines, so the newest-
+	// version shortcut must NOT fire; the caller has to disambiguate the family.
+	const r = resolveModelRef("claude", models, "anthropic");
 	assert.equal(r.ok, false);
 	if (!r.ok) {
-		assert.ok(r.candidates.every((c) => c.startsWith("anthropic/")), "narrowed to the preferred provider");
+		assert.equal(r.reason, "ambiguous");
 		assert.equal(r.candidates.length, 2);
 	}
+});
+
+test("cross-provider ambiguity is never auto-resolved by version (safety: only same-provider)", () => {
+	const models = [
+		{ provider: "anthropic", id: "claude-sonnet-4-5" },
+		{ provider: "openrouter", id: "claude-sonnet-4-6" },
+	];
+	// No preferred provider → the version shortcut (which is session-provider-scoped) can't
+	// fire, so a name spanning providers stays ambiguous rather than picking a route for you.
+	const r = resolveModelRef("sonnet", models);
+	assert.equal(r.ok, false);
+	if (!r.ok) assert.equal(r.reason, "ambiguous");
 });
 
 test("an unknown name fails 'unknown' with the full list", () => {
