@@ -2,8 +2,6 @@
   <img src="assets/banner.png" alt="pi-persona — advanced multi-agent orchestration layer for Pi">
 </p>
 
-# pi-persona
-
 A multi-agent orchestration layer for the [Pi](https://github.com/earendil-works/pi) coding agent.
 It turns one agent into a **supervisor** that runs specialized sub-agents — synchronously or in the
 background, one at a time or fanned out in parallel — coordinates them with composable strategies
