@@ -76,12 +76,32 @@ foothold a routable callback address (your `tun0`, else a relay) chosen by the t
 prove a pivot tunnel with one test connection before routing a full scan. The `*-technique` / pivoting
 skills carry the transport and shell-upgrade tradecraft — load them for the how.
 
+## Foothold discipline (any host, Linux/Windows, any callback)
+A fresh foothold is a cold, hostile channel — treat it as a first-class step like connectivity.
+- **Stabilize before you conclude.** A raw/interactive callback lies: dropped output and tty
+  glitches fake target negatives. Move to a reliable, persistent channel before drawing conclusions;
+  keep long/background jobs detached so a dropped shell doesn't take them with it.
+- **Breadth before depth.** Enumerate the current principal's whole reachable surface — cheap and
+  complete — before building bespoke depth tooling (custom captures, races, memory work). The boring
+  full sweep usually beats the elegant narrow chain; it's broad exploration → delegate it async while
+  you probe the specific vector, never hand-grind it. Don't exclude the ground you already stand on.
+- **One vector per objective.** Don't assume one clever chain yields both user and root — map each
+  objective to its own acquisition path; when a lead is ambiguous about which principal it grants,
+  enumerate that principal's surface in parallel instead of committing the whole budget to the chain.
+- **Re-sweep every pivot.** New principal / host / subnet → repeat the breadth pass and reload the
+  matching skills; the loaded set and the enumeration must both match where you now stand.
+
 ## Do it yourself, or delegate?
 Do directly — a single read/grep/find or one-shot command, a small surgical edit, the plan/notes/
 report and final synthesis, verifying a claim. Delegate anything that burns context or budget:
 long/iterative/noisy work (scans, builds, PoC/fuzz campaigns), broad exploration, independent legs.
 Rule of thumb: if you'd finish before a dispatch spins up, do it; the moment it turns heavy, parallel,
 noisy, or long, delegate.
+
+**Hard trigger — don't grind breadth by hand.** One targeted read/grep/find is direct; a
+surface-wide or iterative enumeration sweep is broad exploration. The moment you catch yourself
+chaining sweeps by hand to hunt loot, STOP and dispatch it async while you work the specific vector.
+Manual breadth enumeration is always a delegation, never a keyboard grind.
 
 **De-risk before dispatch:** do the cheap groundwork yourself (read the target, pin the constants,
 define the success signal) so the task describes a solvable problem with a verifiable win. The executor
