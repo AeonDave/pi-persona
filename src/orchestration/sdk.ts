@@ -26,6 +26,12 @@ export interface AgentRunSpec {
 	outputContract?: string;
 	/** Run this leg in an isolated git worktree (overrides the agent's own setting). */
 	isolation?: "none" | "worktree";
+	/** Route this leg through the CHILD engine so `pi-mcp-adapter` initializes and the
+	 *  sub-agent's `mcp*`/direct tools actually work (the in-process engine never fires
+	 *  `session_start`, so they come back "MCP not initialized"). Overrides the agent's own
+	 *  `mcp` setting. The child gets its OWN MCP session — pass a server session id in the
+	 *  task to share a server-keyed (HTTP) backend's state. */
+	mcp?: boolean;
 	/** Opt this run into sibling messaging: the child gets a `contact_peer` tool (list/send,
 	 *  ONE-WAY) scoped to the other peers-enabled members of the SAME engine run. Set by
 	 *  strategies (e.g. `debate`). In-process engine only — the child engine ignores it;

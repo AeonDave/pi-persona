@@ -172,11 +172,29 @@ full MCP fleet (every stdio server spawned, every HTTP server reconnected) N tim
 adapter's OAuth/UI/consent machinery assumes an interactive session. There is no cheap way to *share*
 one live MCP connection across sessions through the current seam.
 
-**Guidance.** Treat MCP as a **supervisor capability**, not a sub-agent one. Do the MCP-dependent work
-in the supervisor and hand sub-agents the resulting **artifacts** (files, findings, targets) to reason
-over — the offensive/parallel legs corroborate and analyse; they don't drive the tools. When a
-sub-agent genuinely needs to run MCP tools itself (its own independent session, no shared state), route
-it through the child engine (`PI_PERSONA_ENGINE=child`, or an agent that runs there).
+**The `mcp: true` opt-in — a delegable MCP leg.** Because the child engine DOES fire `session_start`
+(it spawns a real `pi -p`), a sub-agent that needs live MCP tools is routed there: mark the agent
+`mcp: true` in its frontmatter, or pass `mcp: true` on a `delegate` task/leg (`AgentRunSpec.mcp`). The
+engine wrapper then runs that one leg through `childEngineAt(root)` — the exact mechanism a
+`isolation: worktree` leg already uses for MCP, minus the git worktree. The child loads `pi-mcp-adapter`
+(it is in the user's `packages`; children never pass `noExtensions`) and connects to the SAME MCP
+servers from `~/.pi/agent/mcp.json`. Cost is one `pi` spawn per leg — for an **HTTP** MCP server it is
+just a client reconnect to an already-running endpoint, not an N× stdio fleet spawn.
+
+**Shared state via a server-keyed backend.** The child gets its OWN MCP *session*, not the supervisor's
+handle — but many servers key their state (workspaces, interactive shells, artifacts) by a **session id
+passed as a tool argument**, and an HTTP server keeps that state in its own process. So a child that
+reconnects to the same HTTP endpoint AND is handed the supervisor's session id operates on the SAME
+server-side state. Put the session id in the task packet; the leg then drives the shared workspace
+directly. (A pure stdio server whose state lives in-process is genuinely separate — there `mcp: true`
+gives the leg its own clean session, not a shared one.)
+
+**Guidance.** Default: treat MCP as a **supervisor capability** — do the MCP-dependent work up top and
+hand sub-agents the resulting **artifacts** (files, findings, targets) to reason over. When a leg must
+DRIVE MCP itself (breadth enumeration you want off the supervisor's context, an independent tool run),
+delegate it with `mcp: true` and pass the session id — the leg reaches the tools and, on an HTTP
+backend, the shared workspace. Do not over-restrict such an agent's `tools` allowlist, or the `mcp*`
+tools get filtered out of its active set.
 
 ## The three communication planes
 

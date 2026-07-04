@@ -122,7 +122,11 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
 
 1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test.
 2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `coaching: true`.
-3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`.
+3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`, `mcp: true`
+   (routes the leg through the child engine so `pi-mcp-adapter` initializes and its `mcp*`/direct
+   tools work — the default in-process engine leaves them "not initialized"; also settable per-leg
+   via `delegate`'s `mcp: true` / `AgentRunSpec.mcp`. Pass a server session id in the task to share
+   an HTTP backend's state).
 4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`), or per-member `- { agent, role, model?, skills? }` to build an ensemble of perspectives from ONE agent (e.g. `review` is one `reviewer` × 3 lens roles). Same-agent members are disambiguated in the live tree by a role hint (`reviewer · SECURITY`) via `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`), so three lenses show as three steerable nodes — keep the seeding loops and the SDK key derivation in lockstep if you touch either.
 5. **Flow**: `flows/<name>.flow.json` — phases + `needs`, optional `gate: true` (checkpoint).
 6. **Contract**: `contracts/<name>.contract.json` (request via `outputContract`). **Preset**: `presets/<name>.preset.json`.

@@ -630,6 +630,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 						/* worktree unavailable → fall back to a normal (non-isolated) run */
 					}
 				}
+				// MCP-capable leg: the DEFAULT in-process engine never fires `session_start`, so
+				// `pi-mcp-adapter` never initializes and the sub-agent's `mcp*`/direct tools come
+				// back "MCP not initialized". Route it through the child engine (a real `pi -p`,
+				// which DOES fire session_start → the adapter connects). Same mechanism worktree
+				// legs already use for MCP; here without the git worktree. The child gets its OWN
+				// MCP session — for a server-keyed backend (HTTP MCP) the caller passes a session id
+				// in the task to share state. (No-op steering: the child engine is one-shot.)
+				const wantsMcp = spec.mcp ?? resolveAgent(spec.agent)?.mcp;
+				if (wantsMcp) return childEngineAt(root).run(spec, perProgress, perSignal, perSteer);
 				return base.run(spec, perProgress, perSignal, perSteer);
 			},
 		});
@@ -1098,6 +1107,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run in an isolated git worktree (edits never touch the main tree)" }),
 		),
+		mcp: Type.Optional(
+			Type.Boolean({ description: "true = give this sub-agent working MCP tools (runs it on the child engine so pi-mcp-adapter initializes; the default engine leaves MCP tools 'not initialized'). Pass any server session id in the task to share a server-keyed backend's state." }),
+		),
 	});
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
@@ -1109,6 +1121,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode)" })),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
+		),
+		mcp: Type.Optional(
+			Type.Boolean({ description: "true = give the single sub-agent working MCP tools (runs it on the child engine; the default engine leaves MCP tools 'not initialized')" }),
 		),
 		tasks: Type.Optional(
 			Type.Array(DelegateTaskItem, { description: "Independent tasks to run in parallel — give each a disjoint scope" }),
@@ -1242,6 +1257,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 					if (t.skills && t.skills.length > 0) spec.skills = t.skills;
 					if (t.role?.trim()) spec.role = t.role.trim();
 					if (t.isolation === "worktree") spec.isolation = "worktree";
+					if (t.mcp === true) spec.mcp = true;
 					return launchAsyncRun(t.agent, t.task, spec, labelFor(t, i));
 				});
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${RUN_LIMITS.maxChildren}) were dropped.` : "";
@@ -1265,6 +1281,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				if (params.skills && params.skills.length > 0) runSpec.skills = params.skills;
 				if (params.role?.trim()) runSpec.role = params.role.trim();
 				if (params.isolation === "worktree") runSpec.isolation = "worktree";
+				if (params.mcp === true) runSpec.mcp = true;
 				const labelArg = { agent, ...(params.name ? { name: params.name } : {}), ...(params.model ? { model: params.model } : {}) };
 				const id = launchAsyncRun(agent, task, runSpec, labelFor(labelArg, 0));
 				return {

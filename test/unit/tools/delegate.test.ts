@@ -58,6 +58,17 @@ test("runDelegate passes an on-the-fly `role` through to the engine spec (single
 	assert.deepEqual(roles, ["You are a Rust auditor.", "You are a CSS wizard.", undefined]);
 });
 
+test("runDelegate threads mcp:true through to the engine spec (single + parallel), false/absent ⇒ unset", async () => {
+	const mcp: Array<boolean | undefined> = [];
+	const engine = engineThat((s) => {
+		mcp.push(s.mcp);
+		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+	});
+	await runDelegate({ agent: "operator", task: "t", mcp: true }, engine);
+	await runDelegate({ tasks: [{ agent: "operator", task: "t", mcp: true }, { agent: "scout", task: "t" }] }, engine);
+	assert.deepEqual(mcp, [true, true, undefined]);
+});
+
 test("DelegationLedger vetoes only after MAX identical failures; model/task changes are new keys", () => {
 	const ledger = new DelegationLedger();
 	const t = { agent: "op", model: "p/m", task: "do X" };
