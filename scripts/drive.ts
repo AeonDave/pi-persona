@@ -67,19 +67,26 @@ env.PI_PERSONA_DEBUG = "1"; // surfaces "[pi-persona] engine=…" so we can conf
 if (opts.persona) env.PI_PERSONA_DEFAULT = opts.persona;
 if (opts.engine) env.PI_PERSONA_ENGINE = opts.engine;
 
+// The prompt is delivered over STDIN, never argv: `pi -p` reads piped stdin as the
+// prompt, which sidesteps shell re-quoting entirely. Passing it as an argv token and
+// rebuilding a `shell: true` cmdline truncated multi-line prompts on Windows (cmd.exe
+// treats an embedded newline as a command separator) — a harness-only bug that faked
+// "your message was cut off" from the model. stdin has no such limit or length cap.
 const args = ["--mode", "json", "-p"];
 if (opts.model) args.push("--model", opts.model);
-args.push(opts.prompt);
 
 console.log(`▶ pi -p   persona=${opts.persona ?? "—"}  engine=${opts.engine ?? "inproc (default)"}  model=${opts.model ?? "default"}`);
 console.log(`  prompt: ${short(opts.prompt, 120)}\n`);
 
-// Spawn via the shell so Windows resolves `pi` → `pi.cmd`; quote each token so the
-// prompt (spaces/quotes) survives re-parsing.
+// Spawn via the shell so Windows resolves `pi` → `pi.cmd`; quote each token (no prompt
+// token now, so nothing multi-line ever reaches the shell re-parse).
 const win = process.platform === "win32";
 const q = (s: string): string => `"${s.replace(/"/g, win ? '""' : '\\"')}"`;
 const cmdline = ["pi", ...args].map(q).join(" ");
-const proc = spawn(cmdline, { env, stdio: ["ignore", "pipe", "pipe"], shell: true });
+const proc = spawn(cmdline, { env, stdio: ["pipe", "pipe", "pipe"], shell: true });
+proc.stdin.setDefaultEncoding("utf8");
+proc.stdin.write(opts.prompt);
+proc.stdin.end();
 let buf = "";
 let finalUsage: Json | undefined;
 let assistantTurns = 0;

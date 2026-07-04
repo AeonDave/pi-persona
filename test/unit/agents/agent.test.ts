@@ -35,6 +35,12 @@ test("parseAgent reads isolation: worktree (else undefined)", () => {
 	assert.equal(parseAgent("---\nname: s\nisolation: none\n---\nbody", "/s")?.isolation, undefined, "none ⇒ unset");
 });
 
+test("parseAgent reads mcp: true (else undefined)", () => {
+	assert.equal(parseAgent("---\nname: s\nmcp: true\n---\nbody", "/s")?.mcp, true);
+	assert.equal(parseAgent("---\nname: s\n---\nbody", "/s")?.mcp, undefined);
+	assert.equal(parseAgent("---\nname: s\nmcp: false\n---\nbody", "/s")?.mcp, undefined, "false ⇒ unset");
+});
+
 test("parseAgent returns null when name is missing", () => {
 	assert.equal(parseAgent("---\ndescription: no name\n---\nbody", "/s"), null);
 });

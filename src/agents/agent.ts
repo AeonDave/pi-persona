@@ -17,6 +17,12 @@ export interface AgentConfig {
 	/** `worktree` runs this agent in an isolated git worktree (its edits never touch the
 	 *  main tree); `none` (default) shares the working tree. */
 	isolation?: "none" | "worktree";
+	/** `mcp: true` routes this agent through the CHILD engine so `session_start`-scoped
+	 *  extensions (notably `pi-mcp-adapter`) initialize and its `mcp*`/direct tools work.
+	 *  The default in-process engine never fires `session_start`, so those tools are dead
+	 *  ("MCP not initialized"). The child gets its OWN MCP session; for a server-keyed
+	 *  backend (HTTP MCP, session id passed as a tool argument) pass the id to share state. */
+	mcp?: boolean;
 	systemPrompt: string;
 	systemPromptMode: SystemPromptMode;
 	source: string;
@@ -39,6 +45,7 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	const tools = asStringArray(fm.tools);
 	if (tools) agent.tools = tools;
 	if (fm.isolation === "worktree") agent.isolation = "worktree";
+	if (fm.mcp === true) agent.mcp = true;
 
 	return agent;
 }

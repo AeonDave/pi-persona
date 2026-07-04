@@ -183,11 +183,15 @@ drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, n
   default — nothing changes unless you set it. Design:
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 
-> **MCP in sub-agents.** A sub-agent runs its own fresh session and does **not** share the
-> supervisor's MCP connection — an in-process sub-agent gets no MCP at all (its `mcp*` tools appear
-> but return "not initialized"). Treat MCP as a supervisor capability: do the MCP work up top and
-> hand sub-agents the resulting artifacts, or route an MCP-driving leg through the child engine
-> (its own separate MCP session). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> **MCP in sub-agents.** By default a sub-agent runs on the in-process engine and gets **no MCP** —
+> its `mcp*` tools appear but return "not initialized" (the in-process engine never fires
+> `session_start`, so `pi-mcp-adapter` never connects). To give a leg working MCP tools, mark the
+> agent `mcp: true` (frontmatter) or pass `mcp: true` on the `delegate` task — it runs on the child
+> engine, which DOES connect (to the same servers in `~/.pi/agent/mcp.json`). The child gets its own
+> MCP session; for an **HTTP** backend that keys state by a session id passed as a tool argument,
+> put that id in the task and the leg drives the SAME shared workspace. Otherwise keep MCP a
+> supervisor capability: do the MCP work up top and hand sub-agents the artifacts. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Recipes
 
