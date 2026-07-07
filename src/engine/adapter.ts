@@ -178,6 +178,19 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const tag = `[${spec.agent} · ${modelRef}${dyn}]`;
 			if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
 			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
+			// MCP-leg diagnosis: an `mcp: true` leg is routed here (the child engine) precisely so
+			// `pi-mcp-adapter` initializes in a fresh headless `pi -p`. When such a leg fails without
+			// completing a single turn, the near-certain cause is the MCP adapter hanging in init —
+			// most often a server that needs INTERACTIVE OAuth, which a headless child can't perform.
+			// Keyed on turns===0 (never really started), not empty output, so an early tool/log line
+			// can't mask it. Name the cause + the fix so the operator never has to guess (a real prod
+			// report: a dead `mcp: true` async delegation with an opaque timeout).
+			if (!child.ok && spec.mcp === true && child.usage.turns === 0) {
+				result.error =
+					`${result.error ?? `${tag} agent failed`} — mcp:true leg never completed a turn: the MCP adapter likely hung initializing in the headless child ` +
+					`(a server needing interactive OAuth can't authenticate without a UI). Fix: authenticate the MCP server once in a normal \`pi\` session (\`/mcp auth\`) so its token is cached — the headless child reuses it; ` +
+					`or drop mcp:true if this leg doesn't need MCP tools. Tune the wait with PI_PERSONA_AGENT_STARTUP_MS (0 disables).`;
+			}
 
 			// Classify the failure so the fallback decorator reroutes ONLY provider errors
 			// (a stream `error`), never an abort/timeout/spawn-miss/agent failure.

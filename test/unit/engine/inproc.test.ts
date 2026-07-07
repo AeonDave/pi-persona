@@ -1,4 +1,13 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
+
+// Keep the event loop ref'd for the whole file. Several tests below await a promise
+// resolved only by an UNREF'd timer (the engine's idle / hard-cap / startup watchdogs, which
+// are unref'd in production so a hung child can't keep pi alive). Without a ref'd handle the
+// loop drains mid-await → node:test aborts with "Promise resolution is still pending but the
+// event loop has already resolved" and cascades `cancelledByParent` to every later test. A
+// ref'd keeper, cleared after all tests, holds the loop open so those watchdog timers fire.
+const _loopKeeper = setInterval(() => {}, 60_000);
+after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -384,6 +393,58 @@ test("inproc engine hard-caps a busy session the idle watchdog would never catch
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /hard cap/);
 	assert.equal(r.failureKind, "timeout", "a hard-cap kill is timeout-class, never a provider reroute");
+});
+
+test("inproc engine startup-kills a session that never makes progress within startupTimeoutMs", async () => {
+	// A session that emits NO events (a stalled start) with a LONG idle window: only the
+	// startup deadline can settle it — the fast-fail for a child that never began.
+	let abortCalled = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 5_000, // idle window long → would NOT fire in this window
+		startupTimeoutMs: 40, // first-progress deadline → fires anyway
+		createSession: async () => {
+			let release!: () => void;
+			const idle = new Promise<void>((r) => {
+				release = r;
+			});
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => {
+						abortCalled = true;
+						release();
+					},
+					waitForIdle: () => idle,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(abortCalled, true, "the startup deadline aborted the stalled session");
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /startup window/);
+	assert.equal(r.failureKind, "timeout", "a startup-deadline kill is timeout-class, never a provider reroute");
+});
+
+test("inproc engine does NOT startup-kill a session that makes progress (the deadline is cancelled)", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		startupTimeoutMs: 5_000,
+		createSession: fakeSessions([msgEnd("quick")]),
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	assert.equal(r.output, "quick");
 });
 
 test("inproc engine does NOT hard-cap a fast run (the cap is disarmed on completion)", async () => {

@@ -92,6 +92,31 @@ test(
 	},
 );
 
+test("runChildAgent startup-deadline kills a child that makes NO progress within startupTimeoutMs", async () => {
+	// [sleep] emits nothing (a stalled init: e.g. a headless mcp:true leg whose MCP adapter hangs).
+	// The idle window is long here, so ONLY the startup deadline can settle it.
+	const r = await runChildAgent({ task: "hang [sleep]" }, undefined, {
+		resolveInvocation: resolveFake,
+		killGraceMs: 200,
+		startupTimeoutMs: 150,
+		timeoutMs: 5_000, // idle window long → proves the STARTUP deadline (not idle) fired
+	});
+	assert.equal(r.timedOut, true, "a startup-deadline kill is timeout-class");
+	assert.equal(r.aborted, false, "a startup deadline is NOT an abort");
+	assert.equal(r.ok, false);
+	assert.match(r.errorMessage ?? "", /startup window/);
+});
+
+test("runChildAgent startup-deadline does NOT fire once the child makes progress", async () => {
+	// A normal child completes a turn (progress) almost immediately, cancelling the deadline.
+	const r = await runChildAgent({ task: "do the thing" }, undefined, {
+		resolveInvocation: resolveFake,
+		startupTimeoutMs: 2_000,
+	});
+	assert.equal(r.ok, true);
+	assert.equal(r.timedOut, false, "progress cancels the startup deadline");
+});
+
 test("runChildAgent caps retained stderr and marks it truncated", async () => {
 	const r = await runChildAgent({ task: "loud [spew-stderr]" }, undefined, {
 		resolveInvocation: resolveFake,

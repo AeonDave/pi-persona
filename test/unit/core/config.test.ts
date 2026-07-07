@@ -37,6 +37,14 @@ test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 60
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "-5" }).agentHardTimeoutMs, 600_000, "negative ⇒ default");
 });
 
+test("PI_PERSONA_AGENT_STARTUP_MS sets the per-agent startup deadline (default 90000; explicit 0 disables)", () => {
+	assert.equal(resolveConfig({}).agentStartupTimeoutMs, 90_000, "a fast-fail startup window by default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "30000" }).agentStartupTimeoutMs, 30000);
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "0" }).agentStartupTimeoutMs, 0, "explicit 0 disables the deadline");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "abc" }).agentStartupTimeoutMs, 90_000, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "-5" }).agentStartupTimeoutMs, 90_000, "negative ⇒ default");
+});
+
 test("PI_PERSONA_NUDGE=off disables the delegation nudge (default on)", () => {
 	assert.equal(resolveConfig({}).nudge, true, "the delegation nudge is on by default");
 	assert.equal(resolveConfig({ PI_PERSONA_NUDGE: "off" }).nudge, false, "explicit off opts out");
