@@ -554,7 +554,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const childEngineAt = (cwd: string): StrategyEngine => {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
 			if (signal) deps.signal = signal;
-			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs };
+			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs };
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
 			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
@@ -572,6 +572,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
 			ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
 			ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
+			ideps.startupTimeoutMs = config.agentStartupTimeoutMs; // first-progress deadline — fast-fail a child that never started
 			if (signal) ideps.signal = signal;
 			if (onProgress) ideps.onProgress = onProgress;
 			if (lastCtx.model) ideps.defaultModel = `${lastCtx.model.provider}/${lastCtx.model.id}`;
@@ -591,7 +592,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
 			if (signal) deps.signal = signal;
 			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
-			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs }; // idle watchdog + hard lifetime ceiling on every child
+			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs }; // idle watchdog + hard cap + startup deadline on every child
 			if (onProgress) deps.childOptions.onProgress = onProgress;
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;

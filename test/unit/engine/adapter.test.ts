@@ -27,6 +27,27 @@ test("child adapter appends the contract format to the task (and only when one i
 	assert.equal(r.failureKind, "contract");
 });
 
+test("child adapter names an mcp:true leg that fails with no output (MCP-init diagnosis, not an opaque timeout)", async () => {
+	// [sleep] never emits → the startup deadline fires with empty output. An mcp:true leg
+	// that dies mute is almost always the MCP adapter failing to init in the headless child;
+	// the error must say so instead of a bare timeout the operator can't act on.
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, startupTimeoutMs: 120, killGraceMs: 150 } });
+	const r = await engine.run({ agent: "a", task: "hang [sleep]", mcp: true });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "timeout");
+	assert.match(r.error ?? "", /mcp:true leg never completed a turn/);
+	assert.match(r.error ?? "", /MCP adapter likely hung initializing/);
+	assert.match(r.error ?? "", /\/mcp auth/, "names the concrete pre-auth remedy");
+	assert.match(r.error ?? "", /PI_PERSONA_AGENT_STARTUP_MS/, "names the tuning knob");
+});
+
+test("child adapter does NOT add the MCP hint when the leg is not mcp:true", async () => {
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, startupTimeoutMs: 120, killGraceMs: 150 } });
+	const r = await engine.run({ agent: "a", task: "hang [sleep]" });
+	assert.equal(r.ok, false);
+	assert.doesNotMatch(r.error ?? "", /mcp:true leg/);
+});
+
 test("child adapter leaves the task untouched when no contract is requested", async () => {
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
 	const r = await engine.run({ agent: "a", task: "decide" });

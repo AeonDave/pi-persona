@@ -192,6 +192,16 @@ drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, n
 > put that id in the task and the leg drives the SAME shared workspace. Otherwise keep MCP a
 > supervisor capability: do the MCP work up top and hand sub-agents the artifacts. See
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+>
+> **Pre-authenticate first (headless caveat).** The `mcp: true` leg is a *fresh, UI-less* `pi -p`
+> child: it can only use MCP servers that initialize **non-interactively**. A server that needs
+> interactive OAuth cannot authenticate without a UI, so the child stalls at startup. pi-persona
+> fast-fails such a leg at the **startup deadline** (`PI_PERSONA_AGENT_STARTUP_MS`, default 90 s,
+> `0` disables) instead of burning the full idle window, and returns a clear error naming the
+> cause. **Fix:** authenticate the server once in a normal `pi` session (`/mcp auth <server>`) — the
+> token is cached on disk and the headless child reuses it. Then `mcp: true` connects cleanly.
+> Servers that key state by a session-id argument (HTTP backends) need that id in the task, not a
+> login.
 
 ## Recipes
 
@@ -339,7 +349,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (timed supervisor wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; default 600000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable the delegation nudge; on by default)
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (timed supervisor wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; default 600000, `0` disables) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — fast-fail a child that never makes progress, e.g. a headless `mcp: true` leg stalled on init; default 90000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable the delegation nudge; on by default)
 
 ## Develop
 

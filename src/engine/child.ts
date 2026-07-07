@@ -49,6 +49,12 @@ export interface ChildEngineOptions {
 	 *  output — so it kills a busy-but-non-converging child (a loop that keeps emitting) that the
 	 *  idle window above never catches. 0/absent = no cap. */
 	hardTimeoutMs?: number;
+	/** STARTUP deadline (ms): a child that never makes PROGRESS (no completed turn, no tokens,
+	 *  no streamed output) within this window is killed as a stalled start — the "never started"
+	 *  case the idle window is too generous for (a headless `mcp: true` leg whose MCP adapter hangs
+	 *  in init emits only the session header, then nothing). The FIRST progress cancels it
+	 *  permanently, so a slow-but-streaming turn is never touched. 0/absent = no startup deadline. */
+	startupTimeoutMs?: number;
 	/** Override the cross-OS force tree-kill (used in tests). Defaults to
 	 *  {@link killProcessTree}. */
 	killProcessTree?: (pid: number) => void;
@@ -162,6 +168,8 @@ export async function runChildAgent(
 	let aborted = false;
 	let timedOut = false;
 	let hardTimedOut = false;
+	let startupTimedOut = false;
+	let progressed = false; // set once the child produces its FIRST real progress (turn/tokens/output)
 	let spawnError: Error | undefined;
 
 	try {
@@ -187,6 +195,7 @@ export async function runChildAgent(
 			let buffer = "";
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let hardTimer: ReturnType<typeof setTimeout> | undefined;
+			let startupTimer: ReturnType<typeof setTimeout> | undefined;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
 			const onLine = (line: string) => {
@@ -205,6 +214,7 @@ export async function runChildAgent(
 				killing = true;
 				if (timer) clearTimeout(timer);
 				if (hardTimer) clearTimeout(hardTimer);
+				if (startupTimer) clearTimeout(startupTimer);
 				const pid = proc.pid;
 				// On Windows, proc.kill("SIGTERM") maps to TerminateProcess: it kills ONLY the root
 				// and fires `close` synchronously, which clears the grace timer before it can run —
@@ -238,6 +248,7 @@ export async function runChildAgent(
 				settled = true;
 				if (timer) clearTimeout(timer);
 				if (hardTimer) clearTimeout(hardTimer);
+				if (startupTimer) clearTimeout(startupTimer);
 				if (graceTimer) clearTimeout(graceTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
 				if (buffer.trim()) onLine(buffer);
@@ -267,6 +278,27 @@ export async function runChildAgent(
 				}, opts.timeoutMs);
 				timer.unref?.();
 			};
+			// Startup deadline: armed ONCE at spawn, cancelled the instant the child makes real
+			// progress. Fires only for a child that never started (no completed turn / tokens /
+			// streamed output) — the header line + bare turn_start noise do NOT count, so a stalled
+			// init is caught while a slow-but-streaming turn survives.
+			const armStartup = () => {
+				if (!opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
+				startupTimer = setTimeout(() => {
+					if (progressed) return;
+					startupTimedOut = true;
+					kill();
+				}, opts.startupTimeoutMs);
+				startupTimer.unref?.();
+			};
+			const noteProgress = () => {
+				if (progressed) return;
+				const s = snapshot(state);
+				if (s.turns > 0 || s.tokens > 0 || s.output.length > 0) {
+					progressed = true;
+					if (startupTimer) clearTimeout(startupTimer);
+				}
+			};
 
 			// Deliver the task and close stdin (pi waits for EOF before starting). A child
 			// that dies before reading (spawn failure, early exit) emits an async 'error'
@@ -280,6 +312,7 @@ export async function runChildAgent(
 				// Guard against an unbounded unterminated line (binary/noise flood).
 				buffer = rest.length > maxLineBytes ? "" : rest;
 				for (const l of lines) onLine(l);
+				noteProgress(); // first real progress cancels the startup deadline
 				opts.onProgress?.(snapshot(state));
 				armTimeout(); // output → reset the idle clock
 			});
@@ -316,6 +349,7 @@ export async function runChildAgent(
 
 			armTimeout(); // start the idle clock (reset on every chunk of output)
 			armHardCap(); // start the lifetime ceiling (never reset)
+			armStartup(); // start the first-progress deadline (cancelled by the first real progress)
 			if (signal) {
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
@@ -323,7 +357,13 @@ export async function runChildAgent(
 		});
 
 		const ok =
-			!aborted && !timedOut && !hardTimedOut && exitCode === 0 && state.stopReason !== "error" && state.stopReason !== "aborted";
+			!aborted &&
+			!timedOut &&
+			!hardTimedOut &&
+			!startupTimedOut &&
+			exitCode === 0 &&
+			state.stopReason !== "error" &&
+			state.stopReason !== "aborted";
 		const result: ChildRunResult = {
 			ok,
 			output: state.output,
@@ -331,9 +371,9 @@ export async function runChildAgent(
 			exitCode,
 			stderr,
 			aborted,
-			// A hard-cap kill is a timeout-class death (never a provider reroute) — surface it via
-			// the same flag the idle timeout uses; the errorMessage below says WHICH cap fired.
-			timedOut: timedOut || hardTimedOut,
+			// A hard-cap OR startup-deadline kill is a timeout-class death (never a provider reroute) —
+			// surface it via the same flag the idle timeout uses; the errorMessage below says WHICH fired.
+			timedOut: timedOut || hardTimedOut || startupTimedOut,
 		};
 		if (state.model !== undefined) result.model = state.model;
 		if (state.stopReason !== undefined) result.stopReason = state.stopReason;
@@ -343,6 +383,8 @@ export async function runChildAgent(
 		const streamErr = state.errorMessage;
 		if (hardTimedOut) {
 			result.errorMessage = `agent exceeded the ${opts.hardTimeoutMs}ms hard cap${streamErr ? ` (last error: ${streamErr})` : ""}`;
+		} else if (startupTimedOut) {
+			result.errorMessage = `agent produced no output within the ${opts.startupTimeoutMs}ms startup window — it never started (a stalled init; tune with PI_PERSONA_AGENT_STARTUP_MS, 0 disables)${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (timedOut) {
 			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (aborted) {

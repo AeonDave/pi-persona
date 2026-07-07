@@ -30,7 +30,13 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   BOTH enforce `RUN_LIMITS.timeoutMs` as an **idle window** (no events/output ⇒ abort; the inproc
   watchdog is disabled for coaching children that may legitimately block on a supervisor reply) AND
   `PI_PERSONA_AGENT_MAX_MS` as a **hard wall-clock cap** (lifetime ceiling armed once, never reset —
-  catches a busy loop the idle window never does; default 600000, `0` disables).
+  catches a busy loop the idle window never does; default 600000, `0` disables) AND
+  `PI_PERSONA_AGENT_STARTUP_MS` as a **startup deadline** (a child that makes ZERO progress — no
+  completed turn / tokens / streamed output — within the window is killed as a stalled start; the
+  first real progress cancels it, so a slow-but-streaming turn is never touched; default 90000,
+  `0` disables). It fast-fails the "never started" case the generous idle window is too slow for —
+  notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; `adapter.ts`
+  turns that (turns===0 + `spec.mcp`) into a clear pre-auth remedy instead of an opaque timeout.
   The child engine delivers the task over **stdin** (`pi -p` prepends piped stdin) — never argv,
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
   share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async

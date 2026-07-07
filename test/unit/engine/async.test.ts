@@ -1,4 +1,13 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
+
+// Keep the event loop ref'd for the whole file. Several tests below await a promise
+// resolved only by an UNREF'd timer (tracker.waitFor timeouts, coalescing-notifier flushes).
+// Without a ref'd handle the loop drains mid-await → node:test aborts with "Promise
+// resolution is still pending but the event loop has already resolved" and cascades
+// `cancelledByParent` to every later test. A ref'd keeper, cleared after all tests, holds
+// the loop open so those timers fire.
+const _loopKeeper = setInterval(() => {}, 60_000);
+after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
 import { type AsyncRun, AsyncRunTracker, buildCompletionReport, IdleCoalescingNotifier, buildPeekDigest } from "../../../src/engine/async.ts";

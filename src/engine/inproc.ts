@@ -101,6 +101,12 @@ export interface InProcessDeps {
 	 *  the idle watchdog, which any event re-arms, never would. 0/absent = no cap. Also skipped
 	 *  for a `coaching` + `allowBlocking` child (it may legitimately block a long time on a reply). */
 	hardTimeoutMs?: number;
+	/** STARTUP deadline (ms): a session that never makes PROGRESS (no completed turn, no tokens,
+	 *  no streamed output) within this window is aborted as a stalled start — the "never started"
+	 *  case the idle window is too generous for. The FIRST progress cancels it permanently, so a
+	 *  slow-but-streaming turn is never touched. 0/absent = no startup deadline. Skipped for a
+	 *  `coaching` + `allowBlocking` child (it may legitimately block before emitting anything). */
+	startupTimeoutMs?: number;
 }
 
 // The sub-agent must never re-enter the supervisor's orchestration surface.
@@ -354,9 +360,43 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 
+			// Startup deadline (mirrors the child engine): a session that never makes PROGRESS
+			// (no completed turn / tokens / streamed output) within `startupMs` is aborted as a
+			// stalled start — the fast-fail for a child that never began, which the generous idle
+			// window is too slow for. The first real progress cancels it; bare lifecycle events do
+			// not. Skipped for a blocking coaching child (it may legitimately wait before emitting).
+			const startupMs = blockingChild ? 0 : (deps.startupTimeoutMs ?? 0);
+			let startupTimedOut = false;
+			let startupProgressed = false;
+			let startupTimer: ReturnType<typeof setTimeout> | undefined;
+			const disarmStartup = (): void => {
+				if (startupTimer) {
+					clearTimeout(startupTimer);
+					startupTimer = undefined;
+				}
+			};
+			const armStartup = (): void => {
+				if (startupMs <= 0) return;
+				startupTimer = setTimeout(() => {
+					if (startupProgressed) return;
+					startupTimedOut = true;
+					session.agent.abort();
+				}, startupMs);
+				startupTimer.unref?.();
+			};
+			const noteStartupProgress = (): void => {
+				if (startupProgressed) return;
+				const s = snapshot(state);
+				if (s.turns > 0 || s.tokens > 0 || s.output.length > 0) {
+					startupProgressed = true;
+					disarmStartup();
+				}
+			};
+
 			const unsub = session.subscribe((ev) => {
 				armIdle(); // any event = activity → reset the idle clock
 				applyEvent(state, ev);
+				noteStartupProgress(); // first real progress cancels the startup deadline
 				const snap = snapshot(state);
 				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
 				else if (deps.onProgress) deps.onProgress(snap);
@@ -442,6 +482,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			try {
 				armIdle(); // start the idle clock (reset on every session event)
 				armHard(); // start the lifetime ceiling (never reset)
+				armStartup(); // start the first-progress deadline (cancelled by the first real progress)
 				await session.prompt(task);
 				await session.agent.waitForIdle();
 			} catch (e) {
@@ -449,6 +490,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			} finally {
 				disarmIdle();
 				disarmHard();
+				disarmStartup();
 				if (signal) signal.removeEventListener("abort", onAbort);
 				unsubBridge?.();
 				if (childHandle) peerLabels.delete(childHandle);
@@ -457,10 +499,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				session.dispose();
 			}
 
-			const ok = !aborted && !timedOut && !hardTimedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
+			const ok =
+				!aborted && !timedOut && !hardTimedOut && !startupTimedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
 			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+			else if (startupTimedOut)
+				result.error = `${tag} agent produced no output within the ${startupMs}ms startup window — it never started (a stalled init; tune with PI_PERSONA_AGENT_STARTUP_MS, 0 disables)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (hardTimedOut) result.error = `${tag} agent exceeded the ${hardMs}ms hard cap${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
@@ -468,7 +513,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
 			// Classify the failure so the fallback decorator can reroute ONLY provider errors
 			// (a thrown API rejection or a stream `error`), never an abort/timeout/hard-cap/agent miss.
-			if (!ok) result.failureKind = timedOut || hardTimedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
+			if (!ok)
+				result.failureKind =
+					timedOut || hardTimedOut || startupTimedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
 
 			if (contractDef) {
 				const v = parseAndValidate(state.output, contractDef);
