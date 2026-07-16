@@ -23,6 +23,16 @@ test("no agents + a delegating persona → seed guidance, not a broken roster", 
 	assert.match(brief ?? "", /cannot run/i);
 });
 
+test("empty targets but agents ARE installed → 'widen the allowlist', NOT the fresh-install seed lie", () => {
+	// A persona holds `delegate` but its permission allowlist matches none of the 5 installed
+	// agents (filtered to []). The brief must diagnose the restriction, not claim nothing is seeded.
+	const brief = buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: true, asyncDefault: true, installedCount: 5 });
+	assert.ok(brief);
+	assert.match(brief ?? "", /allows none of the 5/);
+	assert.match(brief ?? "", /allowlist/i);
+	assert.equal(/\/persona seed/.test(brief ?? ""), false, "must not tell the model to seed — agents ARE installed");
+});
+
 test("lists each agent with its clipped description", () => {
 	const long = "x".repeat(200);
 	const brief = buildDelegationBrief({

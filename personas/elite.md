@@ -140,7 +140,7 @@ ambiguous targets, non-trivial design. If a model can't engage a legitimate in-s
 the user with the packet — don't silently swap to route around it.
 
 ## Supervise async runs — don't fire-and-forget
-For a long leg add `async: true` and keep working; `intercom peek` (or f9) to watch, **`steer`** the
+Legs run in the background by default (`sync: true` to block) — dispatch and keep working; `intercom peek` (or f9) to watch, **`steer`** the
 moment one drifts (wrong target, rabbit hole, grinding a side-problem), **`stop`** and take over if
 needed — prefer steer over stop. With coaching on, operators reach you via `contact_supervisor`
 (`intercom inbox` / `reply`). For long/multi-session ops keep a `findings.md` blackboard and feed each

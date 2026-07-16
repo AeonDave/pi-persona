@@ -76,6 +76,7 @@ Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch 
 
 | Persona | What it's for |
 |---|---|
+| `elite` | Security supervisor-coach — lead operator for pentest / red-team / lab-CTF; loads the right technique skill per kill-chain phase, owns connectivity/pivots/shells, delegates heavy/parallel/long work, drives to the objective with evidence. |
 | `dev` | Software engineer **and** reviewer — tests-first flow, loads the right coding skills, reviews its own/others' changes with cited `file:line` evidence, delegates large/parallel work. |
 | `researcher` | Deep-research supervisor — fans one deep-dive agent out per sub-question, follows links recursively, consolidates sourced findings into a `.research/<topic>/` folder. |
 | `planner` | Planning-first orchestrator — decomposes goals into bounded, verifiable steps and writes plan/design/architecture docs; never edits code, hands implementation to `dev` and investigation to `researcher`. |
