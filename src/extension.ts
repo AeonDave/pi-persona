@@ -382,9 +382,17 @@ export default function piPersona(pi: ExtensionAPI): void {
 	};
 	// Async runs outlive the turn that launched them; on completion we surface the result(s) back as
 	// ONE coalesced notice so the (idle) supervisor can react — e.g. retry a failure with another model.
+	// With delegate now background-by-default (interactive), this is the COMMON delivery path, so the
+	// premature-surrender counterweight must ride it too: a settled leg whose report carries a
+	// [BLOCKED]/FLAG:UNKNOWN marker gets the persistence note appended (the sync tool_result hook can't
+	// see a background run — its report arrives here as a fresh follow-up, not a delegate result).
 	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
 		...idleDelivery,
-		render: (runs) => buildCompletionReport(runs, fenceUntrusted),
+		render: (runs) => {
+			const report = buildCompletionReport(runs, fenceUntrusted);
+			const surrendered = runs.some((r) => r.status === "done" && !!persistenceNudge.scan(r.result?.output ?? ""));
+			return surrendered ? `${report}\n\n${persistenceNudge.scan(runs.map((r) => r.result?.output ?? "").join("\n")) ?? ""}` : report;
+		},
 	});
 	// A child's blocking ask (decision/interview) — coalesced and idle-gated so it can't strand and
 	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
