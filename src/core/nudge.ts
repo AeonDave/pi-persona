@@ -30,7 +30,9 @@ export interface NudgeThresholds {
 
 export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
 	singleHeavyChars: 40_000, // ~10k tokens in one command
-	cumulativeChars: 60_000, // ~15k tokens of accumulated hand-grinding since the last delegate
+	cumulativeChars: 24_000, // ~6k tokens of accumulated hand-grinding since the last delegate —
+	// an early backstop: the standing delegation brief (core/brief.ts) carries the default,
+	// this catches the supervisor that grinds through it anyway.
 };
 
 /** chars → ~thousands of tokens (≈4 chars/token), for the human-facing nudge text. */
@@ -41,7 +43,7 @@ function renderNudge(size: number, burn: number): string {
 		`⟢ pi-persona — that direct command added ~${toK(size)}k tokens to your context ` +
 		`(~${toK(burn)}k burned by hand since your last delegate). ` +
 		`"Delegate anything that burns context or budget." If this is breadth or a stalled vector, ` +
-		"dispatch it (`delegate … async: true`) and keep the specific thread yourself."
+		"hand it off (`delegate` — it runs in the background and reports back) and keep the specific thread yourself."
 	);
 }
 
@@ -86,9 +88,9 @@ export class DelegationNudge {
  * UP: the child's report carries an explicit surrender/blocked marker. It returns a reminder to
  * append to that very result — in RECENT context, on the leg that just landed — that a delegating
  * supervisor must not bank a premature block: confirm it names a genuine missing capability, else
- * steer it back with the recovery pass or re-dispatch. This is the runtime half of elite's "reject
- * premature surrender" gate; the top-of-prompt persona directive has decayed by the time a blocked
- * leg returns.
+ * steer it back with the recovery pass or re-dispatch. This is the runtime half of the operator
+ * protocol's "reject premature surrender" rule; the top-of-prompt persona directive has decayed by
+ * the time a blocked leg returns.
  *
  * Keyed on the ecosystem's OWN explicit protocol tokens (an operator emits `[BLOCKED: need X]`, a CTF
  * leg emits `FLAG: UNKNOWN`) — never a fuzzy "sounds stuck" guess, so it does not misfire on ordinary
@@ -99,7 +101,7 @@ export class DelegationNudge {
 /** Tools whose result is a delegated child's report (where a surrender can surface). */
 const REPORT_TOOLS = new Set(["delegate", "council"]);
 
-/** Explicit surrender/blocked markers the operator + CTF protocols emit (operator.md / elite.md). */
+/** Explicit surrender/blocked markers the operator + CTF protocols emit (operator.md). */
 const SURRENDER_MARKERS: readonly RegExp[] = [/\[BLOCKED\b/i, /\bFLAG:\s*UNKNOWN\b/i];
 
 const PERSISTENCE_NOTE =
