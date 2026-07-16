@@ -180,10 +180,11 @@ drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, n
 - **Message bus — needs `coaching: on`** (every delegating supervisor has it). Children get a
   `contact_supervisor` tool to *reach you*: `progress` surfaces in the result / `intercom inbox`, and
   a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision
-  is cost-aware — nothing is spent until a child wakes you, or the **timed wakeup** fires: while async
-  children run, a periodic peek (on by default, ~30s — `PI_PERSONA_PEEK_MS=0` opts out) wakes the idle
-  supervisor with a digest that flags any child **stalled** (no progress) as *possibly stuck*, so you
-  can steer/stop it even when no completion has fired. Strategies can also opt a run into **sibling peer comm**: `debate`
+  is cost-aware — a healthy background run never interrupts you. While async children run, a silent
+  watchdog wakes the idle supervisor on just two signals: a child that **newly looks stalled** (no
+  progress — `PI_PERSONA_PEEK_MS=0` opts out) or messages you, and an occasional **routine check-in**
+  digest (`PI_PERSONA_CHECKIN_MS`, ~5 min) to catch a leg going off-track early. Between those it stays
+  quiet; completions arrive on their own. Strategies can also opt a run into **sibling peer comm**: `debate`
   and `pair` members always get a `contact_peer` tool to message each other (one-way, no cross-child
   blocking); `map` and `synthesize` add it only with `params: { peers: true }`.
 - **Delegation nudges — on by default.** The reactive mirror of the wakeup, landing in recent context
@@ -366,7 +367,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (timed supervisor wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; default 600000, `0` disables) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — fast-fail a child that never makes progress, e.g. a headless `mcp: true` leg stalled on init; default 90000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable both delegation nudges — hand-off + persistence; on by default)
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; default 600000, `0` disables) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — fast-fail a child that never makes progress, e.g. a headless `mcp: true` leg stalled on init; default 90000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable both delegation nudges — hand-off + persistence; on by default)
 
 ## Develop
 

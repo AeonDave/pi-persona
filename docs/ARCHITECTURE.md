@@ -243,11 +243,16 @@ Steering is always a Bus action; the peek digest is always a read-only ProgressV
   idle/peek/steer.
 - **async** — the supervisor returns control and goes **idle, spending no tokens**, until woken by an
   **event** (a child's `contact_supervisor`: a `decision`/`interview` blocks for a reply, `progress` is
-  one-way) or the **timed wakeup**: a periodic peek (`PI_PERSONA_PEEK_MS`, on by default ~30s, `0`
-  disables) that fires while async children run, carrying a compact ProgressView digest — never full
-  transcripts — with any child that hasn't advanced within `STALL_FLAG_MS` (45s) flagged *possibly
-  stuck*. The wakeup is what lets an idle supervisor notice and steer/stop a wedged child even when NO
-  completion has fired (the enforcing backstop is the engines' hard wall-clock cap, above). Async failures are ALWAYS reported (never suppressed);
+  one-way) or the **peek watchdog**, which fires while async children run but stays SILENT unless there
+  is something to act on — a healthy background run never interrupts. It surfaces on two independent
+  signals: a **fast** wakeup (`PI_PERSONA_PEEK_MS`, ~30s, `0` disables) when a child NEWLY crosses the
+  `STALL_FLAG_MS` (90s) stall window (a focused *possibly stuck* alert, framed patience-first — ask the
+  leg, don't probe its environment) or messages the supervisor; and a **slow routine check-in**
+  (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) that delivers the compact ProgressView digest — never
+  full transcripts — so the supervisor can catch a leg going off-track early. Both let an idle
+  supervisor steer/stop a wedged or drifting child even when NO completion has fired; the enforcing
+  backstop is the engines' hard wall-clock cap (above). The full digest is also on demand via `/peek`.
+  Async failures are ALWAYS reported (never suppressed);
   the runtime `DelegationLedger` vetoes a blind retry loop (an identical agent+model+task delegation
   that failed twice is stopped before it spawns). Coaching is gated by `coaching: on` AND `canUseBus`.
 

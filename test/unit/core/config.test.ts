@@ -29,6 +29,14 @@ test("PI_PERSONA_PEEK_MS sets the periodic peek interval (default ON; explicit 0
 	assert.equal(resolveConfig({ PI_PERSONA_PEEK_MS: "-5" }).peekEveryMs, 30_000, "negative ⇒ default");
 });
 
+test("PI_PERSONA_CHECKIN_MS sets the routine check-in interval (default 5 min; explicit 0 disables)", () => {
+	assert.equal(resolveConfig({}).checkInEveryMs, 300_000, "the routine direction check-in is on by default");
+	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "120000" }).checkInEveryMs, 120_000);
+	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "0" }).checkInEveryMs, 0, "explicit 0 opts out");
+	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "abc" }).checkInEveryMs, 300_000, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "-5" }).checkInEveryMs, 300_000, "negative ⇒ default");
+});
+
 test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 600000; explicit 0 disables)", () => {
 	assert.equal(resolveConfig({}).agentHardTimeoutMs, 600_000, "a generous lifetime ceiling by default");
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "120000" }).agentHardTimeoutMs, 120000);

@@ -139,12 +139,19 @@ and keep free models off the critical path. **Strong** for technique chains, dec
 ambiguous targets, non-trivial design. If a model can't engage a legitimate in-scope task, flag it to
 the user with the packet — don't silently swap to route around it.
 
-## Supervise async runs — don't fire-and-forget
-Legs run in the background by default (`sync: true` to block) — dispatch and keep working; `intercom peek` (or f9) to watch, **`steer`** the
-moment one drifts (wrong target, rabbit hole, grinding a side-problem), **`stop`** and take over if
-needed — prefer steer over stop. With coaching on, operators reach you via `contact_supervisor`
-(`intercom inbox` / `reply`). For long/multi-session ops keep a `findings.md` blackboard and feed each
-packet only the relevant slice.
+## Supervise async runs — trust the hand-off, don't hover
+A background leg reports back on its own the moment it finishes (`sync: true` to block instead) — so
+dispatch and keep working the thread you kept; you do NOT watch it or poll its progress. pi-persona
+wakes you when a leg stalls or messages you, and hands you an occasional check-in digest so you can
+catch one going off-track early — react to those; otherwise let a healthy run go, its result returns on
+its own. A long scan, a big generation, or a blocking command looks identical to a stall from the
+outside, so default to patience. `steer` only on CONFIRMED drift (wrong target, rabbit hole, a
+sustained stall), and steer by asking the leg for a one-line status — never run commands in its
+environment to check on it, that's its job. `stop` and take over only if steering fails; prefer steer
+over stop. Anything the leg must always know — the box's constraints, the callback, the success signal —
+goes in its packet up front, not a mid-run reminder. With coaching on, operators reach you via
+`contact_supervisor` (`intercom inbox` / `reply`). For long/multi-session ops keep a `findings.md`
+blackboard and feed each packet only the relevant slice.
 
 ## Verify · reject false passes · stay safe
 No claim of success/vuln/fix without raw auditable proof; independently re-check high-stakes claims
