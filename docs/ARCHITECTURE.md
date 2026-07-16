@@ -111,9 +111,11 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
 
 - **`src/core/`** — pure kernel (no Pi imports, unit-tested): `frontmatter`, `permissions` +
   `capabilities`, `contract` (+`parseContract`), `config`, `discovery`, `seed`, `fence`
-  (`fenceUntrusted` / `attributeInbound`), `models`, `timer` (`TimerScheduler` — the pure alarm
-  engine behind the supervisor `timer` tool; on fire it wakes the session through the same
-  idle-gated delivery as async completions), `types`.
+  (`fenceUntrusted` / `attributeInbound`), `models`, `brief` (`buildDelegationBrief` — the per-turn
+  delegation brief: live roster + standing hand-off default, rendered to the system-prompt tail),
+  `nudge` (the two runtime-reinforcement state machines, `DelegationNudge` + `PersistenceNudge`),
+  `timer` (`TimerScheduler` — the pure alarm engine behind the supervisor `timer` tool; on fire it
+  wakes the session through the same idle-gated delivery as async completions), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback), `async.ts` (async
   tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event → state).
@@ -246,13 +248,25 @@ Steering is always a Bus action; the peek digest is always a read-only ProgressV
   the runtime `DelegationLedger` vetoes a blind retry loop (an identical agent+model+task delegation
   that failed twice is stopped before it spawns). Coaching is gated by `coaching: on` AND `canUseBus`.
 
-The **delegation nudge** (`core/nudge.ts`, `config.nudge`, on by default; `PI_PERSONA_NUDGE=off`) is the
-mirror: a `tool_result` hook watches the *supervisor's own* tool stream and, when a delegating persona
-grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold),
-**appends** a one-line reminder to that command's result. Rationale: a persona directive lives at the
-TOP of the prompt and its pull decays as recent tool output balloons; the nudge lands in RECENT context,
-on the very command that burned it — runtime reinforcement the static prompt can't give. Sub-agents run
-in their own sessions, so the hook only ever sees the supervisor's tools; a hand-off resets the streak.
+**Runtime reinforcement of the hand-off default** comes as a standing part and a reactive part, because a
+persona directive lives at the TOP of the prompt and its pull decays as recent tool output balloons:
+
+- The **delegation brief** (`core/brief.ts`) is the STANDING half: a compact block — live roster (installed
+  agents + teams + flows) and the hand-off default — appended to the system-prompt TAIL every turn, where
+  recency wins the tug-of-war a top-of-prompt line loses. It is regenerated from the live registry (so it
+  can't desync) and filtered to the active persona's `delegate` allowlist (a persona that denies `delegate`
+  gets none). It never dictates how MANY sub-agents or which shape — that is each persona's own method.
+- The **nudges** (`core/nudge.ts`, `config.nudge`, on by default; `PI_PERSONA_NUDGE=off` silences BOTH) are
+  the REACTIVE half, landing in RECENT context on the very event that warrants them:
+  - **DelegationNudge** — a `tool_result` hook watches the *supervisor's own* tool stream and, when a
+    delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a
+    threshold), appends a one-line "hand it off" reminder to that command's result. Sub-agents run in their
+    own sessions, so the hook only ever sees the supervisor's tools; a hand-off resets the streak.
+  - **PersistenceNudge** — the counterweight to premature surrender: when a delegated leg's report carries an
+    explicit `[BLOCKED]`/`FLAG: UNKNOWN` marker, it appends a "don't bank it yet" reminder. It rides every
+    delivery path — the sync `delegate`/`council` result, the background completion report, and the `intercom
+    wait` join (the latter two through `engine/async.ts`'s `renderCompletion`) — so a blocked leg gets the
+    counterweight however it is collected.
 
 ## Discovery & seeding
 
