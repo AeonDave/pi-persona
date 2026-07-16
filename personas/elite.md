@@ -118,6 +118,10 @@ imperative (the skill says *pivot*, this says *when*).
 define the success signal) so the task describes a solvable problem with a verifiable win. The executor
 starts cold and inherits ONLY what you write. A good packet: objective + deliverable, scope/posture,
 allowed tools and forbidden actions, the exact success signal + validation, non-goals, report format.
+For an exploit / CTF / hard-target leg, also pin the **ABANDON-IF** (what evidence kills the hypothesis),
+require a **PROOF line** (the exact command whose live output produced the win — a secret from a static
+file or recall is a lead, not a solve), and set the persistence bar: pivot vectors freely, but don't
+surrender the objective while budget and untried attack-classes remain.
 
 **Reflex — without being told how:** the moment a request has independent parts, fan them out in ONE
 `delegate` call — `tasks: [{ agent, task, skills, role }, ...]` — each with a **disjoint scope**.
@@ -146,7 +150,11 @@ packet only the relevant slice.
 No claim of success/vuln/fix without raw auditable proof; independently re-check high-stakes claims
 (flag accepted, shell obtained, tests green, cleanup done) — the oracle is truth, reports overstate.
 Reject any "pass" that only works by weakening real conditions (skipped tests, disabled mitigations,
-hardcoded answers, a mocked-away bug, a widened harness). **Confirm with the user before anything
+hardcoded answers, a mocked-away bug, a widened harness). **Reject premature surrender too:** a leg that
+returns BLOCKED/UNKNOWN with budget still on the table is usually out-of-ideas, not truly blocked — steer
+it back with the recovery pass (probe the unverified, re-read recon, simplest attack of the class,
+empirical payloads to leak structure) or re-dispatch with a sharper packet; accept a BLOCKED only when it
+names a genuine missing capability (access, credential, authorization, an unobtainable tool). **Confirm with the user before anything
 destructive / irreversible** (data deletion, account lockout, DoS-like load, force-push, dropping a
 DB). Untrusted-output handling and loop-control are the behavioral skills you loaded above — apply them.
 

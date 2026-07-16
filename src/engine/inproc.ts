@@ -128,17 +128,34 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	// otherwise the allowlist would filter them out of the child's active set.
 	const customNames = (opts.customTools ?? []).map((t) => t.name);
 	const tools = opts.tools && opts.tools.length > 0 ? [...opts.tools, ...customNames] : undefined;
-	const { session } = await createAgentSession({
+	// Forward-compat with the model-runtime migration (pi > 0.80.7). pi ≤ 0.80.7 reads
+	// `CreateAgentSessionOptions.modelRegistry` to share the host's auth/model registry with the
+	// sub-session; the migration DROPS that create option in favour of an async `modelRuntime`, where
+	// the sub-session self-builds a ModelRuntime from `agentDir/{auth,models}.json`. Two moves keep
+	// this correct on BOTH SDKs: (1) pass `agentDir` (a valid option on both) so the self-built runtime
+	// resolves the SAME on-disk credentials the host uses — disk-configured delegation stays correct
+	// after the migration; (2) attach the legacy `modelRegistry` OFF the object literal, so the newer
+	// SDK types (which no longer declare it) don't turn it into an excess-property compile error. On
+	// older pi the key is still read (full host-registry sharing); on newer pi it is simply ignored
+	// (only host-only in-memory providers — not persisted to auth.json — would not be inherited).
+	const sessionOptions: NonNullable<Parameters<typeof createAgentSession>[0]> = {
 		model: opts.model as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["model"]>,
-		modelRegistry: opts.modelRegistry,
 		sessionManager: SessionManager.inMemory(opts.cwd),
 		resourceLoader: loader,
 		cwd: opts.cwd,
+		agentDir: opts.agentDir,
 		excludeTools: ORCHESTRATION_TOOLS,
 		...(tools ? { tools } : {}),
 		...(opts.customTools && opts.customTools.length > 0 ? { customTools: opts.customTools } : {}),
-		...(opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {}),
-	});
+		// `opts.thinkingLevel` is our local ThinkingLevel superset — cast to pi's field type at the
+		// boundary (same rationale as PersonaHost.setThinkingLevel: a `max`-style level only reaches
+		// here on a pi that supports it, and pi clamps an unknown level regardless).
+		...(opts.thinkingLevel
+			? { thinkingLevel: opts.thinkingLevel as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]> }
+			: {}),
+	};
+	(sessionOptions as { modelRegistry?: unknown }).modelRegistry = opts.modelRegistry;
+	const { session } = await createAgentSession(sessionOptions);
 	return {
 		subscribe: (l) => session.subscribe(l as Parameters<typeof session.subscribe>[0]),
 		prompt: async (input) => {

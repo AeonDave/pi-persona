@@ -259,12 +259,14 @@ export class IdleCoalescingNotifier<T> {
 		this.arm(this.debounceMs);
 	}
 
-	/** Cancel any armed flush (reload hygiene — never leak a timer across sessions). */
+	/** Cancel any armed flush AND drop buffered items (reload hygiene — never leak a timer or a
+	 *  previous session's undelivered items across sessions; the instance may be reused). */
 	cancel(): void {
 		if (this.handle !== undefined) {
 			this.deps.clearTimer(this.handle);
 			this.handle = undefined;
 		}
+		this.pending.length = 0;
 	}
 
 	/** Drop buffered items matching `pred` — e.g. results the supervisor already collected

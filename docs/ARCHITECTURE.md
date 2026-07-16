@@ -111,7 +111,9 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
 
 - **`src/core/`** — pure kernel (no Pi imports, unit-tested): `frontmatter`, `permissions` +
   `capabilities`, `contract` (+`parseContract`), `config`, `discovery`, `seed`, `fence`
-  (`fenceUntrusted` / `attributeInbound`), `models`, `types`.
+  (`fenceUntrusted` / `attributeInbound`), `models`, `timer` (`TimerScheduler` — the pure alarm
+  engine behind the supervisor `timer` tool; on fire it wakes the session through the same
+  idle-gated delivery as async completions), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback), `async.ts` (async
   tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event → state).

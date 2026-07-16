@@ -407,6 +407,17 @@ test("IdleCoalescingNotifier.cancel() drops the armed flush (reload hygiene)", (
 	assert.equal(sent.length, 0, "nothing is delivered after cancel");
 });
 
+test("IdleCoalescingNotifier.cancel() also drops buffered items (no leak across sessions)", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	n.notify("stale"); // buffered by the session being torn down
+	n.cancel(); // reload/dispose hygiene: the instance is reused for the next session
+	n.notify("fresh"); // a new item on the reused notifier
+	clock.tick();
+	assert.deepEqual(sent, ["fresh"], "a pre-cancel item must never ride along on the next delivery");
+});
+
 test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];

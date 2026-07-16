@@ -9,9 +9,12 @@ import type { Permission } from "./permissions.ts";
 
 export type { Permission };
 
-/** Pi reasoning/effort levels (mirrors `@earendil-works/pi-ai`'s `ThinkingLevel`). */
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+/** Pi reasoning/effort levels (mirrors `@earendil-works/pi-ai`'s `ThinkingLevel`). Keep in lockstep
+ *  with upstream: `max` was added in pi 0.80.6 (above `xhigh`). If pi's union widens again, add the
+ *  new level here too — `pi.getThinkingLevel()` returns the upstream union, so a missing member here
+ *  is a hard compile error where the host reads it (see `PersonaHost.getThinkingLevel`). */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export function isThinkingLevel(x: unknown): x is ThinkingLevel {
 	return typeof x === "string" && (THINKING_LEVELS as readonly string[]).includes(x);

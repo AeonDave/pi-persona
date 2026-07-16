@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DelegationNudge } from "../../../src/core/nudge.ts";
+import { DelegationNudge, PersistenceNudge } from "../../../src/core/nudge.ts";
 
 // Small explicit thresholds keep these tests independent of the tunable defaults.
 const mk = () => new DelegationNudge({ singleHeavyChars: 100, cumulativeChars: 200 });
@@ -72,4 +72,32 @@ test("reset() clears the streak (new session / persona switch)", () => {
 	n.observe("bash", 80); // burn 160, near the window
 	n.reset();
 	assert.equal(n.observe("bash", 80), undefined, "burn counts from zero after reset");
+});
+
+// --- PersistenceNudge: the premature-surrender counterweight -----------------------------------
+
+test("PersistenceNudge fires when a delegated leg reports a blocked marker", () => {
+	const n = new PersistenceNudge();
+	const note = n.observe("delegate", "tried A, B, C. [BLOCKED: need domain creds]");
+	assert.ok(note, "an explicit BLOCKED in a leg report nudges the supervisor");
+	assert.match(note ?? "", /recovery pass/i);
+});
+
+test("PersistenceNudge fires on a CTF give-up (FLAG: UNKNOWN), case/spacing tolerant", () => {
+	const n = new PersistenceNudge();
+	assert.ok(n.observe("council", "PROOF: none\nFLAG: UNKNOWN"));
+	assert.ok(n.observe("delegate", "flag:   unknown"));
+	assert.ok(n.observe("delegate", "[blocked: dead end]"));
+});
+
+test("PersistenceNudge stays quiet on a clean, successful leg report", () => {
+	const n = new PersistenceNudge();
+	assert.equal(n.observe("delegate", "done — foothold obtained, PROOF: id → uid=0(root)"), undefined);
+});
+
+test("PersistenceNudge ignores the supervisor's own tools — only delegate/council reports", () => {
+	const n = new PersistenceNudge();
+	// A bash/read result that happens to contain the marker is the supervisor's OWN work, not a leg.
+	assert.equal(n.observe("bash", "[BLOCKED: need X]"), undefined);
+	assert.equal(n.observe("read", "FLAG: UNKNOWN"), undefined);
 });

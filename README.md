@@ -130,7 +130,9 @@ same: new *files* on this API, no new core.
 | `delegate` tool | spawn sub-agent(s): single or parallel × sync (blocks the turn) or async (background; result returns as a follow-up) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
 | `intercom` tool | interact with running sub-agents: `peek` (watch) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (hard-abort) work for **any** persona; `list`/`inbox`/`reply`/`send` are the coaching message bus |
+| `timer` tool | arm a wall-clock **alarm** that wakes the session when it fires — the token-cheap way to wait for a fixed moment (a release, a rate-limit reset, a scheduled re-check) instead of a poll loop: `arm { message, delaySeconds \| atIso }` · `cancel { id }` · `list`. The fire is delivered through the same idle-gated path as async completions (a fresh turn), so the supervisor resumes on its own. In-memory per session (cleared on reload) |
 | `flow` tool · `/flow` | run a DAG of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a checkpoint (approve before its dependents run) |
+| `models` tool | list / search the authenticated model ids (`provider/id`) to pick an exact `model` for a `delegate` task — ★ marks the session provider |
 | persona `mode:` | `solo` (opportunistic) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
 | persona `coaching:` | opt into the comm plane — children get a `contact_supervisor` tool to report progress / ask blocking decisions while they run (async) |
 | `isolation: worktree` | an agent (frontmatter) or a `delegate` task runs in a throwaway git worktree — edits/tests never touch the main tree, force-removed after |
@@ -361,6 +363,17 @@ npm test            # node --test
 
 Binding design notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the design contract)
 and [`docs/STRATEGIES.md`](docs/STRATEGIES.md) (the orchestration layer, in depth).
+
+### Pi compatibility
+
+pi-persona tracks Pi's published SDK: peer deps float on `*`, and the committed lockfile pins a
+known-good build. It is written to straddle SDK churn rather than chase it — two seams take the
+brunt: the in-process engine tolerates `createAgentSession`'s `modelRegistry → modelRuntime`
+migration (it passes `agentDir` so a self-built runtime resolves the same on-disk credentials, and
+attaches the legacy `modelRegistry` off the option literal so newer SDK types still compile), and
+the local `ThinkingLevel` mirror is kept a superset of upstream's with a cast at each boundary, so a
+new upstream level flows through without breaking the build either way. After bumping the pi
+packages, run `npm run typecheck` — it is the gate that catches an SDK surface change.
 
 ## License
 

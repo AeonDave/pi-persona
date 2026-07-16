@@ -28,7 +28,7 @@ import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import { seedDefaults, type SeedResult } from "./core/seed.ts";
 import { canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
-import { DelegationNudge } from "./core/nudge.ts";
+import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
@@ -60,6 +60,7 @@ import {
 } from "./persona/config-store.ts";
 import { DelegationLedger, type DelegateView, labelFor, runDelegate, shortModel } from "./tools/delegate.ts";
 import { formatInbox, type IntercomParams, runIntercom } from "./tools/intercom.ts";
+import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
@@ -134,6 +135,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// Delegation nudge: watches the supervisor's OWN tool-result stream and reminds it to hand off
 	// when it grinds heavy work by hand (config.nudge; gated to delegating personas at the hook).
 	const delegationNudge = new DelegationNudge();
+	// Persistence nudge: the counterweight — when a delegated leg comes back BLOCKED/UNKNOWN, remind
+	// the supervisor not to bank a premature surrender (same config.nudge gate + hook as above).
+	const persistenceNudge = new PersistenceNudge();
 	// node id → abort that one agent (so the overlay can STOP a single sub-agent).
 	const stopRegistry = new Map<string, () => void>();
 	const clearStops = (prefix: string): void => {
@@ -301,7 +305,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 		},
 		setThinkingLevel: (level) => {
 			try {
-				pi.setThinkingLevel(level);
+				// `level` is our local ThinkingLevel — a SUPERSET that may include an upstream level
+				// (e.g. `max`) the installed pi predates. Cast to pi's parameter type at the boundary:
+				// we can't statically match every pi version's union, and pi clamps an unknown level.
+				// (A wider level only ever reaches here on a pi that actually supports it, since it
+				// originates from pi.getThinkingLevel() — so the cast is safe in practice, not just typed.)
+				pi.setThinkingLevel(level as Parameters<typeof pi.setThinkingLevel>[0]);
 			} catch {
 				/* clamped/ignored */
 			}
@@ -381,6 +390,24 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const intercomNotifier = new IdleCoalescingNotifier<string>({
 		...idleDelivery,
 		render: (asks) => asks.join("\n\n"),
+	});
+	// Supervisor-armable alarms: when a timer expires it WAKES the session by routing the fire
+	// through the same idle-delivery path (an idle delivery starts a fresh turn, so the supervisor
+	// resumes on its own — no token-burning poll loop). Coalesced so several timers firing close
+	// together arrive as one wake. The scheduler itself is the pure core kernel (src/core/timer.ts).
+	const timerNotifier = new IdleCoalescingNotifier<TimerEntry>({
+		...idleDelivery,
+		render: (entries) => renderTimerFire(entries),
+	});
+	const timerScheduler = new TimerScheduler({
+		now: () => Date.now(),
+		setTimer: (fn, ms) => {
+			const h = setTimeout(fn, ms);
+			h.unref?.(); // never keep the host process alive just for a pending alarm
+			return h;
+		},
+		clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+		onFire: (entry) => timerNotifier.notify(entry),
 	});
 	const tracker = new AsyncRunTracker();
 	tracker.onComplete((run) => {
@@ -988,6 +1015,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
 		completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
 		intercomNotifier.cancel();
+		timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
+		timerNotifier.cancel();
 		// This instance is being torn down (a reload/new/resume rebinds a fresh one); abort in-flight
 		// sub-agents and reset control state so nothing is left orphaned or rendered stale.
 		for (const abort of [...stopRegistry.values()]) {
@@ -1043,10 +1072,18 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (!config.nudge) return undefined;
 		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
 		if (!controller.capabilities?.tools.has("delegate")) return undefined;
+		const notes: string[] = [];
+		// Grinding-by-hand reminder: burn SIZE on the supervisor's own tools (delegate/council reset it).
 		const size = event.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0);
-		const note = delegationNudge.observe(event.toolName, size);
-		if (!note) return undefined;
-		return { content: [...event.content, { type: "text", text: note }] };
+		const burn = delegationNudge.observe(event.toolName, size);
+		if (burn) notes.push(burn);
+		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
+		// results only; because delegate/council reset the burn streak the two never fire on one event).
+		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
+		const surrender = persistenceNudge.observe(event.toolName, text);
+		if (surrender) notes.push(surrender);
+		if (notes.length === 0) return undefined;
+		return { content: [...event.content, { type: "text", text: notes.join("\n\n") }] };
 	});
 
 	// Mandatory orchestration: when the active persona declares a strategy/parallel/
@@ -1533,6 +1570,76 @@ export default function piPersona(pi: ExtensionAPI): void {
 				text += `\n\n(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
 			}
 			return { content: [{ type: "text", text }], details: out.details, isError: !out.details.ok };
+		},
+	});
+
+	// ── timer tool (arm a wall-clock alarm that WAKES the session when it fires) ───
+	// Solves the "wait N minutes for a release / rate-limit window" problem WITHOUT a poll loop:
+	// arm an alarm, end your turn, and when it expires the extension injects a follow-up that
+	// resumes you (idle-gated so it starts a fresh turn instead of stranding). Arm as many as you
+	// want; cancel/list them. In-memory per session (a reload/new session clears armed alarms).
+	const TimerToolParams = Type.Object({
+		action: Type.Union([Type.Literal("arm"), Type.Literal("cancel"), Type.Literal("list")], {
+			description: "arm = schedule a wakeup · cancel = drop one by id · list = show armed alarms",
+		}),
+		message: Type.Optional(
+			Type.String({ description: "arm: the follow-up injected into the session when the timer fires (what to do on wake, e.g. 'spawn Paperwork and start nmap'). Required for arm." }),
+		),
+		delaySeconds: Type.Optional(Type.Number({ description: "arm: fire this many seconds from now. Give this OR atIso, not both." })),
+		atIso: Type.Optional(Type.String({ description: "arm: fire at this absolute time, ISO-8601 (e.g. '2026-07-11T19:00:00Z'). Give this OR delaySeconds, not both." })),
+		label: Type.Optional(Type.String({ description: "arm: a short human label for the alarm (e.g. 'Paperwork release')." })),
+		id: Type.Optional(Type.String({ description: "cancel: the timer id to cancel (e.g. 'timer-1')." })),
+	});
+	pi.registerTool({
+		name: "timer",
+		label: "Timer",
+		description: [
+			"Arm a wall-clock ALARM that wakes you when it fires — the token-cheap way to wait for a",
+			"fixed moment (a machine release, a rate-limit reset, a scheduled re-check) instead of a",
+			"poll loop. `arm` with { message, delaySeconds } or { message, atIso }; end your turn; when",
+			"it expires a follow-up carrying your message is injected and you resume. `cancel` by id,",
+			"`list` the armed ones. Arm as many as you need. Alarms are per-session (cleared on reload).",
+		].join(" "),
+		parameters: TimerToolParams,
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			lastCtx = ctx;
+			if (params.action === "list") {
+				const timers = timerScheduler.list();
+				const text =
+					timers.length === 0
+						? "(no armed timers)"
+						: `Armed timers:\n${timers
+								.map((t) => `• ${t.id} (${t.label}) — fires in ${formatRemaining(t.remainingMs)} [${new Date(t.fireAtEpochMs).toISOString()}]: ${t.message}`)
+								.join("\n")}`;
+				return { content: [{ type: "text", text }], details: { action: "list", count: timers.length, ok: true }, isError: false };
+			}
+			if (params.action === "cancel") {
+				if (!params.id) {
+					return { content: [{ type: "text", text: "timer cancel needs { id } (see `list`)." }], details: { action: "cancel", ok: false }, isError: true };
+				}
+				const cancelled = timerScheduler.cancel(params.id);
+				return cancelled
+					? { content: [{ type: "text", text: `Cancelled ${params.id}.` }], details: { action: "cancel", ok: true }, isError: false }
+					: { content: [{ type: "text", text: `No armed timer with id "${params.id}" (it may have already fired or been cancelled).` }], details: { action: "cancel", ok: false }, isError: true };
+			}
+			// action === "arm"
+			const arm: { message: string; label?: string; delayMs?: number; atEpochMs?: number } = { message: params.message ?? "" };
+			if (params.label !== undefined) arm.label = params.label;
+			if (params.atIso !== undefined) {
+				const at = Date.parse(params.atIso);
+				if (!Number.isFinite(at)) {
+					return { content: [{ type: "text", text: `timer atIso "${params.atIso}" is not a valid ISO-8601 time.` }], details: { action: "arm", ok: false }, isError: true };
+				}
+				arm.atEpochMs = at;
+			}
+			if (params.delaySeconds !== undefined) arm.delayMs = Math.round(params.delaySeconds * 1000);
+			const r = timerScheduler.arm(arm);
+			if (!r.ok || !r.entry) {
+				return { content: [{ type: "text", text: r.error ?? "timer arm failed." }], details: { action: "arm", ok: false }, isError: true };
+			}
+			const e = r.entry;
+			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(e.fireAtEpochMs - Date.now())} [${new Date(e.fireAtEpochMs).toISOString()}]. On fire I'll be woken with: "${e.message}". You can end this turn now.`;
+			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, ok: true }, isError: false };
 		},
 	});
 
