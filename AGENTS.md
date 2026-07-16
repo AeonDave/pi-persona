@@ -61,7 +61,10 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   set when you touch `inproc.ts`/`adapter.ts` or the fallback silently stops working.
 - **Fork-bomb guard**: children run with env `PI_PERSONA_DISABLE=1` so pi-persona self-disables inside
   them. NEVER pass `noExtensions` (it blocks the pi-claude auth provider). The guard is **ref-counted**
-  in `inproc.ts` — keep it concurrency-safe (parallel strategies build several sessions at once).
+  in `inproc.ts` — keep it concurrency-safe (parallel strategies build several sessions at once). Both
+  engines also export `PI_PERSONA_LEG=1` for a delegated leg — a **dedicated** marker (unlike the
+  user-settable `PI_PERSONA_DISABLE`) so a companion extension can tell a real leg from a disabled
+  supervisor; set it in lockstep with the disable guard (in-process guard + child `spawn` env).
 - Three disjoint comm planes: **EngineEvent** (runtime) / **Bus Msg** (semantic, `src/bus`) /
   **ProgressView** (derived UI, never a source of truth). Capabilities are enforced at call time via
   one `EffectiveCapabilities`, never prompt-only. Per-run pinning: `contract@hash` is frozen at start.

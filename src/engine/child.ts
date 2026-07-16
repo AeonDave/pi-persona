@@ -186,7 +186,10 @@ export async function runChildAgent(
 				// (no persona restore, no input-hook orchestration, no `delegate` tool).
 				// Without this, a globally-installed pi-persona makes every child a
 				// supervisor that re-spawns → exponential fork bomb.
-				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1", ...opts.env },
+				// PI_PERSONA_CHILD marks the child process; PI_PERSONA_LEG is the dedicated
+				// "delegated worker leg" marker a companion extension reads to tell a real leg from
+				// a user-set PI_PERSONA_DISABLE kill switch (see inproc.ts pushDisableGuard).
+				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1", PI_PERSONA_LEG: "1", ...opts.env },
 			});
 
 			let settled = false;

@@ -191,18 +191,30 @@ let globalChildSeq = 0;
 // built (a parallel strategy builds several at once), restored only when the LAST one finishes.
 // A per-call save/restore around the async `createSession` races: it can clear the guard
 // mid-build (fork-bomb window) or leave it stuck. Increment/decrement never cross the await.
+//
+// PI_PERSONA_LEG rides alongside it as a DEDICATED "this session is a delegated worker leg" marker.
+// PI_PERSONA_DISABLE alone is ambiguous — a user can set it as a kill switch — so a companion
+// extension (e.g. pi-persona-mind) cannot tell a real leg from a disabled supervisor by DISABLE
+// alone. LEG is set ONLY here (and in the child engine), never by a user, so it names a leg exactly.
 let disableDepth = 0;
 let savedDisable: string | undefined;
+let savedLeg: string | undefined;
 function pushDisableGuard(): void {
-	if (disableDepth === 0) savedDisable = process.env.PI_PERSONA_DISABLE;
+	if (disableDepth === 0) {
+		savedDisable = process.env.PI_PERSONA_DISABLE;
+		savedLeg = process.env.PI_PERSONA_LEG;
+	}
 	disableDepth += 1;
 	process.env.PI_PERSONA_DISABLE = "1";
+	process.env.PI_PERSONA_LEG = "1";
 }
 function popDisableGuard(): void {
 	disableDepth -= 1;
 	if (disableDepth === 0) {
 		if (savedDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
 		else process.env.PI_PERSONA_DISABLE = savedDisable;
+		if (savedLeg === undefined) delete process.env.PI_PERSONA_LEG;
+		else process.env.PI_PERSONA_LEG = savedLeg;
 	}
 }
 

@@ -30,6 +30,7 @@ const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined
 interface Spy {
 	aborted?: boolean;
 	disableDuringCreate?: string | undefined;
+	legDuringCreate?: string | undefined;
 	steered?: unknown[];
 	opts?: CreateSessionOptions;
 	promptText?: string;
@@ -67,6 +68,7 @@ function fakeSessions(events: unknown[], spy?: Spy): CreateInProcSession {
 	return async (opts) => {
 		if (spy) {
 			spy.disableDuringCreate = process.env.PI_PERSONA_DISABLE;
+			spy.legDuringCreate = process.env.PI_PERSONA_LEG;
 			spy.opts = opts;
 		}
 		const session = fakeSession(events, spy);
@@ -96,13 +98,16 @@ test("inproc engine folds the session event stream into output + usage (no live 
 	assert.equal(r.usage.output, 5);
 	assert.equal(r.modelUsed, "stub/m", "the resolved provider/id is reported for the UI + fallback");
 	assert.equal(spy.disableDuringCreate, "1", "PI_PERSONA_DISABLE set while the sub-session is built (fork-bomb guard)");
+	assert.equal(spy.legDuringCreate, "1", "PI_PERSONA_LEG set while the sub-session is built (dedicated worker-leg marker)");
 });
 
-test("inproc engine restores PI_PERSONA_DISABLE after the sub-session is built", async () => {
-	const before = process.env.PI_PERSONA_DISABLE;
+test("inproc engine restores PI_PERSONA_DISABLE and PI_PERSONA_LEG after the sub-session is built", async () => {
+	const beforeDisable = process.env.PI_PERSONA_DISABLE;
+	const beforeLeg = process.env.PI_PERSONA_LEG;
 	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")]) });
 	await engine.run({ agent: "a", task: "t" });
-	assert.equal(process.env.PI_PERSONA_DISABLE, before, "env restored to its prior value");
+	assert.equal(process.env.PI_PERSONA_DISABLE, beforeDisable, "PI_PERSONA_DISABLE restored to its prior value");
+	assert.equal(process.env.PI_PERSONA_LEG, beforeLeg, "PI_PERSONA_LEG restored to its prior value (never leaks to the supervisor)");
 });
 
 test("concurrent sub-session builds keep the fork-bomb guard set and never leak PI_PERSONA_DISABLE", async () => {

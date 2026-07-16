@@ -39,6 +39,7 @@ test("runChildAgent disables pi-persona in the spawned child (prevents fork-bomb
 	assert.equal(r.ok, true);
 	assert.match(r.output, /PI_PERSONA_DISABLE=1/);
 	assert.match(r.output, /PI_PERSONA_CHILD=1/);
+	assert.match(r.output, /PI_PERSONA_LEG=1/, "the dedicated worker-leg marker is exported to the child");
 });
 
 test("runChildAgent reports live progress via onProgress", async () => {
