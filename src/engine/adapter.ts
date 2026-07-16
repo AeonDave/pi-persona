@@ -36,6 +36,8 @@ export interface EngineAdapterDeps {
 	resolveAgent: (name: string) => AgentConfig | undefined;
 	contracts?: (name: string) => ContractDef | undefined;
 	signal?: AbortSignal;
+	/** Known agent names, for self-correcting unknown-agent errors (mirrors the model path). */
+	listAgents?: () => string[];
 	/** Per-agent model override (e.g. a persona's configured ensemble models).
 	 *  Precedence: explicit spec.model > modelFor(agent) > the agent's own default. */
 	modelFor?: (agent: string) => string | undefined;
@@ -98,7 +100,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)`, failureKind: "unknown-agent" };
+				const known = deps.listAgents?.() ?? [];
+				const hint = known.length > 0 ? ` — installed agents: ${known.slice(0, 12).join(", ")}${known.length > 12 ? ", …" : ""}` : "";
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)${hint}`, failureKind: "unknown-agent" };
 			}
 
 			// Resolved (and pinned) up front: the SAME def both instructs the member and

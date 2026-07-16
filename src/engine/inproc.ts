@@ -76,6 +76,8 @@ export interface InProcessDeps {
 	signal?: AbortSignal;
 	/** Construction-time progress sink (used when `run` is called without its own). */
 	onProgress?: (snap: ProgressSnapshot) => void;
+	/** Known agent names, for self-correcting unknown-agent errors (mirrors the model path). */
+	listAgents?: () => string[];
 	/** Session factory — defaults to a real `createAgentSession`; injected in tests. */
 	createSession?: CreateInProcSession;
 	/** The semantic comm plane: when present + `coaching`, each child gets a
@@ -228,7 +230,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)`, failureKind: "unknown-agent" };
+				const known = deps.listAgents?.() ?? [];
+				const hint = known.length > 0 ? ` — installed agents: ${known.slice(0, 12).join(", ")}${known.length > 12 ? ", …" : ""}` : "";
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)${hint}`, failureKind: "unknown-agent" };
 			}
 
 			const ref = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model ?? deps.defaultModel;

@@ -213,6 +213,21 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	assert.match(r.error ?? "", /from spec/);
 });
 
+test("inproc engine's unknown-agent error names the installed agents when listAgents is wired", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([]),
+		listAgents: () => ["scout", "operator"],
+	});
+	const r = await engine.run({ agent: "nope", task: "t" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "unknown-agent", "the hint must not change the failure kind (fallback keys on it)");
+	assert.match(r.error ?? "", /— installed agents: scout, operator/);
+});
+
 test("inproc engine's model-not-found error names real registry candidates (self-correcting retry)", async () => {
 	const registry = {
 		find: () => undefined,

@@ -54,3 +54,24 @@ test("child adapter leaves the task untouched when no contract is requested", as
 	assert.equal(r.ok, true);
 	assert.ok(!r.output.includes("output contract"), "no contract requested → no block injected");
 });
+
+test("child adapter reports an unknown agent with the bare message when listAgents is absent", async () => {
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
+	const r = await engine.run({ agent: "nope", task: "t" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "unknown-agent", "not a provider failure — must not trigger fallback");
+	assert.equal(r.error, "[nope] unknown agent (not found in registry)", "no listAgents → message byte-identical to today's");
+});
+
+test("child adapter's unknown-agent error names the installed agents when listAgents is wired", async () => {
+	const engine = makeEngine({
+		resolveAgent,
+		contracts,
+		childOptions: { resolveInvocation: resolveFake },
+		listAgents: () => ["scout", "operator"],
+	});
+	const r = await engine.run({ agent: "nope", task: "t" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "unknown-agent", "the hint must not change the failure kind (fallback keys on it)");
+	assert.match(r.error ?? "", /— installed agents: scout, operator/);
+});
