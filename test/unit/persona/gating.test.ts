@@ -67,3 +67,15 @@ test("a tools-restricted persona still keeps delegate (delegation is preserved u
 	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout" }), undefined, "delegate survives a tools allowlist");
 	assert.equal(gateToolCall(caps, "R", "write", {})?.block, true, "but other unlisted tools are still blocked");
 });
+
+test("a blocked delegate names the allowed targets (self-correcting)", () => {
+	const caps = resolveCapabilities({
+		allToolNames: ["delegate", "read"],
+		knownAgents: ["scout", "reviewer"],
+		permissions: { delegate: { allow: ["scout"] } },
+	});
+	const r = gateToolCall(caps, "Test", "delegate", { agent: "reviewer" });
+	assert.ok(r?.block);
+	assert.match(r?.reason ?? "", /may not delegate to: reviewer/);
+	assert.match(r?.reason ?? "", /Allowed targets: scout/);
+});

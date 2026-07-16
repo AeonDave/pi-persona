@@ -60,7 +60,14 @@ export function gateToolCall(
 
 	const blocked = extractDelegateTargets(input).filter((t) => !canDelegateTo(caps, t));
 	if (blocked.length > 0) {
-		return { block: true, reason: `Persona "${personaLabel}" may not delegate to: ${blocked.join(", ")}.` };
+		// Self-correcting: name what IS allowed, so a persona-gated refusal teaches the fix
+		// instead of reading like "delegation doesn't work here".
+		const allowed = [...caps.delegateTargets];
+		const hint =
+			allowed.length > 0
+				? ` Allowed targets: ${allowed.slice(0, 12).join(", ")}${allowed.length > 12 ? ", …" : ""}.`
+				: " This persona has no delegate targets.";
+		return { block: true, reason: `Persona "${personaLabel}" may not delegate to: ${blocked.join(", ")}.${hint}` };
 	}
 	// I4: a sub-agent's tool override cannot exceed the persona's own capabilities —
 	// otherwise a tools-restricted persona could escalate via `delegate({ tools: [...] })`.
