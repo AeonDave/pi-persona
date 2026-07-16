@@ -1209,7 +1209,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
 		name: Type.Optional(
-			Type.String({ description: "Short HUMAN codename for this sub-agent (e.g. 'pippo', 'luna', 'kilo') — not a task description; tells several apart in the UI" }),
+			Type.String({ description: "Short codename for this sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug', 'atlas-fuzz'. Pick a DIFFERENT call-sign for EVERY leg so two of the same kind stay apart (orion-recon vs vega-recon). A UI label only — not a task description." }),
 		),
 		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
@@ -1227,7 +1227,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
-		name: Type.Optional(Type.String({ description: "Short HUMAN codename for the sub-agent (e.g. 'pippo') — not a task description (single mode)" })),
+		name: Type.Optional(Type.String({ description: "Short codename for the sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug'. A UI label, not a task description (single mode)." })),
 		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
