@@ -1,0 +1,9 @@
+{
+	"name": "finding",
+	"fields": {
+		"result": { "type": "string", "required": true },
+		"proof": { "type": "string", "required": true, "minLength": 12 },
+		"evidence": { "type": "string" },
+		"confidence": { "type": "number", "min": 0, "max": 1 }
+	}
+}

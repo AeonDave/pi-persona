@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import { asSystemPromptMode, isThinkingLevel } from "../../../src/core/types.ts";
 
-test("isThinkingLevel recognises the six valid levels and rejects others", () => {
-	for (const lvl of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+test("isThinkingLevel recognises every valid level (incl. max) and rejects others", () => {
+	// Mirrors pi-ai's ThinkingLevel; `max` was added upstream in pi 0.80.6 and must be accepted so
+	// a supervisor running at `max` propagates that level to its children instead of falling back.
+	for (const lvl of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
 		assert.equal(isThinkingLevel(lvl), true, lvl);
 	}
 	assert.equal(isThinkingLevel("ultra"), false);

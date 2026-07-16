@@ -19,6 +19,9 @@ export interface FieldSpec {
 	/** Inclusive bounds for `type: "number"`. */
 	min?: number;
 	max?: number;
+	/** Minimum string length for `type: "string"` — a non-empty / substantive gate (e.g. a proof
+	 *  line that must carry a real command + live output, not an empty placeholder). */
+	minLength?: number;
 }
 
 export interface ContractDef {
@@ -90,6 +93,7 @@ export function parseContract(content: string): ContractParse {
 		}
 		if (typeof s.min === "number") spec.min = s.min;
 		if (typeof s.max === "number") spec.max = s.max;
+		if (typeof s.minLength === "number") spec.minLength = s.minLength;
 		fields[fname] = spec;
 	}
 	return { ok: true, def: { name: o.name, fields } };
@@ -127,6 +131,7 @@ function fieldLine(name: string, spec: FieldSpec): string {
 	if (spec.min !== undefined && spec.max !== undefined) parts.push(`${spec.min}..${spec.max}`);
 	else if (spec.min !== undefined) parts.push(`>= ${spec.min}`);
 	else if (spec.max !== undefined) parts.push(`<= ${spec.max}`);
+	if (spec.minLength !== undefined) parts.push(`min ${spec.minLength} chars`);
 	return `- ${name} (${parts.join(", ")})`;
 }
 
@@ -213,7 +218,13 @@ export function validateAgainst(def: ContractDef, value: unknown): ValidationRes
 		}
 		switch (spec.type) {
 			case "string":
-				if (typeof fv !== "string") errors.push(`field ${name} must be a string`);
+				if (typeof fv !== "string") {
+					errors.push(`field ${name} must be a string`);
+					break;
+				}
+				if (spec.minLength !== undefined && fv.length < spec.minLength) {
+					errors.push(`field ${name} must be at least ${spec.minLength} characters`);
+				}
 				break;
 			case "number":
 				if (typeof fv !== "number" || Number.isNaN(fv)) {

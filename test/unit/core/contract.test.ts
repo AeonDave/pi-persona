@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -123,4 +124,31 @@ test("contractInstructions renders one-sided bounds as >=/<=", () => {
 	const text = contractInstructions(def);
 	assert.match(text, /- score \(number, >= 0\)/);
 	assert.match(text, /- cap \(number, <= 10\)/);
+});
+
+test("minLength gates a string field (a non-empty/substantive proof) — parse, validate, instruct", () => {
+	const r = parseContract(JSON.stringify({ name: "finding", fields: { proof: { type: "string", required: true, minLength: 12 } } }));
+	assert.ok(r.ok);
+	if (!r.ok) return;
+	assert.equal(r.def.fields.proof?.minLength, 12);
+	// present-but-too-short (incl. empty) → rejected; a substantive proof → accepted
+	assert.equal(validateAgainst(r.def, { proof: "" }).ok, false);
+	assert.equal(validateAgainst(r.def, { proof: "short" }).ok, false);
+	assert.equal(validateAgainst(r.def, { proof: "curl … → HTB{live_flag_from_exploit}" }).ok, true);
+	// the derived instruction advertises the floor so the agent knows the proof must be real
+	assert.match(contractInstructions(r.def), /- proof \(string, required, min 12 chars\)/);
+});
+
+test("the shipped finding contract requires live-exploit provenance (a substantive proof)", () => {
+	const content = readFileSync(new URL("../../../contracts/finding.contract.json", import.meta.url), "utf-8");
+	const r = parseContract(content);
+	assert.ok(r.ok, "finding.contract.json parses");
+	if (!r.ok) return;
+	assert.equal(r.def.name, "finding");
+	assert.equal(r.def.fields.result?.required, true);
+	assert.equal(r.def.fields.proof?.required, true);
+	assert.ok((r.def.fields.proof?.minLength ?? 0) > 0, "proof carries a non-empty floor");
+	// a result with no proof is rejected; a result WITH a live-exploit proof passes
+	assert.equal(parseAndValidate('{"result":"rooted"}', r.def).ok, false);
+	assert.equal(parseAndValidate('{"result":"rooted","proof":"id → uid=0(root) via CVE-2021-4034 pkexec, live"}', r.def).ok, true);
 });
