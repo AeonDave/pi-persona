@@ -17,6 +17,13 @@ strategy files), so you reshape the whole system without touching the core.
 > `/persona restore`) once to install the defaults into `~/.pi/agent/`, then edit them or add your
 > own. Project (`.pi/`) overrides user overrides builtin, so your copy always wins.
 
+> **Companion — durable memory.** [pi-persona-mind](https://github.com/AeonDave/pi-persona-mind) is a
+> separate, optional extension that gives each persona a durable, persona-aware *mind* — long-term
+> memory (who a persona is), decaying working memory (per project), and a deferred-intent backlog —
+> re-injected every turn so it survives compaction and restart. It scopes memory to the active persona
+> by mirroring pi-persona's own resolution, and is delegation-aware: a background worker leg inherits
+> only a lean, read-only mind. Loosely coupled — pi-persona neither requires nor depends on it.
+
 ## What it does
 
 - **Sub-agents, background-first** — delegate one or fan out many, each an isolated run with its
