@@ -6,6 +6,8 @@
 
 # One `reviewer` agent, three complementary lenses — the role focuses each parallel pass
 # (skills load the rest). Add `model: <provider/id>` to a member for cross-model diversity.
+# Pin cheap models on WORKER members here; leave the SUPERVISOR on the session model (a weak
+# supervisor is the least able to act on its delegation reflex).
 review:
   - { agent: reviewer, role: "Focus ONLY on the SECURITY lens: injection, authz/access-control, secrets & token handling, unsafe sinks, input validation." }
   - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens: algorithmic cost on hot paths, needless allocations/copies, repeated or N+1 I/O, unbounded work." }

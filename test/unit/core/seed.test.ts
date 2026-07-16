@@ -10,7 +10,7 @@ import { seedDefaults } from "../../../src/core/seed.ts";
 function bundled(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-bundled-"));
 	fs.mkdirSync(path.join(dir, "personas"));
-	fs.writeFileSync(path.join(dir, "personas", "elite.md"), "PERSONA elite");
+	fs.writeFileSync(path.join(dir, "personas", "sample.md"), "PERSONA sample");
 	fs.writeFileSync(path.join(dir, "personas", "reviewer.md"), "PERSONA reviewer"); // collides with the agent below
 	fs.mkdirSync(path.join(dir, "agents"));
 	fs.writeFileSync(path.join(dir, "agents", "scout.md"), "AGENT scout");
@@ -30,7 +30,7 @@ const read = (p: string): string => fs.readFileSync(p, "utf8");
 test("seedDefaults copies personas + agents into <user>/agents, and teams/flows/contracts/presets into their dirs", () => {
 	const u = userDir();
 	seedDefaults(bundled(), u, false);
-	assert.equal(read(path.join(u, "agents", "elite.md")), "PERSONA elite", "persona seeded into <user>/agents");
+	assert.equal(read(path.join(u, "agents", "sample.md")), "PERSONA sample", "persona seeded into <user>/agents");
 	assert.equal(read(path.join(u, "agents", "scout.md")), "AGENT scout", "agent seeded into the same folder");
 	assert.ok(fs.existsSync(path.join(u, "flows", "deep.flow.json")));
 	assert.ok(fs.existsSync(path.join(u, "contracts", "v.contract.json")));
@@ -49,12 +49,12 @@ test("force=false keeps a user edit; force=true restores the bundled original", 
 	const b = bundled();
 	const u = userDir();
 	seedDefaults(b, u, false);
-	fs.writeFileSync(path.join(u, "agents", "elite.md"), "MY EDITS");
+	fs.writeFileSync(path.join(u, "agents", "sample.md"), "MY EDITS");
 	const keep = seedDefaults(b, u, false);
-	assert.equal(read(path.join(u, "agents", "elite.md")), "MY EDITS", "non-forced seed keeps edits");
+	assert.equal(read(path.join(u, "agents", "sample.md")), "MY EDITS", "non-forced seed keeps edits");
 	assert.equal(keep.copied.length, 0, "nothing copied on a second non-forced seed");
 	seedDefaults(b, u, true);
-	assert.equal(read(path.join(u, "agents", "elite.md")), "PERSONA elite", "restore overwrites with the original");
+	assert.equal(read(path.join(u, "agents", "sample.md")), "PERSONA sample", "restore overwrites with the original");
 });
 
 test("seedDefaults tolerates a bundled dir missing some asset folders", () => {

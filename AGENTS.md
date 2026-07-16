@@ -71,7 +71,9 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
 - Dynamic sub-agents: `delegate` shapes an on-the-fly specialist with `role` (extra system prompt,
   appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate. Async runs
   are joined with intercom `wait` (bounded ≤ the bus-ask timeout; collected results are discarded from
-  the pending completion follow-up so they are never double-reported).
+  the pending completion follow-up so they are never double-reported). In interactive sessions
+  `delegate` is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to
+  sync so the single turn carries the result).
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
 - **Delegation nudge** (`core/nudge.ts`, `config.nudge`, on unless `PI_PERSONA_NUDGE=off`): a
@@ -79,7 +81,10 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold), APPENDS a
   reminder to that command's result — runtime reinforcement in recent context, where a top-of-prompt
   persona directive has decayed. Pure state machine (`DelegationNudge`); gated to personas holding the
-  `delegate` tool; sub-agents run in separate sessions so the hook only sees the supervisor.
+  `delegate` tool; sub-agents run in separate sessions so the hook only sees the supervisor. Its
+  standing counterpart is the **delegation brief** (`core/brief.ts`): `before_agent_start` appends
+  a live, capability-filtered roster (agents/teams/flows) + a hand-off default to the
+  system-prompt TAIL every turn — discovery that survives context burn.
 - **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
   (`AgentRunSpec.peers` — the `debate` strategy does). The child gets a `contact_peer` tool
   (`bus/peers.ts`): `list`/`send`, ONE-WAY only (blocking stays supervisor-only, so peers can
@@ -106,7 +111,7 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
 
 ## Project structure
 
-- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), types.
+- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (buildDelegationBrief — the per-turn roster + standing hand-off default), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (opt-in cross-process relay: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
