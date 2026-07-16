@@ -75,7 +75,7 @@ function run(task) {
 			type: "message_end",
 			message: {
 				role: "assistant",
-				content: [{ type: "text", text: `PI_PERSONA_DISABLE=${process.env.PI_PERSONA_DISABLE ?? "unset"} PI_PERSONA_CHILD=${process.env.PI_PERSONA_CHILD ?? "unset"} PI_PERSONA_BUS=${process.env.PI_PERSONA_BUS ?? "unset"} PI_PERSONA_HANDLE=${process.env.PI_PERSONA_HANDLE ?? "unset"} PI_PERSONA_PEERS=${process.env.PI_PERSONA_PEERS ?? "unset"} PI_PERSONA_ALLOW_BLOCKING=${process.env.PI_PERSONA_ALLOW_BLOCKING ?? "unset"}` }],
+				content: [{ type: "text", text: `PI_PERSONA_DISABLE=${process.env.PI_PERSONA_DISABLE ?? "unset"} PI_PERSONA_CHILD=${process.env.PI_PERSONA_CHILD ?? "unset"} PI_PERSONA_LEG=${process.env.PI_PERSONA_LEG ?? "unset"} PI_PERSONA_BUS=${process.env.PI_PERSONA_BUS ?? "unset"} PI_PERSONA_HANDLE=${process.env.PI_PERSONA_HANDLE ?? "unset"} PI_PERSONA_PEERS=${process.env.PI_PERSONA_PEERS ?? "unset"} PI_PERSONA_ALLOW_BLOCKING=${process.env.PI_PERSONA_ALLOW_BLOCKING ?? "unset"}` }],
 				model: "stub/model",
 				stopReason: "end",
 				usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },

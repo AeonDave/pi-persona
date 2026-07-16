@@ -54,8 +54,11 @@ These are the guardrails a contributor must not violate. They are enforced in co
   `RUN_LIMITS` (`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` idle window, `maxDepth`)
   are enforced by the SDK on every `agent()` call and by the engine per child; depth is structural —
   children run with `PI_PERSONA_DISABLE=1` so they cannot spawn at all (the **fork-bomb guard**,
-  ref-counted in `inproc.ts`). Never claim isolation from `fs`/`net`/`process`. The param schema and
-  other convenience checks stay **lenient** (warn, never hard-fail) for the same reason.
+  ref-counted in `inproc.ts`), and with `PI_PERSONA_LEG=1` — a **dedicated** worker-leg marker,
+  distinct from the user-settable `PI_PERSONA_DISABLE` kill switch, that a companion extension (e.g.
+  pi-persona-mind) reads to tell a real delegated leg from a disabled supervisor. Never claim isolation
+  from `fs`/`net`/`process`. The param schema and other convenience checks stay **lenient** (warn,
+  never hard-fail) for the same reason.
 - **I3 — Per-run pinning.** A run pins `contract@hash` at start; hot-reload affects **new runs only**;
   an active run never changes schema/logic mid-flight. `makeEngine`/`makeInProcessEngine` pin the
   contract on first use and reuse the frozen snapshot for the whole run.
