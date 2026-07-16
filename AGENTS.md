@@ -76,13 +76,16 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   sync so the single turn carries the result).
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
-- **Delegation nudge** (`core/nudge.ts`, `config.nudge`, on unless `PI_PERSONA_NUDGE=off`): a
-  `tool_result` hook watches the supervisor's OWN tool stream and, when a delegating persona grinds
-  heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold), APPENDS a
-  reminder to that command's result — runtime reinforcement in recent context, where a top-of-prompt
-  persona directive has decayed. Pure state machine (`DelegationNudge`); gated to personas holding the
-  `delegate` tool; sub-agents run in separate sessions so the hook only sees the supervisor. Its
-  standing counterpart is the **delegation brief** (`core/brief.ts`): `before_agent_start` appends
+- **Delegation nudges** (`core/nudge.ts`, `config.nudge`, on unless `PI_PERSONA_NUDGE=off` silences
+  BOTH): a `tool_result` hook watches the supervisor's OWN tool stream and, when a delegating persona
+  grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold),
+  APPENDS a reminder to that command's result — runtime reinforcement in recent context, where a
+  top-of-prompt persona directive has decayed. Pure state machine (`DelegationNudge`); gated to
+  personas holding the `delegate` tool; sub-agents run in separate sessions so the hook only sees the
+  supervisor. Its counterweight is **`PersistenceNudge`** — a leg that comes back `[BLOCKED]`/`FLAG:
+  UNKNOWN` gets a "don't bank it yet" reminder on whichever path the report arrives (sync result,
+  background completion, or `intercom wait` — the last two via `engine/async.ts`'s `renderCompletion`).
+  Its standing counterpart is the **delegation brief** (`core/brief.ts`): `before_agent_start` appends
   a live, capability-filtered roster (agents/teams/flows) + a hand-off default to the
   system-prompt TAIL every turn — discovery that survives context burn.
 - **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
