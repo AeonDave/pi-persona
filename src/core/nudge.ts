@@ -115,9 +115,20 @@ export class PersistenceNudge {
 	/**
 	 * Feed one supervisor tool result: its tool name and the full text of the result. Returns the
 	 * reminder to append when a delegated leg's report signals premature surrender, else undefined.
+	 * The SYNC path (a `delegate`/`council` tool_result the supervisor sees inline).
 	 */
 	observe(toolName: string, text: string): string | undefined {
 		if (!REPORT_TOOLS.has(toolName)) return undefined;
+		return this.scan(text);
+	}
+
+	/**
+	 * Tool-agnostic surrender check on already-known-to-be-a-leg-report text. The ASYNC path uses
+	 * this: a background run (the interactive default) delivers its report through the completion
+	 * notifier as a fresh follow-up, NOT a `delegate` tool_result, so {@link observe}'s tool gate
+	 * would never see it — the caller has already established the text is a settled leg's output.
+	 */
+	scan(text: string): string | undefined {
 		return SURRENDER_MARKERS.some((re) => re.test(text)) ? PERSISTENCE_NOTE : undefined;
 	}
 }

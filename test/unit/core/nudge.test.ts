@@ -106,3 +106,13 @@ test("PersistenceNudge ignores the supervisor's own tools — only delegate/coun
 	assert.equal(n.observe("bash", "[BLOCKED: need X]"), undefined);
 	assert.equal(n.observe("read", "FLAG: UNKNOWN"), undefined);
 });
+
+test("PersistenceNudge.scan is tool-agnostic — the async-completion path (delegate reports arrive as a follow-up, not a delegate tool_result)", () => {
+	const n = new PersistenceNudge();
+	// Background runs (now the interactive default) deliver their reports via the completion
+	// notifier, NOT a delegate/council tool_result — so the surrender check must be reachable
+	// without a tool name.
+	assert.ok(n.scan("tried A, B, C. [BLOCKED: need domain creds]"), "a blocked async report trips the scan");
+	assert.match(n.scan("FLAG: UNKNOWN") ?? "", /recovery pass/i);
+	assert.equal(n.scan("done — foothold obtained, PROOF: id → uid=0(root)"), undefined, "a clean report is quiet");
+});
