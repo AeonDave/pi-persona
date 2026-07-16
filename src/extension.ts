@@ -26,7 +26,8 @@ import { resolveModelRef } from "./core/models.ts";
 import { isThinkingLevel } from "./core/types.ts";
 import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import { seedDefaults, type SeedResult } from "./core/seed.ts";
-import { canFanOut, type RunLimits } from "./core/capabilities.ts";
+import { buildDelegationBrief } from "./core/brief.ts";
+import { canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
@@ -58,7 +59,7 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import { DelegationLedger, type DelegateView, labelFor, runDelegate, shortModel } from "./tools/delegate.ts";
+import { DelegationLedger, type DelegateView, labelFor, runDelegate, shortModel, unknownAgentError } from "./tools/delegate.ts";
 import { formatInbox, type IntercomParams, runIntercom } from "./tools/intercom.ts";
 import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
@@ -580,6 +581,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		// through (a worktree needs its own working dir, i.e. a separate process).
 		const childEngineAt = (cwd: string): StrategyEngine => {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
+			deps.listAgents = () => agents.map((a) => a.name);
 			if (signal) deps.signal = signal;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs };
 			const brokerDeps = getBrokerDeps();
@@ -597,6 +599,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (config.engine === "inproc" && lastCtx) {
 			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
 			const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
+			ideps.listAgents = () => agents.map((a) => a.name);
 			ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
 			ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
 			ideps.startupTimeoutMs = config.agentStartupTimeoutMs; // first-progress deadline — fast-fail a child that never started
@@ -617,6 +620,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		} else {
 			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=child\n");
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
+			deps.listAgents = () => agents.map((a) => a.name);
 			if (signal) deps.signal = signal;
 			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs }; // idle watchdog + hard cap + startup deadline on every child
@@ -943,6 +947,28 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return { lines, total: filtered.length, capped: filtered.length > cap };
 	}
 
+	// The per-turn delegation brief (core/brief.ts): live roster + standing hand-off default,
+	// appended to the TAIL of the system prompt each turn — where a decayed top-of-prompt
+	// persona line has no force, and regenerated from the live registry so it cannot desync.
+	// Capability-aware: a persona that denies `delegate` gets none, and the agent list is
+	// filtered to the persona's allowed targets.
+	function delegationBrief(ctx: ExtensionContext): string | undefined {
+		const caps = controller.capabilities;
+		if (caps && !canFanOut(caps)) return undefined;
+		const targets = caps ? agents.filter((a) => canDelegateTo(caps, a.name)) : agents;
+		const teamAgents: Record<string, string[]> = {};
+		for (const [name, members] of Object.entries(teams)) teamAgents[name] = members.map((m) => rosterSpec(m).agent);
+		return buildDelegationBrief({
+			agents: targets.map((a) => (a.description ? { name: a.name, description: a.description } : { name: a.name })),
+			teams: teamAgents,
+			flows: listFlows(ctx.cwd),
+			standing: controller.activePersona !== undefined,
+			// Interactive sessions delegate in the background by default; headless (`pi -p`)
+			// stays sync (the single turn must carry the result) — mirror that in the copy.
+			asyncDefault: ctx.hasUI === true,
+		});
+	}
+
 	function doctorReport(): string {
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
@@ -1048,6 +1074,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
 		let prompt = controller.composePrompt(event.systemPrompt) ?? event.systemPrompt;
+		const brief = delegationBrief(ctx);
+		if (brief) prompt = `${prompt}\n\n${brief}`;
 		if (pendingOrchestration) {
 			// The result is sub-agent text entering the SYSTEM prompt — fence it (I-guardrail:
 			// untrusted output must never reach the supervisor unfenced, least of all here).
@@ -1170,7 +1198,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 		async: Type.Optional(
 			Type.Boolean({
 				description:
-					"Run in the background (single OR parallel) so YOU stay free to keep working / answer the user. Returns run ids immediately; each result arrives as a follow-up, /peek to watch.",
+					"Explicitly run in the background (already the DEFAULT in interactive sessions) — returns run ids at once; each result comes back to you automatically as a follow-up. Set false to force blocking.",
+			}),
+		),
+		sync: Type.Optional(
+			Type.Boolean({
+				description:
+					"Block this turn until the sub-agent(s) finish and return their results inline — only when you need them before your very next step. (Headless sessions already default to sync.)",
 			}),
 		),
 	});
@@ -1257,22 +1291,29 @@ export default function piPersona(pi: ExtensionAPI): void {
 		name: "delegate",
 		label: "Delegate",
 		description: [
-			"Delegate work to a specialized sub-agent (single) or fan out across several in parallel.",
-			"Reach for this whenever a task has independent parts, needs a fresh/isolated context, or",
-			"benefits from a focused specialist — it runs them and returns their structured results to you.",
-			"No fitting agent? Build one ON THE FLY: use `operator` (or any base agent) and shape it with",
-			"`role` (an extra system prompt) + `skills` — no file needed.",
-			"A sub-agent `model` may be a loose name (e.g. 'sonnet'): it auto-resolves to YOUR provider's",
-			"matching id. If a name is ambiguous you get the candidates back — pick one, or call `models`.",
-			"If the user may want to keep interacting (coach, ask, redirect) while this runs, prefer",
-			"`async: true` so you stay free — results come back as follow-ups; /peek or intercom `wait`",
-			"to collect them; sync only when you must have them before your very next step.",
+			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
+			'Minimum call: { agent: "operator", task: "<self-contained brief: objective, scope, success signal>" } — everything else is optional.',
+			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes), then synthesize the returns yourself.",
+			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once, stay free,",
+			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
+			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
+			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
+			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
+			"candidates (or call `models`). Advanced knobs: name, tools, isolation: \"worktree\", mcp, concurrency.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			lastCtx = ctx;
 			const modelErr = resolveDelegateModels(params, ctx);
 			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: {}, isError: true };
+			// Pre-spawn agent validation (mirrors the model path): a wrong name returns the
+			// installed list instead of spawning into a bare engine failure, and a typo never
+			// counts toward the ledger's 2-strike veto.
+			const agentErr = unknownAgentError(
+				params.tasks && params.tasks.length > 0 ? params.tasks.map((t) => t.agent) : params.agent ? [params.agent] : [],
+				agents.map((a) => a.name),
+			);
+			if (agentErr) return { content: [{ type: "text", text: agentErr }], details: {}, isError: true };
 			// Anti-loop veto (after model canonicalisation, so keys match retries): an
 			// identical delegation that already failed twice does not spawn again.
 			const requested =
@@ -1283,9 +1324,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 						: [];
 			const veto = ledger.vet(requested);
 			if (veto) return { content: [{ type: "text", text: veto }], details: {}, isError: true };
+			// Background by default in interactive sessions: the supervisor stays free and results
+			// return as follow-ups (the idle-gated push path). Headless (`pi -p`) defaults to sync —
+			// the single turn must carry the result, and nothing drains a follow-up after the
+			// process exits. An explicit `async` always wins; `sync: true` opts one call out.
+			const wantsAsync = params.async ?? (ctx.hasUI === true && params.sync !== true);
 			// Async (single OR parallel): run in the background so YOU stay free to keep
 			// working / answer the user — results arrive later as follow-ups; /peek to watch.
-			if (params.async && params.tasks && params.tasks.length > 0) {
+			if (wantsAsync && params.tasks && params.tasks.length > 0) {
 				const tasks = params.tasks.slice(0, RUN_LIMITS.maxChildren);
 				const dropped = params.tasks.length - tasks.length;
 				const ids = tasks.map((t, i) => {
@@ -1310,7 +1356,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 					isError: false,
 				};
 			}
-			if (params.async && params.agent && params.task) {
+			if (wantsAsync && params.agent && params.task) {
 				const agent = params.agent;
 				const task = params.task;
 				const runSpec: AgentRunSpec = { agent, task };
@@ -1664,8 +1710,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"Convene a council of specialists with controlled, complementary biases to deliberate a",
 			"decision and vote — returns the ruling (winner, tally, each member's view, recorded dissent).",
 			"Use it before any significant choice; then EXECUTE the ruling yourself and re-convene when",
-			"execution surfaces a new decision. Pass `params` to vary the persona's default council for",
-			'one call — e.g. { "reflect": false } to run magi as a pure independent poll (no reflection round).',
+			"execution surfaces a new decision. Patterns: adversarial vote (magi, council-rounds), best-of-N",
+			"with an impartial arbiter (judge, compete), batch map, merged synthesis (synthesize).",
+			`Strategies: ${strategyNames()
+				.map((n) => {
+					const p = knownParams(n);
+					const keys = p ? Object.keys(p) : [];
+					return keys.length > 0 ? `${n}(${keys.join(", ")})` : n;
+				})
+				.join(" · ")}.`,
+			'Pass `params` to vary the persona\'s default council for one call — e.g. { "reflect": false }.',
 		].join(" "),
 		parameters: CouncilParams,
 		async execute(_id, params, signal, _onUpdate, ctx) {
@@ -1681,6 +1735,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const mergedParams = { ...(council?.params ?? {}), ...((params.params as Record<string, unknown> | undefined) ?? {}) };
 				// Lenient by design (I2: strategies are trusted project code) — an unknown param key
 				// only warns, it never blocks or alters the run. A correct call is untouched.
+				let paramNote = "";
 				const schema = knownParams(strategy);
 				if (schema) {
 					const unknown = Object.keys(mergedParams).filter((k) => !(k in schema));
@@ -1688,6 +1743,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 						const note = `council: ignoring unknown param(s) [${unknown.join(", ")}] for "${strategy}" — known: ${Object.keys(schema).join(", ") || "(none)"}`;
 						if (process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] ${note}\n`);
 						ctx.ui.notify(note, "warning");
+						paramNote = `\n\n(${note})`;
 					}
 				}
 				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: mergedParams };
@@ -1697,7 +1753,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				return {
 					// The ruling is sub-agent (council member) text — fence it like every other
 					// path that hands sub-agent output to the supervisor.
-					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${drainBusBlock()}` }],
+					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${paramNote}${drainBusBlock()}` }],
 					details: {
 						headline: s.headline ?? s.status ?? "",
 						status: s.status,
@@ -1740,7 +1796,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	// ── flow tool (run a *.flow.json DAG over strategies; the supervisor self-launches) ──
 	const FlowToolParams = Type.Object({
-		name: Type.String({ description: "The flow to run — a *.flow.json by name (see /doctor for the list)" }),
+		name: Type.String({ description: "The flow to run — a *.flow.json by name (installed flows are listed in your sub-agents brief; the user can run /flow to list them)" }),
 		task: Type.String({ description: "The objective to run the flow on" }),
 	});
 	pi.registerTool({
@@ -1758,7 +1814,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			lastCtx = ctx;
 			const parsed = loadFlow(ctx.cwd, params.name);
 			if (!parsed) {
-				return { content: [{ type: "text", text: `no flow named "${params.name}" (see /doctor for the list)` }], details: {}, isError: true };
+				const installed = listFlows(ctx.cwd);
+				const hint = installed.length > 0 ? `Installed flows: ${installed.join(", ")}.` : "No flows are installed — add a *.flow.json under .pi/flows/.";
+				return { content: [{ type: "text", text: `no flow named "${params.name}". ${hint}` }], details: {}, isError: true };
 			}
 			if (!parsed.ok) {
 				return { content: [{ type: "text", text: `flow "${params.name}" is invalid: ${parsed.error}` }], details: {}, isError: true };

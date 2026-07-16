@@ -173,7 +173,11 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	const { ctx } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 
-	assert.equal(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined, "no persona ⇒ no change");
+	// With agents installed even a persona-less turn carries the delegation brief (soft
+	// discovery), but no standing hand-off mandate — that needs an active persona.
+	const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+	assert.match(bare.systemPrompt, /\[pi-persona\] Sub-agents:/, "no persona ⇒ discovery brief");
+	assert.doesNotMatch(bare.systemPrompt, /Hand off by default/i, "no persona ⇒ no standing mandate");
 
 	await m.cmd("persona", "dev", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
