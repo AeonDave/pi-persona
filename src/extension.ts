@@ -34,7 +34,7 @@ import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildPeekDigest, IdleCoalescingNotifier, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildPeekAlert, buildPeekDigest, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -78,9 +78,11 @@ const RUN_LIMITS: RunLimits = {
 };
 
 // A running async child that hasn't ADVANCED (output/turns/tokens) for this long is flagged
-// "possibly stuck" in the peek digest — the heartbeat's soft stall signal, so the supervisor can
-// coach/steer/stop it. Purely advisory (no auto-abort); the hard cap is the enforcing backstop.
-const STALL_FLAG_MS = 45_000;
+// "possibly stuck" — the soft stall signal. It is deliberately patient: a long scan, a big
+// generation, or a blocking command shows no visible progress yet is perfectly healthy, so we wake
+// the supervisor only after a genuinely long quiet spell. Purely advisory (no auto-abort); the hard
+// cap (PI_PERSONA_AGENT_MAX_MS) is the enforcing backstop.
+const STALL_FLAG_MS = 90_000;
 
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -415,6 +417,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 		onFire: (entry) => timerNotifier.notify(entry),
 	});
 	const tracker = new AsyncRunTracker();
+	// Turns the periodic peek from a poll into an exception signal: it surfaces a leg only when it
+	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
+	const peekWatcher = new PeekWatcher();
 	tracker.onComplete((run) => {
 		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
@@ -441,11 +446,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 		);
 	});
 
-	// Periodic peek (the timed supervisor wakeup, on by default — PI_PERSONA_PEEK_MS=0 opts out):
-	// while async children run, the idle supervisor is woken every interval with a compact
-	// ProgressView digest (stalled children flagged "possibly stuck") + unread messages, so it can
-	// coach/steer/stop even when NO completion has fired. Bounded: unref'd, self-stops when no runs remain.
+	// Peek watchdog (the timed supervisor wakeup, on by default — PI_PERSONA_PEEK_MS=0 opts out): while
+	// async children run, a tick checks their progress but stays SILENT unless there is something to act
+	// on, so a healthy background run never interrupts the supervisor. It wakes on two signals: a leg
+	// that NEWLY looks stalled or an unread message (fast, PI_PERSONA_PEEK_MS granularity), and a routine
+	// direction check-in (slow, PI_PERSONA_CHECKIN_MS) to catch a leg going off-track. Bounded: unref'd,
+	// self-stops when no runs remain.
 	let peekTimer: ReturnType<typeof setInterval> | undefined;
+	// When the supervisor was last woken about a run (a stall alert, a message, or a routine check-in).
+	// Gates the slow check-in cadence so it counts from the last time we actually surfaced something.
+	let lastPeekAt = 0;
 	function stopPeek(): void {
 		if (peekTimer) {
 			clearInterval(peekTimer);
@@ -453,7 +463,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 	}
 	function startPeek(): void {
-		if (config.peekEveryMs <= 0 || peekTimer) return;
+		// The two signals opt out independently: the fast stall/message wakeup follows PI_PERSONA_PEEK_MS,
+		// the routine check-in follows PI_PERSONA_CHECKIN_MS. The carrier timer runs while EITHER is on and
+		// ticks at the faster of the two (a disabled one is Infinity, so it never drives).
+		const fastMs = config.peekEveryMs > 0 ? config.peekEveryMs : Number.POSITIVE_INFINITY;
+		const checkMs = config.checkInEveryMs > 0 ? config.checkInEveryMs : Number.POSITIVE_INFINITY;
+		const tickMs = Math.min(fastMs, checkMs);
+		if (!Number.isFinite(tickMs) || peekTimer) return;
+		lastPeekAt = Date.now(); // first routine check-in lands checkInEveryMs after the runs begin
 		peekTimer = setInterval(() => {
 			const runs = tracker.running();
 			if (runs.length === 0) {
@@ -463,17 +480,33 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// Only peek a free, unqueued supervisor: an idle delivery triggers a clean turn, while a
 			// busy one would pile up as a sticky follow-up. Skipping is safe — the next tick re-surfaces.
 			if (lastCtx?.isIdle?.() !== true || lastCtx?.hasPendingMessages?.() === true) return;
+			// The peek is NOT a poll. Two signals, two cadences: (1) the FAST wakeup (PI_PERSONA_PEEK_MS) —
+			// a leg that NEWLY crossed the stall window, or an unread sub-agent message — the "is it dead or
+			// wedged" check; (2) the SLOW routine check-in (PI_PERSONA_CHECKIN_MS) — a progress digest that
+			// catches a leg going off-track (not stalled, just wrong) early. A healthy, quiet run between
+			// check-ins produces no wakeup. Completions always arrive on their own (completionNotifier), and
+			// the full status view stays on demand via `/peek`.
+			const now = Date.now();
+			const fast = config.peekEveryMs > 0;
+			const stuck = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS) : [];
 			// Drain only progress messages; blocking asks (expectsReply) are surfaced by the intercom
 			// notifier and left for the `intercom inbox` tool — so peek never double-shows them.
-			const unread = bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply);
+			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
+			const dueCheckIn = config.checkInEveryMs > 0 && now - lastPeekAt >= config.checkInEveryMs;
+			if (stuck.length === 0 && unread.length === 0 && !dueCheckIn) return; // healthy + quiet ⇒ stay silent
+			const parts: string[] = [];
+			if (stuck.length > 0) parts.push(buildPeekAlert(stuck, { now }));
+			else if (dueCheckIn) parts.push(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS }));
+			if (unread.length > 0) parts.push(`📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}`);
+			// Reset the check-in cadence only on a PROGRESS surfacing (a stall alert or a check-in), NOT on a
+			// message-only wake — else a chatty child would postpone the routine off-track glance forever.
+			if (stuck.length > 0 || dueCheckIn) lastPeekAt = now;
 			try {
-				pi.sendUserMessage(
-					`[pi-persona] peek — ${buildPeekDigest(runs, { now: Date.now(), stallMs: STALL_FLAG_MS })}${unread.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}` : ""}`,
-				);
+				pi.sendUserMessage(`[pi-persona] ${parts.join("\n\n")}`);
 			} catch {
 				/* ignore */
 			}
-		}, config.peekEveryMs);
+		}, tickMs);
 		peekTimer.unref?.();
 	}
 
@@ -588,6 +621,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 			deps.listAgents = () => agents.map((a) => a.name);
 			if (signal) deps.signal = signal;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs };
+			// Feed progress here too (mirrors the plain-child branch): without it a worktree/mcp async leg
+			// never advances its tracker snapshot, so lastAdvanceAt freezes at launch and the leg is falsely
+			// flagged stalled while a genuine later wedge goes undetected.
+			if (onProgress) deps.childOptions.onProgress = onProgress;
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
 			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
@@ -1010,7 +1047,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 		const coaching = controller.activePersona?.coaching ?? false;
 		const peek = config.peekEveryMs > 0 ? `${config.peekEveryMs}ms` : "off";
-		lines.push(`comm plane: coaching=${coaching ? "on (children get contact_supervisor)" : "off"}, periodic-peek=${peek}, bus-peers=${bus.participants().length}`);
+		const checkIn = config.checkInEveryMs > 0 ? `${config.checkInEveryMs}ms` : "off";
+		lines.push(`comm plane: coaching=${coaching ? "on (children get contact_supervisor)" : "off"}, peek-watchdog=${peek}, check-in=${checkIn}, bus-peers=${bus.participants().length}`);
 		if (config.broker) {
 			const status = brokerHost ? brokerHost.endpoint : brokerHostPromise ? "(starting…)" : "(not started — no child-engine build yet)";
 			lines.push(`broker: on — endpoint ${status}, connected children: ${brokerHost?.connectedHandles().length ?? 0}`);
@@ -1047,6 +1085,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		lastCtx = ctx;
 		disposed = true; // gate any late async-run onComplete from touching the next session's instance
 		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
+		peekWatcher.reset(); // …nor a stale "already surfaced this leg as stuck" set into the next session
 		completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
 		intercomNotifier.cancel();
 		timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)

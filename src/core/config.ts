@@ -24,11 +24,16 @@ export interface PiPersonaConfig {
 	/** Engine backend for sub-agents: "inproc" (run in-process via `createAgentSession`,
 	 *  the default) or "child" (spawn `pi -p`, the baseline). */
 	engine?: "child" | "inproc";
-	/** Periodic-peek interval (ms): the timed supervisor wakeup. While async children run, each
-	 *  tick wakes the idle supervisor with a compact digest (stalled children flagged) so it can
-	 *  coach/steer/stop even when no completion has fired. On by default (30000); explicit
-	 *  PI_PERSONA_PEEK_MS=0 opts out. */
+	/** Fast stall/message wakeup interval (ms): while async children run, a tick checks progress but
+	 *  stays SILENT unless a leg NEWLY looks stalled or a sub-agent messaged the supervisor — so a
+	 *  healthy run never interrupts. On by default (30000); PI_PERSONA_PEEK_MS=0 opts out (the routine
+	 *  check-in below is independent). */
 	peekEveryMs: number;
+	/** Routine check-in interval (ms): how often, while async children run, the idle supervisor gets
+	 *  a compact progress digest so it can catch a leg going off-track (not stalled — just wrong) and
+	 *  step in early. Deliberately slow so it is an occasional glance, not a poll, and independent of
+	 *  the fast stall/message wakeup. 300000 (5 min) by default; PI_PERSONA_CHECKIN_MS=0 opts out. */
+	checkInEveryMs: number;
 	/** Per-agent hard wall-clock cap (ms): a definite lifetime ceiling that settles even a
 	 *  busy-but-non-converging child the idle watchdog (reset on every event) never catches.
 	 *  600000 by default; PI_PERSONA_AGENT_MAX_MS=0 disables it. */
@@ -75,6 +80,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// `PI_PERSONA_SEED=on`. Default off — personas are installed via `/persona seed|restore`.
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 30_000,
+		checkInEveryMs: 300_000,
 		agentHardTimeoutMs: 600_000,
 		agentStartupTimeoutMs: 90_000,
 		// On unless explicitly turned off (mirrors PI_PERSONA_PERSIST's `!== "off"` convention).
@@ -88,6 +94,11 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 	if (peekRaw !== undefined && peekRaw !== "") {
 		const peek = Number(peekRaw);
 		if (Number.isFinite(peek) && peek >= 0) config.peekEveryMs = peek;
+	}
+	const checkInRaw = env.PI_PERSONA_CHECKIN_MS?.trim();
+	if (checkInRaw !== undefined && checkInRaw !== "") {
+		const checkIn = Number(checkInRaw);
+		if (Number.isFinite(checkIn) && checkIn >= 0) config.checkInEveryMs = checkIn;
 	}
 	const hardRaw = env.PI_PERSONA_AGENT_MAX_MS?.trim();
 	if (hardRaw !== undefined && hardRaw !== "") {

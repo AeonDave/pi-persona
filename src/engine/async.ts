@@ -154,10 +154,10 @@ export class AsyncRunTracker {
 }
 
 /**
- * A compact ProgressView digest of async runs (for /peek and the periodic peek). When `opts`
- * carries the current clock + a stall window, a RUNNING run that hasn't advanced within that
- * window is flagged "possibly stuck" — the signal the heartbeat surfaces so the (idle) supervisor
- * can coach/steer/stop a wedged worker instead of waiting forever for a completion that won't come.
+ * A compact ProgressView digest of async runs — the full on-demand `/peek` view, and the body the
+ * routine check-in wraps ({@link buildCheckIn}). When `opts` carries the current clock + a stall
+ * window, a RUNNING run that hasn't advanced within that window is flagged "possibly stuck". The
+ * periodic FAST wakeup does NOT send this digest — it sends the focused {@link buildPeekAlert}.
  */
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
 	if (runs.length === 0) return "No async runs.";
@@ -180,6 +180,77 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		return head;
 	});
 	return [`Async runs: ${runs.length} (${running} running)`, ...lines].join("\n");
+}
+
+/**
+ * Turns the periodic peek from a poll into an EXCEPTION signal. Tracks which running legs have already
+ * been surfaced as stalled, so the supervisor is woken ONCE when a leg crosses the stall window — never
+ * every tick while it stays stalled, and never at all while it is making progress. A leg that advances
+ * again (its `lastAdvanceAt` moves) re-arms, so a later stall re-alerts; legs that leave the list are
+ * forgotten. Pure w.r.t. the injected `now`, so it is unit-tested without a real clock.
+ */
+export class PeekWatcher {
+	/** runId → the `lastAdvanceAt` value at which we reported it stalled (a later advance re-arms). */
+	private readonly reportedAt = new Map<string, number>();
+
+	/** The running legs that have NEWLY crossed the stall window since we last reported them. */
+	poll(runs: AsyncRun[], now: number, stallMs: number): AsyncRun[] {
+		const live = new Set<string>();
+		const newlyStuck: AsyncRun[] = [];
+		for (const r of runs) {
+			if (r.status !== "running" || r.lastAdvanceAt === undefined) continue;
+			live.add(r.id);
+			const prev = this.reportedAt.get(r.id);
+			if (prev !== undefined && r.lastAdvanceAt > prev) this.reportedAt.delete(r.id); // advanced ⇒ re-arm
+			if (stallMs > 0 && now - r.lastAdvanceAt >= stallMs && !this.reportedAt.has(r.id)) {
+				this.reportedAt.set(r.id, r.lastAdvanceAt);
+				newlyStuck.push(r);
+			}
+		}
+		for (const id of [...this.reportedAt.keys()]) if (!live.has(id)) this.reportedAt.delete(id);
+		return newlyStuck;
+	}
+
+	/** Forget all tracked state (session start / reload hygiene). */
+	reset(): void {
+		this.reportedAt.clear();
+	}
+}
+
+/**
+ * The periodic peek's wake message for a batch of NEWLY-stalled legs (from {@link PeekWatcher}), or ""
+ * when none. Unlike {@link buildPeekDigest} (the full, on-demand `/peek` view), this is an exception
+ * signal, not a status dump: a long operation looks identical to a stall from outside, so the framing is
+ * patience-first, and intervention means asking the leg — never reaching into its environment to check.
+ */
+export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string {
+	if (stuck.length === 0) return "";
+	const lines = stuck.map((r) => {
+		const secs = Math.round((opts.now - (r.lastAdvanceAt ?? opts.now)) / 1000);
+		return `⚠ ${r.id} (${r.agent}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${r.progress.tokens} tok)`;
+	});
+	return [
+		`${stuck.length} background ${stuck.length === 1 ? "leg" : "legs"} may be stalled:`,
+		...lines,
+		"A long operation (a slow scan, a big generation, a blocking command) looks the same as a stall from out here. " +
+			"If it's likely still working, leave it — the result returns to you as a follow-up. If you think it's genuinely " +
+			"wedged, ask the leg for a one-line status (a light `steer`) or `stop` it — don't run commands in its environment to check.",
+	].join("\n");
+}
+
+/**
+ * The routine check-in: the full progress view ({@link buildPeekDigest}) plus a one-line framing that
+ * this is an occasional glance, not a poll — step in only if a leg is off-track or wedged, otherwise
+ * carry on. It fires on the slow check-in cadence (config.checkInEveryMs) and is the counterpart to the
+ * fast {@link buildPeekAlert} stall signal: it catches a leg going the WRONG way (not stalled, just
+ * wrong) before it burns the budget, without waking the supervisor every tick.
+ */
+export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number }): string {
+	return (
+		`${buildPeekDigest(runs, opts)}\n\n` +
+		"Routine check-in — glance at where your legs are and step in only if one is off-track (wrong " +
+		"target, rabbit hole) or wedged. If they're progressing, carry on; each result returns to you on its own."
+	);
 }
 
 /**

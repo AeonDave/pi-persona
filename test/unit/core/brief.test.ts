@@ -96,8 +96,8 @@ test("asyncDefault phrases the push model; sync default phrases the blocking cal
 	const bg = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, asyncDefault: true });
 	const sync = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, asyncDefault: false });
 	assert.match(bg ?? "", /background/i);
-	assert.match(bg ?? "", /no polling/i);
-	assert.equal(/no polling/i.test(sync ?? ""), false);
+	assert.match(bg ?? "", /don't watch or poll/i);
+	assert.equal(/don't watch or poll/i.test(sync ?? ""), false);
 });
 
 test("caps the agent list and says how many more", () => {

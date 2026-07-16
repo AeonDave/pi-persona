@@ -10,7 +10,7 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCompletionReport, IdleCoalescingNotifier, buildPeekDigest, renderCompletion } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, IdleCoalescingNotifier, buildPeekDigest, PeekWatcher, renderCompletion } from "../../../src/engine/async.ts";
 import type { ProgressSnapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { PersistenceNudge } from "../../../src/core/nudge.ts";
@@ -83,6 +83,82 @@ test("launch tracks a run and exposes its result on completion", async () => {
 	const run = tracker.peek(id);
 	assert.equal(run?.status, "done");
 	assert.equal(run?.result?.output, "done");
+});
+
+const runningRun = (lastAdvanceAt: number, over: Partial<AsyncRun> = {}): AsyncRun => ({
+	id: "run-1",
+	agent: "operator",
+	task: "t",
+	status: "running",
+	progress: { output: "", turns: 1, tokens: 1 },
+	lastAdvanceAt,
+	...over,
+});
+
+test("PeekWatcher surfaces a stalled leg only once, and re-arms after it recovers", () => {
+	const w = new PeekWatcher();
+	// advanced 10s ago, 45s window → healthy, nothing to surface
+	assert.deepEqual(w.poll([runningRun(100_000)], 110_000, 45_000), []);
+	// crossed the window → surfaced exactly once
+	assert.deepEqual(w.poll([runningRun(100_000)], 146_000, 45_000).map((r) => r.id), ["run-1"]);
+	// still stalled at the SAME advance point → not surfaced again (no re-nag every tick)
+	assert.deepEqual(w.poll([runningRun(100_000)], 200_000, 45_000), []);
+	// it advanced (lastAdvanceAt moved), so a fresh stall re-arms and re-alerts
+	assert.deepEqual(w.poll([runningRun(210_000)], 215_000, 45_000), []); // fresh, not yet stalled
+	assert.deepEqual(w.poll([runningRun(210_000)], 260_000, 45_000).map((r) => r.id), ["run-1"]);
+});
+
+test("PeekWatcher never surfaces a non-running leg and forgets legs that leave the list", () => {
+	// A FRESH watcher must exclude a stalled-by-timestamp done/failed leg via the STATUS guard, not the
+	// once-only suppression — so this dies if the status guard regresses (a settled run must never alert).
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0, { status: "done" })], 100_000, 45_000), [], "a never-reported done leg is not 'stalled'");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0, { status: "failed" })], 100_000, 45_000), [], "a never-reported failed leg is not 'stalled'");
+
+	const w = new PeekWatcher();
+	assert.deepEqual(w.poll([runningRun(0)], 100_000, 45_000).map((r) => r.id), ["run-1"]); // stalled → surfaced
+	assert.deepEqual(w.poll([runningRun(0, { status: "done" })], 200_000, 45_000), []); // done → never "stuck"
+	assert.deepEqual(w.poll([], 300_000, 45_000), []); // gone → forgotten
+	assert.deepEqual(w.poll([runningRun(0)], 400_000, 45_000).map((r) => r.id), ["run-1"]); // reappears stalled → re-alert
+	w.reset();
+	assert.deepEqual(w.poll([runningRun(0)], 500_000, 45_000).map((r) => r.id), ["run-1"]); // reset re-arms all
+});
+
+test("PeekWatcher's stall window is inclusive at the boundary and stallMs=0 disables it", () => {
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 45_000, 45_000).map((r) => r.id), ["run-1"], "exactly at the threshold surfaces (>=)");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 44_999, 45_000), [], "one ms short does not");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 10_000_000, 0), [], "stallMs=0 disables the flag, even for an ancient leg");
+});
+
+test("PeekWatcher discriminates per-leg in a mixed batch (only the stalled one)", () => {
+	const w = new PeekWatcher();
+	const fresh = runningRun(100_000, { id: "run-1" });
+	const stalled = runningRun(0, { id: "run-2" });
+	assert.deepEqual(w.poll([fresh, stalled], 100_000, 45_000).map((r) => r.id), ["run-2"], "the healthy leg is never named in the alert");
+});
+
+test("buildPeekAlert renders only stalled legs, patience-first, and never the full heartbeat digest", () => {
+	assert.equal(buildPeekAlert([], { now: 1_000 }), "", "no stalled legs ⇒ no wake");
+	const out = buildPeekAlert([runningRun(1_000, { progress: { output: "", turns: 5, tokens: 1200 } })], { now: 1_000 + 92_000 });
+	assert.match(out, /run-1 \(operator\)/);
+	assert.match(out, /92s/);
+	assert.match(out, /leave it/i, "patience-first framing");
+	assert.match(out, /environment/i, "the ask-the-leg / don't-self-probe boundary");
+	assert.match(out, /1 background leg may be stalled:/, "singular head");
+	assert.doesNotMatch(out, /Async runs:/, "not the full on-demand digest");
+	const two = buildPeekAlert([runningRun(0, { id: "run-2" }), runningRun(0, { id: "run-3" })], { now: 90_000 });
+	assert.match(two, /2 background legs may be stalled:/, "plural head");
+	assert.match(two, /run-2/);
+	assert.match(two, /run-3/);
+});
+
+test("buildCheckIn frames the full digest as an occasional glance and keeps the stall markers", () => {
+	// A leg stalled past the window must still read 'possibly stuck' in the routine check-in — this dies
+	// if buildCheckIn stops forwarding {now, stallMs} into the digest (the off-track glance would go blind).
+	const out = buildCheckIn([runningRun(0, { progress: { output: "x", turns: 3, tokens: 500 } })], { now: 90_000, stallMs: 90_000 });
+	assert.match(out, /Async runs:/, "carries the full progress digest");
+	assert.match(out, /possibly stuck/, "forwards the stall window so a wedge shows on the glance");
+	assert.match(out, /Routine check-in/);
+	assert.match(out, /off-track/);
 });
 
 test("launch passes the run id to the thunk (so the launcher can key a steer handle by it)", async () => {
