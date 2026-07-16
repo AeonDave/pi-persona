@@ -19,9 +19,14 @@ strategy files), so you reshape the whole system without touching the core.
 
 ## What it does
 
-- **Sub-agents, sync or async** — delegate one or fan out many, each an isolated run with its own
-  model, skills, tools, and optional git-worktree isolation. Block for the result, or run
-  `async: true` in the background and collect later with `/peek` or `intercom wait`.
+- **Sub-agents, background-first** — delegate one or fan out many, each an isolated run with its
+  own model, skills, tools, and optional git-worktree isolation. In interactive sessions they run
+  in the background by default: run ids at once, results return as follow-ups (watch with
+  `/peek`, join with `intercom wait`, `sync: true` to block; headless runs stay sync).
+- **Always-on discovery** — every turn the supervisor's prompt carries a live *delegation brief*:
+  the installed agents/teams/flows (capability-filtered) plus a standing hand-off default, so
+  delegation never depends on a decayed persona line; a wrong agent name comes back with the
+  installed list.
 - **Live supervision** — peek progress, steer a run mid-flight, hard-stop it; a `coaching` persona
   adds a two-way bus where a child asks you a blocking `decision` and you reply. All under hard
   limits (timeout, token budget, concurrency, max children) with cooperative abort.
@@ -71,7 +76,6 @@ Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch 
 
 | Persona | What it's for |
 |---|---|
-| `elite` | Security player-coach — lead operator for pentest / red-team / lab-CTF; loads the right technique skill per engagement phase, owns tunnels/pivots/shells, delegates heavy/parallel/long work. |
 | `dev` | Software engineer **and** reviewer — tests-first flow, loads the right coding skills, reviews its own/others' changes with cited `file:line` evidence, delegates large/parallel work. |
 | `researcher` | Deep-research supervisor — fans one deep-dive agent out per sub-question, follows links recursively, consolidates sourced findings into a `.research/<topic>/` folder. |
 | `planner` | Planning-first orchestrator — decomposes goals into bounded, verifiable steps and writes plan/design/architecture docs; never edits code, hands implementation to `dev` and investigation to `researcher`. |
@@ -127,7 +131,7 @@ same: new *files* on this API, no new core.
 
 | Surface | Does |
 |---|---|
-| `delegate` tool | spawn sub-agent(s): single or parallel × sync (blocks the turn) or async (background; result returns as a follow-up) |
+| `delegate` tool | spawn sub-agent(s): single or parallel — background by default in interactive sessions (run ids now, results return as follow-ups; `sync: true` blocks the turn; headless defaults to sync) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
 | `intercom` tool | interact with running sub-agents: `peek` (watch) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (hard-abort) work for **any** persona; `list`/`inbox`/`reply`/`send` are the coaching message bus |
 | `timer` tool | arm a wall-clock **alarm** that wakes the session when it fires — the token-cheap way to wait for a fixed moment (a release, a rate-limit reset, a scheduled re-check) instead of a poll loop: `arm { message, delaySeconds \| atIso }` · `cancel { id }` · `list`. The fire is delivered through the same idle-gated path as async completions (a fresh turn), so the supervisor resumes on its own. In-memory per session (cleared on reload) |
@@ -273,7 +277,7 @@ name: mylead
 persona: true
 coaching: true
 ---
-Delegate with `async: true` and tell each sub-agent to report progress and ask blocking
+Delegate (sub-agents run in the background by default) and tell each sub-agent to report progress and ask blocking
 `decision`s via `contact_supervisor`; use `intercom inbox` to read and `intercom reply` to answer.
 ```
 

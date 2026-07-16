@@ -7,6 +7,9 @@
  * developer or an automated harness can launch a prompt and SEE the outcome without
  * the interactive TUI. Uses the real model/auth (costs tokens); prefer a cheap
  * `--model` and short prompts for smoke tests.
+ * NOTE: delegation-reflex behavior is capability-sensitive — smoke-test plumbing with a cheap
+ * model, but EVALUATE persona/delegation behavior with a mid-tier or better SUPERVISOR model
+ * (workers can stay cheap via roster/member `model` pins in teams.yaml).
  *
  * Usage:
  *   node --import tsx scripts/drive.ts [--persona magi] [--engine inproc] [--model claude-haiku-4-5] "your prompt"
