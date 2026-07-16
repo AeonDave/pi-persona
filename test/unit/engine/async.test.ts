@@ -10,9 +10,14 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCompletionReport, IdleCoalescingNotifier, buildPeekDigest } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCompletionReport, IdleCoalescingNotifier, buildPeekDigest, renderCompletion } from "../../../src/engine/async.ts";
 import type { ProgressSnapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
+import { PersistenceNudge } from "../../../src/core/nudge.ts";
+
+// The real surrender scan, so the test exercises the actual composition (report + persistence note),
+// not a hand-rolled stand-in for it.
+const surrenderScan = ((n) => (t: string) => n.scan(t))(new PersistenceNudge());
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -435,4 +440,31 @@ test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", ()
 	assert.equal(sent.length, 1, "both settled runs arrive as one report");
 	assert.match(sent[0] ?? "", /2 async runs settled — 1 done, 1 failed/);
 	assert.match(sent[0] ?? "", /run-2 \(operator\): boom/);
+});
+
+// renderCompletion — the completion report PLUS the premature-surrender counterweight, shared by
+// the background completion notifier AND the `intercom wait` join so a blocked leg gets the same
+// note however it is collected (the sync tool_result hook never sees a background run).
+
+test("renderCompletion appends the surrender note when a DONE leg reports a blocked marker", () => {
+	const runs = [doneRun("run-1", "operator", "tried A, B. [BLOCKED: need domain creds]")];
+	const out = renderCompletion(runs, (t) => t, surrenderScan);
+	assert.match(out, /1 async run settled — 1 done, 0 failed/, "the base completion report is intact");
+	assert.match(out, /recovery pass/i, "the persistence note rides the completion report");
+});
+
+test("renderCompletion leaves a clean batch untouched — identical to the plain report", () => {
+	const runs = [doneRun("run-1", "scout", "found it — file:line list attached")];
+	const out = renderCompletion(runs, (t) => t, surrenderScan);
+	assert.doesNotMatch(out, /recovery pass/i);
+	assert.equal(out, buildCompletionReport(runs, (t) => t), "no surrender ⇒ byte-identical to buildCompletionReport");
+});
+
+test("renderCompletion scans DONE legs only — a failed leg's marker is not a banked surrender", () => {
+	// A failed run is already surfaced as a failure by buildCompletionReport; the 'don't bank it'
+	// note is for a leg that came back DONE while quietly giving up. Guard and append agree: done-only.
+	const runs = [failedRun("run-1", "operator", "[BLOCKED: dead end]")];
+	const out = renderCompletion(runs, (t) => t, surrenderScan);
+	assert.doesNotMatch(out, /recovery pass/i, "a failed leg does not trigger the surrender note");
+	assert.match(out, /0 done, 1 failed/, "still reported as a failure");
 });

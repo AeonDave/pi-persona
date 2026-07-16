@@ -34,7 +34,7 @@ import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildCompletionReport, buildPeekDigest, IdleCoalescingNotifier } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildPeekDigest, IdleCoalescingNotifier, renderCompletion } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -59,7 +59,7 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import { DelegationLedger, type DelegateView, labelFor, runDelegate, shortModel, unknownAgentError } from "./tools/delegate.ts";
+import { DelegationLedger, type DelegateView, labelFor, runDelegate, shortModel, unknownAgentError, wantsAsyncRun } from "./tools/delegate.ts";
 import { formatInbox, type IntercomParams, runIntercom } from "./tools/intercom.ts";
 import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
@@ -388,11 +388,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// see a background run — its report arrives here as a fresh follow-up, not a delegate result).
 	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
 		...idleDelivery,
-		render: (runs) => {
-			const report = buildCompletionReport(runs, fenceUntrusted);
-			const surrendered = runs.some((r) => r.status === "done" && !!persistenceNudge.scan(r.result?.output ?? ""));
-			return surrendered ? `${report}\n\n${persistenceNudge.scan(runs.map((r) => r.result?.output ?? "").join("\n")) ?? ""}` : report;
-		},
+		render: (runs) => renderCompletion(runs, fenceUntrusted, (t) => persistenceNudge.scan(t)),
 	});
 	// A child's blocking ask (decision/interview) — coalesced and idle-gated so it can't strand and
 	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
@@ -1340,7 +1336,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// return as follow-ups (the idle-gated push path). Headless (`pi -p`) defaults to sync —
 			// the single turn must carry the result, and nothing drains a follow-up after the
 			// process exits. An explicit `async` always wins; `sync: true` opts one call out.
-			const wantsAsync = params.async ?? (ctx.hasUI === true && params.sync !== true);
+			const wantsAsync = wantsAsyncRun(params, ctx.hasUI === true);
 			// Async (single OR parallel): run in the background so YOU stay free to keep
 			// working / answer the user — results arrive later as follow-ups; /peek to watch.
 			if (wantsAsync && params.tasks && params.tasks.length > 0) {
@@ -1448,9 +1444,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const task = args.task ?? "";
 			const preview = task.length > 60 ? `${task.slice(0, 60)}…` : task;
 			// renderCall only fires in an interactive UI, where delegate runs in the BACKGROUND by
-			// default — mirror the execute-side `wantsAsync` (async ?? sync !== true) so the common
+			// default — pass hasUI:true to the same wantsAsyncRun the execute path uses, so the common
 			// (defaulted) background run still shows the tag; `sync: true` drops it.
-			const asyncTag = (args.async ?? args.sync !== true) ? theme.fg("warning", " async") : "";
+			const asyncTag = wantsAsyncRun(args, true) ? theme.fg("warning", " async") : "";
 			return new Text(`${title}${theme.fg("accent", agent)}${asyncTag}${theme.fg("dim", ` ${preview}`)}`, 0, 0);
 		},
 
@@ -1577,10 +1573,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const settled = runs.filter((r) => r.status !== "running");
 				const still = runs.filter((r) => r.status === "running");
 				// These results are delivered HERE — drop them from the pending follow-up
-				// notifier so they aren't reported a second time.
+				// notifier so they aren't reported a second time. Render through the SAME
+				// renderCompletion the passive path uses, so a leg that came back BLOCKED still
+				// carries the premature-surrender note when it is collected via `wait`.
 				const settledIds = new Set(settled.map((r) => r.id));
 				completionNotifier.discard((run) => settledIds.has(run.id));
-				const report = settled.length > 0 ? buildCompletionReport(settled, fenceUntrusted) : "";
+				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => persistenceNudge.scan(t)) : "";
 				const stillNote =
 					still.length > 0 ? `⏳ still running after ${timeoutMs}ms: ${still.map((r) => r.id).join(", ")} — peek/steer/stop them, or wait again.` : "";
 				const text = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";

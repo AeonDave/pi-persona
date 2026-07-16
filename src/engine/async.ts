@@ -213,6 +213,29 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 	return blocks.join("\n");
 }
 
+/**
+ * The completion report PLUS the premature-surrender counterweight. When a settled DONE leg's report
+ * carries a surrender marker, `scan` returns the note to append (else undefined). BOTH the background
+ * completion notifier and the `intercom wait` join render through this, so a blocked leg gets the
+ * same counterweight however it is collected — the sync `tool_result` hook never sees a background
+ * run. Only DONE legs are scanned: a FAILED leg is already surfaced as a failure by
+ * {@link buildCompletionReport}, so the guard and the append agree (no done-vs-all mismatch). `scan`
+ * is injected (PersistenceNudge.scan) to keep this module decoupled from the nudge.
+ */
+export function renderCompletion(
+	runs: AsyncRun[],
+	fence: (text: string) => string,
+	scan: (text: string) => string | undefined,
+): string {
+	const report = buildCompletionReport(runs, fence);
+	const doneOutput = runs
+		.filter((r) => r.status === "done")
+		.map((r) => r.result?.output ?? "")
+		.join("\n");
+	const note = scan(doneOutput);
+	return note ? `${report}\n\n${note}` : report;
+}
+
 export interface IdleNotifierDeps<T> {
 	/** Whether the supervisor is idle (not streaming a turn). */
 	isIdle: () => boolean;
