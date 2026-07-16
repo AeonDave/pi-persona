@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { DelegationLedger, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel, unknownAgentError } from "../../../src/tools/delegate.ts";
+import { DelegationLedger, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel, unknownAgentError, wantsAsyncRun } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -224,4 +224,25 @@ test("unknownAgentError: caps the installed list at 16", () => {
 	const err = unknownAgentError(["nope"], installed);
 	assert.match(err ?? "", /, …/);
 	assert.equal(/a19/.test(err ?? ""), false);
+});
+
+// wantsAsyncRun — the background-by-default launch decision (extension.ts execute + renderCall).
+// The headline v1.5.0 behavior: a regression flipping headless→async (stranding results after
+// `pi -p` exits) or interactive→sync must fail here, not slip through green.
+
+test("wantsAsyncRun: interactive (hasUI) defaults to background, headless defaults to sync", () => {
+	assert.equal(wantsAsyncRun({}, true), true, "interactive ⇒ background by default");
+	assert.equal(wantsAsyncRun({}, false), false, "headless ⇒ sync (the single turn must carry the result)");
+});
+
+test("wantsAsyncRun: sync:true opts an interactive call out; explicit async always wins", () => {
+	assert.equal(wantsAsyncRun({ sync: true }, true), false, "sync:true blocks even interactively");
+	assert.equal(wantsAsyncRun({ async: true }, false), true, "explicit async overrides the headless default");
+	assert.equal(wantsAsyncRun({ async: false }, true), false, "explicit async:false overrides the interactive default");
+	assert.equal(wantsAsyncRun({ async: true, sync: true }, true), true, "async wins over sync when both are set");
+});
+
+test("wantsAsyncRun: renderCall passes hasUI:true (it only fires in a UI) — mirrors the execute default", () => {
+	assert.equal(wantsAsyncRun({}, true), true, "a defaulted interactive call shows the async tag");
+	assert.equal(wantsAsyncRun({ sync: true }, true), false, "sync:true drops the tag");
 });
