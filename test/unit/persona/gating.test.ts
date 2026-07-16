@@ -79,3 +79,17 @@ test("a blocked delegate names the allowed targets (self-correcting)", () => {
 	assert.match(r?.reason ?? "", /may not delegate to: reviewer/);
 	assert.match(r?.reason ?? "", /Allowed targets: scout/);
 });
+
+test("a blocked delegate with ZERO allowed targets says so (empty-hint branch)", () => {
+	// Persona holds `delegate` but its allowlist matches none of the installed agents ⇒
+	// delegateTargets is empty; the block reason takes the empty-hint branch, not an empty list.
+	const caps = resolveCapabilities({
+		allToolNames: ["delegate", "read"],
+		knownAgents: ["scout", "reviewer"],
+		permissions: { delegate: { allow: ["ghost"] } },
+	});
+	const r = gateToolCall(caps, "Test", "delegate", { agent: "scout" });
+	assert.ok(r?.block);
+	assert.match(r?.reason ?? "", /may not delegate to: scout/);
+	assert.match(r?.reason ?? "", /This persona has no delegate targets\./);
+});

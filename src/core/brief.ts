@@ -31,6 +31,13 @@ export interface BriefInput {
 	standing: boolean;
 	/** Delegate runs in the background by default (interactive sessions) — phrases delivery. */
 	asyncDefault: boolean;
+	/**
+	 * Total sub-agents installed in the registry, BEFORE capability filtering. Lets an empty
+	 * `agents` list tell "nothing installed (fresh install ⇒ seed)" apart from "this persona's
+	 * delegate permission allows none of the installed agents (widen the allowlist; seeding won't
+	 * help)". Defaults to `agents.length` when omitted (caller passed no separate registry count).
+	 */
+	installedCount?: number;
 }
 
 /** Longest description carried per agent line — one line each, never a paragraph. */
@@ -55,6 +62,18 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	if (input.agents.length === 0 && !input.standing) return undefined;
 
 	if (input.agents.length === 0) {
+		const installed = input.installedCount ?? input.agents.length;
+		if (installed > 0) {
+			// Agents ARE installed, but this persona's `delegate` permission allows NONE of them (a
+			// restrictive allowlist, or agents renamed/removed out from under it). Seeding won't help —
+			// say so honestly (mirrors gating.ts's "This persona has no delegate targets"), instead of
+			// the fresh-install seed guidance below, which would be a lie here.
+			return (
+				`[pi-persona] This persona holds \`delegate\` but its delegate permission allows none of the ${installed} ` +
+				"installed sub-agent(s) — nothing to hand off. Widen the persona's `delegate` allowlist (or check for " +
+				"renamed/removed agents in /doctor)."
+			);
+		}
 		// A delegating persona is active but the registry is empty (fresh install): the
 		// delegate/council tools are advertised, so every call would fail "unknown agent".
 		// Say WHY and name the fix, instead of letting the first delegation attempts teach

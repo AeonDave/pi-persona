@@ -966,6 +966,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// Interactive sessions delegate in the background by default; headless (`pi -p`)
 			// stays sync (the single turn must carry the result) — mirror that in the copy.
 			asyncDefault: ctx.hasUI === true,
+			// The FULL registry count (pre capability-filter): lets the brief tell "nothing installed
+			// yet (seed)" from "this persona's allowlist filtered every target away (widen it)" when
+			// `targets` came back empty — otherwise a restrictive persona gets the fresh-install lie.
+			installedCount: agents.length,
 		});
 	}
 
@@ -1435,7 +1439,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const agent = args.agent ?? "?";
 			const task = args.task ?? "";
 			const preview = task.length > 60 ? `${task.slice(0, 60)}…` : task;
-			const asyncTag = args.async ? theme.fg("warning", " async") : "";
+			// renderCall only fires in an interactive UI, where delegate runs in the BACKGROUND by
+			// default — mirror the execute-side `wantsAsync` (async ?? sync !== true) so the common
+			// (defaulted) background run still shows the tag; `sync: true` drops it.
+			const asyncTag = (args.async ?? args.sync !== true) ? theme.fg("warning", " async") : "";
 			return new Text(`${title}${theme.fg("accent", agent)}${asyncTag}${theme.fg("dim", ` ${preview}`)}`, 0, 0);
 		},
 

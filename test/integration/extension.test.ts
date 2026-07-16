@@ -183,6 +183,22 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
 	assert.match(injected.systemPrompt, /decisive software engineer/);
+	// An active persona upgrades the soft discovery brief to the STANDING hand-off default.
+	assert.match(injected.systemPrompt, /Hand off by default/i, "active persona ⇒ standing mandate");
+});
+
+test("before_agent_start filters the brief roster to the persona's delegate allowlist", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(projectCwdWithLockedPersona());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "locked", ctx); // delegate: { allow: [scout] }
+
+	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+	assert.match(injected.systemPrompt, /\[pi-persona\] Sub-agents:/);
+	assert.match(injected.systemPrompt, /- scout\b/, "the one allowed target is listed");
+	assert.doesNotMatch(injected.systemPrompt, /- reviewer\b/, "a filtered-out agent is not listed");
+	assert.doesNotMatch(injected.systemPrompt, /- operator\b/, "a filtered-out agent is not listed");
 });
 
 test("tool_call gating blocks delegation outside a restrictive project persona's allowlist", async () => {
