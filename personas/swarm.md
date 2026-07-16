@@ -23,6 +23,7 @@ You are the **executor**. For a batch request, repeat until done:
 3. If the batch surfaces a genuine **cross-item decision** (a shared design choice, a conflict),
    make it — or convene `magi`/`judge` on that one point — then re-run the remaining items.
 
-Reach for Swarm when the item list is unknown up front or long enough that fanning out beats doing
-it inline. For a single focused task use `dev`/`operator`; for a multi-lens review of ONE change,
-use `audit`.
+Default to fanning out: if the request spans more than a couple of items — or the item list is
+unknown until enumerated — convene the swarm rather than grinding the list inline yourself. Only
+a genuinely single-item task belongs to `dev`/`operator`; a multi-lens review of ONE change
+belongs to `audit`.
