@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DelegationNudge, PersistenceNudge } from "../../../src/core/nudge.ts";
+import { DEFAULT_NUDGE_THRESHOLDS, DelegationNudge, PersistenceNudge } from "../../../src/core/nudge.ts";
 
 // Small explicit thresholds keep these tests independent of the tunable defaults.
 const mk = () => new DelegationNudge({ singleHeavyChars: 100, cumulativeChars: 200 });
@@ -72,6 +72,11 @@ test("reset() clears the streak (new session / persona switch)", () => {
 	n.observe("bash", 80); // burn 160, near the window
 	n.reset();
 	assert.equal(n.observe("bash", 80), undefined, "burn counts from zero after reset");
+});
+
+test("default thresholds: the reactive backstop fires around ~6k tokens of grinding, not ~15k", () => {
+	assert.equal(DEFAULT_NUDGE_THRESHOLDS.singleHeavyChars, 40_000);
+	assert.equal(DEFAULT_NUDGE_THRESHOLDS.cumulativeChars, 24_000);
 });
 
 // --- PersistenceNudge: the premature-surrender counterweight -----------------------------------
