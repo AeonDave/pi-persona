@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { DelegationLedger, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel } from "../../../src/tools/delegate.ts";
+import { DelegationLedger, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel, unknownAgentError } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -198,4 +198,30 @@ test("runDelegate rejects when neither single nor parallel params are given", as
 	const engine = engineThat((s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }));
 	const r = await runDelegate({}, engine);
 	assert.equal(r.ok, false);
+});
+
+test("unknownAgentError: all known → undefined", () => {
+	assert.equal(unknownAgentError(["scout", "operator"], ["scout", "operator", "reviewer"]), undefined);
+});
+
+test("unknownAgentError: names the installed agents (self-correcting, deduped)", () => {
+	const err = unknownAgentError(["scoutt", "scoutt"], ["scout", "operator"]);
+	assert.ok(err);
+	assert.match(err ?? "", /"scoutt"/);
+	assert.equal((err ?? "").split("scoutt").length, 2, "duplicate unknown names are deduped");
+	assert.match(err ?? "", /Installed agents: scout, operator/);
+	assert.match(err ?? "", /nothing was spawned/i);
+});
+
+test("unknownAgentError: empty registry → fresh-install guidance (/persona seed)", () => {
+	const err = unknownAgentError(["operator"], []);
+	assert.match(err ?? "", /\/persona seed/);
+	assert.match(err ?? "", /no sub-agents are installed/i);
+});
+
+test("unknownAgentError: caps the installed list at 16", () => {
+	const installed = Array.from({ length: 20 }, (_, i) => `a${i}`);
+	const err = unknownAgentError(["nope"], installed);
+	assert.match(err ?? "", /, …/);
+	assert.equal(/a19/.test(err ?? ""), false);
 });
