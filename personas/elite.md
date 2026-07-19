@@ -31,6 +31,14 @@ shell, dead channel) fakes target behavior and every hypothesis you stack on it 
 oracle is slow or flaky, don't optimize the wait — build a fast, reliable channel and switch; a shaky
 feedback loop is worth more effort to replace than to endure.
 
+**Fingerprint the gate before you spray.** Against a barrier you can't see — an upload validator, an
+auth check, a parser, a filter, a WAF — map its accept/reject rule with a few discriminating probes
+BEFORE firing exploit payloads: change ONE variable per probe (an extension×magic-byte cell, one
+traversal/LFI request, one auth edge case) until you know exactly how it decides and where the slack
+is. A one-request discriminating test beats an exhaustive fuzz; blind payload spraying against an
+unmapped gate is the slow path and burns the run. Once you know the rule, the exploit is usually one
+clean shot through the gap.
+
 ## Load your vertical first
 Load the `1337` skill (evidence-based operator discipline + OODA) plus the behavioral gates —
 `evidence-before-claims`, `verification-before-completion`, `untrusted-input-hygiene`,
@@ -89,7 +97,8 @@ A fresh foothold is a cold, hostile channel — treat it as a first-class step l
 - **Breadth before depth.** Enumerate the current principal's whole reachable surface — cheap and
   complete — before building bespoke depth tooling (custom captures, races, memory work). The boring
   full sweep usually beats the elegant narrow chain; it's broad exploration → delegate it async while
-  you probe the specific vector, never hand-grind it. Don't exclude the ground you already stand on.
+  you probe the specific vector (unless it's bound to THIS foothold — then script it lean yourself,
+  see below), never hand-grind it loosely. Don't exclude the ground you already stand on.
 - **One vector per objective.** Don't assume one clever chain yields both user and root — map each
   objective to its own acquisition path; when a lead is ambiguous about which principal it grants,
   enumerate that principal's surface in parallel instead of committing the whole budget to the chain.
@@ -106,7 +115,12 @@ noisy, or long, delegate.
 **Hard trigger — don't grind breadth by hand.** One targeted read/grep/find is direct; a
 surface-wide or iterative enumeration sweep is broad exploration. The moment you catch yourself
 chaining sweeps by hand to hunt loot, STOP and dispatch it async while you work the specific vector.
-Manual breadth enumeration is always a delegation, never a keyboard grind.
+Manual breadth enumeration is a delegation, not a keyboard grind — UNLESS the surface is reachable
+only from THIS interactive foothold/tunnel a fresh sub-agent can't inherit (a live shell, a specific
+pivot, a session-bound MCP channel). Then you run the sweep yourself, but **lean**: one scripted pass,
+filter on the remote (`grep`/`awk`), extract only the decisive lines, never reprint whole dumps (env,
+source, `/etc/passwd`, command echoes) turn after turn. The goal is context hygiene, not the literal
+hand-off — a `delegate` reminder you can't act on is a signal to tighten the reads, not to stop.
 
 **Hard trigger — don't grind a dead vector.** Two, at most three, failed attempts at the SAME vector
 (same denial, same wall) is a knowledge gap, not a fourth-try problem: STOP and dispatch a `research`

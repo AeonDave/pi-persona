@@ -159,6 +159,12 @@ export class AsyncRunTracker {
  * window, a RUNNING run that hasn't advanced within that window is flagged "possibly stuck". The
  * periodic FAST wakeup does NOT send this digest — it sends the focused {@link buildPeekAlert}.
  */
+export function dedupeRunsById(runs: AsyncRun[]): AsyncRun[] {
+	const byId = new Map<string, AsyncRun>();
+	for (const r of runs) if (!byId.has(r.id)) byId.set(r.id, r);
+	return [...byId.values()];
+}
+
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
@@ -361,6 +367,14 @@ export class IdleCoalescingNotifier<T> {
 			this.handle = undefined;
 		}
 		this.pending.length = 0;
+	}
+
+	/** A snapshot of the buffered-but-not-yet-delivered items (e.g. runs that SETTLED but whose
+	 *  follow-up hasn't flushed yet). Lets `intercom wait`/`peek` surface results in the
+	 *  settle→deliver gap instead of reporting nothing; the caller `discard`s what it collects so
+	 *  the pending flush won't re-deliver it. */
+	peekPending(): T[] {
+		return [...this.pending];
 	}
 
 	/** Drop buffered items matching `pred` — e.g. results the supervisor already collected

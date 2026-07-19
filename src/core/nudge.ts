@@ -7,78 +7,114 @@
  * commands of momentum). The nudge lands in RECENT context — on the very command that triggered
  * it — where a decaying system-prompt line has no force.
  *
- * "Burn" is output SIZE (a token proxy), because that is the persona's OWN criterion — "delegate
- * anything that burns context or budget" — and it is tool-name-agnostic: it fires on any heavy
- * result, not a maintained list of heavy binaries. The persona also says a single read/grep/find is
- * legitimate direct work while an *iterative* sweep is delegation, so the primary trigger is the
- * CUMULATIVE burn since the last hand-off (iterative grinding accrues), with a high single-command
- * threshold reserved for a genuinely enormous one-shot dump. A hand-off tool (delegate/council)
- * resets the streak; nothing else does. Pure — no I/O, fully unit-testable.
+ * The trigger is REPETITION, not raw volume. The antipattern the persona warns against is "chaining
+ * sweeps by hand" — a RUN of substantive hands-on commands with no hand-off (a dirbust/spray/enum
+ * loop). Output volume alone is a poor proxy: a single big file read is high-volume but a legitimate
+ * one-shot that belongs to reading-budget-discipline (grep-first), not delegation. So the primary
+ * trigger counts consecutive SUBSTANTIVE hands-on tool calls since the last hand-off — a tiny call
+ * (echo/cd/one-line check) is orchestration glue and does not advance the run; a run reaching the
+ * threshold is a by-hand sweep. Tool identity is not required (a real sweep mixes read/grep/curl). A
+ * high single-command threshold stays as a SECONDARY trigger for a genuinely enormous one-shot dump
+ * (a sign it should have been detached/quarantined). A hand-off (delegate/council) resets the run;
+ * nothing else does.
+ *
+ * Backoff: repeating the identical reminder is noise once the operator has seen it and kept going —
+ * often because the work is session-bound and cannot be delegated at all (a live shell / tunnel a
+ * sub-agent can't inherit; from the supervisor side that loop is indistinguishable from a delegable
+ * sweep, so no signal can separate them). Each un-actioned nudge WIDENS the next run window (n× the
+ * base): the reminder lands early, then de-escalates. Pure — no I/O, fully unit-testable.
  */
 
-/** Tools that mean "the operator handed work off" — they end (reset) a hand-grinding streak. */
+/** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
 const HANDOFF_TOOLS = new Set(["delegate", "council"]);
 
 export interface NudgeThresholds {
 	/** A single result at/above this many chars is a fat one-shot dump — nudge on its own. Kept
 	 *  high so a normal large file read doesn't trip it; only a linpeas/ffuf-scale dump does. */
 	singleHeavyChars: number;
-	/** Nudge each time direct burn since the last nudge crosses this many chars — this is what
-	 *  catches iterative sweeps done by hand (each small, the accumulation is the signal). */
-	cumulativeChars: number;
+	/** A run of this many consecutive SUBSTANTIVE hands-on commands (no hand-off) is a by-hand
+	 *  sweep — the primary trigger. Counts steps, not bytes, so one big read never trips it. */
+	runLength: number;
+	/** A command whose output is below this many chars is orchestration glue (echo/cd/one-line
+	 *  check), not a sweep step: it does not advance the run counter. */
+	minStepChars: number;
 }
 
 export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
-	singleHeavyChars: 40_000, // ~10k tokens in one command
-	cumulativeChars: 24_000, // ~6k tokens of accumulated hand-grinding since the last delegate —
-	// an early backstop: the standing delegation brief (core/brief.ts) carries the default,
-	// this catches the supervisor that grinds through it anyway.
+	singleHeavyChars: 40_000, // ~10k tokens in one command — a fat one-shot dump
+	runLength: 8, // 8 substantive hands-on commands in a row without a hand-off = a by-hand sweep.
+	// The standing delegation brief (core/brief.ts) carries the default every turn; this is the
+	// reactive backstop for the supervisor who grinds a sweep through it anyway.
+	minStepChars: 200, // below this a command is glue, not a sweep step
 };
 
 /** chars → ~thousands of tokens (≈4 chars/token), for the human-facing nudge text. */
 const toK = (chars: number): number => Math.round(chars / 4 / 1000);
 
-function renderNudge(size: number, burn: number): string {
+/**
+ * Honest lead: name what actually tripped the nudge. A single fat dump blames THAT command; a
+ * cumulative streak names the accumulated burn (never the tiny command that merely crossed the
+ * line — printing its ~0k size looked like the nudge fired on nothing). The tail acknowledges that
+ * not all burn is delegable: work bound to one interactive session a sub-agent can't inherit
+ * (a live shell, a specific tunnel) stays with you — then the fix is to keep it lean, not to hand off.
+ */
+function renderNudge(reason: "dump" | "sweep", run: number, burn: number, size: number): string {
+	const lead =
+		reason === "dump"
+			? `that direct command dumped ~${toK(size)}k tokens in one result (~${toK(burn)}k by hand since your last delegate).`
+			: `${run} hands-on commands in a row (~${toK(burn)}k tokens) with no hand-off.`;
 	return (
-		`⟢ pi-persona — that direct command added ~${toK(size)}k tokens to your context ` +
-		`(~${toK(burn)}k burned by hand since your last delegate). ` +
-		`"Delegate anything that burns context or budget." If this is breadth or a stalled vector, ` +
-		"hand it off (`delegate` — it runs in the background and reports back) and keep the specific thread yourself."
+		`⟢ pi-persona — ${lead} ` +
+		`"Delegate anything that burns context or budget." Breadth or a stalled vector → hand it off ` +
+		"(`delegate` runs in the background and reports back). If the work is bound to one interactive " +
+		"session a sub-agent can't inherit, keep it yourself but lean — one scripted sweep, grep-first, no full-dump reprints."
 	);
 }
 
 export class DelegationNudge {
-	private burn = 0; // chars of direct-tool output since the last hand-off
-	private lastNudgeAt = 0; // burn level at which we last nudged (the re-arm baseline)
+	private run = 0; // consecutive SUBSTANTIVE hands-on calls since the last hand-off
+	private burn = 0; // cumulative output chars since the last hand-off (for the message only)
+	private lastNudgeRun = 0; // run length at which we last nudged (the re-arm baseline)
+	private nudges = 0; // cumulative nudges fired since the last hand-off (drives backoff)
 	private readonly t: NudgeThresholds;
 
 	constructor(thresholds: NudgeThresholds = DEFAULT_NUDGE_THRESHOLDS) {
 		this.t = thresholds;
 	}
 
-	/** Clear the streak — call on a new session or persona switch. */
+	/** Clear the run — call on a new session or persona switch. */
 	reset(): void {
+		this.run = 0;
 		this.burn = 0;
-		this.lastNudgeAt = 0;
+		this.lastNudgeRun = 0;
+		this.nudges = 0;
 	}
 
 	/**
-	 * Feed one supervisor tool result. `size` is its output length in chars. Returns the reminder
+	 * Feed one supervisor tool result: its tool name and output length in chars. Returns the reminder
 	 * text to append to that result, or undefined to leave the result untouched.
 	 */
 	observe(toolName: string, size: number): string | undefined {
 		if (HANDOFF_TOOLS.has(toolName)) {
-			// The operator delegated — the hand-grinding streak is over; the hand-off never nudges.
-			this.burn = 0;
-			this.lastNudgeAt = 0;
+			// The operator delegated — the by-hand run is over; the hand-off itself never nudges.
+			this.reset();
 			return undefined;
 		}
-		this.burn += Math.max(0, size);
+		const step = Math.max(0, size);
+		this.burn += step;
+		// Only a substantive step advances the run; a trivial call is orchestration glue, not a sweep
+		// step (it neither advances nor resets the run — a stray echo mid-sweep doesn't break it).
+		if (step >= this.t.minStepChars) this.run += 1;
 		const single = size >= this.t.singleHeavyChars;
-		const cumulative = this.burn - this.lastNudgeAt >= this.t.cumulativeChars;
-		if (!single && !cumulative) return undefined;
-		this.lastNudgeAt = this.burn;
-		return renderNudge(size, this.burn);
+		// Backoff: each un-actioned nudge widens the next run window, so a long non-delegable
+		// session-bound loop is reminded ONCE then left alone; a real runaway grind still trips the
+		// widened window; a hand-off resets it.
+		const window = this.t.runLength * (this.nudges + 1);
+		const sweep = this.run - this.lastNudgeRun >= window;
+		if (!single && !sweep) return undefined;
+		this.lastNudgeRun = this.run;
+		this.nudges += 1;
+		return renderNudge(sweep ? "sweep" : "dump", this.run, this.burn, size);
 	}
 }
 

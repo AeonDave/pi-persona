@@ -10,7 +10,7 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, IdleCoalescingNotifier, buildPeekDigest, PeekWatcher, renderCompletion } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, PeekWatcher, renderCompletion } from "../../../src/engine/async.ts";
 import type { ProgressSnapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { PersistenceNudge } from "../../../src/core/nudge.ts";
@@ -392,6 +392,26 @@ test("IdleCoalescingNotifier.discard drops buffered items (results already colle
 	n.discard((x) => x === "collected");
 	clock.tick();
 	assert.deepEqual(sent, ["keep"], "the discarded item was not re-delivered");
+});
+
+test("IdleCoalescingNotifier.peekPending exposes buffered-but-undelivered items (settle→deliver gap)", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	// isIdle:false → the notifier never flushes, so items stay buffered (the gap `intercom wait` hit).
+	const n = makeStrNotifier(clock, { isIdle: () => false, deliver: (m) => sent.push(m) });
+	n.notify("a");
+	n.notify("b");
+	clock.tick();
+	assert.deepEqual(n.peekPending(), ["a", "b"], "buffered items are visible before delivery");
+	assert.deepEqual(sent, [], "nothing delivered while busy");
+	n.discard((x) => x === "a");
+	assert.deepEqual(n.peekPending(), ["b"], "discard removes from the pending view too");
+});
+
+test("dedupeRunsById keeps the first occurrence per id, order preserved", () => {
+	const out = dedupeRunsById([doneRun("run-1", "scout", "A"), doneRun("run-2", "op", "B"), doneRun("run-1", "scout", "A2")]);
+	assert.deepEqual(out.map((r) => r.id), ["run-1", "run-2"]);
+	assert.equal(out[0]?.result?.output, "A", "the first run-1 wins");
 });
 
 test("buildCompletionReport fences untrusted sub-agent text (output and reasons)", () => {
