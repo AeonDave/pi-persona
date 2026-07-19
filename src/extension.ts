@@ -34,7 +34,7 @@ import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildPeekAlert, buildPeekDigest, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildPeekAlert, buildPeekDigest, dedupeRunsById, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -1059,7 +1059,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
-		delegationNudge.reset(); // a fresh session starts with a clean hand-grinding streak
+		delegationNudge.reset(); // a fresh session starts with a clean by-hand run
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
 		if (config.seed && !existsSync(seedMarker())) {
@@ -1137,23 +1137,25 @@ export default function piPersona(pi: ExtensionAPI): void {
 		return controller.gate(event.toolName, event.input);
 	});
 
-	// Delegation nudge (config.nudge; delegating personas only): when the supervisor grinds heavy
-	// work by hand — burning context without a hand-off — append a reminder to the offending tool's
-	// result. It lands in RECENT context, on the very command that burned it, where a top-of-prompt
-	// persona directive has already lost its pull. Sub-agents run in their own sessions, so this hook
-	// only ever sees the SUPERVISOR's own tools. A `delegate`/`council` result resets the streak.
+	// Delegation nudge (config.nudge; delegating personas only): when the supervisor grinds a RUN of
+	// hands-on commands by hand — a by-hand sweep with no hand-off — append a reminder to the
+	// offending tool's result. It lands in RECENT context, on the very command that tripped it, where
+	// a top-of-prompt persona directive has already lost its pull. Sub-agents run in their own
+	// sessions, so this hook only ever sees the SUPERVISOR's own tools. A `delegate`/`council` result
+	// resets the run.
 	pi.on("tool_result", (event, ctx) => {
 		lastCtx = ctx;
 		if (!config.nudge) return undefined;
 		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
 		if (!controller.capabilities?.tools.has("delegate")) return undefined;
 		const notes: string[] = [];
-		// Grinding-by-hand reminder: burn SIZE on the supervisor's own tools (delegate/council reset it).
+		// Grinding-by-hand reminder: a RUN of substantive hands-on commands on the supervisor's own
+		// tools (delegate/council reset the run). `size` classifies substantive vs glue + fat dump.
 		const size = event.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0);
-		const burn = delegationNudge.observe(event.toolName, size);
-		if (burn) notes.push(burn);
+		const sweepNote = delegationNudge.observe(event.toolName, size);
+		if (sweepNote) notes.push(sweepNote);
 		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
-		// results only; because delegate/council reset the burn streak the two never fire on one event).
+		// results only; because delegate/council reset the run the two never fire on one event).
 		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
 		const surrender = persistenceNudge.observe(event.toolName, text);
 		if (surrender) notes.push(surrender);
@@ -1595,11 +1597,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// peek + wait + steer + stop are supervisor→child controls over the async tracker /
 			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
-				const runs = params.to ? [tracker.peek(params.to)].filter((r): r is AsyncRun => !!r) : tracker.running();
+				// No `to` → running legs PLUS any settled-but-not-yet-delivered ones (the settle→deliver
+				// gap), so a peek right after a leg finishes shows its result instead of "No async runs".
+				const runs = params.to
+					? [tracker.peek(params.to)].filter((r): r is AsyncRun => !!r)
+					: dedupeRunsById([...tracker.running(), ...completionNotifier.peekPending()]);
 				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: STALL_FLAG_MS }) }], details: { action: "peek", ok: true }, isError: false };
 			}
 			if (params.action === "wait") {
-				const ids = params.to ? [params.to] : tracker.running().map((r) => r.id);
+				// No `to` → wait on running legs AND collect settled legs still queued for follow-up
+				// delivery, so a wait in the settle→deliver gap returns their results (not "nothing").
+				const ids = params.to
+					? [params.to]
+					: dedupeRunsById([...tracker.running(), ...completionNotifier.peekPending()]).map((r) => r.id);
 				if (ids.length === 0) {
 					return { content: [{ type: "text", text: "No async runs to wait for." }], details: { action: "wait", ok: true }, isError: false };
 				}

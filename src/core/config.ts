@@ -44,9 +44,9 @@ export interface PiPersonaConfig {
 	 *  init inside the headless child), so a dead delegation settles in ~90s instead of the full
 	 *  180s idle window. 90000 by default; PI_PERSONA_AGENT_STARTUP_MS=0 disables it. */
 	agentStartupTimeoutMs: number;
-	/** Delegation nudge: when a delegating supervisor grinds heavy work by hand (burns context
-	 *  without a hand-off), append a reminder to the offending tool's result. On by default;
-	 *  PI_PERSONA_NUDGE=off opts out. */
+	/** Delegation nudge: when a delegating supervisor grinds a RUN of hands-on commands by hand (a
+	 *  by-hand sweep) without a hand-off, append a reminder to the offending tool's result. On by
+	 *  default; PI_PERSONA_NUDGE=off opts out. */
 	nudge: boolean;
 	/** Opt-in cross-process broker (spec B1-B7): off (default) ⇒ the child engine spawns
 	 *  exactly as today — no host, no extra env vars, zero behavior change. On ⇒ the
