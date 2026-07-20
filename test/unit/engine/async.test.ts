@@ -224,6 +224,55 @@ test("running() lists only in-flight runs", async () => {
 	assert.equal(tracker.running().length, 0);
 });
 
+test("forceSettle clears a still-running ghost (fires onComplete once, leaves the running set)", async () => {
+	const tracker = new AsyncRunTracker();
+	const completed: string[] = [];
+	tracker.onComplete((r) => completed.push(r.id));
+	let release: () => void = () => {};
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	// A run whose hard-stop handle is gone but whose thunk never settles = the ghost the supervisor's
+	// `stop` used to falsely report as "already finished".
+	const id = tracker.launch({ agent: "a", task: "t" }, async () => {
+		await gate;
+		return { agent: "a", output: "late", usage: usage(), ok: true };
+	});
+	assert.equal(tracker.running().length, 1);
+	assert.equal(tracker.forceSettle(id, "force-stopped"), true);
+	assert.equal(tracker.peek(id)?.status, "failed");
+	assert.equal(tracker.peek(id)?.error, "force-stopped");
+	assert.equal(tracker.running().length, 0, "the ghost leaves the running set");
+	assert.deepEqual(completed, [id], "onComplete fires once for the forced settle");
+	// The late natural resolution must NOT re-notify or overwrite the forced failure.
+	release();
+	await tick();
+	assert.deepEqual(completed, [id], "the late natural result does not double-fire onComplete");
+	assert.equal(tracker.peek(id)?.status, "failed", "the late natural result does not overwrite the forced failure");
+});
+
+test("forceSettle is a no-op on unknown, already-settled, and re-forced runs", async () => {
+	const tracker = new AsyncRunTracker();
+	assert.equal(tracker.forceSettle("run-nope", "x"), false, "unknown id");
+	const id = tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "x", usage: usage(), ok: true }));
+	await tick();
+	assert.equal(tracker.peek(id)?.status, "done");
+	assert.equal(tracker.forceSettle(id, "x"), false, "already settled naturally");
+	let release: () => void = () => {};
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	const gid = tracker.launch({ agent: "a", task: "t" }, async () => {
+		await gate;
+		return { agent: "a", output: "x", usage: usage(), ok: true };
+	});
+	assert.equal(tracker.forceSettle(gid, "first"), true);
+	assert.equal(tracker.forceSettle(gid, "second"), false, "a second force-settle is a no-op");
+	assert.equal(tracker.peek(gid)?.error, "first", "the first forced error is kept");
+	release();
+	await tick();
+});
+
 test("buildPeekDigest summarises runs (counts, ids, statuses)", () => {
 	const digest = buildPeekDigest([
 		{ id: "run-1", agent: "scout", task: "t", status: "running", progress: { output: "", turns: 2, tokens: 30 } },

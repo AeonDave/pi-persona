@@ -26,9 +26,10 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 
 Run limits (`RUN_LIMITS`) are enforced inside `makeSDK` regardless of how a strategy calls `agent()`:
 `maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window), `maxDepth`. On top of the
-idle window, every agent also carries a **hard wall-clock cap** (`PI_PERSONA_AGENT_MAX_MS`, default
-600000) — a lifetime ceiling that settles a busy-but-non-converging worker the idle window never
-catches, so a wedged item can't hang a whole sweep. Safety comes from these runtime limits, not from
+idle window, every agent can also carry an **opt-in hard wall-clock cap** (`PI_PERSONA_AGENT_MAX_MS`,
+OFF by default = unlimited) — a lifetime ceiling that, when armed, settles a busy-but-non-converging
+worker the idle window never catches; left off, a healthy child runs to completion and the idle window
++ token budget bound a wedged item. Safety comes from these runtime limits, not from
 sandboxing the strategy (see the I2 invariant in [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ## Roster-role ensembles

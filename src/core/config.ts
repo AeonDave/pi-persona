@@ -34,9 +34,11 @@ export interface PiPersonaConfig {
 	 *  step in early. Deliberately slow so it is an occasional glance, not a poll, and independent of
 	 *  the fast stall/message wakeup. 300000 (5 min) by default; PI_PERSONA_CHECKIN_MS=0 opts out. */
 	checkInEveryMs: number;
-	/** Per-agent hard wall-clock cap (ms): a definite lifetime ceiling that settles even a
-	 *  busy-but-non-converging child the idle watchdog (reset on every event) never catches.
-	 *  600000 by default; PI_PERSONA_AGENT_MAX_MS=0 disables it. */
+	/** Per-agent hard wall-clock cap (ms): an OPT-IN lifetime ceiling. When set (>0) it settles even
+	 *  a busy-but-non-converging child the idle watchdog (reset on every event) never catches.
+	 *  DISABLED by default (0 = no cap / unlimited) so a healthy, progressing child runs to completion
+	 *  instead of being killed mid-work; the idle watchdog + startup deadline + token budget remain the
+	 *  always-on backstops. Set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a hard cap. */
 	agentHardTimeoutMs: number;
 	/** Per-agent STARTUP deadline (ms): a spawned child that never makes progress (no completed
 	 *  turn / tokens / streamed output) within this window is killed as a stalled start — the
@@ -81,7 +83,10 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 30_000,
 		checkInEveryMs: 300_000,
-		agentHardTimeoutMs: 600_000,
+		// Opt-in: 0 = no hard cap (a healthy child runs to completion). The idle watchdog
+		// (RUN_LIMITS.timeoutMs, reset on progress) + startup deadline + token budget are the
+		// always-on backstops; set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a wall-clock ceiling.
+		agentHardTimeoutMs: 0,
 		agentStartupTimeoutMs: 90_000,
 		// On unless explicitly turned off (mirrors PI_PERSONA_PERSIST's `!== "off"` convention).
 		nudge: env.PI_PERSONA_NUDGE?.trim().toLowerCase() !== "off",

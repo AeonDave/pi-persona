@@ -141,10 +141,11 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
 Both backends sit behind the `StrategyEngine` seam (`run(spec, onProgress?, signal?, onSteerable?) →
 AgentResult`) and enforce two independent deadlines: `RUN_LIMITS.timeoutMs` as an **idle window** (no
 events for that long ⇒ abort; the inproc idle watchdog is disabled for coaching children that
-legitimately block on a supervisor reply), and `PI_PERSONA_AGENT_MAX_MS` as a **hard wall-clock cap**
-— a lifetime ceiling armed once and never reset, so it settles a busy-but-non-converging child (a loop
-that keeps emitting) the idle window never catches. Both classify as `failureKind: "timeout"` (never a
-provider reroute).
+legitimately block on a supervisor reply), and `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock
+cap** — a lifetime ceiling armed once and never reset that, when set, settles a busy-but-non-converging
+child (a loop that keeps emitting) the idle window never catches. OFF by default (0 = unlimited) so a
+healthy, progressing child is never killed mid-work; the idle window + token budget remain the always-on
+backstops. Both classify as `failureKind: "timeout"` (never a provider reroute).
 
 - **InProcessEngine** (default) — a `createAgentSession` per sub-agent: cheaper, shares the host's
   auth/model registry, and **steerable** (inject a live user message into a running sub-agent).
