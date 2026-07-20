@@ -37,12 +37,12 @@ test("PI_PERSONA_CHECKIN_MS sets the routine check-in interval (default 5 min; e
 	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "-5" }).checkInEveryMs, 300_000, "negative ⇒ default");
 });
 
-test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 600000; explicit 0 disables)", () => {
-	assert.equal(resolveConfig({}).agentHardTimeoutMs, 600_000, "a generous lifetime ceiling by default");
+test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 0 = unlimited; >0 arms it)", () => {
+	assert.equal(resolveConfig({}).agentHardTimeoutMs, 0, "unlimited by default — a healthy child runs to completion");
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "120000" }).agentHardTimeoutMs, 120000);
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "0" }).agentHardTimeoutMs, 0, "explicit 0 disables the cap");
-	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "abc" }).agentHardTimeoutMs, 600_000, "non-numeric ⇒ default");
-	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "-5" }).agentHardTimeoutMs, 600_000, "negative ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "abc" }).agentHardTimeoutMs, 0, "non-numeric ⇒ default (unlimited)");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "-5" }).agentHardTimeoutMs, 0, "negative ⇒ default (unlimited)");
 });
 
 test("PI_PERSONA_AGENT_STARTUP_MS sets the per-agent startup deadline (default 90000; explicit 0 disables)", () => {

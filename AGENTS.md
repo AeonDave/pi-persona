@@ -29,8 +29,9 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   the correctness baseline + the path worktree isolation uses). Opt out with `PI_PERSONA_ENGINE=child`.
   BOTH enforce `RUN_LIMITS.timeoutMs` as an **idle window** (no events/output ⇒ abort; the inproc
   watchdog is disabled for coaching children that may legitimately block on a supervisor reply) AND
-  `PI_PERSONA_AGENT_MAX_MS` as a **hard wall-clock cap** (lifetime ceiling armed once, never reset —
-  catches a busy loop the idle window never does; default 600000, `0` disables) AND
+  `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock cap** (lifetime ceiling armed once, never
+  reset — catches a busy loop the idle window never does; OFF by default (0 = unlimited) so a healthy,
+  progressing child runs to completion, set `<ms>` to arm it) AND
   `PI_PERSONA_AGENT_STARTUP_MS` as a **startup deadline** (a child that makes ZERO progress — no
   completed turn / tokens / streamed output — within the window is killed as a stalled start; the
   first real progress cancels it, so a slow-but-streaming turn is never touched; default 90000,

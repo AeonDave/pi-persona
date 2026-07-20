@@ -80,8 +80,9 @@ const RUN_LIMITS: RunLimits = {
 // A running async child that hasn't ADVANCED (output/turns/tokens) for this long is flagged
 // "possibly stuck" — the soft stall signal. It is deliberately patient: a long scan, a big
 // generation, or a blocking command shows no visible progress yet is perfectly healthy, so we wake
-// the supervisor only after a genuinely long quiet spell. Purely advisory (no auto-abort); the hard
-// cap (PI_PERSONA_AGENT_MAX_MS) is the enforcing backstop.
+// the supervisor only after a genuinely long quiet spell. Purely advisory (no auto-abort); the idle
+// watchdog (RUN_LIMITS.timeoutMs, reset on progress) + token budget are the always-on enforcing
+// backstops, with the OPT-IN hard cap (PI_PERSONA_AGENT_MAX_MS, off by default) as an extra ceiling.
 const STALL_FLAG_MS = 90_000;
 
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1659,15 +1660,29 @@ export default function piPersona(pi: ExtensionAPI): void {
 				if (!params.to) {
 					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: { action: "stop", ok: false }, isError: true };
 				}
-				// HARD stop: aborts the run's signal → the engine calls the sub-agent's agent.abort().
+				// HARD stop: aborts the run's signal → the engine calls the sub-agent's agent.abort()
+				// (child.ts escalates SIGTERM → force tree-kill, so this DOES kill a child-engine process).
 				const stopped = stopAgent(`async:${params.to}`);
-				return stopped
-					? { content: [{ type: "text", text: `Aborting ${params.to} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false }
-					: {
-							content: [{ type: "text", text: `Cannot stop "${params.to}" — no running async run by that id (it may have already finished).` }],
-							details: { action: "stop", ok: false },
-							isError: true,
-						};
+				if (stopped) {
+					return { content: [{ type: "text", text: `Aborting ${params.to} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false };
+				}
+				// No live stop handle. The handle registry and the tracker can DISAGREE: a prior abort
+				// consumes the handle (or a queued/never-steerable run never registered one) while the
+				// tracker still shows the run running — a ghost that keeps surfacing in every check-in and
+				// burns the budget. Consult the tracker (the source of truth for check-ins) and force-clear
+				// it, instead of falsely reporting "already finished".
+				if (tracker.forceSettle(params.to, "force-stopped by supervisor: no live stop handle (a prior abort was likely already in flight, or the run could not be signalled)")) {
+					return {
+						content: [{ type: "text", text: `Force-cleared ${params.to} — it had no live stop handle (a prior abort was likely already in flight, or it couldn't be signalled), but the tracker still showed it running. It will no longer be tracked as running; if the underlying process lingers it exits on its own.` }],
+						details: { action: "stop", ok: true },
+						isError: false,
+					};
+				}
+				return {
+					content: [{ type: "text", text: `Cannot stop "${params.to}" — no such running run (it already finished).` }],
+					details: { action: "stop", ok: false },
+					isError: true,
+				};
 			}
 
 			// The message bus (coaching): list / inbox / reply / send.

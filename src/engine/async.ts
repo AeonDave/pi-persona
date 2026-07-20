@@ -24,6 +24,10 @@ export interface AsyncRun {
 	 *  rose) — NOT merely the last event. A worker looping without headway keeps emitting but
 	 *  never bumps this, so `now - lastAdvanceAt` is what tells "working" from "stuck". */
 	lastAdvanceAt?: number;
+	/** Internal bookkeeping: true once the completion listeners have fired for this entry. Guards a
+	 *  force-settle racing the run thunk's natural resolution so listeners fire exactly once. Lives on
+	 *  the entry (not a side Set) so it survives pruning and the `launch` closure still sees it. */
+	settled?: boolean;
 }
 
 /** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
@@ -54,10 +58,7 @@ export class AsyncRunTracker {
 		};
 		this.runs.set(id, entry);
 
-		const settle = (): void => {
-			this.prune();
-			for (const cb of this.completeListeners) cb(entry);
-		};
+		const settle = (): void => this.settleOnce(entry);
 		// `Promise.resolve(run(...))` routes BOTH a returned rejection AND a SYNCHRONOUS throw from
 		// the thunk (e.g. the engine throwing before it returns its promise) through the same failure
 		// path, so onComplete always fires — otherwise the entry would be stuck "running" forever and
@@ -75,11 +76,13 @@ export class AsyncRunTracker {
 				}, id),
 			)
 				.then((result) => {
+					if (entry.settled) return; // force-settled by the supervisor — drop the late natural result
 					entry.status = result.ok ? "done" : "failed";
 					entry.result = result;
 					if (!result.ok && result.error) entry.error = result.error;
 				})
 				.catch((err: unknown) => {
+					if (entry.settled) return;
 					entry.status = "failed";
 					entry.error = err instanceof Error ? err.message : String(err);
 				})
@@ -91,6 +94,33 @@ export class AsyncRunTracker {
 		}
 
 		return id;
+	}
+
+	/** Fire the completion listeners for `entry` exactly once. Both the natural resolution of the run
+	 *  thunk and a supervisor {@link forceSettle} route through here, so a race between them never
+	 *  double-notifies (which would double-clean handles and duplicate the completion report). */
+	private settleOnce(entry: AsyncRun): void {
+		if (entry.settled) return;
+		entry.settled = true;
+		this.prune();
+		for (const cb of this.completeListeners) cb(entry);
+	}
+
+	/**
+	 * Force a still-"running" run to settle as failed and fire its completion listeners. Escape hatch
+	 * for a run whose hard-stop handle is gone (consumed by a prior abort, or never registered) while
+	 * the tracker still shows it running — otherwise the supervisor's `stop` reports "no running async
+	 * run" for a run its own check-in reports as running (an unkillable ghost that keeps burning the
+	 * check-in budget). Idempotent; a no-op on an unknown or already-settled run. The late natural
+	 * result from the underlying thunk is then dropped (guarded in {@link launch}).
+	 */
+	forceSettle(id: string, error: string): boolean {
+		const entry = this.runs.get(id);
+		if (!entry || entry.status !== "running" || entry.settled) return false;
+		entry.status = "failed";
+		entry.error = error;
+		this.settleOnce(entry);
+		return true;
 	}
 
 	/** Keep the map bounded by evicting the oldest *completed* runs (FIFO). */
