@@ -1,7 +1,7 @@
 /**
  * Persona persistence — remember the last explicitly-selected persona and restore
  * it on the next start. Mirrors pi-subagents-persona: the state file lives in the
- * global persona folder (`<agentDir>/persona-mind/state.json`); session-start restore
+ * global persona folder (`<agentDir>/persona/state.json`); session-start restore
  * only READS it, only user gestures (f8 / /persona) write it. Best-effort: any
  * I/O failure is swallowed (persistence must never break a session).
  */
