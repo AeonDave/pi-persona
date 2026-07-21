@@ -86,7 +86,7 @@ const RUN_LIMITS: RunLimits = {
 const STALL_FLAG_MS = 90_000;
 
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DATA_DIR = "persona-mind";
+const DATA_DIR = "persona";
 
 /** The Pi global agent dir, overridable via PI_AGENT_DIR (handy for tests/sandboxes). */
 function userAgentDir(): string {
@@ -94,9 +94,6 @@ function userAgentDir(): string {
 }
 function personaDataDir(): string {
 	return join(userAgentDir(), DATA_DIR);
-}
-function legacyPersonaDir(): string {
-	return join(userAgentDir(), "persona");
 }
 
 /** Cross-process `contact_peer` roster (spec B7): scopes `brokerPeers` — the process-wide,
@@ -226,15 +223,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 	let contractDefs: Record<string, ContractDef> = {};
 	let shadowed: Array<{ name: string; scope: string; path: string }> = [];
 
-	// Remembered selection lives in the persona-mind data folder; only user gestures write it.
+	// Remembered selection lives in the persona data folder; only user gestures write it.
 	const stateFile = config.stateFile ?? join(personaDataDir(), "state.json");
-	const legacyStateFile = join(legacyPersonaDir(), "state.json");
 	const readRememberedPersona = (): string | undefined => {
 		if (!config.persist) return undefined;
-		if (!config.stateFile) {
-			const legacy = readLastPersona(legacyStateFile);
-			if (legacy !== undefined) return legacy;
-		}
 		return readLastPersona(stateFile);
 	};
 	const persist = (name: string | undefined): void => {
@@ -243,11 +235,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	// Per-persona config (model assignments today, open-ended), indexed by persona name.
 	const configFile = join(personaDataDir(), "config.json");
-	const legacyConfigFile = join(legacyPersonaDir(), "config.json");
 	const readConfigStore = (): PersonaConfigStore => {
-		const primary = readPersonaConfigs(configFile);
-		if (existsSync(configFile)) return primary;
-		return readPersonaConfigs(legacyConfigFile);
+		return readPersonaConfigs(configFile);
 	};
 	let personaConfigs: PersonaConfigStore = {};
 	const modelsPrompted = new Set<string>(); // ask-once-per-session guard
@@ -258,26 +247,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// only your own, they simply aren't there. (Contracts/presets/teams keep a builtin layer below:
 	// they aren't "personas" and are needed by strategies once personas are installed.)
 	const defDirs = (cwd: string): ScopedDir[] => [
-		{ path: join(legacyPersonaDir(), "agents"), scope: "user-legacy" },
 		{ path: join(personaDataDir(), "agents"), scope: "user" },
 		{ path: join(cwd, ".pi", "agents"), scope: "project" },
 		...config.extraDirs.map((p) => ({ path: p, scope: "env" })),
 	];
 	const teamFiles = (cwd: string): string[] => [
 		join(BUNDLED_DIR, "teams.yaml"),
-		join(legacyPersonaDir(), "teams.yaml"),
 		join(personaDataDir(), "teams.yaml"),
 		join(cwd, ".pi", "teams.yaml"),
 	];
 	const contractDirs = (cwd: string): ScopedDir[] => [
 		{ path: join(BUNDLED_DIR, "contracts"), scope: "builtin" },
-		{ path: join(legacyPersonaDir(), "contracts"), scope: "user-legacy" },
 		{ path: join(personaDataDir(), "contracts"), scope: "user" },
 		{ path: join(cwd, ".pi", "contracts"), scope: "project" },
 	];
 	const presetDirs = (cwd: string): ScopedDir[] => [
 		{ path: join(BUNDLED_DIR, "presets"), scope: "builtin" },
-		{ path: join(legacyPersonaDir(), "presets"), scope: "user-legacy" },
 		{ path: join(personaDataDir(), "presets"), scope: "user" },
 		{ path: join(cwd, ".pi", "presets"), scope: "project" },
 	];
@@ -298,7 +283,6 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// OPT-IN (PI_PERSONA_SEED=on) and happens once (guarded by the marker); by default nothing is
 	// installed. Best-effort — never block startup on a write error.
 	const seedMarker = (): string => join(personaDataDir(), ".pi-persona-seeded");
-	const legacySeedMarker = (): string => join(legacyPersonaDir(), ".pi-persona-seeded");
 	function runSeed(force: boolean): SeedResult {
 		const result = seedDefaults(BUNDLED_DIR, personaDataDir(), force);
 		try {
@@ -891,7 +875,6 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// ── flows (v0.5): a DAG over strategies, discovered as *.flow.json ────────────
 	const flowDirs = (cwd: string): string[] => [
 		join(BUNDLED_DIR, "flows"),
-		join(legacyPersonaDir(), "flows"),
 		join(personaDataDir(), "flows"),
 		join(cwd, ".pi", "flows"),
 	];
@@ -1090,7 +1073,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		delegationNudge.reset(); // a fresh session starts with a clean by-hand run
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
-		if (config.seed && !(existsSync(seedMarker()) || existsSync(legacySeedMarker()))) {
+		if (config.seed && !existsSync(seedMarker())) {
 			try {
 				const r = runSeed(false);
 				if (ctx.hasUI && r.copied.length > 0) {

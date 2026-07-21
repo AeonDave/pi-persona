@@ -279,7 +279,7 @@ persona directive lives at the TOP of the prompt and its pull decays as recent t
 
 ## Discovery & seeding
 
-- **Precedence (all file kinds):** `builtin < user (~/.pi/agent/persona-mind/…) < project (<root>/.pi/…)`; project
+- **Precedence (all file kinds):** `builtin < user (~/.pi/agent/persona/…) < project (<root>/.pi/…)`; project
   wins collisions. Personas and agents **share a folder**, split by the `persona: true` marker (a
   persona and an agent must not share a name).
 - **Personas/agents load ONLY from the user and project dirs.** The bundled `personas/`+`agents/` are a

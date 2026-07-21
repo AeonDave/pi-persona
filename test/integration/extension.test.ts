@@ -16,7 +16,7 @@ import { seedDefaults } from "../../src/core/seed.ts";
 // their personas. The opt-in test below uses its own fresh dir to prove the empty-by-default case.
 process.env.PI_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-userdir-"));
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const PERSONA_DIR = path.join(process.env.PI_AGENT_DIR, "persona-mind");
+const PERSONA_DIR = path.join(process.env.PI_AGENT_DIR, "persona");
 seedDefaults(REPO_ROOT, PERSONA_DIR, true);
 // Hermetic by default: general tests must not persist/restore the last persona.
 // The persistence test re-enables it explicitly with its own state file.
