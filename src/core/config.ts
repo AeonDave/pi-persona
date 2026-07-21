@@ -56,6 +56,22 @@ export interface PiPersonaConfig {
 	 *  giving `PI_PERSONA_ENGINE=child` runs (and every worktree-isolated leg) the comm
 	 *  plane + steer that in-process runs already have. */
 	broker: boolean;
+	/** External agent-to-agent plane (exocom): independent top-level instances in one workspace
+	 *  discover + message each other. Opt-in, OFF by default (PI_PERSONA_EXOCOM=1 / --exocom),
+	 *  additionally gated by the persona's canUseBus. */
+	exocom: boolean;
+	/** How many settled-but-uncollected async runs {@link AsyncRunTracker} retains before
+	 *  FIFO-evicting the oldest completed ones. 25 by default (today's hardcoded bound); set
+	 *  PI_PERSONA_ASYNC_RETAIN=<n> (a finite value >= 1) to raise it under heavy fan-out. A
+	 *  value < 1 (junk, negative, or 0 — not a meaningful retention bound) keeps the default. */
+	asyncRetain: number;
+	/** Opt-in wider {@link DelegationLedger} veto key: OFF (default) keys purely on
+	 *  `agent+model+task` (today's veto *behavior* — unchanged; the key bytes themselves have
+	 *  moved on, NUL → space → `\x1f`, but record/vet always share the same key() so it
+	 *  cancels out). ON additionally folds in `role`/`tools`/`isolation`, so a genuine retry
+	 *  that only changes those isn't falsely vetoed as "identical" by the 2-strike anti-loop
+	 *  guard. Truthy convention mirrors exocom: unset/""/"off"/"0" ⇒ false. */
+	ledgerV2: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -93,6 +109,9 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// Any non-empty value opts in (mirrors PI_PERSONA_DISABLE's own convention) — the
 		// live-drive doc/examples use PI_PERSONA_BROKER=1.
 		broker: !!env.PI_PERSONA_BROKER && env.PI_PERSONA_BROKER.trim().length > 0,
+		exocom: false,
+		asyncRetain: 25,
+		ledgerV2: false,
 	};
 	// A valid finite value >= 0 sets the interval (0 opts out); junk/negative keeps the default.
 	const peekRaw = env.PI_PERSONA_PEEK_MS?.trim();
@@ -115,6 +134,13 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		const startup = Number(startupRaw);
 		if (Number.isFinite(startup) && startup >= 0) config.agentStartupTimeoutMs = startup;
 	}
+	// A finite value >= 1 sets the retention bound; 0 isn't meaningful here (unlike the interval
+	// knobs above, where 0 opts out) so it — like junk/negative — falls back to the default 25.
+	const asyncRetainRaw = env.PI_PERSONA_ASYNC_RETAIN?.trim();
+	if (asyncRetainRaw !== undefined && asyncRetainRaw !== "") {
+		const retain = Number(asyncRetainRaw);
+		if (Number.isFinite(retain) && retain >= 1) config.asyncRetain = retain;
+	}
 	if (def) config.defaultPersona = def;
 	const stateFile = env.PI_PERSONA_STATE_FILE?.trim();
 	if (stateFile) config.stateFile = stateFile;
@@ -124,5 +150,9 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 	// PI_PERSONA_ENGINE=child.
 	const engine = env.PI_PERSONA_ENGINE?.trim().toLowerCase();
 	config.engine = engine === "child" ? "child" : "inproc";
+	const exocomFlag = env.PI_PERSONA_EXOCOM?.trim().toLowerCase();
+	config.exocom = exocomFlag !== undefined && exocomFlag !== "" && exocomFlag !== "off" && exocomFlag !== "0";
+	const ledgerV2Flag = env.PI_PERSONA_LEDGER_V2?.trim().toLowerCase();
+	config.ledgerV2 = ledgerV2Flag !== undefined && ledgerV2Flag !== "" && ledgerV2Flag !== "off" && ledgerV2Flag !== "0";
 	return config;
 }

@@ -38,6 +38,31 @@ test("explicitly denying `delegate` removes it and disables spawning", () => {
 	assert.equal(caps.delegateTargets.size, 0, "cannot delegate when it cannot spawn");
 });
 
+test("exocom tools follow canUseBus, not the general allowlist (like delegate)", () => {
+	// A restrictive allowlist that omits the exocom tools must NOT lock a bus-holding persona out of
+	// them — else a persona with a live exocom pool can't actually message its peers.
+	const caps = resolveCapabilities(base({ permissions: { tools: { allow: ["read"] } } }));
+	assert.equal(canCallTool(caps, "read"), true);
+	assert.equal(canCallTool(caps, "bash"), false, "the allowlist still restricts ordinary tools");
+	assert.equal(canCallTool(caps, "exocom_send"), true, "exocom_send is granted via canUseBus");
+	assert.equal(canCallTool(caps, "exocom_list"), true);
+	assert.equal(canCallTool(caps, "exocom_name"), true);
+});
+
+test("denying the bus (intercom) also denies the exocom tools", () => {
+	const caps = resolveCapabilities(base({ permissions: { tools: { deny: ["intercom"] } } }));
+	assert.equal(caps.canUseBus, false);
+	assert.equal(canCallTool(caps, "exocom_send"), false, "no bus ⇒ no external-bus tools either");
+});
+
+test("the exocom grant does not inflate the resolved tool set (canUseBus-gated at call time)", () => {
+	// Granting is done in canCallTool, NOT baked into caps.tools — so a no-restriction persona still
+	// resolves to exactly its real tools (the exocom tools are only ever registered when active).
+	const caps = resolveCapabilities(base());
+	assert.equal(caps.tools.has("exocom_send"), false, "not baked into the tool set");
+	assert.equal(canCallTool(caps, "exocom_send"), true, "but callable via canUseBus");
+});
+
 test("delegate allowlist scopes the spawnable roster", () => {
 	const caps = resolveCapabilities(base({ permissions: { delegate: { allow: ["scout"] } } }));
 	assert.equal(canDelegateTo(caps, "scout"), true);

@@ -13,11 +13,15 @@
  * SDK's `Roster` interface (unknown team → empty list).
  */
 
-import { asStringArray, parseYamlSubset } from "../core/frontmatter.ts";
+import { asBoolean, asStringArray, parseYamlSubset } from "../core/frontmatter.ts";
 import type { Roster } from "./sdk.ts";
 
-/** A roster member: a bare agent name, or an inline specialisation of one agent. */
-export type RosterMember = string | { agent: string; role?: string; model?: string; skills?: string[] };
+/** A roster member: a bare agent name, or an inline specialisation of one agent. `tools`/
+ *  `isolation`/`mcp` bring a roster member to parity with an ad-hoc `delegate` task's own
+ *  knobs (see `tools/delegate.ts`'s `DelegateTask`). */
+export type RosterMember =
+	| string
+	| { agent: string; role?: string; model?: string; skills?: string[]; tools?: string[]; isolation?: "none" | "worktree"; mcp?: boolean };
 
 /** The normalised run-spec fields a member contributes (agent + any specialisation). */
 export interface RosterSpec {
@@ -25,15 +29,24 @@ export interface RosterSpec {
 	role?: string;
 	model?: string;
 	skills?: string[];
+	tools?: string[];
+	isolation?: "none" | "worktree";
+	mcp?: boolean;
 }
 
-/** Normalise a member into the fields `sdk.agent()` accepts (a bare name → just `agent`). */
+/** Normalise a member into the fields `sdk.agent()` accepts (a bare name → just `agent`).
+ *  `tools`/`isolation`/`mcp` map onto the SAME `AgentRunSpec` fields the `delegate` path's
+ *  `specOf()` uses for these three concepts — same field names, same "worktree"/`true` only
+ *  semantics — so a roster member and an ad-hoc task behave identically once specialised. */
 export function rosterSpec(member: RosterMember): RosterSpec {
 	if (typeof member === "string") return { agent: member };
 	const spec: RosterSpec = { agent: member.agent };
 	if (member.role?.trim()) spec.role = member.role.trim();
 	if (member.model?.trim()) spec.model = member.model.trim();
 	if (member.skills && member.skills.length > 0) spec.skills = member.skills;
+	if (member.tools && member.tools.length > 0) spec.tools = member.tools;
+	if (member.isolation === "worktree") spec.isolation = "worktree";
+	if (member.mcp === true) spec.mcp = true;
 	return spec;
 }
 
@@ -87,11 +100,17 @@ function toMember(raw: unknown): RosterMember | undefined {
 	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 		const o = raw as Record<string, unknown>;
 		if (typeof o.agent !== "string" || !o.agent.trim()) return undefined;
-		const m: { agent: string; role?: string; model?: string; skills?: string[] } = { agent: o.agent.trim() };
+		const m: { agent: string; role?: string; model?: string; skills?: string[]; tools?: string[]; isolation?: "none" | "worktree"; mcp?: boolean } = {
+			agent: o.agent.trim(),
+		};
 		if (typeof o.role === "string" && o.role.trim()) m.role = o.role.trim();
 		if (typeof o.model === "string" && o.model.trim()) m.model = o.model.trim();
 		const skills = asStringArray(o.skills);
 		if (skills) m.skills = skills;
+		const tools = asStringArray(o.tools);
+		if (tools) m.tools = tools;
+		if (o.isolation === "worktree" || o.isolation === "none") m.isolation = o.isolation;
+		if (asBoolean(o.mcp) === true) m.mcp = true;
 		return m;
 	}
 	return undefined;

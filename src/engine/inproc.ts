@@ -28,7 +28,7 @@ import { type ContractDef, contractInstructions, parseAndValidate, pinContract, 
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
+import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { combineSignals } from "./signals.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
@@ -351,7 +351,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// Any event re-arms the clock, so a long-but-active agent is never killed. Disabled
 			// for coaching children that may block on a supervisor reply (see InProcessDeps).
 			const blockingChild = deps.coaching && (deps.allowBlocking ?? false);
-			const watchdogMs = blockingChild ? 0 : (deps.timeoutMs ?? 0);
+			// NP2: a per-leg spec.timeoutMs override raises (or shortens) just THIS leg's idle
+			// ceiling without touching deps.timeoutMs — the shared default other legs still see.
+			// Junk (non-finite/≤0) is ignored and falls back to the engine-level default.
+			const specTimeoutMs = isPositiveFiniteMs(spec.timeoutMs) ? spec.timeoutMs : undefined;
+			const watchdogMs = blockingChild ? 0 : (specTimeoutMs ?? deps.timeoutMs ?? 0);
 			let timedOut = false;
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
 			const disarmIdle = (): void => {

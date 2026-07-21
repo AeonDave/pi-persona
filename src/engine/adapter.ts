@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
+import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
 import { combineSignals } from "./signals.ts";
@@ -127,6 +127,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
+			// NP2: a per-leg timeoutMs override raises (or shortens) just THIS leg's idle-timeout
+			// ceiling without touching the shared default other legs of the same run still see.
+			// Junk (non-finite/≤0) is ignored — the engine's existing childOptions.timeoutMs stands.
+			if (isPositiveFiniteMs(spec.timeoutMs)) childOptions.timeoutMs = spec.timeoutMs;
 			if (onProgress) {
 				childOptions.onProgress = (snap) =>
 					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });

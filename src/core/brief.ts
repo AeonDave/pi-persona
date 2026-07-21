@@ -113,3 +113,28 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	);
 	return lines.join("\n");
 }
+
+export interface ExocomPeerBrief {
+	name: string;
+	persona?: string;
+	purpose?: string;
+}
+
+/** Per-turn awareness of live exocom peers (independent pi instances in this workspace), or
+ *  undefined when none are reachable. Tells the supervisor WHO is available + their specialization
+ *  so it can choose to collaborate — never an obligation. */
+export function buildExocomBrief(peers: ExocomPeerBrief[]): string | undefined {
+	if (peers.length === 0) return undefined;
+	const lines: string[] = [
+		"[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this workspace right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:",
+	];
+	for (const p of peers.slice(0, MAX_LISTED)) {
+		const spec = p.persona ? (p.purpose ? `${p.persona} — ${clip(p.purpose, DESC_CLIP)}` : p.persona) : "";
+		lines.push(spec ? `- ${p.name} (${spec})` : `- ${p.name}`);
+	}
+	if (peers.length > MAX_LISTED) lines.push(`- …and ${peers.length - MAX_LISTED} more (exocom_list)`);
+	lines.push(
+		`Hand a peer a self-contained subtask with exocom_send({ target: "<name>", message: "<request>" }) — one-way, non-blocking; their reply returns to you as a follow-up. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+	);
+	return lines.join("\n");
+}

@@ -32,11 +32,24 @@ export interface AgentRunSpec {
 	 *  `mcp` setting. The child gets its OWN MCP session — pass a server session id in the
 	 *  task to share a server-keyed (HTTP) backend's state. */
 	mcp?: boolean;
+	/** Per-leg override (ms) of the run's shared idle-timeout ceiling (`RunLimits.timeoutMs`) —
+	 *  lets ONE legitimately slow leg raise its own wall-clock budget without raising the default
+	 *  for its siblings. Engine adapters consume this ONLY when it is a finite, positive number;
+	 *  absent or junk (≤0/NaN/Infinity) ⇒ the run's existing `RunLimits.timeoutMs`, untouched. */
+	timeoutMs?: number;
 	/** Opt this run into sibling messaging: the child gets a `contact_peer` tool (list/send,
 	 *  ONE-WAY) scoped to the other peers-enabled members of the SAME engine run. Set by
 	 *  strategies (e.g. `debate`). In-process engine only — the child engine ignores it;
 	 *  gated at bind time by the persona's `canUseBus` capability. */
 	peers?: boolean;
+}
+
+/** Is `x` a genuine positive, finite `timeoutMs` override — vs. absent/junk (undefined, NaN,
+ *  Infinity, ≤0), which means "no override, fall back to the run's existing default"? The
+ *  ONE predicate every `timeoutMs` site gates on (`specOf`, the single-async delegate path,
+ *  and both engine adapters), so they can't drift into checking it differently. */
+export function isPositiveFiniteMs(x: number | undefined): x is number {
+	return x !== undefined && Number.isFinite(x) && x > 0;
 }
 
 /** A live snapshot of an agent's progress (for streaming UI). */

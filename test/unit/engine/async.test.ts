@@ -72,6 +72,17 @@ test("the tracker caps retained runs by evicting old completed ones", async () =
 	assert.ok(tracker.list().length <= 25, `retained ${tracker.list().length} runs (expected ≤ 25)`);
 });
 
+test("a tracker built with a larger maxRetained retains more than the default 25 settled runs", async () => {
+	const tracker = new AsyncRunTracker({ maxRetained: 40 });
+	for (let i = 0; i < 60; i++) {
+		tracker.launch({ agent: `a${i}`, task: "t" }, async () => ({ agent: `a${i}`, output: "o", usage: usage(), ok: true }));
+	}
+	await tick();
+	await tick();
+	assert.ok(tracker.list().length <= 40, `retained ${tracker.list().length} runs (expected ≤ 40)`);
+	assert.ok(tracker.list().length > 25, `retained ${tracker.list().length} runs (expected > 25 — custom bound honored)`);
+});
+
 test("launch tracks a run and exposes its result on completion", async () => {
 	const tracker = new AsyncRunTracker();
 	const id = tracker.launch({ agent: "scout", task: "explore" }, async (onProgress) => {
@@ -83,6 +94,19 @@ test("launch tracks a run and exposes its result on completion", async () => {
 	const run = tracker.peek(id);
 	assert.equal(run?.status, "done");
 	assert.equal(run?.result?.output, "done");
+});
+
+test("launch carries the optional label/model through onto the tracked entry (existing agent/task-only calls still compile)", async () => {
+	const tracker = new AsyncRunTracker();
+	const id = tracker.launch({ agent: "scout", task: "explore", label: "atlas-static", model: "sonnet" }, async () => ({
+		agent: "scout",
+		output: "done",
+		usage: usage(),
+		ok: true,
+	}));
+	assert.equal(tracker.peek(id)?.label, "atlas-static");
+	assert.equal(tracker.peek(id)?.model, "sonnet");
+	await tick();
 });
 
 const runningRun = (lastAdvanceAt: number, over: Partial<AsyncRun> = {}): AsyncRun => ({
@@ -284,6 +308,52 @@ test("buildPeekDigest summarises runs (counts, ids, statuses)", () => {
 	assert.match(digest, /all good/);
 });
 
+test("buildPeekDigest compacts large token counts (164005 → 164k)", () => {
+	const digest = buildPeekDigest([
+		{ id: "run-1", agent: "operator", task: "t", status: "running", progress: { output: "x", turns: 53, tokens: 164_005 } },
+	]);
+	assert.match(digest, /164k tok/, "tokens shown compact");
+	assert.doesNotMatch(digest, /164005/, "not the raw count");
+});
+
+test("buildPeekDigest shows the canonical <label> · <model> name — the SAME name the agent-tree node uses — not the bare agent type", () => {
+	const digest = buildPeekDigest([
+		{ id: "run-1", agent: "scout", task: "t", label: "atlas-static", model: "sonnet", status: "running", progress: { output: "", turns: 33, tokens: 381_000 } },
+	]);
+	assert.match(digest, /\[run-1\] atlas-static · sonnet — running/, "canonical name, with the run id kept as the steer/stop handle");
+	assert.doesNotMatch(digest, /\bscout\b/, "the bare agent type is not shown once a label is carried");
+});
+
+test("buildPeekDigest falls back to the bare agent type when a run carries no label (back-compat)", () => {
+	const digest = buildPeekDigest([
+		{ id: "run-1", agent: "scout", task: "t", status: "running", progress: { output: "", turns: 1, tokens: 5 } },
+	]);
+	assert.match(digest, /\[run-1\] scout — running/, "no label ⇒ falls back to the agent type");
+});
+
+test("buildPeekDigest omits the model suffix when a run has a label but no model", () => {
+	const digest = buildPeekDigest([
+		{ id: "run-1", agent: "scout", task: "t", label: "atlas-static", status: "running", progress: { output: "", turns: 1, tokens: 5 } },
+	]);
+	assert.match(digest, /\[run-1\] atlas-static — running/);
+	assert.doesNotMatch(digest, /atlas-static ·/, "no model ⇒ no dangling '· ' suffix");
+});
+
+test("buildCompletionReport gives an empty result a plain '(no output)' — never an empty fence shell", () => {
+	const fence = (t: string) => `<F>${t}</F>`;
+	const empty = buildCompletionReport(
+		[{ id: "run-1", agent: "operator", task: "t", status: "done", progress: { output: "", turns: 1, tokens: 5 }, result: { agent: "operator", output: "   ", usage: usage(), ok: true } }],
+		fence,
+	);
+	assert.match(empty, /run-1 \(operator\) done:\n\(no output\)/, "whitespace-only output ⇒ plain (no output)");
+	assert.doesNotMatch(empty, /<F>/, "no fence is emitted around nothing");
+	const real = buildCompletionReport(
+		[{ id: "run-1", agent: "operator", task: "t", status: "done", progress: { output: "x", turns: 1, tokens: 5 }, result: { agent: "operator", output: "real result", usage: usage(), ok: true } }],
+		fence,
+	);
+	assert.match(real, /<F>real result<\/F>/, "real output is still fenced");
+});
+
 test("the tracker resets the stall clock only when progress actually advances (injected clock)", async () => {
 	// Stall detection needs a per-run 'last advanced' stamp: a worker looping without making
 	// headway (identical snapshot) must NOT keep its clock alive, or it never reads as stuck.
@@ -370,6 +440,20 @@ test("buildCompletionReport includes anti-loop guidance on mixed batches (some d
 	const mixed = buildCompletionReport([doneRun("run-1", "scout", "ok"), failedRun("run-2", "operator", "boom")], (t) => t);
 	assert.match(mixed, /Do not re-issue the same failing delegation repeatedly/);
 	assert.match(mixed, /retry ONCE with a different model/);
+});
+
+test("buildCompletionReport salvages a failed/aborted leg's partial output (not lost)", () => {
+	const fence = (t: string) => `<F>${t}</F>`;
+	// A hard-stopped research leg with real accumulated findings (its last progress snapshot).
+	const aborted: AsyncRun = { id: "run-3", agent: "research", task: "t", status: "failed", progress: { output: "found: 0x4016b3 read no bounds check", turns: 32, tokens: 693_000 }, error: "agent aborted" };
+	const report = buildCompletionReport([aborted], fence);
+	assert.match(report, /run-3 \(research\): agent aborted/, "the failure itself is still reported");
+	assert.match(report, /partial output before it was aborted/, "the salvage block is labelled as an abort");
+	assert.match(report, /<F>found: 0x4016b3 read no bounds check<\/F>/, "the partial content is fenced + recoverable");
+	// No salvage BLOCK when there is genuinely nothing to salvage (the guidance line mentions
+	// "partial output" regardless, so match the block's own `↩ … before it …` marker, not the phrase).
+	const empty = buildCompletionReport([failedRun("run-4", "scout", "no model")], fence);
+	assert.doesNotMatch(empty, /↩ .*partial output before it/, "no empty salvage block for a leg that produced nothing");
 });
 
 test("tracker.waitFor resolves once every listed run settles (a join on async runs)", async () => {
@@ -585,6 +669,22 @@ test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", ()
 	assert.equal(sent.length, 1, "both settled runs arrive as one report");
 	assert.match(sent[0] ?? "", /2 async runs settled — 1 done, 1 failed/);
 	assert.match(sent[0] ?? "", /run-2 \(operator\): boom/);
+});
+
+test("IdleCoalescingNotifier honours minIntervalMs and maxDeliveries (R6)", () => {
+	const clock = fakeClock();
+	const delivered: string[] = [];
+	let now = 0;
+	const n = new IdleCoalescingNotifier<string>({
+		isIdle: () => true, hasPending: () => false,
+		deliver: (m) => delivered.push(m), render: (items) => items.join(","),
+		setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+		debounceMs: 1, minIntervalMs: 100, maxDeliveries: 2, now: () => now,
+	});
+	n.notify("a"); clock.tick(); assert.deepEqual(delivered, ["a"], "first delivers");
+	now = 50; n.notify("b"); clock.tick(); assert.deepEqual(delivered, ["a"], "within min-interval ⇒ held");
+	now = 150; clock.tick(); assert.deepEqual(delivered, ["a", "b"], "after min-interval ⇒ delivered");
+	now = 300; n.notify("c"); clock.tick(); assert.deepEqual(delivered, ["a", "b"], "hit maxDeliveries ⇒ suppressed");
 });
 
 // renderCompletion — the completion report PLUS the premature-surrender counterweight, shared by

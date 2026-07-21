@@ -171,7 +171,8 @@ same: new *files* on this API, no new core.
 Params are declared per strategy and looked up by `knownParams()` so this table and the code can't
 drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, never hard-fail.
 
-**Supervising running sub-agents** — two layers, deliberately separate:
+**Supervising running sub-agents — the `intercom` plane.** The supervisor's *internal* comm with the
+children it spawned, in two layers, deliberately separate:
 
 - **Observe / join / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }`
   watches your async sub-agents; `wait` **joins** them (blocks until they settle, returns results);
@@ -220,6 +221,28 @@ drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, n
 > token is cached on disk and the headless child reuses it. Then `mcp: true` connects cleanly.
 > Servers that key state by a session-id argument (HTTP backends) need that id in the task, not a
 > login.
+
+## Exocom — collaborate across pi instances
+
+Where `intercom` (above) is the *internal* plane — a supervisor talking to the sub-agents it spawned —
+**exocom** is the *external* one: independent, hand-launched `pi` instances that share a workspace
+folder discover each other and message **peer-to-peer**, with no supervisor/child relationship between
+them. Open a `dev`, an `elite` and a `researcher` in the same repo and let them coordinate.
+
+Off by default — enable per instance with `PI_PERSONA_EXOCOM=1` or `--exocom`, additionally gated by
+the active persona's `canUseBus` (revoked live if you switch to a persona without it). Each instance
+self-registers in a workspace-scoped file registry (heartbeat + stale-prune — no server to run) under
+a random call-sign (`orion`, `vega`, …) shown next to its current persona.
+
+- **`exocom_list`** — who's reachable right now (the live pool).
+- **`exocom_send({ target, message, in_reply_to? })`** — one-way and **non-blocking**: returns a
+  `msg_id` at once; a reply is just another send with `in_reply_to` set; `target: "*"` broadcasts.
+
+Inbound peer text is **fenced and attributed from the registry** — never from the sender's own claim —
+and per-sender rate-limited, deduplicated and hop-capped, so a peer can neither spoof another's
+identity nor slip instructions past the data boundary. The pool widget shows each peer as
+`📡 orion (researcher) · sonnet · ctx 12% · 3 in · 1 out` (`💤` when it goes quiet). Design:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#exocom--the-external-plane).
 
 ## Recipes
 
@@ -367,7 +390,8 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — fast-fail a child that never makes progress, e.g. a headless `mcp: true` leg stalled on init; default 90000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable both delegation nudges — hand-off + persistence; on by default)
+- CLI flags (per run): `--persona <name>` (start with this persona active — e.g. `pi --persona elite`; overrides `PI_PERSONA_DEFAULT` and the remembered persona, and errors if the name isn't installed) · `--exocom` (join the exocom peer-to-peer plane for this run; same as `PI_PERSONA_EXOCOM=1`). Model + reasoning effort are pi's own native flags: `--model <provider/id>` (e.g. `--model anthropic/claude-opus-4-8`; `--list-models` to search) and `--thinking <off|minimal|low|medium|high|xhigh|max>`.
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — fast-fail a child that never makes progress, e.g. a headless `mcp: true` leg stalled on init; default 90000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable both delegation nudges — hand-off + persistence; on by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`)
 
 ## Develop
 

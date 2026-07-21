@@ -55,6 +55,23 @@ test("child adapter leaves the task untouched when no contract is requested", as
 	assert.ok(!r.output.includes("output contract"), "no contract requested → no block injected");
 });
 
+test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
+	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, timeoutMs: 5_000, killGraceMs: 50 } });
+	const r = await engine.run({ agent: "a", task: "hang [sleep]", timeoutMs: 60 });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "timeout");
+	assert.match(r.error ?? "", /timed out/);
+});
+
+test("child adapter ignores a non-positive spec.timeoutMs override (falls back to the engine-level default)", async () => {
+	// deps-level idle timeout is short; the per-leg override is junk (≤0) and must be ignored.
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, timeoutMs: 60, killGraceMs: 50 } });
+	const r = await engine.run({ agent: "a", task: "hang [sleep]", timeoutMs: -5 });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "timeout", "the deps-level default watchdog still fires");
+});
+
 test("child adapter reports an unknown agent with the bare message when listAgents is absent", async () => {
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
 	const r = await engine.run({ agent: "nope", task: "t" });

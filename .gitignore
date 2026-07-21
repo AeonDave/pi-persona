@@ -9,3 +9,6 @@ Thumbs.db
 
 # Agent working artifacts (task reports, review diffs, progress)
 .superpowers/
+
+# Superpowers specs/plans — local design scratch, not part of the repo
+docs/superpowers/

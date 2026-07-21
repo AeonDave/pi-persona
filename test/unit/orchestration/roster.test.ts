@@ -79,3 +79,28 @@ test("parseTeams resolves build team for compete strategy (adoption example)", (
 	assert.deepEqual(t.build, ["operator", "operator"]);
 	assert.deepEqual(t.repair, ["operator", "verifier"]);
 });
+
+// NP1 — roster members carry tools/isolation/mcp (parity with the delegate path's specOf()).
+
+test("rosterSpec carries tools/isolation/mcp through to the run spec (parity with the delegate path)", () => {
+	const member = { agent: "operator", tools: ["read", "grep"], isolation: "worktree" as const, mcp: true };
+	assert.deepEqual(rosterSpec(member), { agent: "operator", tools: ["read", "grep"], isolation: "worktree", mcp: true });
+});
+
+test("rosterSpec drops isolation: none and mcp: false, mirroring specOf()'s mapping exactly", () => {
+	assert.deepEqual(rosterSpec({ agent: "operator", isolation: "none", mcp: false }), { agent: "operator" });
+});
+
+test("parseTeams reads inline-map members carrying tools/isolation/mcp (roster parity with delegate tasks)", () => {
+	const yaml = ["review:", "  - { agent: operator, tools: [read, grep], isolation: worktree, mcp: true }"].join("\n");
+	const t = parseTeams(yaml);
+	assert.equal(t.review?.length, 1);
+	assert.deepEqual(rosterSpec(t.review![0]!), { agent: "operator", tools: ["read", "grep"], isolation: "worktree", mcp: true });
+});
+
+test("rosterSpec regression-pins the no-new-fields path: absent tools/isolation/mcp ⇒ identical to today's output (no stray keys)", () => {
+	assert.deepEqual(rosterSpec("scout"), { agent: "scout" });
+	const spec = rosterSpec({ agent: "reviewer", role: "sec lens" });
+	assert.deepEqual(spec, { agent: "reviewer", role: "sec lens" });
+	assert.deepEqual(Object.keys(spec).sort(), ["agent", "role"], "no tools/isolation/mcp key present when unset");
+});
