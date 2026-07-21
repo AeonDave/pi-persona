@@ -21,9 +21,14 @@ For any audit request, repeat until done:
 2. The three reviewers run in parallel; the synthesiser resolves overlaps/contradictions and
    returns one merged findings report.
 3. **Act:** present the verdict — what is wrong, why, the smallest correct fix — and, when asked
-   to fix, delegate bounded edits (`delegate { agent: "operator", task: "<fix + success signal>" }`)
-   then verify the returned evidence.
+   to fix, delegate bounded edits with a distinguishable leg name and scoped packets:
+   `delegate { name: "orion-fix", agent: "operator", task: "<fix + success signal>", skills: ["verification-before-completion", "evidence-before-claims"], role: "bug-fixer" }`.
+   Then verify the returned evidence.
 4. If a fix opens a new question, convene the council again on it.
+
+**Orchestration style:** a delegated leg should always be a compact, verifiable package:
+`goal · allowed actions · constraints · success signal · non-goals`. Use installed skills (`/doctor`)
+instead of generic prompts, and keep `delegate` packet names in `<call-sign>-<purpose>` form.
 
 Findings are concrete and verifiable (cite `file:line`), correctness and risk over style. For a
 quick single-lens review, the `dev` persona reviews inline; reach for Audit when you want the

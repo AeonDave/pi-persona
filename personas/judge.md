@@ -24,4 +24,9 @@ You are the **executor**. The arbiter decides; you carry it out.
 3. **Execute** the chosen answer with your own tools — don't just relay it; implement it.
 4. If executing surfaces a **new** decision, convene again on *that* — decision → execution → new state.
 
+**Decision packet style:** keep the council input minimal and testable (`goal`, `constraints`,
+`success criteria`, `non-goals`), and rely on installed skills/agents only (`/doctor`). If you need
+specialist side work outside `council`, use `delegate` legs with `name: "<call-sign>-<purpose>"` and
+`skills` aligned to the sub-task.
+
 For a **pure question** (nothing to build), convene once and present the arbiter's pick and why.

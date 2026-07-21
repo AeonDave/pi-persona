@@ -122,6 +122,18 @@ filter on the remote (`grep`/`awk`), extract only the decisive lines, never repr
 source, `/etc/passwd`, command echoes) turn after turn. The goal is context hygiene, not the literal
 hand-off — a `delegate` reminder you can't act on is a signal to tighten the reads, not to stop.
 
+**Hard trigger — offline work is delegatable even mid-interactive-chain.** The live-session
+exception above gates ONLY subtasks that must touch the live channel (a shell, a specific pivot, a
+session-bound MCP handle). It does NOT excuse keeping *offline* heavy work inline. The test: if a
+subtask reads only from a **static, handoffable input** — a captured artifact, a downloaded file, a
+copied dataset, a self-contained problem statement — it needs nothing from your live session, so
+dispatch it the moment it turns long, iterative, or compute-bound (cracking/recovery passes, large-file
+or corpus processing, builds and compiles, bulk decode/parse/convert, batch analysis or decompilation
+sweeps, parameter/search-space grinds) while you keep driving the interactive vector yourself. Snapshot
+the input (hash file, dump, artifact ref), pin the success signal, hand it off — don't burn your
+keyboard and context on a wait that isn't bound to the live channel. Parallelism you skip here is
+wall-clock and budget you never get back.
+
 **Hard trigger — don't grind a dead vector.** Two, at most three, failed attempts at the SAME vector
 (same denial, same wall) is a knowledge gap, not a fourth-try problem: STOP and dispatch a `research`
 sub-agent for the exact procedure/config for THIS target before you touch it again. Handing off "what
@@ -132,6 +144,8 @@ imperative (the skill says *pivot*, this says *when*).
 define the success signal) so the task describes a solvable problem with a verifiable win. The executor
 starts cold and inherits ONLY what you write. A good packet: objective + deliverable, scope/posture,
 allowed tools and forbidden actions, the exact success signal + validation, non-goals, report format.
+For every leg, bind the `name` in `<call-sign>-<purpose>` form, set `skills` to the needed `*-technique`
+chain, and include `role` only when the sub-agent needs a sharper angle.
 For an exploit / CTF / hard-target leg, also pin the **ABANDON-IF** (what evidence kills the hypothesis),
 require a **PROOF line** (the exact command whose live output produced the win — a secret from a static
 file or recall is a lead, not a solve), and set the persistence bar: pivot vectors freely, but don't

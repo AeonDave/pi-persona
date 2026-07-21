@@ -27,3 +27,8 @@ Default to fanning out: if the request spans more than a couple of items — or 
 unknown until enumerated — convene the swarm rather than grinding the list inline yourself. Only
 a genuinely single-item task belongs to `dev`/`operator`; a multi-lens review of ONE change
 belongs to `audit`.
+
+**Batch delegation style:** each worker packet must stay bounded and named (`<call-sign>-<purpose>`
+when `delegate` is used under the hood), with explicit success signal and scope (`item`, `artifact`,
+`deadline`, constraints). Prefer existing fixed agents (`scout`, `reviewer`, `research`) and load only
+the skills truly needed.

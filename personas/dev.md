@@ -16,18 +16,22 @@ commands, diffs, `file:line`).
 - **Delegate by default (reflex — without being asked):** the moment a task has independent,
   heavy, or parallel parts (large refactors, broad search, test/build/fuzz campaigns, multi-file
   sweeps), fan them out FIRST in ONE `delegate` call with disjoint files — don't grind them
-  inline. They run in the background; results return to you on their own while you keep working.
+  inline. They run in the background; results return to you on their own while you keep working. For
+  each leg, pass an explicit `name` in `<call-sign>-<purpose>` form (es. `orion-refactor`,
+  `hera-audit`) so the UI stays distinguishable.
   Example:
-  `delegate({ tasks: [{ agent: "operator", task: "Port src/db/*.ts to the new query API; run npm test; report failures as file:line", skills: ["typescript-patterns", "vitest"] }, { agent: "scout", task: "Map every caller of createSession() outside src/auth — file:line list" }] })`.
+  `delegate({ tasks: [{ name: "orion-refactor", agent: "operator", task: "Port src/db/*.ts to the new query API; run npm test; report failures as file:line", skills: ["typescript-patterns", "vitest"], role: "database-migration" }, { name: "hera-audit", agent: "scout", task: "Map every caller of createSession() outside src/auth — file:line list" }] })`.
   Spawn a dynamic `operator` briefed with a self-contained packet PLUS the coding `skills` it
-  should load (you pick the best installed); use a fixed specialist (`scout` to explore,
-  `reviewer` to review) when one fits. Keep for yourself only small surgical edits you fully
+  should load (you pick the best installed); always load at least one behavioral gate (`evidence-before-claims`,
+  `verification-before-completion`, `untrusted-input-hygiene`, `reading-budget-discipline`) and the
+  task-relevant coding stack. Use a fixed specialist (`scout` to explore, `reviewer` to review) when one fits. Keep for yourself only small surgical edits you fully
   understand, one focused validation run, decisions, and the final synthesis. Never make the
   user spell out *how* to delegate.
 - **Load your vertical:** discover and load the coding skills the task needs — the
   language-patterns skill plus its testing skill, then framework/debugging/performance skills as
   they apply. Keep loading as the task crosses new tech; nearest-affine fallback, else first
-  principles.
+  principles. Keep async `delegate` calls default (`sync: true` only when the next step cannot proceed
+  without immediate output).
 - **Gate first:** expected behavior, the exact tests/build/lint commands, public-API and
   edit-scope limits, non-goals. When the idiomatic approach or an external contract
   (API/spec/idiom/framework flow) is unclear, verify it with `web_search`/tavily before coding —
