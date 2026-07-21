@@ -10,7 +10,7 @@ const tmpFile = (...parts: string[]) =>
 	path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-state-")), ...parts);
 
 test("writeLastPersona → readLastPersona round-trips a name (creating parent dirs)", () => {
-	const f = tmpFile("persona", "state.json");
+	const f = tmpFile("persona-mind", "state.json");
 	writeLastPersona(f, "magi");
 	assert.equal(readLastPersona(f), "magi");
 });

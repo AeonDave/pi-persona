@@ -124,11 +124,11 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (opt-in cross-process relay: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
 - `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
-- Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent` < project `.pi/`):
+- Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona-mind` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
   persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),
   `teams.yaml`, `flows/*.flow.json`, `contracts/*.contract.json`, `presets/*.preset.json`.
-- Personas/agents load ONLY from the user dir (`~/.pi/agent/agents`) and project `.pi/agents` —
+- Personas/agents load ONLY from the user dir (`~/.pi/agent/persona-mind/agents`) and project `.pi/agents` —
   the bundled `personas/`+`agents/` are a **seed source, not a live discovery layer**, so a fresh
   install shows NO personas until the user installs them. `/persona seed` copies missing defaults
   in, `/persona restore` force-restores originals (`src/core/seed.ts`). First-run auto-install is

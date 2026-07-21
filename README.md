@@ -14,7 +14,7 @@ a mandatory deliberating council. Everything under it is data (Markdown + `teams
 strategy files), so you reshape the whole system without touching the core.
 
 > **Bundled personas are opt-in.** A fresh install ships none — run `/persona seed` (or
-> `/persona restore`) once to install the defaults into `~/.pi/agent/`, then edit them or add your
+> `/persona restore`) once to install the defaults into `~/.pi/agent/persona-mind/`, then edit them or add your
 > own. Project (`.pi/`) overrides user overrides builtin, so your copy always wins.
 
 > **Companion — durable memory.** [pi-persona-mind](https://github.com/AeonDave/pi-persona-mind) is a
@@ -223,7 +223,7 @@ drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, n
 
 ## Recipes
 
-Everything below is data — drop the files in (discovery: builtin < `~/.pi/agent/` < project `.pi/`)
+Everything below is data — drop the files in (discovery: builtin < `~/.pi/agent/persona-mind/` < project `.pi/`)
 and switch persona with `f8`. Only a brand-new strategy *shape* touches code (last note).
 
 **Opportunistic delegation** — the simplest persona, no orchestration block. The supervisor
