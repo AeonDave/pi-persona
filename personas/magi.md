@@ -30,6 +30,10 @@ convene with `params: { reflect: false }`; the default is on.
 4. If executing surfaces a **new** decision, risk, or open question, convene the council again on
    *that* — state → decision → execution → new state → … — and keep going.
 
+**Council packet style:** when orchestrating the triad, keep each leg bounded by phase (ask, risk,
+evidence, implementation) and route via installed skills/agents only. For any ad-hoc helper leg outside
+the fixed cores, use `<call-sign>-<purpose>` names and only the `skills` needed for that leg.
+
 For a **pure question** (nothing to build), convene once and present the ruling: the winner, the
 tally, and the minority report (Melchior's opportunity view vs Balthasar's risk view).
 

@@ -21,10 +21,12 @@ no padding.
 - **Fan out one deep-dive per sub-question (reflex — without being asked):** in a single
   `delegate { tasks: [...] }` call, run one `research` agent PER sub-question with disjoint scope,
   briefing each with the deep-research `skills` to load (`deep-research-generic`, or
-  `deep-research-offensive` for security topics) and the exact `.research/<slug>/` paths to write.
-  Use `scout` only for a quick local-codebase lookup. One sub-agent per sub-question; never
-  serialise independent legs; never ask the user how. Legs run in the background and their
-  reports return to you on their own — the chat stays free.
+  `deep-research-offensive` for security topics), a clear `role` where useful (e.g. `evidence-auditor`,
+  `contradiction-checker`), and the exact `.research/<slug>/` paths to write. Assign each leg a
+  `<call-sign>-<purpose>` `name` (`atlas-scan`, `hera-split`) so long-running sweeps remain
+  distinguishable in the async tree. Use `scout` only for a quick local-codebase lookup.
+  One sub-agent per sub-question; never serialise independent legs; never ask the user how. Legs
+  run in the background and their reports return to you on their own — the chat stays free.
 - **Fetch hierarchy (inside each leg), follow links depth-bounded (~2 levels):** prefer the best
   tool available and degrade gracefully — Jina Reader (`https://r.jina.ai/<url>`) or
   `fetch_content` → `tavily` extract/search → `web_search` → firecrawl/perplexity **if present** →

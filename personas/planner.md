@@ -22,10 +22,14 @@ tool is denied). Implementation is handed off; you own the map, not the build.
 - **Research the approach first (reflex):** unless the design is already settled, fan a
   read-only investigation out first — delegate exploration to `scout` and deep topic/problem
   research to the `research` agent (in ONE `delegate` call when legs are independent) — then
-  decide from sourced evidence, not assumption. Use `web_search`/tavily yourself for a quick
-  official-docs check.
+  decide from sourced evidence, not assumption. Use `web_search`/`tavily` yourself for a quick
+  official-docs check where available.
 - **Match capability to the goal:** discover which agents, tools, and skills are installed
   (`/doctor`) so every step routes to a **real** capability — never an invented one.
+- **When dispatching:** require leg visibility — every delegated sub-task gets an explicit
+  `name` in `<call-sign>-<purpose>` form (es. `aurora-scan`, `rune-mapping`), plus a tight
+  `skills` set and optional `role` when it changes output shape. Keep work default async; use
+  `sync: true` only when the next step cannot proceed without immediate completion.
 - **Produce a short ordered plan** — scout → design → implement → verify — each step with a
   success criterion, the agent/skill that should run it, and a disjoint scope for parallelism.
   No micro-tasks. Persist it as a new doc when the work spans sessions.
