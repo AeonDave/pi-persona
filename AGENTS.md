@@ -107,6 +107,15 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a git repo; without
   one the wrapper silently degrades to unisolated runs) and returns the winning diff for the
   SUPERVISOR to apply.
+- **exocom** (`src/exocom/*`, `src/tools/exocom.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`, gated
+  by `canUseBus`): a plane apart from everything above — those are all INTERNAL to one supervisor's
+  own run (hierarchical, session-keyed children); exocom is FLAT and EXTERNAL, between independent
+  top-level pi instances sharing a workspace, discovered via a workspace-scoped file registry, no
+  parent/child relationship. `exocom_list`/`exocom_send` are one-way and non-blocking (a reply is a
+  send with `in_reply_to` set). Reuses the broker's wire framing (`bus/broker/framing.ts`) and the
+  core fence (`fenceUntrusted`/`attributeInbound`) — no new trust-sensitive code path; inbound
+  attribution is resolved from the registry, never the envelope's self-reported `from_name`.
+  Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#exocom--the-external-plane).
 
 ## Testing
 

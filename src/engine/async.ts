@@ -20,6 +20,13 @@ export interface AsyncRun {
 	progress: ProgressSnapshot;
 	result?: AgentResult;
 	error?: string;
+	/** The codename the launcher gave this run (e.g. "atlas-static") — the SAME name shown on the
+	 *  agent-tree node for this run. When set, it's the canonical display name (over the bare
+	 *  `agent` type); absent for call sites that don't carry one (falls back to `agent`). */
+	label?: string;
+	/** The already-shortened model (e.g. "sonnet") this run was launched with — kept pre-shortened
+	 *  so this module needs no import from delegate.ts just to render it. */
+	model?: string;
 	/** Clock (ms) of the last time `progress` actually *advanced* (output grew, or turns/tokens
 	 *  rose) — NOT merely the last event. A worker looping without headway keeps emitting but
 	 *  never bumps this, so `now - lastAdvanceAt` is what tells "working" from "stuck". */
@@ -37,15 +44,18 @@ export class AsyncRunTracker {
 	private readonly runs = new Map<string, AsyncRun>();
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
 	private seq = 0;
-	private readonly maxRetained = 25;
+	private readonly maxRetained: number;
 	private readonly now: () => number;
 
-	/** `now` is injected so the stall clock is deterministic under test (real time by default). */
-	constructor(opts?: { now?: () => number }) {
+	/** `now` is injected so the stall clock is deterministic under test (real time by default).
+	 *  `maxRetained` (default 25 — today's hardcoded bound) is the config-driven PI_PERSONA_ASYNC_RETAIN
+	 *  knob's landing spot: how many settled-but-uncollected runs survive before FIFO-eviction. */
+	constructor(opts?: { now?: () => number; maxRetained?: number }) {
 		this.now = opts?.now ?? ((): number => Date.now());
+		this.maxRetained = opts?.maxRetained ?? 25;
 	}
 
-	launch(meta: { agent: string; task: string }, run: RunThunk): string {
+	launch(meta: { agent: string; task: string; label?: string; model?: string }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
 		const entry: AsyncRun = {
@@ -56,6 +66,8 @@ export class AsyncRunTracker {
 			progress: { output: "", turns: 0, tokens: 0 },
 			lastAdvanceAt: this.now(),
 		};
+		if (meta.label !== undefined) entry.label = meta.label;
+		if (meta.model !== undefined) entry.model = meta.model;
 		this.runs.set(id, entry);
 
 		const settle = (): void => this.settleOnce(entry);
@@ -195,15 +207,29 @@ export function dedupeRunsById(runs: AsyncRun[]): AsyncRun[] {
 	return [...byId.values()];
 }
 
+/** Compact token count for the status digests — 164005 → "164k", 1_234_567 → "1.2M". Exported so
+ *  every OTHER raw token render (the agent-tree details in extension.ts) goes through the same
+ *  compaction instead of drifting into its own raw `${n} tok` string. */
+export function compactTokens(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+	if (n >= 1_000) return `${Math.round(n / 1000)}k`;
+	return String(n);
+}
+
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
 	const now = opts?.now;
 	const stallMs = opts?.stallMs;
 	const lines = runs.map((r) => {
-		const head = `[${r.id}] ${r.agent} — ${r.status}`;
+		// Canonical display name: the codename the launcher gave it (the SAME name the agent-tree
+		// node shows) + its short model, e.g. "atlas-static · sonnet" — never the bare agent TYPE,
+		// which reads as a different sub-agent than the one the tree shows. Falls back to `agent`
+		// for call sites that never carried a label (keeps this back-compat).
+		const name = r.model ? `${r.label ?? r.agent} · ${r.model}` : (r.label ?? r.agent);
+		const head = `[${r.id}] ${name} — ${r.status}`;
 		if (r.status === "running") {
-			let line = `${head} (${r.progress.turns} turns, ${r.progress.tokens} tok)`;
+			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
 			if (now !== undefined && stallMs !== undefined && stallMs > 0 && r.lastAdvanceAt !== undefined) {
 				const stalledFor = now - r.lastAdvanceAt;
 				if (stalledFor >= stallMs) line += ` ⚠ possibly stuck (no progress for ${Math.round(stalledFor / 1000)}s)`;
@@ -263,7 +289,7 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
 	if (stuck.length === 0) return "";
 	const lines = stuck.map((r) => {
 		const secs = Math.round((opts.now - (r.lastAdvanceAt ?? opts.now)) / 1000);
-		return `⚠ ${r.id} (${r.agent}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${r.progress.tokens} tok)`;
+		return `⚠ ${r.id} (${r.agent}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
 	});
 	return [
 		`${stuck.length} background ${stuck.length === 1 ? "leg" : "legs"} may be stalled:`,
@@ -307,15 +333,29 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed`;
 	const blocks: string[] = [head];
 	for (const r of done) {
-		blocks.push(`\n✅ ${r.id} (${r.agent}) done:\n${fence(r.result?.output ?? "(no output)")}`);
+		// Only fence REAL output — an empty/whitespace result gets a plain "(no output)", never an
+		// empty <fence></fence> shell (there's nothing untrusted to guard, and the empty block reads
+		// as clutter).
+		const body = r.result?.output?.trim() ? fence(r.result.output) : "(no output)";
+		blocks.push(`\n✅ ${r.id} (${r.agent}) done:\n${body}`);
 	}
 	if (failed.length > 0) {
 		const reasons = failed.map((r) => `• ${r.id} (${r.agent}): ${r.error ?? "(no detail)"}`).join("\n");
 		blocks.push(
 			`\n❌ ${failed.length} failed:\n${fence(reasons)}\n\n` +
 				"Handle each failure deliberately: retry ONCE with a different model or approach, or report it to the user. " +
+				"If a failed/aborted leg left partial output below, salvage what's usable instead of re-running from scratch. " +
 				"Do not re-issue the same failing delegation repeatedly.",
 		);
+		// Salvage: a failed or hard-stopped leg's partial output (its last progress snapshot) is NOT
+		// lost — surface it fenced so real work (e.g. an aborted research leg's findings after 600k
+		// tokens) can be reused rather than thrown away. Only when there's actually something to show.
+		for (const r of failed) {
+			if (r.progress.output.trim()) {
+				const how = r.error?.toLowerCase().includes("abort") ? "was aborted" : "failed";
+				blocks.push(`\n↩ ${r.id} (${r.agent}) partial output before it ${how}:\n${fence(r.progress.output)}`);
+			}
+		}
 	}
 	return blocks.join("\n");
 }
@@ -360,6 +400,14 @@ export interface IdleNotifierDeps<T> {
 	debounceMs?: number;
 	/** Re-poll cadence while the supervisor is busy (default 400ms). */
 	retryMs?: number;
+	/** Floor (ms) between successive deliveries — a flush due sooner re-arms for the remainder instead
+	 *  of delivering, WITHOUT dropping what's buffered. Unset ⇒ no floor. */
+	minIntervalMs?: number;
+	/** Once this many deliveries have gone out, further flushes drop the buffer (silently) until
+	 *  {@link IdleCoalescingNotifier.resetDeliveries} is called. Unset ⇒ no ceiling. */
+	maxDeliveries?: number;
+	/** Clock hook, injected for deterministic tests (defaults to `Date.now`). */
+	now?: () => number;
 }
 
 /**
@@ -376,11 +424,19 @@ export class IdleCoalescingNotifier<T> {
 	private handle: unknown;
 	private readonly debounceMs: number;
 	private readonly retryMs: number;
+	private readonly minIntervalMs: number | undefined;
+	private readonly maxDeliveries: number | undefined;
+	private readonly now: () => number;
+	private lastDeliveredAt = 0;
+	private deliveries = 0;
 
 	constructor(deps: IdleNotifierDeps<T>) {
 		this.deps = deps;
 		this.debounceMs = deps.debounceMs ?? 150;
 		this.retryMs = deps.retryMs ?? 400;
+		this.minIntervalMs = deps.minIntervalMs;
+		this.maxDeliveries = deps.maxDeliveries;
+		this.now = deps.now ?? Date.now;
 	}
 
 	/** Buffer an item and arm a coalesced flush. */
@@ -415,6 +471,11 @@ export class IdleCoalescingNotifier<T> {
 		}
 	}
 
+	/** Clear the `maxDeliveries` ceiling, letting the notifier deliver again. */
+	resetDeliveries(): void {
+		this.deliveries = 0;
+	}
+
 	private arm(ms: number): void {
 		if (this.handle !== undefined) return; // a flush is already pending; the new item rides it
 		this.handle = this.deps.setTimer(() => {
@@ -432,11 +493,29 @@ export class IdleCoalescingNotifier<T> {
 			this.arm(this.retryMs);
 			return;
 		}
+		// Ceiling: once hit, silently drop what's buffered rather than deliver — the caller re-opens
+		// the gate via resetDeliveries() when it's ready for more.
+		if (this.maxDeliveries !== undefined && this.deliveries >= this.maxDeliveries) {
+			this.pending.length = 0;
+			return;
+		}
+		// Floor: a flush due sooner than minIntervalMs since the last delivery re-arms for the
+		// remainder instead of delivering early — the buffer is left intact (nothing is lost). The
+		// very first delivery (deliveries === 0) has no "last delivery" to be too close to.
+		if (this.minIntervalMs !== undefined && this.deliveries > 0) {
+			const elapsed = this.now() - this.lastDeliveredAt;
+			if (elapsed < this.minIntervalMs) {
+				this.arm(this.minIntervalMs - elapsed);
+				return;
+			}
+		}
 		const batch = this.pending.splice(0, this.pending.length);
 		const message = this.deps.render(batch);
 		if (!message) return; // render suppressed this batch (e.g. all failures) — nothing to deliver
 		try {
 			this.deps.deliver(message);
+			this.lastDeliveredAt = this.now();
+			this.deliveries += 1;
 		} catch {
 			this.pending.unshift(...batch); // raced a just-started turn — retry when idle
 			this.arm(this.retryMs);

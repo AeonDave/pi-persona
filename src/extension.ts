@@ -26,26 +26,33 @@ import { resolveModelRef } from "./core/models.ts";
 import { isThinkingLevel } from "./core/types.ts";
 import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import { seedDefaults, type SeedResult } from "./core/seed.ts";
-import { buildDelegationBrief } from "./core/brief.ts";
+import { buildDelegationBrief, buildExocomBrief } from "./core/brief.ts";
 import { canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
-import { fenceUntrusted } from "./core/fence.ts";
+import { attributePeer, fenceUntrusted } from "./core/fence.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { withModelFallback } from "./engine/fallback.ts";
 import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildPeekAlert, buildPeekDigest, dedupeRunsById, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildPeekAlert, buildPeekDigest, compactTokens, dedupeRunsById, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
+import { buildInboundDelivery } from "./exocom/inbound.ts";
+import { SeenMessages, SenderBudget } from "./exocom/guards.ts";
+import { EXOCOM } from "./exocom/limits.ts";
+import { endpoint as exocomEndpointFor, workspaceHash } from "./exocom/paths.ts";
+import { ExocomPlane } from "./exocom/plane.ts";
+import { prune as pruneExocom, type RegistryEntry, writeEntry as writeExocomEntry } from "./exocom/registry.ts";
+import { registerExocomTools } from "./tools/exocom.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
 import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
 import { journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
 import { Semaphore } from "./orchestration/parallel.ts";
 import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
-import type { AgentProgress, AgentRunSpec, AgentStatus, SteerFn, StrategyEngine } from "./orchestration/sdk.ts";
+import { type AgentProgress, type AgentRunSpec, type AgentStatus, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
 import type { AgentResult } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
@@ -59,7 +66,7 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import { DelegationLedger, type DelegateView, labelFor, runDelegate, shortModel, unknownAgentError, wantsAsyncRun } from "./tools/delegate.ts";
+import { CODENAMES, DelegationLedger, type DelegateView, nameFor, runDelegate, shortModel, specOf, unknownAgentError, wantsAsyncRun } from "./tools/delegate.ts";
 import { formatInbox, type IntercomParams, runIntercom } from "./tools/intercom.ts";
 import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
@@ -115,6 +122,17 @@ export function listPeersForGroup(brokerPeers: ReadonlyMap<string, { label: stri
 		.map(([handle, p]) => ({ handle, label: p.label }));
 }
 
+/** exocom attribution-label sanitizer (I2): the resolved label is PEER-CONTROLLED registry data
+ *  (`fromEntry.name`/`persona` — a peer writes its own registry entry) and `attributePeer`
+ *  places it OUTSIDE the fence by design (the label is normally supervisor-generated and
+ *  trusted; see core/fence.ts) — so a CR/LF-laden name could otherwise inject pseudo-instructions
+ *  into the supervisor's context, outside the "treat as data" fence. Collapse any run of
+ *  CR/LF/tab to a single space and clamp to a sane display length before the label ever reaches
+ *  `attributePeer`. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
+export function sanitizeLabel(s: string): string {
+	return s.replace(/[\r\n\t]+/g, " ").slice(0, 80);
+}
+
 export default function piPersona(pi: ExtensionAPI): void {
 	// Cross-process broker (v0.5, spec B3): a child spawned with `PI_PERSONA_BUS` set is a
 	// broker-connected sub-agent, not a supervisor — load ONLY the bridge (comm-plane tools +
@@ -130,6 +148,21 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	const config = resolveConfig(process.env);
 	if (config.disabled) return;
+
+	// exocom (opt-in, T9): `--exocom` is a per-invocation convenience alongside PI_PERSONA_EXOCOM
+	// (config.exocom) — the flag declaration is inert unless either is on (see startExocom below).
+	pi.registerFlag("exocom", {
+		description: "Join the exocom peer-to-peer plane for this run (external agent-to-agent collaboration between independent pi instances in this workspace)",
+		type: "boolean",
+		default: false,
+	});
+	// `--persona <name>` — start with a persona active for this run, the CLI equivalent of
+	// PI_PERSONA_DEFAULT (which it overrides). e.g. `pi --persona elite`.
+	pi.registerFlag("persona", {
+		description: "Start with this persona active for the run (e.g. `--persona elite`) — overrides PI_PERSONA_DEFAULT and the remembered persona.",
+		type: "string",
+		default: "",
+	});
 
 	let lastCtx: ExtensionContext | undefined;
 	let disposed = false; // set on session_shutdown; gates late async-run callbacks of a torn-down instance
@@ -427,7 +460,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 		onFire: (entry) => timerNotifier.notify(entry),
 	});
-	const tracker = new AsyncRunTracker();
+	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
 	// Turns the periodic peek from a poll into an exception signal: it surfaces a leg only when it
 	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
 	const peekWatcher = new PeekWatcher();
@@ -592,6 +625,281 @@ export default function piPersona(pi: ExtensionAPI): void {
 				brokerHost?.steer(handle, text);
 			},
 		};
+	}
+
+	// ── exocom (opt-in, T9): the EXTERNAL peer-to-peer plane ─────────────────────
+	// Independent top-level pi instances in this workspace discover + message each other
+	// directly (flat) — distinct from the broker/intercom plane above, which is strictly
+	// hierarchical (a supervisor and its OWN spawned children). Off by default (config.exocom /
+	// --exocom), additionally gated by the active persona's canUseBus capability; no active
+	// persona ⇒ unrestricted (mirrors delegationBrief's own reading of an absent capability set,
+	// rather than silently refusing to join for an unpersona'd session — see startExocom below).
+	let exocomPlane: ExocomPlane | undefined;
+	let exocomName = "";
+	let exocomBudget: SenderBudget | undefined;
+	let exocomSeen: SeenMessages | undefined;
+	let exocomNotifier: IdleCoalescingNotifier<string> | undefined;
+	let exocomHeartbeat: ReturnType<typeof setInterval> | undefined;
+	let exocomResetTimer: ReturnType<typeof setInterval> | undefined;
+
+	// A tiny, stable name→color hash for the pool widget's swatch — exocom peers carry no
+	// persona "label colour" of their own to read, so this derives one deterministically
+	// instead of hardcoding one default for every peer.
+	const EXOCOM_PALETTE = ["#36F9F6", "#FF6B6B", "#FFD93D", "#6BCB77", "#4D96FF", "#C780FA", "#FF9F1C", "#00C2A8"];
+	function exocomColorFor(name: string): string {
+		let h = 0;
+		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+		return EXOCOM_PALETTE[h % EXOCOM_PALETTE.length]!;
+	}
+	// A distinctive per-instance call-sign (orion/vega/…) drawn from the delegate CODENAMES pool,
+	// derived by hashing the session_id so it's stable for the session (never re-randomises on a
+	// plane restart) yet spreads across the pool. Independent of the active persona — the persona
+	// is displayed alongside it, not baked into the name.
+	function exocomCodename(sessionId: string, taken: Set<string>): string {
+		// A deterministic starting point from the session, then the first call-sign NOT already held
+		// by a live peer — so N concurrent instances get N DISTINCT names (`hash % 16` alone collides
+		// ~18% of the time at just 3 instances). Only a >16-live run, or a rare simultaneous-start
+		// race (both read the registry before either registered), falls back to the hashed one and
+		// the display dedup ("orion#2").
+		let h = 0;
+		for (let i = 0; i < sessionId.length; i++) h = (h * 31 + sessionId.charCodeAt(i)) >>> 0;
+		const start = h % CODENAMES.length;
+		for (let i = 0; i < CODENAMES.length; i++) {
+			const name = CODENAMES[(start + i) % CODENAMES.length]!;
+			if (!taken.has(name)) return name;
+		}
+		return CODENAMES[start]!;
+	}
+
+	// One row per live peer (the registry read itself IS the pool — each peer refreshes its
+	// own entry on its own heartbeat, so no ping fan-out is needed here). Best-effort/cosmetic,
+	// mirrors renderAgentWidget above.
+	function renderExocomWidget(): void {
+		if (!lastCtx || !exocomPlane) return;
+		const peers = exocomPlane.listPeers();
+		try {
+			const now = Date.now();
+			const lines =
+				peers.length === 0
+					? undefined
+					: peers.map((p) => {
+							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
+							// Viewer-centric: THIS row's in/out is what WE exchanged with THIS peer, not
+							// the peer's own global self-report (which reads inverted from our side).
+							return `${quiet ? "💤" : "📡"} ${p.displayName}${p.persona ? ` (${p.persona})` : ""} · ${shortModel(p.model) || "?"} · ctx ${p.context_pct}% · ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} in · ${exocomPlane?.sentToPeer(p.session_id) ?? 0} out`;
+						});
+			lastCtx.ui.setWidget("persona-exocom", lines, { placement: "aboveEditor" });
+		} catch {
+			/* cosmetic — the widget is best-effort */
+		}
+		try {
+			lastCtx.ui.setStatus(
+				"persona-exocom",
+				`📡 ${exocomName} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
+			);
+		} catch {
+			/* cosmetic */
+		}
+	}
+
+	// Re-`writeEntry` with the CURRENT persona/model/context% (so a `/persona` switch or a model
+	// change is reflected, not a stale snapshot from session_start) and prune dead peers — one
+	// unref'd tick covers both heartbeat AND pool refresh.
+	function exocomHeartbeatTick(agentDir: string, hash: string, sessionId: string, ep: string, cwd: string): void {
+		if (!exocomPlane) return;
+		const entry: RegistryEntry = {
+			session_id: sessionId,
+			name: exocomName,
+			persona: controller.activePersona?.name ?? "",
+			purpose: controller.activePersona?.description ?? "",
+			color: exocomColorFor(exocomName),
+			model: lastCtx?.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "",
+			pid: process.pid,
+			endpoint: ep,
+			cwd,
+			context_pct: Math.round(lastCtx?.getContextUsage()?.percent ?? 0),
+			inbox: exocomNotifier?.peekPending().length ?? 0,
+			heartbeat_at: new Date().toISOString(),
+		};
+		writeExocomEntry(agentDir, hash, entry);
+		pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
+		renderExocomWidget();
+	}
+
+	// Join the plane for this session — called from session_start ONCE the persona is applied,
+	// so identity + the canUseBus gate reflect the persona actually active. Never throws: a
+	// bind/registry failure degrades to "exocom inactive", it must never block a normal session
+	// from starting (mirrors the broker host's own fire-and-forget-on-failure discipline).
+	async function startExocom(ctx: ExtensionContext): Promise<void> {
+		if (!(config.exocom || pi.getFlag("exocom") === true)) return;
+		if (!(controller.capabilities?.canUseBus ?? true)) return;
+		try {
+			const hash = workspaceHash(ctx.cwd);
+			const sessionId = ctx.sessionManager.getSessionId();
+			const agentDir = userAgentDir();
+			// Default instance name: a distinctive CALL-SIGN (orion/vega/…, the same pool a delegated
+			// sub-agent draws from), INDEPENDENT of the persona (shown separately) — picked collision-
+			// free against the LIVE peers so N instances get N distinct names. It is only a DEFAULT:
+			// the model can rebrand itself creatively via the `exocom_name` tool. The registry FILE is
+			// keyed by session_id, not by name, so the name is purely a display label.
+			const liveAtStart = pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
+			const desired = exocomCodename(sessionId, new Set(liveAtStart.map((e) => e.name)));
+			exocomName = desired;
+			const ep = exocomEndpointFor(agentDir, hash, sessionId, process.platform);
+			exocomBudget = new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES });
+			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
+			// Fenced, attributed follow-up delivery — idle-gated + rate-limited (R6), the same
+			// discipline completionNotifier/intercomNotifier/timerNotifier apply above, but through
+			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
+			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
+			exocomNotifier = new IdleCoalescingNotifier<string>({
+				isIdle: () => lastCtx?.isIdle?.() === true,
+				hasPending: () => lastCtx?.hasPendingMessages?.() === true,
+				deliver: (message) =>
+					pi.sendMessage({ customType: "exocom", content: message, display: true }, { deliverAs: "followUp", triggerTurn: true }),
+				render: (items) => items.join("\n\n"),
+				setTimer: (fn, ms) => {
+					const h = setTimeout(fn, ms);
+					h.unref?.();
+					return h;
+				},
+				clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+				minIntervalMs: EXOCOM.DELIVER_MIN_INTERVAL_MS,
+				maxDeliveries: EXOCOM.DELIVER_MAX_PER_MIN,
+			});
+			exocomPlane = new ExocomPlane({
+				agentDir,
+				hash,
+				identity: {
+					session_id: sessionId,
+					name: exocomName,
+					persona: controller.activePersona?.name ?? "",
+					purpose: controller.activePersona?.description ?? "",
+					color: exocomColorFor(exocomName),
+					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
+					endpoint: ep,
+					cwd: ctx.cwd,
+				},
+				getCard: () => ({
+					name: exocomName,
+					persona: controller.activePersona?.name ?? "",
+					model: lastCtx?.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "",
+					context_pct: Math.round(lastCtx?.getContextUsage()?.percent ?? 0),
+					inbox: exocomNotifier?.peekPending().length ?? 0,
+				}),
+				onInbound: (msg, fromEntry) => {
+					// Attribution from the REGISTRY entry keyed by the connecting session — never from
+					// msg.from_name (the envelope's own self-report, not to be trusted; see inbound.ts).
+					// Sanitized (I2): fromEntry.name/persona are PEER-WRITTEN registry fields, and
+					// attributePeer places this label OUTSIDE the fence — a CR/LF-laden name must
+					// not be able to inject pseudo-instructions there.
+					const label = sanitizeLabel(fromEntry ? `${fromEntry.name}${fromEntry.persona ? ` (${fromEntry.persona})` : ""}` : msg.from_session);
+					const decision = buildInboundDelivery(msg, label, {
+						budget: exocomBudget!,
+						seen: exocomSeen!,
+						injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
+						// attributePeer already fences internally (peer wording — a peer is NOT a
+						// sub-agent, see core/fence.ts), so `fence` here is a pass-through:
+						// attribute(label, fence(text)) still ends up exactly
+						// `[exocom message from label]\n${fencePeer(text)}`, fenced exactly once.
+						fence: (t) => t,
+						attribute: attributePeer,
+					});
+					if ("deliver" in decision) {
+						// A reply hint in OUR trusted text, OUTSIDE the fenced peer body above — nudges
+						// the supervisor toward exocom_send instead of leaving a reply undiscoverable.
+						// Both interpolated values are peer-controlled (fromEntry.name/persona, msg.msg_id)
+						// and MUST go through sanitizeLabel before reaching this trusted text (same I2
+						// concern as the attribution label above).
+						const replyTarget = sanitizeLabel(fromEntry?.name ?? msg.from_session);
+						const replyId = sanitizeLabel(msg.msg_id);
+						const hint = `\n(reply if it helps: exocom_send({ target: "${replyTarget}", message: "…", in_reply_to: "${replyId}" }).)`;
+						exocomNotifier?.notify(decision.deliver + hint);
+					}
+					renderExocomWidget(); // reflect the new "in" count / a fresh pool on any inbound
+				},
+				onPoolChange: () => renderExocomWidget(),
+			});
+			await exocomPlane.start();
+			renderExocomWidget();
+			exocomHeartbeat = setInterval(() => exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd), EXOCOM.HEARTBEAT_MS);
+			exocomHeartbeat.unref?.();
+			// Makes maxDeliveries a per-MINUTE ceiling (R6) instead of a one-shot lifetime cap.
+			exocomResetTimer = setInterval(() => exocomNotifier?.resetDeliveries(), 60_000);
+			exocomResetTimer.unref?.();
+			// I3: a LIVE accessor, not the plane object itself — `stopExocom` nulls `exocomPlane` on a
+			// `canUseBus` downgrade, and the tool bodies re-read it on every call, failing closed
+			// once it's gone (pi has no `unregisterTool`, so this is how revocation is made real).
+			registerExocomTools(pi, () => exocomPlane, (raw) => {
+				// The model's free-choice call-sign. Sanitized (a display label — strip control chars
+				// via sanitizeLabel, clamp to 32) so a crafted name can't break the widget/attribution;
+				// empty after sanitizing ⇒ keep the current one. Rewrite the entry at once so peers see it.
+				const chosen = sanitizeLabel(raw).slice(0, 32).trim();
+				if (chosen) {
+					exocomName = chosen;
+					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
+				}
+				return exocomName;
+			});
+		} catch (err) {
+			exocomPlane = undefined;
+			if (process.env.PI_PERSONA_DEBUG) {
+				process.stderr.write(`[pi-persona] exocom: failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+			}
+		}
+	}
+
+	// Idempotent: recompute the gate and start/stop the plane to match. `startExocom` only ever
+	// runs at `session_start`, so a mid-session persona change (a/persona switch, the f8 cycle)
+	// would otherwise leave a stale decision in place until the next heartbeat (up to
+	// HEARTBEAT_MS later) — or, worse, never revoke a plane that should now be denied
+	// (containment leak: the persona changed to one whose canUseBus is false, but the plane, its
+	// tools, and inbound delivery all keep running under the OLD identity). Every other canUseBus
+	// consumer (engine/adapter.ts, engine/inproc.ts, the buildEngine call sites) reads
+	// `controller.capabilities` FRESH at bind time — this does the same for exocom. Already
+	// running and still gated on ⇒ a no-op (the heartbeat already relabels under the new persona).
+	async function reconcileExocom(ctx: ExtensionContext): Promise<void> {
+		const shouldRun = (config.exocom || pi.getFlag("exocom") === true) && (controller.capabilities?.canUseBus ?? true);
+		if (shouldRun && !exocomPlane) await startExocom(ctx);
+		else if (!shouldRun && exocomPlane) await stopExocom();
+	}
+
+	// Clean shutdown: stop timers, best-effort `bye` + registry cleanup (plane.stop()). Pi's own
+	// session_shutdown already fires on Ctrl+C/SIGHUP/SIGTERM (not just a normal exit), so wiring
+	// teardown only here — like the broker teardown above — covers every exit path without a
+	// redundant raw process.on(SIGINT/SIGTERM) handler.
+	async function stopExocom(): Promise<void> {
+		if (exocomHeartbeat) {
+			clearInterval(exocomHeartbeat);
+			exocomHeartbeat = undefined;
+		}
+		if (exocomResetTimer) {
+			clearInterval(exocomResetTimer);
+			exocomResetTimer = undefined;
+		}
+		exocomNotifier?.cancel();
+		exocomNotifier = undefined;
+		exocomBudget = undefined;
+		exocomSeen = undefined;
+		if (exocomPlane) {
+			const plane = exocomPlane;
+			exocomPlane = undefined;
+			try {
+				await plane.stop();
+			} catch {
+				/* never block shutdown on a teardown error */
+			}
+		}
+		try {
+			lastCtx?.ui.setWidget("persona-exocom", undefined, { placement: "aboveEditor" });
+		} catch {
+			/* cosmetic */
+		}
+		try {
+			lastCtx?.ui.setStatus("persona-exocom", undefined);
+		} catch {
+			/* cosmetic */
+		}
 	}
 
 	function buildEngine(signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, engOpts?: { async?: boolean }): StrategyEngine {
@@ -833,7 +1141,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			onAgentProgress: (agent: string, p: AgentProgress, key?: string) => {
 				const id = `${rootId}/${key ?? agent}`;
 				const patch: { output?: string; detail?: string } = {
-					detail: p.activity || (p.tokens ? `${p.tokens} tok` : ""),
+					detail: p.activity || (p.tokens ? `${compactTokens(p.tokens)} tok` : ""),
 				};
 				if (p.output) patch.output = p.output;
 				agentTree.update(id, patch);
@@ -934,10 +1242,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 				...(signal ? { signal } : {}),
 				journal: journalWriter(journalPath),
 				onPhase: (id, status, result) => {
-					const patch: { status: AgentNodeStatus; output?: string } = {
+					const patch: { status: AgentNodeStatus; output?: string; detail?: string } = {
 						status: status === "running" ? "running" : status === "done" ? "done" : "failed",
 					};
 					if (result?.output) patch.output = result.output;
+					if (result?.error) patch.detail = result.error;
 					agentTree.update(`${flowRoot}/${id}`, patch);
 				},
 				runPhase: async ({ phase, task }) => {
@@ -1085,11 +1394,24 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 		reload(ctx.cwd);
 		personaConfigs = readConfigStore();
-		// Restore order: env pin > remembered-on-disk. Read-only — never writes here.
-		const remembered = config.defaultPersona ?? readRememberedPersona();
+		// Restore order: --persona flag > env pin (PI_PERSONA_DEFAULT) > remembered-on-disk. Read-only.
+		const flagPersona = ((pi.getFlag("persona") as string) || "").trim();
+		const remembered = flagPersona || config.defaultPersona || readRememberedPersona();
 		const target = remembered ? personas.find((p) => p.name === remembered) : undefined;
 		if (target) await controller.activate(target);
-		else host.setStatus(controller.activePersona?.label);
+		else {
+			// An EXPLICIT `--persona` that doesn't resolve is a user error — surface it loudly (a bad
+			// env/remembered value falls back silently, but the flag is a direct instruction). The
+			// model (`--model`) and effort (`--thinking`) are pi's own flags — pi validates those.
+			if (flagPersona) {
+				const names = personas.map((p) => p.name).sort().join(", ") || "(none installed — run /persona seed)";
+				const msg = `pi-persona: --persona "${flagPersona}" is not an installed persona. Available: ${names}`;
+				if (ctx.hasUI) ctx.ui.notify(msg, "error");
+				else process.stderr.write(`${msg}\n`);
+			}
+			host.setStatus(controller.activePersona?.label);
+		}
+		await startExocom(ctx); // after persona activation, so identity + canUseBus reflect it
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -1099,6 +1421,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		peekWatcher.reset(); // …nor a stale "already surfaced this leg as stuck" set into the next session
 		completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
 		intercomNotifier.cancel();
+		exocomNotifier?.cancel(); // …nor a late exocom follow-up (M1) — cancelled BEFORE stopExocom tears down the plane below
 		timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
 		timerNotifier.cancel();
 		// This instance is being torn down (a reload/new/resume rebinds a fresh one); abort in-flight
@@ -1114,6 +1437,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		steerRegistry.clear();
 		agentTree.clear();
 		host.setStatus(undefined);
+		await stopExocom(); // idempotent — off (or never started) ⇒ a no-op
 		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
 		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
 		if (brokerHostPromise) {
@@ -1134,6 +1458,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 		let prompt = controller.composePrompt(event.systemPrompt) ?? event.systemPrompt;
 		const brief = delegationBrief(ctx);
 		if (brief) prompt = `${prompt}\n\n${brief}`;
+		// Per-turn exocom peer AWARENESS (mirrors the delegation brief above): regenerated from the
+		// live registry every turn so it cannot desync, and gated implicitly — exocomPlane is only
+		// set when exocom is on AND canUseBus, so this is a no-op (undefined ⇒ no prompt change)
+		// whenever exocom is off, matching every other opt-in surface in this file.
+		if (exocomPlane) {
+			const peers = exocomPlane.listPeers();
+			const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona, purpose: p.purpose })));
+			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
+		}
 		if (pendingOrchestration) {
 			// The result is sub-agent text entering the SYSTEM prompt — fence it (I-guardrail:
 			// untrusted output must never reach the supervisor unfenced, least of all here).
@@ -1236,6 +1569,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 		mcp: Type.Optional(
 			Type.Boolean({ description: "true = give this sub-agent working MCP tools (runs it on the child engine so pi-mcp-adapter initializes; the default engine leaves MCP tools 'not initialized'). Pass any server session id in the task to share a server-keyed backend's state." }),
 		),
+		timeoutMs: Type.Optional(
+			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default for this task only" }),
+		),
 	});
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
@@ -1250,6 +1586,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 		),
 		mcp: Type.Optional(
 			Type.Boolean({ description: "true = give the single sub-agent working MCP tools (runs it on the child engine; the default engine leaves MCP tools 'not initialized')" }),
+		),
+		timeoutMs: Type.Optional(
+			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default (single mode)" }),
 		),
 		tasks: Type.Optional(
 			Type.Array(DelegateTaskItem, { description: "Independent tasks to run in parallel — give each a disjoint scope" }),
@@ -1302,11 +1641,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// Runtime anti-loop guard: an identical (agent, model, task) delegation that failed
 	// twice is vetoed BEFORE it spawns — the completion report's "don't re-issue" guidance
 	// is advice; this is the enforcement (capabilities are never prompt-only).
-	const ledger = new DelegationLedger();
+	const ledger = new DelegationLedger({ ledgerV2: config.ledgerV2 });
 
 	// Launch one agent in the background (tracked) and add its live async node to the tree.
+	// `label` is the bare codename (nameFor) — the model is folded in here (and stored on the
+	// tracker entry) so the tree node and every intercom digest show the SAME composed name.
 	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string): string {
-		const id = tracker.launch({ agent, task }, (onProgress, runId) => {
+		const model = shortModel(runSpec.model);
+		const id = tracker.launch({ agent, task, label, ...(model ? { model } : {}) }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
 			// A real, HARD stop for the async run (a steer is only a soft request the child may
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
@@ -1323,7 +1665,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 							// Mirrors the main subscription's onAgentProgress fallback: activity (e.g. the
 							// "✉ from …" transparency tick) wins over a bare token count.
 							if (snap.activity) patch.detail = snap.activity;
-							else if (snap.tokens) patch.detail = `${snap.tokens} tok`;
+							else if (snap.tokens) patch.detail = `${compactTokens(snap.tokens)} tok`;
 							if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
 						},
 						{ async: true },
@@ -1336,13 +1678,25 @@ export default function piPersona(pi: ExtensionAPI): void {
 					}),
 				)
 				.then((r) => {
-					ledger.record({ agent, ...(runSpec.model ? { model: runSpec.model } : {}), task }, r.ok);
+					ledger.record(
+						{
+							agent,
+							...(runSpec.model ? { model: runSpec.model } : {}),
+							task,
+							...(runSpec.role ? { role: runSpec.role } : {}),
+							...(runSpec.tools && runSpec.tools.length > 0 ? { tools: runSpec.tools } : {}),
+							...(runSpec.isolation ? { isolation: runSpec.isolation } : {}),
+						},
+						r.ok,
+					);
 					return r;
 				});
 		});
 		const nodeId = `async:${id}`;
-		// "queued" until the semaphore grants a slot and the engine reports it steerable.
-		agentTree.add({ id: nodeId, label: `${label} (async)`, status: "running", detail: "queued" });
+		// "queued" until the semaphore grants a slot and the engine reports it steerable. Every
+		// `async:*` node IS async by construction, so no "(async)" tag is needed — fold in the
+		// model instead, matching the canonical `<codename> · <model>` name shown elsewhere.
+		agentTree.add({ id: nodeId, label: model ? `${label} · ${model}` : label, status: "running", detail: "queued" });
 		startPeek(); // arm the timed supervisor wakeup while this run is in flight (no-op if PI_PERSONA_PEEK_MS=0)
 		return id;
 	}
@@ -1359,7 +1713,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
-			"candidates (or call `models`). Advanced knobs: name, tools, isolation: \"worktree\", mcp, concurrency.",
+			"candidates (or call `models`). Advanced knobs: name, tools, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -1378,9 +1732,25 @@ export default function piPersona(pi: ExtensionAPI): void {
 			// identical delegation that already failed twice does not spawn again.
 			const requested =
 				params.tasks && params.tasks.length > 0
-					? params.tasks.map((t) => ({ agent: t.agent, ...(t.model ? { model: t.model } : {}), task: t.task }))
+					? params.tasks.map((t) => ({
+							agent: t.agent,
+							...(t.model ? { model: t.model } : {}),
+							task: t.task,
+							...(t.role ? { role: t.role } : {}),
+							...(t.tools && t.tools.length > 0 ? { tools: t.tools } : {}),
+							...(t.isolation ? { isolation: t.isolation } : {}),
+						}))
 					: params.agent && params.task
-						? [{ agent: params.agent, ...(params.model ? { model: params.model } : {}), task: params.task }]
+						? [
+								{
+									agent: params.agent,
+									...(params.model ? { model: params.model } : {}),
+									task: params.task,
+									...(params.role ? { role: params.role } : {}),
+									...(params.tools && params.tools.length > 0 ? { tools: params.tools } : {}),
+									...(params.isolation ? { isolation: params.isolation } : {}),
+								},
+							]
 						: [];
 			const veto = ledger.vet(requested);
 			if (veto) return { content: [{ type: "text", text: veto }], details: {}, isError: true };
@@ -1395,14 +1765,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const tasks = params.tasks.slice(0, RUN_LIMITS.maxChildren);
 				const dropped = params.tasks.length - tasks.length;
 				const ids = tasks.map((t, i) => {
-					const spec: AgentRunSpec = { agent: t.agent, task: t.task };
-					if (t.model) spec.model = t.model;
-					if (t.tools && t.tools.length > 0) spec.tools = t.tools;
-					if (t.skills && t.skills.length > 0) spec.skills = t.skills;
-					if (t.role?.trim()) spec.role = t.role.trim();
-					if (t.isolation === "worktree") spec.isolation = "worktree";
-					if (t.mcp === true) spec.mcp = true;
-					return launchAsyncRun(t.agent, t.task, spec, labelFor(t, i));
+					// Routed through specOf() (not a hand-rolled field list) so this, the interactive
+					// DEFAULT delegate path, never drifts from the sync path's mapping — NP2's per-leg
+					// `timeoutMs` (and any future knob) lands here for free instead of needing a second copy.
+					const spec = specOf(t);
+					return launchAsyncRun(t.agent, t.task, spec, nameFor(t, i));
 				});
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${RUN_LIMITS.maxChildren}) were dropped.` : "";
 				return {
@@ -1426,8 +1793,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 				if (params.role?.trim()) runSpec.role = params.role.trim();
 				if (params.isolation === "worktree") runSpec.isolation = "worktree";
 				if (params.mcp === true) runSpec.mcp = true;
+				if (isPositiveFiniteMs(params.timeoutMs)) runSpec.timeoutMs = params.timeoutMs;
 				const labelArg = { agent, ...(params.name ? { name: params.name } : {}), ...(params.model ? { model: params.model } : {}) };
-				const id = launchAsyncRun(agent, task, runSpec, labelFor(labelArg, 0));
+				const id = launchAsyncRun(agent, task, runSpec, nameFor(labelArg, 0));
 				return {
 					content: [
 						{
@@ -1552,6 +1920,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				await controller.activate(personas[next]!);
 				persist(personas[next]!.name);
 			}
+			await reconcileExocom(ctx); // the persona (and so canUseBus) just changed — re-gate now
 		},
 	};
 	type KeyId = Parameters<ExtensionAPI["registerShortcut"]>[0];
@@ -1946,6 +2315,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (arg === "off" || arg === "none") {
 				await controller.deactivate();
 				persist(undefined);
+				await reconcileExocom(ctx); // the persona (and so canUseBus) just changed — re-gate now
 				ctx.ui.notify("persona: cleared (default supervisor)", "info");
 				return;
 			}
@@ -1964,6 +2334,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const active = controller.activePersona?.name;
 				const fresh = active ? personas.find((p) => p.name === active) : undefined;
 				if (fresh) await controller.activate(fresh);
+				await reconcileExocom(ctx); // a restored persona file may have changed canUseBus — re-gate
 				const kept = r.skipped.length > 0 ? `, kept ${r.skipped.length} existing` : "";
 				ctx.ui.notify(`persona: ${force ? "restored" : "seeded"} ${r.copied.length} default(s) to ${userAgentDir()}${kept}.`, "info");
 				return;
@@ -1995,6 +2366,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			}
 			await controller.activate(persona);
 			persist(persona.name);
+			await reconcileExocom(ctx); // the persona (and so canUseBus) just changed — re-gate now
 			ctx.ui.notify(`persona: ${persona.label} active`, "info");
 		},
 	});
@@ -2005,6 +2377,32 @@ export default function piPersona(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			ctx.ui.notify(doctorReport(), "info");
+		},
+	});
+
+	// ── /exocom (T9): the external peer-to-peer plane's live pool ─────────────────
+	pi.registerCommand("exocom", {
+		description: "Show exocom peers in this workspace (refreshes the pool widget): /exocom",
+		handler: async (_args, ctx) => {
+			lastCtx = ctx;
+			if (!exocomPlane) {
+				ctx.ui.notify(
+					"exocom: not active — needs PI_PERSONA_EXOCOM=1 (or --exocom) and an active persona that allows the bus (canUseBus).",
+					"warning",
+				);
+				return;
+			}
+			renderExocomWidget();
+			const peers = exocomPlane.listPeers();
+			const lines = peers.map(
+				(p) => `• ${p.displayName} (${p.persona || "—"} · ${p.model}, ctx ${p.context_pct}%)${p.purpose ? ` — ${p.purpose}` : ""}`,
+			);
+			ctx.ui.notify(
+				peers.length === 0
+					? `exocom: ${exocomName} — no other peers in this workspace right now.`
+					: `exocom: ${exocomName} — ${peers.length} peer(s):\n${lines.join("\n")}`,
+				"info",
+			);
 		},
 	});
 

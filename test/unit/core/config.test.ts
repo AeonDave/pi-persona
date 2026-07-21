@@ -95,3 +95,30 @@ test("env flips keybinding, persist, delegate-default, seed, and default persona
 test("stateFile is undefined by default (resolved to a global default by the extension)", () => {
 	assert.equal(resolveConfig({}).stateFile, undefined);
 });
+
+test("PI_PERSONA_EXOCOM enables the external plane (default OFF; truthy on)", () => {
+	assert.equal(resolveConfig({}).exocom, false, "off by default");
+	assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: "1" }).exocom, true);
+	assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: "true" }).exocom, true);
+	assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: "" }).exocom, false, "empty ⇒ off");
+	assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: "off" }).exocom, false, "explicit off");
+	assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: "0" }).exocom, false, "0 ⇒ off");
+});
+
+test("PI_PERSONA_ASYNC_RETAIN sets the async tracker's retention bound (default 25; junk/<1 falls back)", () => {
+	assert.equal(resolveConfig({}).asyncRetain, 25, "today's hardcoded retention by default");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "50" }).asyncRetain, 50);
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "1" }).asyncRetain, 1, "smallest meaningful bound");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "abc" }).asyncRetain, 25, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "-5" }).asyncRetain, 25, "negative ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "0" }).asyncRetain, 25, "0 isn't a meaningful retention bound ⇒ default");
+});
+
+test("PI_PERSONA_LEDGER_V2 opts into the wider delegation-ledger key (default OFF; truthy on)", () => {
+	assert.equal(resolveConfig({}).ledgerV2, false, "off by default (today's agent+model+task key)");
+	assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: "1" }).ledgerV2, true);
+	assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: "true" }).ledgerV2, true);
+	assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: "" }).ledgerV2, false, "empty ⇒ off");
+	assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: "off" }).ledgerV2, false, "explicit off");
+	assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: "0" }).ledgerV2, false, "0 ⇒ off");
+});

@@ -238,6 +238,46 @@ Steering is always a Bus action; the peek digest is always a read-only ProgressV
   supervisor side (intercom, idle notifier, f9, peek) is unchanged BY CONSTRUCTION. Off by default ⇒
   the host never starts and the child spawns byte-identical to pre-broker pi-persona.
 
+## exocom — the external plane
+
+A separate plane (`src/exocom/`) from everything above, with a different shape entirely: every plane
+in "the comm plane in practice" is **internal** to one supervisor's own run — hierarchical, keyed by
+that supervisor's session id, talking to children *it* spawned. **exocom is flat and external**:
+independent, top-level pi instances sharing a workspace — no parent/child relationship — discover each
+other and message peer-to-peer. (The names encode the split: intercom = internal comm; exocom =
+external comm.)
+
+- **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or `--exocom` (a `pi.registerFlag`
+  convenience); additionally gated by the active persona's `canUseBus`, re-evaluated on every persona
+  switch (`reconcileExocom`) — switching to a bus-restricted persona tears the plane down, switching
+  back to one that allows it rejoins. OFF ⇒ no bind, no registry entry, no tools registered.
+- **Discovery — a workspace-scoped file registry, not an elected hub.** Each instance binds its own
+  socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
+  `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<name>.json`, and heartbeats it; discovery is
+  just reading that directory. Dead-pid and stale-heartbeat entries are pruned on read — no host
+  election, no failover, genuinely peer-to-peer.
+- **Interaction model — one-way + async reply, never blocking.** `exocom_send` returns a `msg_id`
+  immediately; a reply is just another `exocom_send` with `in_reply_to` set, delivered back as a
+  correlated follow-up — no blocking await, no mutual-wait deadlock class. `target: "*"` broadcasts to
+  every live peer (best-effort; one unreachable peer doesn't fail the rest).
+- **Identity from the active persona.** Name = the active persona's name, collision-suffixed against
+  the live registry (`elite`, `elite2`, …), or `pi-<hex>` with no persona active; refreshed on every
+  heartbeat so a `/persona` switch is reflected to peers.
+- **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
+  message is head-truncated, then delivered as `attributeInbound(label, fenceUntrusted(text))` — the
+  same fence/attribute primitives the broker/peer plane above uses. `label` comes from the registry
+  entry keyed by the connecting session, never the envelope's self-reported `from_name`, so a peer
+  cannot spoof its identity. A message over the inline budget spills to a workspace-scoped artifact
+  file (a small preview stays inline) rather than landing whole in the receiver's context. Guardrails:
+  a hop cap, a per-sender rate+byte budget, and a (sender, msg_id) dedup set so an at-least-once resend
+  can't double-trigger a turn.
+- **Tools**, registered only while the plane is active: `exocom_list` (live peers — name, persona,
+  model, context %, purpose) and `exocom_send({ target, message, in_reply_to? })`.
+
+exocom never touches the delegate/council/broker path. A single instance can be **both** a supervisor
+(delegating its own spawned children via intercom/broker) **and** an exocom peer (collaborating with
+independent sibling instances) at once — the planes are independent and independently gated.
+
 ## Supervision & the waiting model
 
 - **sync** — the supervisor actively blocks on the delegate/strategy call (results still stream); no
@@ -327,6 +367,7 @@ The stable contracts other layers build on:
 
 - **`context: fork`** — `fresh` is the right child default; fork stays deferred (fail-fast, no silent
   downgrade).
-- Inter-session intercom (the broker endpoint is per-session by design), blocking peer asks, and hard
-  param validation are all out of scope by design — see the reasons in [STRATEGIES.md](STRATEGIES.md)
-  and the comm-plane section above.
+- Blocking peer asks and hard param validation are out of scope by design — see the reasons in
+  [STRATEGIES.md](STRATEGIES.md) and the comm-plane section above. Inter-session comm (the broker
+  endpoint stays per-session by design) is no longer a gap: **exocom** (above) is the flat, opt-in
+  plane for independently-launched instances sharing a workspace.

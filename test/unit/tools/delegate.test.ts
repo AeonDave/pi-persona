@@ -100,6 +100,71 @@ test("DelegationLedger stays bounded (old keys are evicted, no unbounded growth)
 	assert.notEqual(ledger.vet([{ agent: "op", task: "task 499" }]), undefined);
 });
 
+test("DelegationLedger key: ledgerV2 OFF (default) ⇒ role/tools/isolation differences don't change the key (regression pin)", () => {
+	const ledger = new DelegationLedger();
+	const base = { agent: "op", model: "m", task: "do X" };
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) ledger.record({ ...base, role: "A", tools: ["grep"], isolation: "worktree" }, false);
+	// A retry that changes ONLY role/tools/isolation is still vetoed — today's key is agent+model+task only.
+	assert.match(
+		ledger.vet([{ ...base, role: "B", tools: ["read"], isolation: "none" }]) ?? "",
+		/already failed/,
+		"same agent+model+task ⇒ same key regardless of role/tools/isolation",
+	);
+});
+
+test("DelegationLedger key: ledgerV2 ON ⇒ role/tools/isolation differences produce a fresh key", () => {
+	const ledger = new DelegationLedger({ ledgerV2: true });
+	const base = { agent: "op", model: "m", task: "do X" };
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) ledger.record({ ...base, role: "A", tools: ["grep"], isolation: "worktree" }, false);
+	assert.equal(
+		ledger.vet([{ ...base, role: "B", tools: ["read"], isolation: "none" }]),
+		undefined,
+		"a changed role/tools/isolation is a fresh attempt under ledgerV2 — the retry isn't vetoed",
+	);
+});
+
+test("DelegationLedger key: ledgerV2 ON ⇒ tools order doesn't matter (stable-sorted before joining)", () => {
+	const ledger = new DelegationLedger({ ledgerV2: true });
+	const base = { agent: "op", model: "m", task: "do X" };
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) ledger.record({ ...base, tools: ["b", "a"] }, false);
+	assert.match(
+		ledger.vet([{ ...base, tools: ["a", "b"] }]) ?? "",
+		/already failed/,
+		"same tools in a different order ⇒ same key (sorted before joining)",
+	);
+});
+
+// I1 regression: under ledgerV2, the async fan-out's record() sites key from the NORMALIZED
+// spec (post-specOf() — isolation "none" never survives, role is trimmed), while vet() keys
+// from the RAW params the supervisor typed (isolation:"none" passed through, role untrimmed).
+// If key() didn't normalize both sides identically, these two would silently diverge and the
+// 2-strike veto would never fire for exactly this class of async delegation.
+test("DelegationLedger key: ledgerV2 ON ⇒ isolation \"none\" (raw) keys the same as isolation-absent (normalized) — async record/vet mismatch regression (I1)", () => {
+	const ledger = new DelegationLedger({ ledgerV2: true });
+	const base = { agent: "op", model: "sonnet", task: "X" };
+	// Simulates the async record() sites: a normalized spec never carries isolation:"none".
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) ledger.record(base, false);
+	// Simulates vet(): the raw params, where isolation:"none" is passed through as typed.
+	assert.match(
+		ledger.vet([{ ...base, isolation: "none" }]) ?? "",
+		/already failed/,
+		'a raw isolation:"none" must key identically to an absent/normalized isolation, or the veto silently never fires for this async delegation',
+	);
+});
+
+test("DelegationLedger key: ledgerV2 ON ⇒ a whitespace-padded role (raw) keys the same as its trimmed form (normalized) — async record/vet mismatch regression (I1)", () => {
+	const ledger = new DelegationLedger({ ledgerV2: true });
+	const base = { agent: "op", model: "sonnet", task: "X" };
+	// Simulates the async record() sites: specOf() trims role before it reaches the spec.
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) ledger.record({ ...base, role: "lens" }, false);
+	// Simulates vet(): the raw params carry whatever whitespace the caller typed.
+	assert.match(
+		ledger.vet([{ ...base, role: "lens " }]) ?? "",
+		/already failed/,
+		"a whitespace-padded role must key identically to its trimmed form, or the veto silently never fires for this async delegation",
+	);
+});
+
 test("runDelegate reports a single-agent failure with its error", async () => {
 	const engine = engineThat(() => ({ agent: "x", output: "", usage: usage(), ok: false, error: "boom" }));
 	const r = await runDelegate({ agent: "x", task: "t" }, engine);
@@ -120,6 +185,44 @@ test("runDelegate reports live per-task views via onProgress (parallel)", async 
 	assert.ok(r.views.every((v) => !v.running && v.ok));
 	assert.ok(doneCounts.length >= 2, "progress reported as tasks complete");
 	assert.equal(doneCounts[doneCounts.length - 1], 2);
+});
+
+test("runDelegate threads a per-task timeoutMs through to the engine spec (single-leg override, siblings untouched — the untouched sibling's key is genuinely absent)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine = engineThat((s) => {
+		specs.push(s);
+		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+	});
+	await runDelegate({ tasks: [{ agent: "operator", task: "t", timeoutMs: 5000 }, { agent: "scout", task: "t" }] }, engine);
+	assert.equal(specs[0]?.timeoutMs, 5000);
+	assert.ok(!("timeoutMs" in (specs[1] ?? {})), "the sibling with no override has NO timeoutMs key, not a present-undefined one");
+});
+
+test("runDelegate ignores a non-finite/non-positive timeoutMs (falls back to the engine default — the key is genuinely absent, not present-as-undefined)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine = engineThat((s) => {
+		specs.push(s);
+		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+	});
+	await runDelegate(
+		{ tasks: [{ agent: "a", task: "t", timeoutMs: 0 }, { agent: "b", task: "t", timeoutMs: -5 }, { agent: "c", task: "t", timeoutMs: Number.NaN }] },
+		engine,
+	);
+	assert.ok(specs.every((s) => !("timeoutMs" in s)), "junk timeoutMs never reaches the spec — the key itself is absent, not present-as-undefined");
+});
+
+test("runDelegate threads timeoutMs through to the engine spec in single mode too (valid carries; junk/absent falls back to a genuinely absent key)", async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine = engineThat((s) => {
+		specs.push(s);
+		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+	});
+	await runDelegate({ agent: "scout", task: "t", timeoutMs: 12_000 }, engine);
+	await runDelegate({ agent: "scout", task: "t", timeoutMs: -1 }, engine);
+	await runDelegate({ agent: "scout", task: "t" }, engine);
+	assert.equal(specs[0]?.timeoutMs, 12_000, "a valid timeoutMs carries through");
+	assert.ok(!("timeoutMs" in (specs[1] ?? {})), "a junk (-1) timeoutMs is genuinely absent, not present-as-undefined");
+	assert.ok(!("timeoutMs" in (specs[2] ?? {})), "an omitted timeoutMs is genuinely absent");
 });
 
 test("runDelegate passes per-task skills/model/tools to the engine (dynamic sub-agent)", async () => {

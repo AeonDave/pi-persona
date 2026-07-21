@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildDelegationBrief } from "../../../src/core/brief.ts";
+import { buildDelegationBrief, buildExocomBrief } from "../../../src/core/brief.ts";
 
 const AGENTS = [
 	{ name: "operator", description: "Generic adaptive technical executor verticalized by skills." },
@@ -104,4 +104,20 @@ test("caps the agent list and says how many more", () => {
 	const many = Array.from({ length: 20 }, (_, i) => ({ name: `agent${i}` }));
 	const brief = buildDelegationBrief({ agents: many, teams: {}, flows: [], standing: true, asyncDefault: true });
 	assert.match(brief ?? "", /and 4 more/);
+});
+
+test("buildExocomBrief: no peers → no brief", () => {
+	assert.equal(buildExocomBrief([]), undefined);
+});
+
+test("buildExocomBrief: lists peers with persona — purpose, and the exocom_send guidance line", () => {
+	const brief = buildExocomBrief([
+		{ name: "orion", persona: "dev", purpose: "implements features" },
+		{ name: "vega", persona: "reviewer", purpose: "reviews diffs" },
+	]);
+	assert.ok(brief);
+	assert.match(brief ?? "", /- orion \(dev — implements features\)/);
+	assert.match(brief ?? "", /- vega \(reviewer — reviews diffs\)/);
+	assert.match(brief ?? "", /NOT your sub-agents/);
+	assert.match(brief ?? "", /exocom_send\(\{ target: "<name>", message: "<request>" \}\)/);
 });

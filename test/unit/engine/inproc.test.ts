@@ -377,6 +377,75 @@ test("inproc engine idle-kills a session that emits NO events after timeoutMs (t
 	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
 });
 
+test("inproc engine's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
+	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
+	let abortCalled = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 5_000,
+		createSession: async () => {
+			let release!: () => void;
+			const idle = new Promise<void>((r) => {
+				release = r;
+			});
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => {
+						abortCalled = true;
+						release();
+					},
+					waitForIdle: () => idle,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t", timeoutMs: 40 });
+	assert.equal(abortCalled, true, "the per-leg override fired instead of the long engine-level default");
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /timed out/);
+});
+
+test("inproc engine ignores a non-positive spec.timeoutMs override (falls back to the engine-level default)", async () => {
+	// deps-level idle timeout is short; the per-leg override is junk (≤0) and must be ignored.
+	let abortCalled = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 40,
+		createSession: async () => {
+			let release!: () => void;
+			const idle = new Promise<void>((r) => {
+				release = r;
+			});
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => {
+						abortCalled = true;
+						release();
+					},
+					waitForIdle: () => idle,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t", timeoutMs: -5 });
+	assert.equal(abortCalled, true, "junk override ignored — the engine-level default still fires");
+	assert.equal(r.ok, false);
+});
+
 test("inproc engine hard-caps a busy session the idle watchdog would never catch", async () => {
 	// The idle watchdog resets on every event, so a busy-but-non-converging child never trips it.
 	// The hard wall-clock cap is a definite lifetime ceiling that settles it regardless of activity.
