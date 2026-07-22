@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { endpoint } from "../../../src/exocom/paths.ts";
-import { ExocomPlane } from "../../../src/exocom/plane.ts";
+import { ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
 import { registryEntryFixture, writeEntry } from "../../../src/exocom/registry.ts";
 import type { ExocomMessage } from "../../../src/exocom/envelope.ts";
+import { createFrameReader, encodeFrame } from "../../../src/bus/broker/framing.ts";
 
 let dir: string;
 before(async () => { dir = await mkdtemp(join(tmpdir(), "exo-plane-")); });
@@ -19,7 +20,7 @@ let seq = 0;
 // Cross-platform endpoint (POSIX socket file / Windows named pipe via `paths.endpoint`) —
 // this box is win32, so building it via `endpoint()` (rather than hardcoding a `.sock` path
 // and skipping) exercises the real transport here instead of skipping it.
-function planeFor(name: string, inbox: (m: ExocomMessage) => void) {
+function planeFor(name: string, inbox: (m: ExocomMessage) => void, decide?: (m: ExocomMessage) => ExocomInboundResult) {
 	const session_id = `sid-${name}-${process.pid}-${seq++}`;
 	return new ExocomPlane({
 		agentDir: dir, hash: "h",
@@ -28,7 +29,11 @@ function planeFor(name: string, inbox: (m: ExocomMessage) => void) {
 			endpoint: endpoint(dir, "h", session_id, process.platform), cwd: "/",
 		},
 		getCard: () => ({ name, persona: name, model: "m", context_pct: 0, inbox: 0 }),
-		onInbound: (m) => inbox(m),
+		onInbound: (m) => {
+			const disposition = decide?.(m) ?? { accepted: true };
+			if (disposition.accepted && disposition.duplicate !== true) inbox(m);
+			return disposition;
+		},
 	});
 }
 
@@ -127,7 +132,7 @@ test("send() resolves a deduped displayName (e.g. elite#2) through the SAME help
 				endpoint: endpoint(dir, "h", session_id, process.platform), cwd: "/",
 			},
 			getCard: () => ({ name: "elite", persona: "elite", model: "m", context_pct: 0, inbox: 0 }),
-			onInbound: (m) => onMsg(m),
+			onInbound: (m) => { onMsg(m); return { accepted: true }; },
 		});
 	const a = mk(sessA, (m) => gotA.push(m));
 	const b = mk(sessB, (m) => gotB.push(m));
@@ -202,7 +207,7 @@ test("send() rejects on ack-timeout instead of hanging when a peer accepts but n
 			endpoint: endpoint(dir, "h", senderSession, process.platform), cwd: "/",
 		},
 		getCard: () => ({ name: "elite2", persona: "elite2", model: "m", context_pct: 0, inbox: 0 }),
-		onInbound: () => {},
+		onInbound: () => ({ accepted: true }),
 		ackTimeoutMs: 80,
 	});
 	await sender.start();
@@ -211,5 +216,66 @@ test("send() rejects on ack-timeout instead of hanging when a peer accepts but n
 	} finally {
 		await sender.stop();
 		await new Promise<void>((resolve) => frozenServer.close(() => resolve()));
+	}
+});
+
+test("send() requires a correlated ACK and rejects invalid signature/session bindings", async () => {
+	type ReplyMode = "wrong-id" | "bad-signature" | "bad-session";
+	let mode: ReplyMode = "wrong-id";
+	const rawSession = `sid-raw-auth-${process.pid}-${seq++}`;
+	const rawEndpoint = endpoint(dir, "h", rawSession, process.platform);
+	const rawServer = net.createServer((socket) => {
+		socket.on("data", createFrameReader(
+			(raw) => {
+				const incoming = raw as { msg_id?: unknown };
+				if (typeof incoming.msg_id !== "string") return;
+				const reply = mode === "wrong-id"
+					? { kind: "ack", msg_id: "different-message" }
+					: { kind: "ack", msg_id: incoming.msg_id, from_session: mode === "bad-session" ? "forged-session" : rawSession, signature: "ZmFrZQ==" };
+				socket.write(encodeFrame(reply));
+			},
+			() => socket.destroy(),
+		));
+	});
+	await new Promise<void>((resolve) => rawServer.listen(rawEndpoint, resolve));
+	const advertise = () => writeEntry(dir, "h", registryEntryFixture({
+		session_id: rawSession, name: "raw-auth", pid: process.pid, endpoint: rawEndpoint,
+		heartbeat_at: new Date().toISOString(), public_key: "cHVi",
+	}));
+	advertise();
+	const sender = planeFor("auth-sender", () => {});
+	await sender.start();
+	try {
+		await assert.rejects(() => sender.send("raw-auth", "one"), /unexpected reply frame/, "wrong ACK msg_id is not success");
+		mode = "bad-signature";
+		advertise();
+		await assert.rejects(() => sender.send("raw-auth", "two"), /unauthenticated ack/, "invalid signature is rejected");
+		mode = "bad-session";
+		advertise();
+		await assert.rejects(() => sender.send("raw-auth", "three"), /unauthenticated ack/, "ACK session must match the registry binding");
+	} finally {
+		await sender.stop();
+		await new Promise<void>((resolve) => rawServer.close(() => resolve()));
+	}
+});
+
+test("receiver NACKs a rejected delivery, while duplicate acceptance ACKs without recounting", async () => {
+	const sender = planeFor("contract-sender", () => {});
+	const rejected = planeFor("contract-rejected", () => {}, () => ({ accepted: false, reason: "budget" }));
+	const duplicate = planeFor("contract-duplicate", () => {}, () => ({ accepted: true, duplicate: true }));
+	await sender.start();
+	await rejected.start();
+	await duplicate.start();
+	try {
+		const senderFromRejected = rejected.listPeers().find((p) => p.name === "contract-sender")!;
+		const senderFromDuplicate = duplicate.listPeers().find((p) => p.name === "contract-sender")!;
+		await assert.rejects(() => sender.send("contract-rejected", "too much"), /rejected message: budget/, "drop becomes a signed NACK");
+		assert.equal(rejected.receivedFromPeer(senderFromRejected.session_id), 0, "rejected frames are not counted");
+		await sender.send("contract-duplicate", "retry");
+		assert.equal(duplicate.receivedFromPeer(senderFromDuplicate.session_id), 0, "idempotent duplicate ACK does not recount");
+	} finally {
+		await sender.stop();
+		await rejected.stop();
+		await duplicate.stop();
 	}
 });

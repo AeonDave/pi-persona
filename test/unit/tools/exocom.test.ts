@@ -26,13 +26,17 @@ test("exocom_send returns the msg_id from the plane", async () => {
 	const r = await m.tools.get("exocom_send").execute("c", { target: "dev", message: "hi" }, undefined, undefined, {});
 	assert.equal((r.details as any).msg_id, "to-dev");
 	assert.match(r.content[0].text, /dev/);
+		assert.match(r.content[0].text, /msg_id=to-dev/, "the model-visible tool result exposes the reply correlation id");
+		assert.match(r.content[0].text, /received and queued by dev/, "transport ACK is acceptance, not a read receipt");
+		assert.match(r.content[0].text, /reply arrives automatically as \[exocom_received\] — do not poll exocom_list/);
 });
 
 test("exocom_list renders the peers", async () => {
 	const m = mockPi();
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	const r = await m.tools.get("exocom_list").execute("c", {}, undefined, undefined, {});
-	assert.match(r.content[0].text, /dev/);
+		assert.equal(r.content[0].text, "Exocom presence only (1 peers; not a message inbox)\n- dev · dev · m · ctx 10%\nUse target exactly as shown.");
+	assert.doesNotMatch(r.content[0].text, /purpose|peer-message/, "default roster omits prose metadata and fences");
 });
 
 test("exocom_send target:'*' broadcasts to every peer, best-effort (one failure doesn't abort the rest)", async () => {
@@ -56,6 +60,8 @@ test("exocom_send target:'*' broadcasts to every peer, best-effort (one failure 
 	assert.equal((r.details as any).failed.length, 1);
 	assert.equal((r.details as any).failed[0].target, "elite");
 	assert.match(r.content[0].text, /2 peers/);
+		assert.match(r.content[0].text, /received and queued by 1\/2 peers/);
+		assert.match(r.content[0].text, /replies arrive automatically as \[exocom_received\] — do not poll exocom_list/);
 });
 
 // Two LIVE peers can share the same raw `.name` (session_id-keyed registry, PartA) — the

@@ -75,9 +75,14 @@ export function canFanOut(caps: EffectiveCapabilities, delegateTool = DEFAULT_DE
 	return caps.tools.has(delegateTool);
 }
 
-const EXOCOM_TOOLS = new Set(["exocom_list", "exocom_send", "exocom_name"]);
+export const EXOCOM_TOOL_NAMES = ["exocom_list", "exocom_send", "exocom_name"] as const;
+const EXOCOM_TOOLS: ReadonlySet<string> = new Set(EXOCOM_TOOL_NAMES);
 
 export function canCallTool(caps: EffectiveCapabilities, toolName: string): boolean {
+	// Bus revocation must win even after these dynamically registered tools have entered
+	// `caps.tools` on a later persona activation. Checking the ordinary set first would make
+	// an allow -> deny switch keep the external bus callable.
+	if (EXOCOM_TOOLS.has(toolName)) return caps.canUseBus;
 	if (caps.tools.has(toolName)) return true;
 	// The exocom tools are the EXTERNAL comm bus — governed by `canUseBus` (as `intercom` governs the
 	// internal bus), NOT the general tool allowlist: a persona that holds the bus can message its
@@ -85,7 +90,7 @@ export function canCallTool(caps: EffectiveCapabilities, toolName: string): bool
 	// while exocom is active (which itself requires canUseBus), so this can't expose a tool that
 	// doesn't exist. Resolving them here (not in resolveCapabilities) also sidesteps a timing issue —
 	// a persona's caps are resolved at activation, BEFORE startExocom registers these tools.
-	return caps.canUseBus && EXOCOM_TOOLS.has(toolName);
+	return false;
 }
 
 export function canDelegateTo(caps: EffectiveCapabilities, agent: string): boolean {

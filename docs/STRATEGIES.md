@@ -124,11 +124,15 @@ per-call:
 1. **Author default (static)** — a persona's `council: { strategy, roster, params }` (tool-driven) or
    mandatory `orchestration: { mode, strategy, roster, params }` both carry a `params` map
    (`persona.ts` → `orchestrate.ts`). E.g. `council: { strategy: magi, params: { reflect: false } }`.
-2. **Supervisor override (dynamic)** — the `council` tool accepts a per-call `strategy`, `roster`, and
-   `params`; the params **merge OVER** the persona's (`extension.ts`), so the LLM can pick
+2. **Borrowed persona profile (dynamic)** — `council({ persona: "magi", question: … })` resolves that
+   installed persona's already-expanded `council:` block. The caller remains active and retains its
+   prompt, model, tools, and capability gates; only strategy/roster/params are borrowed. An unknown
+   persona or one without a usable council is a hard error, never a silent MAGI fallback.
+3. **Supervisor override (dynamic)** — the `council` tool accepts a per-call `strategy`, `roster`, and
+   `params`; the params **merge OVER** the selected (or active) persona's (`extension.ts`), so the LLM can pick
    `{ aggregate: "unanimity" }` for one invocation, or switch strategy entirely
    (`council({ strategy: "debate", … })`), without editing the persona.
-3. **Preset (reusable bundle)** — `council: { preset: <name> }` expands `presets/<name>.preset.json`
+4. **Preset (reusable bundle)** — `council: { preset: <name> }` expands `presets/<name>.preset.json`
    into `{ strategy, roster, params }`; authored fields win, params merge (`expandCouncilPreset`).
 
 The mandatory `orchestration:` path fires pre-turn on the raw user text, so it takes no dynamic

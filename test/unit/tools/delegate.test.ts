@@ -58,15 +58,27 @@ test("runDelegate passes an on-the-fly `role` through to the engine spec (single
 	assert.deepEqual(roles, ["You are a Rust auditor.", "You are a CSS wizard.", undefined]);
 });
 
-test("runDelegate threads mcp:true through to the engine spec (single + parallel), false/absent ⇒ unset", async () => {
+test("runDelegate preserves explicit mcp true/false through to the engine spec (single + parallel)", async () => {
 	const mcp: Array<boolean | undefined> = [];
 	const engine = engineThat((s) => {
 		mcp.push(s.mcp);
 		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
 	});
 	await runDelegate({ agent: "operator", task: "t", mcp: true }, engine);
-	await runDelegate({ tasks: [{ agent: "operator", task: "t", mcp: true }, { agent: "scout", task: "t" }] }, engine);
-	assert.deepEqual(mcp, [true, true, undefined]);
+	await runDelegate({ agent: "operator", task: "t", mcp: false }, engine);
+	await runDelegate({ tasks: [{ agent: "operator", task: "t", mcp: true }, { agent: "scout", task: "t", mcp: false }, { agent: "scout", task: "t" }] }, engine);
+	assert.deepEqual(mcp, [true, false, true, false, undefined]);
+});
+
+test("runDelegate preserves explicit isolation worktree/none through to the engine spec", async () => {
+	const isolation: Array<"none" | "worktree" | undefined> = [];
+	const engine = engineThat((s) => {
+		isolation.push(s.isolation);
+		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+	});
+	await runDelegate({ agent: "operator", task: "t", isolation: "none" }, engine);
+	await runDelegate({ tasks: [{ agent: "operator", task: "t", isolation: "worktree" }, { agent: "scout", task: "t", isolation: "none" }] }, engine);
+	assert.deepEqual(isolation, ["none", "worktree", "none"]);
 });
 
 test("DelegationLedger vetoes only after MAX identical failures; model/task changes are new keys", () => {
@@ -170,6 +182,26 @@ test("runDelegate reports a single-agent failure with its error", async () => {
 	const r = await runDelegate({ agent: "x", task: "t" }, engine);
 	assert.equal(r.ok, false);
 	assert.match(r.text, /boom/);
+});
+
+test("runDelegate preserves abort classification in its terminal UI view", async () => {
+	const engine = engineThat(() => ({
+		agent: "x",
+		output: "partial",
+		usage: usage(),
+		ok: false,
+		error: "agent aborted",
+		failureKind: "abort",
+	}));
+	const progress: Array<string | undefined> = [];
+	const r = await runDelegate(
+		{ tasks: [{ agent: "x", task: "t" }] },
+		engine,
+		undefined,
+		(views) => progress.push(views[0]?.failureKind),
+	);
+	assert.equal(r.views[0]?.failureKind, "abort");
+	assert.equal(progress.at(-1), "abort", "the final progress projection carries the abort classification");
 });
 
 test("runDelegate reports live per-task views via onProgress (parallel)", async () => {

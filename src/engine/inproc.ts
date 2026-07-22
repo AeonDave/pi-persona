@@ -345,6 +345,24 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				popDisableGuard();
 			}
 
+			// `agent.abort()` is a cancellation REQUEST, not a settlement guarantee: a provider/tool
+			// can leave both `prompt()` and `waitForIdle()` pending after accepting it. Keep a separate
+			// gate that every abort cause trips, so the engine always reaches its finally-cleanup instead
+			// of retaining the session (and its async semaphore slot) forever.
+			let releaseAbortGate: () => void = () => {};
+			const abortGate = new Promise<void>((resolve) => {
+				releaseAbortGate = resolve;
+			});
+			const abortSession = (): void => {
+				try {
+					session.agent.abort();
+				} catch {
+					// Settlement and dispose must still run when the host abort hook itself throws.
+				} finally {
+					releaseAbortGate();
+				}
+			};
+
 			// Idle watchdog (mirrors the child engine's idle kill): a session that emits no
 			// events for `timeoutMs` is hung (e.g. a stuck provider stream) — without this the
 			// DEFAULT engine would await `waitForIdle()` forever and the run would never settle.
@@ -369,7 +387,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				disarmIdle();
 				idleTimer = setTimeout(() => {
 					timedOut = true;
-					session.agent.abort();
+					abortSession();
 				}, watchdogMs);
 				idleTimer.unref?.();
 			};
@@ -386,7 +404,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				if (hardMs <= 0) return;
 				hardTimer = setTimeout(() => {
 					hardTimedOut = true;
-					session.agent.abort();
+					abortSession();
 				}, hardMs);
 				hardTimer.unref?.();
 			};
@@ -417,7 +435,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				startupTimer = setTimeout(() => {
 					if (startupProgressed) return;
 					startupTimedOut = true;
-					session.agent.abort();
+					abortSession();
 				}, startupMs);
 				startupTimer.unref?.();
 			};
@@ -442,7 +460,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let aborted = false;
 			const onAbort = (): void => {
 				aborted = true;
-				session.agent.abort();
+				abortSession();
 			};
 			if (signal) {
 				if (signal.aborted) onAbort();
@@ -520,8 +538,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				armIdle(); // start the idle clock (reset on every session event)
 				armHard(); // start the lifetime ceiling (never reset)
 				armStartup(); // start the first-progress deadline (cancelled by the first real progress)
-				await session.prompt(task);
-				await session.agent.waitForIdle();
+				const runToIdle = async (): Promise<void> => {
+					await session.prompt(task);
+					// An abort may have won while prompt() was resolving. Do not start another host wait
+					// after that point; the outer race is already taking us through cleanup.
+					if (!aborted && !timedOut && !hardTimedOut && !startupTimedOut) await session.agent.waitForIdle();
+				};
+				if (aborted || timedOut || hardTimedOut || startupTimedOut) await abortGate;
+				else await Promise.race([runToIdle(), abortGate]);
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
 			} finally {

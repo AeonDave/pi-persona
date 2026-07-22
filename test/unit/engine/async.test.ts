@@ -248,7 +248,7 @@ test("running() lists only in-flight runs", async () => {
 	assert.equal(tracker.running().length, 0);
 });
 
-test("forceSettle clears a still-running ghost (fires onComplete once, leaves the running set)", async () => {
+test("forceSettle stops a still-running ghost (fires onComplete once, leaves the running set)", async () => {
 	const tracker = new AsyncRunTracker();
 	const completed: string[] = [];
 	tracker.onComplete((r) => completed.push(r.id));
@@ -264,7 +264,7 @@ test("forceSettle clears a still-running ghost (fires onComplete once, leaves th
 	});
 	assert.equal(tracker.running().length, 1);
 	assert.equal(tracker.forceSettle(id, "force-stopped"), true);
-	assert.equal(tracker.peek(id)?.status, "failed");
+	assert.equal(tracker.peek(id)?.status, "stopped");
 	assert.equal(tracker.peek(id)?.error, "force-stopped");
 	assert.equal(tracker.running().length, 0, "the ghost leaves the running set");
 	assert.deepEqual(completed, [id], "onComplete fires once for the forced settle");
@@ -272,7 +272,22 @@ test("forceSettle clears a still-running ghost (fires onComplete once, leaves th
 	release();
 	await tick();
 	assert.deepEqual(completed, [id], "the late natural result does not double-fire onComplete");
-	assert.equal(tracker.peek(id)?.status, "failed", "the late natural result does not overwrite the forced failure");
+	assert.equal(tracker.peek(id)?.status, "stopped", "the late natural result does not overwrite the forced stop");
+});
+
+test("tracker classifies an engine abort result as stopped, not failed", async () => {
+	const tracker = new AsyncRunTracker();
+	const id = tracker.launch({ agent: "a", task: "t" }, async () => ({
+		agent: "a",
+		output: "partial",
+		usage: usage(),
+		ok: false,
+		error: "agent aborted",
+		failureKind: "abort",
+	}));
+	await tick();
+	assert.equal(tracker.peek(id)?.status, "stopped");
+	assert.equal(tracker.peek(id)?.error, "agent aborted");
 });
 
 test("forceSettle is a no-op on unknown, already-settled, and re-forced runs", async () => {
@@ -442,18 +457,39 @@ test("buildCompletionReport includes anti-loop guidance on mixed batches (some d
 	assert.match(mixed, /retry ONCE with a different model/);
 });
 
-test("buildCompletionReport salvages a failed/aborted leg's partial output (not lost)", () => {
+test("buildCompletionReport reports a stopped leg separately, salvages output, and does not suggest retry", () => {
 	const fence = (t: string) => `<F>${t}</F>`;
 	// A hard-stopped research leg with real accumulated findings (its last progress snapshot).
-	const aborted: AsyncRun = { id: "run-3", agent: "research", task: "t", status: "failed", progress: { output: "found: 0x4016b3 read no bounds check", turns: 32, tokens: 693_000 }, error: "agent aborted" };
+	const aborted: AsyncRun = { id: "run-3", agent: "research", task: "t", status: "stopped", progress: { output: "found: 0x4016b3 read no bounds check", turns: 32, tokens: 693_000 }, error: "agent aborted" };
 	const report = buildCompletionReport([aborted], fence);
-	assert.match(report, /run-3 \(research\): agent aborted/, "the failure itself is still reported");
-	assert.match(report, /partial output before it was aborted/, "the salvage block is labelled as an abort");
+	assert.match(report, /0 done, 0 failed, 1 stopped/, "the stop is not counted as a failure");
+	assert.match(report, /run-3 \(research\): agent aborted/, "the stop reason is still reported");
+	assert.match(report, /partial output before it was stopped/, "the salvage block is labelled as a stop");
 	assert.match(report, /<F>found: 0x4016b3 read no bounds check<\/F>/, "the partial content is fenced + recoverable");
+	assert.doesNotMatch(report, /retry ONCE|Do not re-issue/, "an intentional stop carries no failure retry guidance");
 	// No salvage BLOCK when there is genuinely nothing to salvage (the guidance line mentions
 	// "partial output" regardless, so match the block's own `↩ … before it …` marker, not the phrase).
 	const empty = buildCompletionReport([failedRun("run-4", "scout", "no model")], fence);
 	assert.doesNotMatch(empty, /↩ .*partial output before it/, "no empty salvage block for a leg that produced nothing");
+});
+
+test("buildCompletionReport uses the canonical label/model and bounds salvaged partial output", () => {
+	const partial = `${"h".repeat(20_000)}TAIL-SENTINEL`;
+	const failed: AsyncRun = {
+		id: "run-9",
+		agent: "operator",
+		label: "atlas-static",
+		model: "sonnet",
+		task: "t",
+		status: "stopped",
+		progress: { output: partial, turns: 164, tokens: 888_000 },
+		error: "agent aborted",
+	};
+	const report = buildCompletionReport([failed], (t) => `<F>${t}</F>`);
+	assert.match(report, /run-9 \(atlas-static · sonnet\): agent aborted/, "stop uses the tree's canonical identity");
+	assert.match(report, /partial output truncated; \d+ characters omitted/, "oversized recovery text carries an explicit marker");
+	assert.match(report, /TAIL-SENTINEL/, "the useful tail is retained");
+	assert.doesNotMatch(report, /h{12001}/, "the full oversized payload is not injected into the supervisor context");
 });
 
 test("tracker.waitFor resolves once every listed run settles (a join on async runs)", async () => {
@@ -519,7 +555,7 @@ test("onComplete returns an unsubscribe (waitFor never leaks listeners)", async 
 test("IdleCoalescingNotifier.discard drops buffered items (results already collected via wait)", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
-	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => { sent.push(m); } });
 	n.notify("keep");
 	n.notify("collected");
 	n.discard((x) => x === "collected");
@@ -531,7 +567,7 @@ test("IdleCoalescingNotifier.peekPending exposes buffered-but-undelivered items 
 	const clock = fakeClock();
 	const sent: string[] = [];
 	// isIdle:false → the notifier never flushes, so items stay buffered (the gap `intercom wait` hit).
-	const n = makeStrNotifier(clock, { isIdle: () => false, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => false, deliver: (m) => { sent.push(m); } });
 	n.notify("a");
 	n.notify("b");
 	clock.tick();
@@ -557,7 +593,7 @@ test("buildCompletionReport fences untrusted sub-agent text (output and reasons)
 /** A string-rendering notifier (render = join with "|") for exercising the generic mechanism. */
 function makeStrNotifier(
 	clock: ReturnType<typeof fakeClock>,
-	deps: { isIdle: () => boolean; hasPending?: () => boolean; deliver: (m: string) => void },
+	deps: { isIdle: () => boolean; hasPending?: () => boolean; deliver: (m: string) => void | Promise<void> },
 ): IdleCoalescingNotifier<string> {
 	return new IdleCoalescingNotifier<string>({
 		isIdle: deps.isIdle,
@@ -572,7 +608,7 @@ function makeStrNotifier(
 test("IdleCoalescingNotifier coalesces a burst into a single idle delivery", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
-	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => { sent.push(m); } });
 	n.notify("a");
 	n.notify("b");
 	n.notify("c");
@@ -585,7 +621,7 @@ test("IdleCoalescingNotifier defers while the supervisor is busy, then delivers 
 	const clock = fakeClock();
 	const sent: string[] = [];
 	let idle = false;
-	const n = makeStrNotifier(clock, { isIdle: () => idle, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => idle, deliver: (m) => { sent.push(m); } });
 	n.notify("q");
 	clock.tick(); // busy → re-arms, delivers nothing
 	assert.equal(sent.length, 0);
@@ -595,17 +631,13 @@ test("IdleCoalescingNotifier defers while the supervisor is busy, then delivers 
 	assert.deepEqual(sent, ["q"], "delivered once the supervisor goes idle");
 });
 
-test("IdleCoalescingNotifier treats a queued supervisor as busy (avoids piling onto the queue)", () => {
+test("IdleCoalescingNotifier does not livelock on an orphaned host queue once the supervisor is idle", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
-	let pending = true;
-	const n = makeStrNotifier(clock, { isIdle: () => true, hasPending: () => pending, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => true, hasPending: () => true, deliver: (m) => { sent.push(m); } });
 	n.notify("q");
 	clock.tick();
-	assert.equal(sent.length, 0, "does not deliver while messages are already queued");
-	pending = false;
-	clock.tick();
-	assert.deepEqual(sent, ["q"]);
+	assert.deepEqual(sent, ["q"], "idle delivery starts the clean turn that can drain stale host follow-ups");
 });
 
 test("IdleCoalescingNotifier requeues and retries when a delivery races a just-started turn", () => {
@@ -630,10 +662,62 @@ test("IdleCoalescingNotifier requeues and retries when a delivery races a just-s
 	assert.deepEqual(sent, ["q"]);
 });
 
+test("IdleCoalescingNotifier requeues and retries an asynchronous delivery rejection", async () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	let attempts = 0;
+	const n = makeStrNotifier(clock, {
+		isIdle: () => true,
+		deliver: async (m) => {
+			attempts += 1;
+			await Promise.resolve();
+			if (attempts === 1) throw new Error("late host rejection");
+			sent.push(m);
+		},
+	});
+	n.notify("q");
+	clock.tick();
+	await n.flushIfIdle();
+	assert.deepEqual(n.peekPending(), ["q"], "rejected in-flight batch is restored");
+	assert.equal(clock.armed(), 1, "async rejection leaves a retry armed");
+	clock.tick();
+	await n.flushIfIdle();
+	assert.deepEqual(sent, ["q"], "the restored batch is eventually delivered once");
+});
+
+test("IdleCoalescingNotifier kick flushes immediately on an idle transition", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	let idle = false;
+	const n = makeStrNotifier(clock, { isIdle: () => idle, deliver: (m) => { sent.push(m); } });
+	n.notify("q");
+	clock.tick();
+	assert.equal(clock.armed(), 1, "busy polling left a fallback retry");
+	idle = true;
+	n.kick();
+	assert.deepEqual(sent, ["q"], "agent_settled-style kick does not wait for the retry cadence");
+	assert.equal(clock.armed(), 0, "the obsolete retry timer was cancelled");
+});
+
+test("IdleCoalescingNotifier re-refs its timer while a delivery is pending", () => {
+	let referenced = false;
+	const handle = { ref: () => { referenced = true; } };
+	const n = new IdleCoalescingNotifier<string>({
+		isIdle: () => false,
+		deliver: () => {},
+		render: (items) => items.join(","),
+		setTimer: () => handle,
+		clearTimer: () => {},
+	});
+	n.notify("q");
+	assert.equal(referenced, true, "an outstanding delivery keeps the host event loop alive");
+	n.cancel();
+});
+
 test("IdleCoalescingNotifier.cancel() drops the armed flush (reload hygiene)", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
-	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => { sent.push(m); } });
 	n.notify("q");
 	n.cancel();
 	assert.equal(clock.armed(), 0, "the timer is cleared");
@@ -644,7 +728,7 @@ test("IdleCoalescingNotifier.cancel() drops the armed flush (reload hygiene)", (
 test("IdleCoalescingNotifier.cancel() also drops buffered items (no leak across sessions)", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
-	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => sent.push(m) });
+	const n = makeStrNotifier(clock, { isIdle: () => true, deliver: (m) => { sent.push(m); } });
 	n.notify("stale"); // buffered by the session being torn down
 	n.cancel(); // reload/dispose hygiene: the instance is reused for the next session
 	n.notify("fresh"); // a new item on the reused notifier
@@ -658,7 +742,7 @@ test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", ()
 	const n = new IdleCoalescingNotifier<AsyncRun>({
 		isIdle: () => true,
 		hasPending: () => false,
-		deliver: (m) => sent.push(m),
+		deliver: (m) => { sent.push(m); },
 		render: (runs) => buildCompletionReport(runs, (t) => t),
 		setTimer: clock.setTimer,
 		clearTimer: clock.clearTimer,
@@ -671,20 +755,25 @@ test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", ()
 	assert.match(sent[0] ?? "", /run-2 \(operator\): boom/);
 });
 
-test("IdleCoalescingNotifier honours minIntervalMs and maxDeliveries (R6)", () => {
+test("IdleCoalescingNotifier honours minIntervalMs and holds capped items until reset (R6)", () => {
 	const clock = fakeClock();
 	const delivered: string[] = [];
 	let now = 0;
 	const n = new IdleCoalescingNotifier<string>({
 		isIdle: () => true, hasPending: () => false,
-		deliver: (m) => delivered.push(m), render: (items) => items.join(","),
+		deliver: (m) => { delivered.push(m); }, render: (items) => items.join(","),
 		setTimer: clock.setTimer, clearTimer: clock.clearTimer,
 		debounceMs: 1, minIntervalMs: 100, maxDeliveries: 2, now: () => now,
 	});
 	n.notify("a"); clock.tick(); assert.deepEqual(delivered, ["a"], "first delivers");
 	now = 50; n.notify("b"); clock.tick(); assert.deepEqual(delivered, ["a"], "within min-interval ⇒ held");
 	now = 150; clock.tick(); assert.deepEqual(delivered, ["a", "b"], "after min-interval ⇒ delivered");
-	now = 300; n.notify("c"); clock.tick(); assert.deepEqual(delivered, ["a", "b"], "hit maxDeliveries ⇒ suppressed");
+	now = 300; n.notify("c"); clock.tick(); assert.deepEqual(delivered, ["a", "b"], "hit maxDeliveries ⇒ delayed");
+	assert.deepEqual(n.peekPending(), ["c"], "the ceiling never drops buffered work");
+	assert.equal(clock.armed(), 1, "a capped batch retains a liveness retry");
+	n.resetDeliveries();
+	assert.deepEqual(delivered, ["a", "b", "c"], "reset reopens the gate and flushes immediately");
+	assert.deepEqual(n.peekPending(), []);
 });
 
 // renderCompletion — the completion report PLUS the premature-surrender counterweight, shared by

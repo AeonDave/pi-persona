@@ -24,6 +24,6 @@ test("knownParams exposes a strategy's declared params; magi has reflect + aggre
 	const p = knownParams("magi");
 	assert.ok(p && "reflect" in p && "aggregate" in p);
 	assert.equal(p.reflect?.type, "boolean");
-	assert.equal(knownParams("fanout"), undefined, "a param-less strategy has no schema");
+	assert.deepEqual(knownParams("fanout"), {}, "a known param-less strategy exposes an empty schema");
 	assert.equal(knownParams("nope"), undefined);
 });

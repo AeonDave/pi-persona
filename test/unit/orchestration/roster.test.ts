@@ -87,15 +87,24 @@ test("rosterSpec carries tools/isolation/mcp through to the run spec (parity wit
 	assert.deepEqual(rosterSpec(member), { agent: "operator", tools: ["read", "grep"], isolation: "worktree", mcp: true });
 });
 
-test("rosterSpec drops isolation: none and mcp: false, mirroring specOf()'s mapping exactly", () => {
-	assert.deepEqual(rosterSpec({ agent: "operator", isolation: "none", mcp: false }), { agent: "operator" });
+test("rosterSpec preserves explicit isolation: none and mcp: false overrides", () => {
+	assert.deepEqual(rosterSpec({ agent: "operator", isolation: "none", mcp: false }), {
+		agent: "operator",
+		isolation: "none",
+		mcp: false,
+	});
 });
 
 test("parseTeams reads inline-map members carrying tools/isolation/mcp (roster parity with delegate tasks)", () => {
-	const yaml = ["review:", "  - { agent: operator, tools: [read, grep], isolation: worktree, mcp: true }"].join("\n");
+	const yaml = [
+		"review:",
+		"  - { agent: operator, tools: [read, grep], isolation: worktree, mcp: true }",
+		"  - { agent: scout, isolation: none, mcp: false }",
+	].join("\n");
 	const t = parseTeams(yaml);
-	assert.equal(t.review?.length, 1);
+	assert.equal(t.review?.length, 2);
 	assert.deepEqual(rosterSpec(t.review![0]!), { agent: "operator", tools: ["read", "grep"], isolation: "worktree", mcp: true });
+	assert.deepEqual(rosterSpec(t.review![1]!), { agent: "scout", isolation: "none", mcp: false });
 });
 
 test("rosterSpec regression-pins the no-new-fields path: absent tools/isolation/mcp ⇒ identical to today's output (no stray keys)", () => {

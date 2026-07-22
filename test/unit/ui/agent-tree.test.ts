@@ -9,12 +9,14 @@ test("renderAgentTree nests children under their parent with status glyphs + det
 		{ id: "magi/melchior", label: "Melchior", parentId: "magi", status: "running", detail: undefined },
 		{ id: "magi/balthasar", label: "Balthasar", parentId: "magi", status: "done", detail: "↑12k ↓3k" },
 		{ id: "magi/casper", label: "Casper", parentId: "magi", status: "failed", detail: undefined },
+		{ id: "magi/stopped", label: "Stopped", parentId: "magi", status: "stopped", detail: undefined },
 	];
 	const text = renderAgentTree(nodes).join("\n");
 	assert.match(text, /⏳ magi/);
 	assert.match(text, /├─ ⏳ Melchior/);
 	assert.match(text, /├─ ✓ Balthasar {2}↑12k ↓3k/);
-	assert.match(text, /└─ ✗ Casper/);
+	assert.match(text, /├─ ✗ Casper/);
+	assert.match(text, /└─ ■ Stopped/);
 });
 
 test("AgentTree.add is idempotent on id and update mutates status/detail + notifies", () => {

@@ -48,3 +48,12 @@ test("removeEntry takes a session_id and deletes the right file", () => {
 	const remaining = readAll(dir, H).filter((e) => e.name === "gone");
 	assert.deepEqual(remaining.map((e) => e.session_id), ["stays-sess"], "only the targeted session_id's file is removed");
 });
+
+test("heartbeat rewrite preserves the existing public_key for the same session_id", () => {
+	const publicKey = Buffer.from("test-ed25519-public-key").toString("base64");
+	writeEntry(dir, H, entry({ session_id: "heartbeat-session", name: "before", public_key: publicKey }));
+	writeEntry(dir, H, entry({ session_id: "heartbeat-session", name: "after" }));
+	const stored = readAll(dir, H).find((e) => e.session_id === "heartbeat-session");
+	assert.equal(stored?.name, "after", "heartbeat metadata is refreshed");
+	assert.equal(stored?.public_key, publicKey, "heartbeat cannot erase the plane-owned authentication key");
+});

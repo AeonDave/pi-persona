@@ -9,29 +9,33 @@
  * here rather than re-implemented differently.
  */
 
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import nodeNet from "node:net";
 import type net from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
-import { isExocomFrame, nextHops, truncateForInject, type AgentCard, type ExocomFrame, type ExocomMessage } from "./envelope.ts";
+import { frameSigningPayload, isExocomFrame, nextHops, truncateForInject, type AgentCard, type ExocomAck, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack } from "./envelope.ts";
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
-import { prune, readAll, removeEntry, writeEntry, type RegistryEntry } from "./registry.ts";
+import { normalizePeerName, prune, readAll, removeEntry, writeEntry, type RegistryEntry } from "./registry.ts";
 
 export interface ExocomIdentity {
 	session_id: string; name: string; persona: string; purpose: string; color: string;
 	model: string; endpoint: string; cwd: string;
 }
 
+export type ExocomInboundResult =
+	| { accepted: true; duplicate?: boolean }
+	| { accepted: false; reason: string };
+
 export interface ExocomPlaneDeps {
 	agentDir: string;
 	hash: string;
 	identity: ExocomIdentity;
 	getCard: () => AgentCard;
-	onInbound: (m: ExocomMessage, fromEntry: RegistryEntry | undefined) => void;
+	onInbound: (m: ExocomMessage, fromEntry: RegistryEntry | undefined) => ExocomInboundResult;
 	/** Fired when the live pool changes without our own action — a peer's `bye` (clean shutdown)
 	 *  removes it from the registry, so the widget should refresh at once rather than wait for the
 	 *  next heartbeat tick. Optional; unset ⇒ no-op. */
@@ -64,6 +68,35 @@ function isRestartingError(err: unknown): boolean {
  *  `send` propagates this without pruning the registry (the heartbeat/stale prune is the
  *  right place to evict a genuinely dead entry, not a single slow ack). */
 class AckTimeoutError extends Error {}
+class PeerNackError extends Error {}
+class PeerProtocolError extends Error {}
+class PeerAuthenticationError extends Error {}
+
+function verifyFrameOrigin(frame: ExocomFrame, entry: RegistryEntry): boolean {
+	if (!frame.signature || !entry.public_key) return false;
+	try {
+		const key = createPublicKey({ key: Buffer.from(entry.public_key, "base64"), format: "der", type: "spki" });
+		return cryptoVerify(null, Buffer.from(frameSigningPayload(frame), "utf8"), key, Buffer.from(frame.signature, "base64"));
+	} catch {
+		return false;
+	}
+}
+
+function preparePosixEndpoint(endpoint: string): void {
+	if (process.platform === "win32") return;
+	const dir = dirname(endpoint);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const stat = lstatSync(dir);
+	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`exocom: unsafe socket directory ${dir}`);
+	if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`exocom: socket directory is not owned by this user: ${dir}`);
+	chmodSync(dir, 0o700);
+}
+
+function closeServer(server: net.Server): Promise<void> {
+	return new Promise((resolve) => {
+		try { server.close(() => resolve()); } catch { resolve(); }
+	});
+}
 
 /** Probe: is something actually listening at `endpoint`? (lifted from `broker/host.ts`,
  *  which does not export it — same probe, not a different one.) */
@@ -137,7 +170,7 @@ async function bindServer(netImpl: typeof import("node:net"), endpoint: string, 
 /** Connect, write one frame, and resolve with the peer's first reply frame (ack/pong).
  *  Bounded by an unref'd `ackTimeoutMs` (R4): a peer that accepts the connection and then
  *  never replies (frozen, wedged) must not hang the caller's turn forever. */
-function sendFrame(netImpl: typeof import("node:net"), endpoint: string, frame: ExocomFrame, ackTimeoutMs: number): Promise<ExocomFrame> {
+function sendFrame(netImpl: typeof import("node:net"), endpoint: string, frame: ExocomMessage, ackTimeoutMs: number, expected: RegistryEntry): Promise<ExocomAck> {
 	return new Promise((resolve, reject) => {
 		const socket = netImpl.connect(endpoint);
 		let settled = false;
@@ -151,7 +184,15 @@ function sendFrame(netImpl: typeof import("node:net"), endpoint: string, frame: 
 		socket.on("data", createFrameReader(
 			(raw) => finish(() => {
 				socket.destroy();
-				if (isExocomFrame(raw)) resolve(raw); else reject(new Error("exocom: malformed reply frame"));
+				if (!isExocomFrame(raw)) { reject(new PeerProtocolError("exocom: malformed reply frame")); return; }
+				if (raw.kind === "nack" && raw.msg_id === frame.msg_id) {
+					if (raw.from_session !== expected.session_id || !verifyFrameOrigin(raw, expected)) reject(new PeerAuthenticationError("exocom: unauthenticated nack"));
+					else reject(new PeerNackError(raw.error));
+					return;
+				}
+				if (raw.kind !== "ack" || raw.msg_id !== frame.msg_id) { reject(new PeerProtocolError("exocom: unexpected reply frame")); return; }
+				if (raw.from_session !== expected.session_id || !verifyFrameOrigin(raw, expected)) { reject(new PeerAuthenticationError("exocom: unauthenticated ack")); return; }
+				resolve(raw);
 			}),
 			(e) => finish(() => { socket.destroy(); reject(e); }),
 		));
@@ -220,6 +261,9 @@ export class ExocomPlane {
 	private readonly sockets = new Set<net.Socket>();
 	private readonly inboundHops = new Map<string, number>(); // msg_id -> hops (for reply increment)
 	private readonly ackTimeoutMs: number;
+	private readonly privateKey: KeyObject;
+	private readonly publicKey: string;
+	private readonly artifacts = new Map<string, string>();
 	private server: net.Server | undefined;
 	// Viewer-centric per-peer counters, keyed by the PEER's session_id — NOT a global self-report
 	// (that read "inverted" on another instance's pool: a peer who sent TO us would show ITS OWN
@@ -233,13 +277,28 @@ export class ExocomPlane {
 		this.netImpl = deps.net ?? nodeNet;
 		this.now = deps.now ?? Date.now;
 		this.ackTimeoutMs = deps.ackTimeoutMs ?? EXOCOM.ACK_TIMEOUT_MS;
+		const pair = generateKeyPairSync("ed25519");
+		this.privateKey = pair.privateKey;
+		this.publicKey = pair.publicKey.export({ type: "spki", format: "der" }).toString("base64");
+	}
+
+	private signFrame<T extends ExocomFrame>(frame: T): T {
+		return { ...frame, signature: cryptoSign(null, Buffer.from(frameSigningPayload(frame), "utf8"), this.privateKey).toString("base64") };
+	}
+
+	private ack(msgId: string): ExocomAck {
+		return this.signFrame({ kind: "ack", msg_id: msgId, from_session: this.deps.identity.session_id });
+	}
+
+	private nack(msgId: string, error: string): ExocomNack {
+		return this.signFrame({ kind: "nack", msg_id: msgId, error, from_session: this.deps.identity.session_id });
 	}
 
 	/** The identity name — display-only (see `RegistryEntry.name`'s doc comment). Nothing left to
 	 *  suffix: the registry file is keyed by session_id, so this never diverges from
 	 *  `deps.identity.name`, before or after `start()`. */
 	get name(): string {
-		return this.deps.identity.name;
+		return normalizePeerName(this.deps.identity.name);
 	}
 
 	/** Messages this instance has successfully `send()`'d TO the given peer (ack settled), keyed by
@@ -268,9 +327,29 @@ export class ExocomPlane {
 
 	async start(): Promise<void> {
 		const { agentDir, hash, identity } = this.deps;
-		this.server = await bindServer(this.netImpl, identity.endpoint, (s) => this.handleConnection(s));
-		prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-		writeEntry(agentDir, hash, this.buildEntry());
+		let bound = false;
+		try {
+			preparePosixEndpoint(identity.endpoint);
+			this.server = await bindServer(this.netImpl, identity.endpoint, (s) => this.handleConnection(s));
+			bound = true;
+			if (process.platform !== "win32") chmodSync(identity.endpoint, 0o600);
+			prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
+			writeEntry(agentDir, hash, this.buildEntry());
+			this.cleanupArtifacts();
+		} catch (err) {
+			const server = this.server;
+			this.server = undefined;
+			for (const socket of this.sockets) {
+				try { socket.destroy(); } catch { /* best-effort rollback */ }
+			}
+			this.sockets.clear();
+			if (server) await closeServer(server);
+			if (bound && process.platform !== "win32") {
+				try { unlinkSync(identity.endpoint); } catch { /* best-effort */ }
+			}
+			if (bound) removeEntry(agentDir, hash, identity.session_id);
+			throw err;
+		}
 	}
 
 	/** This instance's registry entry, keyed (by writeEntry) on `identity.session_id` — never on
@@ -280,10 +359,11 @@ export class ExocomPlane {
 		const { identity } = this.deps;
 		const card = this.deps.getCard();
 		return {
-			session_id: identity.session_id, name: identity.name, persona: identity.persona, purpose: identity.purpose,
+			session_id: identity.session_id, name: this.name, persona: identity.persona, purpose: identity.purpose,
 			color: identity.color, model: identity.model, pid: process.pid, endpoint: identity.endpoint,
 			cwd: identity.cwd, context_pct: card.context_pct, inbox: card.inbox,
 			heartbeat_at: new Date(this.now()).toISOString(),
+			public_key: this.publicKey,
 		};
 	}
 
@@ -305,16 +385,35 @@ export class ExocomPlane {
 		const onFrame = (raw: unknown): void => {
 			if (!isExocomFrame(raw)) return; // fail-closed preflight (R5) — silently drop junk
 			switch (raw.kind) {
-				case "message": {
+			case "message": {
+					const entry = readAll(this.deps.agentDir, this.deps.hash).find((e) => e.session_id === raw.from_session);
+					if (!entry || raw.from_endpoint !== entry.endpoint || !verifyFrameOrigin(raw, entry)) {
+						write(this.nack(raw.msg_id, "authentication failed"));
+						return;
+					}
+					let disposition: ExocomInboundResult | undefined;
+					try {
+						disposition = this.deps.onInbound(raw, entry);
+					} catch {
+						write(this.nack(raw.msg_id, "receiver rejected message"));
+						return;
+					}
+					if (disposition?.accepted === false) {
+						write(this.nack(raw.msg_id, disposition.reason.slice(0, 256) || "receiver rejected message"));
+						return;
+					}
+					if (disposition?.accepted === true && disposition.duplicate === true) {
+						write(this.ack(raw.msg_id));
+						return;
+					}
 					this.receivedFrom.set(raw.from_session, (this.receivedFrom.get(raw.from_session) ?? 0) + 1);
 					this.inboundHops.set(raw.msg_id, raw.hops);
 					if (this.inboundHops.size > MAX_TRACKED_HOPS) {
 						const oldest = this.inboundHops.keys().next().value;
 						if (oldest !== undefined) this.inboundHops.delete(oldest);
 					}
-					const entry = readAll(this.deps.agentDir, this.deps.hash).find((e) => e.session_id === raw.from_session);
-					this.deps.onInbound(raw, entry);
-					write({ kind: "ack", msg_id: raw.msg_id });
+					try { this.deps.onPoolChange?.(); } catch { /* UI refresh must never block the transport ACK */ }
+					write(this.ack(raw.msg_id));
 					return;
 				}
 				case "ping":
@@ -322,7 +421,7 @@ export class ExocomPlane {
 					return;
 				case "bye": {
 					const entry = readAll(this.deps.agentDir, this.deps.hash).find((e) => e.session_id === raw.from_session);
-					if (entry) {
+					if (entry && raw.from_endpoint === entry.endpoint && verifyFrameOrigin(raw, entry)) {
 						removeEntry(this.deps.agentDir, this.deps.hash, entry.session_id);
 						this.deps.onPoolChange?.(); // a peer left cleanly — refresh the pool now, don't wait 30s
 					}
@@ -337,14 +436,43 @@ export class ExocomPlane {
 		socket.once("close", () => this.sockets.delete(socket));
 	}
 
+	private cleanupArtifacts(): void {
+		const dir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
+		if (!existsSync(dir)) return;
+		try {
+			const now = Date.now();
+			const live: Array<{ path: string; mtime: number }> = [];
+			for (const file of readdirSync(dir)) {
+				if (!/^[0-9a-f-]{36}\.txt$/i.test(file)) continue;
+				const path = join(dir, file);
+				const stat = statSync(path);
+				if (!stat.isFile()) continue;
+				if (now - stat.mtimeMs > EXOCOM.ARTIFACT_TTL_MS) { try { unlinkSync(path); } catch { /* best-effort */ } }
+				else live.push({ path, mtime: stat.mtimeMs });
+			}
+			live.sort((a, b) => a.mtime - b.mtime);
+			const excess = Math.max(0, live.length - (EXOCOM.ARTIFACT_MAX_FILES - 1));
+			for (let i = 0; i < excess; i++) { try { unlinkSync(live[i]!.path); } catch { /* best-effort */ } }
+		} catch { /* cleanup must not break messaging */ }
+	}
+
+	private removeArtifact(msgId: string): void {
+		const path = this.artifacts.get(msgId);
+		if (!path) return;
+		try { unlinkSync(path); } catch { /* best-effort */ }
+		this.artifacts.delete(msgId);
+	}
+
 	/** Spill to a workspace-scoped artifact once the payload exceeds the inline budget (R3);
 	 *  the receiver reads `path` on its own turn instead of the full text landing inline. */
 	private payloadFor(msgId: string, text: string): string {
 		if (Buffer.byteLength(text, "utf8") <= EXOCOM.INLINE_MAX_BYTES) return text;
 		const dir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
 		mkdirSync(dir, { recursive: true });
+		this.cleanupArtifacts();
 		const path = join(dir, `${msgId}.txt`);
-		writeFileSync(path, text, "utf8");
+		writeFileSync(path, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
+		this.artifacts.set(msgId, path);
 		const preview = truncateForInject(text, EXOCOM.PREVIEW_BYTES).text;
 		return JSON.stringify({ preview, path });
 	}
@@ -359,29 +487,40 @@ export class ExocomPlane {
 
 		const msg_id = randomUUID();
 		const hops = inReplyTo !== undefined ? nextHops(this.inboundHops.get(inReplyTo) ?? 0) : 0;
-		const message: ExocomMessage = {
+		const unsigned: ExocomMessage = {
 			kind: "message", msg_id, from_session: identity.session_id, from_endpoint: identity.endpoint,
 			from_name: this.name, text: this.payloadFor(msg_id, text), hops, ts: new Date(this.now()).toISOString(),
 			...(inReplyTo !== undefined ? { in_reply_to: inReplyTo } : {}),
 		};
+		const message = this.signFrame(unsigned);
 
 		try {
-			await sendFrame(this.netImpl, entry.endpoint, message, this.ackTimeoutMs);
+			await sendFrame(this.netImpl, entry.endpoint, message, this.ackTimeoutMs, entry);
 		} catch (err) {
 			// A frozen-but-registered peer (accepted the connection, never acked) is left for
 			// the normal heartbeat/stale prune to evict — a single slow ack doesn't warrant
 			// mutating the registry here.
-			if (err instanceof AckTimeoutError) throw new Error(`exocom: ack timeout from "${target}"`);
+			if (err instanceof PeerNackError) { this.removeArtifact(msg_id); throw new Error(`exocom: peer "${target}" rejected message: ${err.message}`); }
+			if (err instanceof AckTimeoutError) { this.removeArtifact(msg_id); throw new Error(`exocom: ack timeout from "${target}"`); }
+			if (err instanceof PeerAuthenticationError || err instanceof PeerProtocolError) {
+				this.removeArtifact(msg_id);
+				removeEntry(agentDir, hash, entry.session_id);
+				throw new Error(`${err.message} from "${target}"`);
+			}
 			if (!isRestartingError(err)) {
+				this.removeArtifact(msg_id);
 				removeEntry(agentDir, hash, entry.session_id);
 				throw new Error(`exocom: peer "${target}" unreachable`);
 			}
 			await delay(RECONNECT_DELAY_MS);
 			try {
-				await sendFrame(this.netImpl, entry.endpoint, message, this.ackTimeoutMs);
+				await sendFrame(this.netImpl, entry.endpoint, message, this.ackTimeoutMs, entry);
 			} catch (err2) {
+				this.removeArtifact(msg_id);
+				if (err2 instanceof PeerNackError) throw new Error(`exocom: peer "${target}" rejected message: ${err2.message}`);
 				if (err2 instanceof AckTimeoutError) throw new Error(`exocom: ack timeout from "${target}"`);
 				removeEntry(agentDir, hash, entry.session_id);
+				if (err2 instanceof PeerAuthenticationError || err2 instanceof PeerProtocolError) throw new Error(`${err2.message} from "${target}"`);
 				throw new Error(`exocom: peer "${target}" unreachable`);
 			}
 		}
@@ -391,22 +530,23 @@ export class ExocomPlane {
 
 	async stop(): Promise<void> {
 		const { agentDir, hash, identity } = this.deps;
-		await Promise.all(
-			this.listPeers().map((p) => sendNoReply(this.netImpl, p.endpoint, { kind: "bye", from_session: identity.session_id })),
-		);
+		const bye: ExocomBye = this.signFrame({ kind: "bye", from_session: identity.session_id, from_endpoint: identity.endpoint });
+		try {
+			await Promise.all(this.listPeers().map((p) => sendNoReply(this.netImpl, p.endpoint, bye)));
+		} catch { /* shutdown remains best-effort */ }
 		for (const s of this.sockets) {
 			try { s.destroy(); } catch { /* ignore */ }
 		}
 		this.sockets.clear();
 		const server = this.server;
+		this.server = undefined;
 		if (server) {
-			await new Promise<void>((resolve) => {
-				try { server.close(() => resolve()); } catch { resolve(); }
-			});
+			await closeServer(server);
 		}
 		if (process.platform !== "win32") {
 			try { unlinkSync(identity.endpoint); } catch { /* ignore */ }
 		}
 		removeEntry(agentDir, hash, identity.session_id);
+		for (const msgId of [...this.artifacts.keys()]) this.removeArtifact(msgId);
 	}
 }
