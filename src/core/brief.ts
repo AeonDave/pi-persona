@@ -117,7 +117,17 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 export interface ExocomPeerBrief {
 	name: string;
 	persona?: string;
-	purpose?: string;
+}
+
+/** Registry metadata is peer-controlled. The roster lives in the system prompt, so only a
+ * compact identifier alphabet may cross that boundary; free-form purpose text never does. */
+function peerIdentifier(value: string, max: number): string {
+	return value
+		.normalize("NFKC")
+		.replace(/[^A-Za-z0-9._/@:+#-]+/g, "-")
+		.replace(/-{2,}/g, "-")
+		.replace(/^[-._/@:+#]+|[-._/@:+#]+$/g, "")
+		.slice(0, max);
 }
 
 /** Per-turn awareness of live exocom peers (independent pi instances in this workspace), or
@@ -129,12 +139,13 @@ export function buildExocomBrief(peers: ExocomPeerBrief[]): string | undefined {
 		"[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this workspace right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:",
 	];
 	for (const p of peers.slice(0, MAX_LISTED)) {
-		const spec = p.persona ? (p.purpose ? `${p.persona} — ${clip(p.purpose, DESC_CLIP)}` : p.persona) : "";
-		lines.push(spec ? `- ${p.name} (${spec})` : `- ${p.name}`);
+		const name = peerIdentifier(p.name, 48) || "peer";
+		const persona = p.persona ? peerIdentifier(p.persona, 48) : "";
+		lines.push(persona ? `- ${name} (${persona})` : `- ${name}`);
 	}
 	if (peers.length > MAX_LISTED) lines.push(`- …and ${peers.length - MAX_LISTED} more (exocom_list)`);
 	lines.push(
-		`Hand a peer a self-contained subtask with exocom_send({ target: "<name>", message: "<request>" }) — one-way, non-blocking; their reply returns to you as a follow-up. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+		`Hand a peer a self-contained subtask with exocom_send({ target: "<name>", message: "<request>" }) — one-way, non-blocking. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
 	);
 	return lines.join("\n");
 }

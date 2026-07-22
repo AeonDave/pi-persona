@@ -6,7 +6,7 @@
  * drill into a node. Sources only push status/detail; rendering is pure.
  */
 
-export type AgentNodeStatus = "running" | "done" | "failed";
+export type AgentNodeStatus = "running" | "done" | "failed" | "stopped";
 
 export interface AgentNode {
 	id: string;
@@ -38,7 +38,7 @@ export function flattenTree(nodes: AgentNode[]): FlatRow[] {
 }
 
 /** Status → glyph, shared by every agent surface (tree, overlay). */
-export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗" };
+export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗", stopped: "■" };
 
 /** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
 export function renderAgentTree(nodes: AgentNode[]): string[] {

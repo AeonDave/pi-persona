@@ -62,6 +62,8 @@ export interface DelegateView {
 	label: string;
 	running: boolean;
 	ok: boolean;
+	/** Terminal failure classification; `abort` projects as stopped rather than failed in the UI. */
+	failureKind?: AgentResult["failureKind"];
 	output: string;
 	/** The tool the leg is currently running (e.g. "grep src/…"), "" if none. */
 	activity: string;
@@ -121,8 +123,8 @@ export function specOf(t: DelegateTask): AgentRunSpec {
 	if (t.model) spec.model = t.model;
 	if (t.tools && t.tools.length > 0) spec.tools = t.tools;
 	if (t.role?.trim()) spec.role = t.role.trim();
-	if (t.isolation === "worktree") spec.isolation = "worktree";
-	if (t.mcp === true) spec.mcp = true;
+	if (t.isolation !== undefined) spec.isolation = t.isolation;
+	if (t.mcp !== undefined) spec.mcp = t.mcp;
 	if (isPositiveFiniteMs(t.timeoutMs)) spec.timeoutMs = t.timeoutMs;
 	return spec;
 }
@@ -248,6 +250,7 @@ function viewOf(agent: string, label: string, r: AgentResult): DelegateView {
 		label,
 		running: false,
 		ok: r.ok,
+		...(r.failureKind !== undefined ? { failureKind: r.failureKind } : {}),
 		output: r.ok ? r.output || "(no output)" : r.error ?? "(failed)",
 		activity: "",
 		usage: r.usage,
@@ -313,8 +316,8 @@ export async function runDelegate(
 		if (params.model) single.model = params.model;
 		if (params.tools && params.tools.length > 0) single.tools = params.tools;
 		if (params.role?.trim()) single.role = params.role.trim();
-		if (params.isolation === "worktree") single.isolation = "worktree";
-		if (params.mcp === true) single.mcp = true;
+		if (params.isolation !== undefined) single.isolation = params.isolation;
+		if (params.mcp !== undefined) single.mcp = params.mcp;
 		if (params.timeoutMs !== undefined) single.timeoutMs = params.timeoutMs;
 		const label = labelFor(single, 0);
 		const view: DelegateView = {

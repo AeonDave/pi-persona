@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { composeSystemPrompt, expandCouncilPreset, parsePersona } from "../../../src/persona/persona.ts";
+import { composeSystemPrompt, expandCouncilPreset, parsePersona, resolveCouncilInvocation } from "../../../src/persona/persona.ts";
 
 const MAGI = `---
 name: magi
@@ -130,6 +130,43 @@ test("audit council params include peers: true (adoption example)", () => {
 	assert.equal(audit.council?.strategy, "synthesize");
 	assert.equal(audit.council?.roster, "review");
 	assert.deepEqual(audit.council?.params, { synthesizer: "reviewer", peers: true });
+});
+
+test("resolveCouncilInvocation borrows a named persona's council without changing the active caller", () => {
+	const elite = parsePersona("---\nname: elite\npersona: true\n---\nELITE", "elite.md");
+	const magi = parsePersona(
+		"---\nname: magi\npersona: true\ncouncil:\n  strategy: magi\n  roster: magi\n  params:\n    reflect: true\n---\nMAGI",
+		"magi.md",
+	);
+	assert.ok(elite);
+	assert.ok(magi);
+	const resolved = resolveCouncilInvocation([elite, magi], elite, {
+		persona: "magi",
+		params: { reflect: false },
+	});
+	assert.equal(resolved.ok, true);
+	if (!resolved.ok) return;
+	assert.deepEqual(resolved.value, {
+		strategy: "magi",
+		roster: "magi",
+		params: { reflect: false },
+		persona: "magi",
+	});
+	assert.equal(elite.name, "elite");
+	assert.equal(elite.body, "ELITE");
+});
+
+test("resolveCouncilInvocation rejects an explicit persona with no council even when overrides are supplied", () => {
+	const solo = parsePersona("---\nname: solo\npersona: true\n---\nSOLO", "solo.md");
+	assert.ok(solo);
+	assert.deepEqual(
+		resolveCouncilInvocation([solo], solo, {
+			persona: "solo",
+			strategy: "magi",
+			roster: "magi",
+		}),
+		{ ok: false, error: 'persona "solo" declares no usable council' },
+	);
 });
 
 test("dev persona includes a tool-driven pair council (adoption example)", () => {

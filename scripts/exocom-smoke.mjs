@@ -28,7 +28,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { attributeInbound } from "../src/core/fence.ts";
+import { attributePeer } from "../src/core/fence.ts";
 import { SeenMessages, SenderBudget } from "../src/exocom/guards.ts";
 import { buildInboundDelivery } from "../src/exocom/inbound.ts";
 import { EXOCOM } from "../src/exocom/limits.ts";
@@ -76,7 +76,7 @@ async function main() {
 		const decision = buildInboundDelivery(msg, label, {
 			budget, seen, injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
 			fence: (t) => t,
-			attribute: attributeInbound,
+			attribute: attributePeer,
 		});
 		bDecisions.push({ msg, fromEntry, decision });
 	});
@@ -102,7 +102,11 @@ async function main() {
 		check("send+inbound: delivered follow-up is attributed + fenced",
 			first?.decision && "deliver" in first.decision
 				&& first.decision.deliver.includes("smoke-a")
-				&& first.decision.deliver.includes("<subagent-output>"));
+				&& first.decision.deliver.includes("<peer-message>"));
+		check("send+inbound: delivered follow-up exposes msg_id + reply instruction",
+			first?.decision && "deliver" in first.decision
+				&& first.decision.deliver.includes(firstMsgId)
+				&& first.decision.deliver.includes("in_reply_to"));
 
 		// ── 3. correlated reply ──────────────────────────────────────────────────
 		await b.send("smoke-a", "done", firstMsgId);

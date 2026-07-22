@@ -20,15 +20,16 @@ import { type Static, Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import type { DisplayPeer, ExocomPlane } from "../exocom/plane.ts";
+import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 
 const ExocomSendParams = Type.Object({
-	target: Type.String({ description: 'The peer\'s name (from `exocom_list`), or "*" to broadcast to every reachable peer.' }),
-	message: Type.String({ description: "The message body." }),
-	in_reply_to: Type.Optional(Type.String({ description: "The msg_id you're replying to, if this is a reply." })),
+	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s name (from `exocom_list`), or "*" to broadcast to every reachable peer.' }),
+	message: Type.String({ minLength: 1, maxLength: 1_000_000, description: "The message body." }),
+	in_reply_to: Type.Optional(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$", description: "The msg_id you're replying to, if this is a reply." })),
 });
 
 const ExocomNameParams = Type.Object({
-	name: Type.String({ description: "Your chosen exocom call-sign — a short, distinctive display handle. Free choice: invent one." }),
+	name: Type.String({ minLength: 1, maxLength: 96, description: "Your chosen exocom call-sign — a short, distinctive display handle. Free choice: invent one." }),
 });
 
 /** Single-target send vs. `target: "*"` broadcast — two distinct result shapes, so `execute`'s
@@ -42,10 +43,10 @@ type ExocomSendDetails =
  *  disambiguates two peers registered under the same persona name — see plane.ts's
  *  `dedupeDisplayNames`. */
 function formatPeers(peers: DisplayPeer[]): string {
-	if (peers.length === 0) return "(no exocom peers reachable)";
-	return peers
-		.map((p) => `• ${p.displayName} (${p.persona} · ${p.model}, ctx ${p.context_pct}%)${p.purpose ? ` — ${p.purpose}` : ""}`)
+	const rows = peers
+		.map((p) => `- ${normalizeMetadataText(p.displayName, 80, "peer")} · ${normalizeMetadataText(p.persona, 64, "unknown")} · ${normalizeMetadataText(p.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(p.context_pct) || 0))}%`)
 		.join("\n");
+	return [`Exocom presence only (${peers.length} peers; not a message inbox)`, rows, "Use target exactly as shown."].filter(Boolean).join("\n");
 }
 
 /** `getPlane` is a LIVE accessor, not a captured value: a `canUseBus` downgrade (`stopExocom`,
@@ -62,7 +63,7 @@ export function registerExocomTools(
 	pi.registerTool({
 		name: "exocom_list",
 		label: "Exocom List",
-		description: "List the other top-level pi instances reachable on the exocom plane right now (this workspace's live, pruned peers).",
+		description: "List current exocom peer presence only; this is not a message inbox and replies arrive automatically.",
 		parameters: Type.Object({}),
 		async execute() {
 			const plane = getPlane();
@@ -91,6 +92,7 @@ export function registerExocomTools(
 			if (params.target === "*") {
 				const peers = plane.listPeers();
 				const msg_ids: string[] = [];
+				const sent: Array<{ target: string; msg_id: string }> = [];
 				const failed: Array<{ target: string; error: string }> = [];
 				await Promise.all(
 					// By displayName, not the possibly-shared `.name`: two LIVE peers can share a raw
@@ -101,25 +103,23 @@ export function registerExocomTools(
 						try {
 							const { msg_id } = await plane.send(p.displayName, params.message, params.in_reply_to);
 							msg_ids.push(msg_id);
+							sent.push({ target: p.displayName, msg_id });
 						} catch (err) {
 							failed.push({ target: p.displayName, error: err instanceof Error ? err.message : String(err) });
 						}
 					}),
 				);
-				const failNote = failed.length > 0 ? ` (${failed.length} failed)` : "";
+				const ids = sent.map((item) => `${item.target}=${item.msg_id}`).join(", ");
+				const failNote = failed.length > 0 ? `; ${failed.length} failed` : "";
 				return {
-					// The full msg_ids list is a wall of uuids the model never needs on the happy path —
-					// keep it in `details.msg_ids` for programmatic use, not in the read text.
-					content: [{ type: "text", text: `exocom → ${peers.length} peers ✓${failNote}` }],
+				content: [{ type: "text", text: `✓ received and queued by ${sent.length}/${peers.length} peers${failNote}; replies arrive automatically as [exocom_received] — do not poll exocom_list${ids ? `; msg_ids: ${ids}` : ""}` }],
 					details: { target: "*", msg_ids, failed },
 				};
 			}
 
 			const { msg_id } = await plane.send(params.target, params.message, params.in_reply_to);
 			return {
-				// Drop the full uuid from the read text (KEEP it in `details.msg_id` for programmatic
-				// use, e.g. a later `in_reply_to`) — the model doesn't need to see it to confirm delivery.
-				content: [{ type: "text", text: `exocom → ${params.target} ✓` }],
+			content: [{ type: "text", text: `✓ received and queued by ${params.target}; reply arrives automatically as [exocom_received] — do not poll exocom_list. msg_id=${msg_id}` }],
 				details: { msg_id, target: params.target },
 			};
 		},
@@ -137,7 +137,7 @@ export function registerExocomTools(
 		async execute(_toolCallId, params: Static<typeof ExocomNameParams>) {
 			const plane = getPlane();
 			if (!plane || !onRename) throw new Error("exocom is not active for this persona");
-			const applied = onRename(params.name);
+			const applied = normalizePeerName(onRename(normalizePeerName(params.name)));
 			return { content: [{ type: "text", text: `exocom: you are now "${applied}"` }], details: { name: applied } };
 		},
 	});

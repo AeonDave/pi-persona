@@ -377,6 +377,48 @@ test("inproc engine idle-kills a session that emits NO events after timeoutMs (t
 	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
 });
 
+test("inproc external abort settles and disposes even when prompt never resolves", async () => {
+	let abortCalled = false;
+	let disposed = false;
+	let markPromptStarted!: () => void;
+	const promptStarted = new Promise<void>((resolve) => {
+		markPromptStarted = resolve;
+	});
+	const never = new Promise<void>(() => {});
+	const ac = new AbortController();
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => ({
+			subscribe: () => () => {},
+			prompt: async () => {
+				markPromptStarted();
+				await never;
+			},
+			agent: {
+				abort: () => {
+					abortCalled = true;
+				},
+				waitForIdle: () => never,
+				steer: () => {},
+			},
+			dispose: () => {
+				disposed = true;
+			},
+		}),
+	});
+	const pending = engine.run({ agent: "a", task: "t" }, undefined, ac.signal);
+	await promptStarted;
+	ac.abort();
+	const r = await pending;
+	assert.equal(abortCalled, true, "the host abort hook was invoked");
+	assert.equal(disposed, true, "cleanup does not wait for the stuck host promise");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
+});
+
 test("inproc engine's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
 	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
 	let abortCalled = false;
@@ -450,6 +492,7 @@ test("inproc engine hard-caps a busy session the idle watchdog would never catch
 	// The idle watchdog resets on every event, so a busy-but-non-converging child never trips it.
 	// The hard wall-clock cap is a definite lifetime ceiling that settles it regardless of activity.
 	let abortCalled = false;
+	let disposed = false;
 	const engine = makeInProcessEngine({
 		resolveAgent,
 		contracts,
@@ -458,27 +501,26 @@ test("inproc engine hard-caps a busy session the idle watchdog would never catch
 		timeoutMs: 5_000, // idle watchdog: long → would NOT fire in this window
 		hardTimeoutMs: 40, // total lifetime cap → fires anyway
 		createSession: async () => {
-			let release!: () => void;
-			const idle = new Promise<void>((r) => {
-				release = r;
-			});
+			const never = new Promise<void>(() => {});
 			return {
 				subscribe: () => () => {},
 				prompt: async () => {},
 				agent: {
 					abort: () => {
 						abortCalled = true;
-						release(); // aborting unblocks waitForIdle, like the real session
 					},
-					waitForIdle: () => idle,
+					waitForIdle: () => never,
 					steer: () => {},
 				},
-				dispose: () => {},
+				dispose: () => {
+					disposed = true;
+				},
 			};
 		},
 	});
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(abortCalled, true, "the hard cap aborted the session");
+	assert.equal(disposed, true, "the hard cap settles and disposes even when waitForIdle stays pending");
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /hard cap/);
 	assert.equal(r.failureKind, "timeout", "a hard-cap kill is timeout-class, never a provider reroute");
@@ -725,8 +767,8 @@ test("the delivery bridge steers an incoming peer note into the session, fenced 
 	assert.equal(r.ok, true);
 	const steered = JSON.stringify(spy.steered ?? []);
 	assert.match(steered, /message from peer elsewhere#7/, "sender attributed (outside the fence)");
-	assert.match(steered, /<subagent-output>/, "payload fenced");
-	assert.match(steered, /my position: X/);
+	assert.match(steered, /Sub-agent output \(untrusted data\):/, "payload marked as untrusted data");
+	assert.match(steered, /> my position: X/, "payload line is quoted");
 	assert.equal(bus.pending("supervisor").length, 0, "peer traffic never lands in the supervisor inbox");
 });
 

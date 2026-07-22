@@ -12,6 +12,8 @@ new behavior needs no new files.
 A **persona** is the top layer: a switchable *modus operandi* — from "delegate opportunistically" to
 a mandatory deliberating council. Everything under it is data (Markdown + `teams.yaml` + small
 strategy files), so you reshape the whole system without touching the core.
+An active persona can also borrow another installed persona's declared council for one decision with
+`council({ persona: "magi", question: "…" })`; only the council shape is borrowed — the caller stays active.
 
 > **Bundled personas are opt-in.** A fresh install ships none — run `/persona seed` (or
 > `/persona restore`) once to install the defaults into `~/.pi/agent/persona/`, then edit them or add your
@@ -222,27 +224,40 @@ children it spawned, in two layers, deliberately separate:
 > Servers that key state by a session-id argument (HTTP backends) need that id in the task, not a
 > login.
 
-## Exocom — collaborate across pi instances
+## Multi-agent quick start
 
-Where `intercom` (above) is the *internal* plane — a supervisor talking to the sub-agents it spawned —
-**exocom** is the *external* one: independent, hand-launched `pi` instances that share a workspace
-folder discover each other and message **peer-to-peer**, with no supervisor/child relationship between
-them. Open a `dev`, an `elite` and a `researcher` in the same repo and let them coordinate.
+Seed the bundled personas once, then start a supervisor:
 
-Off by default — enable per instance with `PI_PERSONA_EXOCOM=1` or `--exocom`, additionally gated by
-the active persona's `canUseBus` (revoked live if you switch to a persona without it). Each instance
-self-registers in a workspace-scoped file registry (heartbeat + stale-prune — no server to run) under
-a random call-sign (`orion`, `vega`, …) shown next to its current persona.
+```text
+/persona seed
+pi --persona elite
+```
 
-- **`exocom_list`** — who's reachable right now (the live pool).
-- **`exocom_send({ target, message, in_reply_to? })`** — one-way and **non-blocking**: returns a
-  `msg_id` at once; a reply is just another send with `in_reply_to` set; `target: "*"` broadcasts.
+Delegate a self-contained task and keep working while it runs:
 
-Inbound peer text is **fenced and attributed from the registry** — never from the sender's own claim —
-and per-sender rate-limited, deduplicated and hop-capped, so a peer can neither spoof another's
-identity nor slip instructions past the data boundary. The pool widget shows each peer as
-`📡 orion (researcher) · sonnet · ctx 12% · 3 in · 1 out` (`💤` when it goes quiet). Design:
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#exocom--the-external-plane).
+```js
+delegate({ agent: "operator", task: "Inspect the failing login flow; report root cause and a minimal fix." })
+intercom({ action: "peek" })
+```
+
+For collaboration between independent Pi processes, open the same workspace in two terminals with
+`pi --exocom` (optionally add `--persona <name>`), then use:
+
+```js
+exocom_list({})
+exocom_send({ target: "orion", message: "Review the API boundary and send back concrete risks." })
+```
+
+| | Intercom | Exocom |
+|---|---|---|
+| Shape | Hierarchical: supervisor → its spawned sub-agents | Flat: independent Pi ↔ Pi peers |
+| Control | `peek`, `wait`, `steer`, `stop`; optional coaching messages | Presence plus one-way `list` / `send`; a reply is another send with `in_reply_to` |
+| Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` or `PI_PERSONA_EXOCOM=1` |
+| Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
+
+Both planes are asynchronous and keep inbound text fenced. See
+[`ARCHITECTURE.md`](docs/ARCHITECTURE.md) for lifecycle, trust boundaries, and transport details, and
+[`STRATEGIES.md`](docs/STRATEGIES.md) for orchestration shapes.
 
 ## Recipes
 
@@ -389,7 +404,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 ## Keys & commands
 
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
-- `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/doctor`
+- `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`
 - CLI flags (per run): `--persona <name>` (start with this persona active — e.g. `pi --persona elite`; overrides `PI_PERSONA_DEFAULT` and the remembered persona, and errors if the name isn't installed) · `--exocom` (join the exocom peer-to-peer plane for this run; same as `PI_PERSONA_EXOCOM=1`). Model + reasoning effort are pi's own native flags: `--model <provider/id>` (e.g. `--model anthropic/claude-opus-4-8`; `--list-models` to search) and `--thinking <off|minimal|low|medium|high|xhigh|max>`.
 - env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — fast-fail a child that never makes progress, e.g. a headless `mcp: true` leg stalled on init; default 90000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable both delegation nudges — hand-off + persistence; on by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`)
 

@@ -16,7 +16,7 @@ export interface AsyncRun {
 	id: string;
 	agent: string;
 	task: string;
-	status: "running" | "done" | "failed";
+	status: "running" | "done" | "failed" | "stopped";
 	progress: ProgressSnapshot;
 	result?: AgentResult;
 	error?: string;
@@ -89,7 +89,7 @@ export class AsyncRunTracker {
 			)
 				.then((result) => {
 					if (entry.settled) return; // force-settled by the supervisor — drop the late natural result
-					entry.status = result.ok ? "done" : "failed";
+					entry.status = result.ok ? "done" : result.failureKind === "abort" ? "stopped" : "failed";
 					entry.result = result;
 					if (!result.ok && result.error) entry.error = result.error;
 				})
@@ -119,7 +119,7 @@ export class AsyncRunTracker {
 	}
 
 	/**
-	 * Force a still-"running" run to settle as failed and fire its completion listeners. Escape hatch
+	 * Force a still-"running" run to settle as stopped and fire its completion listeners. Escape hatch
 	 * for a run whose hard-stop handle is gone (consumed by a prior abort, or never registered) while
 	 * the tracker still shows it running — otherwise the supervisor's `stop` reports "no running async
 	 * run" for a run its own check-in reports as running (an unkillable ghost that keeps burning the
@@ -129,7 +129,7 @@ export class AsyncRunTracker {
 	forceSettle(id: string, error: string): boolean {
 		const entry = this.runs.get(id);
 		if (!entry || entry.status !== "running" || entry.settled) return false;
-		entry.status = "failed";
+		entry.status = "stopped";
 		entry.error = error;
 		this.settleOnce(entry);
 		return true;
@@ -216,6 +216,25 @@ export function compactTokens(n: number): string {
 	return String(n);
 }
 
+/** One identity everywhere a tracked run is rendered: the launcher's codename when present,
+ *  otherwise the agent type, with the already-shortened model appended once. */
+function runDisplayName(run: AsyncRun): string {
+	const name = run.label ?? run.agent;
+	return run.model ? `${name} · ${run.model}` : name;
+}
+
+// Failed legs can accumulate megabytes before they are stopped. Preserve enough head + tail to
+// recover useful work without allowing one automatic follow-up to consume the supervisor context.
+const MAX_PARTIAL_OUTPUT_CHARS = 12_000;
+
+function truncatePartialOutput(text: string): string {
+	if (text.length <= MAX_PARTIAL_OUTPUT_CHARS) return text;
+	const headChars = 8_000;
+	const tailChars = MAX_PARTIAL_OUTPUT_CHARS - headChars;
+	const omitted = text.length - MAX_PARTIAL_OUTPUT_CHARS;
+	return `${text.slice(0, headChars)}\n\n[... partial output truncated; ${omitted} characters omitted ...]\n\n${text.slice(-tailChars)}`;
+}
+
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
@@ -226,7 +245,7 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		// node shows) + its short model, e.g. "atlas-static · sonnet" — never the bare agent TYPE,
 		// which reads as a different sub-agent than the one the tree shows. Falls back to `agent`
 		// for call sites that never carried a label (keeps this back-compat).
-		const name = r.model ? `${r.label ?? r.agent} · ${r.model}` : (r.label ?? r.agent);
+		const name = runDisplayName(r);
 		const head = `[${r.id}] ${name} — ${r.status}`;
 		if (r.status === "running") {
 			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
@@ -289,7 +308,7 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
 	if (stuck.length === 0) return "";
 	const lines = stuck.map((r) => {
 		const secs = Math.round((opts.now - (r.lastAdvanceAt ?? opts.now)) / 1000);
-		return `⚠ ${r.id} (${r.agent}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
+		return `⚠ ${r.id} (${runDisplayName(r)}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
 	});
 	return [
 		`${stuck.length} background ${stuck.length === 1 ? "leg" : "legs"} may be stalled:`,
@@ -325,35 +344,48 @@ export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: num
 export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) => string): string {
 	const done = runs.filter((r) => r.status === "done");
 	const failed = runs.filter((r) => r.status === "failed");
+	const stopped = runs.filter((r) => r.status === "stopped");
 	// Failures are always reported — the supervisor must know so it can adjust or tell
 	// the user. Blind retry loops are prevented at RUNTIME by the DelegationLedger
 	// (an identical delegation that failed twice is vetoed before it spawns), not by
 	// hiding information.
 	// First line stays short and informative — pi's queued-message UI shows only this line, truncated.
-	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed`;
+	const stoppedCount = stopped.length > 0 ? `, ${stopped.length} stopped` : "";
+	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed${stoppedCount}`;
 	const blocks: string[] = [head];
 	for (const r of done) {
 		// Only fence REAL output — an empty/whitespace result gets a plain "(no output)", never an
 		// empty <fence></fence> shell (there's nothing untrusted to guard, and the empty block reads
 		// as clutter).
 		const body = r.result?.output?.trim() ? fence(r.result.output) : "(no output)";
-		blocks.push(`\n✅ ${r.id} (${r.agent}) done:\n${body}`);
+		blocks.push(`\n✅ ${r.id} (${runDisplayName(r)}) done:\n${body}`);
+	}
+	if (stopped.length > 0) {
+		const reasons = stopped.map((r) => `• ${r.id} (${runDisplayName(r)}): ${r.error ?? "stopped by supervisor"}`).join("\n");
+		blocks.push(`\n⏹ ${stopped.length} stopped:\n${fence(reasons)}`);
+		// A deliberate stop is not a failure and must not trigger retry guidance. Its accumulated
+		// output is still valuable, so preserve the same bounded, fenced salvage guarantee.
+		for (const r of stopped) {
+			const partial = r.progress.output.trim();
+			if (partial) {
+				blocks.push(`\n↩ ${r.id} (${runDisplayName(r)}) partial output before it was stopped:\n${fence(truncatePartialOutput(partial))}`);
+			}
+		}
 	}
 	if (failed.length > 0) {
-		const reasons = failed.map((r) => `• ${r.id} (${r.agent}): ${r.error ?? "(no detail)"}`).join("\n");
+		const reasons = failed.map((r) => `• ${r.id} (${runDisplayName(r)}): ${r.error ?? "(no detail)"}`).join("\n");
 		blocks.push(
 			`\n❌ ${failed.length} failed:\n${fence(reasons)}\n\n` +
 				"Handle each failure deliberately: retry ONCE with a different model or approach, or report it to the user. " +
 				"If a failed/aborted leg left partial output below, salvage what's usable instead of re-running from scratch. " +
 				"Do not re-issue the same failing delegation repeatedly.",
 		);
-		// Salvage: a failed or hard-stopped leg's partial output (its last progress snapshot) is NOT
-		// lost — surface it fenced so real work (e.g. an aborted research leg's findings after 600k
-		// tokens) can be reused rather than thrown away. Only when there's actually something to show.
+		// Salvage: a failed leg's partial output (its last progress snapshot) is NOT lost — surface it
+		// fenced so real work can be reused rather than thrown away. Only when there's something to show.
 		for (const r of failed) {
-			if (r.progress.output.trim()) {
-				const how = r.error?.toLowerCase().includes("abort") ? "was aborted" : "failed";
-				blocks.push(`\n↩ ${r.id} (${r.agent}) partial output before it ${how}:\n${fence(r.progress.output)}`);
+			const partial = r.progress.output.trim();
+			if (partial) {
+				blocks.push(`\n↩ ${r.id} (${runDisplayName(r)}) partial output before it failed:\n${fence(truncatePartialOutput(partial))}`);
 			}
 		}
 	}
@@ -386,10 +418,12 @@ export function renderCompletion(
 export interface IdleNotifierDeps<T> {
 	/** Whether the supervisor is idle (not streaming a turn). */
 	isIdle: () => boolean;
-	/** Whether the supervisor already has queued messages waiting. */
-	hasPending: () => boolean;
-	/** Deliver the coalesced message (e.g. pi.sendUserMessage); may throw if it races a turn. */
-	deliver: (message: string) => void;
+	/** Legacy host-queue probe. Retained for source compatibility, but deliberately ignored: when
+	 *  the supervisor is idle, starting a turn is what drains any orphaned host follow-ups. */
+	hasPending?: () => boolean;
+	/** Deliver the coalesced message. Async rejection is treated exactly like a synchronous throw:
+	 *  the batch is restored at the front of the queue and retried. */
+	deliver: (message: string) => void | Promise<void>;
 	/** Render a batch of buffered items into one message. */
 	render: (items: T[]) => string;
 	/** Schedule a callback; returns a handle. Injected so the clock is controllable in tests. */
@@ -403,20 +437,18 @@ export interface IdleNotifierDeps<T> {
 	/** Floor (ms) between successive deliveries — a flush due sooner re-arms for the remainder instead
 	 *  of delivering, WITHOUT dropping what's buffered. Unset ⇒ no floor. */
 	minIntervalMs?: number;
-	/** Once this many deliveries have gone out, further flushes drop the buffer (silently) until
-	 *  {@link IdleCoalescingNotifier.resetDeliveries} is called. Unset ⇒ no ceiling. */
+	/** Once this many deliveries have gone out, further flushes retain the buffer until
+	 *  {@link IdleCoalescingNotifier.resetDeliveries} reopens the gate. Unset ⇒ no ceiling. */
 	maxDeliveries?: number;
 	/** Clock hook, injected for deterministic tests (defaults to `Date.now`). */
 	now?: () => number;
 }
 
 /**
- * Coalesces items into a single supervisor message, delivered ONLY while the supervisor is idle
- * and unqueued. Rationale: pi drains its follow-up queue only from an active turn (one-at-a-time,
- * and an errored/aborted turn skips the drain), so a message injected mid-stream can strand as an
- * orphaned "sticky" queued message. An idle delivery always starts a fresh turn, so the message
- * both reaches the supervisor (it can react) and never piles up. Self-healing: while busy it
- * re-arms; on a delivery race it requeues. Used for async-run completions and child intercom asks.
+ * Coalesces items into a single supervisor message, delivered only while the supervisor is idle.
+ * A stale host follow-up is NOT a blocker: an idle delivery starts the clean turn that can drain it.
+ * Self-healing: while busy it re-arms; sync throws and async rejections restore the whole batch.
+ * Used for async-run completions and child intercom asks.
  */
 export class IdleCoalescingNotifier<T> {
 	private readonly deps: IdleNotifierDeps<T>;
@@ -429,6 +461,10 @@ export class IdleCoalescingNotifier<T> {
 	private readonly now: () => number;
 	private lastDeliveredAt = 0;
 	private deliveries = 0;
+	/** One awaitable delivery at a time. Void deliveries stay on the synchronous fast path. */
+	private flushing: Promise<void> | undefined;
+	/** Invalidates an in-flight batch when cancel() tears down/reuses this notifier. */
+	private generation = 0;
 
 	constructor(deps: IdleNotifierDeps<T>) {
 		this.deps = deps;
@@ -448,10 +484,8 @@ export class IdleCoalescingNotifier<T> {
 	/** Cancel any armed flush AND drop buffered items (reload hygiene — never leak a timer or a
 	 *  previous session's undelivered items across sessions; the instance may be reused). */
 	cancel(): void {
-		if (this.handle !== undefined) {
-			this.deps.clearTimer(this.handle);
-			this.handle = undefined;
-		}
+		this.generation += 1;
+		this.clearArmedTimer();
 		this.pending.length = 0;
 	}
 
@@ -469,56 +503,107 @@ export class IdleCoalescingNotifier<T> {
 		for (let i = this.pending.length - 1; i >= 0; i--) {
 			if (pred(this.pending[i] as T)) this.pending.splice(i, 1);
 		}
+		if (this.pending.length === 0) this.clearArmedTimer();
 	}
 
-	/** Clear the `maxDeliveries` ceiling, letting the notifier deliver again. */
+	/** Clear the `maxDeliveries` ceiling and immediately retry anything held behind it. */
 	resetDeliveries(): void {
 		this.deliveries = 0;
+		if (this.pending.length > 0) this.kick();
+	}
+
+	/** Public idle-transition hook. Safe to call repeatedly (e.g. from `agent_settled`): async
+	 *  deliveries share one flight; synchronous deliveries complete before this method returns. */
+	flushIfIdle(): Promise<void> {
+		if (this.flushing) return this.flushing;
+		this.clearArmedTimer();
+		if (this.pending.length === 0) return Promise.resolve();
+
+		const generation = this.generation;
+		let batch: T[] | undefined;
+		try {
+			// Do NOT gate an idle supervisor on its host queue. A stale follow-up can survive an
+			// aborted/errored turn; starting this clean turn is what lets the host drain it.
+			if (!this.deps.isIdle()) {
+				this.arm(this.retryMs);
+				return Promise.resolve();
+			}
+			// A delivery ceiling is a rate limit, never a drop policy. Keep the buffer alive until
+			// resetDeliveries() reopens the gate (the retry is also a liveness fallback).
+			if (this.maxDeliveries !== undefined && this.deliveries >= this.maxDeliveries) {
+				this.arm(this.retryMs);
+				return Promise.resolve();
+			}
+			if (this.minIntervalMs !== undefined && this.deliveries > 0) {
+				const elapsed = this.now() - this.lastDeliveredAt;
+				if (elapsed < this.minIntervalMs) {
+					this.arm(this.minIntervalMs - elapsed);
+					return Promise.resolve();
+				}
+			}
+
+			batch = this.pending.splice(0, this.pending.length);
+			const message = this.deps.render(batch);
+			if (!message) return Promise.resolve(); // explicit renderer suppression
+			const delivery = this.deps.deliver(message);
+			if (!delivery || typeof (delivery as PromiseLike<void>).then !== "function") {
+				if (generation === this.generation) {
+					this.lastDeliveredAt = this.now();
+					this.deliveries += 1;
+				}
+				return Promise.resolve();
+			}
+
+			let flight!: Promise<void>;
+			flight = Promise.resolve(delivery)
+				.then(() => {
+					if (generation !== this.generation) return;
+					this.lastDeliveredAt = this.now();
+					this.deliveries += 1;
+				})
+				.catch(() => {
+					if (generation !== this.generation) return;
+					this.pending.unshift(...(batch as T[]));
+					this.arm(this.retryMs);
+				})
+				.finally(() => {
+					if (this.flushing === flight) this.flushing = undefined;
+					if (this.pending.length > 0 && this.handle === undefined) this.arm(this.retryMs);
+				});
+			this.flushing = flight;
+			return flight;
+		} catch {
+			if (generation === this.generation) {
+				if (batch) this.pending.unshift(...batch);
+				this.arm(this.retryMs);
+			}
+			return Promise.resolve();
+		}
+	}
+
+	/** Fire-and-forget alias for event hooks and timer callbacks. */
+	kick(): void {
+		void this.flushIfIdle();
+	}
+
+	private clearArmedTimer(): void {
+		if (this.handle === undefined) return;
+		this.deps.clearTimer(this.handle);
+		this.handle = undefined;
 	}
 
 	private arm(ms: number): void {
-		if (this.handle !== undefined) return; // a flush is already pending; the new item rides it
-		this.handle = this.deps.setTimer(() => {
+		if (this.handle !== undefined || this.pending.length === 0) return;
+		let scheduled!: unknown;
+		scheduled = this.deps.setTimer(() => {
+			if (this.handle !== scheduled) return; // cancelled/replaced timer racing its callback
 			this.handle = undefined;
-			this.flush();
+			this.kick();
 		}, ms);
-	}
-
-	private flush(): void {
-		if (this.pending.length === 0) return;
-		// Only deliver to an idle, unqueued supervisor: an idle delivery always triggers a turn (so
-		// the message can't strand) and we never inject into a streaming window (which is what left
-		// the orphaned sticky follow-ups). Otherwise wait and re-check.
-		if (!this.deps.isIdle() || this.deps.hasPending()) {
-			this.arm(this.retryMs);
-			return;
-		}
-		// Ceiling: once hit, silently drop what's buffered rather than deliver — the caller re-opens
-		// the gate via resetDeliveries() when it's ready for more.
-		if (this.maxDeliveries !== undefined && this.deliveries >= this.maxDeliveries) {
-			this.pending.length = 0;
-			return;
-		}
-		// Floor: a flush due sooner than minIntervalMs since the last delivery re-arms for the
-		// remainder instead of delivering early — the buffer is left intact (nothing is lost). The
-		// very first delivery (deliveries === 0) has no "last delivery" to be too close to.
-		if (this.minIntervalMs !== undefined && this.deliveries > 0) {
-			const elapsed = this.now() - this.lastDeliveredAt;
-			if (elapsed < this.minIntervalMs) {
-				this.arm(this.minIntervalMs - elapsed);
-				return;
-			}
-		}
-		const batch = this.pending.splice(0, this.pending.length);
-		const message = this.deps.render(batch);
-		if (!message) return; // render suppressed this batch (e.g. all failures) — nothing to deliver
-		try {
-			this.deps.deliver(message);
-			this.lastDeliveredAt = this.now();
-			this.deliveries += 1;
-		} catch {
-			this.pending.unshift(...batch); // raced a just-started turn — retry when idle
-			this.arm(this.retryMs);
-		}
+		this.handle = scheduled;
+		// Delivery is an outstanding obligation. Re-ref a host timer that the wiring created
+		// unref'd; cancel() remains the explicit lifecycle escape hatch.
+		const ref = (scheduled as { ref?: () => void } | null | undefined)?.ref;
+		if (typeof ref === "function") ref.call(scheduled);
 	}
 }

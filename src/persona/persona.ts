@@ -154,6 +154,82 @@ export function expandCouncilPreset(draft: CouncilDraft, presets: Record<string,
 	return merged;
 }
 
+/** Per-call council selection. `persona` borrows only that persona's expanded
+ * council declaration; it never activates the persona or imports its prompt,
+ * model, tools, or permissions. Explicit strategy/roster/params remain local
+ * overrides for backward compatibility. */
+export interface CouncilInvocation {
+	persona?: string | undefined;
+	strategy?: string | undefined;
+	roster?: string | undefined;
+	params?: Record<string, unknown> | undefined;
+}
+
+export interface ResolvedCouncilInvocation {
+	strategy: string;
+	roster: string;
+	params: Record<string, unknown>;
+	/** Persona whose council declaration supplied the defaults, when any. */
+	persona?: string;
+}
+
+export type CouncilInvocationResolution =
+	| { ok: true; value: ResolvedCouncilInvocation }
+	| { ok: false; error: string };
+
+/** Resolve a council call without mutating the active persona.
+ *
+ * An explicit persona is intentionally strict: it must exist and declare a
+ * usable council. Silently falling back to MAGI would make `persona: "solo"`
+ * look authoritative while actually running an unrelated ensemble.
+ */
+export function resolveCouncilInvocation(
+	personas: readonly Persona[],
+	activePersona: Persona | undefined,
+	request: CouncilInvocation,
+): CouncilInvocationResolution {
+	const requestedName = request.persona?.trim();
+	let sourcePersona: Persona | undefined;
+
+	if (requestedName) {
+		sourcePersona = personas.find((persona) => persona.isPersona && persona.name === requestedName);
+		if (!sourcePersona) {
+			const available = personas
+				.filter((persona) => persona.isPersona && Boolean(persona.council?.strategy))
+				.map((persona) => persona.name)
+				.sort();
+			return {
+				ok: false,
+				error: `no persona named "${requestedName}". Council personas: ${available.join(", ") || "(none)"}`,
+			};
+		}
+		if (!sourcePersona.council?.strategy) {
+			return {
+				ok: false,
+				error: `persona "${requestedName}" declares no usable council`,
+			};
+		}
+	} else if (activePersona?.council?.strategy) {
+		sourcePersona = activePersona;
+	}
+
+	const base = sourcePersona?.council;
+	const strategy = request.strategy?.trim() || base?.strategy || "magi";
+	const roster =
+		request.roster?.trim() ||
+		base?.roster ||
+		sourcePersona?.orchestration?.roster ||
+		(!requestedName ? activePersona?.orchestration?.roster : undefined) ||
+		"magi";
+	const value: ResolvedCouncilInvocation = {
+		strategy,
+		roster,
+		params: { ...(base?.params ?? {}), ...(request.params ?? {}) },
+	};
+	if (sourcePersona) value.persona = sourcePersona.name;
+	return { ok: true, value };
+}
+
 /** Compose the turn's system prompt from the base prompt and a persona. */
 export function composeSystemPrompt(base: string, persona: Persona): string {
 	if (persona.systemPromptMode === "replace") return persona.body;

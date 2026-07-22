@@ -34,6 +34,8 @@ parses both.
   an orchestration block ⇒ pure L0.
 - **L1 — declarative shape.** A persona `orchestration: { mode: parallel|pipeline, roster }` (or the
   `council:` tool form) runs a built-in strategy deterministically.
+  A caller may borrow another installed persona's declared council with `council({ persona: "name" })`;
+  this resolves configuration only and never activates or inherits authority from the target persona.
 - **L2 — strategy file.** `src/orchestration/strategies/<name>.ts` on the Strategy SDK drives a
   richer shape (magi vote, critic loop, debate).
 - **L3 — flow file.** `flows/<name>.flow.json` composes strategies into a resumable DAG.
@@ -253,16 +255,17 @@ external comm.)
   back to one that allows it rejoins. OFF ⇒ no bind, no registry entry, no tools registered.
 - **Discovery — a workspace-scoped file registry, not an elected hub.** Each instance binds its own
   socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
-  `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<name>.json`, and heartbeats it; discovery is
+  `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<session-id>.json`, and heartbeats it; discovery is
   just reading that directory. Dead-pid and stale-heartbeat entries are pruned on read — no host
   election, no failover, genuinely peer-to-peer.
 - **Interaction model — one-way + async reply, never blocking.** `exocom_send` returns a `msg_id`
   immediately; a reply is just another `exocom_send` with `in_reply_to` set, delivered back as a
   correlated follow-up — no blocking await, no mutual-wait deadlock class. `target: "*"` broadcasts to
   every live peer (best-effort; one unreachable peer doesn't fail the rest).
-- **Identity from the active persona.** Name = the active persona's name, collision-suffixed against
-  the live registry (`elite`, `elite2`, …), or `pi-<hex>` with no persona active; refreshed on every
-  heartbeat so a `/persona` switch is reflected to peers.
+- **Identity is session-stable, persona is presence metadata.** Each instance gets a collision-aware
+  call-sign (`orion`, `vega`, …) derived from its session id and independent of persona. Persona,
+  model, and context usage are refreshed on heartbeat; changing persona never changes the registry
+  key or grants authority over another peer.
 - **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
   message is head-truncated, then delivered as `attributeInbound(label, fenceUntrusted(text))` — the
   same fence/attribute primitives the broker/peer plane above uses. `label` comes from the registry
@@ -271,12 +274,17 @@ external comm.)
   file (a small preview stays inline) rather than landing whole in the receiver's context. Guardrails:
   a hop cap, a per-sender rate+byte budget, and a (sender, msg_id) dedup set so an at-least-once resend
   can't double-trigger a turn.
-- **Tools**, registered only while the plane is active: `exocom_list` (live peers — name, persona,
-  model, context %, purpose) and `exocom_send({ target, message, in_reply_to? })`.
+- **Tools are lazy and fail closed.** `exocom_list` exposes presence and
+  `exocom_send({ target, message, in_reply_to? })` sends one-way messages. Pi has no dynamic
+  unregister API, so definitions registered by a prior join may remain in the registry; the live
+  accessor, capability gate, and active-tool set all deny them whenever the plane is stopped.
 
 exocom never touches the delegate/council/broker path. A single instance can be **both** a supervisor
 (delegating its own spawned children via intercom/broker) **and** an exocom peer (collaborating with
 independent sibling instances) at once — the planes are independent and independently gated.
+The process that initiates a collaboration is merely the coordinator de facto: the plane remains
+flat, and no peer gains stop/steer authority over another. Those controls exist only on the
+hierarchical intercom plane.
 
 ## Supervision & the waiting model
 

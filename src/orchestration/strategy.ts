@@ -41,7 +41,9 @@ export function strategyNames(): string[] {
 }
 
 /** A strategy's declared param schema, for discovery (`/doctor`) and the council tool's
- *  lenient unknown-key warning. `undefined` for an unknown strategy OR one that declares no params. */
+ *  lenient unknown-key warning. Known param-less strategies return an empty schema;
+ *  `undefined` is reserved for an unknown strategy. */
 export function knownParams(name: string): Record<string, StrategyParam> | undefined {
-	return BUILTINS[name]?.params;
+	const strategy = BUILTINS[name];
+	return strategy ? (strategy.params ?? {}) : undefined;
 }

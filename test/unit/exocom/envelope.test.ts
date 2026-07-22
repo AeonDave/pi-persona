@@ -26,3 +26,10 @@ test("truncateForInject head-truncates by UTF-8 bytes and marks it", () => {
 	assert.ok(Buffer.byteLength(long.text, "utf8") <= 100 + 80, "within cap + notice");
 	assert.match(long.text, /truncated/i);
 });
+
+test("truncateForInject never emits a replacement character at a multibyte boundary", () => {
+	const cut = truncateForInject("A😀B", 3);
+	assert.equal(cut.truncated, true);
+	assert.ok(cut.text.startsWith("A"));
+	assert.doesNotMatch(cut.text, /�/, "partial UTF-8 code points are omitted, never decoded as U+FFFD");
+});

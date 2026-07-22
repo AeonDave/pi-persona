@@ -36,8 +36,8 @@ export interface RosterSpec {
 
 /** Normalise a member into the fields `sdk.agent()` accepts (a bare name → just `agent`).
  *  `tools`/`isolation`/`mcp` map onto the SAME `AgentRunSpec` fields the `delegate` path's
- *  `specOf()` uses for these three concepts — same field names, same "worktree"/`true` only
- *  semantics — so a roster member and an ad-hoc task behave identically once specialised. */
+ *  `specOf()` uses for these three concepts — including explicit `none`/`false` overrides —
+ *  so a roster member and an ad-hoc task behave identically once specialised. */
 export function rosterSpec(member: RosterMember): RosterSpec {
 	if (typeof member === "string") return { agent: member };
 	const spec: RosterSpec = { agent: member.agent };
@@ -45,8 +45,8 @@ export function rosterSpec(member: RosterMember): RosterSpec {
 	if (member.model?.trim()) spec.model = member.model.trim();
 	if (member.skills && member.skills.length > 0) spec.skills = member.skills;
 	if (member.tools && member.tools.length > 0) spec.tools = member.tools;
-	if (member.isolation === "worktree") spec.isolation = "worktree";
-	if (member.mcp === true) spec.mcp = true;
+	if (member.isolation !== undefined) spec.isolation = member.isolation;
+	if (member.mcp !== undefined) spec.mcp = member.mcp;
 	return spec;
 }
 
@@ -110,7 +110,8 @@ function toMember(raw: unknown): RosterMember | undefined {
 		const tools = asStringArray(o.tools);
 		if (tools) m.tools = tools;
 		if (o.isolation === "worktree" || o.isolation === "none") m.isolation = o.isolation;
-		if (asBoolean(o.mcp) === true) m.mcp = true;
+		const mcp = asBoolean(o.mcp);
+		if (mcp !== undefined) m.mcp = mcp;
 		return m;
 	}
 	return undefined;
