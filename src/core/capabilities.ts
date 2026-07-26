@@ -39,6 +39,11 @@ export interface EffectiveCapabilities {
 	 *  the `intercom` tool — a persona that opted out of the bus also opts its children out
 	 *  of sibling peer messaging. An allowlist that merely omits intercom is NOT a denial. */
 	canUseBus: boolean;
+	/** The persona's raw tool allow/deny — kept so the gate can evaluate a tool by NAME against the
+	 *  persona's ACTUAL rules, not only the activation-time `tools` snapshot (which misses tools
+	 *  registered — or MCP-reconnected — AFTER activation; MCP servers connect async and re-register
+	 *  their tools on every reconnect, which would otherwise fail-closed against the stale snapshot). */
+	toolsPerm?: Permission;
 }
 
 const DEFAULT_DELEGATE_TOOL = "delegate";
@@ -67,7 +72,8 @@ export function resolveCapabilities(input: CapabilityInputs): EffectiveCapabilit
 		canSpawn ? input.knownAgents.filter((a) => isAllowed(a, input.permissions.delegate, delegateDefaultAllow)) : [],
 	);
 
-	return { tools, delegateTargets, canUseBus: !explicitlyDenied("intercom", toolsPerm) };
+	const canUseBus = !explicitlyDenied("intercom", toolsPerm);
+	return { tools, delegateTargets, canUseBus, ...(toolsPerm !== undefined ? { toolsPerm } : {}) };
 }
 
 /** Whether the persona may fan out — derived from holding the delegate tool. */
@@ -83,14 +89,16 @@ export function canCallTool(caps: EffectiveCapabilities, toolName: string): bool
 	// `caps.tools` on a later persona activation. Checking the ordinary set first would make
 	// an allow -> deny switch keep the external bus callable.
 	if (EXOCOM_TOOLS.has(toolName)) return caps.canUseBus;
-	if (caps.tools.has(toolName)) return true;
-	// The exocom tools are the EXTERNAL comm bus — governed by `canUseBus` (as `intercom` governs the
-	// internal bus), NOT the general tool allowlist: a persona that holds the bus can message its
-	// peers even under a restrictive allowlist that never listed them. They are only ever REGISTERED
-	// while exocom is active (which itself requires canUseBus), so this can't expose a tool that
-	// doesn't exist. Resolving them here (not in resolveCapabilities) also sidesteps a timing issue —
-	// a persona's caps are resolved at activation, BEFORE startExocom registers these tools.
-	return false;
+	// Evaluate the persona's ACTUAL allow/deny against the NAME — not only the activation-time
+	// `caps.tools` snapshot. The snapshot is built from the tools registered AT activation, so it
+	// fails closed on any tool that registers later: an MCP server connects asynchronously and
+	// re-registers ALL its tools on every reconnect, so an unrestricted persona (Elite) that used
+	// `mcpwn_execute_command` a moment ago is suddenly told it "may not use" it after a reconnect.
+	// Checking the persona's rule by name fixes that (no allowlist ⇒ any tool; an allow/deny still
+	// governs regardless of registration timing). `caps.tools` still covers the `delegate`
+	// special-case (kept under a restrictive allowlist even though the allowlist never names it).
+	if (isAllowed(toolName, caps.toolsPerm, true)) return true;
+	return caps.tools.has(toolName);
 }
 
 export function canDelegateTo(caps: EffectiveCapabilities, agent: string): boolean {
