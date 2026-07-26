@@ -63,6 +63,22 @@ test("the exocom grant does not inflate the resolved tool set (canUseBus-gated a
 	assert.equal(canCallTool(caps, "exocom_send"), true, "but callable via canUseBus");
 });
 
+test("a tool registered AFTER activation (not in the snapshot) is gated by the persona's RULE, not the snapshot", () => {
+	// The activation-time `tools` snapshot (allToolNames) can't include a tool that registers later —
+	// an MCP server connects async and re-registers ALL its tools on every reconnect. The gate must
+	// use the persona's allow/deny by name, or an unrestricted persona is wrongly told it "may not
+	// use" an MCP tool it used a moment ago (regression the snapshot-only check caused).
+	const open = resolveCapabilities(base()); // unrestricted; allToolNames has no mcpwn tool
+	assert.equal(open.tools.has("mcpwn_execute_command"), false, "genuinely not in the activation snapshot");
+	assert.equal(canCallTool(open, "mcpwn_execute_command"), true, "unrestricted persona ⇒ callable anyway");
+	// A restrictive allowlist that never named it still blocks it (timing doesn't loosen the allowlist).
+	const allow = resolveCapabilities(base({ permissions: { tools: { allow: ["read"] } } }));
+	assert.equal(canCallTool(allow, "mcpwn_execute_command"), false, "allowlist omitting it still blocks");
+	// An explicit deny wins for a late tool too.
+	const deny = resolveCapabilities(base({ permissions: { tools: { deny: ["mcpwn_execute_command"] } } }));
+	assert.equal(canCallTool(deny, "mcpwn_execute_command"), false, "explicit deny wins even for a late tool");
+});
+
 test("delegate allowlist scopes the spawnable roster", () => {
 	const caps = resolveCapabilities(base({ permissions: { delegate: { allow: ["scout"] } } }));
 	assert.equal(canDelegateTo(caps, "scout"), true);
