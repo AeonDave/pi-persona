@@ -4,12 +4,10 @@ export interface ExocomMessage {
 	kind: "message"; msg_id: string; from_session: string; from_endpoint: string; from_name: string;
 	text: string; in_reply_to?: string; hops: number; ts: string; signature?: string;
 }
-export interface ExocomPing { kind: "ping"; msg_id: string; from_session: string; from_endpoint: string; signature?: string; }
-export interface ExocomPong { kind: "pong"; msg_id: string; card: AgentCard; from_session?: string; signature?: string; }
 export interface ExocomBye { kind: "bye"; from_session: string; from_endpoint?: string; signature?: string; }
 export interface ExocomAck { kind: "ack"; msg_id: string; from_session?: string; signature?: string; }
 export interface ExocomNack { kind: "nack"; msg_id: string; error: string; from_session?: string; signature?: string; }
-export type ExocomFrame = ExocomMessage | ExocomPing | ExocomPong | ExocomBye | ExocomAck | ExocomNack;
+export type ExocomFrame = ExocomMessage | ExocomBye | ExocomAck | ExocomNack;
 
 const str = (v: unknown): v is string => typeof v === "string";
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -26,13 +24,6 @@ export function isExocomFrame(v: unknown): v is ExocomFrame {
 			return token(o.msg_id) && token(o.from_session) && bounded(o.from_endpoint, 1_024) && bounded(o.from_name, 256)
 				&& str(o.text) && Number.isInteger(o.hops) && num(o.hops) && o.hops >= 0 && bounded(o.ts, 128)
 				&& (o.in_reply_to === undefined || token(o.in_reply_to)) && optionalBounded(o.signature, 512);
-		case "ping":
-			return token(o.msg_id) && token(o.from_session) && bounded(o.from_endpoint, 1_024) && optionalBounded(o.signature, 512);
-		case "pong": {
-			if (!token(o.msg_id) || !o.card || typeof o.card !== "object" || !optionalBounded(o.from_session, 128) || !optionalBounded(o.signature, 512)) return false;
-			const card = o.card as Record<string, unknown>;
-			return bounded(card.name, 256) && str(card.persona) && str(card.model) && num(card.context_pct) && num(card.inbox);
-		}
 		case "bye":
 			return token(o.from_session) && optionalBounded(o.from_endpoint, 1_024) && optionalBounded(o.signature, 512);
 		case "ack":
@@ -49,9 +40,6 @@ export function frameSigningPayload(frame: ExocomFrame): string {
 		case "message":
 			return JSON.stringify([frame.kind, frame.msg_id, frame.from_session, frame.from_endpoint, frame.from_name,
 				frame.text, frame.in_reply_to ?? null, frame.hops, frame.ts]);
-		case "ping": return JSON.stringify([frame.kind, frame.msg_id, frame.from_session, frame.from_endpoint]);
-		case "pong": return JSON.stringify([frame.kind, frame.msg_id, frame.from_session ?? null,
-			frame.card.name, frame.card.persona, frame.card.model, frame.card.context_pct, frame.card.inbox]);
 		case "bye": return JSON.stringify([frame.kind, frame.from_session, frame.from_endpoint ?? null]);
 		case "ack": return JSON.stringify([frame.kind, frame.msg_id, frame.from_session ?? null]);
 		case "nack": return JSON.stringify([frame.kind, frame.msg_id, frame.error, frame.from_session ?? null]);

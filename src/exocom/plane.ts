@@ -1,6 +1,6 @@
 /**
  * exocom peer-to-peer plane — binds this instance's own socket/pipe, serves inbound frames
- * (message/ping/bye), sends point-to-point with large-message artifact spill (R3) and a
+ * (message/bye), sends point-to-point with large-message artifact spill (R3) and a
  * single reconnect on a peer-restarting error (R4), and cleans up on stop.
  *
  * Reuses the broker's length-prefixed framing (`bus/broker/framing.ts`) verbatim, and its
@@ -167,7 +167,7 @@ async function bindServer(netImpl: typeof import("node:net"), endpoint: string, 
 	return attempt.server;
 }
 
-/** Connect, write one frame, and resolve with the peer's first reply frame (ack/pong).
+/** Connect, write one frame, and resolve with the peer's ack (or reject on a signed nack).
  *  Bounded by an unref'd `ackTimeoutMs` (R4): a peer that accepts the connection and then
  *  never replies (frozen, wedged) must not hang the caller's turn forever. */
 function sendFrame(netImpl: typeof import("node:net"), endpoint: string, frame: ExocomMessage, ackTimeoutMs: number, expected: RegistryEntry): Promise<ExocomAck> {
@@ -308,7 +308,7 @@ export class ExocomPlane {
 		return this.sentTo.get(sessionId) ?? 0;
 	}
 
-	/** Inbound `message` frames received FROM the given peer (ping/pong/bye/ack don't count — see
+	/** Inbound `message` frames received FROM the given peer (bye/ack don't count — see
 	 *  `handleConnection`'s `onFrame`), keyed by the peer's session_id — 0 for a peer never heard
 	 *  from. */
 	receivedFromPeer(sessionId: string): number {
@@ -416,9 +416,6 @@ export class ExocomPlane {
 					write(this.ack(raw.msg_id));
 					return;
 				}
-				case "ping":
-					write({ kind: "pong", msg_id: raw.msg_id, card: this.deps.getCard() });
-					return;
 				case "bye": {
 					const entry = readAll(this.deps.agentDir, this.deps.hash).find((e) => e.session_id === raw.from_session);
 					if (entry && raw.from_endpoint === entry.endpoint && verifyFrameOrigin(raw, entry)) {
@@ -428,7 +425,7 @@ export class ExocomPlane {
 					return;
 				}
 				default:
-					return; // ack/pong/nack land on a SENDER's own connection, never here
+					return; // ack/nack land on a SENDER's own connection, never here
 			}
 		};
 		socket.on("data", createFrameReader(onFrame, () => socket.destroy()));
