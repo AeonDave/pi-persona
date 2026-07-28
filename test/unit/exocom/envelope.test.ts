@@ -8,7 +8,7 @@ const msg = (over: Partial<ExocomMessage> = {}): ExocomMessage => ({
 
 test("isExocomFrame accepts well-formed frames and rejects junk (fail-closed)", () => {
 	assert.equal(isExocomFrame(msg()), true);
-	assert.equal(isExocomFrame({ kind: "ping", msg_id: "p1", from_session: "s1", from_endpoint: "/e" }), true);
+	assert.equal(isExocomFrame({ kind: "ack", msg_id: "a1", from_session: "s1" }), true);
 	assert.equal(isExocomFrame({ kind: "bye", from_session: "s1" }), true);
 	assert.equal(isExocomFrame(null), false);
 	assert.equal(isExocomFrame({ kind: "message" }), false, "missing fields");
