@@ -12,3 +12,7 @@ Thumbs.db
 
 # Superpowers specs/plans — local design scratch, not part of the repo
 docs/superpowers/
+
+# Project-local overrides (personas, agents, teams, flows, contracts, presets). This is the
+# highest-precedence discovery layer — it is one developer's machine, never the shipped defaults.
+.pi/

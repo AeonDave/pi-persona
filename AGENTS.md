@@ -3,7 +3,8 @@
 A single Pi coding-agent extension (`@earendil-works/pi-*`) that makes the agent a **supervisor**
 of switchable **personas** + file-based **orchestration strategies**. Loaded by Pi via tsx/jiti —
 no build step. Design contract (binding on any conflict): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
-the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
+the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md);
+the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 
 ## Commands
 
@@ -34,7 +35,7 @@ the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   progressing child runs to completion, set `<ms>` to arm it) AND
   `PI_PERSONA_AGENT_STARTUP_MS` as a **startup deadline** (a child that makes ZERO progress — no
   completed turn / tokens / streamed output — within the window is killed as a stalled start; the
-  first real progress cancels it, so a slow-but-streaming turn is never touched; default 90000,
+  first real progress cancels it, so a slow-but-streaming turn is never touched; default 300000,
   `0` disables). It fast-fails the "never started" case the generous idle window is too slow for —
   notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; `adapter.ts`
   turns that (turns===0 + `spec.mcp`) into a clear pre-auth remedy instead of an opaque timeout.

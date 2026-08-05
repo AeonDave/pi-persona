@@ -111,9 +111,12 @@ These are the guardrails a contributor must not violate. They are enforced in co
 ## Module layout
 
 Downward-only, acyclic dependencies: `core ← all`; `engine`/`bus → core`; `orchestration →
-engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower layers`;
+engine + bus + core`; `persona → orchestration + core`; `exocom → core + bus` (it reuses the
+fence and the broker's wire framing); `tools`/`ui → lower layers`;
 `extension.ts` wires everything to `pi.*`.
 
+- **`src/agents/`** — the agent definition (`agent.ts`: `AgentConfig`/`parseAgent`, the
+  `persona: false` sibling of the persona parser; both share one frontmatter engine).
 - **`src/core/`** — pure kernel (no Pi imports, unit-tested): `frontmatter`, `permissions` +
   `capabilities`, `contract` (+`parseContract`), `config`, `discovery`, `seed`, `fence`
   (`fenceUntrusted` / `attributeInbound`), `models`, `brief` (`buildDelegationBrief` — the per-turn
@@ -131,11 +134,19 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
 - **`src/bus/`** — coordination: `inproc.ts` (handle-based mailbox: send/ask/reply/onMessage),
   `contact.ts` (child `contact_supervisor`), `peers.ts` (child `contact_peer`), `broker/` (opt-in
   cross-process relay: `paths`/`framing`/`messages` pure, `host`/`client` over `node:net`).
+- **`src/exocom/`** — the external peer plane (the exocom section below): `plane.ts` (lifecycle —
+  bind/join/teardown + reconnect), `registry.ts` (workspace-scoped presence + stale pruning),
+  `paths.ts` (pure path layout), `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
+  delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
+  `guards.ts` (`SenderBudget`/`SeenMessages`).
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
   `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`, `state.ts` (last-selected persona),
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
   `persona.ts` for supervisor turns and in the engines for delegated legs).
-- **`src/tools/`** — `delegate.ts`, `intercom.ts`. **`src/ui/`** — agent tree/overlay, model picker.
+- **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
+  tools). **`src/ui/`** — agent tree/overlay, model picker, `usage.ts` (token/usage formatting).
+- **`src/loader.ts`** — the discovery loader (`loadDefinitions`/`loadContracts`/`loadPresets`/
+  `loadTeams`), the concrete read-side of the discovery precedence table.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
   `PI_PERSONA_BUS` is set (a broker child).
 - **`src/extension.ts`** — the single `ExtensionFactory`: wires tools/commands/hooks/engines,
@@ -144,19 +155,24 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
 ## The two engines
 
 Both backends sit behind the `StrategyEngine` seam (`run(spec, onProgress?, signal?, onSteerable?) →
-AgentResult`) and enforce two independent deadlines: `RUN_LIMITS.timeoutMs` as an **idle window** (no
+AgentResult`) and enforce three independent deadlines: `RUN_LIMITS.timeoutMs` as an **idle window** (no
 events for that long ⇒ abort; the inproc idle watchdog is disabled for coaching children that
-legitimately block on a supervisor reply), and `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock
+legitimately block on a supervisor reply), `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock
 cap** — a lifetime ceiling armed once and never reset that, when set, settles a busy-but-non-converging
-child (a loop that keeps emitting) the idle window never catches. OFF by default (0 = unlimited) so a
+child (a loop that keeps emitting) the idle window never catches (OFF by default, 0 = unlimited, so a
 healthy, progressing child is never killed mid-work; the idle window + token budget remain the always-on
-backstops. Both classify as `failureKind: "timeout"` (never a provider reroute).
+backstops) — and `PI_PERSONA_AGENT_STARTUP_MS` as a **startup deadline** (default 300000, `0` disables):
+a child that makes ZERO progress — no completed turn, no tokens, no streamed output — within the window
+is killed as a stalled start. It fast-fails the "never started" case the generous idle window is too
+slow for — notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; the
+first real progress cancels it, so a slow-but-streaming turn is never touched. All three classify as
+`failureKind: "timeout"` (never a provider reroute).
 
 - **InProcessEngine** (default) — a `createAgentSession` per sub-agent: cheaper, shares the host's
   auth/model registry, and **steerable** (inject a live user message into a running sub-agent).
 - **ChildProcessEngine** (`PI_PERSONA_ENGINE=child`, the correctness baseline) — spawns `pi --mode
   json -p`, delivering the task over **stdin** (never argv — a flow-phase task would blow Windows'
-  ~32 KiB command-line cap). The path worktree isolation always uses.
+  ~32 KiB command-line cap). The path worktree isolation always uses the child engine.
 
 `buildEngine` wraps the chosen backend with **provider fallback** (`engine/fallback.ts`): a run whose
 model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on the same model

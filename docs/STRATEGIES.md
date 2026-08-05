@@ -137,7 +137,7 @@ The schema is for discovery and typo-catching, not enforcement: a strategy still
 
 ## How personas choose options
 
-Options reach a strategy's `input.params` from three surfaces, all overridable by the supervisor
+Options reach a strategy's `input.params` from four surfaces, all overridable by the supervisor
 per-call:
 
 1. **Author default (static)** — a persona's `council: { strategy, roster, params }` (tool-driven) or
