@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { tempDir } from "../../setup/temp-dir.ts";
 import {
 	personaModels,
 	readPersonaConfigs,
@@ -25,7 +25,7 @@ test("withPersonaModels merges into the existing persona config without dropping
 });
 
 test("read/write round-trips through a JSON file; missing/invalid file reads as empty", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	assert.deepEqual(readPersonaConfigs(file), {}, "missing file → empty store");
 	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a" }));
@@ -33,7 +33,7 @@ test("read/write round-trips through a JSON file; missing/invalid file reads as 
 });
 
 test("a save keeps personas another pi instance wrote after this store was read", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a" }));
 	const sessionA = readPersonaConfigs(file); // session A's snapshot, taken at session_start
@@ -46,7 +46,7 @@ test("a save keeps personas another pi instance wrote after this store was read"
 });
 
 test("a save keeps another instance's assignment for a different agent of the SAME persona", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	const sessionA = readPersonaConfigs(file); // both sessions start from an empty store
 	writePersonaConfigs(file, withPersonaModels(readPersonaConfigs(file), "magi", { casper: "prov/b" }));
@@ -57,7 +57,7 @@ test("a save keeps another instance's assignment for a different agent of the SA
 });
 
 test("a config that parses but isn't an object is kept as .bak before the next save replaces it", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	writeFileSync(file, '["not", "a", "config"]', "utf8");
 	assert.deepEqual(readPersonaConfigs(file), {});
@@ -65,7 +65,7 @@ test("a config that parses but isn't an object is kept as .bak before the next s
 });
 
 test("a corrupt config is kept as config.json.bak instead of being silently overwritten", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	writeFileSync(file, '{"magi": {"models": {"melchior": "prov/a"', "utf8"); // truncated by a crash
 	assert.deepEqual(readPersonaConfigs(file), {});
@@ -76,7 +76,7 @@ test("the .bak keeps the FIRST corrupt copy — a second bad parse must not dest
 	// The fault that corrupts the file (a sync client, a failing disk) tends to recur, and the
 	// second corruption is typically the emptier one. Overwriting would discard the only copy
 	// that still held the user's assignments — the exact thing the backup exists to keep.
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	writeFileSync(file, '{"magi": {"models": {"melchior": "prov/a"', "utf8");
 	readPersonaConfigs(file);
@@ -89,7 +89,7 @@ test("a save falls back to an in-place write when the rename can never win (a lo
 	// Windows: renameSync throws EPERM while ANY other handle holds the target open. Losing the
 	// save would re-prompt the model picker every session, so a write that survives beats one
 	// that is atomic.
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	const waits: number[] = [];
 	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a" }), {
@@ -104,7 +104,7 @@ test("a save falls back to an in-place write when the rename can never win (a lo
 });
 
 test("a save retries a contended rename and keeps the atomic path when it wins", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	let attempts = 0;
 	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a" }), {
@@ -122,7 +122,7 @@ test("a save retries a contended rename and keeps the atomic path when it wins",
 test("a save succeeds while another process holds the config open for reading", () => {
 	// The routine Windows case (Defender, a sync client, a second pi instance mid-read): an
 	// open handle blocks the rename but not a write.
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a" }));
 	const held = openSync(file, "r");
@@ -140,7 +140,7 @@ test("a save succeeds while another process holds the config open for reading", 
 test("a save MERGES — an assignment left out of the store is preserved, not removed", () => {
 	// Documented, load-bearing limitation: the merge exists so a concurrent instance's save
 	// survives ours, and it cannot tell "the user cleared this" from "this store never saw it".
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-cfg-"));
+	const dir = tempDir("pi-persona-cfg-");
 	const file = join(dir, "config.json");
 	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a", casper: "prov/c" }));
 	writePersonaConfigs(file, { magi: { models: { melchior: "prov/a" } } }); // casper dropped by the caller

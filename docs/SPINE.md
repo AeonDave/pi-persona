@@ -1,5 +1,7 @@
 # The spine — a shared behavioral layer
 
+See [`docs/README.md`](./README.md) for the canonical doc map.
+
 ## Why it exists
 
 Pi's own base system prompt (`buildSystemPrompt` in pi's coding-agent) is a tool manifest, pointers

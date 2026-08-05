@@ -1,5 +1,7 @@
 # Architecture
 
+See [`docs/README.md`](./README.md) for the canonical doc set index.
+
 The design contract for pi-persona — the model, the binding invariants, the module map, and the
 runtime seams. This is the **canonical design reference**: on any conflict, this document and the
 invariants below win. For the user guide see the [README](../README.md); for the orchestration layer

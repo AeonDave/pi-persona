@@ -1,5 +1,7 @@
 # Strategies — the orchestration layer
 
+See [`docs/README.md`](./README.md) for the canonical doc map.
+
 How a roster of sub-agents is coordinated. A **strategy** is a small TypeScript file composing the
 **Strategy SDK**; a **persona** decides whether and how one runs. This document is the contributor's
 deep dive: the SDK contract, every built-in's mechanism and params, the bias-guard invariants you

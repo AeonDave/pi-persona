@@ -1,13 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { tempDir } from "../setup/temp-dir.ts";
 import { readLastPersona, writeLastPersona } from "../../src/persona/state.ts";
 
-const tmpFile = (...parts: string[]) =>
-	path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-state-")), ...parts);
+const tmpFile = (...parts: string[]) => path.join(tempDir("pi-persona-state-"), ...parts);
 
 test("writeLastPersona → readLastPersona round-trips a name (creating parent dirs)", () => {
 	const f = tmpFile("persona", "state.json");

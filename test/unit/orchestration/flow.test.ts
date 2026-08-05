@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { tempDir } from "../../setup/temp-dir.ts";
 import { flowHash, parseFlow, topoOrder } from "../../../src/orchestration/flow.ts";
 import { journalFileName, parseJournal } from "../../../src/orchestration/flow-journal.ts";
 import { runFlow } from "../../../src/orchestration/flow-run.ts";
@@ -54,15 +54,11 @@ test("journalFileName derives one writable filename component from a path-hostil
 	const r = parseFlow(flow([{ id: "a", strategy: "s" }], "../ci: quick/pass"));
 	assert.ok(r.ok);
 	const file = journalFileName(r.flow);
-	const dir = mkdtempSync(join(tmpdir(), "flow-journal-"));
-	try {
-		const path = join(dir, file);
-		assert.equal(dirname(path), dir, "the name cannot walk out of the flows dir");
-		writeFileSync(path, "x"); // the real gate: an unsanitized name is unwritable on both OSes
-		assert.equal(readFileSync(path, "utf8"), "x");
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
+	const dir = tempDir("flow-journal-");
+	const path = join(dir, file);
+	assert.equal(dirname(path), dir, "the name cannot walk out of the flows dir");
+	writeFileSync(path, "x"); // the real gate: an unsanitized name is unwritable on both OSes
+	assert.equal(readFileSync(path, "utf8"), "x");
 });
 
 test("journalFileName gives two names that encode alike their own journals", () => {

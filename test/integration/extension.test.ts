@@ -39,12 +39,13 @@ import { ExocomPlane } from "../../src/exocom/plane.ts";
 import { registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
+import { tempDir } from "../setup/temp-dir.ts";
 
 // Hermetic: point the "user" agent dir at an empty temp dir. pi-persona no longer auto-loads the
 // bundled personas/agents (the bundled dir is only a seed SOURCE), so seed this dir up front —
 // the equivalent of the user running `/persona restore` — to give the persona-dependent tests
 // their personas. The opt-in test below uses its own fresh dir to prove the empty-by-default case.
-process.env.PI_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-userdir-"));
+process.env.PI_AGENT_DIR = tempDir("pi-persona-userdir-");
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const PERSONA_DIR = path.join(process.env.PI_AGENT_DIR, "persona");
 seedDefaults(REPO_ROOT, PERSONA_DIR, true);
@@ -133,7 +134,7 @@ function makeCtx(cwd: string) {
 }
 
 function projectCwdWithLockedPersona(): string {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-ext-"));
+	const cwd = tempDir("pi-persona-ext-");
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "agents", "locked.md"),
@@ -324,7 +325,7 @@ test("session_start loads the installed (seeded) personas and agents", async () 
 });
 
 test("opt-in: a fresh install loads NO personas until /persona restore installs them", async () => {
-	const fresh = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-fresh-"));
+	const fresh = tempDir("pi-persona-fresh-");
 	const prev = process.env.PI_AGENT_DIR;
 	process.env.PI_AGENT_DIR = fresh;
 	try {
@@ -405,7 +406,7 @@ test("tool_call gating blocks delegation outside a restrictive project persona's
 });
 
 test("the spine is injected between Pi's base prompt and the persona body — and on persona-less turns too", async () => {
-	const spineFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-spine-")), "spine.md");
+	const spineFile = path.join(tempDir("pi-persona-spine-"), "spine.md");
 	fs.writeFileSync(spineFile, "\nSPINE SENTINEL LAYER\n\n");
 
 	// Baseline first: the same two turns with the spine OFF (the default).
@@ -551,7 +552,7 @@ test("with NO ui the spine degradation still reaches the operator — on stderr,
 });
 
 test("a delegated leg inherits the spine — end to end, through the real engine wiring", async () => {
-	const spineFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-spine-leg-")), "spine.md");
+	const spineFile = path.join(tempDir("pi-persona-spine-leg-"), "spine.md");
 	fs.writeFileSync(spineFile, "SPINE SENTINEL LAYER\n");
 	// The child engine re-invokes THIS script as `pi` (getPiInvocation); point that at the fake
 	// so the leg runs deterministically, and echoes back the system prompt it was handed.
@@ -710,7 +711,7 @@ test("a persona's `spine: false` suppresses the layer for the legs it spawns, no
 	// Otherwise the documented judge/verify/audit opt-out is hollow: the persona saves the layer on
 	// its own turn and pays for it again on every sub-agent it fans out to.
 	const cleanup = withUserSpines("SUPERVISOR ONLY LAYER", "WORKER ONLY LAYER");
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-nospine-"));
+	const cwd = tempDir("pi-persona-nospine-");
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "agents", "verdict.md"),
@@ -789,7 +790,7 @@ test("the four measurement arms are expressible end to end — the supervisor tu
 });
 
 test("/persona reload re-resolves the spine — the one command whose job is picking up edits", async () => {
-	const spineFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-spine-reload-")), "spine.md");
+	const spineFile = path.join(tempDir("pi-persona-spine-reload-"), "spine.md");
 	fs.writeFileSync(spineFile, "FIRST LAYER\n");
 	process.env.PI_PERSONA_SPINE = spineFile;
 	const cap = captureEngineDeps();
@@ -835,7 +836,7 @@ test("the f8 shortcut cycles into a persona", async () => {
 });
 
 test("persistence: /persona writes the selection and a fresh session restores it", async () => {
-	const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-persist-")), "state.json");
+	const stateFile = path.join(tempDir("pi-persona-persist-"), "state.json");
 	process.env.PI_PERSONA_STATE_FILE = stateFile;
 	process.env.PI_PERSONA_PERSIST = "on";
 	try {
@@ -1152,7 +1153,7 @@ function makeTreeFrameCtx(base: ReturnType<typeof makeCtx>["ctx"]) {
 test("two concurrent runs of ONE strategy hold separate subtrees — the first to settle keeps the second alive", async () => {
 	// `/orchestrate` is the fixed-prefix path (the council tool disambiguates by tool-call id
 	// already), so the run's own root id is the only thing keeping two of them apart.
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-strategyroot-"));
+	const cwd = tempDir("pi-persona-strategyroot-");
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "agents", "rootid-orch.md"),
@@ -1178,7 +1179,7 @@ test("two concurrent runs of ONE strategy hold separate subtrees — the first t
 });
 
 test("two concurrent runs of ONE flow hold separate subtrees too", async () => {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-flowroot-"));
+	const cwd = tempDir("pi-persona-flowroot-");
 	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "flows", "rootid.flow.json"),
@@ -1206,7 +1207,7 @@ test("two concurrent runs of ONE flow hold separate subtrees too", async () => {
 });
 
 test("an aborted flow PHASE reaches its strategy's own cooperative check, not just the engine", async () => {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-flowabort-"));
+	const cwd = tempDir("pi-persona-flowabort-");
 	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "flows", "abortphase.flow.json"),
@@ -1478,7 +1479,7 @@ test("switching persona clears the by-hand delegation run instead of billing it 
 // ── a misconfigured persona grammar must surface, not escape the hook/command ────────────
 
 function projectCwdWithBrokenOrchestration(): string {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-broken-"));
+	const cwd = tempDir("pi-persona-broken-");
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "agents", "broken-orch.md"),
@@ -1515,7 +1516,7 @@ test("/orchestrate reports a misconfigured persona grammar instead of throwing o
 // ── a failed per-persona model save must be reported, not swallowed ──────────────────────
 
 test("a per-persona model assignment that cannot be persisted is reported to the user", async () => {
-	const fresh = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-cfgfail-"));
+	const fresh = tempDir("pi-persona-cfgfail-");
 	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
 	// The store's own save path is atomic (temp file + rename); a DIRECTORY where config.json
 	// belongs is the cross-OS way to make that rename fail the way a locked/full volume would.
@@ -1549,7 +1550,7 @@ test("a per-persona model assignment that cannot be persisted is reported to the
 });
 
 test("a model picker that dies partway keeps — and persists — the picks the user already made", async () => {
-	const fresh = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-partialpick-"));
+	const fresh = tempDir("pi-persona-partialpick-");
 	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
 	const prev = process.env.PI_AGENT_DIR;
 	process.env.PI_AGENT_DIR = fresh;
@@ -1624,7 +1625,7 @@ test("an aborted run reaches the strategy's own cooperative check — no member 
 // ── exocom (T9): the plane runs on a real socket/named pipe over a per-test workspace ────
 
 function exocomWorkspace(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-exo-"));
+	return tempDir("pi-persona-exo-");
 }
 
 function makeExocomCtx(cwd: string, sessionId: string) {

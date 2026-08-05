@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { tempDir } from "../../setup/temp-dir.ts";
 
 import {
 	bundledSpinePath,
@@ -240,7 +242,7 @@ test("the cap is 64 KiB — the bound itself, not just 'some bound'", () => {
 });
 
 test("readSpineFile refuses a file past the cap instead of loading it", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-persona-spine-cap-"));
+	const dir = tempDir("pi-persona-spine-cap-");
 	const huge = join(dir, "huge.md");
 	writeFileSync(huge, "x".repeat(MAX_SPINE_BYTES + 1));
 	const r = readSpineFile(huge);

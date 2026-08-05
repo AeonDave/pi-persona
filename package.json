@@ -26,8 +26,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "test:unit": "node --import tsx --test \"test/unit/**/*.test.ts\"",
+    "test": "node --import tsx --import ./test/setup/hermetic-env.ts --test \"test/**/*.test.ts\"",
+    "test:unit": "node --import tsx --import ./test/setup/hermetic-env.ts --test \"test/unit/**/*.test.ts\"",
     "drive": "node --import tsx scripts/drive.ts"
   },
   "peerDependencies": {
