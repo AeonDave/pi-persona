@@ -59,6 +59,7 @@ An active persona can also borrow another installed persona's declared council f
 | **Team** | a named roster of agents | `teams.yaml` |
 | **Strategy** | how a roster is orchestrated (vote, loop, rounds…) | `src/orchestration/strategies/*.ts` |
 | **Contract** | the structured shape a sub-agent returns (so votes tally) | `contracts/*.contract.json` |
+| **Spine** | an optional shared behavioral layer, off by default, edited like a persona | `prompts/spine.md` · `spine.worker.md` |
 
 ## How it works
 
@@ -217,9 +218,11 @@ children it spawned, in two layers, deliberately separate:
 > **Pre-authenticate first (headless caveat).** The `mcp: true` leg is a *fresh, UI-less* `pi -p`
 > child: it can only use MCP servers that initialize **non-interactively**. A server that needs
 > interactive OAuth cannot authenticate without a UI, so the child stalls at startup. pi-persona
-> fast-fails such a leg at the **startup deadline** (`PI_PERSONA_AGENT_STARTUP_MS`, default 90 s,
+> fast-fails such a leg at the **startup deadline** (`PI_PERSONA_AGENT_STARTUP_MS`, default 5 min,
 > `0` disables) instead of burning the full idle window, and returns a clear error naming the
-> cause. **Fix:** authenticate the server once in a normal `pi` session (`/mcp auth <server>`) — the
+> cause. The window is generous because it must cover the whole cold start — spawn, init, and the
+> first provider response — and it *kills*, where the idle watchdog would let a slow-but-healthy
+> leg live. **Fix:** authenticate the server once in a normal `pi` session (`/mcp auth <server>`) — the
 > token is cached on disk and the headless child reuses it. Then `mcp: true` connects cleanly.
 > Servers that key state by a session-id argument (HTTP backends) need that id in the task, not a
 > login.
