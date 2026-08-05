@@ -454,7 +454,7 @@ test("PI_PERSONA_SPINE=on picks up the user's own <persona data dir>/spine.md", 
 		await m.fire("session_start", undefined, ctx);
 		const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
 		assert.ok(bare.startsWith("BASE\n\nMY OWN SPINE\n\n"), `the user's spine.md shadows the bundled one — got: ${bare.slice(0, 120)}`);
-		assert.doesNotMatch(bare, /Deliver the ask, whole/, "the bundled spine must NOT also be present");
+		assert.doesNotMatch(bare, /Answer first, then show your work/, "the bundled spine must NOT also be present");
 	} finally {
 		delete process.env.PI_PERSONA_SPINE;
 		fs.rmSync(userSpine, { force: true });
@@ -478,7 +478,7 @@ test("PI_PERSONA_SPINE=on with no user copy serves the BUNDLED pair — the stat
 
 		const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
 		assert.ok(
-			bare.startsWith("BASE\n\n**Deliver the ask, whole.**"),
+			bare.startsWith("BASE\n\n**Answer first, then show your work.**"),
 			`with no user copy the supervisor turn leads with prompts/spine.md — got: ${bare.slice(0, 140)}`,
 		);
 
@@ -486,10 +486,10 @@ test("PI_PERSONA_SPINE=on with no user copy serves the BUNDLED pair — the stat
 		await delegate.execute("del-bundled-spine", { tasks: [{ agent: "scout", task: "probe" }] }, undefined, undefined, ctx);
 		const legSpine = cap.inproc.at(-1)?.spine ?? "";
 		assert.ok(
-			legSpine.startsWith("**Do the task you were given, and only that.**"),
+			legSpine.startsWith("**Lead your report with the result.**"),
 			`…and its legs lead with prompts/spine.worker.md — got: ${legSpine.slice(0, 140)}`,
 		);
-		assert.doesNotMatch(legSpine, /Deliver the ask, whole/, "a leg never gets the supervisor text as a stand-in");
+		assert.doesNotMatch(legSpine, /Answer first, then show your work/, "a leg never gets the supervisor text as a stand-in");
 	} finally {
 		delete process.env.PI_PERSONA_SPINE;
 	}
