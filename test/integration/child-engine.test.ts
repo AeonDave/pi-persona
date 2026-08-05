@@ -106,7 +106,45 @@ test("runChildAgent startup-deadline kills a child that makes NO progress within
 	assert.equal(r.aborted, false, "a startup deadline is NOT an abort");
 	assert.equal(r.ok, false);
 	assert.match(r.errorMessage ?? "", /startup window/);
+	// The deadline cannot tell a stalled init from a first provider response slower than the
+	// window (a queued or rate-limited provider, a cold local model), and only the assistant's
+	// own progress disarms it — so the message must offer both readings and name the knob
+	// instead of asserting a leg that may well have started never did.
+	assert.match(r.errorMessage ?? "", /provider/, "names the slow-first-response reading too");
+	assert.match(r.errorMessage ?? "", /PI_PERSONA_AGENT_STARTUP_MS/, "names the knob that raises or disables it");
 });
+
+test("runChildAgent startup-deadline still fires when pi echoes the delivered prompt and then stalls", async () => {
+	// The echoed USER prompt is pi-persona's own task coming back — not child progress. If it
+	// counted, the deadline would be disarmed at prompt delivery and a first-provider-request
+	// hang could only be caught by the far longer idle window.
+	const r = await runChildAgent({ task: "stall [echo-then-hang]" }, undefined, {
+		resolveInvocation: resolveFake,
+		killGraceMs: 200,
+		startupTimeoutMs: 150,
+		timeoutMs: 5_000, // idle window long → proves the STARTUP deadline (not idle) fired
+	});
+	assert.equal(r.timedOut, true);
+	assert.equal(r.ok, false);
+	assert.match(r.errorMessage ?? "", /startup window/);
+	assert.equal(r.output, "", "the echoed prompt is never salvaged as the leg's output");
+});
+
+test(
+	"runChildAgent reports a child killed by an external signal as a failure, not a clean success",
+	{ skip: process.platform === "win32" },
+	async () => {
+		// code=null on a signal death must not become exit 0: none of the engine's own kill
+		// flags are set, so a bare `code ?? 0` would hand the supervisor truncated mid-run
+		// output as a valid result.
+		const r = await runChildAgent({ task: "die [self-signal]" }, undefined, { resolveInvocation: resolveFake });
+		assert.equal(r.ok, false, "an externally killed child is not a success");
+		assert.notEqual(r.exitCode, 0);
+		assert.equal(r.aborted, false, "the engine did not initiate this kill");
+		assert.equal(r.timedOut, false);
+		assert.match(r.errorMessage ?? "", /SIGKILL/);
+	},
+);
 
 test("runChildAgent startup-deadline does NOT fire once the child makes progress", async () => {
 	// A normal child completes a turn (progress) almost immediately, cancelling the deadline.

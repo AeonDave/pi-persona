@@ -49,11 +49,21 @@ export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: s
 		return await body(dir);
 	} finally {
 		// Remove the worktree registration, then the dir (force: it may carry the agent's edits).
-		exec(["-C", root, "worktree", "remove", "--force", dir]);
+		const remove = exec(["-C", root, "worktree", "remove", "--force", dir]);
 		try {
 			rmSync(dir, { recursive: true, force: true });
 		} catch {
 			/* the worktree remove usually handles it; ignore races */
+		}
+		// A failed remove (on Windows a grandchild tool process can still hold a file inside the
+		// worktree) leaves the .git/worktrees entry registered while the dir is gone — prune it,
+		// or stale ghosts accumulate across delegations until a manual `git worktree prune`.
+		// Never throw: cleanup must not replace the body's result (or its error).
+		if (remove.code !== 0) {
+			exec(["-C", root, "worktree", "prune"]);
+			if (process.env.PI_PERSONA_DEBUG) {
+				process.stderr.write(`[pi-persona] git worktree remove failed for ${dir} (pruned): ${remove.stderr.trim() || `git exited ${remove.code}`}\n`);
+			}
 		}
 	}
 }

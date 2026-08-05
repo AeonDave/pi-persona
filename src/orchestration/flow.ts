@@ -66,7 +66,9 @@ export function topoOrder(phases: FlowPhase[]): TopoResult {
 	return { ok: true, order };
 }
 
-/** Parse + validate a `*.flow.json` into a runnable FlowSpec (or a clear error). */
+/** Parse + validate a `*.flow.json` into a runnable FlowSpec (or a clear error). The name is
+ *  taken as the flow's IDENTITY and kept verbatim, path-hostile characters and all: the journal
+ *  filename it becomes is derived from it (`journalFileName`, flow-journal.ts), not spelled by it. */
 export function parseFlow(content: string): FlowParse {
 	let raw: unknown;
 	try {

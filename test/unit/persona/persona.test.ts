@@ -122,6 +122,71 @@ test("composeSystemPrompt appends by default and replaces when asked", () => {
 	assert.equal(composeSystemPrompt("BASE", replace), "ONLY THIS.");
 });
 
+// Differential guard for docs/SPINE.md's "unset / off ⇒ byte-identical to pre-spine behavior".
+// `preSpine` is the pre-spine composeSystemPrompt transcribed VERBATIM from the commit before the
+// spine landed; anything the off path returns must equal it, on every mode × body shape. Written
+// as a differential (not hand-written expectations) so the claim cannot be certified by a test
+// that merely restates whatever the new code happens to do.
+function preSpineCompose(base: string, persona: { systemPromptMode: string; body: string }): string {
+	if (persona.systemPromptMode === "replace") return persona.body;
+	if (!persona.body.trim()) return base;
+	return `${base}\n\n${persona.body}`;
+}
+
+test("with the spine OFF every composition is byte-identical to the pre-spine implementation", () => {
+	for (const mode of ["append", "replace"]) {
+		for (const body of ["You are X.", "", "\n", "   \n\t "]) {
+			const p = parsePersona(`---\nname: p\npersona: true\nsystemPromptMode: ${mode}\n---\n${body}`, "/s")!;
+			for (const off of [undefined, "", "   \n "]) {
+				assert.equal(
+					composeSystemPrompt("BASE", p, off),
+					preSpineCompose("BASE", p),
+					`mode=${mode} body=${JSON.stringify(body)} spine=${JSON.stringify(off)}`,
+				);
+			}
+			// `spine: false` is the other off switch: it must land on the same pre-spine bytes.
+			const optedOut = { ...p, spine: false as const };
+			assert.equal(composeSystemPrompt("BASE", optedOut, "SPINE"), preSpineCompose("BASE", p), `spine:false mode=${mode}`);
+		}
+	}
+});
+
+test("the spine sits between Pi's base prompt and the persona body (append) and replaces the base entirely (replace)", () => {
+	const magi = parsePersona(MAGI, "/s")!;
+	assert.equal(composeSystemPrompt("BASE", magi, "SPINE"), "BASE\n\nSPINE\n\nYou are the MAGI orchestrator.");
+
+	const replace = parsePersona("---\nname: r\npersona: true\nsystemPromptMode: replace\n---\nONLY THIS.", "/s")!;
+	assert.equal(composeSystemPrompt("BASE", replace, "SPINE"), "SPINE\n\nONLY THIS.", "replace drops Pi's base, so the spine is the only scaffolding left");
+});
+
+test("an empty-bodied persona still gets the spine — the same shape a no-persona turn gets", () => {
+	const empty = parsePersona("---\nname: r\npersona: true\nsystemPromptMode: replace\n---\n", "/s")!;
+	assert.equal(composeSystemPrompt("BASE", empty, "SPINE"), "BASE\n\nSPINE");
+});
+
+test("`spine: false` frontmatter opts a persona out of the shared layer", () => {
+	const out = parsePersona("---\nname: judge\npersona: true\nspine: false\n---\nVerdict only.", "/s")!;
+	assert.equal(out.spine, false);
+	assert.equal(composeSystemPrompt("BASE", out, "SPINE"), "BASE\n\nVerdict only.");
+
+	const optedIn = parsePersona("---\nname: j2\npersona: true\nspine: true\n---\nVerdict only.", "/s")!;
+	assert.equal(optedIn.spine, undefined, "only an explicit false is recorded — nothing else changes behavior");
+	assert.equal(composeSystemPrompt("BASE", optedIn, "SPINE"), "BASE\n\nSPINE\n\nVerdict only.");
+});
+
+test("with no spine the composition is BYTE-IDENTICAL to the pre-spine result", () => {
+	const append = parsePersona(MAGI, "/s")!;
+	const replace = parsePersona("---\nname: r\npersona: true\nsystemPromptMode: replace\n---\nONLY THIS.", "/s")!;
+	const empty = parsePersona("---\nname: e\npersona: true\nsystemPromptMode: replace\n---\n", "/s")!;
+	for (const off of [undefined, "", "   \n "]) {
+		assert.equal(composeSystemPrompt("BASE", append, off), "BASE\n\nYou are the MAGI orchestrator.");
+		assert.equal(composeSystemPrompt("BASE", replace, off), "ONLY THIS.");
+		// Pre-spine, `replace` short-circuited on the mode BEFORE it looked at the body, so an
+		// empty-bodied replace persona composed to an empty prompt. The off path still does.
+		assert.equal(composeSystemPrompt("BASE", empty, off), "");
+	}
+});
+
 test("audit council params include peers: true (adoption example)", () => {
 	const audit = parsePersona(
 		"---\nname: audit\npersona: true\ncouncil:\n  strategy: synthesize\n  roster: review\n  params: { synthesizer: reviewer, peers: true }\n---\nAudit supervisor.",

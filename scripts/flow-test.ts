@@ -26,7 +26,6 @@ const operator: AgentConfig = {
 	name: "operator",
 	model: MODEL,
 	systemPrompt: "Follow instructions exactly. Reply with only what is asked, nothing else.",
-	systemPromptMode: "replace",
 	source: "harness",
 	tools: [],
 };

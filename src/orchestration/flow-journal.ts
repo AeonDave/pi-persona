@@ -3,13 +3,40 @@
  * run the journal is read back into a resume map (phase id → output) so done phases are
  * skipped. Lines whose `hash` doesn't match the current `flow@hash` are ignored (the flow
  * changed), and a phase recorded `ok:false` is NOT resumed (it re-runs). `parseJournal`
- * is pure (tested); the read/write helpers are thin `fs` glue.
+ * and the filename derivation are pure (tested); the read/write helpers are thin `fs` glue.
  */
 
 import * as fs from "node:fs";
 
 import { emptyUsage } from "../engine/stream.ts";
+import { flowHash, type FlowSpec } from "./flow.ts";
 import type { FlowJournalEntry, ResumedResult } from "./flow-run.ts";
+
+/** What no filename component can carry on both OSes: separators (which would write outside the
+ *  flows dir), the characters Windows reserves, and control characters. A flow NAME is free to
+ *  contain any of them — it is the flow's identity — but the helpers below swallow fs errors, so a
+ *  name carried into the path verbatim would kill resume in silence. */
+const PATH_HOSTILE = /[/\\<>:"|?*\x00-\x1f]/g;
+
+/** The journal file for a flow, named `<encoded name>.<flow@hash>.journal.jsonl`.
+ *
+ *  The name half is for the human reading the flows dir, so it stays as close to the flow's own
+ *  name as a filename can be; the `flow@hash` half is what actually keeps journals apart, since
+ *  it covers the whole spec (the name included). Two names that encode alike — `ci:quick` and
+ *  `ci?quick` — are therefore still two different specs with two different hashes and two
+ *  different files, and so is a name long enough to be truncated here. Should a truncated hash
+ *  ever collide anyway, every LINE still carries the full one, so a resume reads only its own. */
+export function journalFileName(spec: FlowSpec): string {
+	return `${encodeFlowName(spec.name)}.${flowHash(spec).slice(0, 8)}.journal.jsonl`;
+}
+
+/** A flow name reduced to something a filesystem will accept: hostile characters replaced,
+ *  leading dots dropped (they'd make the journal hidden, and `..` is worth never spelling at
+ *  all), and capped — the hash and the suffix still have to fit under the ~255-byte name limit. */
+function encodeFlowName(name: string): string {
+	const encoded = name.replace(PATH_HOSTILE, "-").replace(/^[.\s]+/, "").slice(0, 64).trim();
+	return encoded || "flow";
+}
 
 /** Fold a JSONL journal into a resume map for the given `flow@hash`. Later lines win, so a
  *  phase that failed then succeeded ends up resumed; a phase still failed is left to re-run.
@@ -24,6 +51,9 @@ export function parseJournal(content: string, hash: string): Record<string, Resu
 		} catch {
 			continue;
 		}
+		// A line can parse cleanly yet not be an entry (`null`, a scalar) — dereferencing it here
+		// would abort the whole fold, and readJournal's blanket catch would drop every phase.
+		if (!e || typeof e !== "object") continue;
 		if (e.hash !== hash || typeof e.phase !== "string") continue;
 		if (e.ok) {
 			const prior = out[e.phase];

@@ -6,6 +6,7 @@
  */
 
 import type { RunLimits } from "../core/capabilities.ts";
+import { emptyUsage } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { mapWithConcurrency } from "./parallel.ts";
 import { aggregateResults } from "./reducers.ts";
@@ -143,6 +144,43 @@ export interface SDKDeps {
 	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
 }
 
+/**
+ * An `ok:false` SYNTHESISED from an engine rejection rather than reported by the engine itself.
+ * Both engines settle a genuine agent failure, so a rejection means the HARNESS broke — a full temp
+ * dir, an adapter crash — which is no evidence about the delegation that provoked it. Consumers
+ * that punish failure (the delegate ledger's 2-strike permanent veto) must skip these, or a local
+ * disk problem silently blacklists a task that was never actually attempted. `failureKind` cannot
+ * carry the distinction: it answers "why did the AGENT stop", where an infra rejection is
+ * indistinguishable from a model-side failure.
+ */
+export interface InfrastructureFailure extends AgentResult {
+	infrastructure: true;
+}
+
+/** Was this `ok:false` synthesised from an engine rejection? See {@link InfrastructureFailure}. */
+export function isInfrastructureFailure(result: Partial<InfrastructureFailure>): boolean {
+	return result.infrastructure === true;
+}
+
+/**
+ * Turn an engine REJECTION into that leg's own `ok:false` result. Both engines normally settle a
+ * failed run (`ok:false` + `failureKind`); one that throws instead used to take the whole fan-out
+ * down with it, discarding the siblings' completed — and already billed — work. Converting here,
+ * where the value type is known, keeps the batch's "N members ⇒ N results" contract intact.
+ * `aborted` preserves the stopped-vs-failed distinction callers key off (`failureKind === "abort"`).
+ */
+export function legFailure(agent: string, error: unknown, aborted: boolean): InfrastructureFailure {
+	return {
+		agent,
+		output: "",
+		usage: emptyUsage(),
+		ok: false,
+		error: `[${agent}] ${error instanceof Error ? error.message : String(error)}`,
+		failureKind: aborted ? "abort" : "agent",
+		infrastructure: true,
+	};
+}
+
 export function makeSDK(deps: SDKDeps): StrategySDK {
 	// Run-scoped enforcement of the declared limits — applied here so NO strategy can
 	// exceed them, however it calls agent() (I2: safety from runtime limits, not isolation).
@@ -174,22 +212,38 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 			deps.onAgentStart?.(spec.agent, () => ac.abort(), key);
 			deps.onAgentStatus?.(spec.agent, "running", undefined, key);
 			const onProgress = deps.onAgentProgress;
+			// The try covers the ENGINE CALL AND NOTHING ELSE. Widened over the bookkeeping below it,
+			// a throw from the HOST's own status callback — which formats the member's OUTPUT, so it
+			// can fail on a completed leg while the empty synthesised failure sails through — would
+			// launder a finished, already-billed result into an `ok:false` carrying the UI's error
+			// message: the exact loss this containment exists to prevent, with a lie attached.
+			let result: AgentResult;
 			try {
-				const result = await deps.engine.run(
+				result = await deps.engine.run(
 					spec,
 					onProgress ? (p) => onProgress(spec.agent, p, key) : undefined,
 					ac.signal,
 					deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer, key) : undefined,
 				);
-				tokensSpent += result.usage.input + result.usage.output;
-				deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result, key);
-				return result;
 			} catch (err) {
-				deps.onAgentStatus?.(spec.agent, "failed", undefined, key);
-				throw err;
+				// PER-LEG failure — contained, never rethrown: one blown engine call must not discard
+				// the fan-out's completed (already billed) sibling results. The RUN-FATAL breaches
+				// above (maxChildren, token budget) are thrown BEFORE this try, so they still stop
+				// the run instead of degrading into a "failed member" the strategy fans out past.
+				const failed = legFailure(spec.agent, err, ac.signal.aborted || (deps.signal?.aborted ?? false));
+				deps.onAgentStatus?.(spec.agent, "failed", failed, key);
+				return failed;
 			}
+			tokensSpent += result.usage.input + result.usage.output;
+			deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result, key);
+			return result;
 		},
 		parallel: (thunks, opts) =>
+			// `agent()` already contains ENGINE failures per leg, so a rejection reaching here is
+			// run-fatal by construction — a limit breach, a host callback that threw, or a thunk that
+			// threw on its own. All three are the run's bug, not a member's; let them stop the run.
+			// The generic `T` is why containment can't live in `mapWithConcurrency`: only the caller
+			// knows what a failed member of its own value type looks like.
 			mapWithConcurrency(thunks, opts?.concurrency ?? deps.limits.maxConcurrency, (thunk) => thunk()),
 		reduce: { aggregate: aggregateResults, vote: voteReduce, judge: prepareJudge },
 		roster: deps.roster,

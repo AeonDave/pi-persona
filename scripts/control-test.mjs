@@ -16,7 +16,7 @@ import { runFlow } from "../src/orchestration/flow-run.ts";
 
 const MODEL = process.env.LIVE_MODEL || "openrouter/openrouter/owl-alpha";
 const { session: probe } = await createAgentSession({});
-const op = { name: "operator", model: MODEL, systemPrompt: "Follow instructions EXACTLY. Work ONE file per turn — never batch.", systemPromptMode: "replace", source: "h", tools: ["read"] };
+const op = { name: "operator", model: MODEL, systemPrompt: "Follow instructions EXACTLY. Work ONE file per turn — never batch.", source: "h", tools: ["read"] };
 const engine = makeInProcessEngine({
 	resolveAgent: (n) => (n === "operator" ? op : undefined),
 	modelRegistry: probe.modelRegistry,

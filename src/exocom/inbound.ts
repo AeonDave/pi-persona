@@ -20,6 +20,10 @@ export interface InboundDeps {
 	injectMaxBytes: number;
 	fence: (t: string) => string;
 	attribute: (label: string, t: string) => string;
+	/** The sender's CURRENT deduped `displayName` ("elite#2") — the ONLY token `plane.send()`
+	 *  resolves. Unset ⇒ the hint falls back to the label's raw name, which addresses the wrong
+	 *  peer when two live peers share a name; the caller supplies it whenever the pool is known. */
+	replyTarget?: string;
 }
 
 export type InboundDecision = { deliver: string } | { duplicate: true } | { drop: "budget" | "hops" };
@@ -48,7 +52,7 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	const { text } = truncateForInject(msg.text, deps.injectMaxBytes);
 	const msgId = routingToken(msg.msg_id);
 	const label = headerLabel(resolvedLabel, "unknown");
-	const target = headerLabel(label.replace(/\s+\([^)]*\)$/, ""), "peer");
+	const target = headerLabel(deps.replyTarget ?? label.replace(/\s+\([^)]*\)$/, ""), "peer");
   const kind = msg.in_reply_to === undefined ? "message" : "reply";
   const peerBlock = fencePeer(deps.fence(text));
   const quotedBody = peerBlock.slice(peerBlock.indexOf("\n") + 1);

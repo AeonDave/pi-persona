@@ -53,6 +53,27 @@ function extractDiff(output: string): { summary: string; diff: string } | undefi
 	return body ? { summary: output.slice(0, i).trim(), diff: body } : undefined;
 }
 
+/** The ballot labels `judge.ts` hands out, in order (position → label). */
+const BALLOT_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/**
+ * The judge's vote reduced to a ballot label. Models routinely answer "Candidate B" or "B."
+ * where the ballot asked for "B", so a bare single-letter token is read as the pick.
+ *
+ * The candidate letters are filtered against the labels ACTUALLY on this ballot, and an
+ * ambiguous vote (two different labels named, e.g. "A or B?") resolves to nothing. Guessing
+ * here is worse than failing: the caller hands the picked competitor's diff back as THE winner
+ * for the supervisor to apply, and the no-pick path already returns every valid diff — so a
+ * refusal loses nothing, while a wrong guess applies the wrong competitor's work.
+ */
+function ballotLabel(vote: string, onBallot: number): string {
+	const bare = vote.trim().toUpperCase();
+	if (bare.length <= 1) return bare;
+	const labels = new Set(BALLOT_LABELS.slice(0, Math.min(onBallot, BALLOT_LABELS.length)));
+	const named = [...new Set(bare.split(/[^A-Z]+/).filter((t) => t.length === 1 && labels.has(t)))];
+	return named.length === 1 ? named[0]! : bare;
+}
+
 /** Clip a diff for the ballot only — the winner's diff is always returned in full. */
 function clip(diff: string, max: number): string {
 	if (diff.length <= max) return diff;
@@ -116,13 +137,26 @@ export const compete: Strategy = {
 				`Return JSON ONLY: {"vote":"<the letter of your pick>","result":"<one-line verdict>","output":"<why it wins>"}`,
 			outputContract: "default",
 		});
-		const label = typeof verdict.structured?.vote === "string" ? verdict.structured.vote : "";
+		const label = ballotLabel(typeof verdict.structured?.vote === "string" ? verdict.structured.vote : "", display.length);
 		const picked = prep.pick(label);
 		// prep.pick returns the display object by reference, so its index maps back to `valid`.
 		const winner = picked ? valid[display.indexOf(picked)] : undefined;
 		const usage = sumUsage([...candidates, verdict].map((r) => r.usage));
 		if (!winner) {
-			return { agent: "compete", output: `compete: the judge could not resolve a pick (verdict: ${verdict.output})`, usage, ok: false };
+			// The competitors' worktrees are already discarded, so these diffs exist ONLY here:
+			// an unresolved pick still hands every valid entry back (unjudged) rather than losing
+			// the whole competition, and names the arbiter's own cause when IT is what failed.
+			const why = verdict.ok ? `verdict: ${verdict.output}` : (verdict.error ?? "the arbiter failed");
+			const entries = valid.map(({ result, diff, summary }) =>
+				[`--- ${result.agent} ---`, summary, "```diff", diff, "```"].join("\n"),
+			);
+			return {
+				agent: "compete",
+				output: [`compete: the judge could not resolve a pick (${why}) — the ${valid.length} valid entries follow, unjudged.`, ...entries].join("\n\n"),
+				structured: { pick: label, entered: team.length, valid: valid.length },
+				usage,
+				ok: false,
+			};
 		}
 
 		const reasoning = (typeof verdict.structured?.output === "string" && verdict.structured.output) || verdict.output;

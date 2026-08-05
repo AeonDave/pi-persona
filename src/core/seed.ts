@@ -5,9 +5,10 @@
  * non-force keeps user edits (first run / pulling in new defaults).
  *
  * Layout mirrors discovery: personas + agents live together under `<user>/agents` (classified
- * by `persona: true`), teams in `<user>/teams.yaml`, and flows/contracts/presets in their own
- * `<user>/<kind>` dirs. Should a persona and an agent ever share a name, in one folder only one
- * file can win, so the PERSONA owns it and the colliding builtin agent still loads.
+ * by `persona: true`), teams in `<user>/teams.yaml`, the spine pair flat in `<user>` (bundled
+ * under `prompts/`, but that is where `resolveSpine` looks), and flows/contracts/presets in
+ * their own `<user>/<kind>` dirs. Should a persona and an agent ever share a name, in one folder
+ * only one file can win, so the PERSONA owns it and the colliding builtin agent still loads.
  *
  * Pure over node:fs (no Pi imports), so the copy/skip logic is unit-tested with temp dirs.
  */
@@ -64,6 +65,15 @@ export function seedDefaults(bundledDir: string, userDir: string, force: boolean
 		["presets", ".preset.json"],
 	] as const) {
 		for (const f of listByExt(join(bundledDir, sub), ext)) place(join(bundledDir, sub, f), join(userDir, sub, f));
+	}
+
+	// The spine pair (docs/SPINE.md) — bundled under `prompts/`, seeded FLAT into the data dir,
+	// because that is where `PI_PERSONA_SPINE=on` looks for the user's own copy. Without this the
+	// documented "your own copy shadows the bundled one" precedence has no gesture that creates
+	// the copy, and a user would have to know the two filenames and write them by hand.
+	for (const f of ["spine.md", "spine.worker.md"]) {
+		const src = join(bundledDir, "prompts", f);
+		if (existsSync(src)) place(src, join(userDir, f));
 	}
 
 	// teams.yaml — a single merged file.

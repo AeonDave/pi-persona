@@ -88,7 +88,6 @@ export class InProcessBus {
 		const box = this.inboxes.get(to);
 		if (!box) throw new Error(`unknown peer: ${to}`);
 		const id = nextId();
-		this.deliver(box, { id, from, to, kind: opts.kind ?? "decision", text, expectsReply: true });
 		const timeoutMs = opts.timeoutMs ?? 600_000;
 		return new Promise<string>((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;
@@ -120,6 +119,10 @@ export class InProcessBus {
 				finish();
 				resolve(reply);
 			});
+			// Deliver only once the resolver is registered: `deliver` notifies observers
+			// synchronously, and one that answers inline would otherwise hit `reply`'s
+			// unknown-id path and strand this ask until its timeout.
+			this.deliver(box, { id, from, to, kind: opts.kind ?? "decision", text, expectsReply: true });
 		});
 	}
 

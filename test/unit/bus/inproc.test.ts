@@ -105,6 +105,18 @@ test("ask that is already-aborted rejects immediately", async () => {
 	await assert.rejects(() => bus.ask("child", "sup", "?", { signal: ac.signal }), /abort/i);
 });
 
+test("a reply issued synchronously from an onMessage observer resolves the ask", async () => {
+	const bus = new InProcessBus();
+	bus.register("sup");
+	let replyResult: boolean | undefined;
+	bus.onMessage((env) => {
+		if (env.expectsReply) replyResult = bus.reply(env.id, "inline answer");
+	});
+	const answer = await bus.ask("child", "sup", "decide?", { kind: "decision", timeoutMs: 1000 });
+	assert.equal(replyResult, true, "the inline reply reports as delivered");
+	assert.equal(answer, "inline answer");
+});
+
 test("ask throws for an unknown peer", () => {
 	const bus = new InProcessBus();
 	assert.throws(() => void bus.ask("child", "nobody", "?"));

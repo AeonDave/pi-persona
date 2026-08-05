@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import { flowHash, parseFlow, topoOrder } from "../../../src/orchestration/flow.ts";
-import { parseJournal } from "../../../src/orchestration/flow-journal.ts";
+import { journalFileName, parseJournal } from "../../../src/orchestration/flow-journal.ts";
 import { runFlow } from "../../../src/orchestration/flow-run.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
@@ -34,6 +37,53 @@ test("parseFlow rejects malformed JSON, empty/duplicate/dangling phases", () => 
 	assert.equal(parseFlow(flow([{ id: "a", strategy: "s", needs: ["ghost"] }])).ok, false, "dangling need");
 	assert.equal(parseFlow(flow([{ id: "a" }])).ok, false, "missing strategy");
 	assert.equal(parseFlow(JSON.stringify({ phases: [{ id: "a", strategy: "s" }] })).ok, false, "missing name");
+});
+
+test("parseFlow keeps a path-hostile flow name — the name is identity, the filename is an encoding of it", () => {
+	const phases = [{ id: "a", strategy: "s" }];
+	const hostile = parseFlow(flow(phases, "../evil"));
+	assert.equal(hostile.ok, true, "a name with separators still describes a runnable flow");
+	if (hostile.ok) assert.equal(hostile.flow.name, "../evil", "the name is carried through verbatim");
+	const colon = parseFlow(flow(phases, "ci: quick pass"));
+	assert.equal(colon.ok, true, "a name Windows can't spell is encoded at the journal, not refused here");
+	if (colon.ok) assert.equal(colon.flow.name, "ci: quick pass");
+	assert.equal(parseFlow(flow(phases, "   ")).ok, false, "a blank name is no identity at all");
+});
+
+test("journalFileName derives one writable filename component from a path-hostile name", () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }], "../ci: quick/pass"));
+	assert.ok(r.ok);
+	const file = journalFileName(r.flow);
+	const dir = mkdtempSync(join(tmpdir(), "flow-journal-"));
+	try {
+		const path = join(dir, file);
+		assert.equal(dirname(path), dir, "the name cannot walk out of the flows dir");
+		writeFileSync(path, "x"); // the real gate: an unsanitized name is unwritable on both OSes
+		assert.equal(readFileSync(path, "utf8"), "x");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("journalFileName gives two names that encode alike their own journals", () => {
+	const a = parseFlow(flow([{ id: "a", strategy: "s" }], "ci:quick"));
+	const b = parseFlow(flow([{ id: "a", strategy: "s" }], "ci?quick"));
+	assert.ok(a.ok && b.ok);
+	assert.notEqual(journalFileName(a.flow), journalFileName(b.flow), "distinct flows must never share a journal");
+});
+
+test("journalFileName always yields a usable, bounded name", () => {
+	const unspellable = parseFlow(flow([{ id: "a", strategy: "s" }], ".."));
+	const long = parseFlow(flow([{ id: "a", strategy: "s" }], "x".repeat(400)));
+	assert.ok(unspellable.ok && long.ok);
+	assert.match(journalFileName(unspellable.flow), /^flow\./, "a name that encodes to nothing ⇒ a placeholder, never a bare `..`");
+	assert.ok(journalFileName(long.flow).length < 120, "a long name can't blow the filesystem's name limit");
+});
+
+test("journalFileName leaves an ordinary name alone (a journal written before this survives)", () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }], "ci quick pass"));
+	assert.ok(r.ok);
+	assert.equal(journalFileName(r.flow), `ci quick pass.${flowHash(r.flow).slice(0, 8)}.journal.jsonl`);
 });
 
 test("parseFlow reads a phase's gate: true (checkpoint before dependents)", () => {
@@ -261,6 +311,162 @@ test("runFlow treats a throwing runPhase as a failed phase (not a crashed DAG)",
 	assert.match(outcome.results.b?.error ?? "", /blocked/, "its dependent is blocked, not run");
 });
 
+// ── run-level abort: a wave already in flight has to observe it ──────────────────────────
+
+test("runFlow cancels an in-flight wave whose phase never consults the run signal", { timeout: 5_000 }, async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }, { id: "b", strategy: "s", needs: ["a"] }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		abortGraceMs: 10,
+		runPhase: async () => {
+			ac.abort(); // a supervisor stop lands while the wave is running
+			return new Promise<AgentResult>(() => { /* a strategy that ignores its signal */ });
+		},
+	});
+	assert.equal(outcome.cancelled, true, "the flow settled as cancelled instead of hanging on the wave");
+	assert.equal(outcome.results.a?.ok, false);
+	assert.match(outcome.results.a?.error ?? "", /cancelled/i);
+	assert.equal(outcome.results.b, undefined, "the next wave never started");
+});
+
+test("an aborted flow is distinguishable from one that merely finished without an answer", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }]));
+	assert.ok(r.ok);
+	const inconclusive = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async ({ phase }) => ({ agent: phase.id, output: "", usage: usage(), ok: false, error: "boom" }),
+	});
+	assert.equal(inconclusive.ok, false);
+	assert.ok(!inconclusive.cancelled, "a failed-but-completed run is not cancelled");
+
+	const ac = new AbortController();
+	ac.abort();
+	const aborted = await runFlow(r.flow, "t", { hash: "h", signal: ac.signal, runPhase: async () => ok("a", "never") });
+	assert.equal(aborted.ok, false);
+	assert.equal(aborted.cancelled, true, "an up-front abort is reported as cancelled, not as a bare failure");
+});
+
+test("an aborted wave gives a cooperative phase its own result rather than a synthetic cancel", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		abortGraceMs: 500,
+		runPhase: async ({ phase }) => {
+			ac.abort();
+			// A real strategy unwinds across at least one turn of the event loop, so the grace —
+			// not merely draining microtasks — is what lets its own (more informative) result land.
+			await new Promise((res) => setTimeout(res, 30));
+			return { agent: phase.id, output: "cancelled after 0 round(s)", usage: usage(), ok: false, error: "aborted" };
+		},
+	});
+	assert.equal(outcome.cancelled, true);
+	assert.equal(outcome.results.a?.output, "cancelled after 0 round(s)", "the phase's own result survives the abort");
+	assert.match(outcome.output, /cancelled after 0 round\(s\)/, "and reaches the flow output");
+});
+
+test("a force-settled phase is classified as an ABORT, not as a plain failure", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		abortGraceMs: 10,
+		runPhase: async () => {
+			ac.abort();
+			return new Promise<AgentResult>(() => { /* a strategy that ignores its signal */ });
+		},
+	});
+	assert.equal(outcome.results.a?.ok, false);
+	assert.equal(
+		outcome.results.a?.failureKind,
+		"abort",
+		"a consumer keying on failureKind must see the stop, not a phase that merely failed",
+	);
+});
+
+test("the DEFAULT grace is long enough for a real strategy's own cancelled result to land", { timeout: 20_000 }, async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	// No `abortGraceMs`: this exercises the production default, which is the only value the
+	// extension ever runs with.
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		runPhase: async ({ phase }) => {
+			ac.abort();
+			// A strategy notices the stop at a round boundary, and only after its in-flight legs
+			// have settled through the engine's abort path — hundreds of ms, not tens.
+			await new Promise((res) => setTimeout(res, 900));
+			return { agent: phase.id, output: "PARTIAL WORK WORTH KEEPING", usage: usage(), ok: false, error: "aborted", failureKind: "abort" as const };
+		},
+	});
+	assert.equal(outcome.cancelled, true);
+	assert.equal(outcome.results.a?.output, "PARTIAL WORK WORTH KEEPING", "the work the user already paid for survives the stop");
+	assert.equal(outcome.results.a?.usage.input, 1, "and so does its usage");
+	assert.match(outcome.output, /PARTIAL WORK WORTH KEEPING/, "and it reaches the flow output");
+});
+
+test("a phase that COMPLETES after its cancelled run is journaled for resume but not re-surfaced", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	const journal: Array<{ phase: string; ok: boolean; output: string }> = [];
+	const statuses: Array<[string, string]> = [];
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		abortGraceMs: 10,
+		journal: (e) => journal.push(e),
+		onPhase: (id, st) => statuses.push([id, st]),
+		runPhase: async ({ phase }) => {
+			ac.abort();
+			await new Promise((res) => setTimeout(res, 80)); // outlives the grace
+			return ok(phase.id, "too late");
+		},
+	});
+	assert.equal(outcome.cancelled, true);
+	assert.equal(outcome.results.a?.output, "", "the run had already given up on it");
+	await new Promise((res) => setTimeout(res, 150)); // let the abandoned phase land
+	assert.deepEqual(
+		journal.map((e) => [e.phase, e.ok, e.output]),
+		[["a", true, "too late"]],
+		"the completed work is recorded, so a resume reuses it instead of paying for the phase twice",
+	);
+	assert.deepEqual(
+		statuses.filter(([, st]) => st !== "running"),
+		[["a", "failed"]],
+		"the phase settled once (cancelled), not again when its late result arrived",
+	);
+});
+
+test("a phase that FAILS after its cancelled run is not journaled (a resume must re-run it)", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "s" }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	const journal: Array<{ phase: string }> = [];
+	await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		abortGraceMs: 10,
+		journal: (e) => journal.push(e),
+		runPhase: async ({ phase }) => {
+			ac.abort();
+			await new Promise((res) => setTimeout(res, 80)); // outlives the grace
+			return { agent: phase.id, output: "", usage: usage(), ok: false, error: "boom" };
+		},
+	});
+	await new Promise((res) => setTimeout(res, 150)); // let the abandoned phase land
+	assert.deepEqual(journal, [], "there is no completed work to keep, so nothing is recorded");
+});
+
 test("flowHash is stable across key order and changes with content", () => {
 	const a = parseFlow(flow([{ id: "a", strategy: "s", params: { x: 1, y: 2 } }]));
 	const b = parseFlow(flow([{ id: "a", strategy: "s", params: { y: 2, x: 1 } }]));
@@ -282,4 +488,15 @@ test("parseJournal folds JSONL into a resume map, honouring hash and re-running 
 	assert.equal(resume.a?.output, "out-a", "a is resumed");
 	assert.equal(resume.b, undefined, "b failed → not resumed (re-runs)");
 	assert.equal(resume.c, undefined, "c is for a different flow hash → ignored");
+});
+
+test("parseJournal skips a corrupt line instead of discarding the whole journal", () => {
+	const lines = [
+		JSON.stringify({ phase: "a", hash: "H", ok: true, output: "out-a" }),
+		"null", // parses fine, but is not an entry
+		JSON.stringify({ phase: "b", hash: "H", ok: true, output: "out-b" }),
+	].join("\n");
+	const resume = parseJournal(lines, "H");
+	assert.equal(resume.a?.output, "out-a");
+	assert.equal(resume.b?.output, "out-b", "one bad line must not destroy every resumed phase");
 });

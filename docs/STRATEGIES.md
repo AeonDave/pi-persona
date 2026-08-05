@@ -15,7 +15,7 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 
 | Primitive | Contract |
 |---|---|
-| `sdk.agent(spec)` | Run ONE sub-agent → `AgentResult`. `spec`: `{ agent, task, model?, tools?, skills?, role?, outputContract?, isolation?, peers? }`. |
+| `sdk.agent(spec)` | Run ONE sub-agent → `AgentResult`. `spec`: `{ agent, task, model?, tools?, skills?, role?, outputContract?, isolation?, mcp?, timeoutMs?, peers? }`. |
 | `sdk.parallel(thunks, {concurrency?})` | Run many at once, capped at `limits.maxConcurrency`. The basis of every fan-out (`parallel(items.map(…))`). |
 | `sdk.reduce.aggregate(results)` | Concatenate N results into one (fan-out's merge). |
 | `sdk.reduce.vote(candidates, opts)` | Tally the candidates' OWN votes → a `ReducerResult` (`voting.ts`). |
@@ -52,7 +52,7 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 |---|---|---|---|
 | `fanout` | Every roster agent on the same task in parallel, then `aggregate`. | — | roster-role |
 | `pipeline` | Roster in SEQUENCE, each builds on the prior output; answer = last step. | — | roster-role |
-| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (maxChildren), `peers` (false) | roster-role, opt-in peers |
+| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1, the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false) | roster-role, opt-in peers |
 | `critic-loop` | Generator proposes, critic attacks; revise while the critic's stance is `reject`, up to `rounds`. | `generator` (roster[0]), `critic` (roster[1]), `rounds` (3) | roster-role, `outputContract` |
 | `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. | `aggregate` ("majority"), `reflect` (true) | vote reducer |
 | `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
@@ -63,6 +63,25 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 | `compete` | N competitors implement the same task in ISOLATED git worktrees; a blind judge picks; the winner is returned as a unified diff for the SUPERVISOR to apply. | `judge` (required), `ballotDiffChars` (6000) | **`isolation: worktree`**, judge reducer |
 
 `fanout`, `pipeline`, `pair` read no params and omit the schema.
+
+Every strategy that runs more than one round or step (`council-rounds`, `debate`, `magi`,
+`critic-loop`, `pipeline`) stops at its own round/step boundary when the run is cancelled: an aborted
+run must not keep convening rosters nobody will read. A cancelled result comes back `ok: false` with
+`failureKind: "abort"` (and a `cancelled`/`status: "cancelled"` marker), so a journal or supervisor
+records it as CANCELLED rather than as a deliberation that completed without a ruling, and the work
+already paid for (the last good draft / the upstream step's output) rides along in `output`.
+
+**A strategy must check BOTH forms of the abort, and the leg form is the load-bearing one.** The run's
+`AbortSignal` reaches a strategy along two paths, and both are live: the ENGINE (`buildEngine(signal)`,
+so a leg already running settles) and the SDK (`extension.ts` passes `signal:` to `runPersonaStrategy`
+for both the `council` and the `flow` tool → `SDKDeps.signal` → `sdk.signal`). So `sdk.signal?.aborted`
+is a real early-out, not a dead branch — check it before convening another roster.
+
+It is not sufficient on its own, for two reasons. A strategy can be run with no signal at all (any
+caller that omits `signal:` still gets an engine-level abort through its legs), and `sdk.signal` is
+only READ at your boundaries — a stop that lands mid-round is invisible to it until the boundary after
+next, while it is already visible in the legs that just came back. Legs settle, they do not throw:
+check them too (`every`/`some` on `failureKind === "abort"` at the boundary you just crossed).
 
 ## Bias-guard invariants (do NOT "fix" these)
 

@@ -333,6 +333,53 @@ test("close during an in-flight initial connect rejects register() and destroys 
 	assert.ok(!host.frames.some((f) => f.t === "register"), "must not complete a register handshake on a closed client");
 });
 
+// A never-settling register() is the defect itself, so this one needs its own deadline —
+// without it a regression hangs the file instead of failing it.
+test("register rejects when the host drops the connection mid-handshake", { timeout: 5000 }, async () => {
+	const { net, hostSide } = fakeNet();
+	const host = wireHost(hostSide);
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	const registerPromise = client.register();
+	await waitFor(() => host.frames.some((f) => f.t === "register"));
+	hostSide.destroy(); // host teardown/crash after accept, before `registered`
+	await assert.rejects(() => registerPromise, /closed/);
+	client.close();
+});
+
+test("a throwing onDeliver listener does not poison the frame reader", async () => {
+	const { client, host } = await connectedClient();
+	try {
+		const seen: string[] = [];
+		client.onDeliver(() => {
+			throw new Error("listener blew up");
+		});
+		client.onDeliver((evt) => seen.push(evt.text));
+		host.send({ t: "deliver", from: "supervisor", kind: "progress", text: "first", msgId: "m1", expectsReply: false });
+		host.send({ t: "deliver", from: "supervisor", kind: "progress", text: "second", msgId: "m2", expectsReply: false });
+		await waitFor(() => seen.length === 2);
+		assert.deepEqual(seen, ["first", "second"]);
+	} finally {
+		client.close();
+	}
+});
+
+test("a throwing onSteer listener does not poison the frame reader", async () => {
+	const { client, host } = await connectedClient();
+	try {
+		const seen: string[] = [];
+		client.onSteer(() => {
+			throw new Error("listener blew up");
+		});
+		client.onSteer((text) => seen.push(text));
+		host.send({ t: "steer", text: "first" });
+		host.send({ t: "steer", text: "second" });
+		await waitFor(() => seen.length === 2);
+		assert.deepEqual(seen, ["first", "second"]);
+	} finally {
+		client.close();
+	}
+});
+
 test("close is idempotent and rejects still-pending asks", async () => {
 	const { client } = await connectedClient();
 	const askPromise = client.ask("supervisor", "decision", "?");

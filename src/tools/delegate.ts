@@ -10,7 +10,15 @@
 import { type ChildUsage, emptyUsage } from "../engine/stream.ts";
 import { mapWithConcurrency } from "../orchestration/parallel.ts";
 import { aggregateResults } from "../orchestration/reducers.ts";
-import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
+import {
+	type AgentRunSpec,
+	type InfrastructureFailure,
+	isInfrastructureFailure,
+	isPositiveFiniteMs,
+	legFailure,
+	type SteerFn,
+	type StrategyEngine,
+} from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 
 export interface DelegateTask {
@@ -208,6 +216,20 @@ export class DelegationLedger {
 }
 
 /**
+ * Is a settled delegation EVIDENCE against re-issuing it — i.e. worth a strike toward the
+ * {@link MAX_IDENTICAL_FAILURES} permanent veto? Two outcomes are terminal without being evidence:
+ * an operator abort is cancellation, and an engine REJECTION is the harness breaking (see
+ * {@link isInfrastructureFailure}) — a full disk or a crashed adapter says nothing about whether the
+ * delegation was a good idea, and two of them would blacklist a task that was never really attempted.
+ * Lives beside the ledger so every path that records feeds it the same notion of evidence: the sync
+ * fan-out settles a rejection as `ok:false` while the single and async paths let it propagate, and
+ * without this the identical infrastructure crash would count in one path and vanish in the others.
+ */
+export function shouldRecordDelegationOutcome(result: Partial<InfrastructureFailure>): boolean {
+	return result.failureKind !== "abort" && !isInfrastructureFailure(result);
+}
+
+/**
  * Pre-spawn agent validation for the `delegate` tool — mirrors the model-name path
  * (extension.ts's `resolveDelegateModels`): a wrong agent name must return a SELF-CORRECTING
  * error naming the installed agents BEFORE anything spawns, instead of the engine's late bare
@@ -264,6 +286,11 @@ export async function runDelegate(
 	onProgress?: (views: DelegateView[]) => void,
 	onLegStart?: (index: number, abort: () => void) => void,
 	onLegSteerable?: (index: number, steer: SteerFn) => void,
+	/** The RUN-level abort signal — the same one the caller baked into its engine. A whole-run
+	 *  cancellation reaches a leg through THIS, never through the per-leg controller below, so
+	 *  without it a cancelled leg whose engine rejects is filed as an agent failure and the user's
+	 *  own stop renders as FAILED. Mirrors `SDKDeps.signal`, which classifies the same way. */
+	signal?: AbortSignal,
 ): Promise<DelegateOutcome> {
 	if (params.tasks && params.tasks.length > 0) {
 		// Enforce the hard ceilings: cap the fan-out and clamp the concurrency the
@@ -286,17 +313,25 @@ export async function runDelegate(
 		const results = await mapWithConcurrency(tasks, concurrency, async (t, i) => {
 			const ac = new AbortController();
 			onLegStart?.(i, () => ac.abort());
-			const r = await engine.run(
-				specOf(t),
-				(p) => {
-					// Stream the leg's rolling output + current tool activity.
-					const cur = views[i] as DelegateView;
-					views[i] = { ...cur, output: p.output || cur.output, activity: p.activity ?? "" };
-					onProgress?.(views.map((v) => ({ ...v })));
-				},
-				ac.signal,
-				(steer) => onLegSteerable?.(i, steer),
-			);
+			// An engine that REJECTS becomes this leg's own ok:false result: the fan-out's completed
+			// siblings (already spawned and billed) must still reach the supervisor. Nothing in here
+			// is run-fatal — the max-children ceiling was applied to `tasks` before anything spawned.
+			let r: AgentResult;
+			try {
+				r = await engine.run(
+					specOf(t),
+					(p) => {
+						// Stream the leg's rolling output + current tool activity.
+						const cur = views[i] as DelegateView;
+						views[i] = { ...cur, output: p.output || cur.output, activity: p.activity ?? "" };
+						onProgress?.(views.map((v) => ({ ...v })));
+					},
+					ac.signal,
+					(steer) => onLegSteerable?.(i, steer),
+				);
+			} catch (err) {
+				r = legFailure(t.agent, err, ac.signal.aborted || (signal?.aborted ?? false));
+			}
 			views[i] = viewOf(t.agent, labels[i] as string, r);
 			onProgress?.(views.map((v) => ({ ...v })));
 			return r;

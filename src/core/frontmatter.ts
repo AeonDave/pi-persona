@@ -122,10 +122,17 @@ export function parseYamlSubset(src: string): Record<string, unknown> {
 		const indent = line.length - line.trimStart().length;
 		const content = line.trim();
 
-		while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent) stack.pop();
+		// A `- item` may sit at the SAME indent as the `key:` it belongs to, so only a
+		// strictly smaller indent closes that frame; key lines still close on equal indent.
+		const isItem = content.startsWith("- ") || content === "-";
+		while (stack.length > 1) {
+			const frameIndent = stack[stack.length - 1]!.indent;
+			if (isItem ? indent < frameIndent : indent <= frameIndent) stack.pop();
+			else break;
+		}
 		const top = stack[stack.length - 1]!;
 
-		if (content.startsWith("- ") || content === "-") {
+		if (isItem) {
 			// Block list item under the current `key:` frame.
 			const itemRaw = content === "-" ? "" : content.slice(2);
 			if (!top.listArr) {

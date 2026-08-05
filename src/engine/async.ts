@@ -115,7 +115,20 @@ export class AsyncRunTracker {
 		if (entry.settled) return;
 		entry.settled = true;
 		this.prune();
-		for (const cb of this.completeListeners) cb(entry);
+		// Iterate a SNAPSHOT: a waitFor join unsubscribes from inside its own listener, and
+		// splicing the live array under the cursor would shift the next join's listener past it.
+		// A listener's throw must likewise not skip the ones after it — and on the natural-settle
+		// path this runs inside an unobserved promise chain, where an escaping throw becomes a
+		// process-killing unhandled rejection.
+		for (const cb of [...this.completeListeners]) {
+			try {
+				cb(entry);
+			} catch (e) {
+				if (process.env.PI_PERSONA_DEBUG) {
+					process.stderr.write(`[pi-persona] async completion listener threw for ${entry.id}: ${e instanceof Error ? e.message : String(e)}\n`);
+				}
+			}
+		}
 	}
 
 	/**

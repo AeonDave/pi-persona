@@ -802,3 +802,36 @@ test("renderCompletion scans DONE legs only — a failed leg's marker is not a b
 	assert.doesNotMatch(out, /recovery pass/i, "a failed leg does not trigger the surrender note");
 	assert.match(out, /0 done, 1 failed/, "still reported as a failure");
 });
+
+test("a throwing completion listener does not strand the listeners registered after it", async () => {
+	// The natural settle runs inside an unobserved `.finally` chain: a throwing listener there
+	// both skips every later listener (a waitFor join hangs until its timeout) and rejects the
+	// chain — an unhandled rejection that can take the host process down.
+	const tracker = new AsyncRunTracker();
+	tracker.onComplete(() => {
+		throw new Error("ui.notify blew up mid-teardown");
+	});
+	let reached = false;
+	tracker.onComplete(() => {
+		reached = true;
+	});
+	tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "x", usage: usage(), ok: true }));
+	await tick();
+	assert.equal(reached, true, "the later listener still fired");
+});
+
+test("a listener that unsubscribes while settling does not skip the next listener", async () => {
+	// Two `intercom wait` joins on the same run: the first one's finish() unsubscribes from
+	// inside the settle, and splicing the live listener array under the iterator would shift
+	// the second join's listener past the cursor — it would never see this settle.
+	const tracker = new AsyncRunTracker();
+	let off: () => void = () => {};
+	off = tracker.onComplete(() => off());
+	let reached = false;
+	tracker.onComplete(() => {
+		reached = true;
+	});
+	tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "x", usage: usage(), ok: true }));
+	await tick();
+	assert.equal(reached, true, "the second join still saw the settle");
+});

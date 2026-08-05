@@ -19,7 +19,7 @@ import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
 import { frameSigningPayload, isExocomFrame, nextHops, truncateForInject, type AgentCard, type ExocomAck, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack } from "./envelope.ts";
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
-import { normalizePeerName, prune, readAll, removeEntry, writeEntry, type RegistryEntry } from "./registry.ts";
+import { isAlive, normalizePeerName, prune, readAll, removeEntry, writeEntry, type RegistryEntry } from "./registry.ts";
 
 export interface ExocomIdentity {
 	session_id: string; name: string; persona: string; purpose: string; color: string;
@@ -43,6 +43,10 @@ export interface ExocomPlaneDeps {
 	now?: () => number;
 	/** Injected transport (tests use real sockets/pipes over a temp dir); defaults to `node:net`. */
 	net?: typeof import("node:net");
+	/** Read-only registry pool read (defaults to `readAll`). Injected so a test can drive the
+	 *  registry-unreadable path — the one failure the delivery path has to survive without
+	 *  turning a good message into a NACK, and one plain `fs` can't be made to produce. */
+	readPool?: (agentDir: string, hash: string) => RegistryEntry[];
 	/** Bounds `send`'s ack-wait (defaults to `EXOCOM.ACK_TIMEOUT_MS`); shrinkable in tests. */
 	ackTimeoutMs?: number;
 }
@@ -367,6 +371,17 @@ export class ExocomPlane {
 		};
 	}
 
+	/** Re-register this instance with FRESH metadata (a `/persona` switch, a model change) — the
+	 *  ONLY supported way to rewrite our own entry. Routing it through the plane is what keeps the
+	 *  ed25519 key attached: the entry file can vanish while we are alive (a peer's transient send
+	 *  error evicts it, or a >STALE_AFTER_MS stall lets every peer prune it), and a re-creation
+	 *  without `public_key` would make every frame we sign unverifiable — permanently, since the
+	 *  key exists only in this process. `session_id` is ours by construction, never the caller's. */
+	heartbeat(entry: Omit<RegistryEntry, "public_key">): void {
+		const { agentDir, hash, identity } = this.deps;
+		writeEntry(agentDir, hash, { ...entry, session_id: identity.session_id, public_key: this.publicKey });
+	}
+
 	/** Pruned live peers, excluding self, with a display-deduped `displayName` ("elite"/"elite#2")
 	 *  computed over the FULL live set (self included) before self is filtered out — so every
 	 *  instance computes the SAME numbering for a given peer, regardless of who's asking. */
@@ -374,6 +389,49 @@ export class ExocomPlane {
 		const { agentDir, hash, identity } = this.deps;
 		const live = prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
 		return dedupeDisplayNames(live).filter((e) => e.session_id !== identity.session_id);
+	}
+
+	/** The whole registry pool, read-only (the `readPool` seam's single choke point). */
+	private pool(): RegistryEntry[] {
+		const { agentDir, hash } = this.deps;
+		return this.deps.readPool ? this.deps.readPool(agentDir, hash) : readAll(agentDir, hash);
+	}
+
+	/** The live subset `prune()` would return, computed WITHOUT its readdir/unlink side effects —
+	 *  same staleness rule, so the numbering derived from it matches `listPeers()`. */
+	private livePool(): RegistryEntry[] {
+		const now = this.now();
+		return this.pool().filter((e) => {
+			const heartbeat = Date.parse(e.heartbeat_at);
+			return isAlive(e.pid) && Number.isFinite(heartbeat) && now - heartbeat <= EXOCOM.STALE_AFTER_MS;
+		});
+	}
+
+	/** The deduped display name for an already-authenticated peer entry — the same token `send()`
+	 *  resolves — WITHOUT mutating the registry. This is what the inbound path (extension.ts's
+	 *  `onInbound`) builds its reply hint from; `listPeers()` cannot serve it:
+	 *  it prunes, so a readdir/unlink error would decide whether a good message is accepted, and a
+	 *  sender whose own heartbeat has just gone stale would be evicted by the very message it sent.
+	 *  Falls back to the entry's own name (what `send()` matches when nothing shares it) when the
+	 *  pool is unreadable or no longer lists the sender. Never throws — delivery must not hinge on
+	 *  a naming nicety. */
+	displayNameFor(entry: RegistryEntry): string {
+		try {
+			return dedupeDisplayNames(this.livePool()).find((p) => p.session_id === entry.session_id)?.displayName ?? entry.name;
+		} catch {
+			return entry.name;
+		}
+	}
+
+	/** Registry lookup for an inbound frame's claimed sender. Fails CLOSED: an unreadable pool
+	 *  yields no entry (⇒ "authentication failed"), rather than escaping the frame reader — which
+	 *  poisons the connection, so the sender reads it as unreachable and evicts US. */
+	private lookupPeer(sessionId: string): RegistryEntry | undefined {
+		try {
+			return this.pool().find((e) => e.session_id === sessionId);
+		} catch {
+			return undefined;
+		}
 	}
 
 	private handleConnection(socket: net.Socket): void {
@@ -386,7 +444,7 @@ export class ExocomPlane {
 			if (!isExocomFrame(raw)) return; // fail-closed preflight (R5) — silently drop junk
 			switch (raw.kind) {
 			case "message": {
-					const entry = readAll(this.deps.agentDir, this.deps.hash).find((e) => e.session_id === raw.from_session);
+					const entry = this.lookupPeer(raw.from_session);
 					if (!entry || raw.from_endpoint !== entry.endpoint || !verifyFrameOrigin(raw, entry)) {
 						write(this.nack(raw.msg_id, "authentication failed"));
 						return;
@@ -417,7 +475,7 @@ export class ExocomPlane {
 					return;
 				}
 				case "bye": {
-					const entry = readAll(this.deps.agentDir, this.deps.hash).find((e) => e.session_id === raw.from_session);
+					const entry = this.lookupPeer(raw.from_session);
 					if (entry && raw.from_endpoint === entry.endpoint && verifyFrameOrigin(raw, entry)) {
 						removeEntry(this.deps.agentDir, this.deps.hash, entry.session_id);
 						this.deps.onPoolChange?.(); // a peer left cleanly — refresh the pool now, don't wait 30s
@@ -521,6 +579,10 @@ export class ExocomPlane {
 				throw new Error(`exocom: peer "${target}" unreachable`);
 			}
 		}
+		// Delivered: the spill file now belongs to the RECEIVER's later turn (EXOCOM.ARTIFACT_TTL_MS),
+		// so drop our claim on it — `stop()` must never reap a handed-off artifact, and the TTL /
+		// max-files sweep in `cleanupArtifacts` is what reclaims it.
+		this.artifacts.delete(msg_id);
 		this.sentTo.set(entry.session_id, (this.sentTo.get(entry.session_id) ?? 0) + 1);
 		return { msg_id };
 	}
@@ -544,6 +606,11 @@ export class ExocomPlane {
 			try { unlinkSync(identity.endpoint); } catch { /* ignore */ }
 		}
 		removeEntry(agentDir, hash, identity.session_id);
-		for (const msgId of [...this.artifacts.keys()]) this.removeArtifact(msgId);
+		for (const msgId of [...this.artifacts.keys()]) this.removeArtifact(msgId); // only spills whose send never landed are still tracked here
+		// A DELIVERED spill is deliberately left for its receiver's later turn, so its reclamation
+		// falls to the TTL/max-files sweep — which otherwise runs only on a plane start or the next
+		// spill. In a workspace where exocom is never enabled again, that is never: sweeping on the
+		// way out bounds the retention without touching anything still inside its TTL.
+		this.cleanupArtifacts();
 	}
 }

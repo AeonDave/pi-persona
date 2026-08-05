@@ -49,6 +49,20 @@ function render(decision: ReducerResult, members: number, bestOf: number, usages
 	};
 }
 
+/** A panel the run cancelled — distinct from one that finished without a ruling, so a
+ *  journal or supervisor records it as cancelled rather than as a completed failure. */
+function cancelled(usages: AgentResult["usage"][]): AgentResult {
+	return {
+		agent: "debate",
+		output: "DEBATE cancelled — the run was aborted before a ruling.",
+		structured: { status: "cancelled" },
+		usage: sumUsage(usages),
+		ok: false,
+		error: "the run was aborted",
+		failureKind: "abort",
+	};
+}
+
 export const debate: Strategy = {
 	name: "debate",
 	params: {
@@ -58,6 +72,7 @@ export const debate: Strategy = {
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length < 2) throw new Error("debate: a roster of at least 2 members is required");
+		if (sdk.signal?.aborted) return cancelled([]);
 		const bestOf = typeof input.params.bestOf === "number" ? input.params.bestOf : Math.floor(team.length / 2) + 1;
 		const aggregate = input.params.aggregate === "unanimity" ? "unanimity" : "majority";
 		sdk.log(`debate: ${team.length} members, live peer exchange, best of ${bestOf}`);
@@ -80,6 +95,12 @@ export const debate: Strategy = {
 				});
 			}),
 		);
+		// An abort settles every member as ok:false/'abort' instead of throwing, so a stop that
+		// landed while the panel was running is first visible here — the vote would otherwise
+		// render it as a normal-looking "no ruling" from a deliberation that never concluded.
+		if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) {
+			return cancelled(candidates.map((c) => c.usage));
+		}
 		const decision = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: true });
 		return render(decision, team.length, bestOf, candidates.map((c) => c.usage));
 	},

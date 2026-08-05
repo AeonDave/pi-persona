@@ -30,6 +30,16 @@ test("delivers with attribution from the RESOLVED label (not the envelope's self
 		assert.match((out as any).deliver, /Peer data · untrusted equal-status collaborator:\n> /);
 });
 
+// The label is a HUMAN identity ("elite (rogue)"); the reply hint is a ROUTING token, and
+// `send()` resolves targets only against the deduped displayName. Two live peers can share a raw
+// name, so stripping the persona off the label would address the wrong "elite" (or none at all).
+test("the reply hint addresses the sender's deduped displayName, not its raw registry name", () => {
+	const out = buildInboundDelivery(msg(), "elite (rogue)", { ...deps(), replyTarget: "elite#2" });
+	assert.ok("deliver" in out);
+	assert.match((out as any).deliver, /^\[elite \(rogue\)\] — message$/m, "the header still shows the resolved identity");
+	assert.match((out as any).deliver, /target:"elite#2"/, "the hint addresses the peer exocom_send can actually resolve");
+});
+
 test("drops a duplicate (sender,msg_id) and an over-budget sender", () => {
 	const d = deps();
 	assert.ok("deliver" in buildInboundDelivery(msg(), "x", d));

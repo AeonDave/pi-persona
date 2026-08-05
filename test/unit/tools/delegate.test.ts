@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { DelegationLedger, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel, unknownAgentError, wantsAsyncRun } from "../../../src/tools/delegate.ts";
+import { DelegationLedger, type DelegateView, labelFor, MAX_IDENTICAL_FAILURES, runDelegate, shortModel, shouldRecordDelegationOutcome, unknownAgentError, wantsAsyncRun } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -380,4 +380,115 @@ test("wantsAsyncRun: sync:true opts an interactive call out; explicit async alwa
 test("wantsAsyncRun: renderCall passes hasUI:true (it only fires in a UI) — mirrors the execute default", () => {
 	assert.equal(wantsAsyncRun({}, true), true, "a defaulted interactive call shows the async tag");
 	assert.equal(wantsAsyncRun({ sync: true }, true), false, "sync:true drops the tag");
+});
+
+// Partial results: an engine that REJECTS a leg (instead of settling ok:false) must not discard
+// the fan-out's completed siblings — the delegation reports N results for N tasks either way.
+
+test("runDelegate parallel mode keeps completed legs when one engine run rejects", async () => {
+	const engine: StrategyEngine = {
+		run: async (s) => {
+			if (s.agent === "b") throw new Error("engine exploded on b");
+			return { agent: s.agent, output: `out:${s.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }, { agent: "c", task: "t" }] }, engine);
+
+	assert.equal(r.results.length, 3, "one result per task, failed or not");
+	assert.deepEqual(r.results.map((x) => x.ok), [true, false, true]);
+	assert.equal(r.results[0]?.output, "out:a", "the completed sibling's work survives");
+	assert.match(r.results[1]?.error ?? "", /engine exploded on b/);
+	assert.equal(r.results[1]?.failureKind, "agent");
+	assert.equal(r.ok, false, "the delegation as a whole still failed");
+	assert.match(r.text, /out:a/);
+	assert.match(r.text, /out:c/);
+});
+
+test("a rejected leg's view settles as failed, never stuck 'running'", async () => {
+	const views: DelegateView[][] = [];
+	const engine: StrategyEngine = {
+		run: async (s) => {
+			if (s.agent === "b") throw new Error("boom");
+			return { agent: s.agent, output: "ok", usage: usage(), ok: true };
+		},
+	};
+	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] }, engine, undefined, (v) => views.push(v));
+
+	assert.deepEqual(r.views.map((v) => v.running), [false, false]);
+	assert.equal(r.views[1]?.ok, false);
+	assert.match(r.views[1]?.output ?? "", /boom/, "the view carries the error the leg died on");
+	const last = views[views.length - 1] as DelegateView[];
+	assert.deepEqual(last.map((v) => v.running), [false, false], "the last streamed frame is settled too");
+});
+
+test("a leg aborted before it rejects settles as 'abort', so the UI shows stopped, not failed", async () => {
+	const engine: StrategyEngine = { run: async () => Promise.reject(new Error("AbortError")) };
+	const r = await runDelegate(
+		{ tasks: [{ agent: "a", task: "t" }] },
+		engine,
+		undefined,
+		undefined,
+		(_i, abort) => abort(),
+	);
+	assert.equal(r.views[0]?.failureKind, "abort");
+	assert.equal(r.results[0]?.failureKind, "abort");
+});
+
+// What the anti-loop ledger is allowed to treat as evidence. Containing a rejection as ok:false put
+// infrastructure crashes on the same footing as agent failures for the first time; a crash that
+// counts twice permanently vetoes a delegation nobody ever really attempted.
+
+test("two infrastructure crashes must not permanently veto a delegation that was never really attempted", async () => {
+	const ledger = new DelegationLedger();
+	const task = { agent: "a", task: "t" };
+	const crashing: StrategyEngine = {
+		run: async () => {
+			throw new Error("ENOSPC writing the prompt file");
+		},
+	};
+	// Exactly how extension.ts feeds the ledger after a sync fan-out.
+	const record = async (engine: StrategyEngine) => {
+		const outcome = await runDelegate({ tasks: [task] }, engine);
+		outcome.results.forEach((r) => {
+			if (shouldRecordDelegationOutcome(r)) ledger.record(task, r.ok);
+		});
+	};
+
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) await record(crashing);
+	assert.equal(ledger.vet([task]), undefined, "a full disk is not evidence that the delegation is a dead end");
+
+	// The contrast that keeps the veto meaningful: the SAME loop against an engine that REPORTS a
+	// failure — the agent tried and could not — does blacklist the task.
+	const failing = engineThat((s) => ({ agent: s.agent, output: "", usage: usage(), ok: false, error: "no path forward", failureKind: "agent" }));
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) await record(failing);
+	assert.match(ledger.vet([task]) ?? "", /already failed/, "a genuine agent failure still counts toward the veto");
+});
+
+test("a leg the RUN signal cancelled is classified as an abort, not an agent failure", async () => {
+	// The per-leg controller is untouched by a whole-run cancellation, so without the run signal a
+	// user's stop lands as an "agent" failure: FAILED in the tree, and a strike in the ledger.
+	const run = new AbortController();
+	const engine: StrategyEngine = {
+		run: async () => {
+			run.abort();
+			throw new Error("AbortError");
+		},
+	};
+	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }] }, engine, undefined, undefined, undefined, undefined, run.signal);
+
+	assert.equal(r.results[0]?.failureKind, "abort", "a cancelled run must not masquerade as an agent failure");
+	assert.equal(r.views[0]?.failureKind, "abort", "the UI projects the leg as stopped, not failed");
+});
+
+test("the max-children ceiling still drops surplus tasks rather than running them", async () => {
+	let runs = 0;
+	const engine = engineThat((s) => {
+		runs += 1;
+		return { agent: s.agent, output: "o", usage: usage(), ok: true };
+	});
+	const tasks = Array.from({ length: 5 }, (_, i) => ({ agent: `a${i}`, task: "t" }));
+	const r = await runDelegate({ tasks }, engine, { maxConcurrency: 4, maxChildren: 2 });
+	assert.equal(runs, 2, "the ceiling is enforced before anything spawns");
+	assert.equal(r.results.length, 2);
+	assert.match(r.text, /3 task\(s\) beyond the max-children limit/);
 });

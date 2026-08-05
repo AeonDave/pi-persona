@@ -11,6 +11,21 @@ import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 
+/** A chain the run cancelled — distinct from one a step failed, so a journal or supervisor
+ *  records it as cancelled rather than as a broken step. The work already produced rides
+ *  along: it cost real tokens and is still the best thing to show. */
+function cancelled(results: AgentResult[], upstream: string): AgentResult {
+	return {
+		agent: "pipeline",
+		output: upstream || "(no output)",
+		structured: { steps: results.length, cancelled: true },
+		usage: results.length > 0 ? sumUsage(results.map((r) => r.usage)) : emptyUsage(),
+		ok: false,
+		error: "the run was aborted",
+		failureKind: "abort",
+	};
+}
+
 export const pipeline: Strategy = {
 	name: "pipeline",
 	async run(input, sdk) {
@@ -21,10 +36,21 @@ export const pipeline: Strategy = {
 		const results: AgentResult[] = [];
 		let upstream = "";
 		for (const member of team) {
+			// An abort settles a step as ok:false/'abort' instead of throwing, and one that lands
+			// between steps marks nothing at all — either way the chain must stop here rather than
+			// walk the rest of the roster.
+			if (sdk.signal?.aborted) return cancelled(results, upstream);
 			const task = upstream ? `${input.task}\n\n--- previous step's output (build on it) ---\n${upstream}` : input.task;
 			const r = await sdk.agent({ ...rosterSpec(member), task });
 			results.push(r);
-			if (!r.ok) break; // a failed step stops the chain — its dependents can't build on nothing
+			if (!r.ok) {
+				// A stop that lands WHILE this step runs settles it here, never at the loop guard
+				// above (the chain already broke): that guard reads `sdk.signal`, which is wired but
+				// only consulted BETWEEN steps. Report it as a cancelled chain that keeps the
+				// upstream work, not as a failed step whose empty output replaces it.
+				if (r.failureKind === "abort") return cancelled(results, upstream);
+				break; // a failed step stops the chain — its dependents can't build on nothing
+			}
 			if (r.output) upstream = r.output;
 		}
 
@@ -36,6 +62,12 @@ export const pipeline: Strategy = {
 			ok: results.length === team.length && results.every((r) => r.ok),
 		};
 		if (last?.structured) result.structured = last.structured;
+		// The chain breaks AT the failing step, so `last` carries the cause — without it the phase
+		// renders as failed with an empty output and nothing to act on.
+		if (!result.ok && last && !last.ok) {
+			if (last.error) result.error = last.error;
+			if (last.failureKind) result.failureKind = last.failureKind;
+		}
 		return result;
 	},
 };

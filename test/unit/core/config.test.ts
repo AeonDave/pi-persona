@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveConfig } from "../../../src/core/config.ts";
+import { OFF_WORDS, resolveConfig } from "../../../src/core/config.ts";
 
 test("defaults apply when no env vars are set", () => {
 	const c = resolveConfig({});
@@ -45,12 +45,12 @@ test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 0 
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_MAX_MS: "-5" }).agentHardTimeoutMs, 0, "negative ⇒ default (unlimited)");
 });
 
-test("PI_PERSONA_AGENT_STARTUP_MS sets the per-agent startup deadline (default 90000; explicit 0 disables)", () => {
-	assert.equal(resolveConfig({}).agentStartupTimeoutMs, 90_000, "a fast-fail startup window by default");
+test("PI_PERSONA_AGENT_STARTUP_MS sets the per-agent startup deadline (default 300000; explicit 0 disables)", () => {
+	assert.equal(resolveConfig({}).agentStartupTimeoutMs, 300_000, "generous enough to cover a cold provider start — this deadline kills, the idle watchdog does not");
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "30000" }).agentStartupTimeoutMs, 30000);
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "0" }).agentStartupTimeoutMs, 0, "explicit 0 disables the deadline");
-	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "abc" }).agentStartupTimeoutMs, 90_000, "non-numeric ⇒ default");
-	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "-5" }).agentStartupTimeoutMs, 90_000, "negative ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "abc" }).agentStartupTimeoutMs, 300_000, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "-5" }).agentStartupTimeoutMs, 300_000, "negative ⇒ default");
 });
 
 test("PI_PERSONA_NUDGE=off disables the delegation nudge (default on)", () => {
@@ -105,6 +105,30 @@ test("PI_PERSONA_EXOCOM enables the external plane (default OFF; truthy on)", ()
 	assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: "0" }).exocom, false, "0 ⇒ off");
 });
 
+test("the off convention is ONE convention: unset/\"\"/off/0/false/no, on every opt-in switch", () => {
+	// `false` and `no` are what a user actually types to turn something off. Without them
+	// PI_PERSONA_EXOCOM=false reads as truthy and PI_PERSONA_SPINE=false becomes a relative PATH.
+	for (const off of ["off", "0", "false", "no", "FALSE", " No "]) {
+		assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: off }).exocom, false, `exocom: ${off}`);
+		assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: off }).ledgerV2, false, `ledgerV2: ${off}`);
+		assert.equal(resolveConfig({ PI_PERSONA_SPINE: off }).spine, "", `spine: ${off} — an off word is never a filename`);
+		assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on", PI_PERSONA_SPINE_LEGS: off }).spineLegs, "", `spineLegs: ${off}`);
+	}
+});
+
+test("OFF_WORDS is exported, so the one convention is readable from outside the module it lives in", () => {
+	// Two doc comments point a reader at {@link OFF_WORDS}; a link to a module-private const does
+	// not resolve in the emitted types, which is exactly where a reader of the config surface looks.
+	// Asserting the SET (not a sample of it) is what keeps the link honest: a word added here that
+	// no switch honours, or a switch that grows its own spelling, fails right here.
+	assert.deepEqual([...OFF_WORDS].sort(), ["", "0", "false", "no", "off"]);
+	for (const off of OFF_WORDS) {
+		assert.equal(resolveConfig({ PI_PERSONA_EXOCOM: off }).exocom, false, `exocom honours "${off}"`);
+		assert.equal(resolveConfig({ PI_PERSONA_LEDGER_V2: off }).ledgerV2, false, `ledgerV2 honours "${off}"`);
+		assert.equal(resolveConfig({ PI_PERSONA_SPINE: off }).spine, "", `spine honours "${off}"`);
+	}
+});
+
 test("PI_PERSONA_ASYNC_RETAIN sets the async tracker's retention bound (default 25; junk/<1 falls back)", () => {
 	assert.equal(resolveConfig({}).asyncRetain, 25, "today's hardcoded retention by default");
 	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "50" }).asyncRetain, 50);
@@ -112,6 +136,57 @@ test("PI_PERSONA_ASYNC_RETAIN sets the async tracker's retention bound (default 
 	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "abc" }).asyncRetain, 25, "non-numeric ⇒ default");
 	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "-5" }).asyncRetain, 25, "negative ⇒ default");
 	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "0" }).asyncRetain, 25, "0 isn't a meaningful retention bound ⇒ default");
+});
+
+test("PI_PERSONA_SPINE selects the shared behavioral layer (default OFF; `on` or a path)", () => {
+	assert.equal(resolveConfig({}).spine, "", "off by default (opt-in, like the broker and exocom)");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "" }).spine, "", "empty ⇒ off");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "off" }).spine, "", "explicit off");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "OFF" }).spine, "", "case-insensitive");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "0" }).spine, "", "0 ⇒ off");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on" }).spine, "on");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: " ON " }).spine, "on", "trimmed + case-insensitive");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: " /etc/Spine.md " }).spine, "/etc/Spine.md", "a path is kept verbatim (case included) — filesystems are case-sensitive");
+});
+
+test("the on words are as forgiving as the off words — a selector whose value can be a path cannot guess", () => {
+	// `not off` does not imply `on` here: anything unrecognised is taken as a filename, so a user
+	// typing the truthy word the broker's docs teach (PI_PERSONA_BROKER=1) would silently get a
+	// relative path named "1" instead of the bundled layer.
+	for (const word of ["1", "true", "yes", "TRUE", " 1 "]) {
+		assert.equal(resolveConfig({ PI_PERSONA_SPINE: word }).spine, "on", `${word} ⇒ on`);
+		assert.equal(resolveConfig({ PI_PERSONA_SPINE_LEGS: word }).spineLegs, "on", `${word} ⇒ on for the legs too`);
+	}
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "onwards.md" }).spine, "onwards.md", "an on-word PREFIX is still a path");
+});
+
+test("PI_PERSONA_SPINE_LEGS follows PI_PERSONA_SPINE unless it is set, and takes the same value grammar", () => {
+	assert.equal(resolveConfig({}).spineLegs, "", "off by default, like the supervisor selector");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on" }).spineLegs, "on", "one switch still spines BOTH roles");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "/etc/Spine.md" }).spineLegs, "/etc/Spine.md", "a supervisor path is followed verbatim too");
+	// Same grammar, applied to its own value.
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on", PI_PERSONA_SPINE_LEGS: "off" }).spineLegs, "", "explicit off wins over the followed `on`");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE_LEGS: " ON " }).spineLegs, "on", "trimmed + case-insensitive");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE_LEGS: " /etc/Worker.md " }).spineLegs, "/etc/Worker.md", "a path is kept verbatim here as well");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on", PI_PERSONA_SPINE_LEGS: "on" }).spine, "on", "and the legs' selector never writes back to the supervisor's");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE_LEGS: "on" }).spine, "", "legs-only leaves the supervisor unspined");
+	// Present-but-empty is how a shell clears a variable, and an inherited empty must not silently
+	// split the legs off from the supervisor — that is "unset", not the off word it is elsewhere.
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on", PI_PERSONA_SPINE_LEGS: "" }).spineLegs, "on", "empty ⇒ unset ⇒ follow");
+	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "on", PI_PERSONA_SPINE_LEGS: "   " }).spineLegs, "on", "whitespace-only ⇒ unset ⇒ follow");
+});
+
+test("the four measurement arms of docs/SPINE.md are each expressible", () => {
+	// A single selector cannot express the middle two, and without them a null result on a fanout
+	// task is uninterpretable: a gain in the supervisor text can hide a loss in the worker text.
+	const arm = (env: Record<string, string>) => {
+		const c = resolveConfig(env);
+		return [c.spine, c.spineLegs];
+	};
+	assert.deepEqual(arm({}), ["", ""], "off — neither set");
+	assert.deepEqual(arm({ PI_PERSONA_SPINE: "on", PI_PERSONA_SPINE_LEGS: "off" }), ["on", ""], "supervisor-only");
+	assert.deepEqual(arm({ PI_PERSONA_SPINE: "off", PI_PERSONA_SPINE_LEGS: "on" }), ["", "on"], "legs-only");
+	assert.deepEqual(arm({ PI_PERSONA_SPINE: "on" }), ["on", "on"], "both — the one switch still covers it");
 });
 
 test("PI_PERSONA_LEDGER_V2 opts into the wider delegation-ledger key (default OFF; truthy on)", () => {

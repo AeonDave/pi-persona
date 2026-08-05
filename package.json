@@ -19,6 +19,7 @@
     "src",
     "personas",
     "agents",
+    "prompts",
     "teams.yaml",
     "README.md",
     "AGENTS.md"

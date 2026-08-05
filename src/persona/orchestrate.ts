@@ -24,6 +24,10 @@ export function resolveStrategyName(orch: OrchestrationGrammar): string | undefi
 	if (orch.strategy) return orch.strategy;
 	if (orch.mode === "parallel") return "fanout";
 	if (orch.mode === "pipeline") return "pipeline";
+	// A mode that names *what* to run without naming it is a misconfiguration, not "nothing to
+	// run" — the persona's mandatory orchestration would otherwise silently never fire.
+	if (orch.mode === "strategy") throw new Error('orchestration "mode: strategy" needs a "strategy:" name');
+	if (orch.mode === "flow" && !orch.flow) throw new Error('orchestration "mode: flow" needs a "flow:" name');
 	return undefined;
 }
 

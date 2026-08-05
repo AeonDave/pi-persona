@@ -197,11 +197,17 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 				/* peer went away mid-write */
 			}
 		};
+		/** This connection's identity in `connections` — compared on cleanup so a socket only
+		 *  ever tears down a registration it still OWNS. */
+		const conn = { write };
 
 		const cleanup = (): void => {
 			for (const ac of pendingAsks.values()) ac.abort();
 			pendingAsks.clear();
-			if (handle) unregisterConnection(handle);
+			// `bye` releases the handle while `handle` stays set (the socket's own `close`
+			// runs cleanup again, asynchronously); by then another connection may legitimately
+			// have claimed the freed handle, and unregistering blind would kill ITS live entry.
+			if (handle && connections.get(handle) === conn) unregisterConnection(handle);
 		};
 
 		const dispatch = (frame: Frame): void => {
@@ -211,10 +217,22 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 						write({ t: "error", reason: "reserved handle" });
 						return;
 					}
+					// Registration is one-shot per socket and exclusive per handle: a
+					// second claim would overwrite the live entry, and this socket's close
+					// would then unregister a handle it no longer owns (or leak the one it
+					// silently abandoned).
+					if (handle) {
+						write({ t: "error", reason: "already registered" });
+						return;
+					}
+					if (connections.has(frame.handle)) {
+						write({ t: "error", reason: `handle already connected: ${frame.handle}` });
+						return;
+					}
 					handle = frame.handle;
 					group = frame.group;
 					bus.register(handle);
-					connections.set(handle, { write });
+					connections.set(handle, conn);
 					if (frame.peers) peerRegistry.set(handle, { handle, label: frame.label ?? handle, group: frame.group ?? "" });
 					write({ t: "registered", handle });
 					drain(handle);

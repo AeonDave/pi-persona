@@ -13,6 +13,12 @@ test("resolveStrategyName resolves an explicit strategy, or parallel → fanout"
 	assert.equal(resolveStrategyName({ mode: "parallel" }), "fanout");
 	assert.equal(resolveStrategyName({ mode: "pipeline" }), "pipeline");
 	assert.equal(resolveStrategyName({ mode: "solo" }), undefined);
+	assert.equal(resolveStrategyName({ mode: "flow", flow: "review" }), undefined);
+});
+
+test("resolveStrategyName throws for a declared orchestration mode whose name key is missing", () => {
+	assert.throws(() => resolveStrategyName({ mode: "strategy" }), /mode: strategy.*strategy:/s);
+	assert.throws(() => resolveStrategyName({ mode: "flow" }), /mode: flow.*flow:/s);
 });
 
 test("runPersonaStrategy runs the persona's strategy with its roster + params", async () => {

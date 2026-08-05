@@ -14,14 +14,33 @@ export async function mapWithConcurrency<TIn, TOut>(
 	const limit = Math.max(1, Math.min(concurrency, items.length));
 	const results = new Array<TOut>(items.length);
 	let next = 0;
+	// Contained rejection, two halves. CONTAINMENT: once a callback rejects no worker pulls another
+	// item, so a failed fan-out can't keep spawning siblings whose results are already destined for
+	// the bin. LATENCY: the batch rejects with the FIRST error the moment it lands. A callback
+	// already in flight cannot be cancelled from here, so awaiting it would not stop the work — it
+	// would only delay the report, and the rejections that reach this path are the run-fatal ones
+	// (`sdk.parallel`: a limit breach, a throwing host callback) that an operator must see now
+	// rather than after the slowest healthy leg, which for a delegated agent is minutes. The worker
+	// swallows into `failure`, so an abandoned one can never surface as an unhandled rejection.
+	let failure: { error: unknown } | undefined;
+	let onFailure = (): void => { /* replaced below */ };
+	const fatal = new Promise<void>((resolve) => {
+		onFailure = resolve;
+	});
 	const worker = async (): Promise<void> => {
-		while (true) {
+		while (!failure) {
 			const index = next++;
 			if (index >= items.length) return;
-			results[index] = await fn(items[index]!, index);
+			try {
+				results[index] = await fn(items[index]!, index);
+			} catch (error) {
+				failure ??= { error };
+				onFailure();
+			}
 		}
 	};
-	await Promise.all(Array.from({ length: limit }, () => worker()));
+	await Promise.race([Promise.all(Array.from({ length: limit }, () => worker())), fatal]);
+	if (failure) throw failure.error;
 	return results;
 }
 

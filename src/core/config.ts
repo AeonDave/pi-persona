@@ -40,11 +40,18 @@ export interface PiPersonaConfig {
 	 *  instead of being killed mid-work; the idle watchdog + startup deadline + token budget remain the
 	 *  always-on backstops. Set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a hard cap. */
 	agentHardTimeoutMs: number;
-	/** Per-agent STARTUP deadline (ms): a spawned child that never makes progress (no completed
-	 *  turn / tokens / streamed output) within this window is killed as a stalled start — the
-	 *  fast-fail for a child that never began (e.g. an `mcp: true` leg whose MCP adapter hangs in
-	 *  init inside the headless child), so a dead delegation settles in ~90s instead of the full
-	 *  180s idle window. 90000 by default; PI_PERSONA_AGENT_STARTUP_MS=0 disables it. */
+	/** Per-agent STARTUP deadline (ms): a child that produces no progress of its own (no completed
+	 *  turn / tokens / streamed assistant output) within this window is killed as a stalled start.
+	 *  It exists because the idle watchdog cannot catch a hung start — that watchdog is re-armed by
+	 *  ANY stdout, and a child emits header/noise before it does any work.
+	 *
+	 *  The window must cover the WHOLE cold start, not just init: spawn, pi init, MCP init, and the
+	 *  first provider response. A queued or rate-limited provider (a 429 carrying a 60s
+	 *  retry-after, then retried), a cold serverless endpoint, or a local model doing a long prompt
+	 *  eval on CPU can all exceed a tight window while perfectly healthy — and this deadline KILLS,
+	 *  where the idle watchdog would have let the leg live. Killing healthy work costs the user
+	 *  more than a dead leg settling slowly, so the default is deliberately generous.
+	 *  300000 (5 min) by default; PI_PERSONA_AGENT_STARTUP_MS=0 disables it. */
 	agentStartupTimeoutMs: number;
 	/** Delegation nudge: when a delegating supervisor grinds a RUN of hands-on commands by hand (a
 	 *  by-hand sweep) without a hand-off, append a reminder to the offending tool's result. On by
@@ -70,11 +77,52 @@ export interface PiPersonaConfig {
 	 *  moved on, NUL → space → `\x1f`, but record/vet always share the same key() so it
 	 *  cancels out). ON additionally folds in `role`/`tools`/`isolation`, so a genuine retry
 	 *  that only changes those isn't falsely vetoed as "identical" by the 2-strike anti-loop
-	 *  guard. Truthy convention mirrors exocom: unset/""/"off"/"0" ⇒ false. */
+	 *  guard. Truthy convention mirrors exocom — see {@link OFF_WORDS}. */
 	ledgerV2: boolean;
+	/** Source selector for the spine — the shared behavioral layer injected between Pi's base
+	 *  prompt and the persona body (docs/SPINE.md). `""` ⇒ off (the default; composition stays
+	 *  byte-identical to pre-spine), `"on"` ⇒ the user-dir `spine.md` if present else the
+	 *  bundled one, anything else ⇒ that path. Off convention mirrors exocom (see
+	 *  {@link OFF_WORDS}); the value is otherwise kept VERBATIM because it is a path. */
+	spine: string;
+	/** Source selector for the spine DELEGATED LEGS get — the worker variant, a different prompt
+	 *  doing a different job. Same grammar as {@link PiPersonaConfig.spine}, and it FOLLOWS that
+	 *  value unless PI_PERSONA_SPINE_LEGS is set: one switch still lifts both roles, while the two
+	 *  together express the four measurement arms of docs/SPINE.md (off / supervisor-only /
+	 *  legs-only / both), which one selector cannot. */
+	spineLegs: string;
 }
 
 type Env = Record<string, string | undefined>;
+
+/** The words that mean "off" for an opt-in switch. `false`/`no` are in here because they are
+ *  what a user actually types: without them `PI_PERSONA_EXOCOM=false` reads as truthy and
+ *  `PI_PERSONA_SPINE=false` is reinterpreted as a relative file PATH. Exported (read-only) so
+ *  the `{@link OFF_WORDS}` references on the switches above resolve for a reader holding only
+ *  the emitted types — a link into a module-private const documents nothing outside this file. */
+export const OFF_WORDS: ReadonlySet<string> = new Set(["", "off", "0", "false", "no"]);
+
+/** The words that mean "on". Symmetric with {@link OFF_WORDS} and needed for the same reason: a
+ *  switch whose value can also be a PATH cannot treat "not off" as "on", so `1`/`true`/`yes` —
+ *  which the broker's own docs teach users to type — would otherwise be resolved as relative
+ *  filenames. */
+export const ON_WORDS: ReadonlySet<string> = new Set(["on", "1", "true", "yes"]);
+
+/** One definition of "off", shared by the switches whose value is a plain flag or a path. The
+ *  older boolean switches (`persist`, `nudge`, `seed`, `broker`, `disabled`, `delegateDefaultAllow`)
+ *  predate it and keep their own published conventions — changing those would alter what an
+ *  existing user's environment means. Unset counts as off. */
+function isOff(value: string | undefined): boolean {
+	return OFF_WORDS.has((value ?? "").trim().toLowerCase());
+}
+
+/** The spine selectors' shared value grammar: an off word ⇒ `""`, an on word ⇒ `"on"`, anything
+ *  else is a PATH. Only the SELECTOR words are matched case-insensitively; a path survives
+ *  verbatim, case included, because filesystems are case-sensitive. */
+function spineSelector(raw: string): string {
+	if (isOff(raw)) return "";
+	return ON_WORDS.has(raw.trim().toLowerCase()) ? "on" : raw;
+}
 
 function splitDirs(value: string | undefined): string[] {
 	if (!value) return [];
@@ -103,7 +151,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// (RUN_LIMITS.timeoutMs, reset on progress) + startup deadline + token budget are the
 		// always-on backstops; set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a wall-clock ceiling.
 		agentHardTimeoutMs: 0,
-		agentStartupTimeoutMs: 90_000,
+		agentStartupTimeoutMs: 300_000,
 		// On unless explicitly turned off (mirrors PI_PERSONA_PERSIST's `!== "off"` convention).
 		nudge: env.PI_PERSONA_NUDGE?.trim().toLowerCase() !== "off",
 		// Any non-empty value opts in (mirrors PI_PERSONA_DISABLE's own convention) — the
@@ -112,6 +160,8 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		exocom: false,
 		asyncRetain: 25,
 		ledgerV2: false,
+		spine: "",
+		spineLegs: "",
 	};
 	// A valid finite value >= 0 sets the interval (0 opts out); junk/negative keeps the default.
 	const peekRaw = env.PI_PERSONA_PEEK_MS?.trim();
@@ -150,9 +200,15 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 	// PI_PERSONA_ENGINE=child.
 	const engine = env.PI_PERSONA_ENGINE?.trim().toLowerCase();
 	config.engine = engine === "child" ? "child" : "inproc";
-	const exocomFlag = env.PI_PERSONA_EXOCOM?.trim().toLowerCase();
-	config.exocom = exocomFlag !== undefined && exocomFlag !== "" && exocomFlag !== "off" && exocomFlag !== "0";
-	const ledgerV2Flag = env.PI_PERSONA_LEDGER_V2?.trim().toLowerCase();
-	config.ledgerV2 = ledgerV2Flag !== undefined && ledgerV2Flag !== "" && ledgerV2Flag !== "off" && ledgerV2Flag !== "0";
+	config.exocom = !isOff(env.PI_PERSONA_EXOCOM);
+	config.ledgerV2 = !isOff(env.PI_PERSONA_LEDGER_V2);
+	config.spine = spineSelector(env.PI_PERSONA_SPINE?.trim() ?? "");
+	// The legs' selector FOLLOWS the supervisor's unless it is set, so one switch still lifts both
+	// roles while the pair expresses all four measurement arms (docs/SPINE.md). Present-but-empty
+	// counts as UNSET here rather than as the off word it is elsewhere: `PI_PERSONA_SPINE_LEGS=` is
+	// how a shell clears a variable, and an inherited empty splitting the legs off from the
+	// supervisor would be a silent, invisible arm nobody chose.
+	const legsRaw = env.PI_PERSONA_SPINE_LEGS?.trim();
+	config.spineLegs = legsRaw ? spineSelector(legsRaw) : config.spine;
 	return config;
 }

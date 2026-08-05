@@ -39,6 +39,20 @@ function render(decision: ReducerResult, round: number, bestOf: number, usages: 
 	};
 }
 
+/** A deliberation the run cancelled — distinct from one that finished without a ruling, so a
+ *  journal or supervisor records it as cancelled rather than as a completed failure. */
+function cancelled(rounds: number, usages: AgentResult["usage"][]): AgentResult {
+	return {
+		agent: "council",
+		output: `COUNCIL cancelled after ${rounds} round(s) — the run was aborted before a ruling.`,
+		structured: { status: "cancelled", rounds },
+		usage: sumUsage(usages),
+		ok: false,
+		error: "the run was aborted",
+		failureKind: "abort",
+	};
+}
+
 export const councilRounds: Strategy = {
 	name: "council-rounds",
 	params: {
@@ -58,6 +72,7 @@ export const councilRounds: Strategy = {
 		let last: ReducerResult | undefined;
 
 		for (let round = 1; round <= maxRounds; round++) {
+			if (sdk.signal?.aborted) return cancelled(round - 1, usages);
 			sdk.log(`council-rounds ${round}/${maxRounds} (best of ${bestOf})`);
 			const task =
 				round === 1
@@ -67,6 +82,11 @@ export const councilRounds: Strategy = {
 				team.map((m) => () => sdk.agent({ ...rosterSpec(m), task, outputContract: "default" })),
 			);
 			usages.push(...candidates.map((c) => c.usage));
+			// An abort settles every member as ok:false/'abort' instead of throwing, so a stop that
+			// landed while the round was running is first visible here — without this the council
+			// keeps convening the whole roster for every remaining round, then reports a
+			// normal-looking "no ruling". The loop guard above is a round too late for it.
+			if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) return cancelled(round - 1, usages);
 			const lastRound = round === maxRounds;
 			last = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: lastRound });
 			if (last.status === "winner" || lastRound) return render(last, round, bestOf, usages);

@@ -28,8 +28,21 @@ export interface StreamState {
 	 *  grow supervisor memory without limit. */
 	transcript: string;
 	/** The current in-progress message's visible content (streamed text, or reasoning
-	 *  while there's no answer text yet). Cleared on message_end (folded into transcript). */
+	 *  while there's no answer text yet). Cleared on message_end (folded into transcript).
+	 *  Bounded (old head trimmed) like the transcript: `snapshot()` copies it on every
+	 *  event, per leg, so an unbounded one is the same leak. */
 	partial: string;
+	/** The in-progress message's content parts assembled from streaming deltas, indexed by
+	 *  `contentIndex`. pi ≥0.83 makes `message_update` DELTA-ONLY on the JSON wire (no
+	 *  cumulative `message`), so live text can only be reconstructed here. */
+	deltaParts: string[];
+	/** {@link deltaParts} joined — the value `partial` takes. Kept incrementally (a delta for
+	 *  the last non-blank part appends to it) because re-joining every part on every delta is
+	 *  quadratic in message length, on the hot path of every leg. */
+	deltaLive: string;
+	/** Index of the last non-blank part in {@link deltaParts}: the only slot whose growth
+	 *  appends to {@link deltaLive} verbatim, which is what makes the append exact. -1 = none. */
+	deltaTail: number;
 	usage: ChildUsage;
 	model?: string;
 	stopReason?: string;
@@ -44,7 +57,14 @@ export function emptyUsage(): ChildUsage {
 }
 
 export function createStreamState(): StreamState {
-	return { output: "", transcript: "", partial: "", usage: emptyUsage(), sawAssistant: false };
+	return { output: "", transcript: "", partial: "", deltaParts: [], deltaLive: "", deltaTail: -1, usage: emptyUsage(), sawAssistant: false };
+}
+
+/** Start the next message's delta assembly from an empty slate (parts AND their cache). */
+function resetDeltaParts(state: StreamState): void {
+	state.deltaParts = [];
+	state.deltaLive = "";
+	state.deltaTail = -1;
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {
@@ -75,6 +95,82 @@ function liveContent(content: unknown): string | undefined {
 		else if (part.type === "text" && typeof part.text === "string" && part.text.trim()) parts.push(part.text);
 	}
 	return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+// A malformed line must not be able to allocate an arbitrarily sparse deltaParts array
+// (the re-join below walks its whole length) — no real message has this many content parts.
+const MAX_CONTENT_PARTS = 4096;
+
+// Bound the in-progress message exactly as the transcript is bounded: MAX_CONTENT_PARTS caps
+// how MANY parts a malformed line can allocate, but nothing on the wire caps the bytes in one
+// (a single `text_end` can carry megabytes), and `snapshot()` copies the assembly on every
+// event, per leg. Over the cap the OLD head goes — the user is watching the tail.
+const PARTIAL_MAX = 200_000;
+const PARTIAL_KEEP = 150_000;
+
+function boundLive(text: string): string {
+	if (text.length <= PARTIAL_MAX) return text;
+	return `…[earlier output trimmed]\n${text.slice(text.length - PARTIAL_KEEP)}`;
+}
+
+/** Re-join every non-blank part and record which one is last. The general case — used when a
+ *  delta can't simply extend the tail of what's already assembled. */
+function rejoinDeltaParts(state: StreamState): void {
+	let live = "";
+	let tail = -1;
+	for (let i = 0; i < state.deltaParts.length; i++) {
+		const part = state.deltaParts[i];
+		if (!part?.trim()) continue;
+		live = live ? `${live}\n\n${part}` : part;
+		tail = i;
+	}
+	state.deltaLive = boundLive(live);
+	state.deltaTail = tail;
+}
+
+/** Fold one streaming `assistantMessageEvent` delta into the live partial. This is the
+ *  pi ≥0.83 wire shape: `message_update` carries only `{contentIndex, delta}`, never the
+ *  cumulative message, so the visible content has to be reassembled part by part.
+ *  Tool-call deltas are raw argument JSON — not something to show as agent output. */
+function applyMessageDelta(state: StreamState, ev: Record<string, unknown>): void {
+	if (ev.type === "start") {
+		resetDeltaParts(state);
+		return;
+	}
+	const idx = ev.contentIndex;
+	if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || idx >= MAX_CONTENT_PARTS) return;
+	const prev = state.deltaParts[idx] ?? "";
+	if (ev.type === "text_delta" || ev.type === "thinking_delta") {
+		if (typeof ev.delta !== "string") return;
+		const grown = boundLive(prev + ev.delta);
+		state.deltaParts[idx] = grown;
+		if (idx === state.deltaTail) {
+			// The hot path. deltaTail is by construction the LAST non-blank part, so appending to
+			// it appends to the assembly verbatim: no re-join, and no trim() of the whole part
+			// either (that flattens the rope V8 builds from the concatenation, which is itself
+			// quadratic in message length). A part just trimmed at the cap moved its own seam.
+			if (grown === prev + ev.delta) state.deltaLive = boundLive(state.deltaLive + ev.delta);
+			else rejoinDeltaParts(state);
+		} else if (idx > state.deltaTail && ev.delta.trim()) {
+			// Every part past the tail is blank, so this one becomes the new tail and lands at the
+			// END of the assembly — an append too.
+			state.deltaLive = boundLive(state.deltaLive ? `${state.deltaLive}\n\n${grown}` : grown);
+			state.deltaTail = idx;
+		} else if (idx < state.deltaTail || grown.trim()) {
+			// A late delta for an earlier part, or a blank part promoted by whitespace-then-text:
+			// the seams moved, so re-join once.
+			rejoinDeltaParts(state);
+		}
+		// else a blank part stayed blank — excluded from the assembly either way, nothing moved.
+	} else if (ev.type === "text_end" || ev.type === "thinking_end") {
+		if (typeof ev.content !== "string") return;
+		state.deltaParts[idx] = boundLive(ev.content);
+		rejoinDeltaParts(state);
+	} else return;
+	if (state.deltaLive) {
+		state.partial = state.deltaLive;
+		delete state.activity; // generating, not running a tool
+	}
 }
 
 /** A short "toolName arg" activity label from a tool_execution_start event. */
@@ -120,11 +216,26 @@ export function applyEvent(state: StreamState, event: unknown): void {
 
 	// Live partial: pi streams the growing message as `message_update` events. Surface
 	// its text (or reasoning) so a long-thinking agent shows progress, not just tokens.
-	if ((event.type === "message_update" || event.type === "message_start") && isObject(event.message)) {
-		const live = liveContent(event.message.content);
-		if (live !== undefined) {
-			state.partial = live;
-			delete state.activity; // generating, not running a tool
+	// ONLY the assistant's own message counts: pi also emits message_start/message_end for
+	// the user prompt it just delivered and for every tool result, and folding those in
+	// would make the child's own task echo look like streamed output — cancelling the
+	// startup deadline before the first provider call and salvaging the prompt as
+	// "partial output" when the leg dies without ever answering.
+	if (event.type === "message_update" || event.type === "message_start") {
+		if (isObject(event.message)) {
+			if (event.message.role !== "assistant") return;
+			if (event.type === "message_start") resetDeltaParts(state);
+			const live = liveContent(event.message.content);
+			if (live !== undefined) {
+				state.partial = boundLive(live);
+				delete state.activity; // generating, not running a tool
+			}
+			return;
+		}
+		// pi ≥0.83 strips the cumulative `message` from message_update on the JSON wire —
+		// only the deltas remain, so assemble the live text from them instead.
+		if (event.type === "message_update" && isObject(event.assistantMessageEvent)) {
+			applyMessageDelta(state, event.assistantMessageEvent);
 		}
 		return;
 	}
@@ -135,6 +246,7 @@ export function applyEvent(state: StreamState, event: unknown): void {
 
 	delete state.activity; // a message means it's reasoning, not mid-tool
 	state.partial = ""; // the completed message is folded into the transcript below
+	resetDeltaParts(state); // the next message's deltas start from an empty slate
 	state.sawAssistant = true;
 	state.usage.turns++;
 

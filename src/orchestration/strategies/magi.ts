@@ -21,6 +21,21 @@ import { rosterSpec } from "../roster.ts";
 
 const LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
+/** A poll the run cancelled — distinct from one that finished without a ruling, so a
+ *  journal or supervisor records it as cancelled rather than as a completed failure. */
+function cancelled(usages: AgentResult["usage"][]): AgentResult {
+	const output = "MAGI cancelled — the run was aborted before a ruling.";
+	return {
+		agent: "magi",
+		output,
+		structured: { status: "cancelled", reflected: false, headline: output },
+		usage: sumUsage(usages),
+		ok: false,
+		error: "the run was aborted",
+		failureKind: "abort",
+	};
+}
+
 export const magi: Strategy = {
 	name: "magi",
 	params: {
@@ -30,6 +45,7 @@ export const magi: Strategy = {
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("magi: a roster of voting personas is required");
+		if (sdk.signal?.aborted) return cancelled([]);
 		const aggregate = input.params.aggregate === "unanimity" ? "unanimity" : "majority";
 		const reflect = input.params.reflect !== false; // default ON — one informed round
 		sdk.log(`magi: ${team.length} systems, ${aggregate} vote${reflect ? " + reflection" : ""}`);
@@ -38,6 +54,13 @@ export const magi: Strategy = {
 		const round1 = await sdk.parallel(
 			team.map((m) => () => sdk.agent({ ...rosterSpec(m), task: input.task, outputContract: "default" })),
 		);
+
+		// An abort settles every core as ok:false/'abort' instead of throwing, so a stop that
+		// landed while round 1 was running is first visible here — without this MAGI re-polls the
+		// whole roster for a reflection round nobody will read, then reports a "no ruling".
+		if (sdk.signal?.aborted || round1.every((c) => c.failureKind === "abort")) {
+			return cancelled(round1.map((c) => c.usage));
+		}
 
 		let candidates = round1;
 		const okCount = round1.filter((c) => c.ok).length;
@@ -56,6 +79,14 @@ export const magi: Strategy = {
 			candidates = await sdk.parallel(
 				team.map((m) => () => sdk.agent({ ...rosterSpec(m), task: reflectTask, outputContract: "default" })),
 			);
+			// Same reasoning as round 1, and both clauses earn their place. `sdk.signal` is wired
+			// (the council/flow tools pass Pi's tool-execution signal down), but a stop that lands
+			// DURING the reflection round is visible here only as every core settling
+			// `failureKind: "abort"` — as is one on a caller that passed no signal. Without the
+			// second clause a stopped run reports a normal-looking "no ruling" from a killed poll.
+			if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) {
+				return cancelled([...round1, ...candidates].map((c) => c.usage));
+			}
 		}
 		const decision = sdk.reduce.vote(candidates, { aggregate, keepBestFallback: true });
 

@@ -4,6 +4,8 @@
 //   contains "[sleep]" -> hang forever (so the test can abort it)
 //   contains "[fail]"  -> emit an error stop reason
 //   otherwise          -> emit a normal assistant message_end echoing the task
+import { readFileSync } from "node:fs";
+
 const args = process.argv.slice(2);
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
@@ -20,6 +22,29 @@ function run(task) {
 	} else if (task.includes("[ignore-term]")) {
 		process.on("SIGTERM", () => {}); // refuse graceful termination → forces the SIGKILL escalation
 		setInterval(() => {}, 1000);
+	} else if (task.includes("[echo-then-hang]")) {
+		// What REAL pi does at agent-loop start: echo the delivered user prompt as a
+		// message_start/message_end pair, then (here) black-hole the first provider request.
+		// The startup deadline must still fire — the echo is not the child's own progress.
+		emit({ type: "agent_start" });
+		emit({ type: "message_start", message: { role: "user", content: [{ type: "text", text: task }] } });
+		emit({ type: "message_end", message: { role: "user", content: [{ type: "text", text: task }] } });
+		setInterval(() => {}, 1000);
+	} else if (task.includes("[self-signal]")) {
+		// Stands in for an EXTERNAL death (OOM killer, `kill -9`, shutdown) mid-run: a completed
+		// turn, then a signal kill nobody in the engine initiated. POSIX only (Windows has no
+		// signal death — TerminateProcess yields a plain non-zero exit code).
+		emit({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "half-finished work" }],
+				model: "stub/model",
+				stopReason: "toolUse",
+				usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },
+			},
+		});
+		setTimeout(() => process.kill(process.pid, "SIGKILL"), 50);
 	} else if (task.includes("[drip]")) {
 		// Emit an event IMMEDIATELY (so node's boot latency can't eat the caller's idle
 		// window under parallel-suite load), then every 150ms a few times (total > a short
@@ -76,6 +101,22 @@ function run(task) {
 			message: {
 				role: "assistant",
 				content: [{ type: "text", text: `PI_PERSONA_DISABLE=${process.env.PI_PERSONA_DISABLE ?? "unset"} PI_PERSONA_CHILD=${process.env.PI_PERSONA_CHILD ?? "unset"} PI_PERSONA_LEG=${process.env.PI_PERSONA_LEG ?? "unset"} PI_PERSONA_BUS=${process.env.PI_PERSONA_BUS ?? "unset"} PI_PERSONA_HANDLE=${process.env.PI_PERSONA_HANDLE ?? "unset"} PI_PERSONA_PEERS=${process.env.PI_PERSONA_PEERS ?? "unset"} PI_PERSONA_ALLOW_BLOCKING=${process.env.PI_PERSONA_ALLOW_BLOCKING ?? "unset"}` }],
+				model: "stub/model",
+				stopReason: "end",
+				usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },
+			},
+		});
+		process.exit(0);
+	} else if (task.includes("[sysprompt]")) {
+		// Echo the system prompt the engine composed for this leg — it arrives as the file
+		// named by `--append-system-prompt`, which is deleted as soon as the child exits.
+		const at = args.indexOf("--append-system-prompt");
+		const text = at >= 0 ? readFileSync(args[at + 1], "utf8") : "(no system prompt)";
+		emit({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: `sysprompt: ${text}` }],
 				model: "stub/model",
 				stopReason: "end",
 				usage: { input: 1, output: 1, cost: { total: 0 }, totalTokens: 2 },

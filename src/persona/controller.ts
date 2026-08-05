@@ -72,9 +72,11 @@ export class PersonaController {
 		this.restoreThinking();
 	}
 
-	/** For the `before_agent_start` hook: the persona-composed prompt, or undefined. */
-	composePrompt(base: string): string | undefined {
-		return this.active ? composeSystemPrompt(base, this.active) : undefined;
+	/** For the `before_agent_start` hook: the persona-composed prompt, or undefined.
+	 *  `spine` is the session's shared behavioral layer (docs/SPINE.md) — a persona-less
+	 *  turn returns undefined and the hook applies the layer itself. */
+	composePrompt(base: string, spine?: string): string | undefined {
+		return this.active ? composeSystemPrompt(base, this.active, spine) : undefined;
 	}
 
 	/** For the `tool_call` hook: a block result, or undefined to allow. */

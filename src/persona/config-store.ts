@@ -6,7 +6,7 @@
  * ensemble like magi can run its cores on *different* models); more keys later.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export interface PersonaConfig {
@@ -20,10 +20,22 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Read the store. NOTE: this reader WRITES on one path — an unusable file is copied to
+ * `${file}.bak` before the next save replaces it (once; an existing backup is never touched).
+ */
 export function readPersonaConfigs(file: string): PersonaConfigStore {
+	let text: string;
 	try {
-		const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-		if (!isPlainObject(parsed)) return {};
+		text = readFileSync(file, "utf8");
+	} catch {
+		return {}; // no config yet (the common case) or unreadable → start empty
+	}
+	try {
+		const parsed: unknown = JSON.parse(text);
+		// Valid JSON that isn't a config object is as unusable as unparseable text — and the next
+		// save replaces it just the same, so it gets the same backup treatment.
+		if (!isPlainObject(parsed)) throw new Error("not a config object");
 		const store: PersonaConfigStore = {};
 		for (const [name, cfg] of Object.entries(parsed)) {
 			if (!isPlainObject(cfg)) continue;
@@ -39,13 +51,90 @@ export function readPersonaConfigs(file: string): PersonaConfigStore {
 		}
 		return store;
 	} catch {
+		// An unusable file is about to be overwritten by the next save; keep it beside the
+		// config so the assignments stay recoverable instead of vanishing silently. `wx` makes
+		// this the FIRST copy only: the underlying fault (a sync client, a failing disk) tends to
+		// recur, and a second bad parse would otherwise overwrite the one copy that still had the
+		// user's assignments in it.
+		try {
+			writeFileSync(`${file}.bak`, text, { encoding: "utf8", flag: "wx" });
+		} catch {
+			/* best effort — an existing backup, or an unwritable dir, must not stop the session */
+		}
 		return {};
 	}
 }
 
-export function writePersonaConfigs(file: string, store: PersonaConfigStore): void {
+/** Injection seams for the rename retry below (tests drive it on any OS). */
+export interface ConfigWriteIO {
+	rename?: (from: string, to: string) => void;
+	sleep?: (ms: number) => void;
+}
+
+// A handle held by a virus scanner, a sync client or another pi instance mid-read is transient,
+// so a few short waits usually win the race — 25+50+75 ms of backoff at worst, on a save.
+const RENAME_ATTEMPTS = 4;
+const RENAME_BACKOFF_MS = 25;
+
+function sleepSync(ms: number): void {
+	// The whole store API is synchronous (this runs on a model assignment, not on a hot path),
+	// so the backoff has to block; Atomics.wait is the standard synchronous sleep.
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * MERGE `store` into the file (read-modify-write), then save it.
+ *
+ * A removal is NOT expressible: an assignment missing from `store` is preserved, not deleted.
+ * The merge exists so a concurrent pi instance's save survives ours, and it cannot tell "the
+ * user cleared this" from "this store was read before that was written" — a clearing gesture
+ * would need its own delete-aware call.
+ */
+export function writePersonaConfigs(file: string, store: PersonaConfigStore, io: ConfigWriteIO = {}): void {
 	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+	// The caller holds a store read at session start; another pi instance in the same workspace
+	// may have saved since. Re-read and merge so its work survives our whole-store write — down
+	// to the agent, since two instances of the *same* persona assign different roster members.
+	const merged: PersonaConfigStore = { ...readPersonaConfigs(file) };
+	for (const [persona, cfg] of Object.entries(store)) {
+		const prev = merged[persona];
+		merged[persona] = prev ? { ...prev, ...cfg, models: { ...prev.models, ...cfg.models } } : cfg;
+	}
+	const payload = `${JSON.stringify(merged, null, 2)}\n`;
+	// Temp file + same-volume rename, so a crash mid-write can never leave a truncated
+	// config.json behind. That is atomic on POSIX; Windows is NOT the same — rename fails with
+	// EPERM/EBUSY while ANY other handle holds the target open (Defender, a sync client, a second
+	// pi instance mid-read), and the persona folder is an ordinary user directory where that is
+	// routine. So a contended rename is retried, and then written in place: a non-atomic save
+	// that lands beats an atomic one that loses the user's assignments every session.
+	const tmp = `${file}.${process.pid}.tmp`;
+	const rename = io.rename ?? renameSync;
+	const sleep = io.sleep ?? sleepSync;
+	writeFileSync(tmp, payload, "utf8");
+	for (let attempt = 1; ; attempt++) {
+		try {
+			rename(tmp, file);
+			return;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (attempt < RENAME_ATTEMPTS && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
+				sleep(RENAME_BACKOFF_MS * attempt);
+				continue;
+			}
+			try {
+				// The scratch file must not be left behind for every pid that ever tried, whether
+				// the in-place write succeeds or throws (the caller still sees a real failure).
+				writeFileSync(file, payload, "utf8");
+			} finally {
+				try {
+					rmSync(tmp, { force: true });
+				} catch {
+					/* best effort */
+				}
+			}
+			return;
+		}
+	}
 }
 
 /** The model assignments for a persona (empty object when none configured). */

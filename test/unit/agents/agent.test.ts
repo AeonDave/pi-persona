@@ -20,8 +20,16 @@ test("parseAgent reads frontmatter and uses the body as the system prompt", () =
 	assert.equal(a.model, "anthropic/claude-x");
 	assert.deepEqual(a.tools, ["read", "grep", "find"]);
 	assert.equal(a.systemPrompt, "You are scout. Explore and report.");
-	assert.equal(a.systemPromptMode, "replace");
 	assert.equal(a.source, "/a/scout.md");
+});
+
+test("an agent carries no systemPromptMode — both engines APPEND, so there is no mode to pick", () => {
+	// The field used to be parsed and read by nothing, and its `replace` default described
+	// behavior agents have never had (child: `--append-system-prompt`; inproc: appendSystemPrompt).
+	// Pinned so it can't come back as a second, silently-ignored knob.
+	const a = parseAgent("---\nname: s\nsystemPromptMode: replace\n---\nbody", "/s");
+	assert.ok(a);
+	assert.ok(!("systemPromptMode" in a), "a mode nothing honours must not appear on the parsed agent");
 });
 
 test("parseAgent accepts tools written as an inline list", () => {
@@ -33,6 +41,12 @@ test("parseAgent reads isolation: worktree (else undefined)", () => {
 	assert.equal(parseAgent("---\nname: s\nisolation: worktree\n---\nbody", "/s")?.isolation, "worktree");
 	assert.equal(parseAgent("---\nname: s\n---\nbody", "/s")?.isolation, undefined);
 	assert.equal(parseAgent("---\nname: s\nisolation: none\n---\nbody", "/s")?.isolation, undefined, "none ⇒ unset");
+});
+
+test("parseAgent reads spine: false, the shared-layer opt-out (else undefined)", () => {
+	assert.equal(parseAgent("---\nname: s\nspine: false\n---\nbody", "/s")?.spine, false);
+	assert.equal(parseAgent("---\nname: s\n---\nbody", "/s")?.spine, undefined, "absent ⇒ the session setting decides");
+	assert.equal(parseAgent("---\nname: s\nspine: true\n---\nbody", "/s")?.spine, undefined, "only an explicit false is recorded");
 });
 
 test("parseAgent reads mcp: true (else undefined)", () => {

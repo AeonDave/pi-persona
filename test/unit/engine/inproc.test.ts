@@ -22,7 +22,7 @@ const stubModel = { provider: "stub", id: "m" };
 const fakeRegistry = { find: () => stubModel, getAll: () => [stubModel] } as unknown as ModelRegistry;
 
 const agents: Record<string, AgentConfig> = {
-	a: { name: "a", model: "stub/m", systemPrompt: "You are a.", systemPromptMode: "replace", source: "x" },
+	a: { name: "a", model: "stub/m", systemPrompt: "You are a.", source: "x" },
 };
 const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
@@ -262,6 +262,22 @@ test("inproc engine appends an on-the-fly `role` to the agent's own system promp
 	await engine.run({ agent: "a", task: "t", role: "You are a Rust unsafe-code auditor." });
 	assert.match(spy.opts?.systemPrompt ?? "", /You are a\./, "the agent's own persona is kept");
 	assert.match(spy.opts?.systemPrompt ?? "", /Rust unsafe-code auditor/, "the role is appended");
+});
+
+test("inproc engine leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
+	const spy: Spy = {};
+	const mk = (deps: Partial<Parameters<typeof makeInProcessEngine>[0]>) =>
+		makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("ok")], spy), ...deps });
+
+	await mk({ spine: "SPINE" }).run({ agent: "a", task: "t", role: "ROLE" });
+	assert.equal(spy.opts?.systemPrompt, "SPINE\n\nYou are a.\n\nROLE", "the shared layer leads, then the agent, then the role");
+
+	await mk({}).run({ agent: "a", task: "t", role: "ROLE" });
+	assert.equal(spy.opts?.systemPrompt, "You are a.\n\nROLE", "no spine ⇒ byte-identical to the pre-spine join");
+
+	const optedOut: Record<string, AgentConfig> = { q: { name: "q", model: "stub/m", systemPrompt: "You are q.", spine: false, source: "x" } };
+	await mk({ spine: "SPINE", resolveAgent: (n) => optedOut[n] }).run({ agent: "q", task: "t" });
+	assert.equal(spy.opts?.systemPrompt, "You are q.", "`spine: false` in the agent's frontmatter opts the leg out");
 });
 
 test("inproc engine tags failed runs with agent · model + dynamic overrides so failures are actionable", async () => {
@@ -858,4 +874,115 @@ test("peer members are unregistered from bus and peer registry when their run en
 	});
 	await engine.run({ agent: "a", task: "t", peers: true });
 	assert.deepEqual(bus.participants(), ["supervisor"], "the child handle is gone after the run");
+});
+
+test("a failed session construction does not strand the child's bus registration", async () => {
+	// The handle is registered BEFORE the session exists; a construction failure (loader fs
+	// error, model runtime, extension load) must not leave a phantom peer on the session-long
+	// bus for the rest of the supervisor's session.
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		coaching: true,
+		createSession: async () => {
+			throw new Error("resource loader exploded");
+		},
+	});
+	await assert.rejects(() => engine.run({ agent: "a", task: "t" }), /resource loader exploded/);
+	assert.deepEqual(bus.participants(), ["supervisor"], "no phantom peer survives the failed construction");
+});
+
+test("a failed session construction drops the child from the run's peer registry", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	type LooseTool = { name: string; execute: (id: string, p: unknown) => Promise<{ content: Array<{ type: string; text?: string }> }> };
+	const tools: LooseTool[] = [];
+	let firstBuild = true;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		createSession: async (opts) => {
+			if (firstBuild) {
+				firstBuild = false;
+				throw new Error("boom");
+			}
+			for (const t of opts.customTools ?? []) tools.push(t as unknown as LooseTool);
+			return fakeSession([msgEnd("x")]);
+		},
+	});
+	await assert.rejects(() => engine.run({ agent: "a", task: "t", peers: true }));
+	await engine.run({ agent: "a", task: "t", peers: true });
+	const r = await tools[0]!.execute("t", { action: "list" });
+	const listed = r.content.map((c) => c.text ?? "").join("");
+	assert.doesNotMatch(listed, /a#\d+/, "the dead member is not offered as a peer to its siblings");
+});
+
+test("a throw from the caller's onSteerable wiring releases the child handle and disposes the session", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	let disposed = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		coaching: true,
+		createSession: async () => ({
+			subscribe: () => () => {},
+			prompt: async () => {},
+			agent: { abort() {}, async waitForIdle() {}, steer() {} },
+			dispose: () => {
+				disposed = true;
+			},
+		}),
+	});
+	await assert.rejects(
+		() =>
+			engine.run({ agent: "a", task: "t" }, undefined, undefined, () => {
+				throw new Error("steer wiring boom");
+			}),
+		/steer wiring boom/,
+	);
+	assert.deepEqual(bus.participants(), ["supervisor"], "the handle is released when the wiring throws");
+	assert.equal(disposed, true, "the live session is not retained after the failed wiring");
+});
+
+test("inproc keeps the cause of death when a contract-bearing leg times out with no output", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		timeoutMs: 40,
+		createSession: async () => {
+			let release!: () => void;
+			const idle = new Promise<void>((r) => {
+				release = r;
+			});
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => release(),
+					waitForIdle: () => idle,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t", outputContract: "default" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "timeout");
+	assert.match(r.error ?? "", /timed out/, "the cause of death survives contract validation");
+	assert.doesNotMatch(r.error ?? "", /contract default failed/);
 });
