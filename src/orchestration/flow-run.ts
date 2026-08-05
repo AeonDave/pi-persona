@@ -42,6 +42,9 @@ export interface FlowRunDeps {
 	/** The pinned `flow@hash` for this run (I3) — recorded in every journal line. */
 	hash: string;
 	signal?: AbortSignal;
+	/** Grace an aborted wave gets to unwind cooperatively before its still-running phases are
+	 *  force-settled (defaults to {@link ABORT_GRACE_MS}); shrinkable in tests. */
+	abortGraceMs?: number;
 	/** Append one entry as each phase completes. */
 	journal?: (entry: FlowJournalEntry) => void;
 	/** Phases already completed (from a prior run's journal) — skipped, output reused. */
@@ -58,6 +61,48 @@ export interface FlowOutcome {
 	results: Record<string, AgentResult>;
 	/** The terminal (sink) phases' combined output — the flow's answer. */
 	output: string;
+	/** The run signal fired before every phase settled ok. A cancelled flow is NOT the same as one
+	 *  that merely finished without an answer, and callers report it differently. */
+	cancelled?: boolean;
+}
+
+/** How long an aborted wave is given to unwind COOPERATIVELY before its still-running phases are
+ *  force-settled as cancelled. A strategy that consults the run signal returns its own (more
+ *  informative) result — the last good draft, the upstream step's output, the usage already
+ *  billed — inside this window; a strategy that ignores the signal must not be able to hold the
+ *  whole run open. Sized for the cooperative path to actually WIN it: a strategy notices at a
+ *  round boundary, and only once its in-flight legs have settled through the engine's abort path
+ *  (an in-process session stop, or a child process tree kill), which is seconds rather than
+ *  milliseconds. The full wait is paid only by a phase that never unwinds at all. */
+const ABORT_GRACE_MS = 5_000;
+
+const CANCELLED_ERROR = "cancelled: the flow run was aborted";
+
+/** Resolves when `signal` aborts — never, when there is none. `dispose` drops the listener, so a
+ *  many-wave run doesn't accumulate one per wave on a long-lived signal. */
+function whenAborted(signal: AbortSignal | undefined): { promise: Promise<void>; dispose: () => void } {
+	if (!signal) return { promise: new Promise<void>(() => { /* never */ }), dispose: () => { /* nothing to drop */ } };
+	let onAbort = (): void => { /* replaced below */ };
+	const promise = new Promise<void>((resolve) => {
+		onAbort = (): void => resolve();
+		if (signal.aborted) resolve();
+		else signal.addEventListener("abort", onAbort, { once: true });
+	});
+	return { promise, dispose: () => signal.removeEventListener("abort", onAbort) };
+}
+
+/** Await `p`, but give up after `ms`. The timer is unref'd: a pending grace must never be the
+ *  reason a process stays alive. */
+function within(p: Promise<unknown>, ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		timer.unref?.();
+		const settle = (): void => {
+			clearTimeout(timer);
+			resolve();
+		};
+		void p.then(settle, settle);
+	});
 }
 
 /** Build a phase's task: the base task plus each upstream phase's output as context. */
@@ -92,9 +137,13 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 	const gateResolved = (id: string): boolean => !byId.get(id)?.gate || gateState.has(id) || done.get(id)?.ok === false;
 	const needFailed = (n: string): boolean => (done.has(n) && !done.get(n)?.ok) || gateState.get(n) === "rejected";
 	let remaining = spec.phases.filter((p) => !done.has(p.id));
+	let cancelled = false;
 
 	while (remaining.length > 0) {
-		if (deps.signal?.aborted) break;
+		if (deps.signal?.aborted) {
+			cancelled = true;
+			break;
+		}
 		// A phase can be considered once every need is done AND any gated need is resolved.
 		const ready = remaining.filter((p) => (p.needs ?? []).every((n) => done.has(n) && gateResolved(n)));
 		if (ready.length === 0) break; // acyclic + progress guarantees this can't happen
@@ -111,8 +160,13 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		}
 
 		const runnable = ready.filter((p) => !blocked.includes(p));
-		const results = await Promise.all(
-			runnable.map(async (p): Promise<[string, AgentResult]> => {
+		// Phases that produced their own result. Anything still missing when an aborted wave's
+		// grace expires is force-settled below, so a run-level abort can cut a wave already in
+		// flight instead of waiting on strategies that never consult the signal.
+		const settled = new Map<string, AgentResult>();
+		let forced = false;
+		const wave = Promise.all(
+			runnable.map(async (p): Promise<void> => {
 				deps.onPhase?.(p.id, "running");
 				const upstream: Record<string, AgentResult> = {};
 				for (const n of p.needs ?? []) {
@@ -129,16 +183,53 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 					const error = err instanceof Error ? err.message : String(err);
 					r = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error };
 				}
+				// The run already gave up on this phase and moved on. Its UI node is torn down and
+				// its outcome is already reported, so re-drive neither — but work that DID complete
+				// is still worth keeping: journal it so a RESUME reuses the output instead of paying
+				// for the same phase a second time. A late FAILURE is not journaled — there is
+				// nothing to reuse, and a resume has to re-run it anyway.
+				if (forced) {
+					if (r.ok) deps.journal?.({ phase: p.id, hash: deps.hash, ok: true, output: r.output });
+					return;
+				}
+				settled.set(p.id, r);
 				deps.onPhase?.(p.id, r.ok ? "done" : "failed", r);
 				deps.journal?.({ phase: p.id, hash: deps.hash, ok: r.ok, output: r.output });
-				return [p.id, r];
 			}),
 		);
-		for (const [id, r] of results) done.set(id, r);
+
+		const abort = whenAborted(deps.signal);
+		try {
+			await Promise.race([wave, abort.promise]);
+			if (deps.signal?.aborted) await within(wave, deps.abortGraceMs ?? ABORT_GRACE_MS);
+		} finally {
+			abort.dispose();
+		}
+		if (deps.signal?.aborted) {
+			forced = true;
+			for (const p of runnable) {
+				if (settled.has(p.id)) continue;
+				// `failureKind: "abort"` is the distinction every other layer keys on (the strategies'
+				// own cancelled results carry it) — without it a phase the USER stopped reads to its
+				// consumers as one that simply failed.
+				const r: AgentResult = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error: CANCELLED_ERROR, failureKind: "abort" };
+				settled.set(p.id, r);
+				deps.onPhase?.(p.id, "failed", r);
+				// Deliberately NOT journaled: the phase produced nothing, so a resume has to re-run
+				// it rather than skip it as done.
+			}
+		}
+		for (const [id, r] of settled) done.set(id, r);
+		if (deps.signal?.aborted) {
+			// Gates are skipped on the way out — an aborted run must not stop to prompt for a
+			// checkpoint nobody is waiting on.
+			cancelled = spec.phases.some((p) => done.get(p.id)?.ok !== true);
+			break;
+		}
 
 		// Resolve checkpoint gates for phases that just completed OK — sequentially, so the
 		// next readiness pass sees each gate's verdict (a rejected gate blocks its dependents).
-		for (const [id, r] of results) {
+		for (const [id, r] of settled) {
 			const phase = byId.get(id);
 			if (!phase?.gate || !r.ok || gateState.has(id)) continue;
 			const approved = deps.approveGate ? await deps.approveGate(phase, r) : true;
@@ -156,5 +247,5 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		.filter((s) => s.trim())
 		.join("\n\n---\n\n");
 	const ok = spec.phases.every((p) => done.get(p.id)?.ok ?? false);
-	return { ok, results, output };
+	return { ok, results, output, ...(cancelled ? { cancelled: true } : {}) };
 }

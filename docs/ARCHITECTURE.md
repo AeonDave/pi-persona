@@ -123,15 +123,18 @@ engine + bus + core`; `persona → orchestration + core`; `tools`/`ui → lower 
   wakes the session through the same idle-gated delivery as async completions), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback), `async.ts` (async
-  tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event → state).
+  tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event → state),
+  `handles.ts` (one bus-handle sequence shared by BOTH engines), `signals.ts` (`combineSignals`).
 - **`src/orchestration/`** — the heart: `sdk.ts` (the Strategy SDK), `strategy.ts` (registry +
   `knownParams`), `strategies/*.ts`, `voting.ts`, `judge.ts` (anonymise-for-judge), `reducers.ts`,
   `roster.ts` (teams + `rosterSpec`), `flow*.ts` (DAG + JSONL journal + gates), `render.ts`.
 - **`src/bus/`** — coordination: `inproc.ts` (handle-based mailbox: send/ask/reply/onMessage),
   `contact.ts` (child `contact_supervisor`), `peers.ts` (child `contact_peer`), `broker/` (opt-in
   cross-process relay: `paths`/`framing`/`messages` pure, `host`/`client` over `node:net`).
-- **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`,
-  `gating.ts`, `orchestrate.ts`, `config-store.ts`.
+- **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
+  `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`, `state.ts` (last-selected persona),
+  `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
+  `persona.ts` for supervisor turns and in the engines for delegated legs).
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`. **`src/ui/`** — agent tree/overlay, model picker.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
   `PI_PERSONA_BUS` is set (a broker child).
@@ -206,6 +209,32 @@ delegate it with `mcp: true` and pass the session id — the leg reaches the too
 backend, the shared workspace. Do not over-restrict such an agent's `tools` allowlist, or the `mcp*`
 tools get filtered out of its active set.
 
+## The spine — one shared behavioral layer
+
+An optional layer of behavioral baseline (scope discipline, verification, how to treat another
+agent's text) that a persona would otherwise restate in its own words. [SPINE.md](SPINE.md) covers
+the content and the A/B that gates its default; the architectural shape is:
+
+- **Where it sits.** Between Pi's base prompt and the persona body — the stable, cacheable *prefix*,
+  the opposite end of the prompt from the per-turn delegation brief. `composeSystemPrompt(base,
+  persona, spine)` (`persona/persona.ts`) is the one supervisor-side composition: a persona-less turn
+  still gets base + layer, and a `replace` persona (which drops Pi's base) keeps the layer as its only
+  scaffolding.
+- **Two texts, two selectors.** The supervisor reads `spine.md`, a delegated leg reads
+  `spine.worker.md` — a leg runs headless, so "confirm irreversible actions with the user" would make
+  it stall or hand the question back as its deliverable. `PI_PERSONA_SPINE` / `PI_PERSONA_SPINE_LEGS`
+  (the legs' selector follows the supervisor's unless set) each take off / on / an explicit path; `on`
+  resolves the user dir before the bundled `prompts/`, a path never falls back to another file.
+- **Source resolution is pure, composition is per-role.** `persona/spine.ts` answers only *which file,
+  if any* — over an injected reader, so the whole precedence table is unit-testable without a disk.
+  The legs' text is prepended by each engine (`engine/inproc.ts`, and `--append-system-prompt` on the
+  child adapter), so a leg keeps Pi's full base prompt either way.
+- **Off by default, opt-out at both ends.** Unset ⇒ every composition above is byte-identical to a
+  pre-spine pi-persona. Frontmatter `spine: false` opts a persona or an agent out, and a persona's
+  opt-out carries to the legs it spawns. A file that is unreadable, empty, or over `MAX_SPINE_BYTES`
+  (64 KiB, refused on its `stat` so the bytes never enter the process) degrades to a warning and no
+  layer — a prompt file is never a hard failure.
+
 ## The three communication planes
 
 Three planes with **disjoint vocabularies** — a concept name lives in exactly one, so "progress" is
@@ -267,13 +296,16 @@ external comm.)
   model, and context usage are refreshed on heartbeat; changing persona never changes the registry
   key or grants authority over another peer.
 - **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
-  message is head-truncated, then delivered as `attributeInbound(label, fenceUntrusted(text))` — the
-  same fence/attribute primitives the broker/peer plane above uses. `label` comes from the registry
-  entry keyed by the connecting session, never the envelope's self-reported `from_name`, so a peer
-  cannot spoof its identity. A message over the inline budget spills to a workspace-scoped artifact
-  file (a small preview stays inline) rather than landing whole in the receiver's context. Guardrails:
-  a hop cap, a per-sender rate+byte budget, and a (sender, msg_id) dedup set so an at-least-once resend
-  can't double-trigger a turn.
+  message is head-truncated, then delivered under a header the RECEIVER writes (`[label] —
+  message|reply`) above a body quoted by `fencePeer` — the peer flavor of the same `core/fence.ts`
+  primitives the planes above use (`fenceUntrusted`/`attributeInbound`), same anti-injection
+  discipline, worded for an equal-status collaborator instead of a leg you commissioned. Attribution
+  sits OUTSIDE the fence, so a payload can't spoof its sender by closing the block, and `label` comes
+  from the registry entry keyed by the connecting session, never the envelope's self-reported
+  `from_name`, so a peer cannot spoof its identity. A message over the inline budget spills to a
+  workspace-scoped artifact file (a small preview stays inline) rather than landing whole in the
+  receiver's context. Guardrails: a hop cap, a per-sender rate+byte budget, and a (sender, msg_id)
+  dedup set so an at-least-once resend can't double-trigger a turn.
 - **Tools are lazy and fail closed.** `exocom_list` exposes presence and
   `exocom_send({ target, message, in_reply_to? })` sends one-way messages. Pi has no dynamic
   unregister API, so definitions registered by a prior join may remain in the registry; the live
@@ -346,8 +378,14 @@ must pass. The broker's transport is the only OS-specific code, confined to `bus
 
 ## Error-handling & lose-nothing invariants
 
-- Per-run `AbortController`; recoverable failures return `AgentResult.error`/`null` + diagnostics,
-  never silently lost. A throwing SDK stage drops that item to `null` (filterable).
+- Per-run `AbortController`; recoverable failures return `AgentResult.error` + diagnostics, never
+  silently lost. A throwing ENGINE call becomes that leg's own `ok: false` result (`legFailure`,
+  flagged `infrastructure: true` so failure-punishing consumers can tell it from a model-side
+  failure), so one blown leg can't discard the fan-out's completed — already billed — siblings.
+  A rejection that reaches `sdk.parallel` is run-fatal by construction (a limit breach, a throwing
+  host callback): the batch stops pulling new items and rethrows the FIRST error immediately.
+  `runPersonaStrategy` returns `null` only for "nothing to run" (a persona naming no mode) — that
+  is not a failure.
 - Model/thinking baseline is snapshot-once and restored on omit; tools are restored from the **full**
   registry, never the active subset ("never strip Pi power").
 - The completion/mutation guard keeps child-claimed success ≠ runtime-verified; the depth guard blocks

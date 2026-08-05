@@ -13,6 +13,7 @@ import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
+import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { emptyUsage } from "./stream.ts";
 
@@ -44,6 +45,11 @@ export interface EngineAdapterDeps {
 	/** Explicit thinking level appended to the child model (`model:level`) so it can't
 	 *  fall into a model's default "adaptive" mode, which some models reject. */
 	childThinking?: string;
+	/** The shared behavioral layer (docs/SPINE.md), prepended to every leg's prompt. This is the
+	 *  WORKER variant (`prompts/spine.worker.md`), not the supervisor text — a leg runs headless
+	 *  with no user to confirm anything with. Absent/empty (the default) ⇒ the composed prompt is
+	 *  byte-identical to the pre-spine one. */
+	spine?: string;
 	/** Forwarded to the child engine (e.g. a test invocation resolver). */
 	childOptions?: ChildEngineOptions;
 	cwd?: string;
@@ -63,11 +69,6 @@ export interface EngineAdapterDeps {
 	 *  default. Forwarded to the child as `PI_PERSONA_ALLOW_BLOCKING` (bridge.ts). */
 	allowBlocking?: boolean;
 }
-
-// Module-level (NOT per-engine), mirroring `inproc.ts`'s `globalChildSeq`: `buildEngine`
-// makes a fresh engine per delegate/council/flow-phase/async-launch, so a per-closure
-// counter would restart at 0 and collide handles across concurrent runs.
-let globalChildSeq = 0;
 
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	// Per-run contract pinning (I3): an engine instance is created per run, so the first
@@ -121,8 +122,12 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (model) childSpec.model = model;
 			const tools = spec.tools ?? cfg.tools;
 			if (tools) childSpec.tools = tools;
-			// The agent's own persona + any on-the-fly `role` specialisation from the spec.
-			const personaPrompt = [cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
+			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
+			// on-the-fly `role` specialisation from the spec. All three go out as
+			// `--append-system-prompt`, so a leg keeps Pi's full base prompt either way — the
+			// layer adds behavioral consistency, it does not fill a scaffolding gap.
+			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
 			if (personaPrompt) childSpec.systemPrompt = personaPrompt;
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
@@ -144,8 +149,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// spawn, wire the child's env, and give the caller a steer function.
 			let handle: string | undefined;
 			if (deps.broker) {
-				globalChildSeq += 1;
-				handle = `${spec.agent}#${globalChildSeq}`;
+				handle = nextChildHandle(spec.agent);
 				const wantsPeers = spec.peers === true && (deps.canUseBus ?? true);
 				const label = spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
 				deps.broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
@@ -211,7 +215,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				if (v.value) result.structured = v.value;
 				if (!v.ok) {
 					result.ok = false;
-					if (v.error) result.error = v.error;
+					// Only NAME the contract miss when nothing else already killed the run: a
+					// timeout/abort/provider error is the cause of death, and "not valid JSON"
+					// over an empty output would send the operator after the wrong problem.
+					if (v.error && result.error === undefined) result.error = v.error;
 					if (result.failureKind === undefined) result.failureKind = "contract";
 				}
 			}

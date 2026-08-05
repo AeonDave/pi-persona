@@ -1,13 +1,14 @@
 /**
  * Agent definition parsing — the executors a persona delegates to. Same MD+YAML
- * engine as personas; the body is the agent's system prompt. Agents default to
- * `systemPromptMode: replace` (narrow-by-default: a clean prompt, no base).
+ * engine as personas; the body is the agent's system prompt, which BOTH engines append to
+ * Pi's base prompt (child: `--append-system-prompt`; in-process: `appendSystemPrompt`).
+ * There is deliberately no `systemPromptMode` here — the persona path owns that knob, and
+ * a copy on the agent would be a mode nothing honours.
  *
  * Pure module — no Pi imports.
  */
 
-import { asStringArray, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
-import { asSystemPromptMode, type SystemPromptMode } from "../core/types.ts";
+import { asBoolean, asStringArray, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
 
 export interface AgentConfig {
 	name: string;
@@ -23,8 +24,10 @@ export interface AgentConfig {
 	 *  ("MCP not initialized"). The child gets its OWN MCP session; for a server-keyed
 	 *  backend (HTTP MCP, session id passed as a tool argument) pass the id to share state. */
 	mcp?: boolean;
+	/** `spine: false` opts this agent out of the shared behavioral layer (docs/SPINE.md).
+	 *  Only an explicit false is recorded; absent ⇒ the session-level setting decides. */
+	spine?: boolean;
 	systemPrompt: string;
-	systemPromptMode: SystemPromptMode;
 	source: string;
 }
 
@@ -37,7 +40,6 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	const agent: AgentConfig = {
 		name,
 		systemPrompt: body,
-		systemPromptMode: asSystemPromptMode(fm.systemPromptMode, "replace"),
 		source,
 	};
 	if (typeof fm.description === "string" && fm.description.trim()) agent.description = fm.description.trim();
@@ -46,6 +48,7 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	if (tools) agent.tools = tools;
 	if (fm.isolation === "worktree") agent.isolation = "worktree";
 	if (fm.mcp === true) agent.mcp = true;
+	if (asBoolean(fm.spine) === false) agent.spine = false;
 
 	return agent;
 }

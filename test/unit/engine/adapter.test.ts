@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
@@ -10,7 +11,7 @@ const FAKE = fileURLToPath(new URL("../../fixtures/fake-pi.mjs", import.meta.url
 const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAKE, ...args] });
 
 const agents: Record<string, AgentConfig> = {
-	a: { name: "a", systemPrompt: "You are a.", systemPromptMode: "replace", source: "x" },
+	a: { name: "a", systemPrompt: "You are a.", source: "x" },
 };
 const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
@@ -46,6 +47,27 @@ test("child adapter does NOT add the MCP hint when the leg is not mcp:true", asy
 	const r = await engine.run({ agent: "a", task: "hang [sleep]" });
 	assert.equal(r.ok, false);
 	assert.doesNotMatch(r.error ?? "", /mcp:true leg/);
+});
+
+test("child adapter leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
+	// The child engine hands the composed prompt over as a temp file (`--append-system-prompt`),
+	// written before the spawn and deleted after it — so read it from inside the invocation seam.
+	let composed: string | undefined;
+	const capture = (args: string[]) => {
+		const at = args.indexOf("--append-system-prompt");
+		composed = at >= 0 ? readFileSync(args[at + 1] as string, "utf8") : undefined;
+		return resolveFake(args);
+	};
+
+	await makeEngine({ resolveAgent, spine: "SPINE", childOptions: { resolveInvocation: capture } }).run({ agent: "a", task: "t", role: "ROLE" });
+	assert.equal(composed, "SPINE\n\nYou are a.\n\nROLE", "the shared layer leads, then the agent, then the role");
+
+	await makeEngine({ resolveAgent, childOptions: { resolveInvocation: capture } }).run({ agent: "a", task: "t", role: "ROLE" });
+	assert.equal(composed, "You are a.\n\nROLE", "no spine ⇒ byte-identical to the pre-spine join");
+
+	const optedOut = (n: string): AgentConfig | undefined => (n === "q" ? { name: "q", systemPrompt: "You are q.", spine: false, source: "x" } : undefined);
+	await makeEngine({ resolveAgent: optedOut, spine: "SPINE", childOptions: { resolveInvocation: capture } }).run({ agent: "q", task: "t" });
+	assert.equal(composed, "You are q.", "`spine: false` in the agent's frontmatter opts the leg out");
 });
 
 test("child adapter leaves the task untouched when no contract is requested", async () => {
@@ -91,4 +113,16 @@ test("child adapter's unknown-agent error names the installed agents when listAg
 	assert.equal(r.ok, false);
 	assert.equal(r.failureKind, "unknown-agent", "the hint must not change the failure kind (fallback keys on it)");
 	assert.match(r.error ?? "", /— installed agents: scout, operator/);
+});
+
+test("child adapter keeps the cause of death when a contract-bearing leg dies before producing output", async () => {
+	// The leg never starts → the startup deadline fires with empty output. Validating that
+	// emptiness must not rename the failure "invalid JSON": the operator would coach the
+	// member on formatting instead of addressing the hang.
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, startupTimeoutMs: 120, killGraceMs: 150 } });
+	const r = await engine.run({ agent: "a", task: "hang [sleep]", outputContract: "default" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "timeout");
+	assert.match(r.error ?? "", /never started/, "the cause of death survives contract validation");
+	assert.doesNotMatch(r.error ?? "", /contract default failed/);
 });

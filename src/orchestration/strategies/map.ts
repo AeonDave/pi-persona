@@ -39,7 +39,7 @@ function parseItems(output: string): string[] {
 export const map: Strategy = {
 	name: "map",
 	params: {
-		maxItems: { type: "number", doc: "default: the run's maxChildren" },
+		maxItems: { type: "number", doc: "default AND ceiling: the run's maxChildren, less the splitter's own slot" },
 		peers: { type: "boolean", default: false, doc: "workers share load-bearing cross-item discoveries live" },
 	},
 	async run(input, sdk) {
@@ -48,14 +48,20 @@ export const map: Strategy = {
 		if (!splitterMember) throw new Error("map: a roster with at least a splitter agent is required");
 		const splitter = rosterSpec(splitterMember);
 		const worker = team[1] ? rosterSpec(team[1]) : splitter;
-		const maxItems = typeof input.params.maxItems === "number" ? input.params.maxItems : sdk.limits.maxChildren;
+		// The splitter spends one child slot before any worker runs, so the worker cap is one
+		// BELOW maxChildren — at the cap the last worker would trip the run's pre-spawn guard
+		// and take the whole (mostly finished) fan-out down with it.
+		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
+		const maxItems = Math.min(typeof input.params.maxItems === "number" ? input.params.maxItems : workerSlots, workerSlots);
 		const peers = input.params.peers === true;
 
 		const split = await sdk.agent({
 			...splitter,
 			task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${input.task}`,
 		});
-		const items = parseItems(split.output).slice(0, Math.max(0, maxItems));
+		const allItems = parseItems(split.output);
+		const items = allItems.slice(0, Math.max(0, maxItems));
+		const dropped = allItems.length - items.length;
 		if (items.length === 0) {
 			return { agent: "map", output: split.output || "(splitter produced no items)", usage: split.usage, ok: false };
 		}
@@ -76,6 +82,13 @@ export const map: Strategy = {
 			),
 		);
 		const agg = sdk.reduce.aggregate(results);
-		return { ...agg, agent: "map", usage: sumUsage([split, ...results].map((r) => r.usage)) };
+		// Say what was left out. The clamp is right — a worker per item past the cap would trip the
+		// pre-spawn guard and lose the whole fan-out — but an aggregate that silently covers part of
+		// the splitter's list reads as a complete answer over an incomplete input set.
+		const output =
+			dropped > 0
+				? `${agg.output}\n\n[pi-persona] ${dropped} sub-item(s) beyond the worker cap (${maxItems}) were not run — this covers ${items.length} of ${allItems.length} sub-items.`
+				: agg.output;
+		return { ...agg, agent: "map", output, usage: sumUsage([split, ...results].map((r) => r.usage)) };
 	},
 };

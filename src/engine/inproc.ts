@@ -30,6 +30,7 @@ import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
+import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
 
@@ -72,6 +73,11 @@ export interface InProcessDeps {
 	defaultModel?: string;
 	/** Explicit thinking level for the sub-agent (the supervisor's, or a default). */
 	childThinking?: string;
+	/** The shared behavioral layer (docs/SPINE.md), prepended to every leg's prompt. This is the
+	 *  WORKER variant (`prompts/spine.worker.md`), not the supervisor text — a leg runs headless
+	 *  with no user to confirm anything with. Absent/empty (the default) ⇒ the composed prompt is
+	 *  byte-identical to the pre-spine one. */
+	spine?: string;
 	/** Whole-run abort signal (combined with each call's own signal). */
 	signal?: AbortSignal;
 	/** Construction-time progress sink (used when `run` is called without its own). */
@@ -104,10 +110,18 @@ export interface InProcessDeps {
 	 *  for a `coaching` + `allowBlocking` child (it may legitimately block a long time on a reply). */
 	hardTimeoutMs?: number;
 	/** STARTUP deadline (ms): a session that never makes PROGRESS (no completed turn, no tokens,
-	 *  no streamed output) within this window is aborted as a stalled start — the "never started"
-	 *  case the idle window is too generous for. The FIRST progress cancels it permanently, so a
+	 *  no streamed output) within this window is aborted as a stalled start — the case the idle
+	 *  window is too generous for. The FIRST progress cancels it permanently, so a
 	 *  slow-but-streaming turn is never touched. 0/absent = no startup deadline. Skipped for a
-	 *  `coaching` + `allowBlocking` child (it may legitimately block before emitting anything). */
+	 *  `coaching` + `allowBlocking` child (it may legitimately block before emitting anything).
+	 *
+	 *  CHOOSE THE VALUE FOR THE FIRST PROVIDER ROUND TRIP, not for init alone. Only the child's
+	 *  OWN assistant output counts as progress — pi emits message_start/message_end for the
+	 *  prompt it just delivered too, and stream.ts filters those out — so the window has to
+	 *  cover the whole way to the FIRST provider response. A queued or rate-limited provider, a
+	 *  cold serverless endpoint or a local model doing a long prompt eval can spend minutes
+	 *  there, and this deadline aborts such a leg outright (failureKind "timeout"); the idle
+	 *  watchdog would not, because any event at all re-arms it. */
 	startupTimeoutMs?: number;
 }
 
@@ -183,10 +197,6 @@ function resolveModel(reg: ModelRegistry, ref: string | undefined): unknown {
 	return reg.getAll().find((m) => m.id === ref);
 }
 
-// Module-level (NOT per-engine) so concurrent engine instances and parallel sub-agent builds
-// share them. `buildEngine` makes a fresh engine per delegate/council/flow-phase/async-launch,
-// so a per-closure counter would restart at 0 and collide bus handles across concurrent runs.
-let globalChildSeq = 0;
 // Ref-counted fork-bomb guard: PI_PERSONA_DISABLE stays "1" while ANY sub-session is being
 // built (a parallel strategy builds several at once), restored only when the LAST one finishes.
 // A per-call save/restore around the async `createSession` races: it can clear the guard
@@ -300,8 +310,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			};
 			if (tools && tools.length > 0) sessionOpts.tools = tools;
 			if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
-			// The agent's own persona + any on-the-fly `role` specialisation from the spec.
-			const personaPrompt = [cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
+			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
+			// on-the-fly `role` specialisation from the spec. All three reach the session as the
+			// loader's `appendSystemPrompt`, so a leg keeps Pi's full base prompt either way — the
+			// layer adds behavioral consistency, it does not fill a scaffolding gap.
+			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
 			if (personaPrompt) sessionOpts.systemPrompt = personaPrompt;
 
 			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle
@@ -313,8 +327,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				process.stderr.write(`[pi-persona] peers requested for ${spec.agent} but bus/capability unavailable — running without contact_peer\n`);
 			}
 			if (deps.bus && (deps.coaching || wantsPeers)) {
-				globalChildSeq += 1;
-				childHandle = `${spec.agent}#${globalChildSeq}`;
+				childHandle = nextChildHandle(spec.agent);
 				deps.bus.register(supervisorHandle);
 				deps.bus.register(childHandle);
 				const customTools: ToolDefinition[] = [];
@@ -335,12 +348,25 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				sessionOpts.customTools = customTools;
 			}
 
+			// The handle is live on the SESSION-LONG bus from here on, while the only unregister sits
+			// in the run's own finally below. Anything that throws before we reach it must release
+			// it, or a phantom peer haunts `intercom list` (collecting dead letters nothing drains)
+			// for the rest of the supervisor's session.
+			const releaseHandle = (): void => {
+				if (!childHandle) return;
+				peerLabels.delete(childHandle);
+				deps.bus?.unregister(childHandle);
+			};
+
 			// Fork-bomb guard (ref-counted, concurrency-safe): disable pi-persona inside the
 			// sub-session while it's built; the guard survives concurrent parallel builds.
 			pushDisableGuard();
 			let session: InProcSession;
 			try {
 				session = await createSession(sessionOpts);
+			} catch (e) {
+				releaseHandle();
+				throw e;
 			} finally {
 				popDisableGuard();
 			}
@@ -417,9 +443,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 			// Startup deadline (mirrors the child engine): a session that never makes PROGRESS
 			// (no completed turn / tokens / streamed output) within `startupMs` is aborted as a
-			// stalled start — the fast-fail for a child that never began, which the generous idle
-			// window is too slow for. The first real progress cancels it; bare lifecycle events do
-			// not. Skipped for a blocking coaching child (it may legitimately wait before emitting).
+			// stalled start — the fast-fail the generous idle window is too slow for. The first
+			// real progress cancels it; bare lifecycle events and the echo of the delivered prompt
+			// do not. Skipped for a blocking coaching child (it may legitimately wait before emitting).
 			const startupMs = blockingChild ? 0 : (deps.startupTimeoutMs ?? 0);
 			let startupTimedOut = false;
 			let startupProgressed = false;
@@ -448,86 +474,103 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 
-			const unsub = session.subscribe((ev) => {
-				armIdle(); // any event = activity → reset the idle clock
-				applyEvent(state, ev);
-				noteStartupProgress(); // first real progress cancels the startup deadline
-				const snap = snapshot(state);
-				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
-				else if (deps.onProgress) deps.onProgress(snap);
-			});
-
+			// From here to the run's own try/finally the child is live but its cleanup is not
+			// armed yet: the subscription, the caller-supplied `onSteerable`, and the delivery
+			// bridge's initial flush all run outside it. A throw in any of them must release the
+			// handle AND the session, never leave a phantom peer plus an orphaned live session.
+			let unsub: (() => void) | undefined;
+			let unsubBridge: (() => void) | undefined;
 			let aborted = false;
 			const onAbort = (): void => {
 				aborted = true;
 				abortSession();
 			};
-			if (signal) {
-				if (signal.aborted) onAbort();
-				else signal.addEventListener("abort", onAbort, { once: true });
-			}
-
-			// Steering: the in-process engine can inject a user message into the running
-			// agent — the v0.4 payoff the one-shot child engine can't do.
-			onSteerable?.((text) => {
-				const trimmed = text.trim();
-				if (trimmed) session.agent.steer({ role: "user", content: [{ type: "text", text: trimmed }] });
-			});
-
-			// Delivery bridge: bus messages addressed to this child are steered into its live
-			// session as fenced, attributed user turns — attribution stays OUTSIDE the fence so
-			// a malicious payload cannot spoof its sender. Serves sibling `contact_peer` sends
-			// AND the supervisor's `intercom send` (previously a dead letter: nothing ever
-			// drained a child inbox). Flush once on subscribe to catch a message that raced
-			// registration (the handle registers before the session finishes building).
-			let unsubBridge: (() => void) | undefined;
-			if (childHandle && deps.bus) {
-				const b = deps.bus;
-				const self = childHandle;
-				const deliver = (): void => {
-					for (const env of b.takeWhere(self, (e) => !e.expectsReply)) {
-						const from = env.from === supervisorHandle ? "your supervisor" : `peer ${peerLabels.get(env.from) ?? env.from}`;
-						// deliver() runs on the initial flush (BEFORE the run's try/finally below) and
-						// inside the bus.onMessage listener (a SENDER's bus.send call stack) — an
-						// uncaught steer() throw here would leak the bus registration/observer, skip
-						// engine.run cleanup, or propagate into the sender's contact_peer call. Drop the
-						// envelope instead; it is lost, not redelivered (mirrors "gone" semantics).
-						try {
-							session.agent.steer({ role: "user", content: [{ type: "text", text: attributeInbound(from, env.text) }] });
-						} catch (e) {
-							if (process.env.PI_PERSONA_DEBUG) {
-								process.stderr.write(`[pi-persona] delivery bridge steer failed for ${self} (envelope from ${env.from} dropped): ${e instanceof Error ? e.message : String(e)}\n`);
-							}
-							continue;
-						}
-						// Transparency tick: surface the delivery on the run's progress line (agent tree).
-						// Mirrors the main subscription's fallback (line ~332): per-call onProgress wins
-						// (AgentProgress — no `turns`), else the construction-time deps.onProgress
-						// (ProgressSnapshot — built from snapshot(state), `turns` included) — the async
-						// launch path (extension.ts) only has the latter.
-						const snap = snapshot(state);
-						const activity = `✉ from ${env.from}`;
-						if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity });
-						else if (deps.onProgress) deps.onProgress({ ...snap, activity });
-					}
-				};
-				unsubBridge = b.onMessage((env) => {
-					if (env.to === self && !env.expectsReply) deliver();
+			let contractDef: ContractDef | undefined;
+			let task: string;
+			try {
+				unsub = session.subscribe((ev) => {
+					armIdle(); // any event = activity → reset the idle clock
+					applyEvent(state, ev);
+					noteStartupProgress(); // first real progress cancels the startup deadline
+					const snap = snapshot(state);
+					if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
+					else if (deps.onProgress) deps.onProgress(snap);
 				});
-				deliver();
-			}
 
-			// The agent's persona is now the session's appended system prompt (see the
-			// resource loader); the user turn carries just the task (+ any skills to load,
-			// + the output-contract format when one is requested — resolved and pinned HERE
-			// so the def that instructs the member is the def that validates it below).
-			const skillsPreamble =
-				spec.skills && spec.skills.length > 0
-					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n`
-					: "";
-			const contractDef = spec.outputContract && deps.contracts ? pinnedDef(spec.outputContract) : undefined;
-			const contractTail = contractDef ? `\n\n${contractInstructions(contractDef)}` : "";
-			const task = `${skillsPreamble}Task: ${spec.task}${contractTail}`;
+				if (signal) {
+					if (signal.aborted) onAbort();
+					else signal.addEventListener("abort", onAbort, { once: true });
+				}
+
+				// Steering: the in-process engine can inject a user message into the running
+				// agent — the v0.4 payoff the one-shot child engine can't do.
+				onSteerable?.((text) => {
+					const trimmed = text.trim();
+					if (trimmed) session.agent.steer({ role: "user", content: [{ type: "text", text: trimmed }] });
+				});
+
+				// Delivery bridge: bus messages addressed to this child are steered into its live
+				// session as fenced, attributed user turns — attribution stays OUTSIDE the fence so
+				// a malicious payload cannot spoof its sender. Serves sibling `contact_peer` sends
+				// AND the supervisor's `intercom send` (previously a dead letter: nothing ever
+				// drained a child inbox). Flush once on subscribe to catch a message that raced
+				// registration (the handle registers before the session finishes building).
+				if (childHandle && deps.bus) {
+					const b = deps.bus;
+					const self = childHandle;
+					const deliver = (): void => {
+						for (const env of b.takeWhere(self, (e) => !e.expectsReply)) {
+							const from = env.from === supervisorHandle ? "your supervisor" : `peer ${peerLabels.get(env.from) ?? env.from}`;
+							// deliver() runs on the initial flush (BEFORE the run's try/finally below) and
+							// inside the bus.onMessage listener (a SENDER's bus.send call stack) — an
+							// uncaught steer() throw here would leak the bus registration/observer, skip
+							// engine.run cleanup, or propagate into the sender's contact_peer call. Drop the
+							// envelope instead; it is lost, not redelivered (mirrors "gone" semantics).
+							try {
+								session.agent.steer({ role: "user", content: [{ type: "text", text: attributeInbound(from, env.text) }] });
+							} catch (e) {
+								if (process.env.PI_PERSONA_DEBUG) {
+									process.stderr.write(`[pi-persona] delivery bridge steer failed for ${self} (envelope from ${env.from} dropped): ${e instanceof Error ? e.message : String(e)}\n`);
+								}
+								continue;
+							}
+							// Transparency tick: surface the delivery on the run's progress line (agent tree).
+							// Mirrors the main subscription's fallback (line ~332): per-call onProgress wins
+							// (AgentProgress — no `turns`), else the construction-time deps.onProgress
+							// (ProgressSnapshot — built from snapshot(state), `turns` included) — the async
+							// launch path (extension.ts) only has the latter.
+							const snap = snapshot(state);
+							const activity = `✉ from ${env.from}`;
+							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity });
+							else if (deps.onProgress) deps.onProgress({ ...snap, activity });
+						}
+					};
+					unsubBridge = b.onMessage((env) => {
+						if (env.to === self && !env.expectsReply) deliver();
+					});
+					deliver();
+				}
+
+				// The agent's persona is now the session's appended system prompt (see the
+				// resource loader); the user turn carries just the task (+ any skills to load,
+				// + the output-contract format when one is requested — resolved and pinned HERE
+				// so the def that instructs the member is the def that validates it below).
+				const skillsPreamble =
+					spec.skills && spec.skills.length > 0
+						? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n`
+						: "";
+				contractDef = spec.outputContract && deps.contracts ? pinnedDef(spec.outputContract) : undefined;
+				const contractTail = contractDef ? `\n\n${contractInstructions(contractDef)}` : "";
+				task = `${skillsPreamble}Task: ${spec.task}${contractTail}`;
+			} catch (e) {
+				disarmIdle();
+				if (signal) signal.removeEventListener("abort", onAbort);
+				unsubBridge?.();
+				unsub?.();
+				releaseHandle();
+				session.dispose();
+				throw e;
+			}
 
 			// Capture a thrown error (e.g. provider API 400 before any stream event fires,
 			// like model_not_supported) so it survives the finally-cleanup and can be
@@ -554,9 +597,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				disarmStartup();
 				if (signal) signal.removeEventListener("abort", onAbort);
 				unsubBridge?.();
-				if (childHandle) peerLabels.delete(childHandle);
-				if (childHandle) deps.bus?.unregister(childHandle);
-				unsub();
+				releaseHandle();
+				unsub?.();
 				session.dispose();
 			}
 
@@ -565,8 +607,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
 			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+			// The deadline cannot tell the two causes apart, so the message names both: claiming
+			// "it never started" would misdirect the operator of a leg that did start and was
+			// simply waiting on a slow first response (mirrors the child engine's wording).
 			else if (startupTimedOut)
-				result.error = `${tag} agent produced no output within the ${startupMs}ms startup window — it never started (a stalled init; tune with PI_PERSONA_AGENT_STARTUP_MS, 0 disables)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+				result.error = `${tag} agent produced no output within the ${startupMs}ms startup window — either it never started (a stalled init) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (hardTimedOut) result.error = `${tag} agent exceeded the ${hardMs}ms hard cap${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
@@ -583,7 +628,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				if (v.value) result.structured = v.value;
 				if (!v.ok) {
 					result.ok = false;
-					if (v.error) result.error = v.error;
+					// The cause of death (timeout/abort/provider) wins over the contract miss —
+					// naming "not valid JSON" over an empty output hides the real failure.
+					if (v.error && result.error === undefined) result.error = v.error;
 					if (result.failureKind === undefined) result.failureKind = "contract";
 				}
 			}

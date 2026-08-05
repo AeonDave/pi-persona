@@ -75,6 +75,30 @@ test("parseYamlSubset reads block lists", () => {
 	assert.deepEqual(parseYamlSubset("list:\n  - a\n  - b"), { list: ["a", "b"] });
 });
 
+test("parseYamlSubset reads a block list whose items sit at the same indent as their key", () => {
+	assert.deepEqual(parseYamlSubset("tools:\n- read\n- grep"), { tools: ["read", "grep"] });
+});
+
+test("parseYamlSubset keeps nested same-indent block lists on their own key", () => {
+	const fm = parseYamlSubset("tools:\n  allow:\n  - read\n  - grep\n  deny:\n  - bash");
+	assert.deepEqual(fm, { tools: { allow: ["read", "grep"], deny: ["bash"] } });
+	// the capability gate must not swallow `deny` entries into `allow`
+	assert.deepEqual(asPermission(fm.tools), { allow: ["read", "grep"], deny: ["bash"] });
+});
+
+test("parseYamlSubset closes same-indent list frames when a shallower key follows", () => {
+	// the `- x` items belong to `a.b`; `c` is a sibling of `b`, `d` a sibling of `a`
+	assert.deepEqual(parseYamlSubset("a:\n  b:\n  - x\n  - y\n  c: 1\nd: 2"), {
+		a: { b: ["x", "y"], c: 1 },
+		d: 2,
+	});
+});
+
+test("parseYamlSubset still reads nested block lists indented under their key", () => {
+	const fm = parseYamlSubset("delegate:\n  allow:\n    - scout\n    - code-*\n  deny:\n    - experimental-*");
+	assert.deepEqual(fm, { delegate: { allow: ["scout", "code-*"], deny: ["experimental-*"] } });
+});
+
 test("parseYamlSubset reads one nested level of maps (delegate allow/deny)", () => {
 	const fm = parseYamlSubset("delegate:\n  allow: [scout, code-*]\n  deny: [experimental-*]");
 	assert.deepEqual(fm, { delegate: { allow: ["scout", "code-*"], deny: ["experimental-*"] } });

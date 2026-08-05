@@ -64,6 +64,10 @@ export interface Persona {
 	council?: CouncilDraft;
 	/** Opt into the comm plane: give async children a `contact_supervisor` tool (§4.9). */
 	coaching?: boolean;
+	/** `spine: false` opts this persona out of the shared behavioral layer (docs/SPINE.md) —
+	 *  for short verdict personas that do not need the baseline. Only an explicit false is
+	 *  recorded; absent ⇒ the session-level setting decides. */
+	spine?: boolean;
 	/** The Markdown body — the supervisor system prompt. */
 	body: string;
 	/** Where it was loaded from (for diagnostics / `/doctor`). */
@@ -120,6 +124,7 @@ export function parsePersona(content: string, source: string): Persona | null {
 	const council = parseCouncil(fm.council);
 	if (council) persona.council = council;
 	if (asBoolean(fm.coaching) === true) persona.coaching = true;
+	if (asBoolean(fm.spine) === false) persona.spine = false;
 
 	return persona;
 }
@@ -230,9 +235,24 @@ export function resolveCouncilInvocation(
 	return { ok: true, value };
 }
 
-/** Compose the turn's system prompt from the base prompt and a persona. */
-export function composeSystemPrompt(base: string, persona: Persona): string {
-	if (persona.systemPromptMode === "replace") return persona.body;
-	if (!persona.body.trim()) return base;
-	return `${base}\n\n${persona.body}`;
+/** Compose the turn's system prompt from the base prompt, the spine, and a persona.
+ *  The spine is the shared behavioral layer (docs/SPINE.md); absent/empty — the default —
+ *  leaves the composition byte-identical to the pre-spine one. */
+export function composeSystemPrompt(base: string, persona: Persona, spine?: string): string {
+	const layer = persona.spine === false ? "" : (spine ?? "").trim();
+	// No layer (the default, and `spine: false`) ⇒ the pre-spine composition, byte for byte.
+	// The `replace` test HAS to come first here, exactly as it did pre-spine: a replace persona
+	// with an empty body yielded an empty prompt, and quietly promoting that to Pi's base prompt
+	// would be a behavior change on the OFF path — which docs/SPINE.md promises there isn't one.
+	if (!layer) {
+		if (persona.systemPromptMode === "replace") return persona.body;
+		if (!persona.body.trim()) return base;
+		return `${base}\n\n${persona.body}`;
+	}
+	// An empty body has nothing to append — and nothing to replace with: the turn keeps Pi's
+	// base prompt, lifted by the spine exactly like a persona-less turn.
+	if (!persona.body.trim()) return `${base}\n\n${layer}`;
+	// `replace` drops Pi's base, so the spine becomes the only scaffolding that persona gets.
+	const head = persona.systemPromptMode === "replace" ? layer : `${base}\n\n${layer}`;
+	return `${head}\n\n${persona.body}`;
 }

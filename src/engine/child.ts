@@ -53,7 +53,15 @@ export interface ChildEngineOptions {
 	 *  no streamed output) within this window is killed as a stalled start — the "never started"
 	 *  case the idle window is too generous for (a headless `mcp: true` leg whose MCP adapter hangs
 	 *  in init emits only the session header, then nothing). The FIRST progress cancels it
-	 *  permanently, so a slow-but-streaming turn is never touched. 0/absent = no startup deadline. */
+	 *  permanently, so a slow-but-streaming turn is never touched. 0/absent = no startup deadline.
+	 *
+	 *  CHOOSE THE VALUE FOR THE WHOLE COLD START, not for init alone. Only the CHILD'S OWN
+	 *  assistant output counts as progress — pi's echo of the delivered prompt is filtered out
+	 *  (stream.ts), and header/turn_start noise never counted — so the window has to cover
+	 *  process spawn + pi init + MCP init + the FIRST provider response. A queued or
+	 *  rate-limited provider, a cold serverless endpoint or a local model doing a long prompt
+	 *  eval can spend minutes there, and this deadline kills such a leg outright (failureKind
+	 *  "timeout"); the idle watchdog would not, because it is re-armed by any stdout at all. */
 	startupTimeoutMs?: number;
 	/** Override the cross-OS force tree-kill (used in tests). Defaults to
 	 *  {@link killProcessTree}. */
@@ -169,6 +177,7 @@ export async function runChildAgent(
 	let timedOut = false;
 	let hardTimedOut = false;
 	let startupTimedOut = false;
+	let killSignal: NodeJS.Signals | undefined; // the signal that ended the child, if any (POSIX)
 	let progressed = false; // set once the child produces its FIRST real progress (turn/tokens/output)
 	let spawnError: Error | undefined;
 
@@ -282,9 +291,11 @@ export async function runChildAgent(
 				timer.unref?.();
 			};
 			// Startup deadline: armed ONCE at spawn, cancelled the instant the child makes real
-			// progress. Fires only for a child that never started (no completed turn / tokens /
-			// streamed output) — the header line + bare turn_start noise do NOT count, so a stalled
-			// init is caught while a slow-but-streaming turn survives.
+			// progress. Fires for a child that has produced no assistant output at all (no completed
+			// turn / tokens / streamed text) — the header line + bare turn_start noise do NOT count,
+			// so a stalled init is caught while a slow-but-streaming turn survives. It cannot see
+			// the difference between a hung init and a first provider response that simply hasn't
+			// arrived, so the window has to be sized for the slowest acceptable cold start.
 			const armStartup = () => {
 				if (!opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
 				startupTimer = setTimeout(() => {
@@ -339,9 +350,14 @@ export async function runChildAgent(
 			});
 			proc.stderr?.on("error", () => {});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, sig) => {
 				exited = true;
-				finish(code ?? 0);
+				// POSIX signal death closes with code=null. Mapping that to 0 would report a
+				// child killed by something OUTSIDE this engine (OOM killer, `kill -9`, shutdown)
+				// as a clean success carrying its truncated mid-run output — none of the
+				// abort/timeout flags are set for those, so nothing else would catch it.
+				if (sig) killSignal = sig;
+				finish(code ?? (sig ? 1 : 0));
 			});
 			// A spawn failure (e.g. ENOENT: `pi` not on PATH) must not be silently
 			// folded into a bare exit code — capture it so it surfaces in errorMessage.
@@ -387,13 +403,20 @@ export async function runChildAgent(
 		if (hardTimedOut) {
 			result.errorMessage = `agent exceeded the ${opts.hardTimeoutMs}ms hard cap${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (startupTimedOut) {
-			result.errorMessage = `agent produced no output within the ${opts.startupTimeoutMs}ms startup window — it never started (a stalled init; tune with PI_PERSONA_AGENT_STARTUP_MS, 0 disables)${streamErr ? ` (last error: ${streamErr})` : ""}`;
+			// Two readings fit the same evidence and the engine cannot distinguish them, so name
+			// both: claiming "it never started" would misdirect the operator of a leg that did
+			// start and was waiting on a slow first response.
+			result.errorMessage = `agent produced no progress within the ${opts.startupTimeoutMs}ms startup window — either it never started (a stalled init, e.g. an MCP adapter hanging) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (timedOut) {
 			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (aborted) {
 			result.errorMessage = `agent aborted${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (spawnError) {
 			result.errorMessage = `failed to spawn pi: ${spawnError.message}`;
+		} else if (killSignal) {
+			// Reached only for a kill this engine did NOT initiate — the branches above own
+			// every engine-initiated one and say which deadline fired.
+			result.errorMessage = `agent process was killed by ${killSignal}${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (streamErr !== undefined) {
 			result.errorMessage = streamErr;
 		}

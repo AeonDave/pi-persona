@@ -11,7 +11,7 @@ const FAKE = fileURLToPath(new URL("../fixtures/fake-pi.mjs", import.meta.url));
 const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAKE, ...args] });
 const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 5000, budgetTokens: 1_000_000 };
 
-const mk = (name: string): AgentConfig => ({ name, systemPrompt: `You are ${name}.`, systemPromptMode: "replace", source: "x" });
+const mk = (name: string): AgentConfig => ({ name, systemPrompt: `You are ${name}.`, source: "x" });
 const AGENTS: Record<string, AgentConfig> = { a: mk("a"), b: mk("b"), c: mk("c") };
 
 test("full spine: fanout strategy → SDK → engine adapter → real child processes → aggregate", async () => {

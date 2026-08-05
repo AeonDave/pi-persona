@@ -171,6 +171,62 @@ test("council-rounds falls back to best-by-confidence on the final round without
 	assert.equal(r.structured?.rounds, 2);
 });
 
+test("council-rounds stops deliberating once the run is aborted mid-round", async () => {
+	const ac = new AbortController();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			ac.abort(); // the user stops the run while round 1 is in flight
+			// Both engines SETTLE an aborted leg (ok:false/abort) rather than throwing.
+			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: { ...LIMITS, maxChildren: 20 }, signal: ac.signal });
+	const r = await councilRounds.run({ task: "decide", roster: "t", params: { rounds: 5 } }, sdk);
+	assert.equal(calls, 3, "the roster is not re-spawned for the remaining rounds");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort", "a cancelled deliberation is not a completed-but-failed one");
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+// council-rounds is the most expensive strategy in the set (a whole roster per round), so it is
+// the one where missing a stop costs the most tokens. Its leg-settled guard is the only thing
+// standing between an abort and four more rosters — see the section further down on the abort a
+// boundary guard cannot see.
+test("council-rounds reports a cancelled deliberation when an abort settles a round (no SDK signal)", async () => {
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: { ...LIMITS, maxChildren: 20 } });
+	const r = await councilRounds.run({ task: "decide", roster: "t", params: { rounds: 5 } }, sdk);
+	assert.equal(calls, 3, "the roster is not re-convened for the four remaining rounds");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort", "a stopped council is not a deliberation that reached no ruling");
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+test("council-rounds convenes nobody when the run is aborted before it starts", async () => {
+	const ac = new AbortController();
+	ac.abort();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return { agent: spec.agent, output: "o", structured: { vote: "x" }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS, signal: ac.signal });
+	const r = await councilRounds.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.equal(calls, 0, "no member is spawned for an already-cancelled run");
+	assert.equal(r.structured?.rounds, 0);
+	assert.equal(r.ok, false);
+});
+
 test("critic-loop revises while the critic rejects, then stops on approve", async () => {
 	let criticCalls = 0;
 	let genCalls = 0;
@@ -230,6 +286,44 @@ test("critic-loop stops at maxRounds even if the critic keeps rejecting", async 
 	assert.equal(genCalls, 3, "initial generation + 2 revisions");
 });
 
+test("critic-loop treats a FAILED critique as non-approval, not as silent approval", async () => {
+	let genCalls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "skeptic") {
+				return { agent: "skeptic", output: "", usage: usage(), ok: false, error: "provider 500", failureKind: "provider" };
+			}
+			genCalls++;
+			return { agent: spec.agent, output: `gen#${genCalls}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer"] }, limits: LIMITS });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: { critic: "skeptic", rounds: 3 } }, sdk);
+	assert.equal(r.ok, false, "unreviewed work must not be reported as having survived the loop");
+	assert.equal(r.structured?.criticOk, false);
+	assert.match(r.error ?? "", /provider 500/, "the critic's cause is surfaced");
+	assert.equal(genCalls, 1, "no revision against a critique that never happened");
+});
+
+test("critic-loop stops before critiquing when the initial generation failed", async () => {
+	let criticCalls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "skeptic") {
+				criticCalls++;
+				return { agent: "skeptic", output: "c", structured: { stance: "approve" }, usage: usage(), ok: true };
+			}
+			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "agent timed out", failureKind: "timeout" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer"] }, limits: LIMITS });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: { critic: "skeptic" } }, sdk);
+	assert.equal(criticCalls, 0, "nothing to review — the critic run is not spent");
+	assert.equal(r.ok, false);
+	assert.equal(r.error, "agent timed out", "the generator's cause survives");
+	assert.equal(r.failureKind, "timeout");
+});
+
 test("pipeline runs roster agents in sequence, each building on the previous output", async () => {
 	const seen: Array<{ agent: string; sawUpstream: boolean }> = [];
 	const engine: StrategyEngine = {
@@ -261,6 +355,20 @@ test("pipeline stops the chain when a step fails", async () => {
 	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
 	assert.deepEqual(seen, ["a", "b"], "stopped after b failed; c never ran");
 	assert.equal(r.ok, false);
+});
+
+test("pipeline surfaces the failing step's cause instead of a bare empty output", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> =>
+			spec.agent === "b"
+				? { agent: "b", output: "", usage: usage(), ok: false, error: "[b · prov/model] agent timed out", failureKind: "timeout" }
+				: { agent: spec.agent, output: `out:${spec.agent}`, usage: usage(), ok: true },
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS });
+	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /agent timed out/, "the phase's detail must have a cause to render");
+	assert.equal(r.failureKind, "timeout", "callers decide retry by CAUSE, not by string-matching");
 });
 
 test("pipeline throws when no roster is provided", async () => {
@@ -408,6 +516,44 @@ test("map caps the fan-out at params.maxItems and stops cleanly on an empty spli
 	const sdk = makeSDK({ engine, roster: { team: () => ["splitter"] }, limits: LIMITS });
 	const r = await map.run({ task: "t", roster: "m", params: { maxItems: 2 } }, sdk);
 	assert.equal(r.ok, false, "no items → not ok");
+});
+
+const splitEngine = (n: number): StrategyEngine => ({
+	run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+		if (spec.agent === "splitter") {
+			return { agent: "splitter", output: JSON.stringify(Array.from({ length: n }, (_, i) => `item${i}`)), usage: usage(), ok: true };
+		}
+		return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+	},
+});
+
+test("map budgets the splitter's own child slot, so a full-size split still fits maxChildren", async () => {
+	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: {} }, sdk);
+	assert.equal(r.ok, true, "the splitter + one worker per item must not exceed maxChildren");
+	assert.equal(r.structured?.count, LIMITS.maxChildren - 1, "one item fewer than maxChildren — the splitter took a slot");
+});
+
+test("map clamps an explicit params.maxItems to the worker slots left after the splitter", async () => {
+	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(r.structured?.count, LIMITS.maxChildren - 1);
+});
+
+test("map says so when it drops sub-items — an aggregate over a truncated list is not a complete answer", async () => {
+	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);
+	assert.equal(r.structured?.count, LIMITS.maxChildren - 1, "only the slots that exist were worked");
+	assert.match(r.output, /3 sub-item\(s\) beyond the worker cap/, "the dropped items are named");
+	assert.match(r.output, /covers 7 of 10 sub-items/, "the reader is told the answer spans part of the split");
+});
+
+test("map appends no truncation note when every sub-item was worked", async () => {
+	const sdk = makeSDK({ engine: splitEngine(3), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: {} }, sdk);
+	assert.equal(r.structured?.count, 3);
+	assert.doesNotMatch(r.output, /sub-item/, "a complete map does not carry a truncation footer");
 });
 
 test("debate requires a roster of at least 2", async () => {
@@ -750,6 +896,55 @@ test("compete keeps the winner's diff intact when its CONTENT embeds a ```diff-l
 	assert.equal(r.structured?.valid, 2);
 });
 
+const competitorEngine = (arbiterResult: AgentResult): StrategyEngine => ({
+	run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+		if (spec.agent === "arbiter") return arbiterResult;
+		return {
+			agent: spec.agent,
+			output: `approach of ${spec.agent}\n\n\`\`\`diff\ndiff --git a/${spec.agent}.txt b/${spec.agent}.txt\n+KEEP-${spec.agent}\n\`\`\``,
+			usage: usage(),
+			ok: true,
+		};
+	},
+});
+
+test("compete hands back every valid diff when the judge's pick can't be resolved", async () => {
+	const engine = competitorEngine({ agent: "arbiter", output: "", usage: usage(), ok: false, error: "provider 500", failureKind: "provider" });
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, false);
+	assert.match(r.output, /KEEP-one/, "the competitors' diffs exist only here — they must survive");
+	assert.match(r.output, /KEEP-two/);
+	assert.match(r.output, /provider 500/, "the arbiter's actual cause is surfaced");
+});
+
+test("compete resolves a judge vote that wraps the label in prose", async () => {
+	const engine = competitorEngine({ agent: "arbiter", output: "Candidate A.", structured: { vote: "Candidate A." }, usage: usage(), ok: true });
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, true);
+	assert.match(r.output, /COMPETE winner: (one|two)/);
+	assert.equal(r.structured?.pick, "A");
+});
+
+test("compete ignores prose letters that are NOT on the ballot when resolving the pick", async () => {
+	// "I" is a stray single letter, not a ballot label with 2 competitors — the real pick is B.
+	const engine = competitorEngine({ agent: "arbiter", output: "I would pick B", structured: { vote: "I would pick B" }, usage: usage(), ok: true });
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.structured?.pick, "B", "a stray non-label letter must not shadow the real ballot label");
+	assert.equal(r.ok, true);
+});
+
+test("compete refuses to guess when the vote names TWO ballot labels (no wrong diff is applied)", async () => {
+	const engine = competitorEngine({ agent: "arbiter", output: "A or B?", structured: { vote: "A or B?" }, usage: usage(), ok: true });
+	const sdk = makeSDK({ engine, roster: { team: () => ["one", "two"] }, limits: LIMITS });
+	const r = await compete.run({ task: "T", roster: "c", params: { judge: "arbiter" } }, sdk);
+	assert.equal(r.ok, false, "an ambiguous pick must not be resolved to the FIRST letter mentioned");
+	assert.match(r.output, /KEEP-one/, "and nothing is lost — every valid diff comes back");
+	assert.match(r.output, /KEEP-two/);
+});
+
 test("compete requires 2+ competitors and params.judge", async () => {
 	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
@@ -814,4 +1009,236 @@ test("critic-loop passes roster role/model/skills to the generator (not just the
 	const gen = specs.find((s) => s.agent === "maker");
 	assert.match(gen?.role ?? "", /FUNCTIONAL/, "the generator's role specialisation is preserved");
 	assert.equal(gen?.model, "prov/fast", "and its model");
+});
+
+test("debate reports a cancelled panel when the run is aborted mid-exchange", async () => {
+	const ac = new AbortController();
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			ac.abort(); // the user stops the run while the panel is live
+			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS, signal: ac.signal });
+	const r = await debate.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort", "a cancelled panel is not a completed-but-failed one");
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+test("debate convenes nobody when the run is aborted before it starts", async () => {
+	const ac = new AbortController();
+	ac.abort();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return { agent: spec.agent, output: "o", structured: { vote: "x" }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS, signal: ac.signal });
+	const r = await debate.run({ task: "decide", roster: "t", params: {} }, sdk);
+	assert.equal(calls, 0, "no member is spawned for an already-cancelled run");
+	assert.equal(r.ok, false);
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+test("magi skips the reflection round once the run is aborted", async () => {
+	const ac = new AbortController();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			ac.abort();
+			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["melchior", "balthasar", "casper"] }, limits: LIMITS, signal: ac.signal });
+	const r = await magi.run({ task: "t", roster: "magi", params: {} }, sdk);
+	assert.equal(calls, 3, "the cores are not re-polled for a reflection round nobody will read");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+test("magi polls nobody when the run is aborted before it starts", async () => {
+	const ac = new AbortController();
+	ac.abort();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return { agent: spec.agent, output: "o", structured: { vote: "x" }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["melchior", "balthasar"] }, limits: LIMITS, signal: ac.signal });
+	const r = await magi.run({ task: "t", roster: "magi", params: {} }, sdk);
+	assert.equal(calls, 0, "no core is spawned for an already-cancelled run");
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+test("critic-loop stops revising once the run is aborted", async () => {
+	const ac = new AbortController();
+	let genCalls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "skeptic") {
+				ac.abort(); // the user stops the run after the first critique
+				return { agent: "skeptic", output: "crit", structured: { stance: "reject" }, usage: usage(), ok: true };
+			}
+			genCalls++;
+			return { agent: spec.agent, output: `gen#${genCalls}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer"] }, limits: LIMITS, signal: ac.signal });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: { critic: "skeptic", generator: "writer", rounds: 5 } }, sdk);
+	assert.equal(genCalls, 2, "the initial generation + the in-flight revision; no further rounds");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort", "a cancelled loop is not work that failed review");
+	assert.equal(r.structured?.cancelled, true);
+});
+
+test("critic-loop generates nothing when the run is aborted before it starts", async () => {
+	const ac = new AbortController();
+	ac.abort();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return { agent: spec.agent, output: "gen", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer", "skeptic"] }, limits: LIMITS, signal: ac.signal });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: {} }, sdk);
+	assert.equal(calls, 0, "no generation is spent on an already-cancelled run");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
+});
+
+test("pipeline stops the chain once the run is aborted between steps", async () => {
+	const ac = new AbortController();
+	const seen: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			seen.push(spec.agent);
+			if (spec.agent === "a") ac.abort(); // the user stops the run after the first step succeeds
+			return { agent: spec.agent, output: `out:${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS, signal: ac.signal });
+	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
+	assert.deepEqual(seen, ["a"], "the remaining steps are not spawned");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort", "a cancelled chain is not a step that failed");
+	assert.match(r.error ?? "", /aborted/);
+	assert.equal(r.output, "out:a", "the work completed before the abort is not discarded");
+});
+
+// ── the abort form a boundary guard cannot see ────────────────────────────────────────
+// `sdk.signal` IS wired in production (extension.ts passes `signal:` to `runPersonaStrategy`
+// alongside `buildEngine(signal)`), but it is only read at a strategy's round/step boundaries,
+// and a caller may pass none at all. A stop that lands mid-round shows up solely as legs
+// settling `ok:false` + `failureKind: "abort"`. These tests deliberately build the SDK with NO
+// signal, so only the leg-settled guard can carry them.
+
+test("magi reports a cancelled poll when an abort settles the reflection round (no SDK signal)", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			// Round 1 lands before the user stops the run; the reflection round settles aborted.
+			if (spec.task.includes("anonymised")) {
+				return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+			}
+			return { agent: spec.agent, output: `${spec.agent}:x`, structured: { vote: "x", confidence: 0.8 }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["melchior", "balthasar", "casper"] }, limits: LIMITS });
+	const r = await magi.run({ task: "t", roster: "magi", params: {} }, sdk);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort", "a stopped reflection round is not a completed no-ruling poll");
+	assert.equal(r.structured?.status, "cancelled");
+});
+
+test("pipeline reports a cancelled chain when an abort settles a step (no SDK signal)", async () => {
+	const seen: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			seen.push(spec.agent);
+			if (spec.agent === "b") return { agent: "b", output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+			return { agent: spec.agent, output: `out:${spec.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: LIMITS });
+	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
+	assert.deepEqual(seen, ["a", "b"], "the chain still stops at the stopped step");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
+	assert.equal(r.structured?.cancelled, true, "a stopped chain is cancelled, not a broken step");
+	assert.equal(r.output, "out:a", "the completed upstream work is not discarded");
+});
+
+test("critic-loop keeps the last good draft when an abort settles a revision (no SDK signal)", async () => {
+	let gens = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "skeptic") return { agent: "skeptic", output: "crit", structured: { stance: "reject" }, usage: usage(), ok: true };
+			gens++;
+			if (gens === 1) return { agent: spec.agent, output: "draft-1", usage: usage(), ok: true };
+			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer", "skeptic"] }, limits: LIMITS });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: { rounds: 3 } }, sdk);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
+	assert.equal(r.structured?.cancelled, true);
+	assert.equal(r.output, "draft-1", "the hardened draft the loop already paid for survives the abort");
+});
+
+test("critic-loop reports a cancelled loop when an abort settles the critic (not a failed review)", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "skeptic") return { agent: "skeptic", output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+			return { agent: spec.agent, output: "draft-1", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer", "skeptic"] }, limits: LIMITS });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: {} }, sdk);
+	assert.equal(r.failureKind, "abort");
+	assert.equal(r.structured?.cancelled, true, "the run stopped — the critic did not fail review");
+	assert.equal(r.output, "draft-1", "the draft under review is still the best thing to show");
+});
+
+test("critic-loop reports a cancelled loop when an abort settles the first generation (no SDK signal)", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => ({
+			agent: spec.agent,
+			output: "",
+			usage: usage(),
+			ok: false,
+			error: "aborted",
+			failureKind: "abort",
+		}),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["writer", "skeptic"] }, limits: LIMITS });
+	const r = await criticLoop.run({ task: "T", roster: "team", params: {} }, sdk);
+	assert.equal(r.failureKind, "abort");
+	assert.equal(r.structured?.cancelled, true);
+	assert.equal(r.structured?.criticOk, false, "no critique ran — the loop must not claim the critic was fine");
+});
+
+test("pipeline runs no step when the run is aborted before it starts", async () => {
+	const ac = new AbortController();
+	ac.abort();
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return { agent: spec.agent, output: "o", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS, signal: ac.signal });
+	const r = await pipeline.run({ task: "T", roster: "chain", params: {} }, sdk);
+	assert.equal(calls, 0, "no step is spawned for an already-cancelled run");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
 });

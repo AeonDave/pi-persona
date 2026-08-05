@@ -43,12 +43,12 @@ import { buildInboundDelivery, type InboundDecision } from "./exocom/inbound.ts"
 import { SeenMessages, SenderBudget } from "./exocom/guards.ts";
 import { EXOCOM } from "./exocom/limits.ts";
 import { endpoint as exocomEndpointFor, workspaceHash } from "./exocom/paths.ts";
-import { ExocomPlane, type ExocomInboundResult } from "./exocom/plane.ts";
-import { prune as pruneExocom, type RegistryEntry, writeEntry as writeExocomEntry } from "./exocom/registry.ts";
+import { ExocomPlane, type DisplayPeer, type ExocomInboundResult } from "./exocom/plane.ts";
+import { prune as pruneExocom, type RegistryEntry } from "./exocom/registry.ts";
 import { registerExocomTools } from "./tools/exocom.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
 import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
-import { journalWriter, readJournal } from "./orchestration/flow-journal.ts";
+import { journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
 import { Semaphore } from "./orchestration/parallel.ts";
 import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
@@ -59,6 +59,7 @@ import type { AgentResult } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import { expandCouncilPreset, resolveCouncilInvocation, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
+import { bundledSpinePath, bundledWorkerSpinePath, readSpineFile, resolveSpine, type SpineSources } from "./persona/spine.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
 import {
 	type PersonaConfigStore,
@@ -67,7 +68,18 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import { CODENAMES, DelegationLedger, type DelegateView, nameFor, runDelegate, shortModel, specOf, unknownAgentError, wantsAsyncRun } from "./tools/delegate.ts";
+import {
+	CODENAMES,
+	DelegationLedger,
+	type DelegateView,
+	nameFor,
+	runDelegate,
+	shortModel,
+	shouldRecordDelegationOutcome,
+	specOf,
+	unknownAgentError,
+	wantsAsyncRun,
+} from "./tools/delegate.ts";
 import { formatInbox, type IntercomParams, runIntercom } from "./tools/intercom.ts";
 import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
@@ -172,11 +184,6 @@ export function announceAsyncRunSettlement(
 	enqueue(run);
 }
 
-/** An operator abort is cancellation, not evidence for the failed-delegation retry ledger. */
-export function shouldRecordDelegationOutcome(result: { failureKind?: string }): boolean {
-	return result.failureKind !== "abort";
-}
-
 /** Project a delegate leg without conflating an explicit abort with an execution failure. */
 export function agentNodeStatusForDelegate(view: Pick<DelegateView, "running" | "ok" | "failureKind">): AgentNodeStatus {
 	if (view.running) return "running";
@@ -201,7 +208,90 @@ export function formatCouncilCallLabel(strategy: string, roster: string): string
 	return `council ${strategy}${strategy === roster ? "" : ` · ${roster}`}`;
 }
 
-export default function piPersona(pi: ExtensionAPI): void {
+/** Agents actually IN FLIGHT: a RUNNING node with no children of its own. "Has a parent" is not the
+ *  same as "is an agent" — a flow phase is a container that also has a parent, a root-level `async:`
+ *  run is a leaf that has none, and a settled leg still sits in the tree until its root is torn
+ *  down. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
+export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus }>): number {
+	const parents = new Set(nodes.map((n) => n.parentId));
+	return nodes.filter((n) => n.status === "running" && !parents.has(n.id)).length;
+}
+
+/** Per-invocation tree root ids. Two concurrent runs of the SAME strategy or flow (two
+ *  `/orchestrate`s, the `flow` tool racing `/flow`) would otherwise share one deterministic root:
+ *  the first to finish clears the other's stop/steer handles and removes its live subtree, leaving
+ *  invisible orphans the overlay can no longer stop. The suffix carries no `/`, so `clearStops`'s
+ *  `id === root || id.startsWith(root + "/")` scoping still covers exactly one run's subtree. */
+export function makeRootIdAllocator(): (prefix: string) => string {
+	let seq = 0;
+	return (prefix) => {
+		seq += 1;
+		return `${prefix}#${seq}`;
+	};
+}
+
+/** One buffered blocking ask — carried with its `askId` so an answered ask can be reconciled out
+ *  of the notifier (see {@link reconcileAnsweredAsk}) instead of waking the supervisor for a
+ *  decision it has already made. */
+export interface PendingAsk {
+	askId: string;
+	text: string;
+}
+
+/** A child's blocking ask lands on TWO surfaces — the idle-gated notifier wake and the supervisor's
+ *  bus inbox — and answering one leaves the other stale (a re-wake for an answered ask, or an
+ *  envelope that re-surfaces in the next `inbox` with its "reply with id" tag). Answering IS the
+ *  reconciliation point: drop the ask from both. Mirrors `completionNotifier.discard` on
+ *  `intercom wait`. */
+export function reconcileAnsweredAsk(
+	askId: string,
+	notifier: { discard: (pred: (item: PendingAsk) => boolean) => void },
+	inbox: { takeWhere: (handle: string, pred: (env: { id: string }) => boolean) => unknown },
+	handle: string,
+): void {
+	notifier.discard((item) => item.askId === askId);
+	inbox.takeWhere(handle, (env) => env.id === askId);
+}
+
+/** Whether an exocom heartbeat failure is worth telling the user about. The tick runs on a timer,
+ *  so reporting every one would spam a session that is otherwise fine; reporting none would hide a
+ *  plane that has silently dropped out of every peer's pool (its entry goes stale after
+ *  EXOCOM.STALE_AFTER_MS and never comes back). So: the first failure at once, then one reminder
+ *  per ~10 ticks for as long as it keeps failing. A single successful tick resets the count. */
+export function shouldReportHeartbeatFailure(consecutiveFailures: number): boolean {
+	return consecutiveFailures === 1 || consecutiveFailures % 10 === 0;
+}
+
+/** The `intercom` bus actions echo text of two different provenances: `inbox` carries CHILD-authored
+ *  message bodies (untrusted — the same text `drainBusBlock`/`peek` fence), while `list`/`reply`/
+ *  `send` (and the empty-inbox placeholder) are supervisor-side. Fence only the former. */
+export function fenceIntercomOutcome(out: { text: string; details: { action: string; messages?: unknown[] } }, fence: (t: string) => string): string {
+	const untrusted = out.details.action === "inbox" && (out.details.messages?.length ?? 0) > 0;
+	return untrusted ? fence(out.text) : out.text;
+}
+
+/** The engine constructors `buildEngine` builds through. Indirected via one object so the deps
+ *  each backend is actually handed are observable: the child engine can be watched through a fake
+ *  `pi` binary, but the in-process one — the DEFAULT backend — creates a real session that needs a
+ *  live model and provider, so its wiring would otherwise have no witness at all. */
+export interface EngineFactories {
+	makeEngine: typeof makeEngine;
+	makeInProcessEngine: typeof makeInProcessEngine;
+}
+
+/** Frozen, so the production table is a constant rather than something a later import can swap
+ *  out from under a running session. */
+const DEFAULT_ENGINE_FACTORIES: EngineFactories = Object.freeze({ makeEngine, makeInProcessEngine });
+
+/** Activation-scoped overrides. Pi's `ExtensionFactory` is `(pi) => void`, so it never passes a
+ *  second argument and this is absent in production; a caller that does supply it substitutes
+ *  for that activation ALONE — nothing process-wide to restore, and nothing left behind for the
+ *  next one if the caller dies mid-way. */
+export interface PiPersonaOptions {
+	engineFactories?: EngineFactories;
+}
+
+export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = {}): void {
 	// Cross-process broker (v0.5, spec B3): a child spawned with `PI_PERSONA_BUS` set is a
 	// broker-connected sub-agent, not a supervisor — load ONLY the bridge (comm-plane tools +
 	// inbound follow-ups) and skip the entire persona/delegate/orchestration surface. Checked
@@ -216,6 +306,42 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	const config = resolveConfig(process.env);
 	if (config.disabled) return;
+
+	// The engine constructors THIS activation builds through (see PiPersonaOptions).
+	const engineFactories = options.engineFactories ?? DEFAULT_ENGINE_FACTORIES;
+
+	// The spine (docs/SPINE.md): the shared behavioral layer that sits between Pi's base prompt
+	// and the persona body, with the WORKER variant leading every delegated leg's prompt (a leg
+	// runs headless, so the supervisor text's "confirm before irreversible" would have it stall
+	// on a user it does not have). Resolved ONCE — a layer that could change mid-conversation
+	// would let two turns run under different rules; `/persona reload` is the deliberate
+	// exception, being the command whose whole purpose is picking up edits. Off by default ⇒
+	// both texts stay "" and every composition below is byte-identical to a pre-spine pi-persona.
+	const spineSources = (): SpineSources => ({
+		selector: config.spine,
+		workerSelector: config.spineLegs,
+		userPath: join(personaDataDir(), "spine.md"),
+		bundledPath: bundledSpinePath(),
+		workerUserPath: join(personaDataDir(), "spine.worker.md"),
+		workerBundledPath: bundledWorkerSpinePath(),
+		read: readSpineFile,
+	});
+	let spine = resolveSpine(spineSources());
+	let spineText = spine.text ?? "";
+	let workerSpineText = spine.worker ?? "";
+	function reloadSpine(): void {
+		spine = resolveSpine(spineSources());
+		spineText = spine.text ?? "";
+		workerSpineText = spine.worker ?? "";
+	}
+	/** A spine was asked for and something did not supply one: say so, then carry on without it.
+	 *  A missing prompt file must never cost the user their session. Emitted from the hook rather
+	 *  than at resolve time — the factory has no `ctx` yet. */
+	function reportSpineWarning(ctx: ExtensionContext): void {
+		if (!spine.warning) return;
+		if (ctx.hasUI) ctx.ui.notify(spine.warning, "warning");
+		else process.stderr.write(`${spine.warning}\n`);
+	}
 
 	// exocom (opt-in, T9): `--exocom` is a per-invocation convenience alongside PI_PERSONA_EXOCOM
 	// (config.exocom) — the flag declaration is inert unless either is on (see startExocom below).
@@ -250,6 +376,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// Persistence nudge: the counterweight — when a delegated leg comes back BLOCKED/UNKNOWN, remind
 	// the supervisor not to bank a premature surrender (same config.nudge gate + hook as above).
 	const persistenceNudge = new PersistenceNudge();
+	// Every visible run (strategy, council, flow) gets its own tree root — see makeRootIdAllocator.
+	const nextRootId = makeRootIdAllocator();
 	// node id → abort that one agent (so the overlay can STOP a single sub-agent).
 	const stopRegistry = new Map<string, () => void>();
 	// A second stop is an explicit force-clear request. Keep the real cancel handle until the
@@ -293,9 +421,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// custom UI (e.g. pi-1337's frame) can show "N agents" — covers strategy/council
 	// cores too, which pi-1337's own delegate-only counter misses.
 	function agentCount(): number {
-		const nodes = agentTree.snapshot();
-		const leaves = nodes.filter((n) => n.parentId !== undefined);
-		return (leaves.length > 0 ? leaves : nodes).length;
+		return inFlightAgentCount(agentTree.snapshot());
 	}
 
 	function renderAgentWidget(): void {
@@ -516,9 +642,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 	});
 	// A child's blocking ask (decision/interview) — coalesced and idle-gated so it can't strand and
 	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
-	const intercomNotifier = new IdleCoalescingNotifier<string>({
+	const intercomNotifier = new IdleCoalescingNotifier<PendingAsk>({
 		...idleDelivery,
-		render: (asks) => asks.join("\n\n"),
+		render: (asks) => asks.map((a) => a.text).join("\n\n"),
 	});
 	// Supervisor-armable alarms: when a timer expires it WAKES the session by routing the fire
 	// through the same idle-delivery path (an idle delivery starts a fresh turn, so the supervisor
@@ -564,9 +690,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (disposed || env.to !== SUPERVISOR || !env.expectsReply) return;
 		// Idle-gated so the ask reaches the (free) supervisor as a turn it can answer via the
 		// intercom tool, rather than stranding mid-stream as a sticky follow-up.
-		intercomNotifier.notify(
-			`[pi-persona] sub-agent ${env.from} needs a ${env.kind}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${env.id}", message: "…" }`,
-		);
+		intercomNotifier.notify({
+			askId: env.id,
+			text: `[pi-persona] sub-agent ${env.from} needs a ${env.kind}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${env.id}", message: "…" }`,
+		});
 	});
 
 	// Peek watchdog (the timed supervisor wakeup, on by default — PI_PERSONA_PEEK_MS=0 opts out): while
@@ -719,6 +846,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	let exocomSeen: SeenMessages | undefined;
 	let exocomNotifier: IdleCoalescingNotifier<string> | undefined;
 	let exocomHeartbeat: ReturnType<typeof setInterval> | undefined;
+	let exocomHeartbeatFailures = 0; // consecutive failed ticks — drives the report cadence, reset by any success
 	let exocomResetTimer: ReturnType<typeof setInterval> | undefined;
 
 	// A tiny, stable name→color hash for the pool widget's swatch — exocom peers carry no
@@ -755,7 +883,16 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// mirrors renderAgentWidget above.
 	function renderExocomWidget(): void {
 		if (!lastCtx || !exocomPlane) return;
-		const peers = exocomPlane.listPeers();
+		// The pool read is disk I/O (readdir + a read per entry) and can fail like any other, so it
+		// is guarded too — otherwise "best-effort" would be false of the very first statement, and
+		// a registry hiccup would escape into whatever tick asked for a repaint. There is nothing
+		// to draw without it; the next heartbeat repaints.
+		let peers: DisplayPeer[];
+		try {
+			peers = exocomPlane.listPeers();
+		} catch {
+			return;
+		}
 		try {
 			const now = Date.now();
 			const selfPersona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
@@ -789,11 +926,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 		}
 	}
 
-	// Re-`writeEntry` with the CURRENT persona/model/context% (so a `/persona` switch or a model
-	// change is reflected, not a stale snapshot from session_start) and prune dead peers — one
-	// unref'd tick covers both heartbeat AND pool refresh.
+	// Re-register with the CURRENT persona/model/context% (so a `/persona` switch or a model change
+	// is reflected, not a stale snapshot from session_start) and prune dead peers — one unref'd tick
+	// covers both heartbeat AND pool refresh. Routed through `plane.heartbeat` rather than a bare
+	// `writeEntry`: the plane re-attaches its ed25519 public key on every re-registration, including
+	// one that RE-CREATES an entry a peer deleted underneath us (plane.ts) — the key lives nowhere
+	// but this process, and an entry without it makes every frame we sign unverifiable.
 	function exocomHeartbeatTick(agentDir: string, hash: string, sessionId: string, ep: string, cwd: string): void {
-		if (!exocomPlane) return;
+		const plane = exocomPlane;
+		if (!plane) return;
 		const persona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
 		const model = sanitizePeerField(lastCtx?.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "", 96);
 		const entry: RegistryEntry = {
@@ -810,9 +951,19 @@ export default function piPersona(pi: ExtensionAPI): void {
 			inbox: exocomNotifier?.peekPending().length ?? 0,
 			heartbeat_at: new Date().toISOString(),
 		};
-		writeExocomEntry(agentDir, hash, entry);
-		pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-		renderExocomWidget();
+		plane.heartbeat(entry);
+		// Everything past the re-registration is local upkeep: sweeping OTHER instances' dead entries
+		// and repainting our own widget. Letting a failure there out would be counted as a heartbeat
+		// failure and tell the user "peers drop this instance from the pool" — which would be false,
+		// since the write above is exactly what keeps us in it. Only the registration decides that.
+		try {
+			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
+			renderExocomWidget();
+		} catch (err) {
+			if (process.env.PI_PERSONA_DEBUG) {
+				process.stderr.write(`[pi-persona] exocom: pool upkeep failed after a good heartbeat: ${err instanceof Error ? err.message : String(err)}\n`);
+			}
+		}
 	}
 
 	// Join the plane for this session — called from session_start ONCE the persona is applied,
@@ -885,10 +1036,22 @@ export default function piPersona(pi: ExtensionAPI): void {
 					const peerName = sanitizePeerField(fromEntry?.name ?? msg.from_session, 48) || "peer";
 					const peerPersona = sanitizePeerField(fromEntry?.persona ?? "", 48);
 					const label = peerPersona ? `${peerName} (${peerPersona})` : peerName;
+					// The reply hint must name the DEDUPED display name ("elite#2") — the only token
+					// plane.send() resolves. The registry `name` alone is shared by two live peers, so a
+					// reply keyed on it would reach whichever of them the dedup numbered first. Resolved
+					// through the plane's NON-pruning read: `listPeers()` would make a readdir/unlink
+					// error decide whether an authenticated message is accepted, and would evict a
+					// sender whose own heartbeat had just gone stale on the strength of the message it
+					// just sent. The fallback inside is the authenticated entry's own name, which is NOT
+					// the attribution label above — `sanitizePeerField` rewrites anything outside its
+					// identifier alphabet, so a peer called "recon ops" would be advertised as
+					// "recon-ops", a target no peer answers to.
+					const replyTarget = fromEntry ? exocomPlane?.displayNameFor(fromEntry) : undefined;
 					const decision = buildInboundDelivery(msg, label, {
 						budget: exocomBudget!,
 						seen: exocomSeen!,
 						injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
+						...(replyTarget ? { replyTarget } : {}),
 						// attributePeer already fences internally (peer wording — a peer is NOT a
 						// sub-agent, see core/fence.ts), so `fence` here is a pass-through:
 						// attribute(label, fence(text)) still ends up exactly
@@ -925,7 +1088,33 @@ export default function piPersona(pi: ExtensionAPI): void {
 			});
 			await exocomPlane.start();
 			renderExocomWidget();
-			exocomHeartbeat = setInterval(() => exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd), EXOCOM.HEARTBEAT_MS);
+			// A throw from a bare timer callback is an uncaughtException — it would take the whole host
+			// session down over a transient registry write error (a full volume, an AV-held destination,
+			// a prune racing our rename). exocom failures must never block a normal session, so the tick
+			// is contained here; a failure that PERSISTS is still surfaced (see the report policy) rather
+			// than leaving the user with a plane no peer can see.
+			exocomHeartbeat = setInterval(() => {
+				try {
+					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
+					exocomHeartbeatFailures = 0;
+				} catch (err) {
+					exocomHeartbeatFailures += 1;
+					const message = err instanceof Error ? err.message : String(err);
+					if (process.env.PI_PERSONA_DEBUG) {
+						process.stderr.write(`[pi-persona] exocom: heartbeat failed (${exocomHeartbeatFailures}×): ${message}\n`);
+					}
+					if (shouldReportHeartbeatFailure(exocomHeartbeatFailures)) {
+						try {
+							lastCtx?.ui.notify(
+								`exocom: heartbeat failed ${exocomHeartbeatFailures}× in a row (${message}) — peers drop this instance from the pool until it recovers.`,
+								"warning",
+							);
+						} catch {
+							/* cosmetic */
+						}
+					}
+				}
+			}, EXOCOM.HEARTBEAT_MS);
 			exocomHeartbeat.unref?.();
 			// Makes maxDeliveries a per-MINUTE ceiling (R6) instead of a one-shot lifetime cap.
 			exocomResetTimer = setInterval(() => exocomNotifier?.resetDeliveries(), 60_000);
@@ -984,11 +1173,39 @@ export default function piPersona(pi: ExtensionAPI): void {
 	// consumer (engine/adapter.ts, engine/inproc.ts, the buildEngine call sites) reads
 	// `controller.capabilities` FRESH at bind time — this does the same for exocom. Already
 	// running and still gated on ⇒ a no-op (the heartbeat already relabels under the new persona).
-	async function reconcileExocom(ctx: ExtensionContext): Promise<void> {
+	async function applyExocomGate(ctx: ExtensionContext): Promise<void> {
 		const shouldRun = (config.exocom || pi.getFlag("exocom") === true) && (controller.capabilities?.canUseBus ?? true);
 		if (shouldRun && !exocomPlane) await startExocom(ctx);
 		else if (!shouldRun && exocomPlane) await stopExocom();
 		syncExocomActiveTools();
+	}
+	// Lifecycle transitions run ONE AT A TIME. `startExocom` publishes `exocomPlane` synchronously
+	// but then suspends inside `plane.start()`'s bind, so an overlapping transition (rapid f8
+	// cycling into a canUseBus:false persona; a Ctrl+C during startup) would otherwise tear down a
+	// plane that has not finished starting: `plane.stop()` closes nothing (no server assigned yet),
+	// then `start()` resumes and keeps a bound socket plus a fresh registry entry for a plane the
+	// extension has already discarded. EVERY start/stop goes through this queue — the shutdown
+	// teardown included, since it is the transition most likely to race a still-pending start.
+	let exocomReconcile: Promise<void> = Promise.resolve();
+	function queueExocom(op: () => Promise<void>): Promise<void> {
+		const next = exocomReconcile.then(op);
+		// A rejected transition must not wedge every later one behind it (startExocom already
+		// degrades on its own; this only keeps the queue's tail alive).
+		exocomReconcile = next.catch(() => {});
+		return next;
+	}
+	function reconcileExocom(ctx: ExtensionContext): Promise<void> {
+		return queueExocom(() => applyExocomGate(ctx));
+	}
+
+	// Every mid-session persona change funnels through here. Besides re-gating exocom, the incoming
+	// persona starts with a clean by-hand run: the nudge's streak, cumulative burn, and backoff
+	// belong to the persona that accumulated them (nudge.ts's reset contract), so leaving them in
+	// place would bill persona A's sweep to B's first command — and let A's fired nudges suppress
+	// B's legitimate early ones.
+	async function onPersonaChanged(ctx: ExtensionContext): Promise<void> {
+		delegationNudge.reset();
+		await reconcileExocom(ctx);
 	}
 
 	// Clean shutdown: stop timers, best-effort `bye` + registry cleanup (plane.stop()). Pi's own
@@ -1000,6 +1217,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			clearInterval(exocomHeartbeat);
 			exocomHeartbeat = undefined;
 		}
+		exocomHeartbeatFailures = 0; // a later re-start reports its own first failure, not this plane's tail
 		if (exocomResetTimer) {
 			clearInterval(exocomResetTimer);
 			exocomResetTimer = undefined;
@@ -1043,6 +1261,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const supLevel = host.getThinkingLevel();
 		const childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
 
+		// A persona that opted out of the layer (`spine: false`) opts its legs out too — otherwise
+		// a short verdict persona (judge/verify/audit) would still pay for the baseline on every
+		// sub-agent it spawns. The per-AGENT opt-out applies on top, inside each engine.
+		const legSpine = controller.activePersona?.spine === false ? "" : workerSpineText;
+
 		// Cross-process broker (spec B1-B7): lazily built on the FIRST actual child-engine
 		// construction below (worktree leg OR `PI_PERSONA_ENGINE=child`) — NOT on every
 		// `buildEngine` call, most of which build the (default) in-process engine and never
@@ -1065,6 +1288,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const childEngineAt = (cwd: string): StrategyEngine => {
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
 			deps.listAgents = () => agents.map((a) => a.name);
+			if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 			if (signal) deps.signal = signal;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs };
 			// Feed progress here too (mirrors the plain-child branch): without it a worktree/mcp async leg
@@ -1078,7 +1302,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const caps = controller.capabilities;
 			if (caps) deps.canUseBus = caps.canUseBus;
 			if (engOpts?.async) deps.allowBlocking = true;
-			return makeEngine(deps);
+			return engineFactories.makeEngine(deps);
 		};
 
 		// v0.4: run sub-agents in-process (createAgentSession) instead of spawning `pi -p`.
@@ -1087,6 +1311,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
 			const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
 			ideps.listAgents = () => agents.map((a) => a.name);
+			if (legSpine) ideps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 			ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
 			ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
 			ideps.startupTimeoutMs = config.agentStartupTimeoutMs; // first-progress deadline — fast-fail a child that never started
@@ -1103,11 +1328,12 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const caps = controller.capabilities;
 			if (caps) ideps.canUseBus = caps.canUseBus;
 			if (engOpts?.async) ideps.allowBlocking = true;
-			base = makeInProcessEngine(ideps);
+			base = engineFactories.makeInProcessEngine(ideps);
 		} else {
 			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=child\n");
 			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
 			deps.listAgents = () => agents.map((a) => a.name);
+			if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 			if (signal) deps.signal = signal;
 			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
 			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs }; // idle watchdog + hard cap + startup deadline on every child
@@ -1119,7 +1345,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			const caps = controller.capabilities;
 			if (caps) deps.canUseBus = caps.canUseBus;
 			if (engOpts?.async) deps.allowBlocking = true;
-			base = makeEngine(deps);
+			base = engineFactories.makeEngine(deps);
 		}
 
 		// Worktree isolation: an agent/leg marked `isolation: worktree` runs in a throwaway git
@@ -1197,8 +1423,8 @@ export default function piPersona(pi: ExtensionAPI): void {
 		if (available.length < 2) return; // can't diversify with a single configured model
 		modelsPrompted.add(persona);
 		const options = orderModelRefs(available.map((m) => `${m.provider}/${m.id}`), ctx.model?.provider);
+		const chosen: Record<string, string> = {};
 		try {
-			const chosen: Record<string, string> = {};
 			for (const agent of missing) {
 				const title = `Model for "${agent}"  ·  ${persona}`;
 				// In the TUI: a searchable picker (type to filter) whose viewport follows the
@@ -1214,12 +1440,21 @@ export default function piPersona(pi: ExtensionAPI): void {
 						: await ctx.ui.select(title, options);
 				if (pick) chosen[agent] = pick;
 			}
-			if (Object.keys(chosen).length > 0) {
-				personaConfigs = withPersonaModels(personaConfigs, persona, chosen);
-				writePersonaConfigs(configFile, personaConfigs);
-			}
 		} catch {
 			/* dismissed / no UI → fall back to the default model */
+		}
+		if (Object.keys(chosen).length === 0) return;
+		// The picks are live for this session either way (the in-memory store is updated first), so
+		// a save failure costs only PERSISTENCE — but silently swallowing it would re-prompt on every
+		// future session with no hint that the assignment never landed.
+		personaConfigs = withPersonaModels(personaConfigs, persona, chosen);
+		try {
+			writePersonaConfigs(configFile, personaConfigs);
+		} catch (err) {
+			ctx.ui.notify(
+				`pi-persona: could not save the model assignment for "${persona}" (${err instanceof Error ? err.message : String(err)}) — it applies to this session only.`,
+				"error",
+			);
 		}
 	}
 
@@ -1287,7 +1522,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
 		await ensurePersonaModels(ctx, roster);
-		const rootId = `${idPrefix}:${label}`;
+		const rootId = nextRootId(`${idPrefix}:${label}`);
 		agentTree.add({ id: rootId, label, status: "running" });
 		// Seed the whole roster at once (cores show by name immediately); "queued" until the
 		// engine actually starts each one — an honest view under the concurrency limit.
@@ -1298,7 +1533,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 			agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key), parentId: rootId, status: "running", detail: "queued" });
 		});
 		try {
-			return await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...strategyTreeDeps(ctx, rootId) });
+			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
+			// cooperatively between rounds, so an aborted run stops convening instead of running every
+			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
+			return await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId) });
 		} finally {
 			clearStops(rootId);
 			clearSteers(rootId);
@@ -1347,13 +1585,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 		} catch {
 			/* best effort */
 		}
-		const journalPath = join(journalDir, `${spec.name}.${hash.slice(0, 8)}.journal.jsonl`);
+		const journalPath = join(journalDir, journalFileName(spec)); // encodes the name — any name is storable
 		const resume = readJournal(journalPath, hash);
 
 		const rosterMembers = spec.phases.flatMap((p) => (p.roster ? (teams[p.roster] ?? []) : []));
 		await ensurePersonaModels(ctx, rosterMembers);
 
-		const flowRoot = `flow:${spec.name}`;
+		const flowRoot = nextRootId(`flow:${spec.name}`);
 		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running" });
 		for (const p of spec.phases) {
 			const pid = `${flowRoot}/${p.id}`;
@@ -1390,6 +1628,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 						engine: buildEngine(signal),
 						teams,
 						limits: RUN_LIMITS,
+						...(signal ? { signal } : {}), // cooperative per-round abort inside the phase's strategy, not just the engine
 						...strategyTreeDeps(ctx, pid),
 					});
 					return r ?? { agent: phase.id, output: `unknown strategy: ${phase.strategy}`, usage: emptyUsage(), ok: false, error: "unknown strategy" };
@@ -1460,6 +1699,15 @@ export default function piPersona(pi: ExtensionAPI): void {
 		});
 	}
 
+	// `resolveStrategyName` fails loudly on a grammar that names a MODE without naming what to run
+	// (`mode: strategy` with no `strategy:`, `mode: flow` with no `flow:`) — a persona-file error,
+	// not a runtime one. Every entry point that calls it as a guard renders this instead of letting
+	// it propagate out of a hook or command handler.
+	function personaGrammarError(err: unknown): string {
+		const who = controller.activePersona?.name ?? "(none)";
+		return `pi-persona: persona "${who}" has an invalid orchestration — ${err instanceof Error ? err.message : String(err)}`;
+	}
+
 	function doctorReport(): string {
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
@@ -1505,6 +1753,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
 		delegationNudge.reset(); // a fresh session starts with a clean by-hand run
+		reportSpineWarning(ctx);
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
 		if (config.seed && !existsSync(seedMarker())) {
@@ -1565,7 +1814,11 @@ export default function piPersona(pi: ExtensionAPI): void {
 		steerRegistry.clear();
 		agentTree.clear();
 		host.setStatus(undefined);
-		await stopExocom(); // idempotent — off (or never started) ⇒ a no-op
+		// Queued, not called bare: a shutdown that lands while session_start's own start is still
+		// pending would otherwise see `exocomPlane` unset, no-op, and let that start bind a socket
+		// and register an entry for a session that no longer exists. Idempotent either way — off
+		// (or never started) ⇒ a no-op.
+		await queueExocom(() => stopExocom());
 		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
 		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
 		if (brokerHostPromise) {
@@ -1594,7 +1847,10 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
-		let prompt = controller.composePrompt(event.systemPrompt) ?? event.systemPrompt;
+		// The spine lifts persona-less turns too: with nothing active the composition is Pi's base
+		// prompt + the layer. Off ⇒ `spineText` is empty and this is `event.systemPrompt` itself.
+		const noPersona = spineText ? `${event.systemPrompt}\n\n${spineText}` : event.systemPrompt;
+		let prompt = controller.composePrompt(event.systemPrompt, spineText) ?? noPersona;
 		const brief = delegationBrief(ctx);
 		if (brief) prompt = `${prompt}\n\n${brief}`;
 		// Per-turn exocom peer AWARENESS (mirrors the delegation brief above): regenerated from the
@@ -1723,7 +1979,17 @@ export default function piPersona(pi: ExtensionAPI): void {
 		const task = event.text?.trim();
 		if (!orch || !task) return undefined;
 		const flowName = orch.mode === "flow" ? orch.flow : undefined;
-		if (!flowName && !resolveStrategyName(orch)) return undefined;
+		let strategyName: string | undefined;
+		try {
+			strategyName = resolveStrategyName(orch);
+		} catch (err) {
+			// Only the persona FILE can fix this; take the turn normally rather than tearing the
+			// input hook down on every keystroke, but say so loudly — the mandatory orchestration
+			// the user configured is silently not happening.
+			ctx.ui.notify(personaGrammarError(err), "error");
+			return undefined;
+		}
+		if (!flowName && !strategyName) return undefined;
 		const mainBusy = ctx.isIdle() !== true;
 		// Steering belongs to the turn already in progress. Never start a competing mandatory
 		// orchestration for it; Pi remains responsible for applying the steering message.
@@ -2033,6 +2299,9 @@ export default function piPersona(pi: ExtensionAPI): void {
 					},
 					(i, abort) => stopRegistry.set(`${delRoot}/${i}`, abort),
 					(i, steer) => steerRegistry.set(`${delRoot}/${i}`, steer),
+					// The same run signal the engine was built with: a leg whose engine REJECTS under a
+					// whole-run stop must file as "abort", not as an agent failure the user never caused.
+					signal,
 				);
 				// Feed the anti-loop ledger (results align with the requested tasks by index).
 				outcome.results.forEach((r, i) => {
@@ -2120,7 +2389,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				await controller.activate(personas[next]!);
 				persist(personas[next]!.name);
 			}
-			await reconcileExocom(ctx); // the persona (and so canUseBus) just changed — re-gate now
+			await onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
 		},
 	};
 	type KeyId = Parameters<ExtensionAPI["registerShortcut"]>[0];
@@ -2266,7 +2535,13 @@ export default function piPersona(pi: ExtensionAPI): void {
 
 			// The message bus (coaching): list / inbox / reply / send.
 			const out = runIntercom(params as IntercomParams, bus, SUPERVISOR);
-			let text = out.text;
+			// An answered ask is settled on every surface it reached — never woken again, never
+			// re-listed (the ask envelope is NOT drained by the peek path, which skips expectsReply).
+			if (params.action === "reply" && out.details.ok && params.askId) {
+				reconcileAnsweredAsk(params.askId, intercomNotifier, bus, SUPERVISOR);
+			}
+			// Child-authored inbox bodies are untrusted, exactly like the drainBusBlock/peek copies.
+			let text = fenceIntercomOutcome(out, fenceUntrusted);
 			if ((params.action === "list" || params.action === "inbox") && !controller.activePersona?.coaching) {
 				const who = controller.activePersona?.name ?? "default";
 				text += `\n\n(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
@@ -2536,19 +2811,24 @@ export default function piPersona(pi: ExtensionAPI): void {
 			if (arg === "off" || arg === "none") {
 				await controller.deactivate();
 				persist(undefined);
-				await reconcileExocom(ctx); // the persona (and so canUseBus) just changed — re-gate now
+				await onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
 				ctx.ui.notify("persona: cleared (default supervisor)", "info");
 				return;
 			}
 			if (arg === "reload") {
 				const activeName = controller.activePersona?.name;
 				reload(ctx.cwd);
+				// Resolve-once-per-session is what keeps two turns of one conversation under the
+				// same rules; an explicit reload is the user asking for exactly this file to be
+				// re-read, so the spine comes along with the personas.
+				reloadSpine();
+				reportSpineWarning(ctx);
 				if (activeName) {
 					const fresh = personas.find((p) => p.name === activeName);
 					if (fresh) await controller.activate(fresh);
 					else await controller.deactivate();
 				}
-				await reconcileExocom(ctx);
+				await onPersonaChanged(ctx);
 				ctx.ui.notify(`persona: reloaded ${personas.length} personas, ${agents.length} agents`, "info");
 				return;
 			}
@@ -2562,7 +2842,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 				const active = controller.activePersona?.name;
 				const fresh = active ? personas.find((p) => p.name === active) : undefined;
 				if (fresh) await controller.activate(fresh);
-				await reconcileExocom(ctx); // a restored persona file may have changed canUseBus — re-gate
+				await onPersonaChanged(ctx); // a restored persona file may have changed canUseBus — re-gate; clear the by-hand run
 				const kept = r.skipped.length > 0 ? `, kept ${r.skipped.length} existing` : "";
 				ctx.ui.notify(`persona: ${force ? "restored" : "seeded"} ${r.copied.length} default(s) to ${userAgentDir()}${kept}.`, "info");
 				return;
@@ -2594,7 +2874,7 @@ export default function piPersona(pi: ExtensionAPI): void {
 			}
 			await controller.activate(persona);
 			persist(persona.name);
-			await reconcileExocom(ctx); // the persona (and so canUseBus) just changed — re-gate now
+			await onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
 			ctx.ui.notify(`persona: ${persona.label} active`, "info");
 		},
 	});
@@ -2724,7 +3004,14 @@ export default function piPersona(pi: ExtensionAPI): void {
 				}
 				return;
 			}
-			if (!orch || !resolveStrategyName(orch)) {
+			let strategyName: string | undefined;
+			try {
+				strategyName = orch ? resolveStrategyName(orch) : undefined;
+			} catch (err) {
+				ctx.ui.notify(personaGrammarError(err), "error");
+				return;
+			}
+			if (!orch || !strategyName) {
 				ctx.ui.notify("orchestrate: the active persona declares no runnable strategy/mode", "warning");
 				return;
 			}

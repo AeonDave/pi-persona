@@ -75,12 +75,57 @@ export function sessionKey(sessionId: string): string {
 	return createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
 }
 
-export function writeEntry(agentDir: string, hash: string, entry: RegistryEntry): void {
+/** Public keys THIS process has registered, keyed by session_id — the second half of the
+ *  key-preservation guarantee. The preserve-from-disk step in `writeEntry` only covers the
+ *  file-still-exists case; an entry can be removed while its instance is alive (a peer's transient
+ *  send error calls `removeEntry`, or a >STALE_AFTER_MS stall lets every peer prune it), and the
+ *  next heartbeat then RE-CREATES the file with nothing on disk to preserve from. A plane's
+ *  ed25519 key exists nowhere but its own process, so a re-registration that dropped it would
+ *  leave the live instance permanently unverifiable. Keyed per session_id, so one instance's key
+ *  is never lent to another; bounded so a long-lived process can't accumulate without limit. */
+const registeredKeys = new Map<string, string>();
+const MAX_REMEMBERED_KEYS = 256;
+
+function rememberKey(sessionId: string, publicKey: string): void {
+	registeredKeys.delete(sessionId); // re-insert so the eviction order stays least-recently-written
+	registeredKeys.set(sessionId, publicKey);
+	while (registeredKeys.size > MAX_REMEMBERED_KEYS) {
+		const oldest = registeredKeys.keys().next().value;
+		if (oldest === undefined) break;
+		registeredKeys.delete(oldest);
+	}
+}
+
+/** Injection seams for the rename retry below (tests drive it on any OS) — mirrors config-store. */
+export interface RegistryWriteIO {
+	rename?: (from: string, to: string) => void;
+	sleep?: (ms: number) => void;
+}
+
+// A handle held by a virus scanner, the search indexer or a peer mid-read is transient, so a few
+// short waits usually win the race — 25+50+75 ms of backoff at worst, on a 30s heartbeat.
+const RENAME_ATTEMPTS = 4;
+const RENAME_BACKOFF_MS = 25;
+
+function sleepSync(ms: number): void {
+	// The registry API is synchronous all the way up to the heartbeat tick, so the backoff has to
+	// block; Atomics.wait is the standard synchronous sleep.
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function writeEntry(agentDir: string, hash: string, entry: RegistryEntry, io: RegistryWriteIO = {}): void {
 	let safe = normalizeRegistryEntry(entry);
 	if (!safe) throw new Error("exocom registry: invalid entry");
 	const dir = agentsDir(agentDir, hash);
 	mkdirSync(dir, { recursive: true });
 	const final = registryPath(agentDir, hash, sessionKey(safe.session_id));
+	// A key THIS process registered for THIS session_id outranks whatever is on disk: it is the
+	// only value guaranteed to match the private half still signing our frames, and it survives
+	// the entry file being deleted underneath us. Disk is the fallback for a key we never wrote.
+	if (!safe.public_key) {
+		const remembered = registeredKeys.get(safe.session_id);
+		if (remembered) safe = { ...safe, public_key: remembered };
+	}
 	if (!safe.public_key && existsSync(final)) {
 		try {
 			const existing = normalizeRegistryEntry(JSON.parse(readFileSync(final, "utf8")));
@@ -89,13 +134,43 @@ export function writeEntry(agentDir: string, hash: string, entry: RegistryEntry)
 			}
 		} catch { /* a malformed previous entry contributes no authentication state */ }
 	}
+	if (safe.public_key) rememberKey(safe.session_id, safe.public_key);
+	const payload = `${JSON.stringify(safe, null, 2)}\n`;
+	// Temp file + same-volume rename, so a peer reading mid-write never parses a half-written entry.
+	// That is atomic on POSIX; Windows is NOT the same — rename fails with EPERM/EBUSY while ANY
+	// other handle holds the target open (Defender, the search indexer, a peer mid-read), and the
+	// registry lives in an ordinary user directory where that is routine. So a contended rename is
+	// retried and then written in place: a torn entry is skipped by `readAll` and repaired by the
+	// next heartbeat, whereas a lost write drops this instance out of every peer's pool.
 	const tmp = `${final}.tmp-${process.pid}-${randomUUID()}`;
+	const rename = io.rename ?? renameSync;
+	const sleep = io.sleep ?? sleepSync;
 	try {
-		writeFileSync(tmp, `${JSON.stringify(safe, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-		renameSync(tmp, final);
+		writeFileSync(tmp, payload, { encoding: "utf8", mode: 0o600 });
 	} catch (err) {
 		try { unlinkSync(tmp); } catch { /* best-effort */ }
 		throw err;
+	}
+	for (let attempt = 1; ; attempt++) {
+		try {
+			rename(tmp, final);
+			return;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (attempt < RENAME_ATTEMPTS && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
+				sleep(RENAME_BACKOFF_MS * attempt);
+				continue;
+			}
+			try {
+				// The scratch file must not survive for every pid that ever tried, whether the
+				// in-place write lands or throws (a real failure still reaches the caller, which
+				// counts it as a heartbeat failure).
+				writeFileSync(final, payload, { encoding: "utf8", mode: 0o600 });
+			} finally {
+				try { unlinkSync(tmp); } catch { /* best-effort */ }
+			}
+			return;
+		}
 	}
 }
 

@@ -101,6 +101,17 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		}
 	}
 
+	/** An application listener's throw must never reach the frame reader: the reader would
+	 *  poison itself and destroy the socket, muting the child for the rest of the run (the
+	 *  host hardens its own dispatch the same way). */
+	function safely(fn: () => void): void {
+		try {
+			fn();
+		} catch {
+			/* a faulty listener is the listener's problem, not the connection's */
+		}
+	}
+
 	function handleFrame(frame: Frame): void {
 		switch (frame.t) {
 			case "registered":
@@ -123,11 +134,11 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 					expectsReply: frame.expectsReply,
 					...(frame.fromLabel !== undefined ? { fromLabel: frame.fromLabel } : {}),
 				};
-				for (const cb of deliverListeners) cb(evt);
+				for (const cb of deliverListeners) safely(() => cb(evt));
 				return;
 			}
 			case "steer":
-				for (const cb of steerListeners) cb(frame.text);
+				for (const cb of steerListeners) safely(() => cb(frame.text));
 				return;
 			case "replied": {
 				const pending = pendingAsks.get(frame.askId);
@@ -213,6 +224,10 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		});
 		s.once("close", () => {
 			socket = undefined;
+			// A peer-initiated drop (host teardown/crash) between connect and the handshake
+			// reply would otherwise leave register() pending for the child's whole life.
+			registerSettle?.reject(new Error("connection closed during register"));
+			registerSettle = undefined;
 		});
 
 		return new Promise<void>((resolve, reject) => {

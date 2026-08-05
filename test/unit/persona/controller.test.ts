@@ -98,3 +98,16 @@ test("gate and composePrompt route through the active persona", async () => {
 	assert.equal(c.gate("delegate", { agent: "scout" }), undefined);
 	assert.match(c.composePrompt("BASE") ?? "", /BASE\n\nBody text/);
 });
+
+test("composePrompt threads the spine into the persona composition (and no persona ⇒ undefined)", async () => {
+	const host = new MockHost();
+	const c = new PersonaController(host, true);
+	assert.equal(c.composePrompt("BASE", "SPINE"), undefined, "no persona ⇒ the hook owns the fallback");
+
+	await c.activate(p("name: r\npersona: true"));
+	assert.equal(c.composePrompt("BASE", "SPINE"), "BASE\n\nSPINE\n\nBody text");
+	assert.equal(c.composePrompt("BASE"), "BASE\n\nBody text", "spine off ⇒ byte-identical to pre-spine");
+
+	await c.activate(p("name: q\npersona: true\nspine: false"));
+	assert.equal(c.composePrompt("BASE", "SPINE"), "BASE\n\nBody text", "the persona's own opt-out still wins");
+});

@@ -89,6 +89,26 @@ function connectClient(server: FakeServer): { client: FakeSocket; send: (f: Fram
 	return { client, send, frames };
 }
 
+/** A server-side socket whose `end()` does NOT close synchronously — a real socket's FIN/close
+ *  is asynchronous, which is exactly what opens the window between the `bye` cleanup and the
+ *  eventual `close` event. */
+class LingeringSocket extends FakeSocket {
+	override end(): void {
+		/* the test decides when this socket actually closes */
+	}
+}
+
+/** Same as `connectClient`, but the host's side of the pair lingers after `end()`. */
+function connectLingeringClient(server: FakeServer): { serverSide: LingeringSocket; send: (f: Frame) => void; frames: Frame[] } {
+	const client = new FakeSocket();
+	const serverSide = new LingeringSocket();
+	client.link(serverSide);
+	serverSide.link(client);
+	server.emit("connection", serverSide);
+	const { send, frames } = wireClient(client);
+	return { serverSide, send, frames };
+}
+
 async function waitFor(pred: () => boolean, timeoutMs = 1000): Promise<void> {
 	const start = Date.now();
 	while (!pred()) {
@@ -230,6 +250,82 @@ test("a client cannot register as the reserved supervisor handle", async () => {
 		send({ t: "register", handle: "supervisor" });
 		await waitFor(() => frames.some((f) => f.t === "error"));
 		assert.ok(!host.connectedHandles().includes("supervisor"));
+	} finally {
+		await host.close();
+	}
+});
+
+test("a second connection cannot take over an already-registered handle", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const a = connectClient(server);
+		a.send({ t: "register", handle: "child#1" });
+		await waitFor(() => a.frames.some((f) => f.t === "registered"));
+
+		const b = connectClient(server);
+		b.send({ t: "register", handle: "child#1" });
+		await waitFor(() => b.frames.some((f) => f.t === "error"));
+		assert.ok(!b.frames.some((f) => f.t === "registered"));
+
+		// The intruder going away must not tear down the live registration it collided with.
+		b.client.destroy();
+		await waitFor(() => host.connectedHandles().length === 1);
+		assert.ok(bus.participants().includes("child#1"));
+		bus.send("supervisor", "child#1", "still routed");
+		await waitFor(() => a.frames.some((f) => f.t === "deliver"));
+	} finally {
+		await host.close();
+	}
+});
+
+test("a second register on one socket is rejected instead of leaking the first handle", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const { client, send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+
+		send({ t: "register", handle: "child#2" });
+		await waitFor(() => frames.some((f) => f.t === "error"));
+		assert.ok(!bus.participants().includes("child#2"));
+
+		client.destroy();
+		await waitFor(() => host.connectedHandles().length === 0);
+		assert.ok(!bus.participants().includes("child#1"), "the first handle is not left behind");
+	} finally {
+		await host.close();
+	}
+});
+
+test("a socket that already said bye cannot unregister the handle a later connection claimed", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const a = connectLingeringClient(server);
+		a.send({ t: "register", handle: "child#1" });
+		await waitFor(() => a.frames.some((f) => f.t === "registered"));
+
+		// `bye` releases the handle immediately, but the socket's own `close` comes later —
+		// `handle` stays set on this connection, so its belated cleanup must not fire blind.
+		a.send({ t: "bye" });
+		await waitFor(() => host.connectedHandles().length === 0);
+
+		const b = connectClient(server);
+		b.send({ t: "register", handle: "child#1" });
+		await waitFor(() => b.frames.some((f) => f.t === "registered"));
+
+		a.serverSide.destroy(); // the departed socket finally closes
+		await new Promise((r) => setTimeout(r, 5));
+
+		assert.deepEqual(host.connectedHandles(), ["child#1"], "the new owner keeps the handle");
+		assert.ok(bus.participants().includes("child#1"));
+		bus.send("supervisor", "child#1", "still routed");
+		await waitFor(() => b.frames.some((f) => f.t === "deliver"));
 	} finally {
 		await host.close();
 	}

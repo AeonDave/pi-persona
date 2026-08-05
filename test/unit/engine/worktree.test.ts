@@ -54,3 +54,22 @@ test("withWorktree throws a clear error if the worktree cannot be created", asyn
 	const { exec } = fakeGit({ "worktree add": { code: 128 } });
 	await assert.rejects(() => withWorktree("/repo", exec, async () => "x"), /worktree/i);
 });
+
+test("withWorktree prunes the registration when `git worktree remove` fails", async () => {
+	// Windows: a grandchild tool process can still hold a file inside the worktree when cleanup
+	// runs, so `remove` exits non-zero. The dir is deleted anyway — without a prune the repo keeps
+	// a stale .git/worktrees entry, and they accumulate across delegations.
+	const { exec, calls } = fakeGit({ "worktree remove": { code: 1 } });
+	const out = await withWorktree("/repo", exec, async () => "result");
+	assert.equal(out, "result", "a cleanup failure never fails the body's result");
+	assert.ok(
+		calls.some((c) => c.includes("worktree") && c.includes("prune")),
+		"the stale registration was pruned",
+	);
+});
+
+test("withWorktree does not prune when the worktree was removed cleanly", async () => {
+	const { exec, calls } = fakeGit();
+	await withWorktree("/repo", exec, async () => "x");
+	assert.equal(calls.some((c) => c.includes("prune")), false, "no pruning of other live worktrees on the happy path");
+});

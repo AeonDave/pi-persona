@@ -21,6 +21,9 @@ function bundled(): string {
 	fs.writeFileSync(path.join(dir, "contracts", "v.contract.json"), "{}");
 	fs.mkdirSync(path.join(dir, "presets"));
 	fs.writeFileSync(path.join(dir, "presets", "p.preset.json"), "{}");
+	fs.mkdirSync(path.join(dir, "prompts"));
+	fs.writeFileSync(path.join(dir, "prompts", "spine.md"), "SPINE supervisor");
+	fs.writeFileSync(path.join(dir, "prompts", "spine.worker.md"), "SPINE worker");
 	fs.writeFileSync(path.join(dir, "teams.yaml"), "magi: [a, b, c]");
 	return dir;
 }
@@ -36,6 +39,29 @@ test("seedDefaults copies personas + agents into <user>/agents, and teams/flows/
 	assert.ok(fs.existsSync(path.join(u, "contracts", "v.contract.json")));
 	assert.ok(fs.existsSync(path.join(u, "presets", "p.preset.json")));
 	assert.equal(read(path.join(u, "teams.yaml")), "magi: [a, b, c]");
+});
+
+test("the spine pair is seeded FLAT into <user>, which is where `on` resolution looks for the user's own copy", () => {
+	// Without this, the documented "your own copy shadows the bundled one" precedence has no
+	// gesture that creates that copy — a user would have to know the filenames and write them by
+	// hand. The destination is deliberately the data dir itself, not a `prompts/` subfolder:
+	// that is the path resolveSpine is handed.
+	const u = userDir();
+	seedDefaults(bundled(), u, false);
+	assert.equal(read(path.join(u, "spine.md")), "SPINE supervisor");
+	assert.equal(read(path.join(u, "spine.worker.md")), "SPINE worker");
+	assert.ok(!fs.existsSync(path.join(u, "prompts")), "flat, not nested — a nested copy shadows nothing");
+});
+
+test("a seeded spine follows the same keep-edits / restore-originals rule as every other default", () => {
+	const b = bundled();
+	const u = userDir();
+	seedDefaults(b, u, false);
+	fs.writeFileSync(path.join(u, "spine.md"), "MY OWN LAYER");
+	seedDefaults(b, u, false);
+	assert.equal(read(path.join(u, "spine.md")), "MY OWN LAYER", "a non-forced seed keeps the layer the user wrote");
+	seedDefaults(b, u, true);
+	assert.equal(read(path.join(u, "spine.md")), "SPINE supervisor", "/persona restore brings the bundled text back");
 });
 
 test("on a persona/agent name collision the PERSONA owns the file (the builtin agent still loads)", () => {

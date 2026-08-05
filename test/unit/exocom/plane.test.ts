@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { endpoint } from "../../../src/exocom/paths.ts";
+import { endpoint, exocomRoot, registryPath } from "../../../src/exocom/paths.ts";
 import { ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
-import { registryEntryFixture, writeEntry } from "../../../src/exocom/registry.ts";
-import type { ExocomMessage } from "../../../src/exocom/envelope.ts";
+import { readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
+import { frameSigningPayload, type ExocomBye, type ExocomMessage } from "../../../src/exocom/envelope.ts";
+import { EXOCOM } from "../../../src/exocom/limits.ts";
 import { createFrameReader, encodeFrame } from "../../../src/bus/broker/framing.ts";
 
 let dir: string;
@@ -69,6 +71,50 @@ test("an oversize message spills to an artifact and sends {preview,path} inline 
 		assert.ok(payload.path.endsWith(".txt"));
 		assert.ok(payload.preview.length > 0 && payload.preview.length < big.length);
 		assert.equal(readFileSync(payload.path, "utf8"), big, "artifact holds the full text");
+	} finally { await a.stop(); await b.stop(); }
+});
+
+// EXOCOM.ARTIFACT_TTL_MS exists so a DELIVERED spill outlives the sender: the receiver only got
+// {preview,path} on the wire and reads `path` on a later idle-gated turn, often after the sender
+// has quit. Only a spill whose send never landed is the sender's to reap.
+test("a delivered artifact survives the sender's stop()", async () => {
+	const got: ExocomMessage[] = [];
+	const a = planeFor("spill-sender", () => {});
+	const b = planeFor("spill-reader", (m) => got.push(m));
+	await a.start();
+	await b.start();
+	try {
+		await a.send("spill-reader", "z".repeat(20_000));
+		await new Promise((r) => setTimeout(r, 100));
+		const payload = JSON.parse(got[0]?.text ?? "{}") as { path: string };
+		await a.stop();
+		assert.equal(readFileSync(payload.path, "utf8").length, 20_000, "the receiver can still read the handed-off artifact");
+	} finally { await a.stop(); await b.stop(); }
+});
+
+// A delivered spill is nobody's to reap until its TTL runs out, and the sweep that enforces that
+// TTL only fires on a plane start or the next spill — so the LAST session to use exocom in a
+// workspace is the one that has to close the loop, or expired payloads sit there forever.
+test("stop() reclaims expired artifacts while leaving a handed-off one for its reader", async () => {
+	const got: ExocomMessage[] = [];
+	const a = planeFor("ttl-sender", () => {});
+	const b = planeFor("ttl-reader", (m) => got.push(m));
+	await a.start();
+	await b.start();
+	try {
+		await a.send("ttl-reader", "w".repeat(20_000));
+		await new Promise((r) => setTimeout(r, 100));
+		const fresh = (JSON.parse(got[0]?.text ?? "{}") as { path: string }).path;
+
+		// An artifact an earlier session handed off and nothing has swept since.
+		const expired = join(exocomRoot(dir, "h"), "artifacts", `${randomUUID()}.txt`);
+		writeFileSync(expired, "an old payload");
+		const aged = (Date.now() - EXOCOM.ARTIFACT_TTL_MS - 60_000) / 1000;
+		utimesSync(expired, aged, aged);
+
+		await a.stop();
+		assert.equal(existsSync(expired), false, "the expired payload is reclaimed on the way out");
+		assert.equal(existsSync(fresh), true, "…while one still inside its TTL is left for the receiver's later turn");
 	} finally { await a.stop(); await b.stop(); }
 });
 
@@ -257,6 +303,186 @@ test("send() requires a correlated ACK and rejects invalid signature/session bin
 		await sender.stop();
 		await new Promise<void>((resolve) => rawServer.close(() => resolve()));
 	}
+});
+
+// An entry can be evicted while its instance is very much alive (a peer's transient send error,
+// or a >STALE_AFTER_MS stall making every peer prune it). The next heartbeat then RE-CREATES the
+// file, and writeEntry's preserve-from-disk step has nothing to preserve from — so the key must
+// come from the plane itself, or the instance stays unauthenticable for the rest of the session.
+test("heartbeat re-registration after entry loss keeps this instance authenticable", async () => {
+	const got: ExocomMessage[] = [];
+	const a = planeFor("key-sender", () => {});
+	const b = planeFor("key-loser", (m) => got.push(m));
+	await a.start();
+	await b.start();
+	try {
+		const bEntry = a.listPeers().find((p) => p.name === "key-loser")!;
+		removeEntry(dir, "h", bEntry.session_id);
+		b.heartbeat(registryEntryFixture({
+			session_id: bEntry.session_id, name: "key-loser", pid: process.pid, endpoint: bEntry.endpoint,
+			heartbeat_at: new Date().toISOString(),
+		}));
+		await a.send("key-loser", "still authenticable");
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 1);
+	} finally { await a.stop(); await b.stop(); }
+});
+
+// `bye` is the one frame that decides ANOTHER entry's fate, so the receiver resolves the claimed
+// sender in the registry and checks the signature against the key stored there. Departure is also
+// what keeps the pool from filling with entries only the 120s stale sweep would clear.
+test("a peer's own signed bye retires its entry and refreshes the pool; a forged one cannot", async () => {
+	let poolChanges = 0;
+	const receiverSession = `sid-bye-recv-${process.pid}-${seq++}`;
+	const receiverEndpoint = endpoint(dir, "h", receiverSession, process.platform);
+	const receiver = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: receiverSession, name: "bye-receiver", persona: "", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: receiverEndpoint, cwd: "/",
+		},
+		getCard: () => ({ name: "bye-receiver", persona: "", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true }),
+		onPoolChange: () => { poolChanges += 1; },
+	});
+	await receiver.start();
+
+	const leaverSession = `sid-bye-leaver-${process.pid}-${seq++}`;
+	const leaverKeys = generateKeyPairSync("ed25519");
+	const leaver = registryEntryFixture({
+		session_id: leaverSession, name: "leaver", pid: process.pid,
+		endpoint: endpoint(dir, "h", leaverSession, process.platform),
+		heartbeat_at: new Date().toISOString(),
+		public_key: leaverKeys.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+	});
+	const leaverFile = registryPath(dir, "h", sessionKey(leaverSession));
+
+	const sayBye = async (key: KeyObject): Promise<void> => {
+		const unsigned: ExocomBye = { kind: "bye", from_session: leaverSession, from_endpoint: leaver.endpoint };
+		const frame: ExocomBye = { ...unsigned, signature: cryptoSign(null, Buffer.from(frameSigningPayload(unsigned), "utf8"), key).toString("base64") };
+		await new Promise<void>((resolve) => {
+			const s = net.connect(receiverEndpoint);
+			s.once("connect", () => s.write(encodeFrame(frame), () => s.end()));
+			s.once("close", () => resolve());
+			s.once("error", () => resolve());
+		});
+		await new Promise((r) => setTimeout(r, 100));
+	};
+
+	try {
+		writeEntry(dir, "h", leaver);
+		await sayBye(generateKeyPairSync("ed25519").privateKey);
+		assert.equal(existsSync(leaverFile), true, "a bye signed by anyone else must not evict the peer it names");
+		assert.equal(poolChanges, 0, "…and must not even be reported as a pool change");
+
+		await sayBye(leaverKeys.privateKey);
+		assert.equal(existsSync(leaverFile), false, "the peer's own signed bye retires its entry");
+		assert.equal(poolChanges, 1, "…and refreshes the pool at once instead of waiting for the stale sweep");
+	} finally {
+		removeEntry(dir, "h", leaverSession);
+		await receiver.stop();
+	}
+});
+
+// ── displayNameFor: the delivery path needs a name, not a registry sweep ─────────────────
+
+test("displayNameFor matches listPeers()'s numbering without pruning the pool", async () => {
+	const a = planeFor("twin", () => {});
+	const b = planeFor("twin", () => {});
+	const viewer = planeFor("name-viewer", () => {});
+	await a.start();
+	await b.start();
+	await viewer.start();
+	// A live-but-lapsed instance: its heartbeat has aged past the stale window, so `listPeers()`
+	// would DELETE its entry — which is exactly what must not happen while resolving a name.
+	const lapsedSession = `sid-lapsed-${process.pid}-${seq++}`;
+	const lapsed = registryEntryFixture({
+		session_id: lapsedSession, name: "lapsed", pid: process.pid,
+		endpoint: endpoint(dir, "h", lapsedSession, process.platform),
+		heartbeat_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+	});
+	writeEntry(dir, "h", lapsed);
+	const lapsedFile = registryPath(dir, "h", sessionKey(lapsedSession));
+	try {
+		const peers = viewer.listPeers().filter((p) => p.name === "twin");
+		assert.equal(peers.length, 2, "both same-named peers are live");
+		for (const p of peers) {
+			assert.equal(viewer.displayNameFor(p), p.displayName, "the resolver agrees with the list's numbering");
+		}
+		assert.deepEqual(peers.map((p) => viewer.displayNameFor(p)).sort(), ["twin", "twin#2"]);
+
+		writeEntry(dir, "h", lapsed); // listPeers() above already reaped it — put it back
+		assert.equal(viewer.displayNameFor(lapsed), "lapsed", "an unlisted sender falls back to its own name");
+		assert.ok(existsSync(lapsedFile), "resolving a name left the registry alone");
+	} finally {
+		removeEntry(dir, "h", lapsedSession);
+		await a.stop();
+		await b.stop();
+		await viewer.stop();
+	}
+});
+
+// The delivery path calls this while a frame is in flight, and plane.ts turns a throw from
+// `onInbound` into a NACK — so a transient registry read error must never be able to reject a
+// message the transport already authenticated.
+test("an unreadable registry during name resolution does not turn delivery into a NACK", async () => {
+	const got: string[] = [];
+	let failPool = false;
+	let receiver: ExocomPlane;
+	const receiverSession = `sid-pool-fail-${process.pid}-${seq++}`;
+	receiver = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: receiverSession, name: "pool-fail", persona: "pool-fail", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", receiverSession, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "pool-fail", persona: "pool-fail", model: "m", context_pct: 0, inbox: 0 }),
+		readPool: (agentDir, hash): RegistryEntry[] => {
+			if (failPool) throw Object.assign(new Error("EIO: registry unreadable"), { code: "EIO" });
+			return readAll(agentDir, hash);
+		},
+		onInbound: (_m, fromEntry) => {
+			// Mirrors extension.ts's reply-hint resolution, which runs on this very callback.
+			failPool = true;
+			try {
+				got.push(receiver.displayNameFor(fromEntry!));
+			} finally {
+				failPool = false;
+			}
+			return { accepted: true };
+		},
+	});
+	const sender = planeFor("pool-sender", () => {});
+	await receiver.start();
+	await sender.start();
+	try {
+		await sender.send("pool-fail", "still deliverable");
+		await new Promise((r) => setTimeout(r, 100));
+		assert.deepEqual(got, ["pool-sender"], "the hint fell back to the authenticated entry's own name");
+	} finally { await sender.stop(); await receiver.stop(); }
+});
+
+test("an unreadable registry fails the sender lookup CLOSED instead of poisoning the connection", async () => {
+	const deaf = `sid-pool-deaf-${process.pid}-${seq++}`;
+	const receiver = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: deaf, name: "pool-deaf", persona: "pool-deaf", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", deaf, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "pool-deaf", persona: "pool-deaf", model: "m", context_pct: 0, inbox: 0 }),
+		readPool: (): RegistryEntry[] => { throw Object.assign(new Error("EIO: registry unreadable"), { code: "EIO" }); },
+		onInbound: () => ({ accepted: true }),
+	});
+	const sender = planeFor("deaf-sender", () => {});
+	await receiver.start();
+	await sender.start();
+	try {
+		// A signed NACK, not a destroyed socket — the latter reads as "unreachable" and would make
+		// the sender evict a peer that is merely having a bad moment with its filesystem.
+		await assert.rejects(() => sender.send("pool-deaf", "hi"), /rejected message: authentication failed/);
+		assert.ok(readAll(dir, "h").some((e) => e.session_id === deaf), "the receiver's entry survived the failed send");
+	} finally { await sender.stop(); await receiver.stop(); }
 });
 
 test("receiver NACKs a rejected delivery, while duplicate acceptance ACKs without recounting", async () => {

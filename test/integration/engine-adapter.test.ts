@@ -13,7 +13,6 @@ const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAK
 const SCOUT: AgentConfig = {
 	name: "scout",
 	systemPrompt: "You are scout.",
-	systemPromptMode: "replace",
 	source: "x",
 	model: "m",
 	tools: ["read"],

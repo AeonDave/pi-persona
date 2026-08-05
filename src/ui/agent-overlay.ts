@@ -158,6 +158,10 @@ export class AgentOverlay extends Container {
 		const node = this.tree.snapshot().find((n) => n.id === this.detailId);
 		if (!node) {
 			this.detailId = undefined;
+			// The compose belonged to *that* agent — drop it, or the next drill-in would
+			// re-open it pre-filled and send it to a different sub-agent.
+			this.steering = false;
+			this.steerBuffer = "";
 			this.renderList();
 			return;
 		}
@@ -234,6 +238,7 @@ export class AgentOverlay extends Container {
 			}
 			if (keyData === "s" && (this.canSteer?.(this.detailId) ?? false)) {
 				this.steering = true;
+				this.steerBuffer = "";
 				this.refresh();
 			} else if (keyData === "x") this.tryStop(this.detailId);
 			else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { closeSync, mkdtempSync, openSync, readdirSync, renameSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { prune, readAll, registryEntryFixture, removeEntry, writeEntry } from "../../../src/exocom/registry.ts";
+import { agentsDir, registryPath } from "../../../src/exocom/paths.ts";
+import { prune, readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
 
 let dir: string;
 before(async () => { dir = await mkdtemp(join(tmpdir(), "exo-reg-")); });
@@ -47,6 +49,77 @@ test("removeEntry takes a session_id and deletes the right file", () => {
 	removeEntry(dir, H, "gone-sess");
 	const remaining = readAll(dir, H).filter((e) => e.name === "gone");
 	assert.deepEqual(remaining.map((e) => e.session_id), ["stays-sess"], "only the targeted session_id's file is removed");
+});
+
+// The preserve-from-disk step below only covers the file-STILL-EXISTS case. An entry can be
+// evicted while its instance is very much alive (a peer's transient send error calls removeEntry,
+// or a >STALE_AFTER_MS stall lets every peer prune it), and the next heartbeat RE-CREATES the
+// file from scratch — with nothing on disk to preserve from. The key exists nowhere but the
+// writing process, so writeEntry remembers the keys IT registered; otherwise a live instance
+// becomes permanently unverifiable (every frame it signs fails verifyFrameOrigin) for the rest of
+// the session, no matter which caller does the heartbeat.
+test("a heartbeat that re-creates a DELETED entry still carries the key this process registered", () => {
+	const publicKey = Buffer.from("resurrect-ed25519-key").toString("base64");
+	writeEntry(dir, H, entry({ session_id: "evicted-session", name: "before", public_key: publicKey }));
+	removeEntry(dir, H, "evicted-session");
+	writeEntry(dir, H, entry({ session_id: "evicted-session", name: "after" }));
+	const stored = readAll(dir, H).find((e) => e.session_id === "evicted-session");
+	assert.equal(stored?.name, "after", "the re-registration carries the fresh metadata");
+	assert.equal(stored?.public_key, publicKey, "a re-CREATED entry stays authenticable");
+});
+
+test("the in-process key memo is per-session_id — it never lends one instance's key to another", () => {
+	writeEntry(dir, H, entry({ session_id: "keyed-one", name: "keyed", public_key: Buffer.from("k1").toString("base64") }));
+	writeEntry(dir, H, entry({ session_id: "keyless-two", name: "keyless" }));
+	const stored = readAll(dir, H).find((e) => e.session_id === "keyless-two");
+	assert.equal(stored?.public_key, undefined, "a session that never registered a key gets none");
+});
+
+test("a heartbeat falls back to an in-place write when the rename can never win (a contended entry)", () => {
+	// Windows: renameSync throws EPERM while ANY other handle holds the target open (Defender, the
+	// search indexer, a peer mid-read). Losing the heartbeat drops this instance out of every
+	// peer's pool, so a write that lands beats one that is atomic.
+	const own = mkdtempSync(join(tmpdir(), "exo-reg-lock-"));
+	const waits: number[] = [];
+	writeEntry(own, H, entry({ session_id: "locked-sess", name: "locked" }), {
+		rename: () => {
+			throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+		},
+		sleep: (ms) => waits.push(ms),
+	});
+	assert.deepEqual(readAll(own, H).map((e) => e.name), ["locked"], "the heartbeat persisted anyway");
+	assert.ok(waits.length > 0, "the contended rename was retried before giving up");
+	const dirFiles = readdirSync(agentsDir(own, H));
+	assert.deepEqual(dirFiles.filter((f) => !f.endsWith(".json")), [], "no scratch temp file is left behind");
+});
+
+test("a heartbeat retries a contended rename and keeps the atomic path when it wins", () => {
+	const own = mkdtempSync(join(tmpdir(), "exo-reg-retry-"));
+	let attempts = 0;
+	writeEntry(own, H, entry({ session_id: "busy-sess", name: "busy" }), {
+		rename: (from, to) => {
+			attempts++;
+			if (attempts === 1) throw Object.assign(new Error("EBUSY: resource busy"), { code: "EBUSY" });
+			renameSync(from, to);
+		},
+		sleep: () => {},
+	});
+	assert.equal(attempts, 2, "the second attempt renamed");
+	assert.deepEqual(readAll(own, H).map((e) => e.name), ["busy"]);
+});
+
+test("a heartbeat lands while another process holds the entry open for reading", () => {
+	// The routine Windows case the two tests above simulate, played for real: an open handle can
+	// block the rename but never the write.
+	const own = mkdtempSync(join(tmpdir(), "exo-reg-open-"));
+	writeEntry(own, H, entry({ session_id: "held-sess", name: "before" }));
+	const held = openSync(registryPath(own, H, sessionKey("held-sess")), "r");
+	try {
+		writeEntry(own, H, entry({ session_id: "held-sess", name: "after" }));
+	} finally {
+		closeSync(held);
+	}
+	assert.deepEqual(readAll(own, H).map((e) => e.name), ["after"], "the heartbeat landed despite the open handle");
 });
 
 test("heartbeat rewrite preserves the existing public_key for the same session_id", () => {
