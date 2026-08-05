@@ -10,7 +10,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 
 - Typecheck (must stay clean): `npm run typecheck`  (`tsc --noEmit`, strict)
 - All tests: `npm test` · unit only: `npm run test:unit`
-- One file: `node --import tsx --test test/unit/core/frontmatter.test.ts`
+- One file: `node --import tsx --import ./test/setup/hermetic-env.ts --test test/unit/core/frontmatter.test.ts`
+  - The second `--import` is the hermeticity choke point: it strips the whole `PI_PERSONA_*`
+    namespace and pins `PI_AGENT_DIR` at a throwaway dir before any test module loads, so a
+    variable exported in your shell (or by CI) cannot reconfigure the extension under the suite.
+    A test that exercises a variable sets it for itself, after that has run. Drop the flag and you
+    are testing your shell, not the code.
 - Live end-to-end (REAL model calls, spends tokens): `npm run drive -- --persona <name> --model <provider/id> "<prompt>"`
   - Control ops: `LIVE_MODEL=<provider/id> node --import tsx scripts/control-test.mjs` (STEER/STOP/RESUME)
   - Models must be **provider-qualified**, e.g. `claude-pro-max-native/claude-opus-4-8` or `.../claude-haiku-4-5`.

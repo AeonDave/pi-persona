@@ -4,10 +4,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { tempDir } from "../setup/temp-dir.ts";
 import { loadContracts, loadDefinitions, loadTeams } from "../../src/loader.ts";
 
 function tmp(files: Record<string, string>): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-test-"));
+	const dir = tempDir("pi-persona-test-");
 	for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
 	return dir;
 }

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { closeSync, mkdtempSync, openSync, readdirSync, renameSync } from "node:fs";
+import { closeSync, openSync, readdirSync, renameSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { tempDir } from "../../setup/temp-dir.ts";
 import { agentsDir, registryPath } from "../../../src/exocom/paths.ts";
 import { prune, readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
 
@@ -79,7 +80,7 @@ test("a heartbeat falls back to an in-place write when the rename can never win 
 	// Windows: renameSync throws EPERM while ANY other handle holds the target open (Defender, the
 	// search indexer, a peer mid-read). Losing the heartbeat drops this instance out of every
 	// peer's pool, so a write that lands beats one that is atomic.
-	const own = mkdtempSync(join(tmpdir(), "exo-reg-lock-"));
+	const own = tempDir("exo-reg-lock-");
 	const waits: number[] = [];
 	writeEntry(own, H, entry({ session_id: "locked-sess", name: "locked" }), {
 		rename: () => {
@@ -94,7 +95,7 @@ test("a heartbeat falls back to an in-place write when the rename can never win 
 });
 
 test("a heartbeat retries a contended rename and keeps the atomic path when it wins", () => {
-	const own = mkdtempSync(join(tmpdir(), "exo-reg-retry-"));
+	const own = tempDir("exo-reg-retry-");
 	let attempts = 0;
 	writeEntry(own, H, entry({ session_id: "busy-sess", name: "busy" }), {
 		rename: (from, to) => {
@@ -111,7 +112,7 @@ test("a heartbeat retries a contended rename and keeps the atomic path when it w
 test("a heartbeat lands while another process holds the entry open for reading", () => {
 	// The routine Windows case the two tests above simulate, played for real: an open handle can
 	// block the rename but never the write.
-	const own = mkdtempSync(join(tmpdir(), "exo-reg-open-"));
+	const own = tempDir("exo-reg-open-");
 	writeEntry(own, H, entry({ session_id: "held-sess", name: "before" }));
 	const held = openSync(registryPath(own, H, sessionKey("held-sess")), "r");
 	try {

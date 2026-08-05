@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
+import { tempDir } from "../../setup/temp-dir.ts";
 import { seedDefaults } from "../../../src/core/seed.ts";
 
 /** A throwaway bundled layout (personas + agents + teams + flows + contracts + presets). */
 function bundled(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-bundled-"));
+	const dir = tempDir("pi-persona-bundled-");
 	fs.mkdirSync(path.join(dir, "personas"));
 	fs.writeFileSync(path.join(dir, "personas", "sample.md"), "PERSONA sample");
 	fs.writeFileSync(path.join(dir, "personas", "reviewer.md"), "PERSONA reviewer"); // collides with the agent below
@@ -27,7 +27,7 @@ function bundled(): string {
 	fs.writeFileSync(path.join(dir, "teams.yaml"), "magi: [a, b, c]");
 	return dir;
 }
-const userDir = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-user-"));
+const userDir = (): string => tempDir("pi-persona-user-");
 const read = (p: string): string => fs.readFileSync(p, "utf8");
 
 test("seedDefaults copies personas + agents into <user>/agents, and teams/flows/contracts/presets into their dirs", () => {
@@ -84,7 +84,7 @@ test("force=false keeps a user edit; force=true restores the bundled original", 
 });
 
 test("seedDefaults tolerates a bundled dir missing some asset folders", () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-persona-partial-"));
+	const dir = tempDir("pi-persona-partial-");
 	fs.mkdirSync(path.join(dir, "personas"));
 	fs.writeFileSync(path.join(dir, "personas", "a.md"), "x"); // only personas
 	const u = userDir();
