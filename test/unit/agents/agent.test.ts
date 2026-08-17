@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { parseAgent } from "../../../src/agents/agent.ts";
 
@@ -37,6 +38,29 @@ test("parseAgent accepts tools written as an inline list", () => {
 	assert.deepEqual(a?.tools, ["read", "web_search"]);
 });
 
+test("parseAgent preserves an explicit empty tool allowlist as deny-all", () => {
+	const a = parseAgent("---\nname: locked\ntools: []\n---\nbody", "/s");
+	assert.deepEqual(a?.tools, [], "undefined means session defaults; [] must remain an explicit no-tools grant");
+});
+
+test("parseAgent preserves a tools deny block instead of silently granting the session default", () => {
+	const a = parseAgent("---\nname: research\ntools:\n  deny: [edit]\n---\nbody", "/s");
+	assert.deepEqual(a?.excludeTools, ["edit"]);
+	assert.equal(a?.tools, undefined);
+});
+
+test("parseAgent preserves both allow and deny tool lists", () => {
+	const a = parseAgent("---\nname: bounded\ntools:\n  allow: [read, grep, edit]\n  deny: [edit]\n---\nbody", "/s");
+	assert.deepEqual(a?.tools, ["read", "grep", "edit"]);
+	assert.deepEqual(a?.excludeTools, ["edit"]);
+});
+
+test("the bundled research worker really denies edit at runtime", () => {
+	const source = new URL("../../../agents/research.md", import.meta.url);
+	const agent = parseAgent(readFileSync(source, "utf8"), source.pathname);
+	assert.deepEqual(agent?.excludeTools, ["edit"]);
+});
+
 test("parseAgent reads isolation: worktree (else undefined)", () => {
 	assert.equal(parseAgent("---\nname: s\nisolation: worktree\n---\nbody", "/s")?.isolation, "worktree");
 	assert.equal(parseAgent("---\nname: s\n---\nbody", "/s")?.isolation, undefined);
@@ -63,5 +87,6 @@ test("parseAgent leaves optional fields undefined when absent", () => {
 	const a = parseAgent("---\nname: bare\n---\nJust a prompt.", "/s");
 	assert.equal(a?.model, undefined);
 	assert.equal(a?.tools, undefined);
+	assert.equal(a?.excludeTools, undefined);
 	assert.equal(a?.systemPrompt, "Just a prompt.");
 });

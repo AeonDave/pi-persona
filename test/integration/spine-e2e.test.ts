@@ -17,6 +17,7 @@ const AGENTS: Record<string, AgentConfig> = { a: mk("a"), b: mk("b"), c: mk("c")
 test("full spine: fanout strategy → SDK → engine adapter → real child processes → aggregate", async () => {
 	const engine = makeEngine({
 		resolveAgent: (n) => AGENTS[n],
+		spine: "SPINE E2E SENTINEL",
 		childOptions: { resolveInvocation: resolveFake },
 	});
 	const sdk = makeSDK({ engine, roster: { team: (n) => (n === "review" ? ["a", "b", "c"] : []) }, limits: LIMITS });
@@ -24,13 +25,15 @@ test("full spine: fanout strategy → SDK → engine adapter → real child proc
 	const fanout = getStrategy("fanout");
 	assert.ok(fanout, "fanout strategy is registered");
 
-	const result = await fanout.run({ task: "audit this", roster: "review", params: {} }, sdk);
+	const result = await fanout.run({ task: "audit this [sysprompt]", roster: "review", params: {} }, sdk);
 
 	assert.equal(result.ok, true);
 	assert.equal(result.structured?.count, 3);
 	assert.match(result.output, /\[a\]/);
 	assert.match(result.output, /\[b\]/);
 	assert.match(result.output, /\[c\]/);
-	assert.match(result.output, /echo: Task: audit this/);
-	assert.ok(result.usage.input >= 15, "usage summed across 3 children (5 each)");
+	assert.match(result.output, /sysprompt: SPINE E2E SENTINEL\n\nYou are a\./);
+	assert.match(result.output, /sysprompt: SPINE E2E SENTINEL\n\nYou are b\./);
+	assert.match(result.output, /sysprompt: SPINE E2E SENTINEL\n\nYou are c\./);
+	assert.ok(result.usage.input >= 3, "usage summed across all 3 child-process prompt probes");
 });

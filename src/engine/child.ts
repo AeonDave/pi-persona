@@ -16,6 +16,7 @@ export interface ChildRunSpec {
 	task: string;
 	model?: string;
 	tools?: string[];
+	excludeTools?: string[];
 	systemPrompt?: string;
 	cwd?: string;
 }
@@ -158,7 +159,11 @@ export async function runChildAgent(
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (spec.model) args.push("--model", spec.model);
-	if (spec.tools && spec.tools.length > 0) args.push("--tools", spec.tools.join(","));
+	if (spec.tools !== undefined) {
+		if (spec.tools.length > 0) args.push("--tools", spec.tools.join(","));
+		else args.push("--no-tools");
+	}
+	if (spec.excludeTools && spec.excludeTools.length > 0) args.push("--exclude-tools", spec.excludeTools.join(","));
 
 	let prompt: { path: string; cleanup: () => void } | undefined;
 	if (spec.systemPrompt?.trim()) {

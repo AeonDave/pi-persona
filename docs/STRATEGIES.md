@@ -55,14 +55,14 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 | `fanout` | Every roster agent on the same task in parallel, then `aggregate`. | — | roster-role |
 | `pipeline` | Roster in SEQUENCE, each builds on the prior output; answer = last step. | — | roster-role |
 | `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1, the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false) | roster-role, opt-in peers |
-| `critic-loop` | Generator proposes, critic attacks; revise while the critic's stance is `reject`, up to `rounds`. | `generator` (roster[0]), `critic` (roster[1]), `rounds` (3) | roster-role, `outputContract` |
+| `critic-loop` | Generator proposes, critic attacks; `reject`/`revise` triggers another draft, and only explicit `approve` succeeds. Exhaustion fails closed with the last reviewed draft + unresolved critique (never an unreviewed tail revision). | `generator` (roster[0]), `critic` (roster[1]), `rounds` (positive integer, 3) | roster-role, `outputContract` |
 | `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. | `aggregate` ("majority"), `reflect` (true) | vote reducer |
 | `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
 | `debate` | 2+ members work the same task in parallel and exchange positions LIVE via `contact_peer`, then a majority vote settles it. | `bestOf` (majority), `aggregate` ("majority") | **peers always**, vote reducer |
-| `judge` | A panel answers in parallel; one impartial arbiter picks on an anonymised, shuffled ballot. | `judge` (required), `contract` (none) | judge reducer |
+| `judge` | A panel answers in parallel; one impartial arbiter picks on an anonymised, shuffled ballot. Only a successful arbiter result can select a winner; partial structured output from a failed/aborted arbiter fails closed. | `judge` (required), `contract` (none) | judge reducer |
 | `synthesize` | Parallel gatherers → one synthesiser merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks). | `synthesizer` (roster[0]), `peers` (false) | roster-role, opt-in peers |
 | `pair` | A driver executes while a navigator inspects the same ground live (risk checklist up front, corrections per milestone, final review attached). | — | **peers always** (both legs) |
-| `compete` | N competitors implement the same task in ISOLATED git worktrees; a blind judge picks; the winner is returned as a unified diff for the SUPERVISOR to apply. | `judge` (required), `ballotDiffChars` (6000) | **`isolation: worktree`**, judge reducer |
+| `compete` | N competitors implement the same task in ISOLATED git worktrees; a successful blind judge picks; the winner is returned as a unified diff for the SUPERVISOR to apply. If judging fails, every valid diff is returned unjudged and the strategy fails closed. | `judge` (required), `ballotDiffChars` (6000) | **`isolation: worktree`**, judge reducer |
 
 `fanout`, `pipeline`, `pair` read no params and omit the schema.
 
@@ -159,6 +159,9 @@ per-call:
 The mandatory `orchestration:` path fires pre-turn on the raw user text, so it takes no dynamic
 per-call params (author params are threaded intact) — that is the difference between the two modes:
 `council:` is convened on demand and fully overridable; `orchestration:` runs the shape automatically.
+Its runtime status survives the hand-off into the supervisor turn: only `ok:true` is presented as a
+ruling. A failed, cancelled, or unresolved run is visibly labelled as such, keeps its fenced evidence,
+and must be repaired/re-verified rather than being laundered into a completion claim.
 
 ## Adding a strategy
 

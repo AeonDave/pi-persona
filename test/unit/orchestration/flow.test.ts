@@ -291,6 +291,47 @@ test("runFlow blocks dependents when an upstream phase fails", async () => {
 	assert.match(outcome.results.b?.error ?? "", /blocked/);
 });
 
+test("runFlow exposes an empty failed sink as readable outcome metadata and text", async () => {
+	const r = parseFlow(flow([{ id: "only", strategy: "s" }]));
+	assert.ok(r.ok);
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async () => ({
+			agent: "only",
+			output: "",
+			usage: usage(),
+			ok: false,
+			error: "provider unavailable",
+			failureKind: "provider" as const,
+		}),
+	});
+	assert.equal(outcome.ok, false);
+	assert.equal(outcome.failedPhase, "only");
+	assert.equal(outcome.error, "provider unavailable");
+	assert.equal(outcome.failureKind, "provider");
+	assert.match(outcome.output, /only/);
+	assert.match(outcome.output, /provider unavailable/);
+});
+
+test("runFlow keeps cancellation authoritative in metadata and output", async () => {
+	const r = parseFlow(flow([{ id: "only", strategy: "s" }]));
+	assert.ok(r.ok);
+	const ac = new AbortController();
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		signal: ac.signal,
+		abortGraceMs: 10,
+		runPhase: async () => {
+			ac.abort();
+			return new Promise<AgentResult>(() => { /* ignores cancellation */ });
+		},
+	});
+	assert.equal(outcome.cancelled, true);
+	assert.equal(outcome.failureKind, "abort");
+	assert.equal(outcome.error, "cancelled: the flow run was aborted");
+	assert.match(outcome.output, /cancelled/i);
+});
+
 test("runFlow treats a throwing runPhase as a failed phase (not a crashed DAG)", async () => {
 	const r = parseFlow(flow([{ id: "a", strategy: "s" }, { id: "b", strategy: "s", needs: ["a"] }]));
 	assert.ok(r.ok);

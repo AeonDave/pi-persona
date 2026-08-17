@@ -87,6 +87,10 @@ test("rosterSpec carries tools/isolation/mcp through to the run spec (parity wit
 	assert.deepEqual(rosterSpec(member), { agent: "operator", tools: ["read", "grep"], isolation: "worktree", mcp: true });
 });
 
+test("rosterSpec preserves an explicit empty tool allowlist", () => {
+	assert.deepEqual(rosterSpec({ agent: "locked", tools: [] }), { agent: "locked", tools: [] });
+});
+
 test("rosterSpec preserves explicit isolation: none and mcp: false overrides", () => {
 	assert.deepEqual(rosterSpec({ agent: "operator", isolation: "none", mcp: false }), {
 		agent: "operator",

@@ -18,7 +18,7 @@ persona/identity — into one cohesive, cross-OS, data-driven codebase.
 | Thing | Is | Lives in |
 |---|---|---|
 | **Persona** | the control surface: a supervisor identity (system-prompt body) + how it orchestrates | `personas/*.md` (`persona: true`) |
-| **Agent** | a unit of work that gets spawned (prompt + model + tools); does not orchestrate | `agents/*.md` |
+| **Agent** | a unit of work that gets spawned (prompt + model + enforced tool allow/deny); does not orchestrate | `agents/*.md` |
 | **Strategy** | an execution shape (vote, loop, fan-out) authored as code on the SDK | `src/orchestration/strategies/*.ts` |
 | **Flow** | a declarative DAG that composes strategies into phases with `needs` edges + gates | `flows/*.flow.json` |
 | **Team** | a named roster of agents a strategy runs over | `teams.yaml` |
@@ -28,6 +28,15 @@ A persona binds to an orchestration mode → which selects a built-in shape or a
 runs over a roster of agents → lowering to engine primitives + deterministic JS reducers. A persona
 file *is* an agent file with `persona: true` plus the orchestration grammar; one frontmatter engine
 parses both.
+
+Persona names are data, never dispatch keys. Optional `delegation:` fields apply generic gates to any
+builtin, user, or project persona: `requireBrief`, `outputContract`, `requireDisjointWrites`,
+`requireFreshVerification`, and `verificationAgents`. Council behavior remains independently
+declarative through `council: { strategy, roster, params }`; a custom persona can compose any installed
+strategy/team without a core change. The gates use effective agent/tool capabilities, conservatively
+treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
+concurrency in both synchronous and background execution. A serialized verifier is accepted only
+after every material writer in that batch; otherwise the call fails before a child starts.
 
 ### The effort ladder (make the simple case simple; complexity is opt-in)
 
@@ -69,8 +78,10 @@ These are the guardrails a contributor must not violate. They are enforced in co
 - **I4 — Capabilities enforced at call time, never prompt-only.** Every tool call, delegate, and bus
   action passes one `EffectiveCapabilities` (`core/capabilities.ts`: `tools`, `delegateTargets`,
   `canUseBus`), resolved once on persona activation (deny-wins; `allow` present ⇒ allowlist; absent ⇒
-  default-allow). Prompt text is advisory only. Restricting `tools` keeps `delegate` unless explicitly
-  denied; `canUseBus` is OFF only when the persona explicitly denies `intercom`.
+  default-allow). Prompt text is advisory only. Declarative delegation gates are checked before spawn:
+  required briefs, contract defaults, parallel write ownership/overlap, and stale concurrent verifier
+  topology. Restricting `tools` keeps `delegate` unless explicitly denied; `canUseBus` is OFF only when
+  the persona explicitly denies `intercom`.
 - **I5 — Flows are the top tier.** A declarative DAG (statically verified: acyclicity, references
   resolve, join reducers valid) above strategies. The flow engine stays thin — parse, verify,
   schedule, persist, resume — and a flow node may call any strategy. Journaled: finished nodes replay
@@ -79,6 +90,8 @@ These are the guardrails a contributor must not violate. They are enforced in co
   first-class cases: *opportunistic* (`mode: solo` / no block — the supervisor MAY delegate by its own
   judgement; never forced) and *mandatory* (`mode: strategy|flow|parallel|pipeline` with a roster —
   the engine runs the shape; the LLM can't opt out, only do its part). A persona picks exactly one.
+  Mandatory hand-off preserves runtime status: only `ok:true` becomes a ruling; failure/cancellation
+  remains visibly unresolved and its fenced output is evidence, never an implicit success.
 - **I7 — Adoption is a success criterion.** The opportunistic path must be *engineered to actually
   fire* — under-delegation is the explicit failure to avoid. The `delegate` tool description is
   compelling and model-agnostic; opportunistic persona bodies coach delegation with concrete
@@ -95,7 +108,8 @@ These are the guardrails a contributor must not violate. They are enforced in co
   SDK), `flows/*.flow.json` — all lower to engine primitives + JS reducers. Built-in strategies ship
   **as files** and double as reference examples.
 - **D4 — Personas are a thin layer over orchestration.** persona = identity + optional default
-  strategy/flow + the declarative grammar; the persona file is the control surface.
+  strategy/flow/council + generic delegation policy; the persona file is the control surface. Runtime
+  code must not branch on a persona name.
 - **D5 — Bias mitigations baked into the reducers.** Anonymise authors, shuffle order, keep-best
   fallback, preserved dissent, invalid-output quarantine — deterministic JS, safe by default (see
   [STRATEGIES.md](STRATEGIES.md#bias-guard-invariants-do-not-fix-these)).
@@ -124,6 +138,8 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
   (`fenceUntrusted` / `attributeInbound`), `models`, `brief` (`buildDelegationBrief` — the per-turn
   delegation brief: live roster + standing hand-off default, rendered to the system-prompt tail),
   `nudge` (the two runtime-reinforcement state machines, `DelegationNudge` + `PersistenceNudge`),
+  `display-label` (`sanitizeDisplayLabel` — an untrusted name reduced to bounded identifier metadata
+  before it is interpolated outside a fence),
   `timer` (`TimerScheduler` — the pure alarm engine behind the supervisor `timer` tool; on fire it
   wakes the session through the same idle-gated delivery as async completions), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
@@ -146,7 +162,9 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
   `persona.ts` for supervisor turns and in the engines for delegated legs).
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
-  tools). **`src/ui/`** — agent tree/overlay, model picker, `usage.ts` (token/usage formatting).
+  tools). **`src/ui/`** — agent tree/overlay, model picker, `presentation.ts` (the shared
+  card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
+  (token/usage formatting).
 - **`src/loader.ts`** — the discovery loader (`loadDefinitions`/`loadContracts`/`loadPresets`/
   `loadTeams`), the concrete read-side of the discovery precedence table.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
@@ -175,6 +193,18 @@ first real progress cancels it, so a slow-but-streaming turn is never touched. A
 - **ChildProcessEngine** (`PI_PERSONA_ENGINE=child`, the correctness baseline) — spawns `pi --mode
   json -p`, delivering the task over **stdin** (never argv — a flow-phase task would blow Windows'
   ~32 KiB command-line cap). The path worktree isolation always uses the child engine.
+
+Tool grants have three distinct states on both engines: absent inherits Pi's session defaults,
+a non-empty array is an allowlist, and an explicit empty array means no tools (`--no-tools`
+on the child backend). Denylists are then applied independently through `excludeTools` /
+`--exclude-tools`; no mapper may collapse the empty grant into the absent/default state.
+
+`isolation: worktree` is fail-closed. It requires a clean Git checkout so the detached `HEAD` view
+cannot silently omit staged/unstaged/untracked supervisor work. A non-repository, dirty checkout,
+worktree creation failure, successful leg without a real unified-diff artifact, or artifact over the
+bounded return limit fails the leg; the base engine is never invoked against the user's real tree as
+an isolation fallback. The generated diff is returned to the supervisor before the temporary tree is
+removed.
 
 `buildEngine` wraps the chosen backend with **provider fallback** (`engine/fallback.ts`): a run whose
 model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on the same model
@@ -287,6 +317,32 @@ Steering is always a Bus action; the peek digest is always a read-only ProgressV
   supervisor side (intercom, idle notifier, f9, peek) is unchanged BY CONSTRUCTION. Off by default ⇒
   the host never starts and the child spawns byte-identical to pre-broker pi-persona.
 
+### Presentation is a projection, not another comm plane
+
+The semantic payload and its human presentation have different lifetimes. A result remains complete
+for the supervisor and for explicit retrieval; the default TUI projection is deliberately small:
+
+- async completions are coalesced and bounded fairly across legs; `intercom { action: "result", to:
+  "<run-id>" }` retrieves one retained result in full and consumes a still-pending duplicate
+  notification;
+- collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
+  Pi's configured expand-key hint. Each surfaces failure at the top of its own card in the shape it
+  has: the delegate card **sorts** failed legs ahead of successful ones (`extension.ts`), a failed
+  council/flow card leads with the cause in its title, and an `intercom wait` card leads with the
+  `N settled — X done, Y failed` tally (the per-leg causes sit in the body, below the preview cut —
+  `buildCompletionReport` emits DONE blocks before the failure block, and `wait` reports
+  `details.ok: true` because the *wait* succeeded, so the card gets no `failed` prefix);
+- follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
+  preview until expanded; terminal escape/control sequences are removed from the visible projection;
+- the sticky agent and exocom widgets have fixed row budgets. F9/`/agents` and paginated
+  `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot
+  permanently push the editor off screen or dump an entire peer registry into model context;
+- `/flow` and `/orchestrate` append durable, TUI-only expandable result entries. They do not dump a
+  large notification and do not add a second copy to the model context.
+
+This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
+underlying result or changing a strategy's contract.
+
 ## exocom — the external plane
 
 A separate plane (`src/exocom/`) from everything above, with a different shape entirely: every plane
@@ -302,15 +358,23 @@ external comm.)
   back to one that allows it rejoins. OFF ⇒ no bind, no registry entry, no tools registered.
 - **Discovery — a workspace-scoped file registry, not an elected hub.** Each instance binds its own
   socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
-  `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<session-id>.json`, and heartbeats it; discovery is
+  `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<session-key>.json` (`sessionKey` — a hash of
+  the session id, so the name is path-safe; a read drops any entry whose filename is not the hash of
+  its own `session_id`), and heartbeats it; discovery is
   just reading that directory. Dead-pid and stale-heartbeat entries are pruned on read — no host
   election, no failover, genuinely peer-to-peer.
 - **Interaction model — one-way + async reply, never blocking.** `exocom_send` returns a `msg_id`
   immediately; a reply is just another `exocom_send` with `in_reply_to` set, delivered back as a
   correlated follow-up — no blocking await, no mutual-wait deadlock class. `target: "*"` broadcasts to
   every live peer (best-effort; one unreachable peer doesn't fail the rest).
-- **Identity is session-stable, persona is presence metadata.** Each instance gets a collision-aware
-  call-sign (`orion`, `vega`, …) derived from its session id and independent of persona. Persona,
+- **Reply routing is session-stable.** `exocom_list` keeps human display names (`name`/`name#2`),
+  while inbound reply hints use `name@<96-bit session hash>`. The authenticated registry entry
+  (endpoint and signing key) is cached with the bounded inbound context, so a stale/pruned sender
+  cannot be retargeted to a same-name twin and its live socket can still receive the reply.
+- **Identity is session-stable, persona is presence metadata.** Each instance starts with a
+  collision-aware call-sign (`orion`, `vega`, …) derived from its session id and independent of
+  persona; `exocom_name` replaces that display label only — the registry entry stays keyed by the
+  session, so a rename cannot take over another peer's slot or its inbound replies. Persona,
   model, and context usage are refreshed on heartbeat; changing persona never changes the registry
   key or grants authority over another peer.
 - **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
@@ -322,12 +386,25 @@ external comm.)
   from the registry entry keyed by the connecting session, never the envelope's self-reported
   `from_name`, so a peer cannot spoof its identity. A message over the inline budget spills to a
   workspace-scoped artifact file (a small preview stays inline) rather than landing whole in the
-  receiver's context. Guardrails: a hop cap, a per-sender rate+byte budget, and a (sender, msg_id)
-  dedup set so an at-least-once resend can't double-trigger a turn.
-- **Tools are lazy and fail closed.** `exocom_list` exposes presence and
-  `exocom_send({ target, message, in_reply_to? })` sends one-way messages. Pi has no dynamic
+  receiver's context. The spill is an exact, validated descriptor (`preview`, `path`, `size`) rendered
+  as readable fenced metadata; arbitrary JSON is ordinary peer text, and an inline-only truncation
+  never claims that an artifact exists. Guardrails: a hop cap, a per-sender rate+byte budget, and a (sender, msg_id)
+  dedup set so an at-least-once resend can't double-trigger a turn. Reply-hop history is keyed by
+  that same sender identity, so two peers reusing a `msg_id` cannot reset each other's loop depth.
+  Registry cleanup is ownership-aware (`session_id` + endpoint + signing key) and atomically claims
+  an entry before deletion, so a failed/replaced session cannot erase the live replacement's slot;
+  socket-file cleanup is likewise conditional on that plane having completed the bind itself.
+- **Tools are lazy and fail closed.** `exocom_list({ offset?, limit? })` exposes bounded, paginated
+  presence (with exact totals and `nextOffset`),
+  `exocom_send({ target, message, in_reply_to? })` sends one-way messages, and
+  `exocom_name({ name })` rebrands this instance's display call-sign (the registry key stays the
+  session id, so a rename moves no state and grants nothing). Pi has no dynamic
   unregister API, so definitions registered by a prior join may remain in the registry; the live
   accessor, capability gate, and active-tool set all deny them whenever the plane is stopped.
+- **Inbound delivery is bounded without loss.** Each external message is injected under the same
+  byte cap whether it is plain text or an artifact descriptor. Bursts remain FIFO-queued and drain
+  one message per rate-limited wake; collapsed cards show only a short preview, while expanding the
+  card reveals that delivered message. A presentation cap never discards the rest of the queue.
 
 exocom never touches the delegate/council/broker path. A single instance can be **both** a supervisor
 (delegating its own spawned children via intercom/broker) **and** an exocom peer (collaborating with
@@ -363,17 +440,30 @@ persona directive lives at the TOP of the prompt and its pull decays as recent t
   recency wins the tug-of-war a top-of-prompt line loses. It is regenerated from the live registry (so it
   can't desync) and filtered to the active persona's `delegate` allowlist (a persona that denies `delegate`
   gets none). It never dictates how MANY sub-agents or which shape — that is each persona's own method.
-- The **nudges** (`core/nudge.ts`, `config.nudge`, on by default; `PI_PERSONA_NUDGE=off` silences BOTH) are
+- The **nudges** (`core/nudge.ts`, on by default) are
   the REACTIVE half, landing in RECENT context on the very event that warrants them:
   - **DelegationNudge** — a `tool_result` hook watches the *supervisor's own* tool stream and, when a
     delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a
     threshold), appends a one-line "hand it off" reminder to that command's result. Sub-agents run in their
-    own sessions, so the hook only ever sees the supervisor's tools; a hand-off resets the streak.
+    own sessions, so the hook only ever sees the supervisor's tools; a successful hand-off resets the
+    streak, while a failed one keeps the streak and returns an actionable re-dispatch hint.
   - **PersistenceNudge** — the counterweight to premature surrender: when a delegated leg's report carries an
-    explicit `[BLOCKED]`/`FLAG: UNKNOWN` marker, it appends a "don't bank it yet" reminder. It rides every
-    delivery path — the sync `delegate`/`council` result, the background completion report, and the `intercom
-    wait` join (the latter two through `engine/async.ts`'s `renderCompletion`) — so a blocked leg gets the
-    counterweight however it is collected.
+    explicit `[BLOCKED]`/`FLAG: UNKNOWN` marker, it appends a "don't bank it yet" reminder. All three
+    delivery paths carry it — the sync `delegate`/`council` result, the background completion report, and
+    the `intercom wait` join (the latter two through `engine/async.ts`'s `renderCompletion`) — but they do
+    not scan the same text, so the coverage is not identical:
+    - the sync path (`PersistenceNudge.observe`) scans the WHOLE `delegate`/`council` tool result, and
+      `aggregateResults` folds every leg's body into it, failed legs included — so a leg that fails
+      carrying `[BLOCKED]` still gets the note;
+    - `renderCompletion` scans only `status === "done"` runs (`r.result?.output`), by design: a FAILED run
+      is already surfaced as a failure by `buildCompletionReport`. So a background/`wait` leg that FAILED
+      while emitting `[BLOCKED]` gets the failure block and its salvaged partial output, but NOT the
+      persistence note. Same marker, same leg, different counterweight depending on how it was collected.
+  - **The off switch covers one hook, not every path.** `config.nudge` (`PI_PERSONA_NUDGE=off`) is read
+    at exactly one place — the `tool_result` hook — so it silences the DelegationNudge entirely and the
+    PersistenceNudge on a sync `delegate`/`council` result. The two `renderCompletion` call sites (the
+    background completion notifier and `intercom wait`) pass an ungated `scan` callback, so on the
+    background-by-default interactive path the persistence note is still appended with the flag off.
 
 ## Discovery & seeding
 

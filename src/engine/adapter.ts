@@ -121,7 +121,8 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (model && deps.childThinking && !model.includes(":")) model = `${model}:${deps.childThinking}`;
 			if (model) childSpec.model = model;
 			const tools = spec.tools ?? cfg.tools;
-			if (tools) childSpec.tools = tools;
+			if (tools !== undefined) childSpec.tools = tools;
+			if (cfg.excludeTools && cfg.excludeTools.length > 0) childSpec.excludeTools = cfg.excludeTools;
 			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
 			// on-the-fly `role` specialisation from the spec. All three go out as
 			// `--append-system-prompt`, so a leg keeps Pi's full base prompt either way — the
@@ -184,7 +185,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const overrides: string[] = [];
 			if (spec.model) overrides.push("model");
 			if (spec.skills && spec.skills.length > 0) overrides.push("skills");
-			if (spec.tools && spec.tools.length > 0) overrides.push("tools");
+			if (spec.tools !== undefined) overrides.push("tools");
 			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
 			const modelRef = childSpec.model ?? "(no model)";
 			const tag = `[${spec.agent} · ${modelRef}${dyn}]`;

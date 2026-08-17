@@ -92,7 +92,7 @@ export function canCallTool(caps: EffectiveCapabilities, toolName: string): bool
 	// Evaluate the persona's ACTUAL allow/deny against the NAME — not only the activation-time
 	// `caps.tools` snapshot. The snapshot is built from the tools registered AT activation, so it
 	// fails closed on any tool that registers later: an MCP server connects asynchronously and
-	// re-registers ALL its tools on every reconnect, so an unrestricted persona (Elite) that used
+	// re-registers ALL its tools on every reconnect, so any unrestricted persona that used
 	// `mcpwn_execute_command` a moment ago is suddenly told it "may not use" it after a reconnect.
 	// Checking the persona's rule by name fixes that (no allowlist ⇒ any tool; an allow/deny still
 	// governs regardless of registration timing). `caps.tools` still covers the `delegate`

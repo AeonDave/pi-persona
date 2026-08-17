@@ -10,7 +10,7 @@
  */
 
 import { sumUsage } from "../reducers.ts";
-import { dissentLine, readableRuling } from "../render.ts";
+import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
@@ -40,10 +40,16 @@ function render(decision: ReducerResult, members: number, bestOf: number, usages
 	if (decision.dissent && decision.dissent.length > 0) {
 		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 	}
+	const headline = decision.winner ? rulingHeadline(decision.winner) : undefined;
 	return {
 		agent: "debate",
 		output: lines.join("\n"),
-		structured: { status: decision.status, tally: decision.tally, usedFallback: decision.usedFallback },
+		structured: {
+			status: decision.status,
+			tally: decision.tally,
+			usedFallback: decision.usedFallback,
+			...(headline ? { headline } : {}),
+		},
 		usage: sumUsage(usages),
 		ok: decision.winner !== undefined,
 	};

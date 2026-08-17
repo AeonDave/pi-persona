@@ -4,6 +4,14 @@ export interface ExocomMessage {
 	kind: "message"; msg_id: string; from_session: string; from_endpoint: string; from_name: string;
 	text: string; in_reply_to?: string; hops: number; ts: string; signature?: string;
 }
+/** The only structured text payload the receiver interprets specially. The marker and exact
+ * field set keep arbitrary peer-authored JSON as ordinary untrusted message text. */
+export interface ExocomArtifactDescriptor {
+	kind: "exocom_artifact";
+	preview: string;
+	path: string;
+	size: number;
+}
 export interface ExocomBye { kind: "bye"; from_session: string; from_endpoint?: string; signature?: string; }
 export interface ExocomAck { kind: "ack"; msg_id: string; from_session?: string; signature?: string; }
 export interface ExocomNack { kind: "nack"; msg_id: string; error: string; from_session?: string; signature?: string; }
@@ -48,7 +56,7 @@ export function frameSigningPayload(frame: ExocomFrame): string {
 
 export function nextHops(current: number): number { return current + 1; }
 
-const NOTICE = "\n\n…[exocom: truncated — read the artifact or ask the sender for the rest]";
+const NOTICE = "\n\n…[exocom: truncated — ask the sender for the rest]";
 /** Head-truncate to a UTF-8 byte budget, adding a notice when cut (R1). */
 export function truncateForInject(text: string, maxBytes: number): { text: string; truncated: boolean } {
 	if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, truncated: false };
@@ -62,4 +70,32 @@ export function truncateForInject(text: string, maxBytes: number): { text: strin
 		used += bytes;
 	}
 	return { text: chunks.join("") + NOTICE, truncated: true };
+}
+
+/**
+ * Parse the descriptor emitted by ExocomPlane.payloadFor(). Deliberately fail closed:
+ * unmarked/arbitrary JSON remains ordinary peer text, and malformed descriptors never
+ * become an instruction to read an attacker-chosen path as an artifact.
+ */
+export function parseExocomArtifactDescriptor(text: string): ExocomArtifactDescriptor | undefined {
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	const keys = Object.keys(record).sort();
+	if (keys.join(",") !== "kind,path,preview,size") return undefined;
+	if (record.kind !== "exocom_artifact" || typeof record.preview !== "string" || typeof record.path !== "string") return undefined;
+	if (record.preview.length > 4_096 || record.path.length === 0 || record.path.length > 4_096) return undefined;
+	if (/[\u0000-\u001F\u007F-\u009F]/.test(record.path)) return undefined;
+	if (typeof record.size !== "number" || !Number.isSafeInteger(record.size) || record.size <= 0) return undefined;
+	return {
+		kind: "exocom_artifact",
+		preview: record.preview,
+		path: record.path,
+		size: record.size,
+	};
 }

@@ -31,7 +31,8 @@ An active persona can also borrow another installed persona's declared council f
 - **Sub-agents, background-first** — delegate one or fan out many, each an isolated run with its
   own model, skills, tools, and optional git-worktree isolation. In interactive sessions they run
   in the background by default: run ids at once, results return as follow-ups (watch with
-  `/peek`, join with `intercom wait`, `sync: true` to block; headless runs stay sync).
+  `/peek`, join with `intercom wait`, retrieve one complete retained payload with
+  `intercom { action: "result", to: "run-id" }`, or use `sync: true` to block; headless runs stay sync).
 - **Always-on discovery** — every turn the supervisor's prompt carries a live *delegation brief*:
   the installed agents/teams/flows (capability-filtered) plus a standing hand-off default, so
   delegation never depends on a decayed persona line; a wrong agent name comes back with the
@@ -47,8 +48,12 @@ An active persona can also borrow another installed persona's declared council f
   agent into several perspectives inline (`{ agent, role, model }`).
 - **Flows** — a declarative DAG over strategies (`*.flow.json`): phases wired by `needs`, fanning
   out where independent, journaled so an interrupted flow resumes; `gate: true` pauses for approval.
-- **Live view** — one agent tree sticks above the input. `f9` (or `/agents`) opens an overlay: ↑↓
-  move, ⏎ read an agent's full chronological log, `x` stop, `s` steer.
+- **Progressive-disclosure UI** — the sticky agent/exocom widgets and completed tool cards stay
+  bounded; a collapsed `delegate` card lists its failed legs first, a failed `council`/`flow` card
+  leads with the cause, and long text opens as a short semantic preview.
+  Use Pi's configured expand key for the full card. `f9` (or `/agents`) opens the complete live tree:
+  ↑↓ move, ⏎ read an agent's chronological log, `x` stop, `s` steer. `/flow` and `/orchestrate`
+  outcomes are durable expandable transcript cards rather than unbounded toast walls.
 
 ## Concepts
 
@@ -81,6 +86,9 @@ An active persona can also borrow another installed persona's declared council f
 ## Bundled personas, agents & teams
 
 Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch persona with `f8`.
+These are examples, not runtime identities: no code branch checks for `elite`, `dev`, or any other
+persona name. A user/project persona can declare the same delegation policy, council, strategy, team,
+flow, contracts, tools, and coaching behavior in its own frontmatter.
 
 **Personas** — the supervisor you become:
 
@@ -105,6 +113,7 @@ Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch 
 | `research` | Deep-dive research worker — recursive link-following over the best available fetch tools, writes cited findings to `.research/` | no `edit` (web/fetch/write) |
 | `reviewer` | One senior reviewer, parameterised by focus — correctness/security/performance/tests, full-spectrum or a single lens (also the `judge` arbiter) | read/grep/find |
 | `verifier` | Runs the project's build/tests; approves only when they pass green | read/bash |
+| `evidence-verifier` | Replays a claimed result against its stated scope and approves only reproducible proof | read/bash |
 | `melchior` · `balthasar` · `casper` | The MAGI cores — Propulsore · Conservatore · Catalizzatore | read/grep/find |
 
 **Teams** (`teams.yaml`) — named rosters a strategy runs over. A member is a bare agent name or an
@@ -113,8 +122,9 @@ inline `{ agent, role, model, skills }` map that specialises one agent (so `revi
 
 | Team | Members | Used by |
 |---|---|---|
-| `review` | `reviewer` × 3 lenses (security · performance · tests) | the `audit` council (synthesised) |
-| `repair` | operator, verifier | `verify` |
+| `review` | `reviewer` × 3 lenses (security · performance · tests) | the `audit` council (synthesised) · the `deep-review` flow's `gather` phase · the `gated-build` flow's `verify` phase |
+| `repair` | operator, verifier | the `verify` persona's council · `dev`'s critic-loop council · the `gated-build` flow's `build` phase |
+| `offensive-assurance` | operator, evidence-verifier | evidence-grade sequential critic loop |
 | `magi` | melchior, balthasar, casper | `magi` (self-vote) and `judge` (arbiter picks) |
 | `swarm` | scout (splitter), operator (worker) | `swarm` (map) |
 | `build` | operator × 2 | `compete` best-of-N (e.g. `dev`'s `roster: 'build'` second opinion) |
@@ -145,13 +155,14 @@ same: new *files* on this API, no new core.
 |---|---|
 | `delegate` tool | spawn sub-agent(s): single or parallel — background by default in interactive sessions (run ids now, results return as follow-ups; `sync: true` blocks the turn; headless defaults to sync) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
-| `intercom` tool | interact with running sub-agents: `peek` (watch) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (hard-abort) work for **any** persona; `list`/`inbox`/`reply`/`send` are the coaching message bus |
+| `intercom` tool | interact with running sub-agents: `peek` (watch) · `result` (retrieve one settled payload in full) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (hard-abort) work for **any** persona; `list`/`inbox`/`reply`/`send` are the coaching message bus |
 | `timer` tool | arm a wall-clock **alarm** that wakes the session when it fires — the token-cheap way to wait for a fixed moment (a release, a rate-limit reset, a scheduled re-check) instead of a poll loop: `arm { message, delaySeconds \| atIso }` · `cancel { id }` · `list`. The fire is delivered through the same idle-gated path as async completions (a fresh turn), so the supervisor resumes on its own. In-memory per session (cleared on reload) |
 | `flow` tool · `/flow` | run a DAG of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a checkpoint (approve before its dependents run) |
 | `models` tool | list / search the authenticated model ids (`provider/id`) to pick an exact `model` for a `delegate` task — ★ marks the session provider |
 | persona `mode:` | `solo` (opportunistic) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
 | persona `coaching:` | opt into the comm plane — children get a `contact_supervisor` tool to report progress / ask blocking decisions while they run (async) |
-| `isolation: worktree` | an agent (frontmatter) or a `delegate` task runs in a throwaway git worktree — edits/tests never touch the main tree, force-removed after |
+| persona `delegation:` | optional generic runtime policy for any persona: complete cold-start briefs, a default output contract, disjoint parallel write ownership, and fresh-verifier ordering |
+| `isolation: worktree` | an agent or `delegate` task runs in a throwaway clean-Git worktree and returns an exported diff; non-Git/dirty checkout, missing artifact, or oversized artifact fails closed — never falls back to the real tree |
 | `council: { preset: <name> }` | expand a `presets/<name>.preset.json` (strategy/roster/params) so persona files stay light — authored fields override |
 | `contracts/<name>.contract.json` | a hot-editable structured-return contract, requested by name via `outputContract`, pinned per run |
 
@@ -162,17 +173,23 @@ same: new *files* on this API, no new core.
 | `fanout` | parallel — every roster agent on the same task, aggregated | *(none)* |
 | `pipeline` | series / chain — each agent builds on the previous one's output | *(none)* |
 | `map` | dynamic fan-out — a splitter breaks the task into a runtime list, one worker per item, aggregated (opt-in live cross-talk via `params: { peers: true }`) | `maxItems` · the run's `maxChildren` − 1 (the splitter takes a slot) · `peers` · `false` |
-| `critic-loop` | generator → critic → revise, until the critic stops rejecting | `generator` · roster[0] · `critic` · roster[1] · `rounds` · `3` |
+| `critic-loop` | generator → critic → revise; only explicit approval succeeds, exhaustion returns the unresolved review as failure | `generator` · roster[0] · `critic` · roster[1] · `rounds` · `3` |
 | `magi` | parallel panel → **self-vote** → ruling + tally + dissent, plus one anonymised **reflection** round by default (`reflect: false` for a pure poll) | `aggregate` · `"majority"` · `reflect` · `true` |
 | `council-rounds` | multi-round `magi`, best-of-X (re-deliberates until a supermajority) | `rounds` · `3` · `bestOf` · majority of roster · `aggregate` · `"majority"` |
 | `debate` | 2+ members work in parallel and exchange positions live (peer-to-peer), then a majority vote settles it | `bestOf` · majority of roster · `aggregate` · `"majority"` |
-| `judge` | parallel panel → an **impartial arbiter** picks the best (anonymised) | `judge` · *(required)* · `contract` · none |
+| `judge` | parallel panel → a successful **impartial arbiter** picks the best (anonymised); a failed arbiter cannot select from partial JSON | `judge` · *(required)* · `contract` · none |
 | `synthesize` | parallel gatherers → one **synthesiser** merges the labeled findings into one coherent answer (opt-in live cross-talk via `params: { peers: true }`) | `synthesizer` · first roster agent · `peers` · `false` |
 | `pair` | driver executes while a navigator inspects the same ground live: risk checklist up front, corrections per milestone, final review (peer-to-peer) | *(none)* |
-| `compete` | N competitors implement the same task in isolated git worktrees; a blind judge picks; the winner returns as a unified diff to apply (requires a git repo) | `judge` · *(required)* · `ballotDiffChars` · `6000` |
+| `compete` | N competitors implement in isolated git worktrees; a successful blind judge picks; on judge failure every valid diff returns unjudged (requires a git repo) | `judge` · *(required)* · `ballotDiffChars` · `6000` |
 
-Params are declared per strategy and looked up by `knownParams()` so this table and the code can't
-drift; `/doctor` lists the same schema live. Unknown param keys only **warn**, never hard-fail.
+Params are declared per strategy and looked up by `knownParams()`; `/doctor` lists the same schema
+live. `test/unit/docs/doc-claims.test.ts` gives this a partial guard: for every registered strategy it
+requires a table row headed by that name, and each declared param backticked somewhere in one of that
+name's rows, in both this file and [STRATEGIES.md](docs/STRATEGIES.md). It matches on the row header
+only, not on which table the row is in — so `fanout`, `pipeline` and `pair` (no params) are covered
+only by their name appearing in *some* table here, and `judge`'s own `judge` param is satisfied by its
+row header. Treat the guard as a drift alarm, not a proof: a reviewer still has to read the row.
+Unknown param keys only **warn**, never hard-fail.
 
 **Supervising running sub-agents — the `intercom` plane.** The supervisor's *internal* comm with the
 children it spawned, in two layers, deliberately separate:
@@ -197,7 +214,13 @@ children it spawned, in two layers, deliberately separate:
   context without a hand-off), appends a one-line "hand it off" reminder to that command's result (a
   `delegate`/`council` resets the streak). **PersistenceNudge** is the counterweight to premature
   surrender: when a delegated leg comes back `[BLOCKED]`/`FLAG: UNKNOWN`, it appends a "don't bank it
-  yet" reminder — on whichever path the report arrives. `PI_PERSONA_NUDGE=off` silences both.
+  yet" reminder on every delivery path — with one asymmetry: the sync path scans the whole
+  `delegate`/`council` result (failed legs included), while the background/`intercom wait` path scans
+  only the legs that finished `done`, so a leg that *failed* while emitting `[BLOCKED]` is reported as a
+  failure but gets no persistence note there. `PI_PERSONA_NUDGE=off` turns off the
+  `tool_result` hook: the hand-off reminder entirely, and the "don't bank it yet" one on a **sync**
+  `delegate`/`council` result. The background-completion and `intercom wait` reports are rendered
+  outside that hook, so their persistence reminder rides along regardless.
 - **Cross-process broker — opt-in, `PI_PERSONA_BROKER=1`.** Extends both layers (steer + the comm
   plane) to sub-agents that don't run in-process: `PI_PERSONA_ENGINE=child` runs and every
   `isolation: worktree` leg (which always uses the child engine). A session-scoped relay (POSIX
@@ -248,13 +271,15 @@ For collaboration between independent Pi processes, open the same workspace in t
 
 ```js
 exocom_list({})
+exocom_list({ offset: 24, limit: 24 }) // next page when the first result reports nextOffset: 24
 exocom_send({ target: "orion", message: "Review the API boundary and send back concrete risks." })
+exocom_name({ name: "atlas" }) // rebrand your own call-sign; routing still keys on the session
 ```
 
 | | Intercom | Exocom |
 |---|---|---|
 | Shape | Hierarchical: supervisor → its spawned sub-agents | Flat: independent Pi ↔ Pi peers |
-| Control | `peek`, `wait`, `steer`, `stop`; optional coaching messages | Presence plus one-way `list` / `send`; a reply is another send with `in_reply_to` |
+| Control | `peek`, `result`, `wait`, `steer`, `stop`; optional coaching messages | Presence plus one-way `exocom_list` / `exocom_send` (+ `exocom_name` to rebrand yourself); a reply is another send with `in_reply_to` |
 | Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` or `PI_PERSONA_EXOCOM=1` |
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 
@@ -297,7 +322,7 @@ review:
 name: myaudit
 persona: true
 # three lens passes in parallel, then one synthesiser merges them into a de-duplicated verdict
-council: { strategy: synthesize, roster: review, params: { synthesizer: reviewer } }
+council: { strategy: synthesize, roster: review, params: { synthesizer: reviewer, peers: true } }
 ---
 Convene the council before sign-off, then apply its merged findings yourself.
 ```
@@ -306,9 +331,39 @@ Convene the council before sign-off, then apply its merged findings yourself.
 council({ question: "cache this or recompute?", strategy: "debate", roster: "review", params: { bestOf: 2 } })
 ```
 
+**A delegation policy on any persona** — this is keyed by declared fields, never by `name`. The
+runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects
+overlapping/missing ownership for parallel writers, and prevents declared verifier agents from
+starting concurrently with—or serially before—a mutation they are meant to check. Per-call
+`concurrency` is honored in both blocking and background fan-out. Only the built-in inspection tools
+(`read`, `grep`, `find`, `ls`) are assumed read-only; shell-capable, MCP-enabled, and unknown/custom toolsets fail
+closed as potential writers. `writeSet` is a scheduling/ownership contract, not an OS sandbox;
+capabilities and worktree isolation remain the enforcement boundaries.
+
+```markdown
+---
+name: my-project-lead
+persona: true
+delegation:
+  requireBrief: true
+  outputContract: finding
+  requireDisjointWrites: true
+  requireFreshVerification: true
+  verificationAgents: [my-checker]
+council: { strategy: critic-loop, roster: my-repair-team, params: { rounds: 3 } }
+---
+Delegate bounded work, then accept completion only after fresh evidence.
+```
+
+The six required `brief` fields are `objective`, `scopeRoe`, `position`, `constraints`,
+`requiredArtifacts`, and `stopConditions`. `verificationAgents` contains ordinary installed agent
+names chosen by the persona author; there is no built-in verifier identity.
+
 **A mandatory-orchestration persona** — `orchestration: { mode: strategy, … }` runs the strategy
 automatically every turn (the LLM can't opt out) and folds the result into the prompt. Use
-`council:` instead when it should run only on demand.
+`council:` instead when it should run only on demand. The hand-off is fail-closed: only `ok:true` is
+presented as a ruling; failed/cancelled/unresolved output is labelled as evidence to repair and verify,
+never as approved work.
 
 ```markdown
 <!-- personas/myguard.md -->
@@ -334,9 +389,11 @@ Delegate (sub-agents run in the background by default) and tell each sub-agent t
 `decision`s via `contact_supervisor`; use `intercom inbox` to read and `intercom reply` to answer.
 ```
 
-**A custom agent** — `tools` (least-privilege; omit to inherit all), `model`, `isolation: worktree`
-in the frontmatter; the body is the prompt. `name`/`description` are what a supervisor's `delegate`
-sees when picking it.
+**A custom agent** — `tools` accepts an allowlist (`[read, grep]`) or an `allow`/`deny` block;
+omit it to inherit the session tool set, while `tools: []` explicitly grants no tools. Both engines enforce the resulting `--tools` / `--no-tools` /
+`--exclude-tools` grant. `model`, `isolation: worktree`, and `mcp: true` are optional too. The body
+is the prompt; the live supervisor brief shows `name`, `description`, effective tool metadata, MCP,
+and worktree isolation so routing does not depend on guessing from an agent's name.
 
 ```markdown
 <!-- agents/hardener.md -->
@@ -349,6 +406,13 @@ isolation: worktree
 ---
 You are the Hardener. Given a diff or area, find and FIX authz/access-control gaps, injection and
 unsafe-sink risks, secrets/token mishandling, and missing input validation. Cite `file:line`.
+```
+
+To inherit every available fetch/write tool while forbidding one dangerous capability:
+
+```yaml
+tools:
+  deny: [edit]
 ```
 
 **A flow with a human checkpoint** — a DAG over strategies; `gate: true` pauses for approval before
@@ -409,7 +473,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`
 - CLI flags (per run): `--persona <name>` (start with this persona active — e.g. `pi --persona elite`; overrides `PI_PERSONA_DEFAULT` and the remembered persona, and errors if the name isn't installed) · `--exocom` (join the exocom peer-to-peer plane for this run; same as `PI_PERSONA_EXOCOM=1`). Model + reasoning effort are pi's own native flags: `--model <provider/id>` (e.g. `--model anthropic/claude-opus-4-8`; `--list-models` to search) and `--thinking <off|minimal|low|medium|high|xhigh|max>`.
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — kills a child that produces no progress of its own, e.g. a headless `mcp: true` leg stalled on init; the window must cover the whole cold start including the first provider response, so the default is generous: 300000, `0` disables) · `PI_PERSONA_NUDGE=off` (disable both delegation nudges — hand-off + persistence; on by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`) · `PI_PERSONA_SPINE=on|<path>` (the spine — a shared behavioral layer injected between pi's base prompt and the persona body, with a worker variant ahead of every sub-agent prompt; `on` uses your own `spine.md`/`spine.worker.md` if you have them, else the bundled `prompts/spine.md` + `prompts/spine.worker.md`, and a path selects one file of your own for both roles; off by default, and `spine: false` in a persona/agent's frontmatter opts that definition out — a persona's opt-out covers the legs it spawns — see docs/SPINE.md) · `PI_PERSONA_SPINE_LEGS=on|off|<path>` (the same selector for delegated legs alone; follows `PI_PERSONA_SPINE` unless set, so the pair expresses the four measurement arms — off, supervisor-only, legs-only, both)
+- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — kills a child that produces no progress of its own, e.g. a headless `mcp: true` leg stalled on init; the window must cover the whole cold start including the first provider response, so the default is generous: 300000, `0` disables) · `PI_PERSONA_NUDGE=off` (silence the `tool_result` nudges — the hand-off reminder, and the persistence one on a sync `delegate`/`council` result; the background-completion and `intercom wait` reports keep theirs. On by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`) · `PI_PERSONA_SPINE=on|<path>` (the spine — a shared behavioral layer injected between pi's base prompt and the persona body, with a worker variant ahead of every sub-agent prompt; `on` uses your own `spine.md`/`spine.worker.md` if you have them, else the bundled `prompts/spine.md` + `prompts/spine.worker.md`, and a path selects one file of your own for both roles; off by default, and `spine: false` in a persona/agent's frontmatter opts that definition out — a persona's opt-out covers the legs it spawns — see docs/SPINE.md) · `PI_PERSONA_SPINE_LEGS=on|off|<path>` (the same selector for delegated legs alone; follows `PI_PERSONA_SPINE` unless set, so the pair expresses the four measurement arms — off, supervisor-only, legs-only, both)
 
 ## Develop
 

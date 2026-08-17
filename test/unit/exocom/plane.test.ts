@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,8 @@ import { endpoint, exocomRoot, registryPath } from "../../../src/exocom/paths.ts
 import { ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
 import { readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
 import { frameSigningPayload, type ExocomBye, type ExocomMessage } from "../../../src/exocom/envelope.ts";
+import { buildInboundDelivery } from "../../../src/exocom/inbound.ts";
+import { SenderBudget, SeenMessages } from "../../../src/exocom/guards.ts";
 import { EXOCOM } from "../../../src/exocom/limits.ts";
 import { createFrameReader, encodeFrame } from "../../../src/bus/broker/framing.ts";
 
@@ -39,6 +41,67 @@ function planeFor(name: string, inbox: (m: ExocomMessage) => void, decide?: (m: 
 	});
 }
 
+/** Feed a signed message through a real Exocom socket while keeping its authored
+ *  hop count/msg_id. `send()` intentionally starts new chains at zero, so the
+ *  collision test needs this wire-level fixture. */
+function signedPlaneMessage(plane: ExocomPlane, frame: ExocomMessage): ExocomMessage {
+	const privateKey = (plane as unknown as { privateKey: KeyObject }).privateKey;
+	return { ...frame, signature: cryptoSign(null, Buffer.from(frameSigningPayload(frame), "utf8"), privateKey).toString("base64") };
+}
+
+async function injectMessage(targetEndpoint: string, frame: ExocomMessage): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const socket = net.connect(targetEndpoint);
+		let settled = false;
+		const timer = setTimeout(() => finish(), 500);
+		timer.unref?.();
+		const finish = (error?: Error): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error) reject(error); else resolve();
+		};
+		socket.once("connect", () => socket.write(encodeFrame(frame), () => socket.end()));
+		socket.once("error", (error) => finish(error));
+		socket.once("close", () => finish());
+	});
+}
+
+/** Like `injectMessage`, but hands back whatever the receiver wrote on the wire, so a test can
+ *  tell an ACK from a NACK instead of inferring the verdict from an empty inbox. */
+function injectForReply(targetEndpoint: string, frame: ExocomMessage): Promise<string> {
+	return new Promise((resolve) => {
+		const socket = net.connect(targetEndpoint);
+		let out = "";
+		const timer = setTimeout(() => { socket.destroy(); resolve(out); }, 1_000);
+		timer.unref?.();
+		socket.once("connect", () => socket.write(encodeFrame(frame)));
+		socket.on("data", (chunk) => { out += chunk.toString("utf8"); });
+		socket.once("close", () => { clearTimeout(timer); resolve(out); });
+		socket.once("error", () => { clearTimeout(timer); resolve(out); });
+	});
+}
+
+async function injectMessages(targetEndpoint: string, frames: ExocomMessage[]): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const socket = net.connect(targetEndpoint);
+		let settled = false;
+		const finish = (error?: Error): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error) reject(error); else resolve();
+		};
+		const timer = setTimeout(() => { socket.destroy(); finish(); }, 2_000);
+		timer.unref?.();
+		socket.once("connect", () => socket.write(Buffer.concat(frames.map((frame) => encodeFrame(frame))), () => {
+			setTimeout(() => socket.end(), 100).unref?.();
+		}));
+		socket.once("error", (error) => finish(error));
+		socket.once("close", () => finish());
+	});
+}
+
 test("a message from one plane lands as inbound on another; list shows the peer", async () => {
 	const got: ExocomMessage[] = [];
 	const a = planeFor("elite", () => {});
@@ -56,7 +119,7 @@ test("a message from one plane lands as inbound on another; list shows the peer"
 	} finally { await a.stop(); await b.stop(); }
 });
 
-test("an oversize message spills to an artifact and sends {preview,path} inline (R3)", async () => {
+test("an oversize message spills to an artifact and sends {preview,path,size} inline (R3)", async () => {
 	const got: ExocomMessage[] = [];
 	const a = planeFor("elite", () => {});
 	const b = planeFor("dev", (m) => got.push(m));
@@ -67,15 +130,37 @@ test("an oversize message spills to an artifact and sends {preview,path} inline 
 		await a.send("dev", big);
 		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(got.length, 1);
-		const payload = JSON.parse(got[0]?.text ?? "{}") as { preview: string; path: string };
+		const payload = JSON.parse(got[0]?.text ?? "{}") as { kind: string; preview: string; path: string; size: number };
+		assert.equal(payload.kind, "exocom_artifact");
 		assert.ok(payload.path.endsWith(".txt"));
 		assert.ok(payload.preview.length > 0 && payload.preview.length < big.length);
+		assert.equal(payload.size, Buffer.byteLength(big, "utf8"));
 		assert.equal(readFileSync(payload.path, "utf8"), big, "artifact holds the full text");
 	} finally { await a.stop(); await b.stop(); }
 });
 
+test("humanDisplayLabelFor dedupes equal names without changing qualified reply routing", async () => {
+	const a = planeFor("twin", () => {});
+	const b = planeFor("twin", () => {});
+	const viewer = planeFor("viewer", () => {});
+	await a.start();
+	await b.start();
+	await viewer.start();
+	try {
+		const twins = viewer.listPeers().filter((p) => p.name === "twin");
+		assert.equal(twins.length, 2);
+		const labels = twins.map((p) => viewer.humanDisplayLabelFor(p)).sort();
+		assert.deepEqual(labels, ["twin", "twin#2"]);
+		assert.ok(twins.every((p) => /^twin@[a-f0-9]{24}$/.test(viewer.replyTargetFor(p))));
+	} finally {
+		await a.stop();
+		await b.stop();
+		await viewer.stop();
+	}
+});
+
 // EXOCOM.ARTIFACT_TTL_MS exists so a DELIVERED spill outlives the sender: the receiver only got
-// {preview,path} on the wire and reads `path` on a later idle-gated turn, often after the sender
+// {preview,path,size} on the wire and reads `path` on a later idle-gated turn, often after the sender
 // has quit. Only a spill whose send never landed is the sender's to reap.
 test("a delivered artifact survives the sender's stop()", async () => {
 	const got: ExocomMessage[] = [];
@@ -137,11 +222,127 @@ test("hops increments across a correlated reply (nextHops wiring)", async () => 
 		const { msg_id } = await a.send("dev", "audit please");
 		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(inboundAtB[0]?.hops, 0);
-		await b.send("elite", "done", msg_id);
+		const aEntry = b.listPeers().find((p) => p.name === "elite")!;
+		await b.send(b.replyTargetFor(aEntry), "done", msg_id);
 		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(inboundAtA[0]?.hops, 1, "reply increments hops from the message it answers");
 		assert.equal(inboundAtA[0]?.in_reply_to, msg_id);
 	} finally { await a.stop(); await b.stop(); }
+});
+
+test("a cached reply id cannot be redirected to another live peer", async () => {
+	const decoyInbox: ExocomMessage[] = [];
+	const a = planeFor("reply-source", () => {});
+	const b = planeFor("reply-owner", () => {});
+	const decoy = planeFor("reply-decoy", (m) => decoyInbox.push(m));
+	await a.start();
+	await b.start();
+	await decoy.start();
+	try {
+		const { msg_id } = await a.send("reply-owner", "original");
+		await assert.rejects(
+			() => b.send("reply-decoy", "misdirected", msg_id),
+			/reply target .* does not match the authenticated sender/,
+		);
+		assert.equal(decoyInbox.length, 0, "the wrong live peer never receives the correlated reply");
+	} finally {
+		await a.stop();
+		await b.stop();
+		await decoy.stop();
+	}
+});
+
+test("an evicted qualified reply target cannot fall through to a raw-name decoy", async () => {
+	const decoyInbox: ExocomMessage[] = [];
+	const source = planeFor("eviction-source", () => {});
+	const receiver = planeFor("eviction-receiver", () => {});
+	await source.start();
+	await receiver.start();
+	let decoy: ExocomPlane | undefined;
+	try {
+		const sourceEntry = receiver.listPeers().find((p) => p.name === "eviction-source")!;
+		const receiverEntry = readAll(dir, "h").find((p) => p.name === "eviction-receiver")!;
+		const { msg_id: oldMsgId } = await source.send("eviction-receiver", "original");
+		const oldTarget = receiver.replyTargetFor(sourceEntry);
+		const filler = Array.from({ length: 1_024 }, (_, i) => signedPlaneMessage(source, {
+			kind: "message", msg_id: `eviction-${i}`, from_session: sourceEntry.session_id,
+			from_endpoint: sourceEntry.endpoint, from_name: sourceEntry.name, text: "filler", hops: 0,
+			ts: new Date().toISOString(),
+		}));
+		await injectMessages(receiverEntry.endpoint, filler);
+		removeEntry(dir, "h", sourceEntry.session_id);
+
+		const decoySession = `sid-eviction-decoy-${process.pid}-${seq++}`;
+		decoy = new ExocomPlane({
+			agentDir: dir, hash: "h",
+			identity: {
+				session_id: decoySession, name: oldTarget, persona: "decoy", purpose: "", color: "#36F9F6", model: "m",
+				endpoint: endpoint(dir, "h", decoySession, process.platform), cwd: "/",
+			},
+			getCard: () => ({ name: oldTarget, persona: "decoy", model: "m", context_pct: 0, inbox: 0 }),
+			onInbound: (m) => { decoyInbox.push(m); return { accepted: true }; },
+		});
+		await decoy.start();
+
+		await assert.rejects(
+			() => receiver.send(oldTarget, "late reply", oldMsgId),
+			/reply target .* does not match|unknown (?:qualified )?peer|unknown qualified reply target/,
+			"an evicted qualified reply must not resolve through a raw display name",
+		);
+		assert.equal(decoyInbox.length, 0, "the decoy never receives the evicted sender's reply");
+	} finally {
+		await source.stop();
+		await receiver.stop();
+		await decoy?.stop();
+	}
+});
+
+test("reply hop history is scoped by sender, even when two peers reuse a msg_id", async () => {
+	const inboundAtA: ExocomMessage[] = [];
+	const a = planeFor("hop-a", (m) => inboundAtA.push(m));
+	const b = planeFor("hop-b", () => {});
+	const receiver = planeFor("hop-receiver", () => {});
+	await a.start();
+	await b.start();
+	await receiver.start();
+	try {
+		const aEntry = receiver.listPeers().find((p) => p.name === "hop-a")!;
+		const bEntry = receiver.listPeers().find((p) => p.name === "hop-b")!;
+		const receiverEntry = readAll(dir, "h").find((p) => p.name === "hop-receiver")!;
+		const sharedMsgId = "shared-hop-id";
+		const common = {
+			kind: "message" as const, msg_id: sharedMsgId, text: "same id from different senders",
+			ts: new Date().toISOString(),
+		};
+		const fromA: ExocomMessage = signedPlaneMessage(a, {
+			...common, from_session: aEntry.session_id, from_endpoint: aEntry.endpoint, from_name: "hop-a", hops: EXOCOM.MAX_HOPS,
+		});
+		const fromB: ExocomMessage = signedPlaneMessage(b, {
+			...common, from_session: bEntry.session_id, from_endpoint: bEntry.endpoint, from_name: "hop-b", hops: 0,
+		});
+
+		// Both are real authenticated deliveries into the same receiver. The second
+		// frame must not overwrite the first sender's hop history.
+		await injectMessage(receiverEntry.endpoint, fromA);
+		await injectMessage(receiverEntry.endpoint, fromB);
+		await receiver.send(receiver.replyTargetFor(aEntry), "reply to A", sharedMsgId);
+
+		const reply = inboundAtA[0];
+		assert.equal(reply?.in_reply_to, sharedMsgId);
+		assert.equal(reply?.hops, EXOCOM.MAX_HOPS + 1, "A's MAX hop count survives B's same-id message");
+		const guarded = buildInboundDelivery(reply!, "hop-receiver", {
+			budget: new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES }),
+			seen: new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS }),
+			injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
+			fence: (text) => text,
+			attribute: (_label, text) => text,
+		});
+		assert.deepEqual(guarded, { drop: "hops" }, "the normal inbound guard rejects the over-cap reply");
+	} finally {
+		await a.stop();
+		await b.stop();
+		await receiver.stop();
+	}
 });
 
 // The ONE real risk in the session_id-keyed refactor: listPeers()'s display-name dedupe and
@@ -197,6 +398,166 @@ test("send() resolves a deduped displayName (e.g. elite#2) through the SAME help
 	} finally { await a.stop(); await b.stop(); await c.stop(); }
 });
 
+// A display name is recomputed from the CURRENT live set on every call, so it is not a stable
+// address: a peer that joins or leaves between the roster and the send can inherit the label.
+// Ordinary sends must therefore be able to address the session-pinned token — and a peer that
+// registers that token as its own free-choice name (`exocom_name` reserves nothing, and
+// normalizePeerName keeps `@`) must not be able to intercept it.
+test("a plain send resolves the session-pinned target, which a name-squatting peer cannot claim", async () => {
+	const pinnedInbox: ExocomMessage[] = [];
+	const squatterInbox: ExocomMessage[] = [];
+	const pinned = planeFor("lyra", (m) => pinnedInbox.push(m));
+	const sender = planeFor("token-sender", () => {});
+	await pinned.start();
+	await sender.start();
+	let squatter: ExocomPlane | undefined;
+	try {
+		const token = sender.listPeers().find((p) => p.name === "lyra")!.target;
+		assert.match(token, /^lyra@[a-f0-9]{24}$/, "the roster exposes a routable session token");
+		const squatterSession = `sid-squatter-${process.pid}-${seq++}`;
+		squatter = new ExocomPlane({
+			agentDir: dir, hash: "h",
+			identity: {
+				session_id: squatterSession, name: token, persona: "squatter", purpose: "", color: "#36F9F6", model: "m",
+				endpoint: endpoint(dir, "h", squatterSession, process.platform), cwd: "/",
+			},
+			getCard: () => ({ name: token, persona: "squatter", model: "m", context_pct: 0, inbox: 0 }),
+			onInbound: (m) => { squatterInbox.push(m); return { accepted: true }; },
+		});
+		await squatter.start();
+		await sender.send(token, "SECRET-FOR-LYRA");
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(pinnedInbox.length, 1, "the pinned session received the message");
+		assert.equal(squatterInbox.length, 0, "the peer holding that string as a display name never sees it");
+	} finally {
+		await pinned.stop();
+		await sender.stop();
+		await squatter?.stop();
+	}
+});
+
+// The plain-send twin of "an evicted qualified reply target cannot fall through to a raw-name
+// decoy": once the session a token names is gone, the send fails — it never degrades into a
+// display-name lookup that a successor peer can answer.
+test("a plain send to a departed session fails loudly instead of falling through to a raw-name decoy", async () => {
+	const decoyInbox: ExocomMessage[] = [];
+	const original = planeFor("orion", () => {});
+	const sender = planeFor("churn-sender", () => {});
+	await original.start();
+	await sender.start();
+	const token = sender.listPeers().find((p) => p.name === "orion")!.target;
+	await original.stop();
+	const decoySession = `sid-churn-decoy-${process.pid}-${seq++}`;
+	const decoy = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: decoySession, name: token, persona: "decoy", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", decoySession, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: token, persona: "decoy", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: (m) => { decoyInbox.push(m); return { accepted: true }; },
+	});
+	await decoy.start();
+	try {
+		await assert.rejects(() => sender.send(token, "SECRET-FOR-THE-FIRST-ORION"), /unknown qualified target/);
+		assert.equal(decoyInbox.length, 0, "a message addressed to the departed session is never handed to a peer that adopted its token as a name");
+	} finally {
+		await decoy.stop();
+		await sender.stop();
+	}
+});
+
+// A spill descriptor asks the receiver to read a file: `Full payload: <path>` goes to its model
+// (exocom/inbound.ts). Both the path and the declared size are peer-authored, so the receiver
+// verifies them against local ground truth before the claim can become an instruction.
+test("an artifact claim is honoured only when the payload on disk is this workspace's own spill for that message", async () => {
+	const got: ExocomMessage[] = [];
+	const sender = planeFor("artifact-claimer", () => {});
+	const reader = planeFor("artifact-reader", (m) => got.push(m));
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, "h").find((p) => p.name === "artifact-claimer")!;
+		const readerEntry = readAll(dir, "h").find((p) => p.name === "artifact-reader")!;
+		const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+		mkdirSync(artifactsDir, { recursive: true });
+		// Every claim below has a REAL spill of the declared shape sitting at the expected path, so
+		// each guard is the only thing standing between the forged field and the receiver.
+		const claim = (msgId: string, over: { path?: string; size?: number } = {}): ExocomMessage => {
+			const spill = join(artifactsDir, `${msgId}.txt`);
+			writeFileSync(spill, "y".repeat(20_000));
+			return signedPlaneMessage(sender, {
+				kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+				from_name: "artifact-claimer", hops: 0, ts: new Date().toISOString(),
+				text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: over.path ?? spill, size: over.size ?? 20_000 }),
+			});
+		};
+		const elsewhere = join(dir, `not-an-artifact-${seq++}.txt`);
+		writeFileSync(elsewhere, "s".repeat(20_000));
+
+		await injectMessage(readerEntry.endpoint, claim(randomUUID(), { path: elsewhere }));
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 0, "the receiver is never asked to read a peer-chosen path");
+
+		await injectMessage(readerEntry.endpoint, claim(randomUUID(), { size: 1 }));
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 0, "a peer cannot under-declare what the payload it points at costs");
+
+		const honest = randomUUID();
+		await injectMessage(readerEntry.endpoint, claim(honest));
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 1, "an honest spill still lands");
+		assert.equal(got[0]?.msg_id, honest);
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
+// The two guards the test above does NOT isolate: a descriptor may name the receiver's own
+// expected path and still be a lie about what is there. Both were reachable with the guard
+// removed and no test noticed, so each claim below leaves exactly one of them standing.
+test("a spill claim naming the right path is still refused when nothing on disk backs it", async () => {
+	const got: ExocomMessage[] = [];
+	const sender = planeFor("phantom-claimer", () => {});
+	const reader = planeFor("phantom-reader", (m) => got.push(m));
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, "h").find((p) => p.name === "phantom-claimer")!;
+		const readerEntry = readAll(dir, "h").find((p) => p.name === "phantom-reader")!;
+		const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+		mkdirSync(artifactsDir, { recursive: true });
+		const claim = (msgId: string, size: number): ExocomMessage => signedPlaneMessage(sender, {
+			kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+			from_name: "phantom-claimer", hops: 0, ts: new Date().toISOString(),
+			text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: join(artifactsDir, `${msgId}.txt`), size }),
+		});
+
+		// No file at all: the size is un-inlinable and self-consistent, so only the existence
+		// check stands between "Full payload: <path>" and a model told to read a missing file.
+		const phantom = randomUUID();
+		const phantomReply = await injectForReply(readerEntry.endpoint, claim(phantom, 20_000));
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 0, "a descriptor for a file that does not exist is never delivered");
+		assert.match(phantomReply, /"kind":"nack"/, "and the sender is told, rather than silently succeeding");
+
+		// A real file at the real path, honestly declared — but small enough that `payloadFor` would
+		// have inlined it. Only a payload that could not travel inline may travel as an artifact;
+		// otherwise the artifact channel becomes a way to route ordinary text past the inject budget.
+		const inlineable = randomUUID();
+		writeFileSync(join(artifactsDir, `${inlineable}.txt`), "z".repeat(5_000));
+		await injectForReply(readerEntry.endpoint, claim(inlineable, 5_000));
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 0, "a payload that fits the inline budget is not an artifact");
+
+		// Same shape, one byte over the inline budget: delivered.
+		const genuine = randomUUID();
+		writeFileSync(join(artifactsDir, `${genuine}.txt`), "z".repeat(EXOCOM.INLINE_MAX_BYTES + 1));
+		await injectForReply(readerEntry.endpoint, claim(genuine, EXOCOM.INLINE_MAX_BYTES + 1));
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(got.length, 1, "the guard rejects only what could have been inlined");
+		assert.equal(got[0]?.msg_id, genuine);
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
 test("stop() removes the registry entry so the peer disappears from others' listPeers", async () => {
 	const a = planeFor("elite", () => {});
 	const b = planeFor("dev", () => {});
@@ -206,6 +567,98 @@ test("stop() removes the registry entry so the peer disappears from others' list
 	await a.stop();
 	assert.ok(!b.listPeers().some((p) => p.name === "elite"), "elite gone after stop()");
 	await b.stop();
+});
+
+test("a failed duplicate-session start does not remove the incumbent registry entry", async () => {
+	const a = planeFor("incumbent", () => {});
+	await a.start();
+	const incumbent = readAll(dir, "h").find((p) => p.name === "incumbent")!;
+	const failed = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: incumbent.session_id, name: "replacement", persona: "replacement", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", `failed-${seq++}`, process.platform), cwd: "/",
+		},
+		getCard: () => { throw new Error("simulated metadata failure"); },
+		onInbound: () => ({ accepted: true }),
+	});
+	try {
+		await assert.rejects(() => failed.start(), /simulated metadata failure/);
+		const stored = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id);
+		assert.equal(stored?.endpoint, incumbent.endpoint, "the failed start did not delete the incumbent");
+		assert.equal(stored?.public_key, incumbent.public_key, "the incumbent authentication key survived");
+	} finally {
+		await failed.stop();
+		await a.stop();
+	}
+});
+
+test("an EADDRINUSE duplicate endpoint start does not remove the incumbent", async () => {
+	const a = planeFor("same-endpoint-incumbent", () => {});
+	await a.start();
+	const incumbent = readAll(dir, "h").find((p) => p.name === "same-endpoint-incumbent")!;
+	let duplicateCleanup = 0;
+	const duplicate = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: incumbent.session_id, name: "same-endpoint-duplicate", persona: "same-endpoint-duplicate", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: incumbent.endpoint, cwd: "/",
+		},
+		getCard: () => ({ name: "same-endpoint-duplicate", persona: "same-endpoint-duplicate", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true }),
+		unlinkEndpoint: () => { duplicateCleanup += 1; },
+	});
+	try {
+		await assert.rejects(() => duplicate.start(), /failed to listen|EADDRINUSE/);
+		await duplicate.stop();
+		assert.equal(duplicateCleanup, 0, "a failed bind never owns the incumbent endpoint");
+		const probe = new ExocomPlane({
+			agentDir: dir, hash: "h",
+			identity: {
+				session_id: `sid-same-endpoint-probe-${process.pid}-${seq++}`, name: "same-endpoint-probe", persona: "same-endpoint-probe", purpose: "", color: "#36F9F6", model: "m",
+				endpoint: incumbent.endpoint, cwd: "/",
+			},
+			getCard: () => ({ name: "same-endpoint-probe", persona: "same-endpoint-probe", model: "m", context_pct: 0, inbox: 0 }),
+			onInbound: () => ({ accepted: true }),
+		});
+		try {
+			await assert.rejects(() => probe.start(), /failed to listen|EADDRINUSE/);
+		} finally {
+			await probe.stop();
+		}
+		const stored = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id);
+		assert.equal(stored?.endpoint, incumbent.endpoint, "the exact endpoint incumbent survived the failed bind");
+		assert.equal(stored?.public_key, incumbent.public_key);
+	} finally {
+		await duplicate.stop();
+		await a.stop();
+	}
+});
+
+test("an old plane cannot remove a replacement that owns its session slot", async () => {
+	const a = planeFor("original-owner", () => {});
+	await a.start();
+	const incumbent = readAll(dir, "h").find((p) => p.name === "original-owner")!;
+	const b = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: incumbent.session_id, name: "replacement-owner", persona: "replacement-owner", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", `replacement-${seq++}`, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "replacement-owner", persona: "replacement-owner", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true }),
+	});
+	await b.start();
+	try {
+		const replacement = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id)!;
+		assert.notEqual(replacement.endpoint, incumbent.endpoint);
+		await a.stop();
+		const stored = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id);
+		assert.equal(stored?.endpoint, replacement.endpoint, "the old plane stop left the replacement registered");
+		assert.equal(stored?.public_key, replacement.public_key);
+	} finally {
+		await b.stop();
+	}
 });
 
 test("send()/inbound bump VIEWER-CENTRIC per-peer counters, not a global self-report", async () => {
@@ -384,9 +837,9 @@ test("a peer's own signed bye retires its entry and refreshes the pool; a forged
 	}
 });
 
-// ── displayNameFor: the delivery path needs a name, not a registry sweep ─────────────────
+// ── replyTargetFor: the delivery path needs a stable route, not a display name ────────────
 
-test("displayNameFor matches listPeers()'s numbering without pruning the pool", async () => {
+test("replyTargetFor is stable and independent of listPeers() display numbering", async () => {
 	const a = planeFor("twin", () => {});
 	const b = planeFor("twin", () => {});
 	const viewer = planeFor("name-viewer", () => {});
@@ -407,18 +860,79 @@ test("displayNameFor matches listPeers()'s numbering without pruning the pool", 
 		const peers = viewer.listPeers().filter((p) => p.name === "twin");
 		assert.equal(peers.length, 2, "both same-named peers are live");
 		for (const p of peers) {
-			assert.equal(viewer.displayNameFor(p), p.displayName, "the resolver agrees with the list's numbering");
+			assert.match(viewer.replyTargetFor(p), /^twin@[a-f0-9]{24}$/, "the reply target is stable and routable");
+			assert.equal(viewer.displayNameFor(p), viewer.replyTargetFor(p), "the compatibility alias matches the stable target");
 		}
-		assert.deepEqual(peers.map((p) => viewer.displayNameFor(p)).sort(), ["twin", "twin#2"]);
+		assert.deepEqual(peers.map((p) => p.displayName).sort(), ["twin", "twin#2"], "human display names remain deduped in the live roster");
 
 		writeEntry(dir, "h", lapsed); // listPeers() above already reaped it — put it back
-		assert.equal(viewer.displayNameFor(lapsed), "lapsed", "an unlisted sender falls back to its own name");
+		assert.match(viewer.displayNameFor(lapsed), /^lapsed@[a-f0-9]{24}$/, "an unlisted sender gets a routable qualified target");
 		assert.ok(existsSync(lapsedFile), "resolving a name left the registry alone");
 	} finally {
 		removeEntry(dir, "h", lapsedSession);
 		await a.stop();
 		await b.stop();
 		await viewer.stop();
+	}
+});
+
+test("qualified stale targets stay within the exocom_send schema budget for long identities", async () => {
+	const viewer = planeFor("long-target-viewer", () => {});
+	await viewer.start();
+	const longSession = "s".repeat(128);
+	const longName = "n".repeat(48);
+	const stale = registryEntryFixture({
+		session_id: longSession, name: longName, pid: process.pid, endpoint: "/long-target",
+		heartbeat_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+	});
+	writeEntry(dir, "h", stale);
+	try {
+		const target = viewer.replyTargetFor(stale);
+		assert.ok(target.length <= 80, "the qualified target fits exocom_send's schema");
+		assert.match(target, new RegExp(`^${longName}@[a-f0-9]{24}$`));
+	} finally {
+		removeEntry(dir, "h", longSession);
+		await viewer.stop();
+	}
+});
+
+test("a reply to an authenticated stale sender uses a qualified target, not its live same-name twin", async () => {
+	const aInbox: ExocomMessage[] = [];
+	const bInbox: ExocomMessage[] = [];
+	const a = planeFor("twin", (m) => aInbox.push(m));
+	const b = planeFor("twin", (m) => bInbox.push(m));
+	let replyTarget = "";
+	let receiver: ExocomPlane;
+	const receiverSession = `sid-stale-receiver-${process.pid}-${seq++}`;
+	receiver = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: receiverSession, name: "stale-receiver", persona: "stale-receiver", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", receiverSession, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "stale-receiver", persona: "stale-receiver", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: (_m, fromEntry) => {
+			assert.ok(fromEntry, "the sender was authenticated before it became stale");
+			writeEntry(dir, "h", { ...fromEntry!, heartbeat_at: new Date(Date.now() - 10 * 60_000).toISOString() });
+			replyTarget = receiver.replyTargetFor(fromEntry!);
+			removeEntry(dir, "h", fromEntry!.session_id);
+			return { accepted: true };
+		},
+	});
+	await a.start();
+	await b.start();
+	await receiver.start();
+	try {
+		const { msg_id } = await a.send("stale-receiver", "question from A");
+		assert.match(replyTarget, /^twin@/, "stale replies use a session-qualified target");
+		assert.notEqual(replyTarget, "twin", "the raw shared display name is not used");
+		await receiver.send(replyTarget, "answer to A", msg_id);
+		assert.equal(aInbox.length, 1, "the stale sender received the reply");
+		assert.equal(bInbox.length, 0, "the live same-name twin did not receive it");
+	} finally {
+		await a.stop();
+		await b.stop();
+		await receiver.stop();
 	}
 });
 
@@ -445,7 +959,7 @@ test("an unreadable registry during name resolution does not turn delivery into 
 			// Mirrors extension.ts's reply-hint resolution, which runs on this very callback.
 			failPool = true;
 			try {
-				got.push(receiver.displayNameFor(fromEntry!));
+				got.push(receiver.replyTargetFor(fromEntry!));
 			} finally {
 				failPool = false;
 			}
@@ -458,7 +972,7 @@ test("an unreadable registry during name resolution does not turn delivery into 
 	try {
 		await sender.send("pool-fail", "still deliverable");
 		await new Promise((r) => setTimeout(r, 100));
-		assert.deepEqual(got, ["pool-sender"], "the hint fell back to the authenticated entry's own name");
+		assert.match(got[0] ?? "", /^pool-sender@/, "the hint uses a routable qualified target");
 	} finally { await sender.stop(); await receiver.stop(); }
 });
 

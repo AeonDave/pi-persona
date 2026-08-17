@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { tempDir } from "../../setup/temp-dir.ts";
 import { agentsDir, registryPath } from "../../../src/exocom/paths.ts";
-import { prune, readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
+import { prune, readAll, registryEntryFixture, removeEntry, removeEntryIfMatches, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
 
 let dir: string;
 before(async () => { dir = await mkdtemp(join(tmpdir(), "exo-reg-")); });
@@ -50,6 +50,48 @@ test("removeEntry takes a session_id and deletes the right file", () => {
 	removeEntry(dir, H, "gone-sess");
 	const remaining = readAll(dir, H).filter((e) => e.name === "gone");
 	assert.deepEqual(remaining.map((e) => e.session_id), ["stays-sess"], "only the targeted session_id's file is removed");
+});
+
+test("removeEntryIfMatches preserves a replacement with the same session_id", () => {
+	const original = entry({ session_id: "owned-original", endpoint: "/old-endpoint", public_key: Buffer.from("old-key").toString("base64") });
+	const replacement = entry({ session_id: "owned-original", endpoint: "/new-endpoint", public_key: Buffer.from("new-key").toString("base64") });
+	writeEntry(dir, H, original);
+	assert.equal(removeEntryIfMatches(dir, H, replacement), false, "a different endpoint/key is not ours to remove");
+	assert.equal(readAll(dir, H).find((e) => e.session_id === original.session_id)?.endpoint, original.endpoint);
+	assert.equal(removeEntryIfMatches(dir, H, original), true, "the exact owner can remove its entry");
+	assert.equal(readAll(dir, H).some((e) => e.session_id === original.session_id), false);
+});
+
+test("removeEntryIfMatches keeps a replacement installed after comparison", () => {
+	const original = entry({ session_id: "owned-after-compare", endpoint: "/old-after-compare", public_key: Buffer.from("old-after").toString("base64") });
+	const replacement = entry({ session_id: original.session_id, endpoint: "/new-after-compare", public_key: Buffer.from("new-after").toString("base64") });
+	writeEntry(dir, H, original);
+	assert.equal(removeEntryIfMatches(dir, H, original, {
+		afterCompare: () => writeEntry(dir, H, replacement),
+	}), true);
+	const stored = readAll(dir, H).find((e) => e.session_id === original.session_id);
+	assert.equal(stored?.endpoint, replacement.endpoint, "the post-compare replacement was not deleted");
+	assert.equal(stored?.public_key, replacement.public_key);
+});
+
+test("prune does not delete a replacement installed after its initial registry read", () => {
+	const stale = entry({ session_id: "prune-replaced", endpoint: "/before-prune", public_key: Buffer.from("before").toString("base64"), heartbeat_at: new Date(0).toISOString() });
+	const replacement = entry({ session_id: stale.session_id, endpoint: "/after-prune", public_key: Buffer.from("after").toString("base64"), heartbeat_at: new Date(1_000_000).toISOString() });
+	writeEntry(dir, H, stale);
+	const live = prune(dir, H, {
+		now: 1_000_000 + 30_000,
+		staleMs: 120_000,
+		isAlive: () => {
+			// Simulate another instance replacing the slot after prune() read it but
+			// before the stale entry is removed.
+			writeEntry(dir, H, replacement);
+			return false;
+		},
+	});
+	assert.deepEqual(live, [], "the original entry was stale");
+	const stored = readAll(dir, H).find((e) => e.session_id === stale.session_id);
+	assert.equal(stored?.endpoint, replacement.endpoint, "prune leaves the replacement intact");
+	assert.equal(stored?.public_key, replacement.public_key);
 });
 
 // The preserve-from-disk step below only covers the file-STILL-EXISTS case. An entry can be

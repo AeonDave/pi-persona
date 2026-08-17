@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { composeSystemPrompt, expandCouncilPreset, parsePersona, resolveCouncilInvocation } from "../../../src/persona/persona.ts";
 
@@ -38,6 +40,20 @@ test("parsePersona reads identity, permissions, orchestration grammar, and body"
 	assert.equal(p.orchestration?.roster, "magi");
 	assert.equal(p.body, "You are the MAGI orchestrator.");
 	assert.equal(p.source, "/p/magi.md");
+});
+
+test("delegation policy is data-driven for any custom persona name", () => {
+	const custom = parsePersona(
+		"---\nname: my-own-supervisor\npersona: true\ndelegation:\n  requireBrief: true\n  outputContract: finding\n  requireDisjointWrites: true\n  requireFreshVerification: true\n  verificationAgents: [check-bot, proof-bot]\n---\nCustom supervisor.",
+		"/p/custom.md",
+	)!;
+	assert.deepEqual(custom.delegation, {
+		requireBrief: true,
+		outputContract: "finding",
+		requireDisjointWrites: true,
+		requireFreshVerification: true,
+		verificationAgents: ["check-bot", "proof-bot"],
+	});
 });
 
 test("parsePersona returns null when the name is missing", () => {
@@ -234,12 +250,32 @@ test("resolveCouncilInvocation rejects an explicit persona with no council even 
 	);
 });
 
-test("dev persona includes a tool-driven pair council (adoption example)", () => {
-	const dev = parsePersona(
-		"---\nname: dev\npersona: true\ncouncil:\n  strategy: pair\n  roster: repair\n---\nDev engineer.",
-		"/p/dev.md",
-	)!;
-	assert.equal(dev.council?.strategy, "pair");
+test("the bundled dev persona uses a sequential fail-closed repair council", () => {
+	const path = fileURLToPath(new URL("../../../personas/dev.md", import.meta.url));
+	const dev = parsePersona(readFileSync(path, "utf8"), path)!;
+	assert.equal(dev.council?.strategy, "critic-loop");
 	assert.equal(dev.council?.roster, "repair");
-	assert.equal(dev.council?.params, undefined);
+	assert.deepEqual(dev.council?.params, { rounds: 3 });
+	assert.deepEqual(dev.delegation, {
+		requireBrief: true,
+		requireDisjointWrites: true,
+		requireFreshVerification: true,
+		verificationAgents: ["verifier"],
+	});
+	for (const field of ["scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"]) {
+		assert.match(dev.body, new RegExp(`\\b${field}\\b`));
+	}
+});
+
+test("the bundled elite persona exposes a sequential evidence-assurance council", () => {
+	const path = fileURLToPath(new URL("../../../personas/elite.md", import.meta.url));
+	const elite = parsePersona(readFileSync(path, "utf8"), path)!;
+	assert.equal(elite.council?.strategy, "critic-loop");
+	assert.equal(elite.council?.roster, "offensive-assurance");
+	assert.deepEqual(elite.council?.params, { rounds: 3 });
+	assert.deepEqual(elite.delegation, { requireBrief: true, outputContract: "finding" });
+	for (const field of ["scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"]) {
+		assert.match(elite.body, new RegExp(`\\b${field}\\b`));
+	}
+	assert.match(elite.body, /outputContract:\s*"finding"/);
 });

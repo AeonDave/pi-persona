@@ -44,7 +44,7 @@ export function rosterSpec(member: RosterMember): RosterSpec {
 	if (member.role?.trim()) spec.role = member.role.trim();
 	if (member.model?.trim()) spec.model = member.model.trim();
 	if (member.skills && member.skills.length > 0) spec.skills = member.skills;
-	if (member.tools && member.tools.length > 0) spec.tools = member.tools;
+	if (member.tools !== undefined) spec.tools = member.tools;
 	if (member.isolation !== undefined) spec.isolation = member.isolation;
 	if (member.mcp !== undefined) spec.mcp = member.mcp;
 	return spec;

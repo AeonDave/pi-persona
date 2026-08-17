@@ -17,13 +17,27 @@
 
 import { type Static, Type } from "typebox";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 import type { DisplayPeer, ExocomPlane } from "../exocom/plane.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 
+const COLLAPSED_PEER_LIMIT = 8;
+/** Model-facing presence is a sample, not a dump. Keep the count and a refresh action below. */
+export const MAX_MODEL_PEER_ROWS = 24;
+/** Structured broadcast details retain enough IDs/errors to act while exact totals cover the rest. */
+export const MAX_BROADCAST_DETAIL_ITEMS = 64;
+const MODEL_BROADCAST_ID_SAMPLE = 12;
+const MODEL_BROADCAST_FAILURE_SAMPLE = 8;
+
+const ExocomListParams = Type.Object({
+	offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000, description: "Zero-based page offset into the live peer list." })),
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_MODEL_PEER_ROWS, description: `Maximum peers to show (default ${MAX_MODEL_PEER_ROWS}).` })),
+});
+
 const ExocomSendParams = Type.Object({
-	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s name (from `exocom_list`), or "*" to broadcast to every reachable peer.' }),
+	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s `target` token exactly as `exocom_list` shows it (a display name still works, but it can be reassigned as peers come and go), or "*" to broadcast to every reachable peer.' }),
 	message: Type.String({ minLength: 1, maxLength: 1_000_000, description: "The message body." }),
 	in_reply_to: Type.Optional(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$", description: "The msg_id you're replying to, if this is a reply." })),
 });
@@ -37,16 +51,90 @@ const ExocomNameParams = Type.Object({
  *  otherwise unifies the two into an ill-typed merged shape). */
 type ExocomSendDetails =
 	| { msg_id: string; target: string }
-	| { target: "*"; msg_ids: string[]; failed: Array<{ target: string; error: string }> };
+	| {
+		target: "*";
+		/** The bounded samples below are accompanied by exact totals so a large fan-out never
+		 * turns the tool result into an unbounded model/context payload. */
+		peerCount: number;
+		queuedCount: number;
+		failedCount: number;
+		msg_ids: string[];
+		failed: Array<{ target: string; error: string }>;
+		omittedMsgIds: number;
+		omittedFailures: number;
+	};
 
-/** One readable line per live peer. `displayName` (not the possibly-shared `.name`) is what
- *  disambiguates two peers registered under the same persona name — see plane.ts's
- *  `dedupeDisplayNames`. */
-function formatPeers(peers: DisplayPeer[]): string {
-	const rows = peers
-		.map((p) => `- ${normalizeMetadataText(p.displayName, 80, "peer")} · ${normalizeMetadataText(p.persona, 64, "unknown")} · ${normalizeMetadataText(p.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(p.context_pct) || 0))}%`)
-		.join("\n");
-	return [`Exocom presence only (${peers.length} peers; not a message inbox)`, rows, "Use target exactly as shown."].filter(Boolean).join("\n");
+type ExocomPeerSummary = Pick<DisplayPeer, "displayName" | "persona" | "model" | "context_pct" | "target">;
+
+function peerWord(count: number): string {
+	return `${count} peer${count === 1 ? "" : "s"}`;
+}
+
+function peerRow(peer: ExocomPeerSummary): string {
+	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}%`;
+}
+
+/** The model-facing row carries the ROUTE as well as the human label: a display name is
+ *  recomputed from the live set on every call, so the label a roster showed can belong to a
+ *  different session by the time the model sends. The TUI row above stays human-sized. */
+function modelPeerRow(peer: ExocomPeerSummary): string {
+	return `${peerRow(peer)} · target: ${normalizeMetadataText(peer.target, 80, "peer")}`;
+}
+
+/** One readable line per live peer: `displayName` (not the possibly-shared `.name`) disambiguates
+ *  two peers registered under the same persona name — see plane.ts's `dedupeDisplayNames` — and
+ *  `target` is what the model must actually address with. */
+function formatPeers(peers: DisplayPeer[], offset = 0, limit = MAX_MODEL_PEER_ROWS): string {
+	const head = `Exocom presence only (${peerWord(peers.length)}; ${peers.length === 0 ? "no reachable peers" : "not a message inbox"})`;
+	if (peers.length === 0) return head;
+	const shown = peers.slice(offset, offset + limit);
+	const paged = offset > 0 || peers.length > limit;
+	const pageHead = paged
+		? `Exocom presence only (${peerWord(peers.length)}; showing ${shown.length === 0 ? "none" : `${offset + 1}–${offset + shown.length}`} of ${peers.length}; not a message inbox)`
+		: head;
+	const omitted = peers.length - shown.length;
+	const lines = [pageHead, shown.map(modelPeerRow).join("\n")];
+	if (omitted > 0) {
+		const next = offset + shown.length < peers.length ? `call exocom_list with offset: ${offset + shown.length} to continue` : "call exocom_list with offset: 0 to return to the first page";
+		lines.push(`…and ${omitted} peers omitted from this bounded page; ${next}.`);
+	}
+	lines.push("Use each peer's target exactly as shown; display names can be reassigned as peers come and go.");
+	return lines.join("\n");
+}
+
+function renderListResult(peers: ExocomPeerSummary[], expanded: boolean, total = peers.length): string {
+	if (total === 0) return "Exocom · 0 peers · no reachable peers";
+	const shown = expanded ? peers : peers.slice(0, COLLAPSED_PEER_LIMIT);
+	const lines = [`Exocom · ${peerWord(total)} (presence only)`];
+	lines.push(...shown.map(peerRow));
+	if (!expanded && total > shown.length) lines.push(`…and ${total - shown.length} more`);
+	if (!expanded && total > shown.length) lines.push(`(${keyHint("app.tools.expand", "to expand")})`);
+	return lines.join("\n");
+}
+
+function isSendDetails(details: unknown): details is ExocomSendDetails {
+	if (!details || typeof details !== "object") return false;
+	const shape = details as { msg_id?: unknown; failed?: unknown };
+	return Array.isArray(shape.failed) || typeof shape.msg_id === "string";
+}
+
+function renderSendResult(details: ExocomSendDetails, expanded: boolean): string {
+	if ("failed" in details) {
+		const failed = details.failedCount ?? details.failed.length;
+		const queued = details.queuedCount ?? details.msg_ids.length;
+		const summary = `${queued > 0 ? "✓" : "✗"} queued ${queued} peer${queued === 1 ? "" : "s"}${failed > 0 ? ` · ${failed} failed` : ""}`;
+		if (!expanded) return `${summary} (${keyHint("app.tools.expand", "to expand")})`;
+		const lines = [summary];
+		if (details.msg_ids.length > 0) lines.push(`msg_ids: ${details.msg_ids.join(", ")}`);
+		for (const failure of details.failed) {
+			lines.push(`✗ ${normalizeMetadataText(failure.target, 80, "peer")}: ${normalizeMetadataText(failure.error, 240, "send failed")}`);
+		}
+		if ((details.omittedMsgIds ?? 0) > 0) lines.push(`…and ${details.omittedMsgIds} more msg_ids omitted; use the returned count to track the remaining queued peers.`);
+		if ((details.omittedFailures ?? 0) > 0) lines.push(`…and ${details.omittedFailures} more failures omitted; retry only the failed targets shown above.`);
+		return lines.join("\n");
+	}
+	const summary = `✓ queued to ${details.target} · msg_id=${details.msg_id}`;
+	return expanded ? summary : `${summary} (${keyHint("app.tools.expand", "to expand")})`;
 }
 
 /** `getPlane` is a LIVE accessor, not a captured value: a `canUseBus` downgrade (`stopExocom`,
@@ -64,12 +152,44 @@ export function registerExocomTools(
 		name: "exocom_list",
 		label: "Exocom List",
 		description: "List current exocom peer presence only; this is not a message inbox and replies arrive automatically.",
-		parameters: Type.Object({}),
-		async execute() {
+		parameters: ExocomListParams,
+		async execute(_toolCallId, params: Static<typeof ExocomListParams>) {
 			const plane = getPlane();
 			if (!plane) throw new Error("exocom is not active for this persona");
 			const peers = plane.listPeers();
-			return { content: [{ type: "text", text: formatPeers(peers) }], details: { peers } };
+			const offset = Math.max(0, Math.floor(params?.offset ?? 0));
+			const limit = Math.max(1, Math.min(MAX_MODEL_PEER_ROWS, Math.floor(params?.limit ?? MAX_MODEL_PEER_ROWS)));
+			const shown: ExocomPeerSummary[] = peers.slice(offset, offset + limit).map((peer) => ({
+				displayName: normalizeMetadataText(peer.displayName, 80, "peer"),
+				target: normalizeMetadataText(peer.target, 80, "peer"),
+				persona: normalizeMetadataText(peer.persona, 64, "unknown"),
+				model: normalizeMetadataText(peer.model, 160, "unknown"),
+				context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
+			}));
+			return {
+				content: [{ type: "text", text: formatPeers(peers, offset, limit) }],
+				details: {
+					peers: shown,
+					total: peers.length,
+					offset,
+					limit,
+					omitted: peers.length - shown.length,
+					...(offset + shown.length < peers.length ? { nextOffset: offset + shown.length } : {}),
+				},
+			};
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("Exocom List")), 0, 0);
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as unknown as { peers?: ExocomPeerSummary[]; total?: number } | undefined;
+			if (!details || !Array.isArray(details.peers)) {
+				const first = result.content.find((item) => item.type === "text");
+				return new Text(theme.fg("error", first?.type === "text" ? first.text : "Exocom list failed"), 0, 0);
+			}
+			const peers = details.peers;
+			const total = typeof details.total === "number" ? details.total : peers.length;
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total)), 0, 0);
 		},
 	});
 
@@ -91,37 +211,93 @@ export function registerExocomTools(
 			if (!plane) throw new Error("exocom is not active for this persona");
 			if (params.target === "*") {
 				const peers = plane.listPeers();
-				const msg_ids: string[] = [];
 				const sent: Array<{ target: string; msg_id: string }> = [];
 				const failed: Array<{ target: string; error: string }> = [];
-				await Promise.all(
-					// By displayName, not the possibly-shared `.name`: two LIVE peers can share a raw
-					// name (session_id-keyed registry, PartA), and `plane.send` resolves its target
-					// against `listPeers()`'s displayName (unique per live peer) — addressing by `.name`
-					// here would resolve BOTH same-named peers to the SAME one.
+				const outcomes = await Promise.all(
+					// By the session-pinned target, not the possibly-shared `.name` nor the display
+					// label: two LIVE peers can share a raw name (session_id-keyed registry, PartA),
+					// and a label is recomputed from the live set on every call — a peer that joins or
+					// leaves mid-fan-out can inherit another's label and receive its message.
 					peers.map(async (p) => {
 						try {
-							const { msg_id } = await plane.send(p.displayName, params.message, params.in_reply_to);
-							msg_ids.push(msg_id);
-							sent.push({ target: p.displayName, msg_id });
+							const { msg_id } = await plane.send(p.target, params.message, params.in_reply_to);
+							return { ok: true as const, target: p.target, msg_id };
 						} catch (err) {
-							failed.push({ target: p.displayName, error: err instanceof Error ? err.message : String(err) });
+							return { ok: false as const, target: p.target, error: err instanceof Error ? err.message : String(err) };
 						}
 					}),
 				);
-				const ids = sent.map((item) => `${item.target}=${item.msg_id}`).join(", ");
+				// Promise completion order is not a presentation contract. Fold after all sends settle so
+				// sampled IDs/errors retain the stable registry order even when peers answer at different speeds.
+				for (const outcome of outcomes) {
+					if (outcome.ok) sent.push({ target: outcome.target, msg_id: outcome.msg_id });
+					else failed.push({ target: outcome.target, error: outcome.error });
+				}
 				const failNote = failed.length > 0 ? `; ${failed.length} failed` : "";
+				const marker = sent.length > 0 ? "✓" : "✗";
+				const shownIds = sent.slice(0, MODEL_BROADCAST_ID_SAMPLE).map((item) =>
+					`${normalizeMetadataText(item.target, 80, "peer")}=${normalizeMetadataText(item.msg_id, 128, "msg")}`,
+				);
+				const omittedIds = sent.length - shownIds.length;
+				const shownFailures = failed.slice(0, MODEL_BROADCAST_FAILURE_SAMPLE).map((item) =>
+					`${normalizeMetadataText(item.target, 80, "peer")}: ${normalizeMetadataText(item.error, 160, "send failed")}`,
+				);
+				const omittedFailures = failed.length - shownFailures.length;
+				const action = omittedIds > 0 || omittedFailures > 0
+					? `; ${[
+						shownIds.length > 0 ? `msg_ids: ${shownIds.join(", ")}${omittedIds > 0 ? `; +${omittedIds} more msg_ids omitted` : ""}` : "",
+						shownFailures.length > 0 ? `failures: ${shownFailures.join("; ")}${omittedFailures > 0 ? `; +${omittedFailures} more failures omitted` : ""}` : "",
+					].filter(Boolean).join("; ")}`
+					: shownIds.length > 0 ? `; msg_ids: ${shownIds.join(", ")}` : "";
 				return {
-				content: [{ type: "text", text: `✓ received and queued by ${sent.length}/${peers.length} peers${failNote}; replies arrive automatically as [exocom_received] — do not poll exocom_list${ids ? `; msg_ids: ${ids}` : ""}` }],
-					details: { target: "*", msg_ids, failed },
+					content: [{ type: "text", text: peers.length === 0 ? "⚠ no reachable peers; nothing queued" : `${marker} queued ${sent.length}/${peers.length} ${peers.length === 1 ? "peer" : "peers"}${failNote}${action}` }],
+					details: {
+						target: "*",
+						peerCount: peers.length,
+						queuedCount: sent.length,
+						failedCount: failed.length,
+						msg_ids: sent.slice(0, MAX_BROADCAST_DETAIL_ITEMS).map((item) => normalizeMetadataText(item.msg_id, 128, "msg")),
+						failed: failed.slice(0, MAX_BROADCAST_DETAIL_ITEMS).map((failure) => ({
+							target: normalizeMetadataText(failure.target, 80, "peer"),
+							error: normalizeMetadataText(failure.error, 240, "send failed"),
+						})),
+						omittedMsgIds: Math.max(0, sent.length - MAX_BROADCAST_DETAIL_ITEMS),
+						omittedFailures: Math.max(0, failed.length - MAX_BROADCAST_DETAIL_ITEMS),
+					},
 				};
 			}
 
-			const { msg_id } = await plane.send(params.target, params.message, params.in_reply_to);
+			let msg_id: string;
+			try {
+				({ msg_id } = await plane.send(params.target, params.message, params.in_reply_to));
+			} catch (err) {
+				// A rejection carries the PEER's own NACK text (plane.send embeds it verbatim), and pi
+				// turns a thrown execute() into model-facing tool-result text. Flatten it exactly like
+				// the broadcast branch above: peer prose must never reach the model with its own line
+				// breaks, framed as this agent's tool output.
+				throw new Error(normalizeMetadataText(err instanceof Error ? err.message : String(err), 240, "exocom: send failed"));
+			}
 			return {
-			content: [{ type: "text", text: `✓ received and queued by ${params.target}; reply arrives automatically as [exocom_received] — do not poll exocom_list. msg_id=${msg_id}` }],
+				content: [{ type: "text", text: `✓ queued to ${params.target} · msg_id=${msg_id}` }],
 				details: { msg_id, target: params.target },
 			};
+		},
+		renderCall(args, theme) {
+			const target = normalizeMetadataText(args.target, 80, "*");
+			const message = String(args.message ?? "").replace(/\s+/g, " ").trim();
+			const preview = normalizeMetadataText(message, 60);
+			const suffix = preview.length < message.length ? "…" : "";
+			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as unknown as ExocomSendDetails | undefined;
+			// pi renders this for a FAILED call too, handing us the error's empty details object — an
+			// unrecognised shape is a failure to show, not a send to congratulate the user on.
+			if (!isSendDetails(details)) {
+				const text = result.content.find((item) => item.type === "text");
+				return new Text(theme.fg("error", text?.type === "text" ? text.text : "(no result)"), 0, 0);
+			}
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderSendResult(details, expanded)), 0, 0);
 		},
 	});
 
@@ -139,6 +315,19 @@ export function registerExocomTools(
 			if (!plane || !onRename) throw new Error("exocom is not active for this persona");
 			const applied = normalizePeerName(onRename(normalizePeerName(params.name)));
 			return { content: [{ type: "text", text: `exocom: you are now "${applied}"` }], details: { name: applied } };
+		},
+		renderCall(args, theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as unknown as { name?: string } | undefined;
+			if (!details?.name) {
+				const first = result.content.find((item) => item.type === "text");
+				return new Text(theme.fg("error", first?.type === "text" ? first.text : "Exocom name failed"), 0, 0);
+			}
+			const name = normalizeMetadataText(details.name, 96, "(unchanged)");
+			const text = `exocom: you are now "${name}"`;
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
 }

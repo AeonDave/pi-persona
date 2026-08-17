@@ -8,20 +8,21 @@
  * on any failure.
  *
  * ── Manual live two-instance trial (Windows/PowerShell) ──────────────────────────────────────
- * Real `pi` runs are left to the user — not driven by this script. Two terminals, SAME workspace
- * folder:
+ * Real `pi` runs are left to the live harness/operator — not driven by this no-token script.
+ * Open two INTERACTIVE terminals in the SAME workspace (print-mode `npm run drive` exits after
+ * one turn and therefore is not a valid receiver):
  *
- *   # terminal 1 (elite)
- *   $env:PI_PERSONA_EXOCOM=1; npm run drive -- --persona elite --model <provider/id> "list your exocom peers, then send dev a task to audit README and wait for its reply"
+ *   # terminal 1 — any installed persona, or omit --persona
+ *   pi --exocom --persona <name> --model <provider/id>
  *
- *   # terminal 2 (dev, same folder)
- *   $env:PI_PERSONA_EXOCOM=1; npm run drive -- --persona dev --model <provider/id> "stand by for exocom messages; when one arrives, do it and reply with in_reply_to"
+ *   # terminal 2 — same workspace, independently chosen persona/model
+ *   pi --exocom --persona <name> --model <provider/id>
  *
  * Verify by eye:
- *   - elite's `exocom_list` shows dev (cross-process discovery)
- *   - elite's `exocom_send` reaches dev (dev's turn wakes with the task)
- *   - dev acts on the task and replies with `in_reply_to` set to the original msg_id
- *   - the reply lands back on elite as a FENCED follow-up (attributed, <subagent-output>-wrapped)
+ *   - each `exocom_list` shows the other's call-sign (cross-process discovery)
+ *   - A's `exocom_send` reaches B and wakes B with an attributed, quoted peer-data follow-up
+ *   - B replies with `in_reply_to` set to the original msg_id
+ *   - the correlated reply wakes A; closing both sessions removes both registry entries
  * Capture the transcript from both terminals.
  */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -102,14 +103,16 @@ async function main() {
 		check("send+inbound: delivered follow-up is attributed + fenced",
 			first?.decision && "deliver" in first.decision
 				&& first.decision.deliver.includes("smoke-a")
-				&& first.decision.deliver.includes("<peer-message>"));
+				&& first.decision.deliver.includes("Peer data · untrusted equal-status collaborator:")
+				&& first.decision.deliver.split("\n").slice(2, -1).every((line) => line.startsWith("> ")));
 		check("send+inbound: delivered follow-up exposes msg_id + reply instruction",
 			first?.decision && "deliver" in first.decision
 				&& first.decision.deliver.includes(firstMsgId)
 				&& first.decision.deliver.includes("in_reply_to"));
 
 		// ── 3. correlated reply ──────────────────────────────────────────────────
-		await b.send("smoke-a", "done", firstMsgId);
+		const replyTarget = first?.fromEntry ? b.replyTargetFor(first.fromEntry) : "";
+		await b.send(replyTarget, "done", firstMsgId);
 		await delay(150);
 		check("correlated reply: A's onInbound fired", aInbound.length === 1);
 		check("correlated reply: in_reply_to matches the original msg_id", aInbound[0]?.in_reply_to === firstMsgId);

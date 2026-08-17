@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { AgentTree, type AgentNode, flattenTree, renderAgentTree } from "../../../src/ui/agent-tree.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+import { AgentTree, type AgentNode, flattenTree, renderAgentTree, renderAgentTreeSummary } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -17,6 +19,65 @@ test("renderAgentTree nests children under their parent with status glyphs + det
 	assert.match(text, /├─ ✓ Balthasar {2}↑12k ↓3k/);
 	assert.match(text, /├─ ✗ Casper/);
 	assert.match(text, /└─ ■ Stopped/);
+});
+
+test("renderAgentTreeSummary bounds a wide fan-out and points to the full overlay", () => {
+	const nodes: AgentNode[] = [
+		{ id: "fanout", label: "fanout", parentId: undefined, status: "running", detail: undefined },
+		...Array.from({ length: 20 }, (_, i): AgentNode => ({
+			id: `fanout/${i}`,
+			label: `worker-${i + 1}`,
+			parentId: "fanout",
+			status: "running",
+			detail: "queued",
+		})),
+	];
+	const lines = renderAgentTreeSummary(nodes, 8);
+	assert.equal(lines.length, 8);
+	assert.match(lines.at(-1) ?? "", /\+14 more.*F9.*\/agents/);
+	assert.doesNotMatch(lines.join("\n"), /worker-20/);
+});
+
+test("renderAgentTreeSummary surfaces failures even when their rows fall below the fold", () => {
+	const nodes: AgentNode[] = [
+		{ id: "fanout", label: "fanout", parentId: undefined, status: "running", detail: undefined },
+		...Array.from({ length: 20 }, (_, i): AgentNode => ({
+			id: `fanout/${i}`,
+			label: `worker-${i + 1}`,
+			parentId: "fanout",
+			status: i === 19 ? "failed" : "running",
+			detail: i === 19 ? "provider" : "queued",
+		})),
+	];
+	const lines = renderAgentTreeSummary(nodes, 8);
+	assert.equal(lines.length, 8);
+	assert.match(lines.join("\n"), /✗ 1 failed.*worker-20.*provider/);
+	assert.match(lines.at(-1) ?? "", /F9.*\/agents/);
+});
+
+test("renderAgentTree strips terminal controls from user-defined labels and details", () => {
+	const lines = renderAgentTree([
+		{ id: "unsafe", label: "safe\u001b[2J\nspoof", parentId: undefined, status: "running", detail: "ok\u0000\r\nnext" },
+	]);
+	assert.equal(lines.length, 1);
+	assert.doesNotMatch(lines[0] ?? "", /\u001b|\u0000|\r|\n/);
+	assert.match(lines[0] ?? "", /safe spoof.*ok next/);
+});
+
+test("renderAgentTree clamps hostile label and detail metadata", () => {
+	const line = renderAgentTree([
+		{ id: "huge", label: "L".repeat(500), parentId: undefined, status: "failed", detail: "D".repeat(500) },
+	])[0] ?? "";
+	assert.ok(line.length <= 210, `tree row was not bounded: ${line.length}`);
+	assert.match(line, /…/);
+});
+
+test("renderAgentTree bounds a wide-glyph row in terminal columns", () => {
+	const line = renderAgentTree([
+		{ id: "cjk", label: "漢".repeat(300), parentId: undefined, status: "running", detail: "字".repeat(300) },
+	])[0] ?? "";
+	assert.ok(visibleWidth(line) <= 210, `tree row occupied ${visibleWidth(line)} terminal columns`);
+	assert.match(line, /…/);
 });
 
 test("AgentTree.add is idempotent on id and update mutates status/detail + notifies", () => {

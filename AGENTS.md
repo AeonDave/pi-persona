@@ -86,15 +86,22 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   sync so the single turn carries the result).
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
-- **Delegation nudges** (`core/nudge.ts`, `config.nudge`, on unless `PI_PERSONA_NUDGE=off` silences
-  BOTH): a `tool_result` hook watches the supervisor's OWN tool stream and, when a delegating persona
-  grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a threshold),
+- **Delegation nudges** (`core/nudge.ts`, on by default): a `tool_result` hook watches the supervisor's
+  OWN tool stream and, when a delegating persona grinds heavy work by hand (output burn since the
+  last `delegate`/`council` crosses a threshold),
   APPENDS a reminder to that command's result — runtime reinforcement in recent context, where a
   top-of-prompt persona directive has decayed. Pure state machine (`DelegationNudge`); gated to
   personas holding the `delegate` tool; sub-agents run in separate sessions so the hook only sees the
   supervisor. Its counterweight is **`PersistenceNudge`** — a leg that comes back `[BLOCKED]`/`FLAG:
-  UNKNOWN` gets a "don't bank it yet" reminder on whichever path the report arrives (sync result,
-  background completion, or `intercom wait` — the last two via `engine/async.ts`'s `renderCompletion`).
+  UNKNOWN` gets a "don't bank it yet" reminder on each of the three delivery paths (sync result,
+  background completion, `intercom wait` — the last two via `engine/async.ts`'s `renderCompletion`), but
+  they do not scan the same text: `observe` scans the whole sync tool result (which `aggregateResults`
+  fills with every leg's body, failures included), while `renderCompletion` scans only `status: "done"`
+  runs. A background leg that FAILED while emitting `[BLOCKED]` therefore gets the failure block but no
+  persistence note — deliberate (see the `renderCompletion` doc comment), not a bug to "fix" silently.
+  `config.nudge` (`PI_PERSONA_NUDGE=off`) is read at ONE place, the `tool_result` hook: it silences the
+  by-hand reminder and the sync-result persistence one, but the two `renderCompletion` call sites pass
+  an ungated `scan` callback, so a background/`intercom wait` report still carries the note.
   Its standing counterpart is the **delegation brief** (`core/brief.ts`): `before_agent_start` appends
   a live, capability-filtered roster (agents/teams/flows) + a hand-off default to the
   system-prompt TAIL every turn — discovery that survives context burn.
@@ -110,15 +117,17 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   On the peer plane: `debate` and `pair` always; `map`/`synthesize` opt-in via `params.peers`.
   `magi`/`judge`/`fanout` stay peer-less BY DESIGN — independence is their bias guard
   (uncorrelated errors; an anonymised ballot cannot survive members who talked) — do not "fix"
-  this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a git repo; without
-  one the wrapper silently degrades to unisolated runs) and returns the winning diff for the
-  SUPERVISOR to apply.
+  this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a clean git repo; missing
+  repo/dirty checkout/worktree failure fails closed and never falls back to the real tree) and returns
+  the winning diff for the SUPERVISOR to apply.
 - **exocom** (`src/exocom/*`, `src/tools/exocom.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`, gated
   by `canUseBus`): a plane apart from everything above — those are all INTERNAL to one supervisor's
   own run (hierarchical, session-keyed children); exocom is FLAT and EXTERNAL, between independent
   top-level pi instances sharing a workspace, discovered via a workspace-scoped file registry, no
   parent/child relationship. `exocom_list`/`exocom_send` are one-way and non-blocking (a reply is a
-  send with `in_reply_to` set). Reuses the broker's wire framing (`bus/broker/framing.ts`) and the
+  send with `in_reply_to` set); `exocom_name` renames only this instance's display call-sign — all
+  three are gated together by `EXOCOM_TOOL_NAMES`/`canUseBus`. Reuses the broker's wire framing
+  (`bus/broker/framing.ts`) and the
   core fence (`fenceUntrusted`/`attributeInbound`) — no new trust-sensitive code path; inbound
   attribution is resolved from the registry, never the envelope's self-reported `from_name`.
   Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#exocom--the-external-plane).
@@ -126,8 +135,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 ## Testing
 
 - TDD: write the failing test first for `core/*` and any behavior change; watch it fail, then fix.
-- Done = `npm run typecheck` clean **and** full suite green. The suite has **one** intentional skip
-  (see Accepted diagnostics).
+- Done = `npm run typecheck` clean **and** full suite green. The suite has **two** intentional skips,
+  both Windows-only — the runner reports `skipped 2` on Windows and `skipped 0` elsewhere (see
+  Accepted diagnostics).
 - When touching engines / strategies / the comm plane, also verify with a live `scripts/drive.ts`
   run (concurrency, steer, worktree, and contact_supervisor are not fully provable from unit tests).
 
@@ -138,7 +148,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (opt-in cross-process relay: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
-- `src/tools/` — `delegate.ts`, `intercom.ts`. `src/ui/` — agent-tree/overlay, model-picker. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
+- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`. `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
   persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),
@@ -149,12 +159,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   in, `/persona restore` force-restores originals (`src/core/seed.ts`). First-run auto-install is
   **opt-in**: off by default, enable with `PI_PERSONA_SEED=on` (guarded once by marker
   `.pi-persona-seeded`). Contracts/presets/teams keep a builtin layer (they aren't personas).
-- `scripts/` — `drive.ts` (headless `pi -p` log), `control-test.mjs`, `flow-test.ts`. `test/` — unit + integration.
+- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip). `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
 
 1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test.
-2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `coaching: true`.
+2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `delegation:` / `coaching: true`; runtime behavior is field-driven, never keyed to a persona name.
 3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`, `mcp: true`
    (routes the leg through the child engine so `pi-mcp-adapter` initializes and its `mcp*`/direct
    tools work — the default in-process engine leaves them "not initialized"; also settable per-leg
@@ -175,7 +185,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 
 ## Accepted diagnostics
 
-- One skipped test: `test/integration/child-engine.test.ts` is skipped on Windows (spawn flakiness) — intentional, do not "fix".
+- Two skipped Windows-only cases in `test/integration/child-engine.test.ts` (force tree-kill and external-signal handling) — intentional, do not "fix".
 - `test/integration/broker.test.ts` (real socket/pipe round-trip) runs UNGATED on every platform,
   Windows named pipes included — it proved reliable across repeated runs; do not add a skip to it
   without first confirming genuine flakiness (see the v0.5 broker task report).

@@ -43,10 +43,29 @@ test("lists each agent with its clipped description", () => {
 		asyncDefault: true,
 	});
 	assert.ok(brief);
-	assert.match(brief ?? "", /- operator — x+…/);
+	assert.match(brief ?? "", /- operator — x+… \[tools=session-default\]/);
 	assert.match(brief ?? "", /- scout/);
 	// clipped: the 200-char description must not survive whole
 	assert.equal((brief ?? "").includes(long), false);
+});
+
+test("agent roster exposes effective tool routing metadata without dumping long grants", () => {
+	const brief = buildDelegationBrief({
+		agents: [
+			{ name: "scout", description: "Read-only explorer", tools: ["read", "grep", "find", "ls"] },
+			{ name: "operator", description: "General executor" },
+			{ name: "locked", description: "No-tool reasoner", tools: [] },
+			{ name: "lab", tools: ["read", "grep", "find", "ls", "bash", "write", "edit", "custom_one", "custom_two"], mcp: true, isolation: "worktree" },
+		],
+		teams: {},
+		flows: [],
+		standing: true,
+		asyncDefault: true,
+	});
+	assert.match(brief ?? "", /scout.*tools=read,grep,find,ls/i);
+	assert.match(brief ?? "", /operator.*tools=session-default/i, "an absent allowlist must not look like no tools");
+	assert.match(brief ?? "", /locked.*tools=none/i, "an explicit empty allowlist must be visible as no tools");
+	assert.match(brief ?? "", /lab.*tools=read,grep,find,ls,bash,write,\+3.*mcp.*worktree/i);
 });
 
 test("teams render as name[members] with ×N for repeated members; flows listed when present", () => {
@@ -72,6 +91,39 @@ test("standing brief states the hand-off default and a minimum call using operat
 	assert.match(brief ?? "", /Hand off by default/i);
 	assert.match(brief ?? "", /delegate\(\{ agent: "operator"/);
 	assert.match(brief ?? "", /council/);
+	assert.match(brief ?? "", /Pi already renders tool calls/i);
+	assert.match(brief ?? "", /do not narrate|don't narrate/i);
+});
+
+test("a generic requireBrief policy advertises the complete cold-start packet", () => {
+	const brief = buildDelegationBrief({
+		agents: AGENTS,
+		teams: {},
+		flows: [],
+		standing: true,
+		asyncDefault: true,
+		requireBrief: true,
+		outputContract: "finding",
+	});
+	for (const field of ["objective", "scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"]) {
+		assert.match(brief ?? "", new RegExp(`\\b${field}\\b`), `missing ${field}`);
+	}
+	assert.match(brief ?? "", /outputContract: "finding"/);
+});
+
+test("generic write ownership and fresh-verification policies are advertised without persona names", () => {
+	const brief = buildDelegationBrief({
+		agents: AGENTS,
+		teams: {},
+		flows: [],
+		standing: true,
+		asyncDefault: true,
+		requireDisjointWrites: true,
+		requireFreshVerification: true,
+	});
+	assert.match(brief ?? "", /writeSet/);
+	assert.match(brief ?? "", /disjoint/i);
+	assert.match(brief ?? "", /fresh verifier/i);
 });
 
 test("without operator the example uses the first listed agent", () => {

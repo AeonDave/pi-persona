@@ -49,6 +49,7 @@ export interface CreateSessionOptions {
 	/** Pi's global agent dir (~/.pi/agent) for the sub-agent's resource loader. */
 	agentDir: string;
 	tools?: string[];
+	excludeTools?: string[];
 	thinkingLevel?: ThinkingLevel;
 	/** The agent's persona (its .md) — appended to the base system prompt. */
 	systemPrompt?: string;
@@ -128,6 +129,15 @@ export interface InProcessDeps {
 // The sub-agent must never re-enter the supervisor's orchestration surface.
 const ORCHESTRATION_TOOLS = ["delegate", "council", "orchestrate", "flow"];
 
+/** Preserve the semantic difference between an absent allowlist (Pi defaults) and an explicit
+ * empty one (no tools). Custom communication tools join only a non-empty allowlist; an empty
+ * grant must not quietly grow capabilities during session construction. */
+export function mergeSessionToolAllowlist(tools: readonly string[] | undefined, customNames: readonly string[]): string[] | undefined {
+	if (tools === undefined) return undefined;
+	if (tools.length === 0) return [];
+	return [...new Set([...tools, ...customNames])];
+}
+
 /** Default factory: a real in-process Pi session. The resource loader appends the
  *  agent's persona to the base system prompt (the in-process `--append-system-prompt`).
  *  Extensions DO load (so auth providers like pi-claude work) — the fork-bomb guard is
@@ -143,7 +153,7 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	// If a `tools` allowlist is set, the injected custom tools must be allowed too,
 	// otherwise the allowlist would filter them out of the child's active set.
 	const customNames = (opts.customTools ?? []).map((t) => t.name);
-	const tools = opts.tools && opts.tools.length > 0 ? [...opts.tools, ...customNames] : undefined;
+	const tools = mergeSessionToolAllowlist(opts.tools, customNames);
 	// Forward-compat with the model-runtime migration (pi > 0.80.7). pi ≤ 0.80.7 reads
 	// `CreateAgentSessionOptions.modelRegistry` to share the host's auth/model registry with the
 	// sub-session; the migration DROPS that create option in favour of an async `modelRuntime`, where
@@ -160,8 +170,8 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		resourceLoader: loader,
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
-		excludeTools: ORCHESTRATION_TOOLS,
-		...(tools ? { tools } : {}),
+		excludeTools: [...new Set([...ORCHESTRATION_TOOLS, ...(opts.excludeTools ?? [])])],
+		...(tools !== undefined ? { tools } : {}),
 		...(opts.customTools && opts.customTools.length > 0 ? { customTools: opts.customTools } : {}),
 		// `opts.thinkingLevel` is our local ThinkingLevel superset — cast to pi's field type at the
 		// boundary (same rationale as PersonaHost.setThinkingLevel: a `max`-style level only reaches
@@ -282,6 +292,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const resolvedRef = rm.provider && rm.id ? `${rm.provider}/${rm.id}` : ref;
 			const thinkingLevel = isThinkingLevel(deps.childThinking) ? deps.childThinking : undefined;
 			const tools = spec.tools ?? cfg.tools;
+			const excludeTools = cfg.excludeTools;
 
 			// Diagnostic tag: which agent + which model ref + whether it was dynamically
 			// specialised (skills / model / tools override on the spec). Users need this
@@ -289,7 +300,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const overrides: string[] = [];
 			if (spec.model) overrides.push("model");
 			if (spec.skills && spec.skills.length > 0) overrides.push("skills");
-			if (spec.tools && spec.tools.length > 0) overrides.push("tools");
+			if (spec.tools !== undefined) overrides.push("tools");
 			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
 			const tag = `[${spec.agent} · ${ref ?? "(no model)"}${dyn}]`;
 
@@ -308,7 +319,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				cwd: deps.cwd,
 				agentDir: deps.agentDir ?? deps.cwd,
 			};
-			if (tools && tools.length > 0) sessionOpts.tools = tools;
+			if (tools !== undefined) sessionOpts.tools = tools;
+			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
 			if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
 			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
 			// on-the-fly `role` specialisation from the spec. All three reach the session as the

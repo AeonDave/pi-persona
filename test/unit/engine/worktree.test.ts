@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type GitExec, isGitRepo, withWorktree } from "../../../src/engine/worktree.ts";
+import * as worktree from "../../../src/engine/worktree.ts";
+import type { GitExec, WorktreeArtifact } from "../../../src/engine/worktree.ts";
+import { isGitRepo, withWorktree } from "../../../src/engine/worktree.ts";
 
 /** A fake git that records calls and returns scripted results. */
 function fakeGit(results: Record<string, { code: number; stdout?: string }> = {}): { exec: GitExec; calls: string[][] } {
@@ -14,6 +16,47 @@ function fakeGit(results: Record<string, { code: number; stdout?: string }> = {}
 	};
 	return { exec, calls };
 }
+
+test("withWorktree rejects a dirty repository before creating or running an isolated leg", async () => {
+	const { exec, calls } = fakeGit({ status: { code: 0, stdout: " M src/live.ts\n?? notes.txt\n" } });
+	await assert.rejects(
+		() => withWorktree("/repo", exec, async () => "must not run"),
+		/commit|stash|remove isolation/i,
+	);
+	assert.equal(calls.some((c) => c.includes("worktree") && c.includes("add")), false, "dirty worktree must not spawn git worktree add");
+});
+
+test("withWorktree rejects a non-Git cwd before creating or running an isolated leg", async () => {
+	const { exec, calls } = fakeGit({ "rev-parse": { code: 128 } });
+	await assert.rejects(
+		() => withWorktree("/not-a-repo", exec, async () => "must not run"),
+		/git repository|isolation/i,
+	);
+	assert.equal(calls.some((c) => c.includes("worktree") && c.includes("add")), false, "non-repo must not spawn git worktree add");
+});
+
+test("captureWorktreeArtifact exports tracked and untracked edits as a unified diff", () => {
+	const { exec, calls } = fakeGit({
+		"no-index": { code: 1, stdout: "diff --git a/notes.txt b/notes.txt\n+new\n" },
+		diff: { code: 0, stdout: "diff --git a/src/live.ts b/src/live.ts\n+changed\n" },
+		"ls-files": { code: 0, stdout: "notes.txt\n" },
+	});
+	assert.equal(typeof worktree.captureWorktreeArtifact, "function", "the artifact capture seam must exist");
+	const artifact = (worktree.captureWorktreeArtifact as (root: string, git: GitExec) => WorktreeArtifact)("/wt", exec);
+	assert.equal(artifact.ok, true);
+	if (artifact.ok) {
+		assert.match(artifact.diff, /src\/live\.ts/);
+		assert.match(artifact.diff, /notes\.txt/);
+	}
+	assert.ok(calls.some((c) => c.includes("ls-files") && c.includes("--others")));
+});
+
+test("captureWorktreeArtifact rejects an artifact too large to return safely", () => {
+	const { exec } = fakeGit({ diff: { code: 0, stdout: "x".repeat(1_000_001) } });
+	const artifact = worktree.captureWorktreeArtifact("/wt", exec);
+	assert.equal(artifact.ok, false);
+	if (!artifact.ok) assert.match(artifact.error, /too large|limit/i);
+});
 
 test("isGitRepo true only when rev-parse succeeds", () => {
 	assert.equal(isGitRepo("/r", fakeGit({ "rev-parse": { code: 0 } }).exec), true);

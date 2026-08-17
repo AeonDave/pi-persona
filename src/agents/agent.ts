@@ -8,13 +8,16 @@
  * Pure module — no Pi imports.
  */
 
-import { asBoolean, asStringArray, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { asBoolean, asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
 
 export interface AgentConfig {
 	name: string;
 	description?: string;
 	model?: string;
+	/** Tool allowlist passed to Pi. Absent means the session default tool set. */
 	tools?: string[];
+	/** Tool denylist applied after the allowlist/session default. */
+	excludeTools?: string[];
 	/** `worktree` runs this agent in an isolated git worktree (its edits never touch the
 	 *  main tree); `none` (default) shares the working tree. */
 	isolation?: "none" | "worktree";
@@ -44,8 +47,9 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	};
 	if (typeof fm.description === "string" && fm.description.trim()) agent.description = fm.description.trim();
 	if (typeof fm.model === "string" && fm.model.trim()) agent.model = fm.model.trim();
-	const tools = asStringArray(fm.tools);
-	if (tools) agent.tools = tools;
+	const tools = asPermission(fm.tools);
+	if (tools?.allow) agent.tools = tools.allow;
+	if (tools?.deny) agent.excludeTools = tools.deny;
 	if (fm.isolation === "worktree") agent.isolation = "worktree";
 	if (fm.mcp === true) agent.mcp = true;
 	if (asBoolean(fm.spine) === false) agent.spine = false;

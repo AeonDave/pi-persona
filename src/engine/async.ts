@@ -11,6 +11,9 @@
 
 import type { ProgressSnapshot } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
+import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel } from "../core/display-label.ts";
+
+export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
 
 export interface AsyncRun {
 	id: string;
@@ -42,6 +45,9 @@ export type RunThunk = (onProgress: (snapshot: ProgressSnapshot) => void, runId:
 
 export class AsyncRunTracker {
 	private readonly runs = new Map<string, AsyncRun>();
+	/** Ids of settled runs in SETTLE order — the eviction queue {@link prune} drains from the front.
+	 *  `runs` is keyed in LAUNCH order, which stops matching once legs finish out of order. */
+	private readonly settledOrder: string[] = [];
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
 	private seq = 0;
 	private readonly maxRetained: number;
@@ -66,8 +72,11 @@ export class AsyncRunTracker {
 			progress: { output: "", turns: 0, tokens: 0 },
 			lastAdvanceAt: this.now(),
 		};
-		if (meta.label !== undefined) entry.label = meta.label;
-		if (meta.model !== undefined) entry.model = meta.model;
+		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
+		// once at the tracker boundary so a caller cannot smuggle multiline instructions into any of
+		// those views; renderers still sanitize defensively when they compose a label.
+		if (meta.label !== undefined) entry.label = sanitizeDisplayLabel(meta.label);
+		if (meta.model !== undefined) entry.model = sanitizeDisplayLabel(meta.model, "model");
 		this.runs.set(id, entry);
 
 		const settle = (): void => this.settleOnce(entry);
@@ -114,6 +123,7 @@ export class AsyncRunTracker {
 	private settleOnce(entry: AsyncRun): void {
 		if (entry.settled) return;
 		entry.settled = true;
+		this.settledOrder.push(entry.id);
 		this.prune();
 		// Iterate a SNAPSHOT: a waitFor join unsubscribes from inside its own listener, and
 		// splicing the live array under the cursor would shift the next join's listener past it.
@@ -148,12 +158,21 @@ export class AsyncRunTracker {
 		return true;
 	}
 
-	/** Keep the map bounded by evicting the oldest *completed* runs (FIFO). */
+	/**
+	 * Keep the RETAINED (settled) runs bounded, evicting the least recently settled first.
+	 *
+	 * Two invariants this must not violate. A still-running entry is never evictable — its
+	 * stop/steer handles and live peek hang off it — so bounding the WHOLE map would make the run
+	 * that just settled the only eviction candidate whenever more legs are in flight than
+	 * `maxRetained`, destroying its payload before {@link settleOnce} has even told the supervisor
+	 * to fetch it. And "oldest" means oldest SETTLED, not oldest launched: legs finish out of launch
+	 * order, so launch-order eviction can drop a run seconds after its completion follow-up pointed
+	 * the supervisor at it. The run settling right now is appended last, hence evicted last.
+	 */
 	private prune(): void {
-		if (this.runs.size <= this.maxRetained) return;
-		for (const [id, run] of this.runs) {
-			if (this.runs.size <= this.maxRetained) break;
-			if (run.status !== "running") this.runs.delete(id);
+		while (this.settledOrder.length > this.maxRetained) {
+			const id = this.settledOrder.shift() as string;
+			this.runs.delete(id);
 		}
 	}
 
@@ -232,20 +251,90 @@ export function compactTokens(n: number): string {
 /** One identity everywhere a tracked run is rendered: the launcher's codename when present,
  *  otherwise the agent type, with the already-shortened model appended once. */
 function runDisplayName(run: AsyncRun): string {
-	const name = run.label ?? run.agent;
-	return run.model ? `${name} · ${run.model}` : name;
+	const model = run.model === undefined ? undefined : sanitizeDisplayLabel(run.model, "model", 24);
+	if (model === undefined) return sanitizeDisplayLabel(run.label ?? run.agent);
+	const suffix = ` · ${model}`;
+	const nameLimit = Math.max(1, MAX_DISPLAY_LABEL_CHARS - suffix.length);
+	return `${sanitizeDisplayLabel(run.label ?? run.agent, "agent", nameLimit)}${suffix}`;
 }
 
-// Failed legs can accumulate megabytes before they are stopped. Preserve enough head + tail to
-// recover useful work without allowing one automatic follow-up to consume the supervisor context.
-const MAX_PARTIAL_OUTPUT_CHARS = 12_000;
+// Completion reports are automatic follow-ups, so they must remain bounded even when a healthy
+// child returns a very large report. The full payload stays available through the result action;
+// these limits only govern the notification/digest surface.
+export const MAX_PARTIAL_OUTPUT_CHARS = 12_000;
+export const MAX_COMPLETION_REPORT_CHARS = 12_000;
+export const MAX_COMPLETION_RUN_CHARS = Math.min(MAX_PARTIAL_OUTPUT_CHARS, 4_000);
+export const MAX_ASYNC_STATUS_ROWS = 64;
 
-function truncatePartialOutput(text: string): string {
-	if (text.length <= MAX_PARTIAL_OUTPUT_CHARS) return text;
-	const headChars = 8_000;
-	const tailChars = MAX_PARTIAL_OUTPUT_CHARS - headChars;
-	const omitted = text.length - MAX_PARTIAL_OUTPUT_CHARS;
-	return `${text.slice(0, headChars)}\n\n[... partial output truncated; ${omitted} characters omitted ...]\n\n${text.slice(-tailChars)}`;
+/**
+ * Hard-cap a completion surface without cutting through a line. Fenced sub-agent payload lines
+ * start with `> `; slicing one mid-line would turn the suffix back into apparently trusted prose.
+ * Keeping only complete head/tail lines preserves that trust boundary while retaining useful
+ * status metadata and the most recent guidance.
+ */
+export function boundCompletionSurface(
+	text: string,
+	omission = `completion report truncated at ${MAX_COMPLETION_REPORT_CHARS} characters; open individual runs with intercom { action:"result", to:"<run-id>" }`,
+): string {
+	if (text.length <= MAX_COMPLETION_REPORT_CHARS) return text;
+	const normalizedOmission = omission
+		.replace(/\r\n?/g, " ")
+		.replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	const maxOmissionChars = 512;
+	const boundedOmission = normalizedOmission.length > maxOmissionChars
+		? `${normalizedOmission.slice(0, maxOmissionChars - 1)}…`
+		: normalizedOmission || "content truncated";
+	const marker = `\n\n[... ${boundedOmission} ...]\n\n`;
+	const contentBudget = Math.max(0, MAX_COMPLETION_REPORT_CHARS - marker.length);
+	const headBudget = Math.floor(contentBudget * 0.65);
+	const tailBudget = Math.max(0, contentBudget - headBudget);
+
+	const headBreak = text.lastIndexOf("\n", headBudget);
+	const head = headBreak >= 0 ? text.slice(0, headBreak) : "";
+	const tailWindowStart = Math.max(0, text.length - tailBudget);
+	const tailBreak = text.indexOf("\n", tailWindowStart);
+	const tail = tailBreak >= 0 ? text.slice(tailBreak + 1) : "";
+	return `${head}${marker}${tail}`;
+}
+
+const resultActionHint = (id: string): string => `intercom { action:"result", to:"${id}" }`;
+
+/** A timeout is a status update, not an invitation to poll. The passive completion notifier is
+ * the normal delivery path, so send the supervisor back to useful work and reserve peek/steer/stop
+ * for intervention. */
+export function buildWaitTimeoutNote(ids: readonly string[], timeoutMs: number): string {
+	const visibleIds = ids.slice(0, MAX_ASYNC_STATUS_ROWS);
+	const omitted = ids.length - visibleIds.length;
+	const idSummary = `${visibleIds.join(", ")}${omitted > 0 ? `, … +${omitted} more` : ""}`;
+	return (
+		`⏳ still running after ${timeoutMs}ms: ${idSummary}. ` +
+		"Continue useful supervisor work; completion will notify you automatically. " +
+		"Use peek only when status is needed, steer to redirect, or stop a truly stalled run — do not immediately wait again."
+	);
+}
+
+/** Return the complete text for one run for an explicit/on-demand result action. */
+export function getFullRunOutput(run: AsyncRun): string {
+	if (run.result?.output?.trim()) return run.result.output;
+	if (run.progress.output.trim()) return run.progress.output;
+	if (run.error?.trim()) return run.error;
+	return "(no output)";
+}
+
+export function clipRunOutput(text: string, id: string, maxChars: number, label = "result output"): string {
+	const budget = Math.max(0, Math.floor(maxChars));
+	if (text.length <= budget) return text;
+	const marker = `\n\n[... ${label} truncated; ${text.length - budget} characters omitted for ${id}. Full output: ${resultActionHint(id)} ...]\n\n`;
+	// A hostile/oversized id can make the drill-down marker longer than the entire
+	// budget. Keep the hard cap absolute; callers may still retrieve the full output
+	// through the internal run id, while this notification surface stays bounded.
+	if (marker.length >= budget) return marker.slice(0, budget);
+	const contentBudget = budget - marker.length;
+	const headChars = Math.ceil(contentBudget / 2);
+	const tailChars = Math.max(0, contentBudget - headChars);
+	return `${text.slice(0, headChars)}${marker}${tailChars > 0 ? text.slice(-tailChars) : ""}`;
 }
 
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
@@ -253,7 +342,8 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 	const running = runs.filter((r) => r.status === "running").length;
 	const now = opts?.now;
 	const stallMs = opts?.stallMs;
-	const lines = runs.map((r) => {
+	const visibleRuns = runs.slice(0, MAX_ASYNC_STATUS_ROWS);
+	const lines = visibleRuns.map((r) => {
 		// Canonical display name: the codename the launcher gave it (the SAME name the agent-tree
 		// node shows) + its short model, e.g. "atlas-static · sonnet" — never the bare agent TYPE,
 		// which reads as a different sub-agent than the one the tree shows. Falls back to `agent`
@@ -268,11 +358,16 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 			}
 			return line;
 		}
-		// A failed run's WHY is its error, not its (usually empty) output.
-		if (r.status === "failed") return `${head}${r.error ? `: ${r.error}` : ""}`;
-		if (r.result) return `${head}: ${r.result.output.slice(0, 80).replace(/\s+/g, " ")}`;
+		// Peek is a ProgressView that can be returned directly as a tool result or injected into a
+		// routine follow-up. Never put child-authored output or error text on this path: even a short
+		// preview is an untrusted prompt-injection carrier. The explicit result action is the fenced,
+		// on-demand surface for details.
+		if (r.status === "failed") return `${head}: failure details available via intercom result (to: ${r.id})`;
+		if (r.result) return `${head}: full result available via intercom result (to: ${r.id})`;
 		return head;
 	});
+	const omitted = runs.length - visibleRuns.length;
+	if (omitted > 0) lines.push(`… ${omitted} additional async runs omitted from this bounded status view.`);
 	return [`Async runs: ${runs.length} (${running} running)`, ...lines].join("\n");
 }
 
@@ -319,10 +414,13 @@ export class PeekWatcher {
  */
 export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string {
 	if (stuck.length === 0) return "";
-	const lines = stuck.map((r) => {
+	const visibleStuck = stuck.slice(0, MAX_ASYNC_STATUS_ROWS);
+	const lines = visibleStuck.map((r) => {
 		const secs = Math.round((opts.now - (r.lastAdvanceAt ?? opts.now)) / 1000);
 		return `⚠ ${r.id} (${runDisplayName(r)}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
 	});
+	const omitted = stuck.length - visibleStuck.length;
+	if (omitted > 0) lines.push(`… ${omitted} additional stalled-run alerts omitted from this bounded view.`);
 	return [
 		`${stuck.length} background ${stuck.length === 1 ? "leg" : "legs"} may be stalled:`,
 		...lines,
@@ -358,6 +456,14 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 	const done = runs.filter((r) => r.status === "done");
 	const failed = runs.filter((r) => r.status === "failed");
 	const stopped = runs.filter((r) => r.status === "stopped");
+	// Share the notification budget across every leg that can contribute payload. This keeps a
+	// large fan-out fair: the first result cannot consume the whole follow-up while later statuses
+	// are still waiting to be rendered. The final report cap remains a hard backstop for metadata.
+	const payloadRuns = runs.filter((r) => r.status === "done" || r.progress.output.trim());
+	const fairRunChars = Math.min(
+		MAX_COMPLETION_RUN_CHARS,
+		Math.max(256, Math.floor(MAX_COMPLETION_REPORT_CHARS / Math.max(1, payloadRuns.length * 2))),
+	);
 	// Failures are always reported — the supervisor must know so it can adjust or tell
 	// the user. Blind retry loops are prevented at RUNTIME by the DelegationLedger
 	// (an identical delegation that failed twice is vetoed before it spawns), not by
@@ -370,7 +476,8 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 		// Only fence REAL output — an empty/whitespace result gets a plain "(no output)", never an
 		// empty <fence></fence> shell (there's nothing untrusted to guard, and the empty block reads
 		// as clutter).
-		const body = r.result?.output?.trim() ? fence(r.result.output) : "(no output)";
+		const full = getFullRunOutput(r);
+		const body = full !== "(no output)" ? fence(clipRunOutput(full, r.id, fairRunChars)) : "(no output)";
 		blocks.push(`\n✅ ${r.id} (${runDisplayName(r)}) done:\n${body}`);
 	}
 	if (stopped.length > 0) {
@@ -381,14 +488,14 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 		for (const r of stopped) {
 			const partial = r.progress.output.trim();
 			if (partial) {
-				blocks.push(`\n↩ ${r.id} (${runDisplayName(r)}) partial output before it was stopped:\n${fence(truncatePartialOutput(partial))}`);
+				blocks.push(`\n↩ ${r.id} (${runDisplayName(r)}) partial output before it was stopped:\n${fence(clipRunOutput(partial, r.id, fairRunChars, "partial output"))}`);
 			}
 		}
 	}
 	if (failed.length > 0) {
 		const reasons = failed.map((r) => `• ${r.id} (${runDisplayName(r)}): ${r.error ?? "(no detail)"}`).join("\n");
 		blocks.push(
-			`\n❌ ${failed.length} failed:\n${fence(reasons)}\n\n` +
+			`\n❌ ${failed.length} failed:\n${fence(clipRunOutput(reasons, "failures", fairRunChars))}\n\n` +
 				"Handle each failure deliberately: retry ONCE with a different model or approach, or report it to the user. " +
 				"If a failed/aborted leg left partial output below, salvage what's usable instead of re-running from scratch. " +
 				"Do not re-issue the same failing delegation repeatedly.",
@@ -398,11 +505,11 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 		for (const r of failed) {
 			const partial = r.progress.output.trim();
 			if (partial) {
-				blocks.push(`\n↩ ${r.id} (${runDisplayName(r)}) partial output before it failed:\n${fence(truncatePartialOutput(partial))}`);
+				blocks.push(`\n↩ ${r.id} (${runDisplayName(r)}) partial output before it failed:\n${fence(clipRunOutput(partial, r.id, fairRunChars, "partial output"))}`);
 			}
 		}
 	}
-	return blocks.join("\n");
+	return boundCompletionSurface(blocks.join("\n"));
 }
 
 /**
@@ -425,7 +532,7 @@ export function renderCompletion(
 		.map((r) => r.result?.output ?? "")
 		.join("\n");
 	const note = scan(doneOutput);
-	return note ? `${report}\n\n${note}` : report;
+	return boundCompletionSurface(note ? `${report}\n\n${note}` : report);
 }
 
 export interface IdleNotifierDeps<T> {
@@ -453,6 +560,13 @@ export interface IdleNotifierDeps<T> {
 	/** Once this many deliveries have gone out, further flushes retain the buffer until
 	 *  {@link IdleCoalescingNotifier.resetDeliveries} reopens the gate. Unset ⇒ no ceiling. */
 	maxDeliveries?: number;
+	/** Maximum queued items rendered into one delivery. Remaining items stay ordered in the queue
+	 * and are scheduled for a later flush; unset preserves the normal whole-burst coalescing.
+	 * A function receives the queue (in order) and returns how many LEADING items this delivery may
+	 * carry — for a channel whose per-delivery budget is measured in content, not in items, so the
+	 * drain keeps pace with small items instead of being pinned to the worst case. Either form is
+	 * clamped to at least one item: a queue must always drain. */
+	maxBatchItems?: number | ((pending: readonly T[]) => number);
 	/** Clock hook, injected for deterministic tests (defaults to `Date.now`). */
 	now?: () => number;
 }
@@ -471,11 +585,16 @@ export class IdleCoalescingNotifier<T> {
 	private readonly retryMs: number;
 	private readonly minIntervalMs: number | undefined;
 	private readonly maxDeliveries: number | undefined;
+	private readonly maxBatchItems: ((pending: readonly T[]) => number) | undefined;
 	private readonly now: () => number;
 	private lastDeliveredAt = 0;
 	private deliveries = 0;
 	/** One awaitable delivery at a time. Void deliveries stay on the synchronous fast path. */
 	private flushing: Promise<void> | undefined;
+	/** The batch currently handed to an async host delivery. Explicit collection can remove an item
+	 *  from a later retry, even after the batch has left `pending` (the synchronous Pi delivery path
+	 * has no interleaving window, but test/RPC hosts may return a promise). */
+	private activeBatch: T[] | undefined;
 	/** Invalidates an in-flight batch when cancel() tears down/reuses this notifier. */
 	private generation = 0;
 
@@ -485,6 +604,12 @@ export class IdleCoalescingNotifier<T> {
 		this.retryMs = deps.retryMs ?? 400;
 		this.minIntervalMs = deps.minIntervalMs;
 		this.maxDeliveries = deps.maxDeliveries;
+		const batchLimit = deps.maxBatchItems;
+		this.maxBatchItems = typeof batchLimit === "function"
+			? batchLimit
+			: batchLimit !== undefined && Number.isFinite(batchLimit)
+				? ((): number => Math.max(1, Math.floor(batchLimit)))
+				: undefined;
 		this.now = deps.now ?? Date.now;
 	}
 
@@ -515,6 +640,11 @@ export class IdleCoalescingNotifier<T> {
 	discard(pred: (item: T) => boolean): void {
 		for (let i = this.pending.length - 1; i >= 0; i--) {
 			if (pred(this.pending[i] as T)) this.pending.splice(i, 1);
+		}
+		if (this.activeBatch) {
+			for (let i = this.activeBatch.length - 1; i >= 0; i--) {
+				if (pred(this.activeBatch[i] as T)) this.activeBatch.splice(i, 1);
+			}
 		}
 		if (this.pending.length === 0) this.clearArmedTimer();
 	}
@@ -555,14 +685,24 @@ export class IdleCoalescingNotifier<T> {
 				}
 			}
 
-			batch = this.pending.splice(0, this.pending.length);
+			const take = this.maxBatchItems === undefined ? this.pending.length : Math.max(1, Math.floor(this.maxBatchItems(this.pending)));
+			batch = this.pending.splice(0, take);
 			const message = this.deps.render(batch);
-			if (!message) return Promise.resolve(); // explicit renderer suppression
+			if (!message) {
+				// Empty text from a non-empty batch is a renderer failure, not an acknowledgement: put the
+				// batch back at the front so a transient formatter bug cannot silently discard comms.
+				this.pending.unshift(...batch);
+				this.arm(this.retryMs);
+				return Promise.resolve();
+			}
+			this.activeBatch = batch;
 			const delivery = this.deps.deliver(message);
 			if (!delivery || typeof (delivery as PromiseLike<void>).then !== "function") {
+				this.activeBatch = undefined;
 				if (generation === this.generation) {
 					this.lastDeliveredAt = this.now();
 					this.deliveries += 1;
+					if (this.pending.length > 0) this.arm(this.retryMs);
 				}
 				return Promise.resolve();
 			}
@@ -575,19 +715,24 @@ export class IdleCoalescingNotifier<T> {
 					this.deliveries += 1;
 				})
 				.catch(() => {
+					const retryBatch = this.activeBatch === batch ? this.activeBatch : batch;
+					this.activeBatch = undefined;
 					if (generation !== this.generation) return;
-					this.pending.unshift(...(batch as T[]));
+					this.pending.unshift(...(retryBatch as T[]));
 					this.arm(this.retryMs);
 				})
 				.finally(() => {
+					if (this.activeBatch === batch) this.activeBatch = undefined;
 					if (this.flushing === flight) this.flushing = undefined;
 					if (this.pending.length > 0 && this.handle === undefined) this.arm(this.retryMs);
 				});
 			this.flushing = flight;
 			return flight;
 		} catch {
+			const retryBatch = this.activeBatch === batch ? this.activeBatch : batch;
+			this.activeBatch = undefined;
 			if (generation === this.generation) {
-				if (batch) this.pending.unshift(...batch);
+				if (retryBatch) this.pending.unshift(...retryBatch);
 				this.arm(this.retryMs);
 			}
 			return Promise.resolve();

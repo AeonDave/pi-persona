@@ -16,6 +16,8 @@
  */
 import { spawn } from "node:child_process";
 
+import { effectiveDriveExitCode, terminalAssistantError } from "./drive-status.ts";
+
 type Json = Record<string, unknown>;
 
 function parseArgs(argv: string[]): { persona?: string; engine?: string; model?: string; prompt: string } {
@@ -93,6 +95,7 @@ proc.stdin.end();
 let buf = "";
 let finalUsage: Json | undefined;
 let assistantTurns = 0;
+let assistantError: string | undefined;
 const t0 = Date.now();
 
 proc.stdout.setEncoding("utf8");
@@ -118,6 +121,7 @@ proc.stdout.on("data", (d: string) => {
 			case "message_end": {
 				const m = ev.message as Json | undefined;
 				if (m && m.role === "assistant") {
+					assistantError = terminalAssistantError(m) ?? assistantError;
 					const t = firstText(m.content);
 					if (t.trim()) {
 						assistantTurns++;
@@ -145,13 +149,15 @@ proc.stderr.on("data", (d: string) => {
 
 proc.on("close", (code: number | null) => {
 	const secs = ((Date.now() - t0) / 1000).toFixed(1);
+	const exitCode = effectiveDriveExitCode(code, assistantError);
 	if (finalUsage) {
 		const cost = (finalUsage.cost as Json | undefined)?.total ?? 0;
 		console.log(
 			`— turns=${assistantTurns} in=${finalUsage.input} out=${finalUsage.output} cacheW=${finalUsage.cacheWrite} ctx=${finalUsage.totalTokens} cost=$${Number(cost).toFixed(4)}  (${secs}s)`,
 		);
 	}
+	if (assistantError) console.error(`[assistant error] ${short(assistantError, 600)}`);
 	if (code !== 0 && stderr.trim()) console.error(`[stderr] ${stderr.trim().slice(0, 600)}`);
-	console.log(`▷ exit ${code}`);
-	process.exit(code ?? 0);
+	console.log(`▷ exit ${exitCode}`);
+	process.exit(exitCode);
 });

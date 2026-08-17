@@ -24,3 +24,18 @@ When touching this folder:
 - Keep names stable (`ARCHITECTURE.md`, `STRATEGIES.md`, `SPINE.md`) because many docs and comments link to them directly.
 - Prefer links to this folder over copying duplicate prose into code comments.
 - Update both this map and inbound links when adding new authoritative docs.
+- A few factual claims are machine-checked by `test/unit/docs/doc-claims.test.ts`. Know its blind
+  spots before trusting it:
+  - **Env names.** It collects the whole `PI_*` identifiers `src/**/*.ts` actually reads and fails
+    when a documented name is not one of them, so a documented name that is merely a *prefix* of a
+    real one is caught. It still never reads `scripts/`, so a variable only that tree consumes
+    reads as undocumented-in-reverse: the check is one-directional (docs → source), and a source
+    variable nothing documents is not flagged at all.
+  - **Strategy tables.** It fails when a registered strategy has no row headed by its name in this
+    README and `STRATEGIES.md`, or when a declared param is not backticked in one of that name's rows.
+    It does not check *which* table the row is in.
+  - **Skip count.** It compares AGENTS.md's stated number against occurrences of the literal `{ skip:`
+    in `test/integration/child-engine.test.ts` only — not against the runner's reported `skipped N`,
+    and not against skips added in any other file or written as `test.skip` / `{skip:`.
+- Everything else here is prose a reader has to check against the code — so state behavior precisely
+  enough to be falsifiable, and cite the module that settles it.
