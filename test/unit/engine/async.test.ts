@@ -10,7 +10,7 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, PeekWatcher, renderCompletion } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, buildRetentionOverflowNote, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion } from "../../../src/engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { PersistenceNudge } from "../../../src/core/nudge.ts";
@@ -132,6 +132,92 @@ test("eviction displaces the least recently SETTLED run, never the newest", asyn
 	assert.equal(tracker.peek(ids[3] as string)?.result?.output, "payload-3", "the newest completion is retained");
 	(release[1] as (r: AgentResult) => void)({ agent: "a1", output: "payload-1", usage: usage(), ok: true });
 	await tick();
+});
+
+test("retention evicts a COLLECTED payload before an uncollected one", async () => {
+	// The supervisor has already read run 1's full payload; runs 0 and 2 are still only NAMED by the
+	// completion follow-up. Under pressure the spare copy must go first — even though it is not the
+	// oldest — rather than the unread result a plain settle-order eviction would take.
+	const tracker = new AsyncRunTracker({ maxRetained: 2 });
+	const release: Array<(result: AgentResult) => void> = [];
+	const ids: string[] = [];
+	for (let i = 0; i < 4; i++) {
+		ids.push(tracker.launch({ agent: `a${i}`, task: "t" }, () => new Promise<AgentResult>((resolve) => { release.push(resolve); })));
+	}
+	for (const i of [0, 1]) {
+		(release[i] as (r: AgentResult) => void)({ agent: `a${i}`, output: `payload-${i}`, usage: usage(), ok: true });
+		await tick();
+	}
+	tracker.markCollected(ids[1] as string);
+	(release[2] as (r: AgentResult) => void)({ agent: "a2", output: "payload-2", usage: usage(), ok: true });
+	await tick();
+
+	assert.equal(tracker.peek(ids[1] as string), undefined, "the collected run is the eviction victim");
+	assert.equal(tracker.peek(ids[0] as string)?.result?.output, "payload-0", "the OLDER but uncollected payload survives");
+	assert.equal(tracker.peek(ids[2] as string)?.result?.output, "payload-2");
+	assert.equal(tracker.wasDropped(ids[1] as string), false, "an already-collected eviction is not a lost result");
+	(release[3] as (r: AgentResult) => void)({ agent: "a3", output: "payload-3", usage: usage(), ok: true });
+	await tick();
+});
+
+test("a payload evicted before anyone collected it is remembered as DROPPED, not merely unknown", async () => {
+	const tracker = new AsyncRunTracker({ maxRetained: 1 });
+	const ids: string[] = [];
+	for (let i = 0; i < 3; i++) {
+		ids.push(tracker.launch({ agent: `a${i}`, task: "t" }, async () => ({ agent: `a${i}`, output: `o${i}`, usage: usage(), ok: true })));
+	}
+	await tick();
+	await tick();
+	assert.equal(tracker.peek(ids[0] as string), undefined);
+	assert.equal(tracker.wasDropped(ids[0] as string), true, "an uncollected eviction is recorded so the tool can say so");
+	assert.equal(tracker.wasDropped(ids[2] as string), false, "the retained run is not dropped");
+	assert.equal(tracker.wasDropped("run-nonexistent"), false, "an id that never existed is not a drop");
+	assert.equal(tracker.retention, 1, "the bound is quotable back to the supervisor");
+});
+
+test("the dropped-id memory is itself bounded (a long session cannot grow it without limit)", async () => {
+	const tracker = new AsyncRunTracker({ maxRetained: 1 });
+	const ids: string[] = [];
+	for (let i = 0; i < MAX_DROPPED_IDS + 50; i++) {
+		ids.push(tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "o", usage: usage(), ok: true })));
+	}
+	await tick();
+	await tick();
+	assert.equal(tracker.wasDropped(ids[0] as string), false, "the oldest drops are forgotten once the memory is full");
+	assert.equal(tracker.wasDropped(ids[ids.length - 2] as string), true, "the recent drops — the ones a supervisor might still ask about — are kept");
+});
+
+test("buildRetentionOverflowNote names the unfetchable ids and the bound (and is empty when nothing was lost)", () => {
+	assert.equal(buildRetentionOverflowNote([], 25), "");
+	const note = buildRetentionOverflowNote(["run-1", "run-2"], 25);
+	assert.match(note, /run-1, run-2/);
+	assert.match(note, /25/);
+	assert.match(note, /PI_PERSONA_ASYNC_RETAIN/);
+});
+
+test("writers() lists a running mutating leg and forgets it the moment it settles", async () => {
+	const tracker = new AsyncRunTracker();
+	const release: Array<(result: AgentResult) => void> = [];
+	const writer = tracker.launch({ agent: "operator", task: "edit", mutates: true }, () => new Promise<AgentResult>((r) => { release.push(r); }));
+	tracker.launch({ agent: "scout", task: "read" }, () => new Promise<AgentResult>((r) => { release.push(r); }));
+	assert.deepEqual(tracker.writers().map((r) => r.id), [writer], "only the mutating leg counts as a writer");
+	(release[0] as (r: AgentResult) => void)({ agent: "operator", output: "done", usage: usage(), ok: true });
+	await tick();
+	assert.deepEqual(tracker.writers(), [], "a settled leg no longer blocks a declared verifier");
+	(release[1] as (r: AgentResult) => void)({ agent: "scout", output: "done", usage: usage(), ok: true });
+	await tick();
+});
+
+test("a mutating thunk that throws synchronously leaves no writer behind", async () => {
+	// The ordering hazard the entry-carried flag removes: this run settles INSIDE launch(), before
+	// the caller ever holds its id, so a registration performed after launch() returns would
+	// re-insert an already-dead run and leak it for the life of the session.
+	const tracker = new AsyncRunTracker();
+	const id = tracker.launch({ agent: "operator", task: "edit", mutates: true }, () => {
+		throw new Error("engine exploded before it returned a promise");
+	});
+	assert.equal(tracker.peek(id)?.status, "failed");
+	assert.deepEqual(tracker.writers(), [], "a run that never started is not a live mutation");
 });
 
 test("launch tracks a run and exposes its result on completion", async () => {
@@ -747,6 +833,48 @@ test("IdleCoalescingNotifier requeues a batch when a renderer accidentally retur
 	clock.tick();
 	assert.deepEqual(notifier.peekPending(), ["keep-me"]);
 	assert.equal(clock.armed(), 1, "the retained batch is eligible for a later retry");
+});
+
+test("a PERSISTENTLY empty renderer gives up instead of spinning the retry timer forever", () => {
+	// arm() deliberately re-refs its handle, so an unbounded requeue would also keep the host
+	// process alive for the rest of the session.
+	const clock = fakeClock();
+	const notifier = new IdleCoalescingNotifier<string>({
+		isIdle: () => true,
+		deliver: () => { throw new Error("an empty render must never reach delivery"); },
+		render: () => "",
+		setTimer: clock.setTimer,
+		clearTimer: clock.clearTimer,
+	});
+	notifier.notify("doomed");
+	for (let round = 0; round <= MAX_EMPTY_RENDER_RETRIES + 3; round++) clock.tick();
+	assert.deepEqual(notifier.peekPending(), [], "the undeliverable batch is finally released");
+	assert.equal(clock.armed(), 0, "…and nothing is left armed to spin on it");
+});
+
+test("a renderer that recovers keeps its full retry budget for the next batch", () => {
+	const clock = fakeClock();
+	const sent: string[] = [];
+	let broken = true;
+	const notifier = new IdleCoalescingNotifier<string>({
+		isIdle: () => true,
+		deliver: (m) => { sent.push(m); },
+		render: (items) => (broken ? "" : items.join("|")),
+		setTimer: clock.setTimer,
+		clearTimer: clock.clearTimer,
+	});
+	notifier.notify("a");
+	clock.tick();
+	clock.tick();
+	broken = false;
+	clock.tick();
+	assert.deepEqual(sent, ["a"], "a transient formatter bug still delivers once it recovers");
+	broken = true;
+	notifier.notify("b");
+	for (let round = 0; round < MAX_EMPTY_RENDER_RETRIES; round++) clock.tick();
+	assert.deepEqual(notifier.peekPending(), ["b"], "the recovery reset the budget, so this batch is still being retried");
+	clock.tick();
+	assert.deepEqual(notifier.peekPending(), [], "…and it is released once its own budget runs out");
 });
 
 test("IdleCoalescingNotifier defers while the supervisor is busy, then delivers when idle", () => {

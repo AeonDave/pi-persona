@@ -52,7 +52,8 @@ An active persona can also borrow another installed persona's declared council f
   bounded; a collapsed `delegate` card lists its failed legs first, a failed `council`/`flow` card
   leads with the cause, and long text opens as a short semantic preview.
   Use Pi's configured expand key for the full card. `f9` (or `/agents`) opens the complete live tree:
-  ↑↓ move, ⏎ read an agent's chronological log, `x` stop, `s` steer. `/flow` and `/orchestrate`
+  ↑↓ move, ⏎ read an agent's chronological log, `x` stop, `s` steer — `x`/`s` act only on the agent
+  still under the ▸ marker, so if it settled first the keypress just re-anchors. `/flow` and `/orchestrate`
   outcomes are durable expandable transcript cards rather than unbounded toast walls.
 
 ## Concepts
@@ -183,13 +184,12 @@ same: new *files* on this API, no new core.
 | `compete` | N competitors implement in isolated git worktrees; a successful blind judge picks; on judge failure every valid diff returns unjudged (requires a git repo) | `judge` · *(required)* · `ballotDiffChars` · `6000` |
 
 Params are declared per strategy and looked up by `knownParams()`; `/doctor` lists the same schema
-live. `test/unit/docs/doc-claims.test.ts` gives this a partial guard: for every registered strategy it
-requires a table row headed by that name, and each declared param backticked somewhere in one of that
-name's rows, in both this file and [STRATEGIES.md](docs/STRATEGIES.md). It matches on the row header
-only, not on which table the row is in — so `fanout`, `pipeline` and `pair` (no params) are covered
-only by their name appearing in *some* table here, and `judge`'s own `judge` param is satisfied by its
-row header. Treat the guard as a drift alarm, not a proof: a reviewer still has to read the row.
-Unknown param keys only **warn**, never hard-fail.
+live. `test/unit/docs/doc-claims.test.ts` guards it: for every registered strategy it requires exactly
+one row in *this* table (and in [STRATEGIES.md](docs/STRATEGIES.md)'s), and each declared param
+backticked in a cell *after* the row's name — so a row that drifts into another table, or a `judge`
+row that says nothing beyond its own name, fails. Treat it as a drift alarm, not a proof: it checks
+that each param is described, never that the description is right. Unknown param keys only **warn**,
+never hard-fail.
 
 **Supervising running sub-agents — the `intercom` plane.** The supervisor's *internal* comm with the
 children it spawned, in two layers, deliberately separate:
@@ -217,10 +217,8 @@ children it spawned, in two layers, deliberately separate:
   yet" reminder on every delivery path — with one asymmetry: the sync path scans the whole
   `delegate`/`council` result (failed legs included), while the background/`intercom wait` path scans
   only the legs that finished `done`, so a leg that *failed* while emitting `[BLOCKED]` is reported as a
-  failure but gets no persistence note there. `PI_PERSONA_NUDGE=off` turns off the
-  `tool_result` hook: the hand-off reminder entirely, and the "don't bank it yet" one on a **sync**
-  `delegate`/`council` result. The background-completion and `intercom wait` reports are rendered
-  outside that hook, so their persistence reminder rides along regardless.
+  failure but gets no persistence note there. `PI_PERSONA_NUDGE=off` silences both nudges on every
+  delivery path — the `tool_result` hook and the background-completion / `intercom wait` reports alike.
 - **Cross-process broker — opt-in, `PI_PERSONA_BROKER=1`.** Extends both layers (steer + the comm
   plane) to sub-agents that don't run in-process: `PI_PERSONA_ENGINE=child` runs and every
   `isolation: worktree` leg (which always uses the child engine). A session-scoped relay (POSIX
@@ -333,8 +331,10 @@ council({ question: "cache this or recompute?", strategy: "debate", roster: "rev
 
 **A delegation policy on any persona** — this is keyed by declared fields, never by `name`. The
 runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects
-overlapping/missing ownership for parallel writers, and prevents declared verifier agents from
-starting concurrently with—or serially before—a mutation they are meant to check. Per-call
+overlapping/missing ownership for parallel writers, and refuses a declared verifier that would start
+concurrently with—or serially before—a material writer in the SAME call, or while any material-mutation
+background run is still in flight (it names the run to wait on). That is a scheduling contract inside
+`delegate`, not a guarantee about mutations made outside it. Per-call
 `concurrency` is honored in both blocking and background fan-out. Only the built-in inspection tools
 (`read`, `grep`, `find`, `ls`) are assumed read-only; shell-capable, MCP-enabled, and unknown/custom toolsets fail
 closed as potential writers. `writeSet` is a scheduling/ownership contract, not an OS sandbox;
@@ -473,7 +473,7 @@ register it, and name it in any persona's `council:` block. Everything else abov
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`
 - CLI flags (per run): `--persona <name>` (start with this persona active — e.g. `pi --persona elite`; overrides `PI_PERSONA_DEFAULT` and the remembered persona, and errors if the name isn't installed) · `--exocom` (join the exocom peer-to-peer plane for this run; same as `PI_PERSONA_EXOCOM=1`). Model + reasoning effort are pi's own native flags: `--model <provider/id>` (e.g. `--model anthropic/claude-opus-4-8`; `--list-models` to search) and `--thinking <off|minimal|low|medium|high|xhigh|max>`.
-- env: `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — kills a child that produces no progress of its own, e.g. a headless `mcp: true` leg stalled on init; the window must cover the whole cold start including the first provider response, so the default is generous: 300000, `0` disables) · `PI_PERSONA_NUDGE=off` (silence the `tool_result` nudges — the hand-off reminder, and the persistence one on a sync `delegate`/`council` result; the background-completion and `intercom wait` reports keep theirs. On by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`) · `PI_PERSONA_SPINE=on|<path>` (the spine — a shared behavioral layer injected between pi's base prompt and the persona body, with a worker variant ahead of every sub-agent prompt; `on` uses your own `spine.md`/`spine.worker.md` if you have them, else the bundled `prompts/spine.md` + `prompts/spine.worker.md`, and a path selects one file of your own for both roles; off by default, and `spine: false` in a persona/agent's frontmatter opts that definition out — a persona's opt-out covers the legs it spawns — see docs/SPINE.md) · `PI_PERSONA_SPINE_LEGS=on|off|<path>` (the same selector for delegated legs alone; follows `PI_PERSONA_SPINE` unless set, so the pair expresses the four measurement arms — off, supervisor-only, legs-only, both)
+- env (the knobs worth reaching for; `src/core/config.ts` declares the full set): `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=1` (cross-process comm plane + steer for child/worktree sub-agents; off by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — kills a child that produces no progress of its own, e.g. a headless `mcp: true` leg stalled on init; the window must cover the whole cold start including the first provider response, so the default is generous: 300000, `0` disables) · `PI_PERSONA_NUDGE=off` (silence both nudges — the hand-off reminder and the "don't bank it yet" one — on every delivery path: the `tool_result` hook, background completions, and `intercom wait`. On by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`) · `PI_PERSONA_SPINE=on|<path>` (the spine — a shared behavioral layer injected between pi's base prompt and the persona body, with a worker variant ahead of every sub-agent prompt; `on` uses your own `spine.md`/`spine.worker.md` if you have them, else the bundled `prompts/spine.md` + `prompts/spine.worker.md`, and a path selects one file of your own for both roles; off by default, and `spine: false` in a persona/agent's frontmatter opts that definition out — a persona's opt-out covers the legs it spawns — see docs/SPINE.md) · `PI_PERSONA_SPINE_LEGS=on|off|<path>` (the same selector for delegated legs alone; follows `PI_PERSONA_SPINE` unless set, so the pair expresses the four measurement arms — off, supervisor-only, legs-only, both)
 
 ## Develop
 

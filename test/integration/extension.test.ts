@@ -233,6 +233,27 @@ test("intercom schema bounds routing identifiers and delivered messages", () => 
 	assert.equal(intercom.parameters.properties.message.maxLength, MAX_INTERCOM_MESSAGE_CHARS);
 });
 
+test("a pinned persona that does not resolve is reported, not silently ignored", async () => {
+	// The session then runs with NO persona at all. Staying quiet reads as "it's active" — and
+	// anything keyed on the pinned NAME (per-persona memory, status chrome) would be serving a
+	// persona this process never activated.
+	const previous = process.env.PI_PERSONA_DEFAULT;
+	process.env.PI_PERSONA_DEFAULT = "ghost-supervisor";
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const base = makeCtx(os.tmpdir());
+		const ctx = { ...base.ctx, hasUI: true };
+		await m.fire("session_start", undefined, ctx);
+		const said = base.notes.join("\n");
+		assert.match(said, /PI_PERSONA_DEFAULT "ghost-supervisor" is not an installed persona/, "the unresolved pin is named, with its source");
+		assert.match(said, /Available: /, "…and the installed names, so the fix is one keystroke away");
+	} finally {
+		if (previous === undefined) delete process.env.PI_PERSONA_DEFAULT;
+		else process.env.PI_PERSONA_DEFAULT = previous;
+	}
+});
+
 test("/peek reports no async runs initially", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
@@ -1013,6 +1034,80 @@ test("a fan-out wider than the retention bound keeps a settled payload fetchable
 		releases.shift()?.();
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
+});
+
+test("a fan-out that settles MORE results than retention keeps says so, instead of reporting the ids as unknown", async () => {
+	// The residual the retention guarantee cannot close: 30 legs settle against a 25-run bound, so five
+	// payloads are genuinely destroyed. What must not happen is the supervisor following the report's
+	// own "open individual runs with intercom result" instruction into a bare not-found.
+	const stub: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `payload for ${spec.task}`, usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	const launched = await delegate.execute(
+		"async-overflow-fanout",
+		{ tasks: Array.from({ length: 30 }, (_, i) => ({ agent: "scout", task: `leg-${i}` })), async: true },
+		undefined,
+		undefined,
+		ctx,
+	);
+	const ids = launched.details?.runIds as string[];
+	assert.equal(ids.length, 30);
+	await waitUntil(() => m.sentMessages().length > 0, "the coalesced completion follow-up");
+
+	const report = m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
+	assert.match(report, /can no longer be fetched by id/, "the report admits the overflow while the summaries are still in view");
+	assert.match(report, new RegExp(ids[0] as string), "…and names the ids that were dropped");
+	assert.match(report, /PI_PERSONA_ASYNC_RETAIN/, "…and how to keep more next time");
+
+	const gone = await intercom.execute("overflow-result", { action: "result", to: ids[0] }, undefined, undefined, ctx);
+	assert.equal(gone.isError, true);
+	const goneText = String(gone.content?.[0]?.text ?? "");
+	assert.match(goneText, /retention bound/, "a dropped payload is explained, not reported as an id that never existed");
+	assert.doesNotMatch(goneText, /^No retained async run/);
+	const kept = await intercom.execute("overflow-result-kept", { action: "result", to: ids[29] }, undefined, undefined, ctx);
+	assert.equal(kept.isError, false, "the newest completions are still retained");
+	const never = await intercom.execute("overflow-result-never", { action: "result", to: "run-never" }, undefined, undefined, ctx);
+	assert.match(String(never.content?.[0]?.text ?? ""), /No retained async run "run-never"/, "an id that never existed still says exactly that");
+});
+
+test("PI_PERSONA_NUDGE=off silences the premature-surrender note on the BACKGROUND completion path too", async () => {
+	// The kill switch is documented as covering the persistence counterweight; interactive delegate is
+	// background by default, so the completion follow-up — not the sync tool_result hook — is the path
+	// that actually carries it.
+	const blocked = "[BLOCKED] I could not proceed without more access.";
+	const stub: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: blocked, usage: emptyUsage(), ok: true }),
+	};
+	const collect = async (nudge: string | undefined): Promise<string> => {
+		const previous = process.env.PI_PERSONA_NUDGE;
+		if (nudge === undefined) delete process.env.PI_PERSONA_NUDGE;
+		else process.env.PI_PERSONA_NUDGE = nudge;
+		try {
+			const m = makeMockPi();
+			piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+			const { ctx } = makeCtx(os.tmpdir());
+			await m.fire("session_start", undefined, ctx);
+			const delegate = m.tool("delegate") as { execute: AnyFn };
+			await delegate.execute("nudge-async", { agent: "scout", task: "try the thing", async: true }, undefined, undefined, ctx);
+			await waitUntil(() => m.sentMessages().length > 0, "the completion follow-up");
+			return m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
+		} finally {
+			if (previous === undefined) delete process.env.PI_PERSONA_NUDGE;
+			else process.env.PI_PERSONA_NUDGE = previous;
+		}
+	};
+
+	const on = await collect(undefined);
+	assert.match(on, /Don't bank it yet/, "by default a blocked leg still gets the counterweight");
+	const off = await collect("off");
+	assert.match(off, /BLOCKED/, "the completion report itself is unaffected");
+	assert.doesNotMatch(off, /Don't bank it yet/, "the documented off switch silences this path as well");
 });
 
 test("intercom result retrieves one complete async payload by id without a duplicate follow-up", async () => {
@@ -2253,6 +2348,32 @@ test("delegate, intercom, council, and flow cards bound collapsed output and pri
 	assert.match(flowCard, /verification rejected/);
 });
 
+test("the council SUCCESS card bounds and strips member-authored headline/status/tally", () => {
+	// The failure branch is exercised above; this is the branch a passing council actually takes —
+	// and its three extra fields are the winning member's own words, not chrome the runtime wrote.
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const hostile = `verdict\u001b[2J\n${"z".repeat(500)}`;
+	const council = m.tool("council") as { renderResult: AnyFn };
+	const card = renderComponent(
+		council.renderResult(
+			{
+				content: [{ type: "text", text: "full ruling" }],
+				details: { ok: true, headline: hostile, status: "consensus_reached", tally: { [hostile]: 3, no: 1 }, body: `full ruling\n${"y".repeat(20_000)}` },
+				isError: false,
+			},
+			{ expanded: false },
+			traceTheme,
+		),
+	);
+	assert.doesNotMatch(card, /\u001b/, "a member-authored headline cannot smuggle terminal escapes onto the card");
+	assert.ok(card.split("\n").every((line) => line.length < 240), `success card line was not bounded: ${card}`);
+	assert.match(card, /verdict/, "the ruling headline still reaches the operator");
+	assert.match(card, /consensus reached/, "…with the status");
+	assert.match(card, /tally /, "…and the vote tally");
+	assert.match(card, /expand/i, "…and the hint that the full ruling is one keystroke away");
+});
+
 test("dynamic tool chrome sanitizes and bounds hostile labels and causes", () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
@@ -2921,6 +3042,30 @@ test("a failed delegate call does not silently reset the supervisor's by-hand nu
 	) as { content?: Array<{ type: string; text?: string }> } | undefined;
 	assert.match(failed?.content?.map((c) => c.text ?? "").join("\n") ?? "", /re-dispatch|failed hand-off/i);
 	assert.ok(m.fire("tool_result", heavy, ctx), "the next direct command still reaches the five-step threshold");
+});
+
+test("PI_PERSONA_NUDGE=off silences the tool_result hook — both the sweep and the surrender note", async () => {
+	// The hermetic harness strips the whole PI_PERSONA_* namespace, so nothing else in this suite ever
+	// runs with the switch OFF; without this the documented kill switch is only aspirational.
+	const previous = process.env.PI_PERSONA_NUDGE;
+	process.env.PI_PERSONA_NUDGE = "off";
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx } = makeCtx(os.tmpdir());
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "dev", ctx);
+		const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(300) }] };
+		for (let i = 0; i < 10; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined, "a by-hand sweep is never nudged while the switch is off");
+		assert.equal(
+			m.fire("tool_result", { toolName: "delegate", content: [{ type: "text", text: "[BLOCKED] no access" }], isError: false }, ctx),
+			undefined,
+			"…and neither is a blocked leg's premature-surrender counterweight",
+		);
+	} finally {
+		if (previous === undefined) delete process.env.PI_PERSONA_NUDGE;
+		else process.env.PI_PERSONA_NUDGE = previous;
+	}
 });
 
 // ── a misconfigured persona grammar must surface, not escape the hook/command ────────────

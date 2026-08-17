@@ -31,11 +31,15 @@ When touching this folder:
     real one is caught. It still never reads `scripts/`, so a variable only that tree consumes
     reads as undocumented-in-reverse: the check is one-directional (docs → source), and a source
     variable nothing documents is not flagged at all.
-  - **Strategy tables.** It fails when a registered strategy has no row headed by its name in this
-    README and `STRATEGIES.md`, or when a declared param is not backticked in one of that name's rows.
-    It does not check *which* table the row is in.
-  - **Skip count.** It compares AGENTS.md's stated number against occurrences of the literal `{ skip:`
-    in `test/integration/child-engine.test.ts` only — not against the runner's reported `skipped N`,
-    and not against skips added in any other file or written as `test.skip` / `{skip:`.
+  - **Strategy tables.** It fails when a registered strategy has anything other than exactly one row
+    in the strategy table proper (the one headed `| Strategy | … | Params …`) of the root README and
+    `STRATEGIES.md`, or when a declared param is not backticked in a cell *after* the row's name — so
+    neither a row that drifted into another table nor a row that only repeats its own name passes. It
+    still cannot tell whether the *description* of a param or its default is correct.
+  - **Skip count.** It scans every `test/**/*.test.ts` for skip markers (an options-object `skip` key
+    or a `.skip` shorthand), and fails unless AGENTS.md's stated word, its `skipped N` on Windows and
+    its `skipped 0` elsewhere all match, every marker is gated on `process.platform === "win32"`, and
+    AGENTS.md names each file carrying one. It counts markers rather than running the runner, so a
+    marker on a suite of several skipped subtests would count once where the runner counts each.
 - Everything else here is prose a reader has to check against the code — so state behavior precisely
   enough to be falsifiable, and cite the module that settles it.

@@ -20,7 +20,8 @@ import { type Static, Type } from "typebox";
 import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-import type { DisplayPeer, ExocomPlane } from "../exocom/plane.ts";
+import { fencePeer } from "../core/fence.ts";
+import { ExocomPeerRejection, type DisplayPeer, type ExocomPlane } from "../exocom/plane.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 
 const COLLAPSED_PEER_LIMIT = 8;
@@ -110,6 +111,23 @@ function renderListResult(peers: ExocomPeerSummary[], expanded: boolean, total =
 	if (!expanded && total > shown.length) lines.push(`…and ${total - shown.length} more`);
 	if (!expanded && total > shown.length) lines.push(`(${keyHint("app.tools.expand", "to expand")})`);
 	return lines.join("\n");
+}
+
+/** A refusal in OUR voice: the peer's own prose is stripped out of it and carried separately, so it
+ *  can travel to the model behind the peer fence instead of inside this agent's tool output. */
+function refusalLine(target: string, err: unknown): string {
+	if (err instanceof ExocomPeerRejection) return `exocom: peer "${normalizeMetadataText(target, 80, "peer")}" rejected the message; its stated reason is quoted below`;
+	return normalizeMetadataText(err instanceof Error ? err.message : String(err), 240, "exocom: send failed");
+}
+
+/** The peer half of one or more refusals, quoted into a single fence. Each reason is flattened to
+ *  one bounded line first (`normalizeMetadataText`), so a peer can neither fake a fence terminator
+ *  nor spend the receiving turn's context, and the fence keeps it marked as what it is. */
+function fencedPeerReasons(reasons: Array<{ target: string; reason: string }>): string {
+	if (reasons.length === 0) return "";
+	return fencePeer(reasons
+		.map((item) => `${normalizeMetadataText(item.target, 80, "peer")}: ${normalizeMetadataText(item.reason, 240, "no reason given")}`)
+		.join("\n"));
 }
 
 function isSendDetails(details: unknown): details is ExocomSendDetails {
@@ -213,6 +231,9 @@ export function registerExocomTools(
 				const peers = plane.listPeers();
 				const sent: Array<{ target: string; msg_id: string }> = [];
 				const failed: Array<{ target: string; error: string }> = [];
+				// Peer-authored refusal prose, kept apart from our own failure lines so the whole
+				// fan-out's worth of it can be quoted into ONE peer fence below.
+				const rejections: Array<{ target: string; reason: string }> = [];
 				const outcomes = await Promise.all(
 					// By the session-pinned target, not the possibly-shared `.name` nor the display
 					// label: two LIVE peers can share a raw name (session_id-keyed registry, PartA),
@@ -223,15 +244,20 @@ export function registerExocomTools(
 							const { msg_id } = await plane.send(p.target, params.message, params.in_reply_to);
 							return { ok: true as const, target: p.target, msg_id };
 						} catch (err) {
-							return { ok: false as const, target: p.target, error: err instanceof Error ? err.message : String(err) };
+							return {
+								ok: false as const, target: p.target,
+								error: err instanceof Error ? err.message : String(err),
+								reason: err instanceof ExocomPeerRejection ? err.reason : undefined,
+							};
 						}
 					}),
 				);
 				// Promise completion order is not a presentation contract. Fold after all sends settle so
 				// sampled IDs/errors retain the stable registry order even when peers answer at different speeds.
 				for (const outcome of outcomes) {
-					if (outcome.ok) sent.push({ target: outcome.target, msg_id: outcome.msg_id });
-					else failed.push({ target: outcome.target, error: outcome.error });
+					if (outcome.ok) { sent.push({ target: outcome.target, msg_id: outcome.msg_id }); continue; }
+					failed.push({ target: outcome.target, error: outcome.error });
+					if (outcome.reason !== undefined) rejections.push({ target: outcome.target, reason: outcome.reason });
 				}
 				const failNote = failed.length > 0 ? `; ${failed.length} failed` : "";
 				const marker = sent.length > 0 ? "✓" : "✗";
@@ -239,8 +265,12 @@ export function registerExocomTools(
 					`${normalizeMetadataText(item.target, 80, "peer")}=${normalizeMetadataText(item.msg_id, 128, "msg")}`,
 				);
 				const omittedIds = sent.length - shownIds.length;
+				// The model-facing sample describes each failure in OUR words; a peer's own explanation
+				// travels only inside the fence appended below (`details` keeps it verbatim for the
+				// operator's card, which is rendering, not context).
+				const rejectedTargets = new Set(rejections.map((item) => item.target));
 				const shownFailures = failed.slice(0, MODEL_BROADCAST_FAILURE_SAMPLE).map((item) =>
-					`${normalizeMetadataText(item.target, 80, "peer")}: ${normalizeMetadataText(item.error, 160, "send failed")}`,
+					`${normalizeMetadataText(item.target, 80, "peer")}: ${rejectedTargets.has(item.target) ? "rejected by the peer; reason quoted below" : normalizeMetadataText(item.error, 160, "send failed")}`,
 				);
 				const omittedFailures = failed.length - shownFailures.length;
 				const action = omittedIds > 0 || omittedFailures > 0
@@ -249,8 +279,10 @@ export function registerExocomTools(
 						shownFailures.length > 0 ? `failures: ${shownFailures.join("; ")}${omittedFailures > 0 ? `; +${omittedFailures} more failures omitted` : ""}` : "",
 					].filter(Boolean).join("; ")}`
 					: shownIds.length > 0 ? `; msg_ids: ${shownIds.join(", ")}` : "";
+				const quoted = fencedPeerReasons(rejections.slice(0, MODEL_BROADCAST_FAILURE_SAMPLE));
+				const summary = `${marker} queued ${sent.length}/${peers.length} ${peers.length === 1 ? "peer" : "peers"}${failNote}${action}`;
 				return {
-					content: [{ type: "text", text: peers.length === 0 ? "⚠ no reachable peers; nothing queued" : `${marker} queued ${sent.length}/${peers.length} ${peers.length === 1 ? "peer" : "peers"}${failNote}${action}` }],
+					content: [{ type: "text", text: peers.length === 0 ? "⚠ no reachable peers; nothing queued" : [summary, quoted].filter(Boolean).join("\n") }],
 					details: {
 						target: "*",
 						peerCount: peers.length,
@@ -271,11 +303,12 @@ export function registerExocomTools(
 			try {
 				({ msg_id } = await plane.send(params.target, params.message, params.in_reply_to));
 			} catch (err) {
-				// A rejection carries the PEER's own NACK text (plane.send embeds it verbatim), and pi
-				// turns a thrown execute() into model-facing tool-result text. Flatten it exactly like
-				// the broadcast branch above: peer prose must never reach the model with its own line
-				// breaks, framed as this agent's tool output.
-				throw new Error(normalizeMetadataText(err instanceof Error ? err.message : String(err), 240, "exocom: send failed"));
+				// pi turns a thrown execute() into model-facing tool-result text, so a refusal carrying
+				// the PEER's own NACK prose would land in the supervisor's context as this agent's own
+				// words. Our half stays ours; the peer's half is flattened and fenced, exactly as an
+				// inbound peer message is (src/core/fence.ts).
+				const quoted = err instanceof ExocomPeerRejection ? fencedPeerReasons([{ target: params.target, reason: err.reason }]) : "";
+				throw new Error([refusalLine(params.target, err), quoted].filter(Boolean).join("\n"));
 			}
 			return {
 				content: [{ type: "text", text: `✓ queued to ${params.target} · msg_id=${msg_id}` }],
