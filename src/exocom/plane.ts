@@ -10,10 +10,10 @@
  */
 
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import nodeNet from "node:net";
 import type net from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
 import { frameSigningPayload, isExocomFrame, nextHops, parseExocomArtifactDescriptor, truncateForInject, type AgentCard, type ExocomAck, type ExocomArtifactDescriptor, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack } from "./envelope.ts";
@@ -57,6 +57,13 @@ const STALE_PROBE_TIMEOUT_MS = 1000;
 const RECONNECT_DELAY_MS = 150;
 const MAX_TRACKED_HOPS = 1024;
 
+/** Ceiling on a spill payload, enforced against the bytes ON DISK (see `artifactClaimError`).
+ *  `exocom_send` caps a message at 1,000,000 characters, which cannot exceed 4 MiB once UTF-8
+ *  encoded, so no honest spill is ever refused by this — but nothing else in the system bounds
+ *  what a peer can point the receiver's model at: `isExocomFrame` does not bound the message text,
+ *  and the per-sender byte window deliberately charges only what crossed the wire. */
+export const ARTIFACT_MAX_BYTES = 4 * 1_024 * 1_024;
+
 /** Hop history belongs to a message as observed from one sender.  msg_id is only
  * sender-scoped by protocol, so using it alone lets two peers overwrite each
  * other's chain depth. JSON's array encoding is unambiguous for the token fields
@@ -85,6 +92,18 @@ class AckTimeoutError extends Error {}
 class PeerNackError extends Error {}
 class PeerProtocolError extends Error {}
 class PeerAuthenticationError extends Error {}
+
+/** A peer refused the message. `reason` is the PEER's own prose, kept separate from our wrapper so
+ *  the tool layer can put that half behind the peer fence (src/core/fence.ts) instead of letting it
+ *  land in the supervisor's transcript as this agent's own words — `message` keeps the flat wording
+ *  every other caller (and the operator-facing card) already reads. */
+export class ExocomPeerRejection extends Error {
+	readonly reason: string;
+	constructor(target: string, reason: string) {
+		super(`exocom: peer "${target}" rejected message: ${reason}`);
+		this.reason = reason;
+	}
+}
 
 function verifyFrameOrigin(frame: ExocomFrame, entry: RegistryEntry): boolean {
 	if (!frame.signature || !entry.public_key) return false;
@@ -254,8 +273,24 @@ function qualifiedTarget(entry: RegistryEntry): string {
 	return `${entry.name}@${sessionSuffix}`;
 }
 
-function isQualifiedTarget(target: string): boolean {
+/** The tail `qualifiedTarget` emits, whatever the call-sign in front of it. A string of this shape
+ *  is a ROUTE: it names one session and never degrades into a display-name lookup, because names
+ *  are unreserved (`normalizePeerName` keeps `@`, so a peer can register another's token as its own
+ *  label). The test stays deliberately un-anchored — a call-sign may itself contain `@`, and the
+ *  token built from it must keep that protection too. A call-sign that legitimately LOOKS like a
+ *  token is the cost of that rule; `namesakeTarget` is what keeps such a peer reachable. */
+function isRoutingToken(target: string): boolean {
 	return /@[a-f0-9]{24}$/i.test(target);
+}
+
+/** The same file, spelled two ways. Peers share one registry by construction (that `agentDir`+`hash`
+ *  pair IS the registry both sides read), but each reaches it through its own `PI_AGENT_DIR`, which
+ *  may differ in case on Windows or carry relative segments — comparing the peer's path string
+ *  byte-for-byte would NACK every large message between two such peers. A symlinked root is
+ *  deliberately NOT resolved here; the `lstat` in `artifactClaimError` is what refuses links. */
+function samePath(a: string, b: string): boolean {
+	const canonical = (path: string): string => (process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path));
+	return canonical(a) === canonical(b);
 }
 
 interface InboundContext {
@@ -472,11 +507,24 @@ export class ExocomPlane {
 	 * direct stale targeting stays limited to replies, so an ordinary send resolves only against
 	 * the live roster `exocom_list` publishes. */
 	private qualifiedPeer(target: string, inReplyTo: string | undefined): RegistryEntry | undefined {
-		if (!isQualifiedTarget(target)) return undefined;
+		if (!isRoutingToken(target)) return undefined;
 		try {
 			if (inReplyTo === undefined) return this.listPeers().find((entry) => qualifiedTarget(entry) === target);
 			const own = this.deps.identity.session_id;
 			return this.pool().find((entry) => entry.session_id !== own && qualifiedTarget(entry) === target);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** The routing token of a live peer that carries `target` as its DISPLAY name. A call-sign is
+	 * the model's free choice, so one can legitimately look like a routing token — and such a peer
+	 * must not simply become unaddressable. Routing still refuses (a token names one session and is
+	 * never answered by whoever happens to hold that string as a label), but the refusal can hand
+	 * back the address that does work, so the caller repairs the send instead of giving up. */
+	private namesakeTarget(target: string): string | undefined {
+		try {
+			return this.listPeers().find((peer) => peer.displayName === target)?.target;
 		} catch {
 			return undefined;
 		}
@@ -540,27 +588,35 @@ export class ExocomPlane {
 	/** A spill descriptor is a CLAIM about a file, and the receiver turns it into `Full payload:
 	 *  <path>` for its own model plus a byte charge against the sender's window (exocom/inbound.ts).
 	 *  The peer authors both fields, so verify them against local ground truth here — the only
-	 *  layer that has it — before the claim can become an instruction to read something. All peers
-	 *  in one registry share `agentDir`+`hash` by construction (that pair IS the registry both
-	 *  sides read), so `payloadFor`'s path is byte-exact on this side too. Returns a nack reason,
-	 *  or undefined when the message carries no descriptor / a verified one. */
+	 *  layer that has it — before the claim can become an instruction to read something. What is
+	 *  established: the path names THIS workspace's artifacts directory (however it is spelled), the
+	 *  file there is a regular file this workspace itself wrote rather than a link to some other
+	 *  file, and its size on disk both matches the declared number and sits inside the artifact
+	 *  band. What is NOT established is the CONTENT: a peer that can write the file can put anything
+	 *  in it, and the delivery is fenced as untrusted peer data for exactly that reason. Returns a
+	 *  nack reason, or undefined when the message carries no descriptor / a verified one. */
 	private artifactClaimError(msg: ExocomMessage): string | undefined {
 		const descriptor = parseExocomArtifactDescriptor(msg.text);
 		if (!descriptor) return undefined;
 		const expected = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", `${msg.msg_id}.txt`);
-		if (descriptor.path !== expected) return "artifact path is not this workspace's spill for that message";
-		let actual: number;
+		if (!samePath(descriptor.path, expected)) return "artifact path is not this workspace's spill for that message";
+		let stat: Stats;
 		try {
-			const stat = statSync(expected);
-			if (!stat.isFile()) return "artifact payload is not a file";
-			actual = stat.size;
+			// lstat, never stat: the check above constrains a NAME, and a name is not a file. A link
+			// left at that name would otherwise hand the receiver's model any file this user can read
+			// — a symlink fails `isFile()`, and a hard link is a second name for a file this
+			// workspace never spilled, which is what `nlink` reports.
+			stat = lstatSync(expected);
 		} catch {
 			return "artifact payload is missing";
 		}
-		if (actual !== descriptor.size) return "artifact size does not match the payload on disk";
+		if (!stat.isFile()) return "artifact payload is not a regular file";
+		if (stat.nlink > 1) return "artifact payload is linked to another file";
+		if (stat.size !== descriptor.size) return "artifact size does not match the payload on disk";
 		// Only a payload the sender could not inline may travel as an artifact (see `payloadFor`);
 		// anything smaller belongs in the message text, where the inject budget governs it.
-		if (actual <= EXOCOM.INLINE_MAX_BYTES) return "artifact payload fits the inline budget";
+		if (stat.size <= EXOCOM.INLINE_MAX_BYTES) return "artifact payload fits the inline budget";
+		if (stat.size > ARTIFACT_MAX_BYTES) return "artifact payload exceeds the artifact ceiling";
 		return undefined;
 	}
 
@@ -643,8 +699,19 @@ export class ExocomPlane {
 				else live.push({ path, mtime: stat.mtimeMs });
 			}
 			live.sort((a, b) => a.mtime - b.mtime);
-			const excess = Math.max(0, live.length - (EXOCOM.ARTIFACT_MAX_FILES - 1));
-			for (let i = 0; i < excess; i++) { try { unlinkSync(live[i]!.path); } catch { /* best-effort */ } }
+			// The artifacts directory is shared by every peer in the workspace and this sweep runs on
+			// any of them starting, stopping or spilling. A spill is written, sent and verified by its
+			// receiver inside the sender's ack budget, so anything younger than that may be IN FLIGHT:
+			// reaping it turns a capacity sweep into a hard, lossy send failure ("artifact payload is
+			// missing") for a peer that did nothing wrong. The file cap is therefore a soft bound —
+			// a burst can briefly exceed it, and the TTL sweep above is what ultimately reclaims.
+			let excess = Math.max(0, live.length - (EXOCOM.ARTIFACT_MAX_FILES - 1));
+			for (const candidate of live) {
+				if (excess === 0) break;
+				if (now - candidate.mtime < EXOCOM.ACK_TIMEOUT_MS) continue;
+				try { unlinkSync(candidate.path); } catch { /* best-effort */ }
+				excess -= 1;
+			}
 		} catch { /* cleanup must not break messaging */ }
 	}
 
@@ -677,18 +744,24 @@ export class ExocomPlane {
 	async send(target: string, text: string, inReplyTo?: string): Promise<{ msg_id: string }> {
 		const { agentDir, hash, identity } = this.deps;
 		// Routing order: the authenticated inbound context (replies), then the session-qualified
-		// token, then the human display name. A qualified token names ONE session, so it NEVER
-		// falls back to a display name — peer names are self-chosen and unreserved, and
-		// `normalizePeerName` keeps `@`, so a peer can register another's token as its own label.
+		// token, then the human display name. A routing token names ONE session, so it NEVER falls
+		// back to a display name — peer names are self-chosen and unreserved, and `normalizePeerName`
+		// keeps `@`, so a peer can register another's token as its own label. A call-sign may
+		// legitimately look like a token, so the refusal names the address that peer does answer to
+		// rather than leaving the caller with a dead end.
 		const cachedReply = inReplyTo !== undefined ? this.cachedReplyPeer(target, inReplyTo) : undefined;
 		if (inReplyTo !== undefined && this.hasCachedReply(inReplyTo) && !cachedReply) {
 			throw new Error(`exocom: reply target "${target}" does not match the authenticated sender for "${inReplyTo}"`);
 		}
 		const qualified = this.qualifiedPeer(target, inReplyTo);
-		if (isQualifiedTarget(target) && !cachedReply && !qualified) {
-			throw new Error(inReplyTo === undefined
-				? `exocom: unknown qualified target "${target}"`
-				: `exocom: unknown qualified reply target "${target}"`);
+		if (isRoutingToken(target) && !cachedReply && !qualified) {
+			const namesake = this.namesakeTarget(target);
+			throw new Error([
+				inReplyTo === undefined
+					? `exocom: unknown qualified target "${target}"`
+					: `exocom: unknown qualified reply target "${target}"`,
+				namesake ? ` — a live peer holds that string as its display name; address it as "${namesake}"` : "",
+			].join(""));
 		}
 		const entry = cachedReply
 			?? qualified
@@ -710,7 +783,7 @@ export class ExocomPlane {
 			// A frozen-but-registered peer (accepted the connection, never acked) is left for
 			// the normal heartbeat/stale prune to evict — a single slow ack doesn't warrant
 			// mutating the registry here.
-			if (err instanceof PeerNackError) { this.removeArtifact(msg_id); throw new Error(`exocom: peer "${target}" rejected message: ${err.message}`); }
+			if (err instanceof PeerNackError) { this.removeArtifact(msg_id); throw new ExocomPeerRejection(target, err.message); }
 			if (err instanceof AckTimeoutError) { this.removeArtifact(msg_id); throw new Error(`exocom: ack timeout from "${target}"`); }
 			if (err instanceof PeerAuthenticationError || err instanceof PeerProtocolError) {
 				this.removeArtifact(msg_id);
@@ -727,7 +800,7 @@ export class ExocomPlane {
 				await sendFrame(this.netImpl, entry.endpoint, message, this.ackTimeoutMs, entry);
 			} catch (err2) {
 				this.removeArtifact(msg_id);
-				if (err2 instanceof PeerNackError) throw new Error(`exocom: peer "${target}" rejected message: ${err2.message}`);
+				if (err2 instanceof PeerNackError) throw new ExocomPeerRejection(target, err2.message);
 				if (err2 instanceof AckTimeoutError) throw new Error(`exocom: ack timeout from "${target}"`);
 				removeEntryIfMatches(agentDir, hash, entry);
 				if (err2 instanceof PeerAuthenticationError || err2 instanceof PeerProtocolError) throw new Error(`${err2.message} from "${target}"`);

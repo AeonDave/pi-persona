@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { after, before, test } from "node:test";
 import { endpoint, exocomRoot, registryPath } from "../../../src/exocom/paths.ts";
-import { ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
+import { ARTIFACT_MAX_BYTES, ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
 import { readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
 import { frameSigningPayload, type ExocomBye, type ExocomMessage } from "../../../src/exocom/envelope.ts";
 import { buildInboundDelivery } from "../../../src/exocom/inbound.ts";
@@ -68,17 +68,20 @@ async function injectMessage(targetEndpoint: string, frame: ExocomMessage): Prom
 }
 
 /** Like `injectMessage`, but hands back whatever the receiver wrote on the wire, so a test can
- *  tell an ACK from a NACK instead of inferring the verdict from an empty inbox. */
+ *  tell an ACK from a NACK instead of inferring the verdict from an empty inbox. The receiver
+ *  answers with a single frame and leaves the connection open, so this settles on the first chunk
+ *  rather than waiting out the timeout on every verdict. */
 function injectForReply(targetEndpoint: string, frame: ExocomMessage): Promise<string> {
 	return new Promise((resolve) => {
 		const socket = net.connect(targetEndpoint);
 		let out = "";
-		const timer = setTimeout(() => { socket.destroy(); resolve(out); }, 1_000);
+		const finish = (): void => { clearTimeout(timer); socket.destroy(); resolve(out); };
+		const timer = setTimeout(finish, 1_000);
 		timer.unref?.();
 		socket.once("connect", () => socket.write(encodeFrame(frame)));
-		socket.on("data", (chunk) => { out += chunk.toString("utf8"); });
-		socket.once("close", () => { clearTimeout(timer); resolve(out); });
-		socket.once("error", () => { clearTimeout(timer); resolve(out); });
+		socket.on("data", (chunk) => { out += chunk.toString("utf8"); finish(); });
+		socket.once("close", finish);
+		socket.once("error", finish);
 	});
 }
 
@@ -556,6 +559,167 @@ test("a spill claim naming the right path is still refused when nothing on disk 
 		assert.equal(got.length, 1, "the guard rejects only what could have been inlined");
 		assert.equal(got[0]?.msg_id, genuine);
 	} finally { await sender.stop(); await reader.stop(); }
+});
+
+// The path constraint pins a NAME, and a name is not a file: a link left at that name makes any
+// local file look like this workspace's own spill, and nothing else in the system bounds what a
+// peer can point the receiver's model at (`isExocomFrame` does not bound the message text, and the
+// per-sender window deliberately charges only what crossed the wire).
+test("a spill claim is refused when the file at the expected path is a link or exceeds the artifact ceiling", async () => {
+	const got: ExocomMessage[] = [];
+	const sender = planeFor("link-claimer", () => {});
+	const reader = planeFor("link-reader", (m) => got.push(m));
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, "h").find((p) => p.name === "link-claimer")!;
+		const readerEntry = readAll(dir, "h").find((p) => p.name === "link-reader")!;
+		const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+		mkdirSync(artifactsDir, { recursive: true });
+		const claim = (msgId: string, size: number): ExocomMessage => signedPlaneMessage(sender, {
+			kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+			from_name: "link-claimer", hops: 0, ts: new Date().toISOString(),
+			text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: join(artifactsDir, `${msgId}.txt`), size }),
+		});
+
+		// A file this workspace never spilled, given the receiver's expected spill name by a second
+		// hard link. Every declared field is honest about the bytes at that path.
+		const outside = join(dir, `outside-payload-${seq++}.txt`);
+		writeFileSync(outside, "S".repeat(20_000));
+		const hardLinked = randomUUID();
+		linkSync(outside, join(artifactsDir, `${hardLinked}.txt`));
+		const hardReply = await injectForReply(readerEntry.endpoint, claim(hardLinked, 20_000));
+		assert.equal(got.length, 0, "a second name for a file we never wrote is not this workspace's spill");
+		assert.match(hardReply, /"kind":"nack".*linked/, "and the sender is told why");
+
+		// Same trick through a symlink — pointed at a file of its own, so nothing but refusing to
+		// follow the link stands in the way: every check that follows would pass on the TARGET's
+		// bytes. Windows only creates a symlink unprivileged with Developer Mode on, so this half
+		// stands down where the platform refuses rather than failing for an unrelated reason.
+		const symlinkTarget = join(dir, `outside-payload-${seq++}.txt`);
+		writeFileSync(symlinkTarget, "S".repeat(20_000));
+		const symlinked = randomUUID();
+		let symlinkable = true;
+		try { symlinkSync(symlinkTarget, join(artifactsDir, `${symlinked}.txt`)); } catch { symlinkable = false; }
+		if (symlinkable) {
+			const symReply = await injectForReply(readerEntry.endpoint, claim(symlinked, 20_000));
+			assert.equal(got.length, 0, "…and the verification never follows a link out of the artifacts directory");
+			assert.match(symReply, /"kind":"nack".*not a regular file/, "the link is refused for what it is, not for its size");
+		}
+
+		// An honest, unlinked spill that is simply unbounded: `exocom_send` caps a message at
+		// 1,000,000 characters, so no legitimate sender reaches this — but a peer writing the file
+		// directly would otherwise have the receiver advertise `Full payload:` for a file of any size.
+		const huge = randomUUID();
+		writeFileSync(join(artifactsDir, `${huge}.txt`), Buffer.alloc(ARTIFACT_MAX_BYTES + 1, 0x7a));
+		const hugeReply = await injectForReply(readerEntry.endpoint, claim(huge, ARTIFACT_MAX_BYTES + 1));
+		assert.equal(got.length, 0, "a payload no budget covers is not delivered");
+		assert.match(hugeReply, /"kind":"nack".*ceiling/);
+
+		// The control: same shape, a real spill of its own, delivered.
+		const honest = randomUUID();
+		writeFileSync(join(artifactsDir, `${honest}.txt`), "z".repeat(20_000));
+		await injectForReply(readerEntry.endpoint, claim(honest, 20_000));
+		assert.equal(got.length, 1, "an ordinary spill still lands");
+		assert.equal(got[0]?.msg_id, honest);
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
+// Peers share one registry — that agentDir+hash pair IS the registry both sides read — but each
+// reaches it through its own PI_AGENT_DIR, which may differ in case (Windows) or carry relative
+// segments. A byte-exact comparison would NACK every large message between two such peers.
+test("a spill claim is honoured when the peer spells the very same file a different way", async () => {
+	const got: ExocomMessage[] = [];
+	const sender = planeFor("spelling-claimer", () => {});
+	const reader = planeFor("spelling-reader", (m) => got.push(m));
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, "h").find((p) => p.name === "spelling-claimer")!;
+		const readerEntry = readAll(dir, "h").find((p) => p.name === "spelling-reader")!;
+		const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+		mkdirSync(artifactsDir, { recursive: true });
+		const claim = (msgId: string, path: string): ExocomMessage => signedPlaneMessage(sender, {
+			kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+			from_name: "spelling-claimer", hops: 0, ts: new Date().toISOString(),
+			text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path, size: 20_000 }),
+		});
+		const spill = (msgId: string): string => {
+			const path = join(artifactsDir, `${msgId}.txt`);
+			writeFileSync(path, "y".repeat(20_000));
+			return path;
+		};
+
+		const relative = randomUUID();
+		spill(relative);
+		// Not `join(...)`: it would normalize the detour away before the plane ever saw it.
+		await injectForReply(readerEntry.endpoint, claim(relative, `${artifactsDir}${sep}..${sep}artifacts${sep}${relative}.txt`));
+		assert.equal(got.length, 1, "a relative detour through the same directory is the same spill");
+		assert.equal(got[0]?.msg_id, relative);
+
+		if (process.platform === "win32") {
+			const cased = randomUUID();
+			spill(cased);
+			await injectForReply(readerEntry.endpoint, claim(cased, join(artifactsDir, `${cased}.txt`).toUpperCase()));
+			assert.equal(got.length, 2, "on a case-insensitive filesystem, a differently cased path is the same spill");
+			assert.equal(got[1]?.msg_id, cased);
+		}
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
+// The artifacts directory is shared by every peer in the workspace, and the capacity sweep runs on
+// any peer's start, stop or next spill. A sweep landing between a sender's write and the receiver's
+// verification turns a benign race into a hard, lossy send failure ("artifact payload is missing").
+test("the capacity sweep leaves spills that may still be in flight alone", async () => {
+	const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+	mkdirSync(artifactsDir, { recursive: true });
+	const burst = Array.from({ length: EXOCOM.ARTIFACT_MAX_FILES + 20 }, () => join(artifactsDir, `${randomUUID()}.txt`));
+	for (const path of burst) writeFileSync(path, "b");
+	const sweeper = planeFor("sweeper", () => {});
+	try {
+		await sweeper.start(); // start() sweeps, exactly as a peer joining mid-conversation would
+		assert.deepEqual(burst.filter((path) => !existsSync(path)), [], "no just-written payload was reaped out from under its receiver");
+	} finally {
+		await sweeper.stop();
+		for (const path of burst) { try { unlinkSync(path); } catch { /* already reaped */ } }
+	}
+});
+
+// A call-sign is the model's own free choice, so one can legitimately end in the same `@<24 hex>`
+// shape a routing token does. Such a name still must not be answerable — a token names ONE session,
+// and whoever holds that string as a label is not it (see the departed-session test above) — but
+// refusing it silently leaves the model holding an address it has no way to repair.
+test("a call-sign shaped like a session token is not answerable, and the refusal names the address that is", async () => {
+	const inbox: ExocomMessage[] = [];
+	const callSign = "quinn@0123456789abcdef01234567";
+	// Built directly rather than through planeFor: a session_id is a token (registry.ts), so it
+	// cannot carry the `@` this peer put in its freely chosen call-sign.
+	const quinnSession = `sid-token-shaped-${process.pid}-${seq++}`;
+	const quinn = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: quinnSession, name: callSign, persona: "quinn", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", quinnSession, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: callSign, persona: "quinn", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: (m) => { inbox.push(m); return { accepted: true }; },
+	});
+	const sender = planeFor("token-shaped-sender", () => {});
+	await quinn.start();
+	await sender.start();
+	try {
+		const peer = sender.listPeers().find((p) => p.name === callSign)!;
+		assert.equal(peer.displayName, callSign, "the roster still shows the peer under its chosen call-sign");
+		await assert.rejects(
+			() => sender.send(callSign, "by name"),
+			new RegExp(`unknown qualified target.*display name.*"${peer.target}"`),
+			"the refusal hands back the address that peer does answer to",
+		);
+		assert.equal(inbox.length, 0, "a token-shaped string is never answered by whoever holds it as a label");
+		await sender.send(peer.target, "by token");
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(inbox.length, 1, "…and that address delivers");
+	} finally { await quinn.stop(); await sender.stop(); }
 });
 
 test("stop() removes the registry entry so the peer disappears from others' listPeers", async () => {

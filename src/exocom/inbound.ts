@@ -6,7 +6,9 @@
  * Preconditions this module cannot check itself: a caller must only pass messages whose artifact
  * descriptor the transport has already verified against local ground truth (`ExocomPlane`'s
  * `artifactClaimError`), since a path claim can only be judged against the receiver's own
- * artifacts directory and the file on disk.
+ * artifacts directory and the file on disk. That check is also where a spill's SIZE is bounded
+ * (`ARTIFACT_MAX_BYTES`) and reconciled with the bytes actually there — nothing below can do
+ * either, so an unverified caller would advertise a payload of any size to its model.
  *
  * `fence`/`attribute` are injected rather than imported directly: `extension.ts` wires the
  * real `fenceUntrusted`/`attributeInbound` (src/core/fence.ts) at the call site. Attribution
@@ -75,8 +77,9 @@ function formatArtifactSize(bytes: number): string {
 
 /** Renders the spill as the readable form the model sees. `path` is peer-authored and this line
  *  is an invitation to READ it, so it may only be rendered for a descriptor the transport already
- *  verified against this workspace's own artifacts directory and the bytes on disk (see
- *  `ExocomPlane.artifactClaimError`) — nothing here can check a path. */
+ *  verified against this workspace's own artifacts directory and the bytes on disk — that the file
+ *  is this workspace's own unlinked spill, and that its size matches and is bounded (see
+ *  `ExocomPlane.artifactClaimError`). Nothing here can check a path or a file. */
 function artifactBody(descriptor: ReturnType<typeof parseExocomArtifactDescriptor>): string {
 	if (!descriptor) return "";
 	return [
@@ -96,7 +99,8 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	// sender's own, for a payload this receiver never inlines. Charging it would drop legitimate
 	// large spills (`exocom_send` accepts a 1 MB message) on the first message of a window, and a
 	// peer wanting to bypass the window would just under-declare. The artifact channel is bounded
-	// by the per-sender message count and by the plane's descriptor verification instead.
+	// by the per-sender message count and by the plane's descriptor verification instead — which
+	// is what makes the declared number honest AND caps it (`ARTIFACT_MAX_BYTES`, plane.ts).
 	const wireBytes = Buffer.byteLength(msg.text, "utf8");
 	if (!deps.budget.allow(msg.from_session, wireBytes)) return { drop: "budget" };
 	// Artifacts are structured transport metadata, but their preview/path are still peer-authored

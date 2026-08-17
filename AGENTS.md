@@ -99,9 +99,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   fills with every leg's body, failures included), while `renderCompletion` scans only `status: "done"`
   runs. A background leg that FAILED while emitting `[BLOCKED]` therefore gets the failure block but no
   persistence note — deliberate (see the `renderCompletion` doc comment), not a bug to "fix" silently.
-  `config.nudge` (`PI_PERSONA_NUDGE=off`) is read at ONE place, the `tool_result` hook: it silences the
-  by-hand reminder and the sync-result persistence one, but the two `renderCompletion` call sites pass
-  an ungated `scan` callback, so a background/`intercom wait` report still carries the note.
+  `config.nudge` (`PI_PERSONA_NUDGE=off`) silences all of it: the `tool_result` hook (the by-hand
+  reminder and the sync-result persistence one) and both `renderCompletion` call sites, which take
+  their `scan` through the same gate — so a background/`intercom wait` report carries no note either.
   Its standing counterpart is the **delegation brief** (`core/brief.ts`): `before_agent_start` appends
   a live, capability-filtered roster (agents/teams/flows) + a hand-off default to the
   system-prompt TAIL every turn — discovery that survives context burn.

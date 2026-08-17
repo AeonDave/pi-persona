@@ -62,6 +62,36 @@ test("an over-long OSC payload is shown, not swallowed", () => {
 	assert.equal(sanitizeTerminalText("a\u001b]0;short title\u0007b"), "ab");
 });
 
+test("an OSC erase stops at the next ESC, so one introducer cannot hide a whole report", () => {
+	// The payload class excludes ESC as well as BEL. Without that exclusion a single `ESC ]`
+	// swallows everything up to the next BEL — intervening sequences included — which is the
+	// same "fold my whole report behind one introducer" trick the length cap exists to stop,
+	// just spelled with a terminator the child controls. The exclusion is also what keeps each
+	// introducer's scan region disjoint, the property the overlay's row cache reads it for.
+	const hidden = sanitizeTerminalText("visible]0;[0mSECRETtail");
+	assert.ok(hidden.includes("SECRET"), "the erase ends at the interrupting ESC, not at the far BEL");
+	assert.match(hidden, /^visible/);
+	assert.match(hidden, /tail$/);
+	assert.doesNotMatch(hidden, /|/, "while the control bytes themselves still go");
+});
+
+/** An unpaired surrogate — what clipping between the halves of an astral character leaves. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+test("clipping chrome and previews never splits a surrogate pair", () => {
+	// Astral characters (emoji) occupy two code units, so an odd-length clip lands between the
+	// halves and leaves one behind. Terminals draw that as a replacement glyph — directly
+	// before the ellipsis, in chrome whose whole job is to look deliberate.
+	const inline = compactInlineText("😀".repeat(200), { maxChars: 24 });
+	assert.doesNotMatch(inline, LONE_SURROGATE, `inline chrome ended mid-pair: ${JSON.stringify(inline)}`);
+	assert.ok(visibleWidth(inline) <= 24, `chrome occupied ${visibleWidth(inline)} terminal columns`);
+	assert.match(inline, /…$/);
+
+	const preview = compactVisibleText("😀".repeat(200), { maxLines: 2, maxLineChars: 42 });
+	assert.doesNotMatch(preview.text, LONE_SURROGATE, `preview ended mid-pair: ${JSON.stringify(preview.text)}`);
+	assert.equal(preview.truncated, true);
+});
+
 test("compactInlineText sanitizes metadata, folds whitespace, and clamps one-line chrome", () => {
 	const text = compactInlineText(` safe\u001b[2J\n${"x".repeat(100)} `, { maxChars: 24 });
 	assert.equal(text.length, 24);

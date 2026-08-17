@@ -38,16 +38,32 @@ export interface AsyncRun {
 	 *  force-settle racing the run thunk's natural resolution so listeners fire exactly once. Lives on
 	 *  the entry (not a side Set) so it survives pruning and the `launch` closure still sees it. */
 	settled?: boolean;
+	/** True once the supervisor has explicitly fetched this run's FULL payload. Retention then treats
+	 *  the retained copy as spare and evicts it before a result nobody has read yet. */
+	collected?: boolean;
+	/** True when the launcher classified this leg as a potential workspace MUTATION (its tool grant is
+	 *  not provably read-only) — what a persona's fresh-verification policy gates on. Carried on the
+	 *  entry rather than in a side Set at the call site: a thunk that throws synchronously settles the
+	 *  run INSIDE {@link AsyncRunTracker.launch}, before the caller holds the id, so a registration
+	 *  performed after launch() returns would re-insert an already-dead run and leak it. */
+	mutates?: boolean;
 }
 
 /** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
 export type RunThunk = (onProgress: (snapshot: ProgressSnapshot) => void, runId: string) => Promise<AgentResult>;
+
+/** How many uncollected evictions the tracker remembers, so a later `result` can answer "dropped
+ *  under pressure" instead of an indistinguishable "never existed". Bounded: a session that drops
+ *  thousands of runs only ever needs to explain the recent ones. */
+export const MAX_DROPPED_IDS = 256;
 
 export class AsyncRunTracker {
 	private readonly runs = new Map<string, AsyncRun>();
 	/** Ids of settled runs in SETTLE order — the eviction queue {@link prune} drains from the front.
 	 *  `runs` is keyed in LAUNCH order, which stops matching once legs finish out of order. */
 	private readonly settledOrder: string[] = [];
+	/** Ids whose payload was evicted while STILL UNCOLLECTED, oldest first (insertion-ordered Set). */
+	private readonly droppedIds = new Set<string>();
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
 	private seq = 0;
 	private readonly maxRetained: number;
@@ -61,7 +77,7 @@ export class AsyncRunTracker {
 		this.maxRetained = opts?.maxRetained ?? 25;
 	}
 
-	launch(meta: { agent: string; task: string; label?: string; model?: string }, run: RunThunk): string {
+	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
 		const entry: AsyncRun = {
@@ -72,6 +88,7 @@ export class AsyncRunTracker {
 			progress: { output: "", turns: 0, tokens: 0 },
 			lastAdvanceAt: this.now(),
 		};
+		if (meta.mutates) entry.mutates = true;
 		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
 		// once at the tracker boundary so a caller cannot smuggle multiline instructions into any of
 		// those views; renderers still sanitize defensively when they compose a label.
@@ -168,12 +185,53 @@ export class AsyncRunTracker {
 	 * to fetch it. And "oldest" means oldest SETTLED, not oldest launched: legs finish out of launch
 	 * order, so launch-order eviction can drop a run seconds after its completion follow-up pointed
 	 * the supervisor at it. The run settling right now is appended last, hence evicted last.
+	 *
+	 * A bound this small cannot promise every payload survives: a fan-out wider than `maxRetained`
+	 * settles more results than there is room for, whoever wins the ordering. So retention is
+	 * preference plus honesty — a run the supervisor has already READ is evicted before one nobody
+	 * has, and an eviction that does destroy an uncollected payload is recorded ({@link wasDropped})
+	 * so the tool can say the result was dropped instead of reporting the id as unknown.
 	 */
 	private prune(): void {
 		while (this.settledOrder.length > this.maxRetained) {
-			const id = this.settledOrder.shift() as string;
+			const collectedAt = this.settledOrder.findIndex((id) => this.runs.get(id)?.collected === true);
+			const at = collectedAt >= 0 ? collectedAt : 0;
+			const [id] = this.settledOrder.splice(at, 1) as [string];
+			if (collectedAt < 0) this.recordDrop(id);
 			this.runs.delete(id);
 		}
+	}
+
+	private recordDrop(id: string): void {
+		this.droppedIds.add(id);
+		// Insertion-ordered, so the first key is the oldest drop we still remember.
+		if (this.droppedIds.size > MAX_DROPPED_IDS) this.droppedIds.delete(this.droppedIds.values().next().value as string);
+	}
+
+	/** Record that the supervisor has read this run's full payload (an explicit `intercom result`).
+	 *  Its retained copy becomes the cheapest thing to evict when the bound is next hit. */
+	markCollected(id: string): void {
+		const entry = this.runs.get(id);
+		if (entry) entry.collected = true;
+	}
+
+	/** Did this id name a run whose payload was evicted before anyone collected it? Distinguishes a
+	 *  result lost to retention pressure from an id that never existed — the two are the same
+	 *  `peek() === undefined` otherwise, and only one of them deserves an explanation. */
+	wasDropped(id: string): boolean {
+		return this.droppedIds.has(id);
+	}
+
+	/** The retention bound in force, quoted back to the supervisor when a payload is dropped. */
+	get retention(): number {
+		return this.maxRetained;
+	}
+
+	/** The still-running legs that may MUTATE the workspace (what a persona's cross-call
+	 *  fresh-verification gate holds a declared verifier against). Derived from live status on every
+	 *  call, so a settled leg can never linger as a phantom writer. */
+	writers(): AsyncRun[] {
+		return this.running().filter((r) => r.mutates === true);
 	}
 
 	peek(id: string): AsyncRun | undefined {
@@ -312,6 +370,24 @@ export function buildWaitTimeoutNote(ids: readonly string[], timeoutMs: number):
 		`⏳ still running after ${timeoutMs}ms: ${idSummary}. ` +
 		"Continue useful supervisor work; completion will notify you automatically. " +
 		"Use peek only when status is needed, steer to redirect, or stop a truly stalled run — do not immediately wait again."
+	);
+}
+
+/**
+ * The explicit overflow signal for the one case retention cannot cover: more runs settled than the
+ * tracker keeps, so some of the ids this very report names can no longer be fetched. Saying it here,
+ * where the results are still in front of the supervisor, is what keeps "each result returns to you"
+ * honest — the alternative is a bare "no such run" later, when the payload is unrecoverable.
+ */
+export function buildRetentionOverflowNote(droppedIds: readonly string[], retention: number): string {
+	if (droppedIds.length === 0) return "";
+	const visible = droppedIds.slice(0, MAX_ASYNC_STATUS_ROWS);
+	const omitted = droppedIds.length - visible.length;
+	const idSummary = `${visible.join(", ")}${omitted > 0 ? `, … +${omitted} more` : ""}`;
+	return (
+		`⚠ ${droppedIds.length} of these run${droppedIds.length === 1 ? "" : "s"} can no longer be fetched by id (${idSummary}): ` +
+		`more runs settled than the ${retention}-run retention bound keeps, so their full payloads were dropped. ` +
+		"Work from the summaries above. To keep more, raise PI_PERSONA_ASYNC_RETAIN or fan out in narrower waves and collect as you go."
 	);
 }
 
@@ -535,6 +611,12 @@ export function renderCompletion(
 	return boundCompletionSurface(note ? `${report}\n\n${note}` : report);
 }
 
+/** How many consecutive empty renders of the SAME batch are retried before it is released. A
+ *  renderer returning "" for a non-empty batch is a bug, so the batch is put back — but the retry
+ *  timer is deliberately ref'd, so an unbounded requeue would spin (and hold the host process open)
+ *  for the rest of the session. */
+export const MAX_EMPTY_RENDER_RETRIES = 3;
+
 export interface IdleNotifierDeps<T> {
 	/** Whether the supervisor is idle (not streaming a turn). */
 	isIdle: () => boolean;
@@ -589,6 +671,9 @@ export class IdleCoalescingNotifier<T> {
 	private readonly now: () => number;
 	private lastDeliveredAt = 0;
 	private deliveries = 0;
+	/** Consecutive empty renders since the last successful one — the {@link MAX_EMPTY_RENDER_RETRIES}
+	 *  budget. Reset by any render that produces text, so a transient bug costs nothing later. */
+	private emptyRenders = 0;
 	/** One awaitable delivery at a time. Void deliveries stay on the synchronous fast path. */
 	private flushing: Promise<void> | undefined;
 	/** The batch currently handed to an async host delivery. Explicit collection can remove an item
@@ -690,11 +775,22 @@ export class IdleCoalescingNotifier<T> {
 			const message = this.deps.render(batch);
 			if (!message) {
 				// Empty text from a non-empty batch is a renderer failure, not an acknowledgement: put the
-				// batch back at the front so a transient formatter bug cannot silently discard comms.
-				this.pending.unshift(...batch);
+				// batch back at the front so a TRANSIENT formatter bug cannot silently discard comms. A
+				// persistently empty renderer is a different problem — retry a bounded number of times,
+				// then let the batch go rather than re-arm forever against a bug no retry will fix.
+				this.emptyRenders += 1;
+				if (this.emptyRenders <= MAX_EMPTY_RENDER_RETRIES) {
+					this.pending.unshift(...batch);
+				} else {
+					this.emptyRenders = 0;
+					if (process.env.PI_PERSONA_DEBUG) {
+						process.stderr.write(`[pi-persona] notifier released ${batch.length} item(s): renderer returned empty text ${MAX_EMPTY_RENDER_RETRIES + 1}x\n`);
+					}
+				}
 				this.arm(this.retryMs);
 				return Promise.resolve();
 			}
+			this.emptyRenders = 0;
 			this.activeBatch = batch;
 			const delivery = this.deps.deliver(message);
 			if (!delivery || typeof (delivery as PromiseLike<void>).then !== "function") {

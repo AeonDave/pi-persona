@@ -9,7 +9,10 @@ import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 //
 // The OSC payload stops at the next ESC as well as at BEL: without that an `ESC ]` a child
 // never terminates makes the class run to end-of-string and backtrack from *every* such
-// position — quadratic, on the synchronous render path.
+// position — quadratic, on the synchronous render path. The length cap below does not make
+// that exclusion redundant: it is also what keeps each introducer's erase region disjoint, so
+// a child cannot fold an arbitrary run of its report — sequences included — behind one
+// introducer by delaying the BEL.
 //
 // It also stops after OSC_MAX_PAYLOAD characters, and the CSI parameter run after its own
 // cap. Erasing an OSC payload is what makes `ESC ]0;` a way to *hide* text, so an unbounded
@@ -61,6 +64,17 @@ export interface CompactInlineTextOptions {
 }
 
 /**
+ * Clip to at most `units` code units without cutting an astral character in half. A lone
+ * surrogate draws as a replacement glyph, and every clip here puts it directly before the
+ * ellipsis — the most visible position in the line.
+ */
+function clipCodeUnits(text: string, units: number): string {
+	if (units >= text.length) return text;
+	const last = text.charCodeAt(units - 1);
+	return text.slice(0, last >= 0xd800 && last <= 0xdbff ? units - 1 : units);
+}
+
+/**
  * Sanitize and bound trusted UI chrome such as labels, model names, and error causes.
  * `maxChars` bounds both code units and *display columns*: a CJK label passes a character
  * count at twice the width, and a widget row "bounded" by characters alone then wraps
@@ -70,7 +84,7 @@ export function compactInlineText(input: string, opts: CompactInlineTextOptions 
 	const maxChars = Math.max(16, Math.floor(opts.maxChars ?? 160));
 	const compact = sanitizeTerminalText(input).replace(/\s+/g, " ").trim();
 	// Clip by code units first, so the column measurement below never walks a whole report.
-	const clipped = compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}…` : compact;
+	const clipped = compact.length > maxChars ? `${clipCodeUnits(compact, maxChars - 1)}…` : compact;
 	if (visibleWidth(clipped) <= maxChars) return clipped;
 	// pi-tui's truncateToWidth would splice in ANSI resets, and chrome must stay escape-free.
 	return `${sliceByColumn(clipped, 0, maxChars - 1, true)}…`;
@@ -122,7 +136,7 @@ export function compactVisibleText(
 	const clamp = (line: string): string => {
 		if (line.length <= maxLineChars) return line;
 		lineTruncated = true;
-		return `${line.slice(0, maxLineChars - 1)}…`;
+		return `${clipCodeUnits(line, maxLineChars - 1)}…`;
 	};
 
 	let omittedLines = 0;

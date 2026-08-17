@@ -52,6 +52,7 @@ export class AgentOverlay extends Container {
 	private canSteer: ((nodeId: string) => boolean) | undefined;
 	private unsubscribe: () => void;
 	private selectedId: string | undefined; // the selected agent's *id*, never its row index
+	private aimLost = false; // the aimed-at agent settled: swallow the next directed keystroke
 	private listScroll = 0; // list rows scrolled off the top (keeps the selection visible)
 	private detailId: string | undefined;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
@@ -126,13 +127,29 @@ export class AgentOverlay extends Container {
 	 * live tree, and agents are pruned from it as they settle: an index would slide `x`
 	 * (stop) and `s` (steer) onto a *different* agent whenever an earlier sibling went
 	 * away. When the aimed-at agent is the one that vanishes, fall back to the head of
-	 * the list, where the ▸ marker visibly shows the user their target changed.
+	 * the list, where the ▸ marker visibly shows the user their target changed — and
+	 * record that the aim was lost, for the directed keys (see `aimedLeaf`).
 	 */
 	private selectedLeaf(leaves: FlatRow[]): FlatRow | undefined {
 		const anchored = this.selectedId !== undefined ? leaves.find((r) => r.node.id === this.selectedId) : undefined;
 		const leaf = anchored ?? leaves[0];
+		if (this.selectedId !== undefined && anchored === undefined && leaf !== undefined) this.aimLost = true;
 		this.selectedId = leaf?.node.id;
 		return leaf;
+	}
+
+	/**
+	 * The leaf a *directed* key (`x` stop, `s` steer) may act on. A keystroke is always in flight
+	 * while runs settle underneath it, and stopping an agent cannot be undone — so the first such
+	 * key after the aimed-at agent vanished only re-anchors and re-renders. The user then acts on
+	 * the target the ▸ marker actually shows, rather than on whichever agent inherited the aim.
+	 */
+	private aimedLeaf(leaves: FlatRow[]): FlatRow | undefined {
+		const leaf = this.selectedLeaf(leaves);
+		if (!this.aimLost) return leaf;
+		this.aimLost = false;
+		this.refresh();
+		return undefined;
 	}
 
 	/** Move the selection by whole rows, keeping it anchored on an id. */
@@ -141,6 +158,7 @@ export class AgentOverlay extends Container {
 		if (!current) return;
 		const index = leaves.findIndex((r) => r.node.id === current.node.id);
 		this.selectedId = leaves[Math.min(leaves.length - 1, Math.max(0, index + delta))]?.node.id;
+		this.aimLost = false; // moving the marker by hand *is* taking aim
 	}
 
 	private rebuild(): void {
@@ -243,7 +261,9 @@ export class AgentOverlay extends Container {
 		if (!node) {
 			this.detailId = undefined;
 			// The compose belonged to *that* agent — drop it, or the next drill-in would
-			// re-open it pre-filled and send it to a different sub-agent.
+			// re-open it pre-filled and send it to a different sub-agent. Re-rendering the
+			// list also loses the anchor (the selection *is* the drilled-in agent), so an
+			// `x` still in flight for it is refused instead of landing on the list beneath.
 			this.steering = false;
 			this.steerBuffer = "";
 			this.renderList();
@@ -343,12 +363,13 @@ export class AgentOverlay extends Container {
 			if (leaf) {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0; // open at the latest output (auto-scroll to bottom)
+				this.aimLost = false; // reading a row is harmless, and it re-takes aim on it
 				this.refresh();
 			}
 		} else if (keyData === "s") {
 			// Steer straight from the list: drill into the selected agent with the
 			// compose line already open (same gate as the detail view's `s`).
-			const leaf = this.selectedLeaf(leaves);
+			const leaf = this.aimedLeaf(leaves);
 			if (leaf && leaf.node.status === "running" && (this.canSteer?.(leaf.node.id) ?? false)) {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0;
@@ -357,7 +378,7 @@ export class AgentOverlay extends Container {
 				this.refresh();
 			}
 		} else if (keyData === "x") {
-			const leaf = this.selectedLeaf(leaves);
+			const leaf = this.aimedLeaf(leaves);
 			if (leaf) this.tryStop(leaf.node.id);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.close();

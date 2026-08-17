@@ -36,7 +36,9 @@ declarative through `council: { strategy, roster, params }`; a custom persona ca
 strategy/team without a core change. The gates use effective agent/tool capabilities, conservatively
 treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
 concurrency in both synchronous and background execution. A serialized verifier is accepted only
-after every material writer in that batch; otherwise the call fails before a child starts.
+after every material writer in that batch; otherwise the call fails before a child starts. The rule
+also holds ACROSS calls: a verifier launched while a material-writer background run is still live is
+rejected with the run id to wait on, so a later call cannot slip past the in-batch ordering.
 
 ### The effort ladder (make the simple case simple; complexity is opt-in)
 
@@ -338,7 +340,12 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot
   permanently push the editor off screen or dump an entire peer registry into model context;
 - `/flow` and `/orchestrate` append durable, TUI-only expandable result entries. They do not dump a
-  large notification and do not add a second copy to the model context.
+  large notification and do not add a second copy to the model context;
+- the F9 overlay's *directed* keys (`x` stop, `s` steer) act only on the agent the ▸ marker still
+  shows. Runs settle and are pruned under the cursor while a keystroke is in flight, so when the
+  aimed-at agent is the one that vanished, the selection re-anchors visibly and that keypress is
+  spent re-aiming (`src/ui/agent-overlay.ts`) — aborting an agent the user never chose is not
+  undoable. ↑↓, ⏎ and the scroll keys never refuse: they cost nothing to repeat.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.
@@ -388,7 +395,13 @@ external comm.)
   workspace-scoped artifact file (a small preview stays inline) rather than landing whole in the
   receiver's context. The spill is an exact, validated descriptor (`preview`, `path`, `size`) rendered
   as readable fenced metadata; arbitrary JSON is ordinary peer text, and an inline-only truncation
-  never claims that an artifact exists. Guardrails: a hop cap, a per-sender rate+byte budget, and a (sender, msg_id)
+  never claims that an artifact exists. A descriptor is verified at the RECEIVER's transport boundary
+  before anything reaches its model: the path must be this workspace's own `artifacts/<msg_id>.txt`,
+  the file must be a regular unlinked file whose size equals the declared one, and that size must sit
+  between the inline cap and `ARTIFACT_MAX_BYTES`; anything else is NACKed to the sender rather than
+  advertised as readable. The per-sender byte window charges only what crossed the wire, not a spill's
+  declared size, so a legitimate large spill is delivered instead of being refused as "budget".
+  Guardrails: a hop cap, a per-sender rate+byte budget, and a (sender, msg_id)
   dedup set so an at-least-once resend can't double-trigger a turn. Reply-hop history is keyed by
   that same sender identity, so two peers reusing a `msg_id` cannot reset each other's loop depth.
   Registry cleanup is ownership-aware (`session_id` + endpoint + signing key) and atomically claims
@@ -396,7 +409,10 @@ external comm.)
   socket-file cleanup is likewise conditional on that plane having completed the bind itself.
 - **Tools are lazy and fail closed.** `exocom_list({ offset?, limit? })` exposes bounded, paginated
   presence (with exact totals and `nextOffset`),
-  `exocom_send({ target, message, in_reply_to? })` sends one-way messages, and
+  `exocom_send({ target, message, in_reply_to? })` sends one-way messages — a target that LOOKS like
+  a session-qualified token is resolved only as one and never falls back to a display name (names are
+  self-chosen, so the fallback was an interception route), and a peer whose call-sign happens to take
+  that shape is reachable through the qualified address the refusal names — and
   `exocom_name({ name })` rebrands this instance's display call-sign (the registry key stays the
   session id, so a rename moves no state and grants nothing). Pi has no dynamic
   unregister API, so definitions registered by a prior join may remain in the registry; the live
@@ -459,11 +475,11 @@ persona directive lives at the TOP of the prompt and its pull decays as recent t
       is already surfaced as a failure by `buildCompletionReport`. So a background/`wait` leg that FAILED
       while emitting `[BLOCKED]` gets the failure block and its salvaged partial output, but NOT the
       persistence note. Same marker, same leg, different counterweight depending on how it was collected.
-  - **The off switch covers one hook, not every path.** `config.nudge` (`PI_PERSONA_NUDGE=off`) is read
-    at exactly one place — the `tool_result` hook — so it silences the DelegationNudge entirely and the
-    PersistenceNudge on a sync `delegate`/`council` result. The two `renderCompletion` call sites (the
-    background completion notifier and `intercom wait`) pass an ungated `scan` callback, so on the
-    background-by-default interactive path the persistence note is still appended with the flag off.
+  - **The off switch covers every path.** `config.nudge` (`PI_PERSONA_NUDGE=off`) gates the
+    `tool_result` hook — silencing the DelegationNudge entirely and the PersistenceNudge on a sync
+    `delegate`/`council` result — and both `renderCompletion` call sites (the background completion
+    notifier and `intercom wait`) take their `scan` through the same gate, so "off" means off wherever
+    a settled leg is collected, not only on the synchronous path.
 
 ## Discovery & seeding
 

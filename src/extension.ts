@@ -42,7 +42,7 @@ import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./
 import { withModelFallback } from "./engine/fallback.ts";
 import { captureWorktreeArtifact, defaultGitExec, withWorktree, worktreePreflight } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -841,7 +841,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// see a background run — its report arrives here as a fresh follow-up, not a delegate result).
 	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
 		...idleDelivery,
-		render: (runs) => renderCompletion(runs, fenceUntrusted, (t) => persistenceNudge.scan(t)),
+		render: (runs) => {
+			const report = renderCompletion(runs, fenceUntrusted, (t) => scanForSurrender(t));
+			// Retention is a bound, not a promise: a fan-out wider than it settles more payloads than the
+			// tracker can hold. Name the ids this very report points at that can no longer be fetched,
+			// while their summaries are still in front of the supervisor — the alternative is a bare
+			// "no retained async run" later, when nothing can be recovered.
+			const dropped = runs.filter((r) => tracker.wasDropped(r.id)).map((r) => r.id);
+			const overflow = buildRetentionOverflowNote(dropped, tracker.retention);
+			return overflow ? boundCompletionSurface(`${report}\n\n${overflow}`) : report;
+		},
 	});
 	// A child's blocking ask (decision/interview) — coalesced and idle-gated so it can't strand and
 	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
@@ -868,10 +877,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		onFire: (entry) => timerNotifier.notify(entry),
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
-	// Background legs that may mutate the workspace, by run id. A persona's fresh-verification policy
-	// is a cross-CALL rule (delegate is background by default), so a later call needs to know which of
-	// the still-running legs are material mutations; entries are dropped as their runs settle.
-	const writerRuns = new Set<string>();
+	// The premature-surrender counterweight rides the SAME kill switch as the by-hand nudge
+	// (PI_PERSONA_NUDGE=off). Both completion surfaces — the background follow-up and `intercom wait` —
+	// go through here, so "off" means off wherever a settled leg is collected, not just on the
+	// synchronous tool_result hook.
+	const scanForSurrender = (text: string): string | undefined => (config.nudge ? persistenceNudge.scan(text) : undefined);
+	// A run id that is neither live nor retained has two very different meanings: it never existed, or
+	// its payload was evicted under retention pressure. Only the second deserves an explanation — and a
+	// bare "no such run" for a result the supervisor was just TOLD to fetch is exactly the dead end
+	// this distinction exists to prevent.
+	function missingRunMessage(id: string, display: string | undefined): string {
+		if (!tracker.wasDropped(id)) return `No retained async run "${display}".`;
+		return (
+			`Async run "${display}" settled, but its full payload is gone: more runs settled than the ${tracker.retention}-run retention bound keeps. ` +
+			"Its summary was delivered in the completion follow-up. Raise PI_PERSONA_ASYNC_RETAIN, or fan out in narrower waves and collect as you go, to keep more."
+		);
+	}
 	// Turns the periodic peek from a poll into an exception signal: it surfaces a leg only when it
 	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
 	const peekWatcher = new PeekWatcher();
@@ -880,7 +901,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
 		stopRequested.delete(`async:${run.id}`);
-		writerRuns.delete(run.id); // a settled leg no longer blocks a declared verifier
 		if (disposed) return; // instance torn down — don't notify the next session or re-arm a cancelled timer
 		// Immediate human feedback + one semantic completion. Explicit stops are informational,
 		// while natural failures retain the error toast and every terminal result is still delivered.
@@ -2099,13 +2119,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const target = remembered ? personas.find((p) => p.name === remembered) : undefined;
 		if (target) await controller.activate(target);
 		else {
-			// An EXPLICIT `--persona` that doesn't resolve is a user error — surface it loudly (a bad
-			// env/remembered value falls back silently, but the flag is a direct instruction). The
-			// model (`--model`) and effort (`--thinking`) are pi's own flags — pi validates those.
-			if (flagPersona) {
+			// A name that doesn't resolve leaves the session with NO persona at all, whichever source it
+			// came from — and silence there reads as "it's active" while nothing is (downstream tooling
+			// keyed on the remembered name, e.g. per-persona memory, then serves a persona that was never
+			// activated). An EXPLICIT `--persona` is a direct instruction, so it stays an error; an env
+			// pin or a stale remembered name is a warning. The marker itself is deliberately NOT cleared:
+			// personas are discovered per-cwd, so a name that is missing here may be present in the
+			// project the user came from. The model (`--model`) and effort (`--thinking`) are pi's own
+			// flags — pi validates those.
+			if (remembered) {
 				const names = personas.map((p) => p.name).sort().join(", ") || "(none installed — run /persona seed)";
-				const msg = `pi-persona: --persona "${flagPersona}" is not an installed persona. Available: ${names}`;
-				if (ctx.hasUI) ctx.ui.notify(msg, "error");
+				const source = flagPersona ? "--persona" : config.defaultPersona ? "PI_PERSONA_DEFAULT" : "remembered persona";
+				const msg = `pi-persona: ${source} "${remembered}" is not an installed persona. Available: ${names}`;
+				if (ctx.hasUI) ctx.ui.notify(msg, flagPersona ? "error" : "warning");
 				else process.stderr.write(`${msg}\n`);
 			}
 			host.setStatus(controller.activePersona?.label);
@@ -2513,6 +2539,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// potential writers; treating them as readers would let a persona's ownership policy fail open
 	// merely by moving an edit into a script. ONE classifier for the in-batch gates and the
 	// cross-call one below, so a leg can never count as a writer in one and a reader in the other.
+	// `skills`/`role` are deliberately NOT part of this: both are prompt text (a skills preamble and an
+	// appended system prompt), while `tools` is an enforced session allowlist in both engines — a leg
+	// granted only read/grep/find/ls cannot write however it is instructed. Classifying on them would
+	// invent writers that provably cannot write, and under requireDisjointWrites that is a hard refusal.
 	const readOnlyTools = new Set(["read", "grep", "find", "ls"]);
 	function mayMutateWorkspace(spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): boolean {
 		const configured = agents.find((agent) => agent.name === spec.agent);
@@ -2526,7 +2556,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// tracker entry) so the tree node and every intercom digest show the SAME composed name.
 	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, batchSlots?: Semaphore): string {
 		const model = shortModel(runSpec.model);
-		const id = tracker.launch({ agent, task, label, ...(model ? { model } : {}) }, (onProgress, runId) => {
+		// The writer classification travels WITH the run (tracker metadata), not in a side Set keyed by
+		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
+		// registration after launch() returns would re-insert an already-dead run and leak it.
+		const id = tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec) }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
 			// A real, HARD stop for the async run (a steer is only a soft request the child may
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
@@ -2581,7 +2614,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					return r;
 				});
 		});
-		if (mayMutateWorkspace(runSpec)) writerRuns.add(id);
 		const nodeId = `async:${id}`;
 		// "queued" until the semaphore grants a slot and the engine reports it steerable. Every
 		// `async:*` node IS async by construction, so no "(async)" tag is needed — fold in the
@@ -2671,7 +2703,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				if (requestedAgents.some((agent) => verifierNames.has(agent))) {
 					// A declared verifier's own background legs are not the mutation it must approve
 					// (same carve-out the in-batch gate makes for a test-running verifier).
-					const liveMutations = tracker.running().filter((run) => writerRuns.has(run.id) && !verifierNames.has(run.agent));
+					const liveMutations = tracker.writers().filter((run) => !verifierNames.has(run.agent));
 					if (liveMutations.length > 0) {
 						const verifierList = [...new Set(requestedAgents.filter((agent) => verifierNames.has(agent)))].map((agent) => `"${agent}"`).join(", ");
 						const visibleMutations = liveMutations.slice(0, 8);
@@ -2985,7 +3017,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				}
 				const run = tracker.peek(params.to);
 				if (!run) {
-					return { content: [{ type: "text", text: `No retained async run "${displayTarget}".` }], details: { action: "result", ok: false }, isError: true };
+					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: { action: "result", ok: false }, isError: true };
 				}
 				if (run.status === "running") {
 					return {
@@ -2995,8 +3027,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					};
 				}
 				// Explicit collection owns this delivery: remove a still-buffered passive completion so the
-				// same result cannot appear again as a follow-up a moment later.
+				// same result cannot appear again as a follow-up a moment later. Telling the tracker too
+				// makes this retained copy the first thing retention evicts — the supervisor has read it,
+				// so it is the cheapest payload in the map to lose.
 				completionNotifier.discard((pending) => pending.id === run.id);
+				tracker.markCollected(run.id);
 				const full = getFullRunOutput(run);
 				const body = full === "(no output)" ? full : fenceUntrusted(full);
 				// The cause is engine/child-authored text too. Keep the run id/status as trusted compact
@@ -3013,7 +3048,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// No `to` → wait on running legs AND collect settled legs still queued for follow-up
 				// delivery, so a wait in the settle→deliver gap returns their results (not "nothing").
 				if (params.to && !tracker.peek(params.to)) {
-					return { content: [{ type: "text", text: `No retained async run "${displayTarget}".` }], details: { action: "wait", ok: false }, isError: true };
+					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: { action: "wait", ok: false }, isError: true };
 				}
 				const ids = params.to
 					? [params.to]
@@ -3035,7 +3070,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// carries the premature-surrender note when it is collected via `wait`.
 				const settledIds = new Set(settled.map((r) => r.id));
 				completionNotifier.discard((run) => settledIds.has(run.id));
-				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => persistenceNudge.scan(t)) : "";
+				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => scanForSurrender(t)) : "";
 				const stillNote = still.length > 0 ? buildWaitTimeoutNote(still.map((r) => r.id), timeoutMs) : "";
 				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
 				const text = boundCompletionSurface(joined);

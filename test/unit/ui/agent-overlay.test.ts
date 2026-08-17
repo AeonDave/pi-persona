@@ -98,7 +98,12 @@ test("list selection follows the chosen agent when an earlier sibling is pruned"
 	overlay.dispose();
 });
 
-test("a pruned selection re-anchors on the first agent rather than on whatever slid into its slot", () => {
+test("a stop aimed at an agent that settles first re-anchors and refuses, instead of stopping another", () => {
+	// The contract for the destructive keys: a keystroke can always be in flight while its target
+	// settles, and stopping an agent cannot be undone. So when the aimed-at agent is the one that
+	// vanishes, the selection re-anchors *visibly* (the ▸ marker moves) and this keypress does
+	// nothing; the next one — aimed at what the user can now see — acts. Silently retargeting
+	// would abort an agent the user never chose, which is the failure mode that matters here.
 	const tree = new AgentTree();
 	tree.add({ id: "a", label: "alpha" });
 	tree.add({ id: "b", label: "bravo" });
@@ -112,7 +117,86 @@ test("a pruned selection re-anchors on the first agent rather than on whatever s
 	tree.remove("b"); // the aimed-at agent is the one that vanishes
 	assert.match(overlay.render(80).join("\n"), /▸ ⏳ alpha/, "the marker visibly falls back to the top");
 	overlay.handleInput("x");
-	assert.deepEqual(stopped, ["a"]);
+	assert.deepEqual(stopped, [], "the keypress aimed at bravo must not abort alpha");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["a"], "a second press stops the agent the marker now shows");
+	overlay.dispose();
+});
+
+test("a steer aimed at an agent that settles first is refused the same way", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "alpha" });
+	tree.add({ id: "b", label: "bravo" });
+	const steered: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, undefined, (id, text) => {
+		steered.push(`${id}:${text}`);
+		return true;
+	}, () => true);
+	overlay.handleInput("j"); // aim at bravo
+	tree.remove("b");
+	overlay.handleInput("s");
+	assert.doesNotMatch(overlay.render(80).join("\n"), /steer ▸/, "no compose opens on an agent the user did not aim at");
+	overlay.handleInput("s"); // deliberate, on the re-anchored selection
+	type(overlay, "carry on");
+	overlay.handleInput("\n");
+	assert.deepEqual(steered, ["a:carry on"]);
+	overlay.dispose();
+});
+
+test("moving the marker after a lost aim re-arms the directed keys at once", () => {
+	// The refusal costs one keystroke, and only while the user has not yet re-aimed: a deliberate
+	// ↑↓ (or drilling in) IS taking aim, so the next `x` must act rather than be swallowed again.
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "alpha" });
+	tree.add({ id: "b", label: "bravo" });
+	tree.add({ id: "c", label: "charlie" });
+	const stopped: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
+		stopped.push(id);
+		return true;
+	}, undefined, () => true);
+	overlay.handleInput("j"); // aim at bravo
+	tree.remove("b"); // aim lost — the marker falls back to alpha
+	overlay.handleInput("j"); // and the user aims again, at charlie
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["c"], "the re-aimed stop is not swallowed");
+	overlay.dispose();
+});
+
+test("drilling into a row after a lost aim re-arms the directed keys too", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "alpha" });
+	tree.add({ id: "b", label: "bravo" });
+	const stopped: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
+		stopped.push(id);
+		return true;
+	}, undefined, () => true);
+	overlay.handleInput("j"); // aim at bravo
+	tree.remove("b"); // aim lost — the marker falls back to alpha
+	overlay.handleInput("\n"); // read alpha's output, then esc back out to the list
+	overlay.handleInput("");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["a"], "the stop aimed at the row the user just read is not swallowed");
+	overlay.dispose();
+});
+
+test("a stop typed at a drilled-in agent that finishes first does not fall through to the list", () => {
+	// Backing out of the detail view is the same lost aim: the agent under the cursor is gone and
+	// the list underneath is a different target.
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "alpha" });
+	tree.add({ id: "b", label: "bravo" });
+	const stopped: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
+		stopped.push(id);
+		return true;
+	}, undefined, () => true);
+	overlay.handleInput("j"); // aim at bravo
+	overlay.handleInput("\n"); // drill into it
+	tree.remove("b"); // it settles while the user is reading its output
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, [], "the stop meant for bravo must not land on alpha");
 	overlay.dispose();
 });
 
