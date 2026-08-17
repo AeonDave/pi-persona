@@ -35,4 +35,14 @@ test("aggregateResults concatenates labeled sections, sums usage, and embeds str
 test("aggregateResults is ok=false when any result failed", () => {
 	const agg = aggregateResults([ok("a", "fine"), { agent: "b", output: "x", usage: usage(1), ok: false, error: "boom" }]);
 	assert.equal(agg.ok, false);
+	assert.match(agg.output, /boom/, "the supervisor must receive the actionable leg error, not only '(no output)'");
+	assert.equal((agg.structured?.results as Array<Record<string, unknown>>)[1]?.error, "boom");
+});
+
+test("aggregateResults preserves a failure kind when the failed leg has no output", () => {
+	const agg = aggregateResults([
+		{ agent: "isolated", output: "", usage: usage(1), ok: false, error: "worktree requires a clean Git checkout", failureKind: "contract" },
+	]);
+	assert.match(agg.output, /worktree requires a clean Git checkout/);
+	assert.match(agg.output, /contract/);
 });

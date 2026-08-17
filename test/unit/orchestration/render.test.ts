@@ -54,6 +54,46 @@ test("aggregate UI humanizes structured members and preserves a prose fallback",
 	assert.doesNotMatch(text, /"result"/);
 });
 
+test("aggregate UI keeps a failed member's cause and failure kind", () => {
+	const aggregate: AgentResult = {
+		agent: "fanout",
+		output: "raw aggregate",
+		structured: {
+			count: 1,
+			results: [
+				{
+					agent: "melchior",
+					ok: false,
+					output: "",
+					error: "provider unavailable",
+					failureKind: "provider",
+					structured: null,
+				},
+			],
+		},
+		usage,
+		ok: false,
+	};
+	const text = humanizeAggregateResult(aggregate) ?? "";
+	assert.match(text, /✗ melchior/);
+	assert.match(text, /provider/);
+	assert.match(text, /provider unavailable/);
+});
+
+test("dissent lines stay bounded while preserving member and vote", () => {
+	const member: AgentResult = {
+		agent: "casper",
+		output: "x".repeat(500),
+		structured: { vote: "stage" },
+		usage,
+		ok: true,
+	};
+	const text = dissentLine(member);
+	assert.match(text, /^\[casper · stage\] /);
+	assert.ok(text.length < 260, `dissent line was not bounded: ${text.length}`);
+	assert.match(text, /…$/);
+});
+
 test("council result is answer-first and leaves the single title to renderCall", () => {
 	const collapsed = formatCouncilResult(
 		{ headline: "Ship the staged rollout", status: "winner", tally: { ship: 2, wait: 1 }, usedFallback: false, body: "full ruling" },
@@ -66,4 +106,23 @@ test("council result is answer-first and leaves the single title to renderCall",
 		formatCouncilResult({ headline: undefined, status: undefined, tally: undefined, usedFallback: undefined, body: "full ruling" }, true),
 		"full ruling",
 	);
+});
+
+test("the collapsed council card sanitizes and bounds the child-authored headline and tally", () => {
+	// The winner's `result`/`vote` reach these fields verbatim; only `body` is stripped
+	// upstream, and collapsed is the view the user sees before expanding.
+	const tally: Record<string, number> = { ["x".repeat(5_000)]: 1, ["y".repeat(5_000)]: 1 };
+	const collapsed = formatCouncilResult(
+		{
+			headline: "\u001b[2J\u001b[H\u001b]0;pwned\u0007OWNED",
+			status: "win\u001b[?1049hner",
+			tally,
+			usedFallback: false,
+			body: "full ruling",
+		},
+		false,
+	);
+	assert.doesNotMatch(collapsed, /\u001b|\u0007/, "council chrome must not carry terminal escapes");
+	assert.match(collapsed, /^OWNED · winner · tally /);
+	assert.ok(collapsed.length <= 400, `collapsed council card was ${collapsed.length} chars`);
 });

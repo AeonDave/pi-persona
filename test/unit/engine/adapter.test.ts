@@ -77,6 +77,21 @@ test("child adapter leaves the task untouched when no contract is requested", as
 	assert.ok(!r.output.includes("output contract"), "no contract requested → no block injected");
 });
 
+test("child adapter carries an agent tools deny block to the spawned pi process", async () => {
+	const seen: string[] = [];
+	const restricted = (name: string): AgentConfig | undefined =>
+		name === "research"
+			? { name, model: "stub/m", excludeTools: ["edit"], systemPrompt: "research", source: "x" }
+			: undefined;
+	const capture = (args: string[]) => {
+		seen.push(...args);
+		return resolveFake(args);
+	};
+	const result = await makeEngine({ resolveAgent: restricted, childOptions: { resolveInvocation: capture } }).run({ agent: "research", task: "inspect" });
+	assert.equal(result.ok, true);
+	assert.ok(seen.includes("--exclude-tools") && seen.includes("edit"));
+});
+
 test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
 	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, timeoutMs: 5_000, killGraceMs: 50 } });

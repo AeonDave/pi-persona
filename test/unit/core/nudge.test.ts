@@ -36,6 +36,17 @@ test("trivial commands (orchestration glue) don't advance the run", () => {
 	for (let i = 0; i < 12; i++) assert.equal(n.observe("bash", 5), undefined); // size 5 < minStepChars 10
 });
 
+test("short edit/write results still count as hands-on coding work", () => {
+	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 200 });
+	assert.equal(n.observe("edit", 20), undefined);
+	assert.equal(n.observe("write", 20), undefined);
+	assert.equal(n.observe("apply_patch", 20), undefined);
+	assert.ok(n.observe("edit", 20), "four terse mutations are a coding grind even when each tool result is tiny");
+
+	const control = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 200 });
+	for (let i = 0; i < 10; i++) assert.equal(control.observe("read", 20), undefined, "short read/glue output remains non-substantive");
+});
+
 test("a glue command mid-sweep doesn't reset the run", () => {
 	const n = mk();
 	n.observe("bash", 50); // run 1
@@ -61,6 +72,16 @@ test("a delegate resets the run — grinding after a hand-off starts fresh", () 
 	assert.equal(n.observe("delegate", 9999), undefined, "the hand-off itself never nudges");
 	// Without the reset the next command would be run 4 and fire; after it, the run is 1.
 	assert.equal(n.observe("bash", 50), undefined, "run counts from the hand-off");
+});
+
+test("a failed delegate remains actionable and does not erase the by-hand run", () => {
+	const n = mk();
+	n.observe("bash", 50);
+	n.observe("grep", 50);
+	n.observe("read", 50); // run 3, one short of the sweep
+	const repair = n.observe("delegate", 500, false);
+	assert.match(repair ?? "", /failed.*hand-off|re-dispatch/i);
+	assert.ok(n.observe("bash", 50), "the failed hand-off did not buy a false reset");
 });
 
 test("council is also a hand-off and resets the run", () => {
@@ -91,6 +112,8 @@ test("a sweep nudge names the run, not a single dump, and acknowledges non-deleg
 	assert.doesNotMatch(note ?? "", /in one result/, "not framed as a single fat dump");
 	assert.match(note ?? "", /in a row/i);
 	assert.match(note ?? "", /interactive session a sub-agent can't inherit/i, "acknowledges non-delegable work");
+	assert.match(note ?? "", /agent.*tool.*re-dispatch/i, "a weak hand-off is corrected instead of absorbed by the supervisor");
+	assert.ok((note ?? "").length <= 360, "the reminder itself must not become another wall of text");
 });
 
 test("the single-dump nudge names the burn in tokens and points at delegate", () => {
@@ -111,9 +134,9 @@ test("reset() clears the run (new session / persona switch)", () => {
 	assert.equal(n.observe("bash", 50), undefined, "run counts from zero after reset");
 });
 
-test("default thresholds: a sweep is 8 substantive commands; glue is under 200 chars", () => {
+test("default thresholds: a sweep is 5 substantive commands; glue is under 200 chars", () => {
 	assert.equal(DEFAULT_NUDGE_THRESHOLDS.singleHeavyChars, 40_000);
-	assert.equal(DEFAULT_NUDGE_THRESHOLDS.runLength, 8);
+	assert.equal(DEFAULT_NUDGE_THRESHOLDS.runLength, 5);
 	assert.equal(DEFAULT_NUDGE_THRESHOLDS.minStepChars, 200);
 });
 

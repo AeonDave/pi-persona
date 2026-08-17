@@ -82,10 +82,26 @@ legs get, and follows `PI_PERSONA_SPINE` unless set.
 | `on` / `1` / `true` / `yes` | User-dir file if present, else the bundled one (`prompts/spine.md`, `prompts/spine.worker.md`). |
 | *a path* | That file. Unreadable, empty, or over 64 KiB → no spine, with a warning naming the reason; never a hard failure. |
 
+One narrow upgrade exception protects users who seeded the original v1.8.0 pair before the prompts
+were rewritten: if a user-dir file is byte-for-byte one of those shipped originals, pi-persona leaves
+the user's bytes untouched but bypasses that legacy candidate, so selector `on` falls through to the
+current bundled file. Detection first rejects anything that is not a single-link regular file of the
+exact legacy size, then hashes a bounded descriptor read. Symlinks, hardlinks, oversized files, and
+every edited/custom digest remain ordinary user copies and continue to shadow the bundle.
+
+Activation and `/persona reload` inspect only roles whose selector is exactly `on`; an explicit path
+does not inspect the unused user-dir copy. `/persona seed` preserves existing files, while the
+explicit `/persona restore` operation force-restores both bundled originals. Seed, restore, reload, and
+first-run auto-seed all refresh the cached resolution for the next supervisor turn and delegated leg
+without a restart. `/doctor` shows each selector and its resolved source (or `off` / `degraded`) plus
+the legacy paths being bypassed and any inspection warning.
+
 Both word lists are matched case-insensitively and after trimming; a path is kept verbatim, case
-included, because filesystems are case-sensitive. The lists are `OFF_WORDS` / `ON_WORDS` in
-`src/core/config.ts`, shared with `PI_PERSONA_EXOCOM` and `PI_PERSONA_LEDGER_V2`. The older boolean
-switches (`PI_PERSONA_PERSIST`, `_NUDGE`, `_SEED`, `_BROKER`, `_DISABLE`, `_DELEGATE_DEFAULT`) keep
+included, because filesystems are case-sensitive. They are `OFF_WORDS` / `ON_WORDS` in
+`src/core/config.ts`; `OFF_WORDS` is the shared definition of "off" that `PI_PERSONA_EXOCOM` and
+`PI_PERSONA_LEDGER_V2` also use, while `ON_WORDS` exists only for the selectors whose value can also
+be a path. The older boolean switches
+(`PI_PERSONA_PERSIST`, `_NUDGE`, `_SEED`, `_BROKER`, `_DISABLE`, `_DELEGATE_DEFAULT`) keep
 their own published conventions — changing those would silently alter what an existing user's
 environment means. A selector whose value can also be a path has to recognise its on-words
 explicitly: "not off" cannot imply "on" when anything unrecognised is a filename.

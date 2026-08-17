@@ -11,7 +11,8 @@ export async function mapWithConcurrency<TIn, TOut>(
 	fn: (item: TIn, index: number) => Promise<TOut>,
 ): Promise<TOut[]> {
 	if (items.length === 0) return [];
-	const limit = Math.max(1, Math.min(concurrency, items.length));
+	const requested = Number.isFinite(concurrency) ? Math.floor(concurrency) : 1;
+	const limit = Math.max(1, Math.min(requested, items.length));
 	const results = new Array<TOut>(items.length);
 	let next = 0;
 	// Contained rejection, two halves. CONTAINMENT: once a callback rejects no worker pulls another
@@ -55,25 +56,47 @@ export class Semaphore {
 	private readonly waiters: Array<() => void> = [];
 
 	constructor(slots: number) {
-		this.available = Math.max(1, slots);
+		this.available = Math.max(1, Number.isFinite(slots) ? Math.floor(slots) : 1);
 	}
 
-	/** Run `fn` once a slot is free; the slot is released when it settles. */
-	async with<T>(fn: () => Promise<T>): Promise<T> {
-		await this.acquire();
+	/** Run `fn` once a slot is free; the slot is released when it settles. A signal removes a
+	 * queued waiter immediately, so a stopped background leg can never start later. */
+	async with<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		await this.acquire(signal);
 		try {
+			if (signal?.aborted) throw this.abortError();
 			return await fn();
 		} finally {
 			this.release();
 		}
 	}
 
-	private acquire(): Promise<void> {
+	private acquire(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return Promise.reject(this.abortError());
 		if (this.available > 0) {
 			this.available -= 1;
 			return Promise.resolve();
 		}
-		return new Promise((resolve) => this.waiters.push(resolve));
+		return new Promise((resolve, reject) => {
+			const grant = (): void => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			};
+			const onAbort = (): void => {
+				const index = this.waiters.indexOf(grant);
+				if (index >= 0) this.waiters.splice(index, 1);
+				signal?.removeEventListener("abort", onAbort);
+				reject(this.abortError());
+			};
+			this.waiters.push(grant);
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
+	}
+
+	private abortError(): Error {
+		const error = new Error("Semaphore wait aborted");
+		error.name = "AbortError";
+		return error;
 	}
 
 	private release(): void {

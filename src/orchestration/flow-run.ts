@@ -10,7 +10,7 @@
 
 import { emptyUsage } from "../engine/stream.ts";
 import type { FlowPhase, FlowSpec } from "./flow.ts";
-import type { AgentResult } from "./types.ts";
+import type { AgentResult, FailureKind } from "./types.ts";
 
 export type PhaseStatus = "running" | "done" | "failed";
 
@@ -61,6 +61,12 @@ export interface FlowOutcome {
 	results: Record<string, AgentResult>;
 	/** The terminal (sink) phases' combined output — the flow's answer. */
 	output: string;
+	/** The first phase that failed, when a settled result identifies one. */
+	failedPhase?: string;
+	/** The actionable cause of the flow's first failure, or the cancellation cause. */
+	error?: string;
+	/** The machine-readable cause of the flow failure. */
+	failureKind?: FailureKind;
 	/** The run signal fired before every phase settled ok. A cancelled flow is NOT the same as one
 	 *  that merely finished without an answer, and callers report it differently. */
 	cancelled?: boolean;
@@ -242,10 +248,47 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 	const results: Record<string, AgentResult> = Object.fromEntries(done);
 	const needed = new Set(spec.phases.flatMap((p) => p.needs ?? []));
 	const terminals = spec.phases.filter((p) => !needed.has(p.id));
-	const output = terminals
+	const terminalOutput = terminals
 		.map((p) => done.get(p.id)?.output ?? "")
 		.filter((s) => s.trim())
 		.join("\n\n---\n\n");
 	const ok = spec.phases.every((p) => done.get(p.id)?.ok ?? false);
-	return { ok, results, output, ...(cancelled ? { cancelled: true } : {}) };
+	const failures = spec.phases
+		.map((phase) => ({ phase, result: done.get(phase.id) }))
+		.filter((entry): entry is { phase: FlowPhase; result: AgentResult } => entry.result !== undefined && !entry.result.ok);
+	const cancellation = cancelled;
+	// Cancellation is authoritative: a normal failure from an earlier phase must not replace the
+	// user's stop with an ordinary failure classification. Prefer an explicitly aborted phase when
+	// one settled, otherwise keep the cancellation at flow level without inventing a failed phase.
+	const failure = cancellation
+		? failures.find((entry) => entry.result.failureKind === "abort")
+		: failures[0];
+	const failedPhase = failure?.phase.id;
+	const error = cancellation ? (failure?.result.error ?? CANCELLED_ERROR) : failure?.result.error;
+	const failureKind = cancellation ? "abort" as const : failure?.result.failureKind;
+	const failureText = failedPhase
+		? `Flow failed at phase "${failedPhase}": ${error ?? "the phase failed"}`
+		: `Flow failed: ${error ?? "the flow did not complete successfully"}`;
+	const cancellationText = `Flow cancelled${failedPhase ? ` at phase "${failedPhase}"` : ""}: ${error ?? CANCELLED_ERROR}`;
+	const outputAlreadySignalsCancellation = /\b(?:cancel(?:led|lation)?|abort(?:ed)?|stopp?ed)\b/i.test(terminalOutput);
+	const output = cancellation
+		? terminalOutput.trim()
+			? outputAlreadySignalsCancellation
+				? terminalOutput
+				: `${terminalOutput}\n\n${cancellationText}`
+			: cancellationText
+		: terminalOutput.trim()
+			? terminalOutput
+			: failure
+				? failureText
+				: terminalOutput;
+	return {
+		ok,
+		results,
+		output,
+		...(failedPhase ? { failedPhase } : {}),
+		...(error ? { error } : {}),
+		...(failureKind ? { failureKind } : {}),
+		...(cancelled ? { cancelled: true } : {}),
+	};
 }

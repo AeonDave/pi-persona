@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isExocomFrame, truncateForInject, type ExocomMessage } from "../../../src/exocom/envelope.ts";
+import { isExocomFrame, parseExocomArtifactDescriptor, truncateForInject, type ExocomMessage } from "../../../src/exocom/envelope.ts";
 
 const msg = (over: Partial<ExocomMessage> = {}): ExocomMessage => ({
 	kind: "message", msg_id: "m1", from_session: "s1", from_endpoint: "/e", from_name: "elite", text: "hi", hops: 0, ts: "2026-07-17T00:00:00Z", ...over,
@@ -32,4 +32,23 @@ test("truncateForInject never emits a replacement character at a multibyte bound
 	assert.equal(cut.truncated, true);
 	assert.ok(cut.text.startsWith("A"));
 	assert.doesNotMatch(cut.text, /�/, "partial UTF-8 code points are omitted, never decoded as U+FFFD");
+});
+
+test("plain truncation asks for the rest without promising a nonexistent artifact", () => {
+	const cut = truncateForInject("x".repeat(9_000), 8_192);
+	assert.equal(cut.truncated, true);
+	assert.match(cut.text, /ask the sender for the rest/i);
+	assert.doesNotMatch(cut.text, /read the artifact/i);
+});
+
+test("artifact descriptors require the exact marker and validated fields", () => {
+	const raw = JSON.stringify({ kind: "exocom_artifact", preview: "first lines", path: "C:/workspace/artifacts/a.txt", size: 20_000 });
+	assert.deepEqual(parseExocomArtifactDescriptor(raw), {
+		kind: "exocom_artifact",
+		preview: "first lines",
+		path: "C:/workspace/artifacts/a.txt",
+		size: 20_000,
+	});
+	assert.equal(parseExocomArtifactDescriptor(JSON.stringify({ preview: "first lines", path: "a.txt", size: 20_000 })), undefined, "arbitrary JSON is not an artifact");
+	assert.equal(parseExocomArtifactDescriptor(JSON.stringify({ kind: "exocom_artifact", preview: "x", path: "a.txt", size: "20000" })), undefined, "size must be numeric");
 });

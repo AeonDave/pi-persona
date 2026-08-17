@@ -27,6 +27,9 @@
 
 /** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
 const HANDOFF_TOOLS = new Set(["delegate", "council"]);
+/** Mutation tools often return only a terse acknowledgement. Their output size is not a useful
+ * proxy for the amount of direct coding work, so every call counts as substantive. */
+const MUTATING_TOOLS = new Set(["edit", "write", "apply_patch"]);
 
 export interface NudgeThresholds {
 	/** A single result at/above this many chars is a fat one-shot dump — nudge on its own. Kept
@@ -42,7 +45,7 @@ export interface NudgeThresholds {
 
 export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
 	singleHeavyChars: 40_000, // ~10k tokens in one command — a fat one-shot dump
-	runLength: 8, // 8 substantive hands-on commands in a row without a hand-off = a by-hand sweep.
+	runLength: 5, // 5 substantive hands-on commands in a row without a hand-off = a by-hand sweep.
 	// The standing delegation brief (core/brief.ts) carries the default every turn; this is the
 	// reactive backstop for the supervisor who grinds a sweep through it anyway.
 	minStepChars: 200, // below this a command is glue, not a sweep step
@@ -61,13 +64,12 @@ const toK = (chars: number): number => Math.round(chars / 4 / 1000);
 function renderNudge(reason: "dump" | "sweep", run: number, burn: number, size: number): string {
 	const lead =
 		reason === "dump"
-			? `that direct command dumped ~${toK(size)}k tokens in one result (~${toK(burn)}k by hand since your last delegate).`
-			: `${run} hands-on commands in a row (~${toK(burn)}k tokens) with no hand-off.`;
+			? `one direct command dumped ~${toK(size)}k tokens in one result (~${toK(burn)}k since the last hand-off).`
+			: `${run} hands-on commands in a row (~${toK(burn)}k tokens) since the last hand-off.`;
 	return (
 		`⟢ pi-persona — ${lead} ` +
-		`"Delegate anything that burns context or budget." Breadth or a stalled vector → hand it off ` +
-		"(`delegate` runs in the background and reports back). If the work is bound to one interactive " +
-		"session a sub-agent can't inherit, keep it yourself but lean — one scripted sweep, grep-first, no full-dump reprints."
+		"Delegate work that burns context or budget. Weak hand-off? Fix its agent/tool grant and re-dispatch; don't absorb the scope. " +
+		"If work is bound to one interactive session a sub-agent can't inherit, keep it lean and grep-first."
 	);
 }
 
@@ -94,9 +96,12 @@ export class DelegationNudge {
 	 * Feed one supervisor tool result: its tool name and output length in chars. Returns the reminder
 	 * text to append to that result, or undefined to leave the result untouched.
 	 */
-	observe(toolName: string, size: number): string | undefined {
+	observe(toolName: string, size: number, handoffSucceeded = true): string | undefined {
 		if (HANDOFF_TOOLS.has(toolName)) {
-			// The operator delegated — the by-hand run is over; the hand-off itself never nudges.
+			if (!handoffSucceeded) {
+				return "⟢ pi-persona — the hand-off failed before useful work landed. Fix the agent, model, brief, or tool grant and re-dispatch; do not absorb the delegated scope. The direct-work streak remains active.";
+			}
+			// The operator delegated successfully — the by-hand run is over; the hand-off itself never nudges.
 			this.reset();
 			return undefined;
 		}
@@ -104,7 +109,7 @@ export class DelegationNudge {
 		this.burn += step;
 		// Only a substantive step advances the run; a trivial call is orchestration glue, not a sweep
 		// step (it neither advances nor resets the run — a stray echo mid-sweep doesn't break it).
-		if (step >= this.t.minStepChars) this.run += 1;
+		if (MUTATING_TOOLS.has(toolName) || step >= this.t.minStepChars) this.run += 1;
 		const single = size >= this.t.singleHeavyChars;
 		// Backoff: each un-actioned nudge widens the next run window, so a long non-delegable
 		// session-bound loop is reminded ONCE then left alone; a real runaway grind still trips the

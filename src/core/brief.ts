@@ -18,6 +18,12 @@
 export interface BriefAgent {
 	name: string;
 	description?: string;
+	/** Explicit Pi tool allowlist; absent means the session default grant. */
+	tools?: string[];
+	/** Tools removed from either the allowlist or session default. */
+	excludeTools?: string[];
+	mcp?: boolean;
+	isolation?: "none" | "worktree";
 }
 
 export interface BriefInput {
@@ -31,6 +37,14 @@ export interface BriefInput {
 	standing: boolean;
 	/** Delegate runs in the background by default (interactive sessions) — phrases delivery. */
 	asyncDefault: boolean;
+	/** Require the six-field cold-start packet on every delegated leg. */
+	requireBrief?: boolean;
+	/** Output contract the active persona supplies by default. */
+	outputContract?: string;
+	/** Require parallel writers to declare disjoint path ownership. */
+	requireDisjointWrites?: boolean;
+	/** Require verification to begin after, never concurrently with, the mutation it checks. */
+	requireFreshVerification?: boolean;
 	/**
 	 * Total sub-agents installed in the registry, BEFORE capability filtering. Lets an empty
 	 * `agents` list tell "nothing installed (fresh install ⇒ seed)" apart from "this persona's
@@ -44,8 +58,26 @@ export interface BriefInput {
 const DESC_CLIP = 96;
 /** Most agents/teams/flows listed by name; beyond this the brief says "+N more". */
 const MAX_LISTED = 16;
+const MAX_TOOL_NAMES = 6;
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+function compactNames(names: readonly string[]): string {
+	const clean = names
+		.map((name) => clip(name.replace(/[\r\n,;\[\]]+/g, " ").replace(/\s+/g, " ").trim(), 32))
+		.filter(Boolean);
+	const visible = clean.slice(0, MAX_TOOL_NAMES);
+	const omitted = clean.length - visible.length;
+	return `${visible.join(",")}${omitted > 0 ? `,+${omitted}` : ""}`;
+}
+
+function capabilitySummary(agent: BriefAgent): string {
+	const bits = [`tools=${agent.tools === undefined ? "session-default" : agent.tools.length > 0 ? compactNames(agent.tools) : "none"}`];
+	if (agent.excludeTools && agent.excludeTools.length > 0) bits.push(`deny=${compactNames(agent.excludeTools)}`);
+	if (agent.mcp) bits.push("mcp");
+	if (agent.isolation === "worktree") bits.push("worktree");
+	return `[${bits.join("; ")}]`;
+}
 
 /** Render `[a, a, b]` as `a×2, b` — rosters repeat an agent for parallel lenses. */
 function memberSummary(members: string[]): string {
@@ -88,7 +120,8 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const lines: string[] = ["[pi-persona] Sub-agents:"];
 	const listed = input.agents.slice(0, MAX_LISTED);
 	for (const a of listed) {
-		lines.push(a.description ? `- ${a.name} — ${clip(a.description, DESC_CLIP)}` : `- ${a.name}`);
+		const capabilities = capabilitySummary(a);
+		lines.push(a.description ? `- ${a.name} — ${clip(a.description, DESC_CLIP)} ${capabilities}` : `- ${a.name} ${capabilities}`);
 	}
 	if (input.agents.length > listed.length) {
 		lines.push(`- …and ${input.agents.length - listed.length} more (see /doctor)`);
@@ -101,14 +134,27 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 		);
 	}
 	if (input.flows.length > 0) lines.push(`Flows: ${input.flows.slice(0, MAX_LISTED).join(", ")}`);
+	lines.push("Presentation: Pi already renders tool calls and their output. Do not narrate upcoming commands or stream a worklog; surface only decisions, blockers, and the final synthesis.");
 
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.asyncDefault
 		? "they run in the background and each result returns to you automatically as a follow-up — don't watch or poll a healthy leg; you're woken if one stalls or messages you, plus an occasional check-in to catch drift"
 		: "the call returns when they finish";
+	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
+	if (input.requireBrief) {
+		callFields.push(
+			'brief: { objective: "<verifiable objective + success signal>", scopeRoe: "<in-scope targets + hard boundaries>", position: "<minimum starting state>", constraints: ["<tool/noise/destructive limits>"], requiredArtifacts: ["<exact reproducible evidence>"], stopConditions: ["<when to stop and report>"] }',
+		);
+	}
+	if (input.requireDisjointWrites) callFields.push('writeSet: ["<repository-relative paths this leg alone may edit>"]');
+	if (input.outputContract?.trim()) callFields.push(`outputContract: ${JSON.stringify(input.outputContract.trim())}`);
+	const discipline: string[] = [];
+	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts.");
+	if (input.requireFreshVerification) discipline.push("After a material mutation, start a fresh verifier sequentially against the resulting state; a verifier launched before or during the mutation cannot approve completion.");
+	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}); convene \`council\` for deliberation or batch sweeps. Keep only trivial single-step work, decisions, and the final synthesis inline. Minimum call: delegate({ agent: "${example}", task: "<self-contained brief: objective, scope, success signal>" }).`
+			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}); convene \`council\` for deliberation or batch sweeps. Keep only trivial single-step work, decisions, and the final synthesis inline. ${minimum}`
 			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).`,
 	);
 	return lines.join("\n");

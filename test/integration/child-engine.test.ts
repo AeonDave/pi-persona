@@ -20,9 +20,9 @@ test("runChildAgent spawns a child, parses output + usage, and reports success",
 	assert.equal(r.aborted, false);
 });
 
-test("runChildAgent passes model/tools flags through to the child", async () => {
+test("runChildAgent passes model/tool allow+deny flags through to the child", async () => {
 	const seen: string[] = [];
-	const r = await runChildAgent({ task: "x", model: "prov/m", tools: ["read", "grep"] }, undefined, {
+	const r = await runChildAgent({ task: "x", model: "prov/m", tools: ["read", "grep", "edit"], excludeTools: ["edit"] }, undefined, {
 		resolveInvocation: (args) => {
 			seen.push(...args);
 			return resolveFake(args);
@@ -30,8 +30,22 @@ test("runChildAgent passes model/tools flags through to the child", async () => 
 	});
 	assert.equal(r.ok, true);
 	assert.ok(seen.includes("--model") && seen.includes("prov/m"));
-	assert.ok(seen.includes("--tools") && seen.includes("read,grep"));
+	assert.ok(seen.includes("--tools") && seen.includes("read,grep,edit"));
+	assert.ok(seen.includes("--exclude-tools") && seen.includes("edit"));
 	assert.ok(seen.includes("--no-session"));
+});
+
+test("runChildAgent turns an explicit empty tool allowlist into --no-tools", async () => {
+	const seen: string[] = [];
+	const r = await runChildAgent({ task: "x", tools: [] }, undefined, {
+		resolveInvocation: (args) => {
+			seen.push(...args);
+			return resolveFake(args);
+		},
+	});
+	assert.equal(r.ok, true);
+	assert.ok(seen.includes("--no-tools"), "[] is deny-all, not an absent/default tool grant");
+	assert.equal(seen.includes("--tools"), false);
 });
 
 test("runChildAgent disables pi-persona in the spawned child (prevents fork-bomb recursion)", async () => {

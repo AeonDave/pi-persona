@@ -15,7 +15,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
-import { type CreateInProcSession, type CreateSessionOptions, type InProcSession, makeInProcessEngine } from "../../../src/engine/inproc.ts";
+import { type CreateInProcSession, type CreateSessionOptions, type InProcSession, makeInProcessEngine, mergeSessionToolAllowlist } from "../../../src/engine/inproc.ts";
 
 // A stub registry: one model, resolvable by provider/id or bare id.
 const stubModel = { provider: "stub", id: "m" };
@@ -99,6 +99,45 @@ test("inproc engine folds the session event stream into output + usage (no live 
 	assert.equal(r.modelUsed, "stub/m", "the resolved provider/id is reported for the UI + fallback");
 	assert.equal(spy.disableDuringCreate, "1", "PI_PERSONA_DISABLE set while the sub-session is built (fork-bomb guard)");
 	assert.equal(spy.legDuringCreate, "1", "PI_PERSONA_LEG set while the sub-session is built (dedicated worker-leg marker)");
+});
+
+test("inproc engine enforces an agent's denied tools alongside its allowlist", async () => {
+	const spy: Spy = {};
+	const resolveRestricted = (name: string): AgentConfig | undefined =>
+		name === "restricted"
+			? { name, model: "stub/m", tools: ["read", "grep", "edit"], excludeTools: ["edit"], systemPrompt: "bounded", source: "x" }
+			: undefined;
+	const engine = makeInProcessEngine({
+		resolveAgent: resolveRestricted,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("done")], spy),
+	});
+	const result = await engine.run({ agent: "restricted", task: "inspect" });
+	assert.equal(result.ok, true);
+	assert.deepEqual(spy.opts?.tools, ["read", "grep", "edit"]);
+	assert.deepEqual(spy.opts?.excludeTools, ["edit"]);
+});
+
+test("inproc engine preserves an agent's explicit empty tool allowlist", async () => {
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({
+		resolveAgent: (name) => name === "locked"
+			? { name, model: "stub/m", tools: [], systemPrompt: "reason only", source: "x" }
+			: undefined,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("done")], spy),
+	});
+	const result = await engine.run({ agent: "locked", task: "think" });
+	assert.equal(result.ok, true);
+	assert.deepEqual(spy.opts?.tools, [], "[] must reach Pi instead of silently restoring its default tools");
+});
+
+test("an explicit empty inproc allowlist does not re-enable injected custom tools", () => {
+	assert.deepEqual(mergeSessionToolAllowlist([], ["contact_supervisor", "contact_peer"]), []);
+	assert.deepEqual(mergeSessionToolAllowlist(["read"], ["contact_supervisor"]), ["read", "contact_supervisor"]);
+	assert.equal(mergeSessionToolAllowlist(undefined, ["contact_supervisor"]), undefined);
 });
 
 test("inproc engine restores PI_PERSONA_DISABLE and PI_PERSONA_LEG after the sub-session is built", async () => {

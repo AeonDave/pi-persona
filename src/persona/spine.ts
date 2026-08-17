@@ -50,6 +50,11 @@ export interface SpineSources {
 	workerUserPath: string;
 	/** The `prompts/spine.worker.md` shipped with the package. */
 	workerBundledPath: string;
+	/** Read-only upgrade compatibility: skip a user candidate already identified as the exact
+	 * pristine v1.8.0 prompt and fall through to the current bundle. Explicit selectors do not use
+	 * candidate lists, so they remain literal even when they name the same file. */
+	skipUserPath?: boolean;
+	skipWorkerUserPath?: boolean;
 	read: SpineReader;
 }
 
@@ -132,7 +137,7 @@ interface ResolvedRole {
 export function resolveSpine(sources: SpineSources): ResolvedSpine {
 	const { selector, workerSelector, userPath, bundledPath, workerUserPath, workerBundledPath, read } = sources;
 	const supervisor = resolveRole(
-		{ selector, candidates: [userPath, bundledPath], file: "spine.md", consequence: "continuing without one" },
+		{ selector, candidates: sources.skipUserPath ? [bundledPath] : [userPath, bundledPath], file: "spine.md", consequence: "continuing without one" },
 		read,
 	);
 	// The default wiring points BOTH roles at the same explicit path (the legs follow the
@@ -143,7 +148,12 @@ export function resolveSpine(sources: SpineSources): ResolvedSpine {
 		workerSelector === selector && selector !== "" && selector !== "on"
 			? supervisor
 			: resolveRole(
-					{ selector: workerSelector, candidates: [workerUserPath, workerBundledPath], file: "spine.worker.md", consequence: "delegated legs continue without one" },
+					{
+						selector: workerSelector,
+						candidates: sources.skipWorkerUserPath ? [workerBundledPath] : [workerUserPath, workerBundledPath],
+						file: "spine.worker.md",
+						consequence: "delegated legs continue without one",
+					},
 					read,
 				);
 

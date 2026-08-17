@@ -62,8 +62,9 @@ export function makeContactSupervisorTool(
 		parameters: ContactParams,
 		async execute(_toolCallId, params: Static<typeof ContactParams>, signal, _onUpdate, _ctx) {
 			const kind = params.kind as MsgKind;
+			const message = boundContactMessage(params.message);
 			if (kind === "progress") {
-				const delivered = bus.send(fromHandle, supervisorHandle, params.message, "progress");
+				const delivered = bus.send(fromHandle, supervisorHandle, message, "progress");
 				return result(
 					delivered ? "Progress reported to the supervisor." : "(no supervisor listening; progress dropped)",
 					{ kind, delivered },
@@ -73,7 +74,7 @@ export function makeContactSupervisorTool(
 			// In a sync run the supervisor is blocked holding the turn → it cannot answer. Post the
 			// question one-way and let the child proceed, rather than deadlock until timeout.
 			if (!allowBlocking) {
-				const delivered = bus.send(fromHandle, supervisorHandle, params.message, kind);
+				const delivered = bus.send(fromHandle, supervisorHandle, message, kind);
 				return result(
 					delivered
 						? "The supervisor is busy right now; your question was noted — proceed using your best judgement."
@@ -87,7 +88,7 @@ export function makeContactSupervisorTool(
 			// turned into a RESULT — execute() must never throw or hang under the tool contract.
 			let answer: Promise<string>;
 			try {
-				answer = bus.ask(fromHandle, supervisorHandle, params.message, signal ? { kind, signal } : { kind });
+				answer = bus.ask(fromHandle, supervisorHandle, message, signal ? { kind, signal } : { kind });
 			} catch {
 				return result("(no supervisor reachable — proceed using your best judgement)", { kind, delivered: false });
 			}
@@ -102,4 +103,18 @@ export function makeContactSupervisorTool(
 			}
 		},
 	});
+}
+/** Maximum body accepted by contact_supervisor's message action. Full reports should use the
+ * delegated result channel rather than sending megabytes over the supervisor bus. */
+export const MAX_CONTACT_MESSAGE_CHARS = 8_000;
+
+/** Keep the sender-facing body bounded while preserving both ends and an omission count. */
+export function boundContactMessage(message: string, maxChars = MAX_CONTACT_MESSAGE_CHARS): string {
+	if (message.length <= maxChars) return message;
+	const marker = `\n\n[… ${message.length - maxChars} characters omitted; send the remaining detail in smaller contact_supervisor messages …]\n\n`;
+	if (marker.length >= maxChars) return marker.slice(0, Math.max(0, maxChars));
+	const content = Math.max(0, maxChars - marker.length);
+	const head = Math.ceil(content / 2);
+	const tail = Math.max(0, content - head);
+	return `${message.slice(0, head)}${marker}${tail > 0 ? message.slice(-tail) : ""}`;
 }

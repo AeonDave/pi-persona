@@ -1,3 +1,5 @@
+import { compactInlineText } from "./presentation.ts";
+
 /**
  * The unified agent tree — a single live model of *every* agent in flight,
  * regardless of how it was spawned: strategy cores (magi/fanout/critic), the
@@ -40,6 +42,10 @@ export function flattenTree(nodes: AgentNode[]): FlatRow[] {
 /** Status → glyph, shared by every agent surface (tree, overlay). */
 export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗", stopped: "■" };
 
+function safeInline(value: string): string {
+	return compactInlineText(value, { maxChars: 96 });
+}
+
 /** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
 export function renderAgentTree(nodes: AgentNode[]): string[] {
 	const lines: string[] = [];
@@ -51,8 +57,10 @@ export function renderAgentTree(nodes: AgentNode[]): string[] {
 			const isRoot = parentId === undefined;
 			const isLast = i === kids.length - 1;
 			const branch = isRoot ? "" : isLast ? "└─ " : "├─ ";
-			const detail = node.detail ? `  ${node.detail}` : "";
-			lines.push(`${prefix}${branch}${GLYPH[node.status]} ${node.label}${detail}`);
+			const label = safeInline(node.label) || safeInline(node.id) || "agent";
+			const detailText = node.detail ? safeInline(node.detail) : "";
+			const detail = detailText ? `  ${detailText}` : "";
+			lines.push(`${prefix}${branch}${GLYPH[node.status]} ${label}${detail}`);
 			const childPrefix = isRoot ? "" : `${prefix}${isLast ? "   " : "│  "}`;
 			walk(node.id, childPrefix);
 		});
@@ -60,6 +68,38 @@ export function renderAgentTree(nodes: AgentNode[]): string[] {
 
 	walk(undefined, "");
 	return lines;
+}
+
+/**
+ * Bounded above-editor digest. Large fan-outs belong in the scrollable F9
+ * overlay; they must not push the editor and conversation off the screen.
+ */
+export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8): string[] {
+	const rows = renderAgentTree(nodes);
+	const limit = Math.max(1, Math.floor(maxRows));
+	if (rows.length <= limit) return rows;
+	const failed = nodes.filter((node) => node.status === "failed");
+	if (failed.length > 0) {
+		const names = failed.slice(0, 2).map((node) => {
+			const label = safeInline(node.label) || "agent";
+			const detail = node.detail ? safeInline(node.detail) : "";
+			return detail ? `${label} (${detail})` : label;
+		});
+		const extra = failed.length - names.length;
+		const failureLine = `✗ ${failed.length} failed: ${names.join(", ")}${extra > 0 ? `, +${extra} more` : ""}`;
+		if (limit === 1) return [failureLine];
+		const visibleCount = Math.max(0, limit - 2);
+		return [
+			...rows.slice(0, visibleCount),
+			failureLine,
+			`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`,
+		];
+	}
+	const visibleCount = Math.max(0, limit - 1);
+	return [
+		...rows.slice(0, visibleCount),
+		`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`,
+	];
 }
 
 export interface AddNodeInput {

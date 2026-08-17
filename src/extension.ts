@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 
@@ -25,16 +25,24 @@ import { resolveConfig } from "./core/config.ts";
 import { resolveModelRef } from "./core/models.ts";
 import { isThinkingLevel } from "./core/types.ts";
 import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
-import { seedDefaults, type SeedResult } from "./core/seed.ts";
+import {
+	inspectLegacySeededSpines,
+	seedDefaults,
+	type SeedResult,
+	type SpineLegacyIO,
+	type SpineLegacyResult,
+	type SpineLegacySelection,
+} from "./core/seed.ts";
 import { buildDelegationBrief, buildExocomBrief } from "./core/brief.ts";
 import { canDelegateTo, canFanOut, EXOCOM_TOOL_NAMES, type RunLimits } from "./core/capabilities.ts";
 import { attributePeer, fenceUntrusted } from "./core/fence.ts";
+import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
 import { withModelFallback } from "./engine/fallback.ts";
-import { defaultGitExec, isGitRepo, withWorktree } from "./engine/worktree.ts";
+import { captureWorktreeArtifact, defaultGitExec, withWorktree, worktreePreflight } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildPeekAlert, buildPeekDigest, compactTokens, dedupeRunsById, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -55,7 +63,7 @@ import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/r
 import type { AgentProgress, AgentRunSpec, AgentStatus, SteerFn, StrategyEngine } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
 import { compactMemberResult, formatCouncilResult, humanizeAggregateResult } from "./orchestration/render.ts";
-import type { AgentResult } from "./orchestration/types.ts";
+import type { AgentResult, FailureKind } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
 import { expandCouncilPreset, resolveCouncilInvocation, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
@@ -73,18 +81,22 @@ import {
 	DelegationLedger,
 	type DelegateView,
 	nameFor,
+	normalizeDelegateConcurrency,
 	runDelegate,
 	shortModel,
 	shouldRecordDelegationOutcome,
 	specOf,
 	unknownAgentError,
+	validateDelegationBrief,
+	validateParallelWriteSets,
 	wantsAsyncRun,
 } from "./tools/delegate.ts";
-import { formatInbox, type IntercomParams, runIntercom } from "./tools/intercom.ts";
+import { formatInbox, type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS, runIntercom } from "./tools/intercom.ts";
 import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTree } from "./ui/agent-tree.ts";
+import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
+import { boundDisplayRows, compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -167,6 +179,74 @@ export function formatExocomQueuedToast(label: string, inReplyTo: string | undef
 	return `exocom: ${inReplyTo === undefined ? "message" : "reply"} from ${label} queued`;
 }
 
+export interface ExocomQueuedToast {
+	label: string;
+	inReplyTo: string | undefined;
+}
+
+interface CommandResultEntry {
+	label: string;
+	content: string;
+	ok: boolean;
+	failureKind?: FailureKind;
+	error?: string;
+}
+
+/** One human toast for a burst; the semantic messages themselves remain in the idle-gated card. */
+export function formatExocomQueuedBatchToast(items: readonly ExocomQueuedToast[]): string {
+	if (items.length === 0) return "";
+	const first = items[0]!;
+	if (items.length === 1) return formatExocomQueuedToast(first.label, first.inReplyTo);
+	const counts = new Map<string, number>();
+	for (const item of items) counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
+	const senders = [...counts.entries()];
+	const visible = senders.slice(0, 3).map(([label, count]) => count > 1 ? `${label} ×${count}` : label);
+	const omitted = senders.length - visible.length;
+	return `exocom: ${items.length} messages/replies queued from ${visible.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`;
+}
+
+/** Bound the model-facing external-inbound burst while retaining the already-built attribution
+ * and peer fence on every complete line that survives the head/tail sample. */
+export function boundExocomInboundBatch(items: readonly string[]): string {
+	return boundCompletionSurface(
+		items.join("\n\n"),
+		"exocom inbound batch truncated; remaining peer messages stay queued for later delivery",
+	);
+}
+
+/**
+ * How many leading queued peer messages one inbound wake may carry. exocom has no receiver-side
+ * inbox or result retrieval, so a message truncated INSIDE a delivery is lost outright — the batch
+ * is therefore sized to what {@link boundExocomInboundBatch} renders whole, and the rest stays
+ * queued in FIFO order for the next wake. Sizing by content rather than by a fixed item count is
+ * what lets the drain keep pace with ordinary chatter: the wake gates (R6: 10s apart, 6/min) cap
+ * the number of DELIVERIES, while each sender may send EXOCOM.SENDER_MAX_MSGS per minute, so a
+ * one-message-per-wake drain falls permanently behind a handful of peers talking normally. A single
+ * item over the whole budget still goes out alone (it is already head-truncated to
+ * EXOCOM.INJECT_MAX_BYTES on arrival), so the queue can never wedge.
+ */
+export function exocomInboundBatchSize(items: readonly string[]): number {
+	let chars = 0;
+	let count = 0;
+	for (const item of items) {
+		const withItem = chars + (count > 0 ? 2 : 0) + item.length; // 2 = the "\n\n" join
+		if (count > 0 && withItem > MAX_COMPLETION_REPORT_CHARS) break;
+		chars = withItem;
+		count += 1;
+	}
+	return Math.max(1, count);
+}
+
+/**
+ * How many undelivered peer messages the inbox holds before further inbound messages are REFUSED
+ * at the ACK (a signed nack the sender surfaces, not a silent drop). Sustained large messages drain
+ * one per wake, which is slower than a single sender's permitted rate, so without a ceiling the
+ * queue grows monotonically: memory climbs, every fresh message waits behind the whole backlog, and
+ * a persona downgrade or shutdown discards all of it at once. This depth still absorbs a full
+ * minute of bursting from three peers at their maximum permitted rate.
+ */
+export const EXOCOM_INBOX_MAX = 3 * EXOCOM.SENDER_MAX_MSGS;
+
 /**
  * Keep the immediate operator-facing settlement toast and the semantic completion delivery on one
  * path. A supervisor-requested abort is terminal, but it is not an execution error: the tracker
@@ -178,9 +258,10 @@ export function announceAsyncRunSettlement(
 	notify: ((message: string, level: "info" | "error") => void) | undefined,
 	enqueue: (run: AsyncRun) => void,
 ): void {
-	if (run.status === "stopped") notify?.(`async run ${run.id} (${run.agent}) stopped`, "info");
-	else if (run.status === "failed") notify?.(`async run ${run.id} (${run.agent}) failed: ${run.error ?? "(no detail)"}`, "error");
-	else notify?.(`async run ${run.id} (${run.agent}) done`, "info");
+	const id = compactInlineText(run.id, { maxChars: 80 }) || "run";
+	const agent = compactInlineText(run.agent, { maxChars: 80 }) || "agent";
+	if (run.status === "stopped") notify?.(`async run ${id} (${agent}) stopped`, "info");
+	else if (run.status === "failed") notify?.(`async run ${id} (${agent}) failed: ${compactInlineText(run.error ?? "(no detail)", { maxChars: 240 })}`, "error");
 	enqueue(run);
 }
 
@@ -204,8 +285,20 @@ export function sendPersonaFollowUp(
 	);
 }
 
+function expandDetailHint(): string {
+	try {
+		return keyHint("app.tools.expand", "to expand");
+	} catch {
+		// Renderers are also exercised by headless/test hosts where Pi's interactive theme and
+		// keybinding registry do not exist. The production TUI takes the branch above.
+		return "expand to see full detail";
+	}
+}
+
 export function formatCouncilCallLabel(strategy: string, roster: string): string {
-	return `council ${strategy}${strategy === roster ? "" : ` · ${roster}`}`;
+	const safeStrategy = compactInlineText(strategy, { maxChars: 80 }) || "?";
+	const safeRoster = compactInlineText(roster, { maxChars: 80 }) || "?";
+	return `council ${safeStrategy}${strategy === roster ? "" : ` · ${safeRoster}`}`;
 }
 
 /** Agents actually IN FLIGHT: a RUNNING node with no children of its own. "Has a parent" is not the
@@ -236,6 +329,15 @@ export function makeRootIdAllocator(): (prefix: string) => string {
 export interface PendingAsk {
 	askId: string;
 	text: string;
+}
+
+/** Bound a burst of blocking child questions before it becomes an automatic supervisor turn. Each
+ * item is already individually fenced; the line-safe completion bound preserves those quote lines. */
+export function renderPendingAskBatch(asks: readonly PendingAsk[]): string {
+	return boundCompletionSurface(
+		asks.map((ask) => ask.text).join("\n\n"),
+		"blocking-ask batch truncated; pending questions remain available through intercom inbox",
+	);
 }
 
 /** A child's blocking ask lands on TWO surfaces — the idle-gated notifier wake and the supervisor's
@@ -270,6 +372,11 @@ export function fenceIntercomOutcome(out: { text: string; details: { action: str
 	return untrusted ? fence(out.text) : out.text;
 }
 
+export function coachingDisabledHint(personaName: string | undefined): string {
+	const who = sanitizeDisplayLabel(personaName ?? "default", "default");
+	return `(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
+}
+
 /** The engine constructors `buildEngine` builds through. Indirected via one object so the deps
  *  each backend is actually handed are observable: the child engine can be watched through a fake
  *  `pi` binary, but the in-process one — the DEFAULT backend — creates a real session that needs a
@@ -289,6 +396,8 @@ const DEFAULT_ENGINE_FACTORIES: EngineFactories = Object.freeze({ makeEngine, ma
  *  next one if the caller dies mid-way. */
 export interface PiPersonaOptions {
 	engineFactories?: EngineFactories;
+	/** Activation-local test seam for read-only legacy-spine inspection. */
+	spineLegacyIO?: SpineLegacyIO;
 }
 
 export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = {}): void {
@@ -306,6 +415,73 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	const config = resolveConfig(process.env);
 	if (config.disabled) return;
+	const registerFollowUpRenderer = (customType: "pi-persona" | "exocom_received", label: string): void => {
+		pi.registerMessageRenderer(customType, (message, { expanded, outputPad }, theme) => {
+			const raw = typeof message.content === "string"
+				? message.content
+				: message.content.map((part) => part.type === "text" ? part.text : "[image]").join("\n");
+			const full = sanitizeTerminalText(raw);
+			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
+			const firstLine = full.split("\n", 1)[0] ?? "";
+			// External peer text is data and must never choose our UI chrome. Internal follow-ups own
+			// their first status line; parse only that line and do not turn a healthy "0 failed" red.
+			const isFailure = customType === "pi-persona"
+				&& !/\b0 failed\b/i.test(firstLine)
+				&& /\b(?:failed|failure|error|rejected|unresolved)\b/i.test(firstLine);
+			const titleColor = isFailure ? "error" : customType === "exocom_received" ? "accent" : "success";
+			const title = theme.fg(titleColor, theme.bold(label));
+			if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full || "(no output)")}`, outputPad, 0);
+			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+			return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, outputPad, 0);
+		});
+	};
+	// These follow-ups remain complete in the model context, but the human-facing card starts as a
+	// bounded digest. This is the central progressive-disclosure boundary for async completions and
+	// external peer messages; expanding the card reveals the exact sanitized payload.
+	registerFollowUpRenderer("pi-persona", "pi-persona · update");
+	registerFollowUpRenderer("exocom_received", "exocom · inbound");
+	pi.registerEntryRenderer("pi-persona-result", (entry, { expanded }, theme) => {
+		const data = entry.data as CommandResultEntry;
+		const full = sanitizeTerminalText(data.content || "(no output)");
+		const cause = compactVisibleText(
+			[data.failureKind, data.error].filter((part): part is string => !!part).join(" · "),
+			{ maxLines: 1, maxLineChars: 80 },
+		).text;
+		const status = data.ok ? "complete" : "failed";
+		const label = compactInlineText(data.label, { maxChars: 96 }) || "result";
+		const title = theme.fg(data.ok ? "success" : "error", theme.bold(`${label} · ${status}${!data.ok && cause !== "(no output)" ? ` · ${cause}` : ""}`));
+		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
+		const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
+		const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+	});
+	const appendCommandResult = (
+		label: string,
+		content: string,
+		ok: boolean,
+		meta: { failureKind?: FailureKind; error?: string } = {},
+	): void => {
+		pi.appendEntry("pi-persona-result", {
+			label,
+			content,
+			ok,
+			...(meta.failureKind ? { failureKind: meta.failureKind } : {}),
+			...(meta.error ? { error: meta.error } : {}),
+		} satisfies CommandResultEntry);
+	};
+	const enabledSpineRoles = (): SpineLegacySelection => ({
+		supervisor: config.spine === "on",
+		worker: config.spineLegs === "on",
+	});
+	// v1.8.1 rewrote the spine pair, but `on` deliberately prefers a seeded user copy and the
+	// one-shot seed marker means a normal package upgrade never calls runSeed(). Detect ONLY the
+	// exact v1.8.0 bytes and bypass them during `on` resolution; never rewrite a user-controlled file
+	// automatically. Each role is inspected only when its selector consults that user-dir file.
+	const activationLegacy = inspectLegacySeededSpines(
+		personaDataDir(),
+		enabledSpineRoles(),
+		options.spineLegacyIO ?? {},
+	);
 
 	// The engine constructors THIS activation builds through (see PiPersonaOptions).
 	const engineFactories = options.engineFactories ?? DEFAULT_ENGINE_FACTORIES;
@@ -314,8 +490,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// and the persona body, with the WORKER variant leading every delegated leg's prompt (a leg
 	// runs headless, so the supervisor text's "confirm before irreversible" would have it stall
 	// on a user it does not have). Resolved ONCE — a layer that could change mid-conversation
-	// would let two turns run under different rules; `/persona reload` is the deliberate
-	// exception, being the command whose whole purpose is picking up edits. Off by default ⇒
+	// would let two turns run under different rules; `/persona reload`, `seed`, and `restore` are
+	// the deliberate refresh gestures. Off by default ⇒
 	// both texts stay "" and every composition below is byte-identical to a pre-spine pi-persona.
 	const spineSources = (): SpineSources => ({
 		selector: config.spine,
@@ -324,23 +500,43 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		bundledPath: bundledSpinePath(),
 		workerUserPath: join(personaDataDir(), "spine.worker.md"),
 		workerBundledPath: bundledWorkerSpinePath(),
+		skipUserPath: spineLegacy.legacy.includes(join(personaDataDir(), "spine.md")),
+		skipWorkerUserPath: spineLegacy.legacy.includes(join(personaDataDir(), "spine.worker.md")),
 		read: readSpineFile,
 	});
+	let spineLegacy = activationLegacy;
 	let spine = resolveSpine(spineSources());
 	let spineText = spine.text ?? "";
 	let workerSpineText = spine.worker ?? "";
-	function reloadSpine(): void {
+	function resolveSpineNow(): void {
 		spine = resolveSpine(spineSources());
 		spineText = spine.text ?? "";
 		workerSpineText = spine.worker ?? "";
+	}
+	function inspectEnabledLegacySpines(): SpineLegacyResult {
+		const result = inspectLegacySeededSpines(
+			personaDataDir(),
+			enabledSpineRoles(),
+			options.spineLegacyIO ?? {},
+		);
+		spineLegacy = result;
+		resolveSpineNow();
+		return result;
+	}
+	function refreshSpineAfterSeed(): void {
+		inspectEnabledLegacySpines();
+	}
+	function currentSpineWarnings(): string[] {
+		return [...new Set([...spineLegacy.warnings, ...(spine.warning ? [spine.warning] : [])])];
 	}
 	/** A spine was asked for and something did not supply one: say so, then carry on without it.
 	 *  A missing prompt file must never cost the user their session. Emitted from the hook rather
 	 *  than at resolve time — the factory has no `ctx` yet. */
 	function reportSpineWarning(ctx: ExtensionContext): void {
-		if (!spine.warning) return;
-		if (ctx.hasUI) ctx.ui.notify(spine.warning, "warning");
-		else process.stderr.write(`${spine.warning}\n`);
+		for (const warning of currentSpineWarnings()) {
+			if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+			else process.stderr.write(`${warning}\n`);
+		}
 	}
 
 	// exocom (opt-in, T9): `--exocom` is a per-invocation convenience alongside PI_PERSONA_EXOCOM
@@ -351,9 +547,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		default: false,
 	});
 	// `--persona <name>` — start with a persona active for this run, the CLI equivalent of
-	// PI_PERSONA_DEFAULT (which it overrides). e.g. `pi --persona elite`.
+	// PI_PERSONA_DEFAULT (which it overrides). e.g. `pi --persona my-supervisor`.
 	pi.registerFlag("persona", {
-		description: "Start with this persona active for the run (e.g. `--persona elite`) — overrides PI_PERSONA_DEFAULT and the remembered persona.",
+		description: "Start with this persona active for the run (e.g. `--persona my-supervisor`) — overrides PI_PERSONA_DEFAULT and the remembered persona.",
 		type: "string",
 		default: "",
 	});
@@ -365,7 +561,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const MAX_DEFERRED_ORCHESTRATIONS = 16;
 	const deferredOrchestrations: Array<{ task: string; orchestration: OrchestrationGrammar }> = [];
 	// A finished mandatory orchestration, injected (hidden) into the next turn's system prompt.
-	let pendingOrchestration: { label: string; output: string } | undefined;
+	type MandatoryOutcome = {
+		label: string;
+		output: string;
+		ok: boolean;
+		error?: string;
+		failureKind?: FailureKind;
+	};
+	let pendingOrchestration: MandatoryOutcome | undefined;
 
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
@@ -428,7 +631,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (!lastCtx) return;
 		const empty = agentTree.isEmpty();
 		try {
-			const lines = empty ? undefined : renderAgentTree(agentTree.snapshot());
+			const lines = empty ? undefined : renderAgentTreeSummary(agentTree.snapshot());
 			lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
 		} catch {
 			/* cosmetic — the widget is best-effort */
@@ -644,7 +847,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
 	const intercomNotifier = new IdleCoalescingNotifier<PendingAsk>({
 		...idleDelivery,
-		render: (asks) => asks.map((a) => a.text).join("\n\n"),
+		render: renderPendingAskBatch,
 	});
 	// Supervisor-armable alarms: when a timer expires it WAKES the session by routing the fire
 	// through the same idle-delivery path (an idle delivery starts a fresh turn, so the supervisor
@@ -665,6 +868,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		onFire: (entry) => timerNotifier.notify(entry),
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
+	// Background legs that may mutate the workspace, by run id. A persona's fresh-verification policy
+	// is a cross-CALL rule (delegate is background by default), so a later call needs to know which of
+	// the still-running legs are material mutations; entries are dropped as their runs settle.
+	const writerRuns = new Set<string>();
 	// Turns the periodic peek from a poll into an exception signal: it surfaces a leg only when it
 	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
 	const peekWatcher = new PeekWatcher();
@@ -673,6 +880,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
 		stopRequested.delete(`async:${run.id}`);
+		writerRuns.delete(run.id); // a settled leg no longer blocks a declared verifier
 		if (disposed) return; // instance torn down — don't notify the next session or re-arm a cancelled timer
 		// Immediate human feedback + one semantic completion. Explicit stops are informational,
 		// while natural failures retain the error toast and every terminal result is still delivered.
@@ -692,7 +900,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// intercom tool, rather than stranding mid-stream as a sticky follow-up.
 		intercomNotifier.notify({
 			askId: env.id,
-			text: `[pi-persona] sub-agent ${env.from} needs a ${env.kind}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${env.id}", message: "…" }`,
+			text: `[pi-persona] sub-agent ${sanitizeDisplayLabel(env.from)} needs a ${sanitizeDisplayLabel(env.kind, "decision", 32)}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${sanitizeDisplayLabel(env.id, "ask")}", message: "…" }`,
 		});
 	});
 
@@ -845,6 +1053,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let exocomBudget: SenderBudget | undefined;
 	let exocomSeen: SeenMessages | undefined;
 	let exocomNotifier: IdleCoalescingNotifier<string> | undefined;
+	/** Latched while the inbox is at EXOCOM_INBOX_MAX, so a peer hammering a full inbox produces one
+	 *  operator warning rather than one per refused message. */
+	let exocomInboxFull = false;
+	let exocomToastNotifier: IdleCoalescingNotifier<ExocomQueuedToast> | undefined;
 	let exocomHeartbeat: ReturnType<typeof setInterval> | undefined;
 	let exocomHeartbeatFailures = 0; // consecutive failed ticks — drives the report cadence, reset by any success
 	let exocomResetTimer: ReturnType<typeof setInterval> | undefined;
@@ -898,10 +1110,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const selfPersona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
 			const selfModel = sanitizePeerField(lastCtx.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "", 96);
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(lastCtx.getContextUsage()?.percent ?? 0)));
-			const local = `📡 ${exocomName} (you)${selfPersona ? ` · ${selfPersona}` : ""} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}% · recv ${exocomPlane.totalReceived} · sent ${exocomPlane.totalSent}`;
-			const lines = [
-				local,
-				...peers.map((p) => {
+			const local = `📡 ${exocomName} (you)${selfPersona ? ` · ${selfPersona}` : ""} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
+			const peerRows = peers.map((p) => {
 							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
 							const name = sanitizePeerField(p.displayName, 48) || "peer";
 							const persona = sanitizePeerField(p.persona, 48);
@@ -910,8 +1120,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 							// Viewer-centric: THIS row's in/out is what WE exchanged with THIS peer, not
 							// the peer's own global self-report (which reads inverted from our side).
 							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${shortModel(model) || "?"} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}`;
-						}),
-			];
+						});
+			const lines = boundDisplayRows(local, peerRows, 7, "exocom_list for the full pool");
 			lastCtx.ui.setWidget("persona-exocom", lines, { placement: "aboveEditor" });
 		} catch {
 			/* cosmetic — the widget is best-effort */
@@ -997,7 +1207,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			exocomNotifier = new IdleCoalescingNotifier<string>({
 				isIdle: () => !processingDeferredOrchestration && lastCtx?.isIdle?.() === true,
 				deliver: (message) => sendPersonaFollowUp(pi, message, "exocom_received"),
-				render: (items) => items.join("\n\n"),
+				// A burst of independent peers must not turn one idle wake into an unbounded model
+				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;
+				// boundCompletionSurface keeps complete lines (including quote prefixes) intact while
+				// retaining a bounded head/tail sample and an actionable drill-down marker.
+				render: boundExocomInboundBatch,
+				// Deliver whole peer messages — as many as one wake renders untruncated — and retain the
+				// rest in FIFO order; truncating a coalesced burst would silently lose communication that
+				// has no other retrieval path. Sized by content, so the drain keeps pace with ordinary
+				// traffic instead of being pinned to one message per wake (see exocomInboundBatchSize).
+				maxBatchItems: exocomInboundBatchSize,
 				setTimer: (fn, ms) => {
 					const h = setTimeout(fn, ms);
 					h.unref?.();
@@ -1006,6 +1225,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 				minIntervalMs: EXOCOM.DELIVER_MIN_INTERVAL_MS,
 				maxDeliveries: EXOCOM.DELIVER_MAX_PER_MIN,
+			});
+			exocomToastNotifier = new IdleCoalescingNotifier<ExocomQueuedToast>({
+				// This channel is human-only and deliberately independent from model idleness: it folds a
+				// burst of arrivals into one small receipt instead of emitting one toast per peer message.
+				isIdle: () => true,
+				deliver: (message) => {
+					try {
+						lastCtx?.ui.notify(message, "info");
+					} catch {
+						/* cosmetic */
+					}
+				},
+				render: formatExocomQueuedBatchToast,
+				setTimer: (fn, ms) => {
+					const h = setTimeout(fn, ms);
+					h.unref?.();
+					return h;
+				},
+				clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+				debounceMs: 200,
 			});
 			exocomPlane = new ExocomPlane({
 				agentDir,
@@ -1028,25 +1267,43 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					inbox: exocomNotifier?.peekPending().length ?? 0,
 				}),
 				onInbound: (msg, fromEntry) => {
+					// A full inbox is REFUSED, never silently queued forever: the sender's budget
+					// (SENDER_MAX_MSGS per sender, unbounded senders) can outrun what an idle-gated
+					// receiver drains, and an unbounded queue would grow monotonically, delay every fresh
+					// message behind the backlog, and lose the lot at the next teardown. The nack tells
+					// the peer its message did not land, so it can retry — checked BEFORE
+					// buildInboundDelivery so the refused message is not recorded as seen and the retry
+					// is not swallowed as a duplicate.
+					const queued = exocomNotifier?.peekPending().length ?? 0;
+					if (queued >= EXOCOM_INBOX_MAX) {
+						if (!exocomInboxFull) {
+							exocomInboxFull = true;
+							try {
+								lastCtx?.ui.notify(`exocom: inbox full (${queued} undelivered peer messages) — refusing further messages until it drains.`, "warning");
+							} catch {
+								/* cosmetic */
+							}
+						}
+						return { accepted: false, reason: `receiver inbox full (${queued} queued) — retry once it drains` };
+					}
+					exocomInboxFull = false;
 					// Attribution from the REGISTRY entry keyed by the connecting session — never from
 					// msg.from_name (the envelope's own self-report, not to be trusted; see inbound.ts).
 					// Sanitized (I2): fromEntry.name/persona are PEER-WRITTEN registry fields, and
 					// attributePeer places this label OUTSIDE the fence — a CR/LF-laden name must
 					// not be able to inject pseudo-instructions there.
-					const peerName = sanitizePeerField(fromEntry?.name ?? msg.from_session, 48) || "peer";
+					const peerName = sanitizePeerField(
+						fromEntry ? (exocomPlane?.humanDisplayLabelFor(fromEntry) ?? fromEntry.name) : msg.from_session,
+						48,
+					) || "peer";
 					const peerPersona = sanitizePeerField(fromEntry?.persona ?? "", 48);
 					const label = peerPersona ? `${peerName} (${peerPersona})` : peerName;
-					// The reply hint must name the DEDUPED display name ("elite#2") — the only token
-					// plane.send() resolves. The registry `name` alone is shared by two live peers, so a
-					// reply keyed on it would reach whichever of them the dedup numbered first. Resolved
-					// through the plane's NON-pruning read: `listPeers()` would make a readdir/unlink
-					// error decide whether an authenticated message is accepted, and would evict a
-					// sender whose own heartbeat had just gone stale on the strength of the message it
-					// just sent. The fallback inside is the authenticated entry's own name, which is NOT
-					// the attribution label above — `sanitizePeerField` rewrites anything outside its
-					// identifier alphabet, so a peer called "recon ops" would be advertised as
-					// "recon-ops", a target no peer answers to.
-					const replyTarget = fromEntry ? exocomPlane?.displayNameFor(fromEntry) : undefined;
+					// The reply hint is a stable qualified token from the authenticated registry entry,
+					// not the human display name. Raw names are shared by live twins and can become stale
+					// between delivery and the model's reply; the plane caches this token with the sender's
+					// endpoint/key so it remains routable even after registry pruning. Attribution remains
+					// the separate sanitized human label above.
+					const replyTarget = fromEntry ? exocomPlane?.replyTargetFor(fromEntry) : undefined;
 					const decision = buildInboundDelivery(msg, label, {
 						budget: exocomBudget!,
 						seen: exocomSeen!,
@@ -1065,11 +1322,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						// Never inject peer text into a live model turn. A compact human-only toast makes
 						// receipt visible while a long tool loop keeps the follow-up idle-gated.
 						if (lastCtx?.isIdle?.() !== true) {
-							try {
-								lastCtx?.ui.notify(formatExocomQueuedToast(label, msg.in_reply_to), "info");
-							} catch {
-								/* cosmetic */
-							}
+							exocomToastNotifier?.notify({ label, inReplyTo: msg.in_reply_to });
 						}
 					}
 					// Plane accounting happens after this callback returns. Defer the render one
@@ -1137,9 +1390,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// `plane.start()` may have bound its server before a later registry write failed.
 			// Teardown while the reference is still owned; this also cancels notifier/timers.
 			await stopExocom();
-			if (process.env.PI_PERSONA_DEBUG) {
-				process.stderr.write(`[pi-persona] exocom: failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+			const message = err instanceof Error ? err.message : String(err);
+			try {
+				ctx.ui.notify(`exocom failed to start: ${message}`, "error");
+			} catch {
+				/* the session may already be tearing down */
 			}
+			if (process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] exocom: failed to start: ${message}\n`);
 		}
 	}
 
@@ -1224,6 +1481,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 		exocomNotifier?.cancel();
 		exocomNotifier = undefined;
+		exocomInboxFull = false; // a later plane reports its own first full inbox, not this one's tail
+		exocomToastNotifier?.cancel();
+		exocomToastNotifier = undefined;
 		exocomBudget = undefined;
 		exocomSeen = undefined;
 		if (exocomPlane) {
@@ -1350,7 +1610,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 		// Worktree isolation: an agent/leg marked `isolation: worktree` runs in a throwaway git
 		// worktree via the child engine (its edits never touch the main tree), regardless of the
-		// default backend. No repo / not requested ⇒ the base engine, unchanged.
+		// default backend. This branch is deliberately fail-closed: a missing/dirty repository or
+		// failed worktree creation is a contract failure, never permission to run in the real cwd.
 		// Provider fallback (outermost): a run whose model PROVIDER fails at call time (auth,
 		// outage, 5xx, model-not-supported) is retried on the same model id under another
 		// authenticated provider — "priority to the supervisor's provider, but try others and
@@ -1362,17 +1623,38 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return withModelFallback(eng, { models: configuredModels(lastCtx), ...(prefer ? { preferProvider: prefer } : {}) });
 		};
 		const root = lastCtx?.cwd;
-		if (!root) return wrapFallback(base);
 		return wrapFallback({
 			async run(spec, perProgress, perSignal, perSteer) {
 				const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
-				if (iso === "worktree" && isGitRepo(root)) {
+				if (iso === "worktree") {
+					if (!root) {
+						return isolatedWorktreeFailure(spec, "worktree isolation requires a real Git cwd; remove isolation: \"worktree\" or run inside a Git checkout");
+					}
+					const preflight = worktreePreflight(root, defaultGitExec);
+					if (!preflight.ok) return isolatedWorktreeFailure(spec, preflight.error);
 					try {
-						return await withWorktree(root, defaultGitExec, (dir) =>
-							childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer),
-						);
-					} catch {
-						/* worktree unavailable → fall back to a normal (non-isolated) run */
+						return await withWorktree(root, defaultGitExec, async (dir) => {
+							const result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
+							const artifact = captureWorktreeArtifact(dir, defaultGitExec);
+							const hasOutputArtifact = hasUnifiedDiff(result.output);
+							if (!result.ok) {
+								return artifact.ok && artifact.diff.trim().length > 0
+									? appendWorktreeArtifact(result, artifact.diff)
+									: result;
+							}
+							if (!artifact.ok) {
+								if (hasOutputArtifact) return result;
+								return isolatedWorktreeFailure(spec, `${artifact.error}; the isolated leg returned success without an exportable diff/artifact`);
+							}
+							if (artifact.diff.trim().length > 0) return appendWorktreeArtifact(result, artifact.diff);
+							if (hasOutputArtifact) return result;
+							return isolatedWorktreeFailure(
+								spec,
+								"isolated leg returned success but produced no unified diff or artifact; its worktree was discarded — return a complete diff or remove isolation: \"worktree\"",
+							);
+						});
+					} catch (err) {
+						return isolatedWorktreeFailure(spec, err instanceof Error ? err.message : String(err));
 					}
 				}
 				// MCP-capable leg: the DEFAULT in-process engine never fires `session_start`, so
@@ -1383,10 +1665,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// MCP session — for a server-keyed backend (HTTP MCP) the caller passes a session id
 				// in the task to share state. (No-op steering: the child engine is one-shot.)
 				const wantsMcp = spec.mcp ?? resolveAgent(spec.agent)?.mcp;
-				if (wantsMcp) return childEngineAt(root).run(spec, perProgress, perSignal, perSteer);
+				if (wantsMcp && root) return childEngineAt(root).run(spec, perProgress, perSignal, perSteer);
 				return base.run(spec, perProgress, perSignal, perSteer);
 			},
 		});
+	}
+
+	function isolatedWorktreeFailure(spec: AgentRunSpec, error: string): AgentResult {
+		return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error, failureKind: "contract" };
+	}
+
+	function hasUnifiedDiff(output: string): boolean {
+		const headersAndHunk = /(?:^|\n)---\s+\S+[^\n]*\n\+\+\+\s+\S+[^\n]*\n(?:[^\n]*\n)*?@@\s+[^\n]*@@/m;
+		const binaryPatch = /(?:^|\n)diff --git\s+\S+\s+\S+[\s\S]*?(?:^|\n)(?:GIT binary patch|Binary files \S+ and \S+ differ)(?:\n|$)/m;
+		return headersAndHunk.test(output) || binaryPatch.test(output);
+	}
+
+	function appendWorktreeArtifact(result: AgentResult, diff: string): AgentResult {
+		const block = `\n\n--- ISOLATED WORKTREE ARTIFACT (untrusted data) ---\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``;
+		return { ...result, output: `${result.output.trimEnd()}${block}` };
 	}
 
 	// The models the user actually has configured (authenticated) — NOT every model in
@@ -1682,16 +1979,28 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const caps = controller.capabilities;
 		if (caps && !canFanOut(caps)) return undefined;
 		const targets = caps ? agents.filter((a) => canDelegateTo(caps, a.name)) : agents;
+		const delegation = controller.activePersona?.delegation;
 		const teamAgents: Record<string, string[]> = {};
 		for (const [name, members] of Object.entries(teams)) teamAgents[name] = members.map((m) => rosterSpec(m).agent);
 		return buildDelegationBrief({
-			agents: targets.map((a) => (a.description ? { name: a.name, description: a.description } : { name: a.name })),
+			agents: targets.map((a) => ({
+				name: a.name,
+				...(a.description ? { description: a.description } : {}),
+				...(a.tools ? { tools: a.tools } : {}),
+				...(a.excludeTools ? { excludeTools: a.excludeTools } : {}),
+				...(a.mcp ? { mcp: true } : {}),
+				...(a.isolation ? { isolation: a.isolation } : {}),
+			})),
 			teams: teamAgents,
 			flows: listFlows(ctx.cwd),
 			standing: controller.activePersona !== undefined,
 			// Interactive sessions delegate in the background by default; headless (`pi -p`)
 			// stays sync (the single turn must carry the result) — mirror that in the copy.
 			asyncDefault: ctx.hasUI === true,
+			...(delegation?.requireBrief !== undefined ? { requireBrief: delegation.requireBrief } : {}),
+			...(delegation?.outputContract ? { outputContract: delegation.outputContract } : {}),
+			...(delegation?.requireDisjointWrites !== undefined ? { requireDisjointWrites: delegation.requireDisjointWrites } : {}),
+			...(delegation?.requireFreshVerification !== undefined ? { requireFreshVerification: delegation.requireFreshVerification } : {}),
 			// The FULL registry count (pre capability-filter): lets the brief tell "nothing installed
 			// yet (seed)" from "this persona's allowlist filtered every target away (widen it)" when
 			// `targets` came back empty — otherwise a restrictive persona gets the fresh-install lie.
@@ -1712,6 +2021,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
 		lines.push(`engine backend: ${config.engine === "child" ? "child-process" : "in-process"}`);
+		const spineRole = (selector: string, source: string | undefined): string => {
+			if (!selector) return "off";
+			return source ? `${selector} -> ${source}` : `${selector} -> degraded`;
+		};
+		lines.push(`spine: supervisor=${spineRole(config.spine, spine.source)}; worker=${spineRole(config.spineLegs, spine.workerSource)}`);
+		if (spineLegacy.legacy.length > 0) {
+			lines.push(`spine legacy bypass: ${spineLegacy.legacy.join(", ")} (pristine v1.8.0 left untouched; using current bundle — /persona restore updates disk)`);
+		}
+		for (const warning of currentSpineWarnings()) {
+			lines.push(warning.startsWith("spine legacy inspection warning:") ? warning : `spine warning: ${warning}`);
+		}
 		lines.push(`personas (${personas.length}): ${personas.map((p) => p.name).join(", ") || "—"}`);
 		lines.push(`agents (${agents.length}): ${agents.map((a) => a.name).join(", ") || "—"}`);
 		const teamNames = Object.keys(teams);
@@ -1753,19 +2073,24 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
 		delegationNudge.reset(); // a fresh session starts with a clean by-hand run
-		reportSpineWarning(ctx);
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
 		if (config.seed && !existsSync(seedMarker())) {
 			try {
 				const r = runSeed(false);
+				// Resolution happened before session_start, when a fresh install had no user copy. Refresh
+				// now so this very process uses what auto-seed just created and reports only post-seed state.
+				refreshSpineAfterSeed();
 				if (ctx.hasUI && r.copied.length > 0) {
 					ctx.ui.notify(`pi-persona: seeded ${r.copied.length} default(s) to ${personaDataDir()} — edit them freely; /persona restore brings back the originals.`, "info");
 				}
 			} catch {
-				/* a copy failure (read-only dir, …) must never block session start */
+				// Seeding is multi-file: an error can arrive after the prompt itself was copied. Re-resolve
+				// and retry only enabled legacy roles so partial progress is visible in this same process.
+				inspectEnabledLegacySpines();
 			}
 		}
+		reportSpineWarning(ctx);
 		reload(ctx.cwd);
 		personaConfigs = readConfigStore();
 		// Restore order: --persona flag > env pin (PI_PERSONA_DEFAULT) > remembered-on-disk. Read-only.
@@ -1865,7 +2190,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (pendingOrchestration) {
 			// The result is sub-agent text entering the SYSTEM prompt — fence it (I-guardrail:
 			// untrusted output must never reach the supervisor unfenced, least of all here).
-			prompt = `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration was run on the user's request and produced the result below. Present and build on it as your answer — do not re-run it:\n\n${fenceUntrusted(pendingOrchestration.output)}`;
+			if (pendingOrchestration.ok) {
+				// Keep the established success hand-off byte-for-byte: successful mandatory runs are
+				// still rulings the supervisor should present without spending the same council twice.
+				prompt = `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration was run on the user's request and produced the result below. Present and build on it as your answer — do not re-run it:\n\n${fenceUntrusted(pendingOrchestration.output)}`;
+			} else {
+				const evidence = pendingOrchestration.error && pendingOrchestration.error !== pendingOrchestration.output
+					? `${pendingOrchestration.output}\n\n--- RUNTIME ERROR ---\n${pendingOrchestration.error}`
+					: pendingOrchestration.output;
+				prompt = pendingOrchestration.failureKind === "abort"
+					? `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration was CANCELLED. Report the cancellation; do not present its partial output as approved, and do not resume or re-run it unless the user explicitly asks:\n\n${fenceUntrusted(evidence)}`
+					: `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration FAILED or remained unresolved. Do not present its output as approved or claim completion. Report the blocker, then repair and verify before declaring success:\n\n${fenceUntrusted(evidence)}`;
+				reportMandatoryFailure(ctx, pendingOrchestration);
+			}
 			pendingOrchestration = undefined;
 		}
 		return prompt === event.systemPrompt ? undefined : { systemPrompt: prompt };
@@ -1891,7 +2228,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// Grinding-by-hand reminder: a RUN of substantive hands-on commands on the supervisor's own
 		// tools (delegate/council reset the run). `size` classifies substantive vs glue + fat dump.
 		const size = event.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0);
-		const sweepNote = delegationNudge.observe(event.toolName, size);
+		const sweepNote = delegationNudge.observe(event.toolName, size, event.isError !== true);
 		if (sweepNote) notes.push(sweepNote);
 		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
 		// results only; because delegate/council reset the run the two never fire on one event).
@@ -1906,27 +2243,70 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// pipeline mode (or a flow), run it on the user's turn (the LLM cannot skip it) and
 	// fold the result into the prompt. Opportunistic personas (no orchestration) take the
 	// normal turn.
+	function mandatoryFailure(label: string, output: string, error: string, failureKind: FailureKind): MandatoryOutcome {
+		return { label, output, ok: false, error, failureKind };
+	}
+
+	/** Make a mandatory failure visible outside the hidden system prompt too. The cause may contain
+	 * provider/model text, so compact it to one bounded operator-facing line. */
+	function reportMandatoryFailure(ctx: ExtensionContext, outcome: MandatoryOutcome): void {
+		const label = outcome.label.replace(/\s+/g, " ").trim().slice(0, 120);
+		const cause = (outcome.error ?? "unresolved result").replace(/\s+/g, " ").trim().slice(0, 500);
+		const kind = outcome.failureKind ? ` [${outcome.failureKind}]` : "";
+		const message = `pi-persona: mandatory orchestration ${label} failed${kind}: ${cause}`;
+		try {
+			if (ctx.hasUI) ctx.ui.notify(message, "error");
+			else process.stderr.write(`${message}\n`);
+		} catch {
+			// Diagnostics are best-effort; the fail-closed system-prompt hand-off remains authoritative.
+		}
+	}
+
 	async function executeMandatoryOrchestration(
 		ctx: ExtensionContext,
 		orch: OrchestrationGrammar,
 		task: string,
-	): Promise<{ label: string; output: string }> {
+	): Promise<MandatoryOutcome> {
 		const flowName = orch.mode === "flow" ? orch.flow : undefined;
 		const label = flowName ? `flow ${flowName}` : (resolveStrategyName(orch) ?? "strategy");
 		try {
-			let output: string;
 			if (flowName) {
 				const parsed = loadFlow(ctx.cwd, flowName);
-				if (!parsed) output = `no flow named "${flowName}"`;
-				else if (!parsed.ok) output = `flow "${flowName}" is invalid: ${parsed.error}`;
-				else output = (await runFlowVisible(ctx, parsed.flow, task)).output || "(the flow returned no output)";
-			} else {
-				const result = await runStrategyVisible(ctx, orch, task, "strategy");
-				output = result ? result.output : "(the orchestration returned no result)";
+				if (!parsed) {
+					const error = `no flow named "${flowName}"`;
+					return mandatoryFailure(label, error, error, "contract");
+				}
+				if (!parsed.ok) {
+					const error = `flow "${flowName}" is invalid: ${parsed.error}`;
+					return mandatoryFailure(label, error, error, "contract");
+				}
+				const outcome = await runFlowVisible(ctx, parsed.flow, task);
+				const output = outcome.output || "(the flow returned no output)";
+				if (outcome.ok) return { label, output, ok: true };
+				const error = outcome.cancelled
+					? "the mandatory flow was aborted"
+					: (outcome.error ?? "the mandatory flow did not complete successfully");
+				const failureKind = outcome.cancelled ? "abort" : (outcome.failureKind ?? "agent");
+				return mandatoryFailure(label, output, error, failureKind);
 			}
-			return { label, output };
+
+			const result = await runStrategyVisible(ctx, orch, task, "strategy");
+			if (!result) {
+				const error = "the mandatory orchestration returned no result";
+				return mandatoryFailure(label, `(${error})`, error, "contract");
+			}
+			if (!result.ok) {
+				return mandatoryFailure(
+					label,
+					result.output || "(the orchestration returned no output)",
+					result.error ?? "the mandatory orchestration did not complete successfully",
+					result.failureKind ?? "agent",
+				);
+			}
+			return { label, output: result.output, ok: true };
 		} catch (err) {
-			return { label, output: `orchestration failed: ${err instanceof Error ? err.message : String(err)}` };
+			const error = `orchestration failed: ${err instanceof Error ? err.message : String(err)}`;
+			return mandatoryFailure(label, error, error, "agent");
 		}
 	}
 
@@ -2016,9 +2396,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		description:
 			"On-the-fly specialist persona: extra system-prompt text appended to the agent's own (e.g. 'You are a Rust unsafe-code auditor…') — combine with `skills` to shape a dynamic sub-agent without authoring a file",
 	});
+	const BriefListSchema = Type.Union([Type.String(), Type.Array(Type.String())]);
+	const DelegationBriefSchema = Type.Object({
+		objective: Type.String({ description: "Verifiable objective and success signal" }),
+		scopeRoe: Type.String({ description: "In-scope targets plus hard scope/authorization boundaries" }),
+		position: Type.String({ description: "Minimum starting state, foothold, credentials, or assumptions the worker may rely on" }),
+		constraints: BriefListSchema,
+		requiredArtifacts: BriefListSchema,
+		stopConditions: BriefListSchema,
+	});
+	const WriteSetSchema = Type.Array(Type.String(), {
+		description: "Repository-relative files/directories this leg alone may modify; parallel overlaps are rejected",
+	});
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
+		brief: Type.Optional(DelegationBriefSchema),
 		name: Type.Optional(
 			Type.String({ description: "Short codename for this sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug', 'atlas-fuzz'. Pick a DIFFERENT call-sign for EVERY leg so two of the same kind stay apart (orion-recon vs vega-recon). A UI label only — not a task description." }),
 		),
@@ -2027,7 +2420,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		model: Type.Optional(
 			Type.String({ description: "Model override (exact provider/id — call the `models` tool to find one)" }),
 		),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent" })),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" })),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run in an isolated git worktree (edits never touch the main tree)" }),
 		),
@@ -2037,15 +2430,18 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		timeoutMs: Type.Optional(
 			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default for this task only" }),
 		),
+		writeSet: Type.Optional(WriteSetSchema),
+		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for this leg" })),
 	});
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
+		brief: Type.Optional(DelegationBriefSchema),
 		name: Type.Optional(Type.String({ description: "Short codename for the sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug'. A UI label, not a task description (single mode)." })),
 		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode)" })),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" })),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
 		),
@@ -2055,10 +2451,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		timeoutMs: Type.Optional(
 			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default (single mode)" }),
 		),
+		writeSet: Type.Optional(WriteSetSchema),
+		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for the single leg" })),
 		tasks: Type.Optional(
 			Type.Array(DelegateTaskItem, { description: "Independent tasks to run in parallel — give each a disjoint scope" }),
 		),
-		concurrency: Type.Optional(Type.Number({ description: "Max children to run at once (default 4)" })),
+		concurrency: Type.Optional(
+			Type.Integer({ minimum: 1, description: `Max children to run at once (default ${RUN_LIMITS.maxConcurrency}; larger requests are clamped)` }),
+		),
 		async: Type.Optional(
 			Type.Boolean({
 				description:
@@ -2109,10 +2509,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// is advice; this is the enforcement (capabilities are never prompt-only).
 	const ledger = new DelegationLedger({ ledgerV2: config.ledgerV2 });
 
+	// Only the built-in inspection tools are known read-only. Shells and unknown/custom tools are
+	// potential writers; treating them as readers would let a persona's ownership policy fail open
+	// merely by moving an edit into a script. ONE classifier for the in-batch gates and the
+	// cross-call one below, so a leg can never count as a writer in one and a reader in the other.
+	const readOnlyTools = new Set(["read", "grep", "find", "ls"]);
+	function mayMutateWorkspace(spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): boolean {
+		const configured = agents.find((agent) => agent.name === spec.agent);
+		const effectiveTools = spec.tools !== undefined ? spec.tools : configured?.tools;
+		const effectiveMcp = spec.mcp ?? configured?.mcp;
+		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !readOnlyTools.has(tool));
+	}
+
 	// Launch one agent in the background (tracked) and add its live async node to the tree.
 	// `label` is the bare codename (nameFor) — the model is folded in here (and stored on the
 	// tracker entry) so the tree node and every intercom digest show the SAME composed name.
-	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string): string {
+	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, batchSlots?: Semaphore): string {
 		const model = shortModel(runSpec.model);
 		const id = tracker.launch({ agent, task, label, ...(model ? { model } : {}) }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
@@ -2120,8 +2532,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
 			const ac = new AbortController();
 			stopRegistry.set(nodeId, () => ac.abort());
-			return asyncSlots
-				.with(() =>
+			const execute = () =>
+				asyncSlots.with(() =>
 					buildEngine(
 						undefined,
 						(snap) => {
@@ -2142,7 +2554,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						steerRegistry.set(nodeId, steer);
 						agentTree.update(nodeId, { detail: "" }); // live now — clear the "queued" marker
 					}),
-				)
+					ac.signal,
+				);
+			// A per-call semaphore composes with the process-wide ceiling. Acquire it first so a
+			// queued member of a serial batch never occupies a global slot while waiting for its
+			// predecessor. This makes `concurrency: 1` mean the same thing in sync and async mode.
+			return (batchSlots ? batchSlots.with(execute, ac.signal) : execute())
+				.catch((error: unknown): AgentResult => {
+					if (!ac.signal.aborted) throw error;
+					return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
+				})
 				.then((r) => {
 					if (shouldRecordDelegationOutcome(r)) {
 						ledger.record(
@@ -2151,7 +2572,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 								...(runSpec.model ? { model: runSpec.model } : {}),
 								task,
 								...(runSpec.role ? { role: runSpec.role } : {}),
-								...(runSpec.tools && runSpec.tools.length > 0 ? { tools: runSpec.tools } : {}),
+								...(runSpec.tools !== undefined ? { tools: runSpec.tools } : {}),
 								...(runSpec.isolation ? { isolation: runSpec.isolation } : {}),
 							},
 							r.ok,
@@ -2160,6 +2581,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					return r;
 				});
 		});
+		if (mayMutateWorkspace(runSpec)) writerRuns.add(id);
 		const nodeId = `async:${id}`;
 		// "queued" until the semaphore grants a slot and the engine reports it steerable. Every
 		// `async:*` node IS async by construction, so no "(async)" tag is needed — fold in the
@@ -2175,17 +2597,93 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		description: [
 			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
 			'Minimum call: { agent: "operator", task: "<self-contained brief: objective, scope, success signal>" } — everything else is optional.',
-			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes), then synthesize the returns yourself.",
+			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes), then synthesize the returns yourself. A persona may declaratively require a six-field `brief`, a structured output contract, or disjoint `writeSet` ownership; those calls fail before spawn when incomplete.",
 			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once, stay free,",
 			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
 			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
-			"candidates (or call `models`). Advanced knobs: name, tools, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
+			"candidates (or call `models`). Advanced knobs: name, tools, brief, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			lastCtx = ctx;
+			const policy = controller.activePersona?.delegation;
+			const defaultOutputContract = policy?.outputContract;
+			if (defaultOutputContract) {
+				params = params.tasks && params.tasks.length > 0
+					? {
+							...params,
+							tasks: params.tasks.map((task) => task.outputContract?.trim() ? task : { ...task, outputContract: defaultOutputContract }),
+						}
+					: params.agent && params.task && !params.outputContract?.trim()
+						? { ...params, outputContract: defaultOutputContract }
+						: params;
+			}
+			if (policy?.requireBrief) {
+				const briefError = validateDelegationBrief(params);
+				if (briefError) return { content: [{ type: "text", text: briefError }], details: {}, isError: true };
+			}
+			if (params.tasks && params.tasks.length > 0) {
+				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, RUN_LIMITS.maxConcurrency);
+				const classified = params.tasks.map((task, index) => ({ task, index, mayWrite: mayMutateWorkspace(task) }));
+				const writing = classified.filter((entry) => entry.mayWrite);
+				if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
+					const verifierNames = new Set(policy.verificationAgents);
+					const verifiers = classified.filter(({ task }) => verifierNames.has(task.agent));
+					// A declared verifier may itself have `bash` for running tests; that makes it a
+					// potential filesystem writer for ownership purposes, but not the material mutation
+					// it is meant to approve. Compare it only with the other mutating roles here.
+					const mutations = writing.filter(({ task }) => !verifierNames.has(task.agent));
+					const lastMutation = mutations.reduce((last, entry) => Math.max(last, entry.index), -1);
+					const staleOrder = effectiveConcurrency === 1 && verifiers.some(({ index }) => index <= lastMutation);
+					if (mutations.length > 0 && verifiers.length > 0 && (effectiveConcurrency > 1 || staleOrder)) {
+						const names = verifiers.map(({ index, task }) => `tasks[${index}] ("${task.agent}")`).join(", ");
+						const reason = effectiveConcurrency > 1
+							? "would overlap a material mutation"
+							: "is ordered before a material mutation";
+						const message = `delegate: fresh verification must run after every material mutation; ${names} ${reason}. Serialize the batch with every writer first and every declared verifier last, or start the verifier in a later call once every writer has SETTLED (its completion follow-up, or intercom { action:"wait", to:"<run-id>" }) — a later call while a writer is still running is rejected the same way.`;
+						return { content: [{ type: "text", text: message }], details: {}, isError: true };
+					}
+				}
+				if (effectiveConcurrency > 1) {
+					if (policy?.requireDisjointWrites) {
+						if (writing.length > 1) {
+							const missing = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim())).map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
+							if (missing.length > 0) {
+								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths, split the scopes, or serialize the writers.`;
+								return { content: [{ type: "text", text: message }], details: {}, isError: true };
+							}
+						}
+					}
+					const writeSetError = validateParallelWriteSets(params.tasks);
+					if (writeSetError) return { content: [{ type: "text", text: writeSetError }], details: {}, isError: true };
+				}
+			}
+			// The gate above sees ONE call. Interactive delegate is background by default, so the
+			// remedy it prescribes — run the verifier in a later call — lands WHILE the mutation is
+			// still running unless the same rule holds across calls; the policy would otherwise be
+			// defeated by following its own instructions. Guidance is never the enforcement here
+			// (capabilities are runtime-checked), so a verifier waits for the writers to settle.
+			if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
+				const verifierNames = new Set(policy.verificationAgents);
+				const requestedAgents = params.tasks && params.tasks.length > 0 ? params.tasks.map((t) => t.agent) : params.agent ? [params.agent] : [];
+				if (requestedAgents.some((agent) => verifierNames.has(agent))) {
+					// A declared verifier's own background legs are not the mutation it must approve
+					// (same carve-out the in-batch gate makes for a test-running verifier).
+					const liveMutations = tracker.running().filter((run) => writerRuns.has(run.id) && !verifierNames.has(run.agent));
+					if (liveMutations.length > 0) {
+						const verifierList = [...new Set(requestedAgents.filter((agent) => verifierNames.has(agent)))].map((agent) => `"${agent}"`).join(", ");
+						const visibleMutations = liveMutations.slice(0, 8);
+						const omittedMutations = liveMutations.length - visibleMutations.length;
+						const inFlight = `${visibleMutations.map((run) => `${run.id} (${sanitizeLabel(run.agent)})`).join(", ")}${omittedMutations > 0 ? `, … +${omittedMutations} more` : ""}`;
+						const message =
+							`delegate: fresh verification must run after every material mutation; ${verifierList} cannot start while ${inFlight} ${liveMutations.length === 1 ? "is" : "are"} still mutating. ` +
+							`Wait for the completion follow-up (or intercom { action:"wait", to:"${liveMutations[0]?.id}" }), then start the verifier against the resulting state.`;
+						return { content: [{ type: "text", text: message }], details: {}, isError: true };
+					}
+				}
+			}
 			const modelErr = resolveDelegateModels(params, ctx);
 			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: {}, isError: true };
 			// Pre-spawn agent validation (mirrors the model path): a wrong name returns the
@@ -2205,7 +2703,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 							...(t.model ? { model: t.model } : {}),
 							task: t.task,
 							...(t.role ? { role: t.role } : {}),
-							...(t.tools && t.tools.length > 0 ? { tools: t.tools } : {}),
+							...(t.tools !== undefined ? { tools: t.tools } : {}),
 							...(t.isolation ? { isolation: t.isolation } : {}),
 						}))
 					: params.agent && params.task
@@ -2215,7 +2713,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 									...(params.model ? { model: params.model } : {}),
 									task: params.task,
 									...(params.role ? { role: params.role } : {}),
-									...(params.tools && params.tools.length > 0 ? { tools: params.tools } : {}),
+									...(params.tools !== undefined ? { tools: params.tools } : {}),
 									...(params.isolation ? { isolation: params.isolation } : {}),
 								},
 							]
@@ -2232,6 +2730,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (wantsAsync && params.tasks && params.tasks.length > 0) {
 				const tasks = params.tasks.slice(0, RUN_LIMITS.maxChildren);
 				const dropped = params.tasks.length - tasks.length;
+				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, RUN_LIMITS.maxConcurrency);
+				// Avoid an extra scheduling hop when the requested limit cannot bind (also keeps a
+				// one-leg background launch observably immediate, as it was before per-call limits).
+				const batchSlots = effectiveConcurrency < tasks.length ? new Semaphore(effectiveConcurrency) : undefined;
 				const nameOffset = asyncNameSequence;
 				asyncNameSequence += tasks.length;
 				const ids = tasks.map((t, i) => {
@@ -2239,7 +2741,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// DEFAULT delegate path, never drifts from the sync path's mapping — NP2's per-leg
 					// `timeoutMs` (and any future knob) lands here for free instead of needing a second copy.
 					const spec = specOf(t);
-					return launchAsyncRun(t.agent, t.task, spec, nameFor(t, nameOffset + i));
+					return launchAsyncRun(t.agent, t.task, spec, nameFor(t, nameOffset + i), batchSlots);
 				});
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${RUN_LIMITS.maxChildren}) were dropped.` : "";
 				return {
@@ -2329,9 +2831,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// Names live in the tree / final card — keep the call line itself minimal.
 				return new Text(`${title}${theme.fg("accent", `parallel (${args.tasks.length})`)}`, 0, 0);
 			}
-			const agent = args.agent ?? "?";
-			const task = args.task ?? "";
-			const preview = task.length > 60 ? `${task.slice(0, 60)}…` : task;
+			const agent = compactInlineText(args.agent ?? "?", { maxChars: 80 }) || "?";
+			const preview = compactInlineText(args.task ?? "", { maxChars: 60 });
 			// renderCall only fires in an interactive UI, where delegate runs in the BACKGROUND by
 			// default — pass hasUI:true to the same wantsAsyncRun the execute path uses, so the common
 			// (defaulted) background run still shows the tag; `sync: true` drops it.
@@ -2341,14 +2842,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 		renderResult(result, { expanded }, theme) {
 			// Safe: the delegate `execute` above always stores `{ views: DelegateView[] }` (sync,
-			// single/parallel) or `{ runId }` (async) in `details`; the double cast just narrows
+			// single/parallel) or `{ runId | runIds }` (async) in `details`; the double cast just narrows
 			// Pi's opaque `details` type to that known shape for rendering.
-			const details = result.details as unknown as { views?: DelegateView[]; runId?: string } | undefined;
+			const details = result.details as unknown as { views?: DelegateView[]; runId?: string; runIds?: string[] } | undefined;
 			const views = details?.views ?? [];
 			if (views.length === 0) {
 				const first = result.content[0];
-				const text = first?.type === "text" ? first.text : details?.runId ? `async run ${details.runId}` : "(no output)";
-				return new Text(text, 0, 0);
+				const fallback = details?.runIds?.length
+					? `async runs ${details.runIds.join(", ")}`
+					: details?.runId
+						? `async run ${details.runId}`
+						: "(no output)";
+				const text = first?.type === "text" ? first.text : fallback;
+				return new Text(sanitizeTerminalText(text), 0, 0);
 			}
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const running = views.filter((v) => v.running).length;
@@ -2359,15 +2865,31 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const okCount = views.filter((v) => v.ok).length;
 			const container = new Container();
 			container.addChild(new Text(`${title}${theme.fg("accent", `${okCount}/${views.length} ok`)}`, 0, 0));
-			for (const v of views) {
+			// A failure is actionable; never bury it below a page of successful legs. Collapsed cards
+			// show at most three semantic one-line previews. Expansion remains the lossless inspection
+			// surface, while F9 keeps the live navigable tree.
+			const ordered = expanded ? views : [...views].sort((a, b) => Number(a.ok) - Number(b.ok));
+			const visible = expanded ? ordered : ordered.slice(0, 3);
+			for (const v of visible) {
 				const icon = v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
 				const usageStr = formatUsage(v.usage);
 				const usage = usageStr ? theme.fg("dim", ` ${usageStr}`) : "";
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(`${icon} ${theme.fg("accent", v.label)}${usage}`, 0, 0));
-				const body = v.output || "(no output)";
-				const preview = expanded ? body : body.split("\n").slice(0, 4).join("\n");
-				container.addChild(new Text(theme.fg("toolOutput", preview), 0, 0));
+				const body = sanitizeTerminalText(v.output || "(no output)");
+				if (expanded) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 96 }) || "agent")}${usage}`, 0, 0));
+					container.addChild(new Text(theme.fg("toolOutput", body), 0, 0));
+					continue;
+				}
+				const preview = compactVisibleText(body, { maxLines: 1, maxLineChars: 72 });
+				container.addChild(
+					new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 96 }) || "agent")}${usage} · ${theme.fg("toolOutput", preview.text)}`, 0, 0),
+				);
+			}
+			if (!expanded) {
+				const omitted = views.length - visible.length;
+				const prefix = omitted > 0 ? `… +${omitted} more result${omitted === 1 ? "" : "s"} · ` : "";
+				container.addChild(new Text(theme.fg("dim", `${prefix}${expandDetailHint()}`), 0, 0));
 			}
 			return container;
 		},
@@ -2410,6 +2932,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		action: Type.Union(
 			[
 				Type.Literal("peek"),
+				Type.Literal("result"),
 				Type.Literal("wait"),
 				Type.Literal("steer"),
 				Type.Literal("stop"),
@@ -2420,12 +2943,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			],
 			{
 				description:
-					"peek = watch your running async sub-agents · wait = BLOCK until async run(s) settle and collect their results (a join) · steer = soft redirect into one by run id (it may ignore it) · stop = HARD-abort one by run id · (all four for any persona, in-process) · list/inbox/reply/send = the coaching message bus (needs a coaching persona)",
+					"peek = watch async sub-agents · result = retrieve one complete settled result by run id · wait = BLOCK until async run(s) settle and collect their bounded reports (a join) · steer = soft redirect into one by run id (it may ignore it) · stop = HARD-abort one by run id · list/inbox/reply/send = the coaching message bus (needs a coaching persona)",
 			},
 		),
-		to: Type.Optional(Type.String({ description: "steer/stop/peek/wait: the async run id (e.g. 'run-1'; wait without it = all running) · send: the child bus handle (from `list`)" })),
-		askId: Type.Optional(Type.String({ description: "reply: the message id of the child's pending question" })),
-		message: Type.Optional(Type.String({ description: "steer/reply/send: the text to deliver" })),
+		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek/wait: the async run id (e.g. 'run-1'; wait without it = all running) · send: the child bus handle (from `list`)" })),
+		askId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "reply: the message id of the child's pending question" })),
+		message: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_MESSAGE_CHARS, description: "steer/reply/send: the text to deliver" })),
 		timeoutMs: Type.Optional(Type.Number({ description: "wait: max ms to hold your turn (default 600000, cap 600000) — on timeout you get what settled + what's still running" })),
 	});
 	pi.registerTool({
@@ -2433,8 +2956,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		label: "Intercom",
 		description: [
 			"See, steer, message, and JOIN your running sub-agents.",
-			"`peek` watches what your async sub-agents are doing; `wait` blocks until they settle and",
-			"returns their results (use it when you now need an async result before your next step);",
+			"`peek` watches what your async sub-agents are doing; `result` retrieves one complete settled",
+			"payload by run id; `wait` blocks until runs settle and returns a bounded join report;",
 			"`steer` injects a course-correction into one (by run id) mid-run — all for ANY persona on",
 			"in-process async runs.",
 			"`list`/`inbox`/`reply`/`send` are the message bus (a child reaching you via `contact_supervisor`)",
@@ -2443,6 +2966,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		parameters: IntercomToolParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			lastCtx = ctx;
+			// `to` comes from model-authored tool arguments. Use the exact value for routing, but never
+			// interpolate it into trusted prose without reducing it to compact identifier metadata.
+			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
 			// peek + wait + steer + stop are supervisor→child controls over the async tracker /
 			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
@@ -2453,9 +2979,42 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					: dedupeRunsById([...tracker.running(), ...completionNotifier.peekPending()]);
 				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: STALL_FLAG_MS }) }], details: { action: "peek", ok: true }, isError: false };
 			}
+			if (params.action === "result") {
+				if (!params.to) {
+					return { content: [{ type: "text", text: "intercom result needs { to: <run id> }." }], details: { action: "result", ok: false }, isError: true };
+				}
+				const run = tracker.peek(params.to);
+				if (!run) {
+					return { content: [{ type: "text", text: `No retained async run "${displayTarget}".` }], details: { action: "result", ok: false }, isError: true };
+				}
+				if (run.status === "running") {
+					return {
+						content: [{ type: "text", text: `${displayTarget} is still running. Use intercom peek/wait, or request result after it settles.` }],
+						details: { action: "result", ok: false, status: run.status },
+						isError: true,
+					};
+				}
+				// Explicit collection owns this delivery: remove a still-buffered passive completion so the
+				// same result cannot appear again as a follow-up a moment later.
+				completionNotifier.discard((pending) => pending.id === run.id);
+				const full = getFullRunOutput(run);
+				const body = full === "(no output)" ? full : fenceUntrusted(full);
+				// The cause is engine/child-authored text too. Keep the run id/status as trusted compact
+				// metadata, but put the diagnostic inside the same untrusted fence as the payload.
+				const cause = run.error ? `\nFailure detail:\n${fenceUntrusted(run.error)}` : "";
+				const displayRun = sanitizeDisplayLabel(run.label ?? run.agent);
+				return {
+					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${cause}\n${body}` }],
+					details: { action: "result", ok: true, status: run.status, runId: run.id },
+					isError: false,
+				};
+			}
 			if (params.action === "wait") {
 				// No `to` → wait on running legs AND collect settled legs still queued for follow-up
 				// delivery, so a wait in the settle→deliver gap returns their results (not "nothing").
+				if (params.to && !tracker.peek(params.to)) {
+					return { content: [{ type: "text", text: `No retained async run "${displayTarget}".` }], details: { action: "wait", ok: false }, isError: true };
+				}
 				const ids = params.to
 					? [params.to]
 					: dedupeRunsById([...tracker.running(), ...completionNotifier.peekPending()]).map((r) => r.id);
@@ -2477,9 +3036,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const settledIds = new Set(settled.map((r) => r.id));
 				completionNotifier.discard((run) => settledIds.has(run.id));
 				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => persistenceNudge.scan(t)) : "";
-				const stillNote =
-					still.length > 0 ? `⏳ still running after ${timeoutMs}ms: ${still.map((r) => r.id).join(", ")} — peek/steer/stop them, or wait again.` : "";
-				const text = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
+				const stillNote = still.length > 0 ? buildWaitTimeoutNote(still.map((r) => r.id), timeoutMs) : "";
+				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
+				const text = boundCompletionSurface(joined);
 				return {
 					content: [{ type: "text", text }],
 					details: { action: "wait", ok: true, settled: [...settledIds], running: still.map((r) => r.id) },
@@ -2493,7 +3052,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const nodeId = `async:${params.to}`;
 				if (!steerRegistry.has(nodeId)) {
 					return {
-						content: [{ type: "text", text: `Cannot steer "${params.to}" — no steerable in-process async run by that id (it may have finished; the child engine can't be steered).` }],
+						content: [{ type: "text", text: `Cannot steer "${displayTarget}" — no live steer handle is available (the run may have finished or not started yet, or its engine/broker does not expose steering).` }],
 						details: { action: "steer", ok: false },
 						isError: true,
 					};
@@ -2501,8 +3060,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// Routed through the guarded steerAgent so a just-finished/disposed handle can't throw.
 				const steered = steerAgent(nodeId, params.message);
 				return steered
-					? { content: [{ type: "text", text: `Steered ${params.to}: "${params.message}" (note: steer is a soft request — use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false }
-					: { content: [{ type: "text", text: `Could not steer "${params.to}" — it may have just finished, or the message was empty.` }], details: { action: "steer", ok: false }, isError: true };
+					? { content: [{ type: "text", text: `Steered ${displayTarget} (soft request; use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false }
+					: { content: [{ type: "text", text: `Could not steer "${displayTarget}" — it may have just finished, or the message was empty.` }], details: { action: "steer", ok: false }, isError: true };
 			}
 			if (params.action === "stop") {
 				if (!params.to) {
@@ -2514,20 +3073,20 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const repeated = stopRequested.has(nodeId);
 				const stopped = stopAgent(nodeId);
 				if (stopped && !repeated) {
-					return { content: [{ type: "text", text: `Aborting ${params.to} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false };
+					return { content: [{ type: "text", text: `Aborting ${displayTarget} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false };
 				}
 				// A repeated stop has just invoked the REAL cancel handle again. Only now force-clear
 				// tracker state if engine settlement is still lagging; the handle remains registered
 				// until onComplete so cancellation can never be replaced by UI-only bookkeeping.
 				if (stopped && repeated && tracker.forceSettle(params.to, "force-stopped by supervisor after repeated engine cancellation")) {
 					return {
-						content: [{ type: "text", text: `Force-cleared ${params.to} after repeating the engine cancellation; it will no longer be tracked as running.` }],
+						content: [{ type: "text", text: `Force-cleared ${displayTarget} after repeating the engine cancellation; it will no longer be tracked as running.` }],
 						details: { action: "stop", ok: true },
 						isError: false,
 					};
 				}
 				return {
-					content: [{ type: "text", text: `Cannot stop "${params.to}" — no such running run (it already finished).` }],
+					content: [{ type: "text", text: `Cannot stop "${displayTarget}" — no such running run (it already finished).` }],
 					details: { action: "stop", ok: false },
 					isError: true,
 				};
@@ -2543,10 +3102,35 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// Child-authored inbox bodies are untrusted, exactly like the drainBusBlock/peek copies.
 			let text = fenceIntercomOutcome(out, fenceUntrusted);
 			if ((params.action === "list" || params.action === "inbox") && !controller.activePersona?.coaching) {
-				const who = controller.activePersona?.name ?? "default";
-				text += `\n\n(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
+				text += `\n\n${coachingDisabledHint(controller.activePersona?.name)}`;
 			}
 			return { content: [{ type: "text", text }], details: out.details, isError: !out.details.ok };
+		},
+		renderCall(args, theme) {
+			const action = compactInlineText(args.action ?? "?", { maxChars: 24 }) || "?";
+			let target = "";
+			if (action === "wait" || action === "peek") target = compactInlineText(args.to ?? "all", { maxChars: 80 }) || "all";
+			else if (["result", "steer", "stop", "send"].includes(action)) target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
+			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
+			const timeout = action === "wait" && Number.isFinite(args.timeoutMs) && args.timeoutMs !== undefined
+				? ` · ${Math.max(0, Math.floor(args.timeoutMs))}ms`
+				: "";
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${target ? theme.fg("dim", ` ${target}${timeout}`) : ""}`,
+				0,
+				0,
+			);
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = (result.details ?? {}) as { action?: string; ok?: boolean };
+			const first = result.content[0];
+			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
+			const failed = details.ok === false;
+			const prefix = failed ? `${theme.fg("error", theme.bold("failed"))}\n` : "";
+			if (expanded) return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
+			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
+			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+			return new Text(`${prefix}${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 		},
 	});
 
@@ -2700,12 +3284,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const s = (result?.structured ?? {}) as { headline?: string; status?: string; tally?: Record<string, number>; usedFallback?: boolean; count?: number };
 				const ruling = result?.output ?? "(the council returned no ruling)";
 				const uiBody = result ? (humanizeAggregateResult(result) ?? result.output) : "";
-				const headline = s.headline ?? (strategy === "fanout" && typeof s.count === "number" ? `${s.count} independent member views` : s.status ?? "");
+				const headline = s.headline ?? (typeof s.count === "number" ? `${s.count} member results` : s.status ?? "");
 				return {
 					// The ruling is sub-agent (council member) text — fence it like every other
 					// path that hands sub-agent output to the supervisor.
 					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${paramNote}${drainBusBlock()}` }],
 					details: {
+						ok: result?.ok ?? false,
 						headline,
 						status: s.status,
 						tally: s.tally,
@@ -2714,6 +3299,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						strategy,
 						roster,
 						persona,
+						...(result?.error ? { error: result.error } : {}),
+						...(result?.failureKind ? { failureKind: result.failureKind } : {}),
 					},
 					isError: !(result?.ok ?? false),
 				};
@@ -2734,13 +3321,33 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return new Text(theme.fg("toolTitle", theme.bold(formatCouncilCallLabel(strategy, roster))), 0, 0);
 		},
 		renderResult(result, { expanded }, theme) {
-			const d = (result.details ?? {}) as { headline?: string; status?: string; tally?: Record<string, number>; usedFallback?: boolean; body?: string; strategy?: string; roster?: string; error?: string };
-			if (d.error) return new Text(theme.fg("error", d.error), 0, 0);
+			const d = (result.details ?? {}) as {
+				ok?: boolean;
+				headline?: string;
+				status?: string;
+				tally?: Record<string, number>;
+				usedFallback?: boolean;
+				body?: string;
+				strategy?: string;
+				roster?: string;
+				error?: string;
+				failureKind?: FailureKind;
+			};
 			const first = result.content[0];
-			const body = d.body || (first && first.type === "text" ? first.text : "");
+			const body = sanitizeTerminalText(d.body || (first && first.type === "text" ? first.text : ""));
+			const failed = d.ok === false || !!d.error;
+			if (failed) {
+				const cause = compactInlineText([d.failureKind, d.error].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
+				const title = theme.fg("error", theme.bold(`council failed${cause ? ` · ${cause}` : ""}`));
+				if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", body || "(no ruling)")}`, 0, 0);
+				const preview = compactVisibleText(body || "(no ruling)", { maxLines: 3, maxLineChars: 100 });
+				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+				return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+			}
 			const text = formatCouncilResult(
 				{ headline: d.headline, status: d.status, tally: d.tally, usedFallback: d.usedFallback, body },
 				expanded,
+				expandDetailHint(),
 			);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", text), 0, 0);
 		},
@@ -2775,14 +3382,49 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			try {
 				const outcome = await runFlowVisible(ctx, parsed.flow, params.task, signal);
-				return { content: [{ type: "text", text: fenceUntrusted(outcome.output || "(flow produced no output)") }], details: { ok: outcome.ok }, isError: !outcome.ok };
+				return {
+					content: [{ type: "text", text: fenceUntrusted(outcome.output || "(flow produced no output)") }],
+					details: {
+						ok: outcome.ok,
+						failedPhase: outcome.failedPhase,
+						failureKind: outcome.failureKind,
+						error: outcome.error,
+					},
+					isError: !outcome.ok,
+				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				return { content: [{ type: "text", text: `flow failed: ${message}` }], details: { error: message }, isError: true };
 			}
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", args.name ?? "?")}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(args.name ?? "?", { maxChars: 96 }) || "?")}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = (result.details ?? {}) as {
+				ok?: boolean;
+				failedPhase?: string;
+				failureKind?: FailureKind;
+				error?: string;
+			};
+			const first = result.content[0];
+			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
+			const failed = details.ok === false;
+			const failureBits = failed
+				? compactInlineText(
+						[details.failedPhase ? `phase ${details.failedPhase}` : undefined, details.failureKind, details.error]
+							.filter((part): part is string => !!part)
+							.join(" · "),
+						{ maxChars: 160 },
+					)
+				: "";
+			const title = failed
+				? theme.fg("error", theme.bold(`flow failed${failureBits ? ` · ${failureBits}` : ""}`))
+				: theme.fg("success", theme.bold("flow complete"));
+			if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
+			const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
+			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+			return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 		},
 	});
 
@@ -2821,7 +3463,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// Resolve-once-per-session is what keeps two turns of one conversation under the
 				// same rules; an explicit reload is the user asking for exactly this file to be
 				// re-read, so the spine comes along with the personas.
-				reloadSpine();
+				inspectEnabledLegacySpines();
 				reportSpineWarning(ctx);
 				if (activeName) {
 					const fresh = personas.find((p) => p.name === activeName);
@@ -2837,6 +3479,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (arg === "seed" || arg === "restore") {
 				const force = arg === "restore";
 				const r = runSeed(force);
+				// These commands can create, migrate, preserve, or overwrite either prompt file. Refresh
+				// both cached roles now so the very next supervisor turn and delegated leg agree without
+				// requiring a second `/persona reload` or a process restart.
+				refreshSpineAfterSeed();
+				reportSpineWarning(ctx);
 				reload(ctx.cwd);
 				// Re-apply the active persona so a restored definition takes effect immediately.
 				const active = controller.activePersona?.name;
@@ -2911,11 +3558,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					return `• ${name} (${persona} · ${model}, ctx ${contextPct}%)`;
 				},
 			);
-			ctx.ui.notify(
+			appendCommandResult(
+				`exocom ${exocomName}`,
 				peers.length === 0
-					? `exocom: ${exocomName} — no other peers in this workspace right now.`
-					: `exocom: ${exocomName} — ${peers.length} peer(s):\n${lines.join("\n")}`,
-				"info",
+					? "no other peers in this workspace right now"
+					: `${peers.length} peer${peers.length === 1 ? "" : "s"}:\n${lines.join("\n")}`,
+				true,
 			);
 		},
 	});
@@ -2998,7 +3646,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				}
 				try {
 					const outcome = await runFlowVisible(ctx, parsed.flow, task);
-					ctx.ui.notify(outcome.output || "(flow produced no output)", outcome.ok ? "info" : "warning");
+					appendCommandResult(`flow ${orch.flow}`, outcome.output || "(flow produced no output)", outcome.ok, {
+						...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
+						...(outcome.error ? { error: outcome.error } : {}),
+					});
 				} catch (err) {
 					ctx.ui.notify(`orchestrate failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 				}
@@ -3017,7 +3668,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			try {
 				const result = await runStrategyVisible(ctx, orch, task, "orchestrate");
-				ctx.ui.notify(result?.output || "(no output)", result?.ok ? "info" : "warning");
+				appendCommandResult(
+					`orchestrate ${strategyName}`,
+					result?.output || "(no output)",
+					result?.ok ?? false,
+					{
+						...(result?.failureKind ? { failureKind: result.failureKind } : {}),
+						...(result?.error ? { error: result.error } : {}),
+					},
+				);
 			} catch (err) {
 				ctx.ui.notify(`orchestrate failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
@@ -3056,7 +3715,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			try {
 				const outcome = await runFlowVisible(ctx, parsed.flow, task);
-				ctx.ui.notify(outcome.output || "(flow produced no output)", outcome.ok ? "info" : "warning");
+				appendCommandResult(`flow ${name}`, outcome.output || "(flow produced no output)", outcome.ok, {
+					...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
+					...(outcome.error ? { error: outcome.error } : {}),
+				});
 			} catch (err) {
 				ctx.ui.notify(`flow failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}

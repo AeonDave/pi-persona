@@ -9,17 +9,17 @@
  * here rather than re-implemented differently.
  */
 
-import { createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import nodeNet from "node:net";
 import type net from "node:net";
 import { dirname, join } from "node:path";
 
 import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
-import { frameSigningPayload, isExocomFrame, nextHops, truncateForInject, type AgentCard, type ExocomAck, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack } from "./envelope.ts";
+import { frameSigningPayload, isExocomFrame, nextHops, parseExocomArtifactDescriptor, truncateForInject, type AgentCard, type ExocomAck, type ExocomArtifactDescriptor, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack } from "./envelope.ts";
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
-import { isAlive, normalizePeerName, prune, readAll, removeEntry, writeEntry, type RegistryEntry } from "./registry.ts";
+import { isAlive, normalizePeerName, prune, readAll, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
 
 export interface ExocomIdentity {
 	session_id: string; name: string; persona: string; purpose: string; color: string;
@@ -49,11 +49,21 @@ export interface ExocomPlaneDeps {
 	readPool?: (agentDir: string, hash: string) => RegistryEntry[];
 	/** Bounds `send`'s ack-wait (defaults to `EXOCOM.ACK_TIMEOUT_MS`); shrinkable in tests. */
 	ackTimeoutMs?: number;
+	/** Endpoint cleanup seam; production unlinks only POSIX socket paths. */
+	unlinkEndpoint?: () => void;
 }
 
 const STALE_PROBE_TIMEOUT_MS = 1000;
 const RECONNECT_DELAY_MS = 150;
 const MAX_TRACKED_HOPS = 1024;
+
+/** Hop history belongs to a message as observed from one sender.  msg_id is only
+ * sender-scoped by protocol, so using it alone lets two peers overwrite each
+ * other's chain depth. JSON's array encoding is unambiguous for the token fields
+ * and keeps the map key independent of any delimiter escaping. */
+function inboundHopKey(fromSession: string, msgId: string): string {
+	return JSON.stringify([fromSession, msgId]);
+}
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => {
@@ -231,15 +241,37 @@ function sendNoReply(netImpl: typeof import("node:net"), endpoint: string, frame
 	});
 }
 
-export type DisplayPeer = RegistryEntry & { displayName: string };
+/** `displayName` is the human label (may be renumbered as peers come and go); `target` is the
+ *  session-pinned token every caller should ROUTE with. Both are derived, never stored. */
+export type DisplayPeer = RegistryEntry & { displayName: string; target: string };
+
+/** A display name is intentionally human-sized, may be shared, and is renumbered from the live
+ * set on every read. This qualified token uses a 96-bit session hash, stays within the tool's
+ * 80-character budget even for maximum-length names, and is kept separate from human roster
+ * labels so a send always addresses the authenticated session it was aimed at. */
+function qualifiedTarget(entry: RegistryEntry): string {
+	const sessionSuffix = createHash("sha256").update(entry.session_id).digest("hex").slice(0, 24);
+	return `${entry.name}@${sessionSuffix}`;
+}
+
+function isQualifiedTarget(target: string): boolean {
+	return /@[a-f0-9]{24}$/i.test(target);
+}
+
+interface InboundContext {
+	msg_id: string;
+	hops: number;
+	entry: RegistryEntry;
+	replyTarget: string;
+}
 
 /** Display-time-only name disambiguation. The registry FILE is keyed by session_id (registry.ts),
- *  so a name collision can never corrupt storage — but two peers named "elite" still need
- *  distinct labels for a human/tool to address. Ties are broken by `session_id` (stable: the
- *  numbering never flaps as peers come and go, unlike ordering by arrival/heartbeat). Never
- *  mutates the stored `.name`; recomputed fresh from the CURRENT live set on every call.
- *  `listPeers()` and `send()`'s target resolution both go through this ONE helper, so the
- *  numbering shown by `exocom_list` can never diverge from what `exocom_send` actually resolves. */
+ *  so a name collision can never corrupt storage — but two peers named "orion" still need
+ *  distinct labels for a human to read. Ties are broken by `session_id`, so every instance
+ *  computes the SAME numbering for one live set; the numbering is NOT stable across time, since
+ *  it is recomputed from the CURRENT live set and a group that loses a member gives up its
+ *  suffixes. That is precisely why `target` (session-pinned) rides along with every label and is
+ *  what routing uses. Never mutates the stored `.name`. */
 function dedupeDisplayNames(peers: RegistryEntry[]): DisplayPeer[] {
 	const byName = new Map<string, RegistryEntry[]>();
 	for (const p of peers) {
@@ -249,11 +281,11 @@ function dedupeDisplayNames(peers: RegistryEntry[]): DisplayPeer[] {
 	const out: DisplayPeer[] = [];
 	for (const group of byName.values()) {
 		if (group.length === 1) {
-			out.push({ ...group[0]!, displayName: group[0]!.name });
+			out.push({ ...group[0]!, displayName: group[0]!.name, target: qualifiedTarget(group[0]!) });
 			continue;
 		}
 		const ordered = [...group].sort((a, b) => (a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0));
-		ordered.forEach((p, i) => out.push({ ...p, displayName: i === 0 ? p.name : `${p.name}#${i + 1}` }));
+		ordered.forEach((p, i) => out.push({ ...p, displayName: i === 0 ? p.name : `${p.name}#${i + 1}`, target: qualifiedTarget(p) }));
 	}
 	return out;
 }
@@ -263,12 +295,18 @@ export class ExocomPlane {
 	private readonly netImpl: typeof import("node:net");
 	private readonly now: () => number;
 	private readonly sockets = new Set<net.Socket>();
-	private readonly inboundHops = new Map<string, number>(); // msg_id -> hops (for reply increment)
+	private readonly inboundContext = new Map<string, InboundContext>(); // [from_session,msg_id] -> auth + hops + reply target
 	private readonly ackTimeoutMs: number;
 	private readonly privateKey: KeyObject;
 	private readonly publicKey: string;
 	private readonly artifacts = new Map<string, string>();
 	private server: net.Server | undefined;
+	private readonly unlinkEndpoint: () => void;
+	private endpointOwned = false;
+	/** Ownership of the registry entry successfully written by this plane.  A plane
+	 * may share a session_id with a replacement, so session_id alone is not enough
+	 * to clean up safely. */
+	private registeredOwnership: RegistryOwnership | undefined;
 	// Viewer-centric per-peer counters, keyed by the PEER's session_id — NOT a global self-report
 	// (that read "inverted" on another instance's pool: a peer who sent TO us would show ITS OWN
 	// out-count, not what WE received from it). Local to this instance, never published in the
@@ -281,6 +319,11 @@ export class ExocomPlane {
 		this.netImpl = deps.net ?? nodeNet;
 		this.now = deps.now ?? Date.now;
 		this.ackTimeoutMs = deps.ackTimeoutMs ?? EXOCOM.ACK_TIMEOUT_MS;
+		this.unlinkEndpoint = deps.unlinkEndpoint ?? (() => {
+			if (process.platform !== "win32") {
+				try { unlinkSync(deps.identity.endpoint); } catch { /* best-effort */ }
+			}
+		});
 		const pair = generateKeyPairSync("ed25519");
 		this.privateKey = pair.privateKey;
 		this.publicKey = pair.publicKey.export({ type: "spki", format: "der" }).toString("base64");
@@ -332,13 +375,22 @@ export class ExocomPlane {
 	async start(): Promise<void> {
 		const { agentDir, hash, identity } = this.deps;
 		let bound = false;
+		let registeredOnThisStart = false;
 		try {
 			preparePosixEndpoint(identity.endpoint);
 			this.server = await bindServer(this.netImpl, identity.endpoint, (s) => this.handleConnection(s));
 			bound = true;
+			this.endpointOwned = true;
 			if (process.platform !== "win32") chmodSync(identity.endpoint, 0o600);
 			prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-			writeEntry(agentDir, hash, this.buildEntry());
+			const entry = this.buildEntry();
+			writeEntry(agentDir, hash, entry);
+			this.registeredOwnership = {
+				session_id: entry.session_id,
+				endpoint: entry.endpoint,
+				...(entry.public_key ? { public_key: entry.public_key } : {}),
+			};
+			registeredOnThisStart = true;
 			this.cleanupArtifacts();
 		} catch (err) {
 			const server = this.server;
@@ -348,10 +400,14 @@ export class ExocomPlane {
 			}
 			this.sockets.clear();
 			if (server) await closeServer(server);
-			if (bound && process.platform !== "win32") {
-				try { unlinkSync(identity.endpoint); } catch { /* best-effort */ }
+			if (bound) {
+				try { this.unlinkEndpoint(); } catch { /* best-effort */ }
+				this.endpointOwned = false;
 			}
-			if (bound) removeEntry(agentDir, hash, identity.session_id);
+			if (registeredOnThisStart && this.registeredOwnership) {
+				removeEntryIfMatches(agentDir, hash, this.registeredOwnership);
+				this.registeredOwnership = undefined;
+			}
 			throw err;
 		}
 	}
@@ -379,10 +435,12 @@ export class ExocomPlane {
 	 *  key exists only in this process. `session_id` is ours by construction, never the caller's. */
 	heartbeat(entry: Omit<RegistryEntry, "public_key">): void {
 		const { agentDir, hash, identity } = this.deps;
-		writeEntry(agentDir, hash, { ...entry, session_id: identity.session_id, public_key: this.publicKey });
+		const owned = { ...entry, session_id: identity.session_id, public_key: this.publicKey };
+		writeEntry(agentDir, hash, owned);
+		this.registeredOwnership = { session_id: owned.session_id, endpoint: owned.endpoint, public_key: owned.public_key };
 	}
 
-	/** Pruned live peers, excluding self, with a display-deduped `displayName` ("elite"/"elite#2")
+	/** Pruned live peers, excluding self, with a display-deduped `displayName` ("orion"/"orion#2")
 	 *  computed over the FULL live set (self included) before self is filtered out — so every
 	 *  instance computes the SAME numbering for a given peer, regardless of who's asking. */
 	listPeers(): DisplayPeer[] {
@@ -391,36 +449,81 @@ export class ExocomPlane {
 		return dedupeDisplayNames(live).filter((e) => e.session_id !== identity.session_id);
 	}
 
+	/** Read-only live pool used for human labels. Unlike listPeers(), this never prunes: an
+	 * authenticated inbound sender may be just past its heartbeat window while its socket is
+	 * still serving the message. The same liveness predicate keeps numbering aligned with the
+	 * normal roster whenever the registry is healthy. */
+	private livePoolForDisplay(): RegistryEntry[] {
+		const now = this.now();
+		return this.pool().filter((entry) => {
+			const heartbeat = Date.parse(entry.heartbeat_at);
+			return isAlive(entry.pid) && Number.isFinite(heartbeat) && now - heartbeat <= EXOCOM.STALE_AFTER_MS;
+		});
+	}
+
 	/** The whole registry pool, read-only (the `readPool` seam's single choke point). */
 	private pool(): RegistryEntry[] {
 		const { agentDir, hash } = this.deps;
 		return this.deps.readPool ? this.deps.readPool(agentDir, hash) : readAll(agentDir, hash);
 	}
 
-	/** The live subset `prune()` would return, computed WITHOUT its readdir/unlink side effects —
-	 *  same staleness rule, so the numbering derived from it matches `listPeers()`. */
-	private livePool(): RegistryEntry[] {
-		const now = this.now();
-		return this.pool().filter((e) => {
-			const heartbeat = Date.parse(e.heartbeat_at);
-			return isAlive(e.pid) && Number.isFinite(heartbeat) && now - heartbeat <= EXOCOM.STALE_AFTER_MS;
-		});
+	/** Resolve a session-qualified token. A REPLY may still reach a sender whose registry entry
+	 * has already been pruned (the whole pool is searched before `listPeers()` would evict it) —
+	 * direct stale targeting stays limited to replies, so an ordinary send resolves only against
+	 * the live roster `exocom_list` publishes. */
+	private qualifiedPeer(target: string, inReplyTo: string | undefined): RegistryEntry | undefined {
+		if (!isQualifiedTarget(target)) return undefined;
+		try {
+			if (inReplyTo === undefined) return this.listPeers().find((entry) => qualifiedTarget(entry) === target);
+			const own = this.deps.identity.session_id;
+			return this.pool().find((entry) => entry.session_id !== own && qualifiedTarget(entry) === target);
+		} catch {
+			return undefined;
+		}
 	}
 
-	/** The deduped display name for an already-authenticated peer entry — the same token `send()`
-	 *  resolves — WITHOUT mutating the registry. This is what the inbound path (extension.ts's
-	 *  `onInbound`) builds its reply hint from; `listPeers()` cannot serve it:
-	 *  it prunes, so a readdir/unlink error would decide whether a good message is accepted, and a
-	 *  sender whose own heartbeat has just gone stale would be evicted by the very message it sent.
-	 *  Falls back to the entry's own name (what `send()` matches when nothing shares it) when the
-	 *  pool is unreadable or no longer lists the sender. Never throws — delivery must not hinge on
-	 *  a naming nicety. */
-	displayNameFor(entry: RegistryEntry): string {
-		try {
-			return dedupeDisplayNames(this.livePool()).find((p) => p.session_id === entry.session_id)?.displayName ?? entry.name;
-		} catch {
-			return entry.name;
+	/** An authenticated inbound frame pins its endpoint/key even if its registry
+	 * file is pruned before the supervisor gets a chance to answer. Match the exact
+	 * target token emitted for that frame, not merely a shared raw name. */
+	private cachedReplyPeer(target: string, msgId: string): RegistryEntry | undefined {
+		for (const context of this.inboundContext.values()) {
+			if (context.msg_id === msgId && context.replyTarget === target) return context.entry;
 		}
+		return undefined;
+	}
+
+	private hasCachedReply(msgId: string): boolean {
+		for (const context of this.inboundContext.values()) if (context.msg_id === msgId) return true;
+		return false;
+	}
+
+	/** Stable, routable token for an authenticated inbound sender. Human display
+	 * names remain the concern of `listPeers()`/`exocom_list`; reply hints always
+	 * use this token so a later prune or same-name peer cannot retarget them. */
+	replyTargetFor(entry: RegistryEntry): string {
+		return qualifiedTarget(entry);
+	}
+
+	/** Compatibility alias for callers that used the old reply-hint method name. */
+	displayNameFor(entry: RegistryEntry): string {
+		return this.replyTargetFor(entry);
+	}
+
+	/** Human-facing, stable label for an authenticated registry entry. This is deliberately
+	 * separate from replyTargetFor(): display labels may be `name#2`, while routing always uses
+	 * the qualified session token. A registry read failure degrades to the entry's own sanitized
+	 * name so naming cannot reject an otherwise valid inbound message. */
+	humanDisplayLabelFor(entry: RegistryEntry): string {
+		try {
+			const live = this.livePoolForDisplay();
+			const display = dedupeDisplayNames(live).find((peer) => peer.session_id === entry.session_id);
+			if (display) return display.displayName;
+			const siblings = live.filter((peer) => peer.name === entry.name);
+			if (siblings.length > 0) return `${entry.name}@${createHash("sha256").update(entry.session_id).digest("hex").slice(0, 8)}`;
+		} catch {
+			/* Human naming must never block authenticated delivery. */
+		}
+		return entry.name;
 	}
 
 	/** Registry lookup for an inbound frame's claimed sender. Fails CLOSED: an unreadable pool
@@ -432,6 +535,33 @@ export class ExocomPlane {
 		} catch {
 			return undefined;
 		}
+	}
+
+	/** A spill descriptor is a CLAIM about a file, and the receiver turns it into `Full payload:
+	 *  <path>` for its own model plus a byte charge against the sender's window (exocom/inbound.ts).
+	 *  The peer authors both fields, so verify them against local ground truth here — the only
+	 *  layer that has it — before the claim can become an instruction to read something. All peers
+	 *  in one registry share `agentDir`+`hash` by construction (that pair IS the registry both
+	 *  sides read), so `payloadFor`'s path is byte-exact on this side too. Returns a nack reason,
+	 *  or undefined when the message carries no descriptor / a verified one. */
+	private artifactClaimError(msg: ExocomMessage): string | undefined {
+		const descriptor = parseExocomArtifactDescriptor(msg.text);
+		if (!descriptor) return undefined;
+		const expected = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", `${msg.msg_id}.txt`);
+		if (descriptor.path !== expected) return "artifact path is not this workspace's spill for that message";
+		let actual: number;
+		try {
+			const stat = statSync(expected);
+			if (!stat.isFile()) return "artifact payload is not a file";
+			actual = stat.size;
+		} catch {
+			return "artifact payload is missing";
+		}
+		if (actual !== descriptor.size) return "artifact size does not match the payload on disk";
+		// Only a payload the sender could not inline may travel as an artifact (see `payloadFor`);
+		// anything smaller belongs in the message text, where the inject budget governs it.
+		if (actual <= EXOCOM.INLINE_MAX_BYTES) return "artifact payload fits the inline budget";
+		return undefined;
 	}
 
 	private handleConnection(socket: net.Socket): void {
@@ -447,6 +577,11 @@ export class ExocomPlane {
 					const entry = this.lookupPeer(raw.from_session);
 					if (!entry || raw.from_endpoint !== entry.endpoint || !verifyFrameOrigin(raw, entry)) {
 						write(this.nack(raw.msg_id, "authentication failed"));
+						return;
+					}
+					const artifactError = this.artifactClaimError(raw);
+					if (artifactError) {
+						write(this.nack(raw.msg_id, artifactError));
 						return;
 					}
 					let disposition: ExocomInboundResult | undefined;
@@ -465,10 +600,12 @@ export class ExocomPlane {
 						return;
 					}
 					this.receivedFrom.set(raw.from_session, (this.receivedFrom.get(raw.from_session) ?? 0) + 1);
-					this.inboundHops.set(raw.msg_id, raw.hops);
-					if (this.inboundHops.size > MAX_TRACKED_HOPS) {
-						const oldest = this.inboundHops.keys().next().value;
-						if (oldest !== undefined) this.inboundHops.delete(oldest);
+					this.inboundContext.set(inboundHopKey(raw.from_session, raw.msg_id), {
+						msg_id: raw.msg_id, hops: raw.hops, entry, replyTarget: this.replyTargetFor(entry),
+					});
+					if (this.inboundContext.size > MAX_TRACKED_HOPS) {
+						const oldest = this.inboundContext.keys().next().value;
+						if (oldest !== undefined) this.inboundContext.delete(oldest);
 					}
 					try { this.deps.onPoolChange?.(); } catch { /* UI refresh must never block the transport ACK */ }
 					write(this.ack(raw.msg_id));
@@ -477,7 +614,7 @@ export class ExocomPlane {
 				case "bye": {
 					const entry = this.lookupPeer(raw.from_session);
 					if (entry && raw.from_endpoint === entry.endpoint && verifyFrameOrigin(raw, entry)) {
-						removeEntry(this.deps.agentDir, this.deps.hash, entry.session_id);
+						removeEntryIfMatches(this.deps.agentDir, this.deps.hash, entry);
 						this.deps.onPoolChange?.(); // a peer left cleanly — refresh the pool now, don't wait 30s
 					}
 					return;
@@ -528,20 +665,38 @@ export class ExocomPlane {
 		const path = join(dir, `${msgId}.txt`);
 		writeFileSync(path, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
 		this.artifacts.set(msgId, path);
-		const preview = truncateForInject(text, EXOCOM.PREVIEW_BYTES).text;
-		return JSON.stringify({ preview, path });
+		const descriptor: ExocomArtifactDescriptor = {
+			kind: "exocom_artifact",
+			preview: truncateForInject(text, EXOCOM.PREVIEW_BYTES).text,
+			path,
+			size: Buffer.byteLength(text, "utf8"),
+		};
+		return JSON.stringify(descriptor);
 	}
 
 	async send(target: string, text: string, inReplyTo?: string): Promise<{ msg_id: string }> {
 		const { agentDir, hash, identity } = this.deps;
-		// Resolved against listPeers()'s displayName — the SAME helper (dedupeDisplayNames) that
-		// exocom_list shows, so a target like "elite#2" resolves to exactly the peer the list
-		// numbered that way, never a different same-named one.
-		const entry = this.listPeers().find((e) => e.displayName === target);
+		// Routing order: the authenticated inbound context (replies), then the session-qualified
+		// token, then the human display name. A qualified token names ONE session, so it NEVER
+		// falls back to a display name — peer names are self-chosen and unreserved, and
+		// `normalizePeerName` keeps `@`, so a peer can register another's token as its own label.
+		const cachedReply = inReplyTo !== undefined ? this.cachedReplyPeer(target, inReplyTo) : undefined;
+		if (inReplyTo !== undefined && this.hasCachedReply(inReplyTo) && !cachedReply) {
+			throw new Error(`exocom: reply target "${target}" does not match the authenticated sender for "${inReplyTo}"`);
+		}
+		const qualified = this.qualifiedPeer(target, inReplyTo);
+		if (isQualifiedTarget(target) && !cachedReply && !qualified) {
+			throw new Error(inReplyTo === undefined
+				? `exocom: unknown qualified target "${target}"`
+				: `exocom: unknown qualified reply target "${target}"`);
+		}
+		const entry = cachedReply
+			?? qualified
+			?? this.listPeers().find((e) => e.displayName === target);
 		if (!entry) throw new Error(`exocom: unknown peer "${target}"`);
 
 		const msg_id = randomUUID();
-		const hops = inReplyTo !== undefined ? nextHops(this.inboundHops.get(inReplyTo) ?? 0) : 0;
+		const hops = inReplyTo !== undefined ? nextHops(this.inboundContext.get(inboundHopKey(entry.session_id, inReplyTo))?.hops ?? 0) : 0;
 		const unsigned: ExocomMessage = {
 			kind: "message", msg_id, from_session: identity.session_id, from_endpoint: identity.endpoint,
 			from_name: this.name, text: this.payloadFor(msg_id, text), hops, ts: new Date(this.now()).toISOString(),
@@ -559,12 +714,12 @@ export class ExocomPlane {
 			if (err instanceof AckTimeoutError) { this.removeArtifact(msg_id); throw new Error(`exocom: ack timeout from "${target}"`); }
 			if (err instanceof PeerAuthenticationError || err instanceof PeerProtocolError) {
 				this.removeArtifact(msg_id);
-				removeEntry(agentDir, hash, entry.session_id);
+				removeEntryIfMatches(agentDir, hash, entry);
 				throw new Error(`${err.message} from "${target}"`);
 			}
 			if (!isRestartingError(err)) {
 				this.removeArtifact(msg_id);
-				removeEntry(agentDir, hash, entry.session_id);
+				removeEntryIfMatches(agentDir, hash, entry);
 				throw new Error(`exocom: peer "${target}" unreachable`);
 			}
 			await delay(RECONNECT_DELAY_MS);
@@ -574,7 +729,7 @@ export class ExocomPlane {
 				this.removeArtifact(msg_id);
 				if (err2 instanceof PeerNackError) throw new Error(`exocom: peer "${target}" rejected message: ${err2.message}`);
 				if (err2 instanceof AckTimeoutError) throw new Error(`exocom: ack timeout from "${target}"`);
-				removeEntry(agentDir, hash, entry.session_id);
+				removeEntryIfMatches(agentDir, hash, entry);
 				if (err2 instanceof PeerAuthenticationError || err2 instanceof PeerProtocolError) throw new Error(`${err2.message} from "${target}"`);
 				throw new Error(`exocom: peer "${target}" unreachable`);
 			}
@@ -602,10 +757,15 @@ export class ExocomPlane {
 		if (server) {
 			await closeServer(server);
 		}
-		if (process.platform !== "win32") {
-			try { unlinkSync(identity.endpoint); } catch { /* ignore */ }
+		if (this.endpointOwned) {
+			try { this.unlinkEndpoint(); } catch { /* ignore */ }
+			this.endpointOwned = false;
 		}
-		removeEntry(agentDir, hash, identity.session_id);
+		const ownership = this.registeredOwnership;
+		if (ownership) {
+			removeEntryIfMatches(agentDir, hash, ownership);
+			this.registeredOwnership = undefined;
+		}
 		for (const msgId of [...this.artifacts.keys()]) this.removeArtifact(msgId); // only spills whose send never landed are still tracked here
 		// A DELIVERED spill is deliberately left for its receiver's later turn, so its reclamation
 		// falls to the TTL/max-files sweep — which otherwise runs only on a plane start or the next

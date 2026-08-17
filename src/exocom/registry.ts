@@ -1,18 +1,25 @@
 /** exocom workspace registry — one JSON file per live instance. */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { agentsDir, registryPath } from "./paths.ts";
 
 export interface RegistryEntry {
 	/** `name` is display-only — NOT unique, NOT a lookup key. The registry FILE is keyed by
 	 *  `session_id` (via `sessionKey`), so two instances launched under the SAME persona name
 	 *  persist as two distinct files; a shared name is disambiguated only at display time
-	 *  (see plane.ts's `listPeers()` → "elite"/"elite#2"). */
+	 *  (see plane.ts's `listPeers()` → "orion"/"orion#2"). */
 	session_id: string; name: string; persona: string; purpose: string; color: string; model: string;
 	pid: number; endpoint: string; cwd: string; context_pct: number; inbox: number;
 	heartbeat_at: string;
 	public_key?: string;
 }
+
+/** The fields that prove which process owns a registry slot.  `session_id` is the
+ * filename key, while endpoint + public_key bind the slot to the live transport
+ * and signing identity that registered it. */
+export type RegistryOwnership = Pick<RegistryEntry, "session_id" | "endpoint"> & {
+	public_key?: string;
+};
 
 const CONTROL_OR_MARKUP = /[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]/g;
 const HAS_CONTROL_OR_MARKUP = /[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]/;
@@ -100,6 +107,12 @@ function rememberKey(sessionId: string, publicKey: string): void {
 export interface RegistryWriteIO {
 	rename?: (from: string, to: string) => void;
 	sleep?: (ms: number) => void;
+}
+
+/** Test seam for the compare-and-delete claim. Production uses the atomic rename
+ *  claim and leaves this unset. */
+export interface RegistryRemoveIO {
+	afterCompare?: () => void;
 }
 
 // A handle held by a virus scanner, the search indexer or a peer mid-read is transient, so a few
@@ -204,11 +217,68 @@ export function prune(
 		const heartbeat = Date.parse(e.heartbeat_at);
 		const stale = !Number.isFinite(heartbeat) || opts.now - heartbeat > opts.staleMs;
 		if (alive(e.pid) && !stale) { live.push(e); continue; }
-		removeEntry(agentDir, hash, e.session_id);
+		removeEntryIfMatches(agentDir, hash, e);
 	}
 	return live;
 }
 
 export function removeEntry(agentDir: string, hash: string, sessionId: string): void {
 	try { unlinkSync(registryPath(agentDir, hash, sessionKey(sessionId))); } catch { /* best-effort */ }
+}
+
+function restoreClaim(agentPath: string, claimedPath: string): void {
+	// An exclusive hard-link restore cannot overwrite a replacement that a writer
+	// installed while the slot was claimed. In that case the claimed old entry is
+	// discarded and the writer's replacement remains authoritative.
+	for (let attempt = 1; ; attempt++) {
+		try {
+			linkSync(claimedPath, agentPath);
+			try { unlinkSync(claimedPath); } catch { /* link is now the restored entry */ }
+			return;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "EEXIST" || existsSync(agentPath)) {
+				try { unlinkSync(claimedPath); } catch { /* best-effort */ }
+				return;
+			}
+			if (attempt >= RENAME_ATTEMPTS || !["EPERM", "EBUSY", "EACCES", "ENOENT"].includes(code ?? "")) break;
+			try { sleepSync(RENAME_BACKOFF_MS * attempt); } catch { break; }
+		}
+	}
+	// Do not fall back to rename: on POSIX it would overwrite a writer that wins
+	// immediately after the existsSync check. Leaving the quarantine file is safer
+	// than deleting or overwriting a replacement; the next heartbeat writes the
+	// live slot back at its canonical path.
+}
+
+/** Remove a registry entry only while it still belongs to the caller that observed it.
+ *
+ * Registry updates use a same-volume rename, so a peer can replace the session file
+ * between `readAll()` and a cleanup action.  The old session-only unlink would then
+ * delete the replacement.  First atomically claim the file, then compare session
+ * key, endpoint and signing key while no writer can address that path.  A mismatch
+ * is restored without overwriting a replacement that appeared meanwhile.
+ */
+export function removeEntryIfMatches(agentDir: string, hash: string, expected: RegistryOwnership, io: RegistryRemoveIO = {}): boolean {
+	const path = registryPath(agentDir, hash, sessionKey(expected.session_id));
+	const claimed = `${path}.claim-${process.pid}-${randomUUID()}`;
+	let claimedByUs = false;
+	try {
+		renameSync(path, claimed);
+		claimedByUs = true;
+		const current = normalizeRegistryEntry(JSON.parse(readFileSync(claimed, "utf8")));
+		const matches = current !== undefined && current.session_id === expected.session_id && current.endpoint === expected.endpoint
+			&& (current.public_key ?? undefined) === (expected.public_key ?? undefined);
+		if (matches) {
+			io.afterCompare?.();
+			unlinkSync(claimed);
+			claimedByUs = false;
+			return true;
+		}
+		return false;
+	} catch {
+		return false;
+	} finally {
+		if (claimedByUs) restoreClaim(path, claimed);
+	}
 }

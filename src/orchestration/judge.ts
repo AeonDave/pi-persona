@@ -8,6 +8,7 @@
  * maps its verdict via `prep.pick(...)` — no new engine surface needed.
  */
 
+import { fenceUntrusted } from "../core/fence.ts";
 import type { AgentResult } from "./types.ts";
 
 export interface JudgePrep {
@@ -31,7 +32,7 @@ export function prepareJudge(candidates: AgentResult[], order?: number[]): Judge
 		if (!c) return;
 		const label = LABELS[pos] ?? `#${pos + 1}`;
 		byLabel.set(label, c);
-		sections.push(`[${label}]\n${c.output.trim()}`);
+		sections.push(`[${label}]\n${fenceUntrusted(c.output.trim())}`);
 	});
 	return {
 		ballot: sections.join("\n\n"),

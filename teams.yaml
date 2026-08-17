@@ -14,6 +14,9 @@ review:
   - { agent: reviewer, role: "Focus ONLY on the TESTS lens: untested branches and edge/error cases, brittle or mock-asserting tests, missing regression pins." }
 
 repair: [operator, verifier]
+# Offensive assurance: execute one bounded leg, then independently replay its proof. Used by Elite's
+# on-demand critic-loop council; unlike the software verifier, this checks objective/scope/artifacts.
+offensive-assurance: [operator, evidence-verifier]
 magi: [melchior, balthasar, casper]
 
 # compete: N implementers race the same task in isolated worktrees; a judge picks the winning diff.

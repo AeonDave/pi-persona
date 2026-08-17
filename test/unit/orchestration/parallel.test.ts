@@ -97,6 +97,45 @@ test("Semaphore releases the slot when a job throws (no starvation)", async () =
 	assert.equal(ran, true, "the slot freed by the failed job is reusable");
 });
 
+test("Semaphore removes an aborted waiter instead of running it after a slot frees", async () => {
+	const sem = new Semaphore(1);
+	let releaseFirst = (): void => {};
+	let markFirstStarted = (): void => {};
+	const firstStarted = new Promise<void>((resolve) => {
+		markFirstStarted = resolve;
+	});
+	const first = sem.with(() => new Promise<void>((resolve) => {
+		releaseFirst = resolve;
+		markFirstStarted();
+	}));
+	await firstStarted;
+	const ac = new AbortController();
+	let secondRan = false;
+	const second = sem.with(async () => {
+		secondRan = true;
+	}, ac.signal);
+	ac.abort();
+	releaseFirst();
+	await first;
+	await assert.rejects(second, /abort/i);
+	assert.equal(secondRan, false);
+});
+
+test("Semaphore floors fractional slots and fails safe for non-finite input", async () => {
+	for (const slots of [1.5, Number.NaN]) {
+		const sem = new Semaphore(slots);
+		let active = 0;
+		let maxActive = 0;
+		await Promise.all(Array.from({ length: 3 }, () => sem.with(async () => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			active--;
+		})));
+		assert.equal(maxActive, 1, `slots=${String(slots)} must not round up or deadlock`);
+	}
+});
+
 test("Semaphore clamps to at least one slot", async () => {
 	const sem = new Semaphore(0);
 	let ran = false;

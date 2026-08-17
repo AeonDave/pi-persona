@@ -9,6 +9,8 @@
 
 import { type ChildUsage, emptyUsage } from "../engine/stream.ts";
 import { mapWithConcurrency } from "../orchestration/parallel.ts";
+import { posix, win32 } from "node:path";
+import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { aggregateResults } from "../orchestration/reducers.ts";
 import {
 	type AgentRunSpec,
@@ -24,6 +26,8 @@ import type { AgentResult } from "../orchestration/types.ts";
 export interface DelegateTask {
 	agent: string;
 	task: string;
+	/** Structured hand-off context. The integration layer may validate this before spawning. */
+	brief?: Partial<DelegationBrief>;
 	/** A friendly display name (the loader's choice), to tell sub-agents apart. */
 	name?: string;
 	/** Skills the sub-agent must load first (dynamic specialisation). */
@@ -44,11 +48,16 @@ export interface DelegateTask {
 	 *  leg raise its own wall-clock budget without raising the default for its siblings. Ignored
 	 *  unless a finite, positive number (junk/≤0 falls back to the engine's default). */
 	timeoutMs?: number;
+	/** Files/directories this leg may modify. Parallel overlap is rejected before spawning. */
+	writeSet?: string[];
+	/** Output contract enforced by the engine (for example `finding`). */
+	outputContract?: string;
 }
 
 export interface DelegateParams {
 	agent?: string;
 	task?: string;
+	brief?: Partial<DelegationBrief>;
 	name?: string;
 	skills?: string[];
 	model?: string;
@@ -59,8 +68,160 @@ export interface DelegateParams {
 	/** Per-leg override (ms) of the shared idle-timeout ceiling (single mode). Ignored unless a
 	 *  finite, positive number (junk/≤0 falls back to the engine's default). */
 	timeoutMs?: number;
+	writeSet?: string[];
+	outputContract?: string;
 	tasks?: DelegateTask[];
 	concurrency?: number;
+}
+
+/** Structured cold-start context that any persona policy may require. */
+export interface DelegationBrief {
+	objective: string;
+	scopeRoe: string;
+	position: string;
+	constraints: string | readonly string[];
+	requiredArtifacts: string | readonly string[];
+	stopConditions: string | readonly string[];
+}
+
+const BRIEF_FIELDS = ["objective", "scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"] as const;
+
+function briefText(value: unknown): string {
+	return typeof value === "string" ? value.trim() : "";
+}
+
+function briefItems(value: unknown): string[] {
+	if (typeof value === "string") return value.trim() ? [value.trim()] : [];
+	if (!Array.isArray(value)) return [];
+	return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
+}
+
+/** Render the brief in a fixed order so a cold-start worker receives identical context every time. */
+export function renderDelegationBrief(brief: Partial<DelegationBrief> | undefined): string {
+	if (!brief) return "";
+	const lines = [
+		"[DELEGATION BRIEF]",
+		`Objective: ${briefText(brief.objective) || "(missing)"}`,
+		`Scope / Rules of Engagement: ${briefText(brief.scopeRoe) || "(missing)"}`,
+		`Position: ${briefText(brief.position) || "(missing)"}`,
+		"Constraints:",
+		...briefItems(brief.constraints).map((item) => `- ${item}`),
+		"Required artifacts:",
+		...briefItems(brief.requiredArtifacts).map((item) => `- ${item}`),
+		"Stop conditions:",
+		...briefItems(brief.stopConditions).map((item) => `- ${item}`),
+		"[/DELEGATION BRIEF]",
+	];
+	return lines.join("\n");
+}
+
+/**
+ * Pure, actionable validation for a policy-enabled integration layer. It intentionally does not
+ * reject ordinary backwards-compatible delegate calls; callers opt into this check when they
+ * require an evidence-grade hand-off.
+ */
+export function validateDelegationBrief(params: DelegateParams): string | undefined {
+	const targets: Array<{ label: string; brief: Partial<DelegationBrief> | undefined }> = [];
+	if (params.tasks && params.tasks.length > 0) {
+		params.tasks.forEach((task, index) => targets.push({ label: `tasks[${index}] (${task.agent || "(missing agent)"})`, brief: task.brief }));
+	} else if (params.agent !== undefined || params.task !== undefined) {
+		targets.push({ label: `agent "${params.agent ?? "(missing)"}"`, brief: params.brief });
+	}
+	for (const target of targets) {
+		const missing = BRIEF_FIELDS.filter((field) => {
+			const value = target.brief?.[field];
+			return field === "constraints" || field === "requiredArtifacts" || field === "stopConditions"
+				? briefItems(value).length === 0
+				: briefText(value).length === 0;
+		});
+		if (missing.length > 0) {
+			return (
+				`delegate: ${target.label} requires a complete brief; missing or empty: ${missing.join(", ")}. ` +
+				`Provide all fields (${BRIEF_FIELDS.join(", ")}) before spawning the policy-controlled leg.`
+			);
+		}
+	}
+	return undefined;
+}
+
+interface NormalizedWritePath {
+	value: string;
+	windows: boolean;
+}
+
+function normalizeWritePath(raw: string): NormalizedWritePath {
+	const trimmed = raw.trim();
+	const windows = process.platform === "win32" || trimmed.includes("\\") || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\");
+	const normalized = (windows ? win32.normalize(trimmed) : posix.normalize(trimmed)).replaceAll("\\", "/");
+	const value = normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+	return { value: windows ? value.toLowerCase() : value, windows };
+}
+
+function pathsOverlap(a: NormalizedWritePath, b: NormalizedWritePath): boolean {
+	const left = a.windows || b.windows ? a.value.toLowerCase() : a.value;
+	const right = a.windows || b.windows ? b.value.toLowerCase() : b.value;
+	const isAncestor = (parent: string, child: string): boolean => {
+		if (parent === "/") return child.startsWith("/");
+		if (parent === ".") return !child.startsWith("/");
+		return child.startsWith(`${parent}/`);
+	};
+	return left === right || isAncestor(left, right) || isAncestor(right, left);
+}
+
+export interface WriteSetOverlap {
+	firstIndex: number;
+	secondIndex: number;
+	firstPath: string;
+	secondPath: string;
+}
+
+/** Find equal/ancestor-descendant write-set collisions in deterministic task/path order. */
+export function findWriteSetOverlaps(tasks: readonly Pick<DelegateTask, "agent" | "writeSet">[]): WriteSetOverlap[] {
+	const overlaps: WriteSetOverlap[] = [];
+	for (let i = 0; i < tasks.length; i++) {
+		const first = tasks[i];
+		if (!first) continue;
+		for (let j = i + 1; j < tasks.length; j++) {
+			const second = tasks[j];
+			if (!second) continue;
+			for (const firstPath of first.writeSet ?? []) {
+				if (!firstPath.trim()) continue;
+				for (const secondPath of second.writeSet ?? []) {
+					if (!secondPath.trim()) continue;
+					if (pathsOverlap(normalizeWritePath(firstPath), normalizeWritePath(secondPath))) {
+						overlaps.push({ firstIndex: i, secondIndex: j, firstPath, secondPath });
+					}
+				}
+			}
+		}
+	}
+	return overlaps;
+}
+
+/** Return an actionable error for a parallel write-set collision; undefined means safe to spawn. */
+export function validateParallelWriteSets(tasks: readonly Pick<DelegateTask, "agent" | "writeSet">[]): string | undefined {
+	for (const [index, task] of tasks.entries()) {
+		for (const path of task.writeSet ?? []) {
+			if (typeof path !== "string" || !path.trim()) {
+				return `delegate: task[${index}] ("${task.agent}") has an empty writeSet path; remove it or provide a repository-relative path.`;
+			}
+			const raw = path.trim();
+			const slash = raw.replaceAll("\\", "/");
+			const normalized = posix.normalize(slash);
+			if (posix.isAbsolute(slash) || win32.isAbsolute(raw) || normalized === ".." || normalized.startsWith("../")) {
+				return `delegate: task[${index}] ("${task.agent}") writeSet path "${path}" is outside the repository-relative ownership namespace; use "." for the repository root.`;
+			}
+		}
+	}
+	const overlap = findWriteSetOverlaps(tasks)[0];
+	if (!overlap) return undefined;
+	const first = tasks[overlap.firstIndex];
+	const second = tasks[overlap.secondIndex];
+	return (
+		`delegate: parallel writeSet overlap between task[${overlap.firstIndex}] ("${first?.agent ?? "?"}") ` +
+		`path "${overlap.firstPath}" and task[${overlap.secondIndex}] ("${second?.agent ?? "?"}") ` +
+		`path "${overlap.secondPath}". Split the paths, serialize these tasks, or remove the overlap before spawning.`
+	);
 }
 
 /** A live per-sub-agent view for the UI (running → done/failed). */
@@ -98,7 +259,8 @@ export function shortModel(ref: string | undefined): string {
  *  model itself (e.g. the async tree node, `AsyncRun.label`) doesn't have to strip it back out
  *  of {@link labelFor}'s composite string. */
 export function nameFor(t: { agent: string; name?: string }, index: number): string {
-	return t.name?.trim() || (t.agent === "operator" ? (CODENAMES[index % CODENAMES.length] as string) : t.agent);
+	const fallback = t.agent === "operator" ? (CODENAMES[index % CODENAMES.length] as string) : t.agent;
+	return sanitizeDisplayLabel(t.name?.trim() || fallback, fallback);
 }
 
 /** Display label for a sub-agent: its bare {@link nameFor} name plus its short model. */
@@ -121,16 +283,27 @@ export interface DelegateLimits {
 	maxChildren: number;
 }
 
+/** Normalize an LLM-authored concurrency request once for sync scheduling, async scheduling, and
+ * policy gates. Fractional/non-finite inputs fail toward serialization instead of rounding up. */
+export function normalizeDelegateConcurrency(value: number | undefined, maximum: number): number {
+	const ceiling = Math.max(1, Number.isFinite(maximum) ? Math.floor(maximum) : 1);
+	if (value === undefined) return ceiling;
+	if (!Number.isFinite(value)) return 1;
+	return Math.min(ceiling, Math.max(1, Math.floor(value)));
+}
+
 /** Map a task to the run-spec fields the engine accepts — the single source of truth for the
  *  delegate path's field mapping. Exported so the async launch path (extension.ts) routes
  *  through the SAME mapping instead of duplicating it (a duplicated copy is how NP2's
  *  `timeoutMs` could silently miss the async fan-out, which is the interactive default). */
 export function specOf(t: DelegateTask): AgentRunSpec {
-	const spec: AgentRunSpec = { agent: t.agent, task: t.task };
+	const renderedBrief = renderDelegationBrief(t.brief);
+	const spec: AgentRunSpec = { agent: t.agent, task: renderedBrief ? `${t.task}\n\n${renderedBrief}` : t.task };
 	if (t.skills && t.skills.length > 0) spec.skills = t.skills;
 	if (t.model) spec.model = t.model;
-	if (t.tools && t.tools.length > 0) spec.tools = t.tools;
+	if (t.tools !== undefined) spec.tools = t.tools;
 	if (t.role?.trim()) spec.role = t.role.trim();
+	if (t.outputContract?.trim()) spec.outputContract = t.outputContract.trim();
 	if (t.isolation !== undefined) spec.isolation = t.isolation;
 	if (t.mcp !== undefined) spec.mcp = t.mcp;
 	if (isPositiveFiniteMs(t.timeoutMs)) spec.timeoutMs = t.timeoutMs;
@@ -183,7 +356,7 @@ export class DelegationLedger {
 		const base = `${t.agent}${SEP}${t.model ?? ""}${SEP}${t.task}`;
 		if (!this.ledgerV2) return base;
 		const role = t.role?.trim() ?? "";
-		const toolsKey = t.tools && t.tools.length > 0 ? [...t.tools].sort().join(",") : "";
+		const toolsKey = t.tools === undefined ? "<session-default>" : JSON.stringify([...t.tools].sort());
 		const isolation = t.isolation === "worktree" ? "worktree" : "";
 		return `${base}${SEP}${role}${SEP}${toolsKey}${SEP}${isolation}`;
 	}
@@ -297,7 +470,11 @@ export async function runDelegate(
 		// LLM requested — a strategy/tool call cannot exceed the declared limits.
 		const tasks = params.tasks.slice(0, limits.maxChildren);
 		const dropped = params.tasks.length - tasks.length;
-		const concurrency = Math.min(Math.max(1, params.concurrency ?? limits.maxConcurrency), limits.maxConcurrency);
+		const concurrency = normalizeDelegateConcurrency(params.concurrency, limits.maxConcurrency);
+		if (concurrency > 1) {
+			const writeSetError = validateParallelWriteSets(tasks);
+			if (writeSetError) return { text: writeSetError, results: [], views: [], ok: false };
+		}
 		const labels = tasks.map((t, i) => labelFor(t, i));
 		const views: DelegateView[] = tasks.map((t, i) => ({
 			agent: t.agent,
@@ -349,11 +526,14 @@ export async function runDelegate(
 		if (params.name) single.name = params.name;
 		if (params.skills && params.skills.length > 0) single.skills = params.skills;
 		if (params.model) single.model = params.model;
-		if (params.tools && params.tools.length > 0) single.tools = params.tools;
+		if (params.tools !== undefined) single.tools = params.tools;
 		if (params.role?.trim()) single.role = params.role.trim();
 		if (params.isolation !== undefined) single.isolation = params.isolation;
 		if (params.mcp !== undefined) single.mcp = params.mcp;
 		if (params.timeoutMs !== undefined) single.timeoutMs = params.timeoutMs;
+		if (params.brief !== undefined) single.brief = params.brief;
+		if (params.writeSet !== undefined) single.writeSet = params.writeSet;
+		if (params.outputContract !== undefined) single.outputContract = params.outputContract;
 		const label = labelFor(single, 0);
 		const view: DelegateView = {
 			agent: params.agent,

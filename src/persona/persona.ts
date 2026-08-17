@@ -7,7 +7,7 @@
  * `orchestration:` block is the control surface; absent ⇒ L0 (opportunistic).
  */
 
-import { asBoolean, asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { asBoolean, asPermission, asStringArray, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
 import type { Permission } from "../core/permissions.ts";
 import { asSystemPromptMode, type SystemPromptMode } from "../core/types.ts";
 
@@ -46,6 +46,22 @@ export interface CouncilDraft {
 	preset?: string;
 }
 
+/** Optional, fully data-driven runtime discipline for any persona. No persona name has special
+ * behavior: a project/user persona opts into the same packet, contract, and write-set gates by
+ * declaring this block in frontmatter. */
+export interface DelegationPolicy {
+	/** Require every delegate leg to carry the complete structured `brief`. */
+	requireBrief?: boolean;
+	/** Default output contract applied to delegate legs that omit one. */
+	outputContract?: string;
+	/** Require ownership declarations for parallel writers and reject overlapping paths. */
+	requireDisjointWrites?: boolean;
+	/** Require declared verifier agents to start after, not concurrently with, a mutation. */
+	requireFreshVerification?: boolean;
+	/** Agents treated as verifiers for the runtime stale-verification concurrency gate. */
+	verificationAgents?: string[];
+}
+
 export interface Persona {
 	name: string;
 	label: string;
@@ -62,6 +78,8 @@ export interface Persona {
 	/** Tool-driven council the `council` tool runs (no mandatory firing). After load, any
 	 *  `preset` is expanded so `strategy`/`roster`/`params` are concrete. */
 	council?: CouncilDraft;
+	/** Optional delegation runtime/brief policy; usable by any custom persona. */
+	delegation?: DelegationPolicy;
 	/** Opt into the comm plane: give async children a `contact_supervisor` tool (§4.9). */
 	coaching?: boolean;
 	/** `spine: false` opts this persona out of the shared behavioral layer (docs/SPINE.md) —
@@ -123,10 +141,28 @@ export function parsePersona(content: string, source: string): Persona | null {
 	if (orchestration) persona.orchestration = orchestration;
 	const council = parseCouncil(fm.council);
 	if (council) persona.council = council;
+	const delegation = parseDelegationPolicy(fm.delegation);
+	if (delegation) persona.delegation = delegation;
 	if (asBoolean(fm.coaching) === true) persona.coaching = true;
 	if (asBoolean(fm.spine) === false) persona.spine = false;
 
 	return persona;
+}
+
+function parseDelegationPolicy(value: unknown): DelegationPolicy | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const o = value as Record<string, unknown>;
+	const policy: DelegationPolicy = {};
+	const requireBrief = asBoolean(o.requireBrief);
+	if (requireBrief !== undefined) policy.requireBrief = requireBrief;
+	const requireDisjointWrites = asBoolean(o.requireDisjointWrites);
+	if (requireDisjointWrites !== undefined) policy.requireDisjointWrites = requireDisjointWrites;
+	const requireFreshVerification = asBoolean(o.requireFreshVerification);
+	if (requireFreshVerification !== undefined) policy.requireFreshVerification = requireFreshVerification;
+	const verificationAgents = asStringArray(o.verificationAgents);
+	if (verificationAgents) policy.verificationAgents = verificationAgents;
+	if (typeof o.outputContract === "string" && o.outputContract.trim()) policy.outputContract = o.outputContract.trim();
+	return Object.keys(policy).length > 0 ? policy : undefined;
 }
 
 /** Parse a persona's `council:` block (strategy + roster + params, or just a `preset`). */

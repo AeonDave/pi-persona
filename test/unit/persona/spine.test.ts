@@ -60,6 +60,33 @@ test("`on` prefers the user-dir spine.md and never reads the bundled one", () =>
 	assert.deepEqual(read.seen, [USER, USER_WORKER], "the user copies win before the bundled defaults are consulted");
 });
 
+test("resolution can bypass an exact legacy user candidate without affecting explicit paths", () => {
+	const read = reader({
+		[USER]: "LEGACY SUPERVISOR",
+		[BUNDLED]: "CURRENT SUPERVISOR",
+		[USER_WORKER]: "LEGACY WORKER",
+		[BUNDLED_WORKER]: "CURRENT WORKER",
+	});
+	const on = resolveSpine({
+		selector: "on",
+		workerSelector: "on",
+		userPath: USER,
+		bundledPath: BUNDLED,
+		workerUserPath: USER_WORKER,
+		workerBundledPath: BUNDLED_WORKER,
+		skipUserPath: true,
+		skipWorkerUserPath: true,
+		read,
+	});
+	assert.equal(on.text, "CURRENT SUPERVISOR");
+	assert.equal(on.source, BUNDLED);
+	assert.equal(on.worker, "CURRENT WORKER");
+	assert.deepEqual(read.seen, [BUNDLED, BUNDLED_WORKER], "legacy candidates are not read a second time");
+
+	const explicit = resolveWith(USER, reader({ [USER]: "EXPLICIT LEGACY BYTES" }));
+	assert.equal(explicit.text, "EXPLICIT LEGACY BYTES", "an explicit selector remains literal and never participates in bypass");
+});
+
 test("`on` falls back to the bundled spine when the user has none", () => {
 	const read = reader({ [BUNDLED]: "BUNDLED SPINE", [BUNDLED_WORKER]: "BUNDLED WORKER" });
 	const r = resolveWith("on", read);
