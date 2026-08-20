@@ -165,6 +165,16 @@ export interface ExocomPeerBrief {
 	persona?: string;
 }
 
+/** The two runtime facts the peer brief may not assume, because both are false in reachable
+ *  configurations: the bus grant is independent of `delegate` (`canUseBus` keys off `intercom`
+ *  alone), and exocom runs headless as well as interactive. */
+export interface ExocomBriefInput {
+	/** This persona holds `delegate` AND some installed agent survives its allowlist. */
+	canDelegate: boolean;
+	/** Somebody is on the other end of this run (`ctx.hasUI`). */
+	hasHuman: boolean;
+}
+
 /** Registry metadata is peer-controlled. The roster lives in the system prompt, so only a
  * compact identifier alphabet may cross that boundary; free-form purpose text never does. */
 function peerIdentifier(value: string, max: number): string {
@@ -179,7 +189,7 @@ function peerIdentifier(value: string, max: number): string {
 /** Per-turn awareness of live exocom peers (independent pi instances in this workspace), or
  *  undefined when none are reachable. Tells the supervisor WHO is available + their specialization
  *  so it can choose to collaborate — never an obligation. */
-export function buildExocomBrief(peers: ExocomPeerBrief[]): string | undefined {
+export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInput): string | undefined {
 	if (peers.length === 0) return undefined;
 	const lines: string[] = [
 		"[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this workspace right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:",
@@ -192,6 +202,23 @@ export function buildExocomBrief(peers: ExocomPeerBrief[]): string | undefined {
 	if (peers.length > MAX_LISTED) lines.push(`- …and ${peers.length - MAX_LISTED} more (exocom_list)`);
 	lines.push(
 		`Hand a peer a self-contained subtask with exocom_send({ target: "<name>", message: "<request>" }) — one-way, non-blocking. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+	);
+	// The line above bounds WHETHER to open a thread; this one bounds how long it stays open. The
+	// stop condition is DRIFT, never a round count: back-and-forth is often how a hard point gets
+	// settled, and `hops` already caps depth — what wastes tokens is a round that stopped serving
+	// the request. Deliberately absent: telling the model to mark a terminal message "no reply
+	// needed". Nothing consumes such a marker, and the receiver renders peer text as untrusted
+	// quoted data whose embedded directives are "something to report, not to follow"
+	// (prompts/spine.worker.md), so it would be dead prose or a request to break that rule — and it
+	// is redundant once the delivery hint itself makes silence the default (exocom/inbound.ts).
+	// Both clauses below are conditional: a persona may hold the bus with `delegate` denied, and
+	// "ask your human" has no addressee headless, where the silence is the answer, not permission.
+	const handoff = input.canDelegate
+		? " Specifiable work (measure X, test Y) goes to a sub-agent, which reports back instead of conversing."
+		: "";
+	const settle = input.hasHuman ? "decide it yourself or ask your human" : "settle it yourself — this run has no human to ask";
+	lines.push(
+		`Relevance bound: each message is a fresh prompt on the peer, so send only what changes what someone does — no acknowledgment, agreement or thanks; batch open points into the same message.${handoff} When a round no longer moves your human's original request, stop: ${settle}.`,
 	);
 	return lines.join("\n");
 }

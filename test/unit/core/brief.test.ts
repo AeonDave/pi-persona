@@ -158,8 +158,11 @@ test("caps the agent list and says how many more", () => {
 	assert.match(brief ?? "", /and 4 more/);
 });
 
+const XOPTS = { canDelegate: true, hasHuman: true };
+const PEERS = [{ name: "orion", persona: "dev" }];
+
 test("buildExocomBrief: no peers → no brief", () => {
-	assert.equal(buildExocomBrief([]), undefined);
+	assert.equal(buildExocomBrief([], XOPTS), undefined);
 });
 
 test("buildExocomBrief: lists identifier-only peer presence and excludes free-form metadata", () => {
@@ -172,7 +175,7 @@ test("buildExocomBrief: lists identifier-only peer presence and excludes free-fo
 		{ name: "orion", persona: "dev" },
 		{ name: "vega", persona: "reviewer" },
 		hostilePeer,
-	]);
+	], XOPTS);
 	assert.ok(brief);
 	assert.match(brief ?? "", /- orion \(dev\)/);
 	assert.match(brief ?? "", /- vega \(reviewer\)/);
@@ -183,4 +186,104 @@ test("buildExocomBrief: lists identifier-only peer presence and excludes free-fo
 	assert.match(brief ?? "", /do not poll exocom_list or arm timers/);
 	assert.match(brief ?? "", /exocom_list is presence only/);
 	assert.match(brief ?? "", /exocom_send\(\{ target: "<name>", message: "<request>" \}\)/);
+});
+
+test("buildExocomBrief: the relevance bound names the cost, bans courtesy traffic, batches, and stops on drift", () => {
+	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
+	assert.match(brief, /each message is a fresh prompt on the peer/i, "the bound must state what a round costs");
+	assert.match(brief, /no acknowledgment, agreement or thanks/i, "courtesy traffic is the spiral");
+	assert.match(brief, /batch open points into the same message/i);
+	assert.match(brief, /no longer moves your human's original request/i, "the stop condition is drift");
+});
+
+// A round COUNT is the wrong bound here — `hops` already caps depth and back-and-forth is often how
+// a hard point gets settled — so the brief must never acquire one, in any phrasing. A guard that
+// only knows the phrasings its author thought of is the same vacuous guard in a new costume, so
+// three shapes are recognised, per sentence (a verb and a noun that merely coexist in the brief
+// must not indict each other): a count NEAR a conversational noun (up to two words apart, so
+// "three short rounds" and "a couple of replies" cannot walk past it), the same with a roman
+// numeral, and a limiting verb sharing a sentence with either a count or a noun ("twice at most",
+// "cap the thread at 3"). Every alternative below is pinned by the self-check at the bottom.
+const CAP_COUNT = String.raw`\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|single|couple|pair|handful|once|twice|thrice`;
+// Two characters or more on purpose: a lone "I"/"V"/"X" is ordinary prose ("measure X, test Y").
+const CAP_ROMAN = String.raw`II|III|IV|VI{1,3}|IX|XI{0,2}|XV|XX`;
+const CAP_NOUN = String.raw`rounds?|repl(?:y|ies)|exchanges?|messages?|turns?|asks?|pings?|back-and-forths?|responses?|follow-?ups?|iterations?|volleys?|round-?trips?|threads?|conversations?`;
+const CAP_VERB = String.raw`at most|(?:no|not) (?:more|further) than|no further|cap(?:ped|s)?\b|limit(?:ed|s)?\b|maximum|max\b|budget|exceed|beyond|ceiling|quota|allowance|up to|stop(?:ping)? after|after the|by the|keep (?:it|them|the \w+) to|hold (?:it|them|the \w+) to|restrict(?:ed)? to|confine(?:d)? to|at the outside|tops\b|wrap (?:it )?up|once you have`;
+const nearNoun = (count: string) => new RegExp(String.raw`\b(?:${count})\b(?:\W+\w+){0,2}\W+(?:${CAP_NOUN})\b`, "i");
+const countCap = nearNoun(CAP_COUNT);
+const romanCap = nearNoun(CAP_ROMAN);
+const verbCap = new RegExp(String.raw`\b(?:${CAP_VERB})`, "i");
+const capNoun = new RegExp(String.raw`\b(?:${CAP_NOUN})\b`, "i");
+const capCount = new RegExp(String.raw`\b(?:${CAP_COUNT})\b`, "i");
+
+function arithmeticCap(text: string): string | undefined {
+	return text
+		.split(/\n|(?<=[.;:])\s+/)
+		.find((s) => countCap.test(s) || romanCap.test(s) || (verbCap.test(s) && (capNoun.test(s) || capCount.test(s))));
+}
+
+test("buildExocomBrief: the bound stays drift, never regresses into an arithmetic cap", () => {
+	// Every reachable rendering, including the overflow line, which carries a live number.
+	for (const canDelegate of [true, false]) {
+		for (const hasHuman of [true, false]) {
+			for (const peers of [PEERS, Array.from({ length: 12 }, (_, i) => ({ name: `p${i}`, persona: "dev" }))]) {
+				const brief = buildExocomBrief(peers, { canDelegate, hasHuman }) ?? "";
+				assert.equal(arithmeticCap(brief), undefined, `the brief counts rounds: ${arithmeticCap(brief)}`);
+			}
+		}
+	}
+	// …and the detector has to bite, or the assertion above passes on any cap at all. These are
+	// phrasings a future edit would plausibly reach for, not only the ones this list was written
+	// around: number words, digits, ordinals, roman numerals, quantifiers, and bare limit verbs.
+	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
+	for (const cap of [
+		"Stop after at most 3 exchanges.",
+		"Do not exceed two more replies per peer.",
+		"Cap the conversation at four turns, then decide.",
+		"Budget one ask per peer.",
+		"Wrap it up by the third round.",
+		"Send no more than a handful of replies.",
+		"Keep the thread to III rounds.",
+		"Answer a peer twice at most.",
+		"Send a couple of replies, then decide.",
+		"Cap the thread at 3, then decide it yourself.",
+		"After the fourth follow-up, close the thread.",
+		"Allow three short rounds per peer.",
+		"Stop once you have sent four responses.",
+		"Wrap it up by the sixth round.",
+		"Two peer messages is the ceiling.",
+		"Never send more than a dozen replies.",
+		"Reply at most twice.",
+		"Hold the thread to two volleys.",
+		"Limit yourself to a pair of exchanges.",
+		"Stop after your 2nd reply.",
+		"Do not go beyond three rounds.",
+		"A single round is usually enough.",
+		"Your third message must be the last.",
+		"Allow yourself two further pings.",
+	]) {
+		assert.equal(arithmeticCap(`${brief}\n${cap}`), cap, `an arithmetic cap phrased "${cap}" would slip through`);
+	}
+});
+
+// `canUseBus` keys off `intercom` alone, so a persona can hold the peer bus with `delegate` denied
+// (or allowing no installed agent). Urging a hand-off the gate will refuse is worse than silence.
+test("buildExocomBrief: the sub-agent hand-off appears only when this persona can actually delegate", () => {
+	const yes = buildExocomBrief(PEERS, { canDelegate: true, hasHuman: true }) ?? "";
+	const no = buildExocomBrief(PEERS, { canDelegate: false, hasHuman: true }) ?? "";
+	assert.match(yes, /goes to a sub-agent, which reports back instead of conversing/);
+	assert.doesNotMatch(no, /goes to a sub-agent/, "a persona that cannot fan out is not told to");
+	assert.doesNotMatch(no, /measure X/);
+	assert.match(no, /no longer moves your human's original request/, "only the hand-off clause drops, not the bound");
+});
+
+// exocom runs headless too (`shouldRun` has no UI gate), and "ask your human" has no addressee in a
+// `pi -p` run — the absent human is the answer, not permission to keep messaging the peer.
+test("buildExocomBrief: escalation addresses a human only when the run has one", () => {
+	const ui = buildExocomBrief(PEERS, { canDelegate: true, hasHuman: true }) ?? "";
+	const headless = buildExocomBrief(PEERS, { canDelegate: true, hasHuman: false }) ?? "";
+	assert.match(ui, /decide it yourself or ask your human/);
+	assert.doesNotMatch(ui, /settle it yourself/);
+	assert.match(headless, /settle it yourself/);
+	assert.doesNotMatch(headless, /ask your human/, "there is nobody to escalate to headless");
 });

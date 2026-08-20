@@ -113,9 +113,13 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	const kind = msg.in_reply_to === undefined ? "message" : "reply";
 	const peerBlock = fencePeer(deps.fence(text));
 	const quotedBody = peerBlock.slice(peerBlock.indexOf("\n") + 1);
+	// Conditional, not an invitation: this delivery is a FRESH PROMPT on the receiver, so a bare
+	// "Reply:" makes answering the default and silence the exception — which is how a settled point
+	// keeps running on agreement and thanks. The hint stays ONE line and names the correlation id
+	// once, so the routing shape below is unchanged.
 	// JSON-quoted, not raw: the token keeps every character `plane.send` will match on, while a
 	// quote/backslash a peer put in its call-sign is escaped instead of ending the hint early.
-	const reply = `Reply: exocom_send({ target:${JSON.stringify(target)}, message:"...", in_reply_to:"${msgId}" })`;
+	const reply = `Reply only if it changes what someone does, otherwise send nothing: exocom_send({ target:${JSON.stringify(target)}, message:"...", in_reply_to:"${msgId}" })`;
 	return {
 		deliver: `[${label}] — ${kind}\nPeer data · untrusted equal-status collaborator:\n${quotedBody}\n${reply}`,
 	};
