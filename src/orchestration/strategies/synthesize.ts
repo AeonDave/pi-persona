@@ -10,8 +10,10 @@
  */
 
 import { rosterSpec } from "../roster.ts";
-import { sumUsage } from "../reducers.ts";
+import { fenceUntrusted } from "../../core/fence.ts";
+import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import type { Strategy } from "../sdk.ts";
+import type { AgentResult } from "../types.ts";
 
 // Cooperative cross-talk (params.peers): gatherers surface contradictions early instead of
 // leaving them all to the synthesizer. Task-text injection keeps UI tree keys stable.
@@ -54,11 +56,19 @@ export const synthesize: Strategy = {
 		);
 		const usable = results.filter((r) => r.ok && r.output.trim());
 		if (usable.length === 0) {
+			const cause = summarizeFailedResults(results, "no gatherer produced output");
 			const reasons = results.map((r) => `[${r.agent}] ${r.error ?? "(no output)"}`).join("; ");
-			return { agent: "synthesize", output: `(no gatherer produced output: ${reasons})`, usage: sumUsage(results.map((r) => r.usage)), ok: false };
+			return {
+				agent: "synthesize",
+				output: `(no gatherer produced output: ${reasons})`,
+				usage: sumUsage(results.map((r) => r.usage)),
+				ok: false,
+				error: cause.error,
+				failureKind: cause.failureKind,
+			};
 		}
 
-		const sections = usable.map((r) => `--- [${r.agent}] ---\n${r.output.trim()}`).join("\n\n");
+		const sections = usable.map((r) => `--- [${r.agent}] ---\n${fenceUntrusted(r.output.trim())}`).join("\n\n");
 		const final = await sdk.agent({
 			agent: synthesizer,
 			task:
@@ -73,12 +83,17 @@ export const synthesize: Strategy = {
 		const structuredResult = final.structured?.result;
 		const headline = (typeof structuredResult === "string" && structuredResult.trim() ? structuredResult : firstLine).slice(0, 120);
 
-		return {
+		const result: AgentResult = {
 			agent: "synthesize",
 			output: final.output,
 			structured: { ...(final.structured ?? {}), gatherers: usable.length, headline },
 			usage: sumUsage([...results, final].map((r) => r.usage)),
 			ok: final.ok,
 		};
+		if (!final.ok) {
+			result.error = final.error ?? "the synthesizer failed";
+			result.failureKind = final.failureKind ?? "agent";
+		}
+		return result;
 	},
 };

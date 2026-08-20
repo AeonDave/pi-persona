@@ -42,7 +42,10 @@ const FAKE_CTX = { ui: { setStatus: () => {} } } as unknown as ExtensionContext;
 
 /** A fake `BrokerClient` — records calls, lets a test fire `onDeliver`/`onSteer`, and lets a
  *  test control whether/when `register()` settles (to exercise the not-yet-connected path). */
-function makeFakeClient(opts: { registerNeverSettles?: boolean } = {}) {
+function makeFakeClient(opts: {
+	registerNeverSettles?: boolean;
+	list?: BrokerClient["list"];
+} = {}) {
 	const deliverCbs: Array<(evt: DeliverEvent) => void> = [];
 	const steerCbs: Array<(text: string) => void> = [];
 	const sends: Array<{ to: string; kind: string; text: string }> = [];
@@ -54,7 +57,7 @@ function makeFakeClient(opts: { registerNeverSettles?: boolean } = {}) {
 		},
 		ask: async () => "supervisor answer",
 		reply: () => {},
-		list: async () => [],
+		list: opts.list ?? (async () => []),
 		onDeliver: (cb) => {
 			deliverCbs.push(cb);
 		},
@@ -222,4 +225,38 @@ test("contact_supervisor degrades cleanly (no hang, no crash) when the broker ne
 	assert.equal(fake.sends.length, 0, "never written to a broker that has not registered yet");
 	const text = r.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
 	assert.match(text, /no supervisor|not listening|dropped/i);
+});
+
+test("contact_peer's first list awaits and coalesces the broker roster refresh", async () => {
+	const pi = makeFakePi();
+	let listCalls = 0;
+	let resolveRoster!: (peers: Array<{ handle: string; label: string }>) => void;
+	const roster = new Promise<Array<{ handle: string; label: string }>>((resolve) => {
+		resolveRoster = resolve;
+	});
+	const fake = makeFakeClient({
+		list: () => {
+			listCalls += 1;
+			return roster;
+		},
+	});
+	installBridge(pi.pi, FAKE_CTX, {
+		env: { PI_PERSONA_BUS: "/tmp/x.sock", PI_PERSONA_HANDLE: "scout#1", PI_PERSONA_PEERS: "1" },
+		makeClient: () => fake.client,
+	});
+	// Let register() mark the bridge connected and start its initial roster request.
+	await Promise.resolve();
+	await Promise.resolve();
+	const tool = pi.tool("contact_peer");
+	assert.ok(tool);
+	const first = tool!.execute("t1", { action: "list" }, undefined, undefined, FAKE_CTX);
+	let settled = false;
+	void first.then(() => { settled = true; });
+	await Promise.resolve();
+	assert.equal(settled, false, "the first list must not report an empty pre-refresh cache");
+	assert.equal(listCalls, 1, "the tool call coalesces with the bridge's initial refresh");
+	resolveRoster([{ handle: "reviewer#2", label: "reviewer" }]);
+	const result = await first;
+	const text = result.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /reviewer/, "the first list exposes the roster returned by the broker");
 });

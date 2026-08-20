@@ -638,7 +638,7 @@ export function renderCompletion(
 	const report = buildCompletionReport(runs, fence);
 	const doneOutput = runs
 		.filter((r) => r.status === "done")
-		.map((r) => r.result?.output ?? "")
+		.map((r) => getFullRunOutput(r))
 		.join("\n");
 	const note = scan(doneOutput);
 	return boundCompletionSurface(note ? `${report}\n\n${note}` : report);

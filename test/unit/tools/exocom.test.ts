@@ -161,6 +161,35 @@ test("exocom_list bounds model output and details while retaining pool counts an
 	assert.equal((secondPage.details as any).offset, 24);
 });
 
+test("exocom_list renderer identifies the requested page and its next offset", async () => {
+	const m = mockPi();
+	const peers = Array.from({ length: 5 }, (_, i) => ({
+		name: `peer-${i}`, persona: "dev", model: "m", context_pct: i, purpose: "",
+		displayName: `peer-${i}`, target: `peer-${i}@0123456789abcdef01234567`,
+	}));
+	registerExocomTools(m.pi, () => stubPlane({ listPeers: () => peers }) as never);
+	const tool = m.tools.get("exocom_list");
+	const result = await tool.execute("c", { offset: 2, limit: 2 }, undefined, undefined, {});
+	const rendered = tool.renderResult(result, { expanded: true }, plainTheme).render(200).join("\n");
+	assert.match(rendered, /showing 3[–-]4 of 5/, "the card must not look like page one");
+	assert.match(rendered, /next offset: 4/i, "the operator can continue from the current page");
+});
+
+test("exocom_list keeps collapsed and expanded metadata rows within 100 terminal columns", async () => {
+	const m = mockPi();
+	const peers = [{
+		name: "peer", persona: "p".repeat(100), model: "m".repeat(300), context_pct: 99, purpose: "",
+		displayName: "d".repeat(100), target: "peer@0123456789abcdef01234567",
+	}];
+	registerExocomTools(m.pi, () => stubPlane({ listPeers: () => peers }) as never);
+	const tool = m.tools.get("exocom_list");
+	const result = await tool.execute("c", {}, undefined, undefined, {});
+	for (const expanded of [false, true]) {
+		const lines = tool.renderResult(result, { expanded }, plainTheme).render(500).map((line: string) => line.trimEnd());
+		assert.ok(lines.every((line: string) => line.length <= 100), `${expanded ? "expanded" : "collapsed"} row exceeded 100 columns: ${lines.join("\n")}`);
+	}
+});
+
 test("exocom_send broadcast bounds model output and structured ids/errors with totals", async () => {
 	const m = mockPi();
 	const peers = Array.from({ length: 1_000 }, (_, i) => ({

@@ -60,10 +60,13 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   the host never starts, and the child spawns byte-identical to pre-broker pi-persona — see
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 - **Provider fallback**: `buildEngine` wraps the engine in `withModelFallback` (`engine/fallback.ts`).
-  A run whose model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on
-  the SAME model id under another authenticated provider, walking the whole chain (session provider
-  first) until one responds — "priority to the supervisor's provider, but try others and switch on
-  error". Only `failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal.
+  A provider-qualified `spec.model` is an explicit provider/billing pin and is strict by default:
+  a failed `openai-codex/...` leg never silently moves to OpenCode, and a failed
+  `claude-pro-max-native/...` leg never silently moves to a metered third-party route. Unpinned/default
+  selections may retry the SAME model id only through the data-driven, family-compatible provider
+  policy (OpenAI-family → OpenAI providers; Claude-family → the native Claude provider). A caller may
+  explicitly opt a pinned run into cross-provider recovery. Only `failureKind === "provider"` reroutes;
+  abort/timeout/contract/unknown/agent are terminal.
   Engines classify the cause on the `AgentResult` (`failureKind` + resolved `modelUsed`); keep those
   set when you touch `inproc.ts`/`adapter.ts` or the fallback silently stops working.
 - **Fork-bomb guard**: children run with env `PI_PERSONA_DISABLE=1` so pi-persona self-disables inside

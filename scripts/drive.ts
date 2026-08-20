@@ -12,22 +12,35 @@
  * (workers can stay cheap via roster/member `model` pins in teams.yaml).
  *
  * Usage:
- *   node --import tsx scripts/drive.ts [--persona magi] [--engine inproc] [--model claude-haiku-4-5] "your prompt"
+ *   node --import tsx scripts/drive.ts [--persona magi] [--engine inproc] [--model claude-pro-max-native/claude-haiku-4-5] [--thinking xhigh] [--tools read,grep,find,ls,delegate] "your prompt"
  */
 import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { effectiveDriveExitCode, terminalAssistantError } from "./drive-status.ts";
 
 type Json = Record<string, unknown>;
 
-function parseArgs(argv: string[]): { persona?: string; engine?: string; model?: string; prompt: string } {
-	const out: { persona?: string; engine?: string; model?: string; prompt: string } = { prompt: "" };
+interface DriveOptions {
+	persona?: string;
+	engine?: string;
+	model?: string;
+	thinking?: string;
+	tools?: string;
+	prompt: string;
+}
+
+function parseArgs(argv: string[]): DriveOptions {
+	const out: DriveOptions = { prompt: "" };
 	const rest: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] as string;
 		if (a === "--persona") out.persona = argv[++i];
 		else if (a === "--engine") out.engine = argv[++i];
 		else if (a === "--model") out.model = argv[++i];
+		else if (a === "--thinking") out.thinking = argv[++i];
+		else if (a === "--tools") out.tools = argv[++i];
 		else rest.push(a);
 	}
 	out.prompt = rest.join(" ");
@@ -63,7 +76,7 @@ function resultText(result: unknown): string {
 
 const opts = parseArgs(process.argv.slice(2));
 if (!opts.prompt) {
-	console.error('usage: drive.ts [--persona x] [--engine inproc] [--model m] "prompt"');
+	console.error('usage: drive.ts [--persona x] [--engine inproc] [--model provider/id] [--thinking level] [--tools names] "prompt"');
 	process.exit(2);
 }
 
@@ -77,18 +90,32 @@ if (opts.engine) env.PI_PERSONA_ENGINE = opts.engine;
 // rebuilding a `shell: true` cmdline truncated multi-line prompts on Windows (cmd.exe
 // treats an embedded newline as a command separator) — a harness-only bug that faked
 // "your message was cut off" from the model. stdin has no such limit or length cap.
-const args = ["--mode", "json", "-p"];
+const args = ["--mode", "json", "-p", "--no-session"];
 if (opts.model) args.push("--model", opts.model);
+if (opts.thinking) args.push("--thinking", opts.thinking);
+if (opts.tools) args.push("--tools", opts.tools);
 
-console.log(`▶ pi -p   persona=${opts.persona ?? "—"}  engine=${opts.engine ?? "inproc (default)"}  model=${opts.model ?? "default"}`);
+console.log(`▶ pi -p   persona=${opts.persona ?? "—"}  engine=${opts.engine ?? "inproc (default)"}  model=${opts.model ?? "default"}  thinking=${opts.thinking ?? "default"}`);
 console.log(`  prompt: ${short(opts.prompt, 120)}\n`);
 
-// Spawn via the shell so Windows resolves `pi` → `pi.cmd`; quote each token (no prompt
-// token now, so nothing multi-line ever reaches the shell re-parse).
-const win = process.platform === "win32";
-const q = (s: string): string => `"${s.replace(/"/g, win ? '""' : '\\"')}"`;
-const cmdline = ["pi", ...args].map(q).join(" ");
-const proc = spawn(cmdline, { env, stdio: ["pipe", "pipe", "pipe"], shell: true });
+// Invoke Pi's installed JS entry directly through this Node runtime. This avoids both the Windows
+// `.cmd`/shell quoting path and PATH drift to a different global Pi. The prompt remains on stdin.
+const piIndex = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const piCli = join(dirname(piIndex), "cli.js");
+const proc = spawn(process.execPath, [piCli, ...args], {
+	env,
+	stdio: ["pipe", "pipe", "pipe"],
+	windowsHide: true,
+});
+let spawnError: string | undefined;
+// `spawn()` reports launch failures asynchronously. Without this listener Windows turns a
+// missing/inaccessible runtime into an uncaught exception instead of a clean smoke-test failure.
+proc.on("error", (error) => {
+	spawnError = error instanceof Error ? error.message : String(error);
+});
+proc.stdin.on("error", () => {
+	// A provider/process may terminate before consuming stdin; `close` below owns the diagnosis.
+});
 proc.stdin.setDefaultEncoding("utf8");
 proc.stdin.write(opts.prompt);
 proc.stdin.end();
@@ -149,7 +176,7 @@ proc.stderr.on("data", (d: string) => {
 
 proc.on("close", (code: number | null) => {
 	const secs = ((Date.now() - t0) / 1000).toFixed(1);
-	const exitCode = effectiveDriveExitCode(code, assistantError);
+	const exitCode = effectiveDriveExitCode(code, assistantError ?? spawnError);
 	if (finalUsage) {
 		const cost = (finalUsage.cost as Json | undefined)?.total ?? 0;
 		console.log(
@@ -157,6 +184,7 @@ proc.on("close", (code: number | null) => {
 		);
 	}
 	if (assistantError) console.error(`[assistant error] ${short(assistantError, 600)}`);
+	if (spawnError) console.error(`[spawn error] ${short(spawnError, 600)}`);
 	if (code !== 0 && stderr.trim()) console.error(`[stderr] ${stderr.trim().slice(0, 600)}`);
 	console.log(`▷ exit ${exitCode}`);
 	process.exit(exitCode);

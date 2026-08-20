@@ -6,6 +6,7 @@
  */
 
 import { emptyUsage } from "../../engine/stream.ts";
+import { fenceUntrusted } from "../../core/fence.ts";
 import { sumUsage } from "../reducers.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
@@ -40,7 +41,9 @@ export const pipeline: Strategy = {
 			// between steps marks nothing at all — either way the chain must stop here rather than
 			// walk the rest of the roster.
 			if (sdk.signal?.aborted) return cancelled(results, upstream);
-			const task = upstream ? `${input.task}\n\n--- previous step's output (build on it) ---\n${upstream}` : input.task;
+			const task = upstream
+				? `${input.task}\n\n--- previous step's output (build on it) ---\n${fenceUntrusted(upstream)}`
+				: input.task;
 			const r = await sdk.agent({ ...rosterSpec(member), task });
 			results.push(r);
 			if (!r.ok) {

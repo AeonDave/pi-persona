@@ -1,7 +1,7 @@
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona, {
 	agentNodeStatusForDelegate,
 	announceAsyncRunSettlement,
+	canDeliverPersonaNotification,
 	coachingDisabledHint,
 	type EngineFactories,
 	exocomInboundDisposition,
@@ -204,6 +205,28 @@ test("piPersona registers the delegate tool, f8/f9 shortcuts, and agents/doctor/
 	assert.equal(m.shortcutCount(), 2); // f8 (cycle persona) + f9 (agent overlay)
 });
 
+test("models includes installed native-provider catalogs when the auth snapshot is partial", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-native-model-catalog-"));
+	const native = { provider: "claude-pro-max-native", id: "claude-opus-4-8" };
+	const session = { provider: "openai-codex", id: "gpt-5.6-luna" };
+	const ctx = {
+		...base,
+		model: session,
+		modelRegistry: {
+			getAll: () => [native, session, { provider: "openrouter", id: "anthropic/claude-opus-4-8" }],
+			getAvailable: () => [session],
+			getRegisteredProviderIds: () => [native.provider],
+		},
+	};
+	const models = m.tool("models") as { execute: AnyFn };
+	const result = await models.execute("native-catalog", { query: "opus-4-8" }, undefined, undefined, ctx);
+	const text = String(result.content?.[0]?.text ?? "");
+	assert.match(text, /claude-pro-max-native\/claude-opus-4-8/, "an installed native provider must survive a partial getAvailable snapshot");
+	assert.doesNotMatch(text, /openrouter/, "an unrelated unconfigured built-in provider must stay hidden");
+});
+
 test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable per-leg override)", () => {
 	// This pins model-facing discoverability. The canonical field mapping is tested against
 	// `specOf()` in the delegate unit suite, while background scheduling is exercised below through
@@ -231,6 +254,93 @@ test("intercom schema bounds routing identifiers and delivered messages", () => 
 	assert.equal(intercom.parameters.properties.to.maxLength, MAX_INTERCOM_REF_CHARS);
 	assert.equal(intercom.parameters.properties.askId.maxLength, MAX_INTERCOM_REF_CHARS);
 	assert.equal(intercom.parameters.properties.message.maxLength, MAX_INTERCOM_MESSAGE_CHARS);
+});
+
+test("Pi's tool_result boundary marks recoverable pi-persona failures as real tool errors", async () => {
+	// Pi 0.84.x ignores an `isError` property returned from execute(); the host event starts false.
+	// This test deliberately models that boundary instead of trusting the direct execute() shape.
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(tempDir("pi-persona-tool-error-"));
+	const flow = m.tool("flow") as { execute: AnyFn; renderResult: AnyFn };
+	const raw = await flow.execute("missing-flow", { name: "definitely-missing", task: "probe" }, undefined, undefined, ctx);
+	const failures = [
+		["flow", raw],
+		["intercom", await (m.tool("intercom") as { execute: AnyFn }).execute("bad-intercom", { action: "result" }, undefined, undefined, ctx)],
+		["timer", await (m.tool("timer") as { execute: AnyFn }).execute("bad-timer", { action: "cancel" }, undefined, undefined, ctx)],
+		["council", await (m.tool("council") as { execute: AnyFn }).execute("bad-council", { question: "decide" }, undefined, undefined, ctx)],
+		[
+			"delegate",
+			await (m.tool("delegate") as { execute: AnyFn }).execute(
+				"bad-delegate",
+				{ agent: "scout", task: "probe", model: "missing-provider/missing-model" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		],
+	] as const;
+	for (const [toolName, result] of failures) {
+		const patched = m.fire(
+			"tool_result",
+			{ toolName, content: result.content, details: result.details, isError: false },
+			ctx,
+		) as { isError?: boolean; details?: Record<string, unknown> } | undefined;
+		assert.equal(patched?.isError, true, `${toolName}: the extension must repair the host-visible error bit`);
+		assert.equal(patched?.details?.__piPersonaToolError, undefined, `${toolName}: the private transport marker must not persist`);
+	}
+	const card = renderComponent(flow.renderResult(raw, { expanded: false }, traceTheme));
+	assert.match(card, /flow failed/i, "the same pre-run failure must never render as a green completion");
+	assert.doesNotMatch(card, /flow complete/i);
+});
+
+test("idle notifiers stay closed while mandatory orchestration owns the input hook", () => {
+	assert.equal(canDeliverPersonaNotification(false, false, true), true);
+	assert.equal(canDeliverPersonaNotification(true, false, true), false, "an old completion must not start a competing turn during mandatory orchestration");
+	assert.equal(canDeliverPersonaNotification(false, true, true), false, "deferred orchestration keeps the same boundary");
+	assert.equal(canDeliverPersonaNotification(false, false, false), false);
+});
+
+test("flow checkpoints fail closed in headless mode and when the TUI chooser is dismissed", async () => {
+	for (const mode of ["headless", "dismissed"] as const) {
+		const cwd = tempDir(`pi-persona-flow-gate-${mode}-`);
+		const flowDir = path.join(cwd, ".pi", "flows");
+		fs.mkdirSync(flowDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(flowDir, "qa-gate.flow.json"),
+			JSON.stringify({
+				name: "qa-gate",
+				phases: [
+					{ id: "plan", strategy: "fanout", roster: "review", gate: true },
+					{ id: "after", strategy: "fanout", roster: "review", needs: ["plan"] },
+				],
+			}),
+		);
+		const calls: string[] = [];
+		const engine: StrategyEngine = {
+			run: async (spec) => {
+				calls.push(spec.agent);
+				return { agent: spec.agent, output: `ok:${spec.agent}`, usage: emptyUsage(), ok: true };
+			},
+		};
+		const m = makeMockPi();
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+		const base = makeCtx(cwd).ctx;
+		const ctx = {
+			...base,
+			hasUI: mode === "dismissed",
+			ui: {
+				...base.ui,
+				select: async () => undefined,
+			},
+		};
+		await m.fire("session_start", undefined, ctx);
+		const flow = m.tool("flow") as { execute: AnyFn };
+		const result = await flow.execute(`gate-${mode}`, { name: "qa-gate", task: "plan only until approval" }, undefined, undefined, ctx);
+
+		assert.equal((result.details as { ok?: boolean }).ok, false, `${mode}: an absent explicit approval must reject the checkpoint`);
+		assert.equal(calls.length, 3, `${mode}: only the gated review roster may run; its dependent must remain blocked`);
+	}
 });
 
 test("a pinned persona that does not resolve is reported, not silently ignored", async () => {
@@ -610,6 +720,75 @@ test("opt-in: a fresh install loads NO personas until /persona restore installs 
 	}
 });
 
+test("activation upgrades an exact known-pristine seeded persona before discovery and reports it", async () => {
+	const fresh = tempDir("pi-persona-seeded-persona-migration-");
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	const old = "---\nname: dev\nlabel: Legacy Dev\npersona: true\n---\nOLD BEHAVIOR THAT MUST NOT LOAD\n";
+	const target = path.join(fresh, "persona", "agents", "dev.md");
+	fs.mkdirSync(path.dirname(target), { recursive: true });
+	fs.writeFileSync(target, old);
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi, {
+			seedMigration: {
+				legacyDefaults: {
+					"personas/dev.md": {
+						size: Buffer.byteLength(old),
+						sha256: createHash("sha256").update(old).digest("hex"),
+					},
+				},
+			},
+		});
+		const { ctx: base, notes } = makeCtx(os.tmpdir());
+		const ctx = { ...base, hasUI: true };
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "dev", ctx);
+		const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
+		assert.doesNotMatch(prompt, /OLD BEHAVIOR THAT MUST NOT LOAD/);
+		assert.doesNotMatch(fs.readFileSync(target, "utf8"), /OLD BEHAVIOR THAT MUST NOT LOAD/);
+
+		notes.length = 0;
+		await m.cmd("doctor", "", ctx);
+		assert.match(notes.join("\n"), /seed migration: upgraded .*dev\.md/i);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+	}
+});
+
+test("/doctor exposes custom persona-agent name collisions and neither definition loads", async () => {
+	const fresh = tempDir("pi-persona-definition-collision-user-");
+	const cwd = tempDir("pi-persona-definition-collision-project-");
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	const userPersona = path.join(fresh, "persona", "agents", "quartz.md");
+	const projectAgent = path.join(cwd, ".pi", "agents", "quartz.md");
+	fs.mkdirSync(path.dirname(userPersona), { recursive: true });
+	fs.mkdirSync(path.dirname(projectAgent), { recursive: true });
+	fs.writeFileSync(userPersona, "---\nname: quartz\nlabel: Quartz\npersona: true\n---\nSupervisor\n");
+	fs.writeFileSync(projectAgent, "---\nname: quartz\ntools: [read]\n---\nWorker\n");
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx: base, notes } = makeCtx(cwd);
+		const ctx = { ...base, hasUI: true };
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "quartz", ctx);
+		assert.match(notes.at(-1) ?? "", /not found/i, "the ambiguous persona must not activate");
+
+		notes.length = 0;
+		await m.cmd("doctor", "", ctx);
+		const report = notes.join("\n");
+		assert.match(report, /definition collisions.*quartz/i);
+		assert.match(report, new RegExp(userPersona.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(report, new RegExp(projectAgent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+	}
+});
+
 test("opt-in auto-seed refreshes an enabled spine before the first session continues", async () => {
 	const fresh = tempDir("pi-persona-auto-seed-spine-");
 	const previousAgentDir = process.env.PI_AGENT_DIR;
@@ -940,6 +1119,44 @@ test("a declared verifier cannot start in a later call while the mutation it mus
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test("maxChildren cannot silently truncate the fresh verifier from an otherwise valid serial batch", async () => {
+	const cwd = tempDir("pi-persona-fresh-verifier-cap-");
+	const personaPath = path.join(cwd, ".pi", "agents", "bounded-conductor.md");
+	fs.mkdirSync(path.dirname(personaPath), { recursive: true });
+	fs.writeFileSync(
+		personaPath,
+		"---\nname: bounded-conductor\npersona: true\ndelegation:\n  requireFreshVerification: true\n  verificationAgents: [verifier]\n---\nCustom supervisor.",
+	);
+	let spawned = 0;
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			spawned++;
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "bounded-conductor", ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const tasks = [
+		...Array.from({ length: 64 }, (_, i) => ({ agent: "operator", task: `mutation ${i}` })),
+		{ agent: "verifier", task: "freshly verify every mutation" },
+	];
+	const result = await delegate.execute(
+		"fresh-verifier-cap",
+		{ tasks, concurrency: 1, sync: true },
+		undefined,
+		undefined,
+		ctx,
+	);
+
+	assert.equal(result.isError, true, "the batch must be rejected rather than run without its verifier");
+	assert.match(String(result.content?.[0]?.text ?? ""), /verifier|max.?children|limit|truncat/i);
+	assert.equal(spawned, 0, "policy validation must happen against the batch that will actually execute");
 });
 
 test("async fanout honors its requested per-call concurrency", async () => {
@@ -2295,6 +2512,19 @@ test("delegate, intercom, council, and flow cards bound collapsed output and pri
 	assert.match(delegateCard, /worker-11/);
 	assert.match(delegateCard, /provider failed/);
 	assert.match(delegateCard, /expand/i);
+	const wideDelegateCard = renderComponent(
+		delegate.renderResult(
+			{
+				content: [{ type: "text", text: "full" }],
+				details: { views: [{ label: `worker-${"L".repeat(200)}`, running: false, ok: true, output: "result ".concat("x".repeat(2_000)), usage: emptyUsage() }] },
+				isError: false,
+			},
+			{ expanded: false },
+			traceTheme,
+		),
+		500,
+	);
+	assert.ok(wideDelegateCard.split("\n").every((line) => line.trimEnd().length <= 100), wideDelegateCard);
 
 	assert.ok(intercom.renderResult, "intercom has a compact result renderer");
 	assert.ok(intercom.renderCall, "intercom has a compact call renderer");
@@ -2381,6 +2611,7 @@ test("dynamic tool chrome sanitizes and bounds hostile labels and causes", () =>
 	const delegate = m.tool("delegate") as { renderCall: AnyFn; renderResult: AnyFn };
 	const council = m.tool("council") as { renderCall: AnyFn; renderResult: AnyFn };
 	const flow = m.tool("flow") as { renderCall: AnyFn; renderResult: AnyFn };
+	const models = m.tool("models") as { renderCall: AnyFn };
 	const entry = m.entryRenderer("pi-persona-result");
 	const surfaces = [
 		renderComponent(delegate.renderCall({ agent: hostile, task: hostile }, traceTheme)),
@@ -2389,6 +2620,7 @@ test("dynamic tool chrome sanitizes and bounds hostile labels and causes", () =>
 		renderComponent(council.renderResult({ content: [{ type: "text", text: "no" }], details: { ok: false, error: hostile, body: "no" } }, { expanded: false }, traceTheme)),
 		renderComponent(flow.renderCall({ name: hostile }, traceTheme)),
 		renderComponent(flow.renderResult({ content: [{ type: "text", text: "no" }], details: { ok: false, failedPhase: hostile, error: hostile } }, { expanded: false }, traceTheme)),
+		renderComponent(models.renderCall({ query: hostile }, traceTheme)),
 		renderComponent(entry!({ data: { label: hostile, content: "ok", ok: true } }, { expanded: false }, traceTheme)),
 	];
 	for (const surface of surfaces) {
@@ -3042,6 +3274,24 @@ test("a failed delegate call does not silently reset the supervisor's by-hand nu
 	) as { content?: Array<{ type: string; text?: string }> } | undefined;
 	assert.match(failed?.content?.map((c) => c.text ?? "").join("\n") ?? "", /re-dispatch|failed hand-off/i);
 	assert.ok(m.fire("tool_result", heavy, ctx), "the next direct command still reaches the five-step threshold");
+});
+
+test("failed hand-off dedupe fingerprints same-size text and preserves distinct failures", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(300) }] };
+	for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+	const failed = (text: string): { content?: Array<{ type: string; text?: string }> } | undefined =>
+		m.fire("tool_result", { toolName: "delegate", content: [{ type: "text", text }], isError: true }, ctx) as
+			{ content?: Array<{ type: string; text?: string }> } | undefined;
+	const first = failed("unknown agent");
+	assert.ok(first, `first failed hand-off hook returned ${JSON.stringify(first)}`);
+	assert.match(first?.content?.map((c) => c.text ?? "").join("\n") ?? "", /re-dispatch|failed hand-off/i, JSON.stringify(first));
+	const distinct = failed("different err");
+	assert.match(distinct?.content?.map((c) => c.text ?? "").join("\n") ?? "", /re-dispatch|failed hand-off/i);
 });
 
 test("PI_PERSONA_NUDGE=off silences the tool_result hook — both the sweep and the surrender note", async () => {

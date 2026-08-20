@@ -10,11 +10,11 @@
  * (`ARTIFACT_MAX_BYTES`) and reconciled with the bytes actually there — nothing below can do
  * either, so an unverified caller would advertise a payload of any size to its model.
  *
- * `fence`/`attribute` are injected rather than imported directly: `extension.ts` wires the
- * real `fenceUntrusted`/`attributeInbound` (src/core/fence.ts) at the call site. Attribution
- * MUST come from the caller's `resolvedLabel` (the registry-resolved identity) — this module
- * never reads `msg.from_name`, which is the envelope's own self-report and not to be trusted
- * (a peer could otherwise spoof its sender for attribution purposes).
+ * Attribution MUST come from the caller's `resolvedLabel` (the registry-resolved identity) —
+ * this module never reads `msg.from_name`, which is the envelope's own self-report and not to be
+ * trusted (a peer could otherwise spoof its sender for attribution purposes). The canonical
+ * `fencePeer` implementation is used here directly: there is one trust-sensitive path, not an
+ * injectable callback whose tests could pass while production attribution drifted.
  */
 import { parseExocomArtifactDescriptor, truncateForInject, type ExocomMessage } from "./envelope.ts";
 import type { SeenMessages, SenderBudget } from "./guards.ts";
@@ -26,8 +26,6 @@ export interface InboundDeps {
 	budget: SenderBudget;
 	seen: SeenMessages;
 	injectMaxBytes: number;
-	fence: (t: string) => string;
-	attribute: (label: string, t: string) => string;
 	/** Authenticated, caller-resolved route for the sender. The plane supplies a stable,
 	 *  session-qualified reply token; this pure layer never derives routing from the human label.
 	 *  Unset is a defensive fallback for callers that have no registry context. */
@@ -106,7 +104,13 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	// by the per-sender message count and by the plane's descriptor verification instead — which
 	// is what makes the declared number honest AND caps it (`ARTIFACT_MAX_BYTES`, plane.ts).
 	const wireBytes = Buffer.byteLength(msg.text, "utf8");
-	if (!deps.budget.allow(msg.from_session, wireBytes)) return { drop: "budget" };
+	if (!deps.budget.allow(msg.from_session, wireBytes)) {
+		// seenBefore reserves the id so a duplicate can be rejected without charging the
+		// budget twice. A budget rejection is different: it is transient, and the sender
+		// must be able to retry the same id after the window rolls over.
+		deps.seen.forget(msg.from_session, msg.msg_id);
+		return { drop: "budget" };
+	}
 	// Artifacts are structured transport metadata, but their preview/path are still peer-authored
 	// text. Apply the exact same injection budget after rendering the readable form; otherwise a
 	// small wire descriptor can expand into several KiB inside the supervisor's next turn.
@@ -122,7 +126,7 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	// against OUR clock and degrades an unbelievable peer timestamp to an honest label instead of
 	// dressing a peer-chosen value in the harness's voice (src/core/time.ts).
 	const sent = peerSentLabel(msg.ts, (deps.now ?? Date.now)());
-	const peerBlock = fencePeer(deps.fence(text));
+	const peerBlock = fencePeer(text);
 	const quotedBody = peerBlock.slice(peerBlock.indexOf("\n") + 1);
 	// Conditional, not an invitation: this delivery is a FRESH PROMPT on the receiver, so a bare
 	// "Reply:" makes answering the default and silence the exception — which is how a settled point

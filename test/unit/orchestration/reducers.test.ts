@@ -46,3 +46,13 @@ test("aggregateResults preserves a failure kind when the failed leg has no outpu
 	assert.match(agg.output, /worktree requires a clean Git checkout/);
 	assert.match(agg.output, /contract/);
 });
+
+test("aggregateResults propagates the homogeneous failed-leg cause", () => {
+	const agg = aggregateResults([
+		{ agent: "a", output: "", usage: usage(1), ok: false, error: "provider unavailable", failureKind: "provider" },
+		{ agent: "b", output: "", usage: usage(1), ok: false, error: "provider unavailable", failureKind: "provider" },
+	]);
+	assert.equal(agg.ok, false);
+	assert.equal(agg.error, "provider unavailable");
+	assert.equal(agg.failureKind, "provider");
+});

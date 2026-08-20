@@ -77,6 +77,25 @@ test("child adapter leaves the task untouched when no contract is requested", as
 	assert.ok(!r.output.includes("output contract"), "no contract requested → no block injected");
 });
 
+test("child adapter fails closed when a requested contract is missing", async () => {
+	let spawned = false;
+	const engine = makeEngine({
+		resolveAgent,
+		contracts: () => undefined,
+		childOptions: {
+			resolveInvocation: (args) => {
+				spawned = true;
+				return resolveFake(args);
+			},
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "decide", outputContract: "missing" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "contract");
+	assert.match(r.error ?? "", /output contract [\"']missing[\"'] not found/);
+	assert.equal(spawned, false, "a missing contract must not run an unconstrained agent");
+});
+
 test("child adapter carries an agent tools deny block to the spawned pi process", async () => {
 	const seen: string[] = [];
 	const restricted = (name: string): AgentConfig | undefined =>

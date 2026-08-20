@@ -11,11 +11,10 @@
  * Ported from comtac `broker/client.ts`, slimmed to the B6 frame set and to what a
  * per-session child — which lives strictly less than the run — actually needs: capped
  * exponential backoff (250ms–5s) on the INITIAL connect only (comtac's presence tracking,
- * `list` request timeout/roster, and endless reconnect-after-disconnect "storm" are
- * dropped — YAGNI here, see spec B6/Task 4 brief). An unexpected disconnect (host died
- * mid-run) is NOT auto-reconnected: sends silently go nowhere and in-flight asks simply
- * ride out their own timeout, exactly as the design's error-handling section specifies —
- * the child keeps executing, mute, never crashing.
+ * roster cache, and endless reconnect-after-disconnect "storm" are dropped — YAGNI here,
+ * see spec B6/Task 4 brief). An unexpected disconnect (host died
+ * mid-run) is NOT auto-reconnected: sends silently go nowhere, while in-flight asks/lists
+ * reject promptly and clean up their timers — the child keeps executing, mute, never crashing.
  *
  * Pure over an injected socket factory (`net`), mirroring `host.ts`'s `net` param — same
  * transport-injection seam, opposite side of the same fake in tests.
@@ -69,6 +68,9 @@ const RECONNECT_BASE_MS = 250;
 const RECONNECT_MAX_MS = 5000;
 const CONNECT_MAX_ATTEMPTS = 6;
 const ASK_TIMEOUT_MS = 600_000;
+// A roster lookup is one local socket/pipe round-trip, unlike a blocking supervisor ask. Do not
+// let a half-open broker pin `contact_peer list/send` until the child idle watchdog fires.
+const LIST_TIMEOUT_MS = 10_000;
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => {
@@ -219,8 +221,8 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 			),
 		);
 		s.on("error", () => {
-			/* permanent sink post-connect: ask()/list() surface a dead link via their own
-			 * timeout/hang, per the design's mid-run host-death handling (header). */
+			/* The close event rejects in-flight requests; this listener only prevents an
+			 * unhandled socket error from taking down the child. */
 		});
 		s.once("close", () => {
 			socket = undefined;
@@ -228,6 +230,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 			// reply would otherwise leave register() pending for the child's whole life.
 			registerSettle?.reject(new Error("connection closed during register"));
 			registerSettle = undefined;
+			if (!closed) rejectAllPending("broker connection closed");
 		});
 
 		return new Promise<void>((resolve, reject) => {
@@ -247,6 +250,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function ask(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<string> {
+		if (closed) return Promise.reject(new Error("broker client closed"));
 		const msgId = randomUUID();
 		return new Promise<string>((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;
@@ -293,9 +297,23 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function list(): Promise<Array<{ handle: string; label: string }>> {
+		if (closed) return Promise.reject(new Error("broker client closed"));
 		const reqId = randomUUID();
 		return new Promise((resolve, reject) => {
-			pendingLists.set(reqId, { resolve, reject });
+			let timer: ReturnType<typeof setTimeout>;
+			const finish = (): void => {
+				clearTimeout(timer);
+				pendingLists.delete(reqId);
+			};
+			pendingLists.set(reqId, {
+				resolve: (peers) => { finish(); resolve(peers); },
+				reject: (err) => { finish(); reject(err); },
+			});
+			timer = setTimeout(() => {
+				finish();
+				reject(new Error(`list timeout after ${LIST_TIMEOUT_MS}ms`));
+			}, LIST_TIMEOUT_MS);
+			timer.unref?.();
 			write({ t: "list", reqId });
 		});
 	}

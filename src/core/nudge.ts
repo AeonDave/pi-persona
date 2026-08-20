@@ -31,6 +31,17 @@ const HANDOFF_TOOLS = new Set(["delegate", "council"]);
  * proxy for the amount of direct coding work, so every call counts as substantive. */
 const MUTATING_TOOLS = new Set(["edit", "write", "apply_patch"]);
 
+/** Stable, fixed-size identity for an untrusted failed tool result. The input is streamed through
+ * the hash and never retained in the nudge state; the stored key is only the length + 32-bit digest. */
+function fingerprintFailure(text: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return `${text.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 export interface NudgeThresholds {
 	/** A single result at/above this many chars is a fat one-shot dump — nudge on its own. Kept
 	 *  high so a normal large file read doesn't trip it; only a linpeas/ffuf-scale dump does. */
@@ -41,6 +52,8 @@ export interface NudgeThresholds {
 	/** A command whose output is below this many chars is orchestration glue (echo/cd/one-line
 	 *  check), not a sweep step: it does not advance the run counter. */
 	minStepChars: number;
+	/** Number of identical consecutive failed hand-off reminders to suppress before repeating one. */
+	failedHandoffBackoff?: number;
 }
 
 export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
@@ -49,6 +62,7 @@ export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
 	// The standing delegation brief (core/brief.ts) carries the default every turn; this is the
 	// reactive backstop for the supervisor who grinds a sweep through it anyway.
 	minStepChars: 200, // below this a command is glue, not a sweep step
+	failedHandoffBackoff: 1, // suppress one identical immediate repair reminder; the failure remains visible
 };
 
 /** chars → ~thousands of tokens (≈4 chars/token), for the human-facing nudge text. */
@@ -78,6 +92,8 @@ export class DelegationNudge {
 	private burn = 0; // cumulative output chars since the last hand-off (for the message only)
 	private lastNudgeRun = 0; // run length at which we last nudged (the re-arm baseline)
 	private nudges = 0; // cumulative nudges fired since the last hand-off (drives backoff)
+	private failedHandoffKey: string | undefined;
+	private failedHandoffRepeats = 0;
 	private readonly t: NudgeThresholds;
 
 	constructor(thresholds: NudgeThresholds = DEFAULT_NUDGE_THRESHOLDS) {
@@ -90,21 +106,40 @@ export class DelegationNudge {
 		this.burn = 0;
 		this.lastNudgeRun = 0;
 		this.nudges = 0;
+		this.failedHandoffKey = undefined;
+		this.failedHandoffRepeats = 0;
 	}
 
 	/**
-	 * Feed one supervisor tool result: its tool name and output length in chars. Returns the reminder
-	 * text to append to that result, or undefined to leave the result untouched.
+	 * Feed one supervisor tool result: its tool name, output length, and optionally its text identity.
+	 * The text is fingerprinted immediately and never retained. Returns the reminder text to append to
+	 * that result, or undefined to leave the result untouched.
 	 */
-	observe(toolName: string, size: number, handoffSucceeded = true): string | undefined {
+	observe(toolName: string, size: number, handoffSucceeded = true, failureText?: string): string | undefined {
 		if (HANDOFF_TOOLS.has(toolName)) {
 			if (!handoffSucceeded) {
+				const normalizedSize = Math.max(0, Math.floor(size));
+				const identity = failureText === undefined ? `size:${normalizedSize}` : fingerprintFailure(failureText);
+				const key = `${toolName}:${identity}`;
+				if (key === this.failedHandoffKey) {
+					this.failedHandoffRepeats += 1;
+					const suppress = Math.max(0, Math.floor(this.t.failedHandoffBackoff ?? DEFAULT_NUDGE_THRESHOLDS.failedHandoffBackoff ?? 0));
+					if (this.failedHandoffRepeats <= suppress) return undefined;
+					this.failedHandoffRepeats = 0;
+				} else {
+					this.failedHandoffKey = key;
+					this.failedHandoffRepeats = 0;
+				}
 				return "⟢ pi-persona — the hand-off failed before useful work landed. Fix the agent, model, brief, or tool grant and re-dispatch; do not absorb the delegated scope. The direct-work streak remains active.";
 			}
 			// The operator delegated successfully — the by-hand run is over; the hand-off itself never nudges.
 			this.reset();
 			return undefined;
 		}
+		// A failed hand-off is only deduplicated when the next event is another failed hand-off;
+		// direct work starts a fresh repair sequence.
+		this.failedHandoffKey = undefined;
+		this.failedHandoffRepeats = 0;
 		const step = Math.max(0, size);
 		this.burn += step;
 		// Only a substantive step advances the run; a trivial call is orchestration glue, not a sweep
