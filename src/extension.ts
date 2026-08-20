@@ -880,7 +880,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		},
 		setStatus: (text) => {
 			try {
-				lastCtx?.ui.setStatus("persona", text);
+				lastCtx?.ui.setStatus("persona", text === undefined ? undefined : compactInlineText(text, { maxChars: 80 }));
 			} catch {
 				/* cosmetic */
 			}

@@ -29,7 +29,7 @@ function isCsiIntermediate(code: number): boolean {
  * would make the regex rescan the remaining report from every introducer (quadratic work on
  * the synchronous supervisor path).
  */
-function stripTerminalControls(text: string): string {
+export function stripTerminalControls(text: string): string {
 	const out: string[] = [];
 	for (let i = 0; i < text.length;) {
 		const code = text.charCodeAt(i);
