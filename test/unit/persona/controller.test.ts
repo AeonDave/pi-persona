@@ -70,6 +70,13 @@ test("activate sanitizes and clamps an untrusted persona status label", async ()
 	assert.doesNotMatch(host.status!, /\u001b|\n|\r/);
 });
 
+test("activate preserves safe emoji in the human-facing persona status", async () => {
+	const host = new MockHost();
+	const c = new PersonaController(host, true);
+	await c.activate(p('name: elite\nlabel: "🎯 Elite"\npersona: true'));
+	assert.equal(host.status, "🎯 Elite");
+});
+
 test("model + thinking are overridden on activate and restored on deactivate", async () => {
 	const host = new MockHost();
 	const c = new PersonaController(host, true);
