@@ -3468,8 +3468,8 @@ test("an inbound peer message tells the supervisor to reply to the stable qualif
 // buildExocomBrief's two conditional clauses are only as true as the facts the CALL SITE feeds it,
 // and that wiring is one line in before_agent_start: `canDelegate` must be read from the live
 // persona (holding the bus says nothing about `delegate` — `canUseBus` keys off `intercom` alone)
-// and `hasHuman` from `ctx.hasUI` (exocom has no UI gate, so a `pi -p` run has peers and nobody to
-// escalate to). Pinning them only through the pure function leaves both hardcodable at the call
+// and `canAskHuman` from `ctx.hasUI` (exocom has no UI gate, so a `pi -p` run has peers and no
+// channel to escalate on). Pinning them only through the pure function leaves both hardcodable at the call
 // site with the suite still green, which is exactly the failure this brief exists to avoid.
 test("the exocom brief's conditional clauses are wired to the live run, not to a default", async () => {
 	const prev = process.env.PI_PERSONA_EXOCOM;
@@ -3501,14 +3501,16 @@ test("the exocom brief's conditional clauses are wired to the live run, not to a
 		// headless (`makeCtx` is hasUI:false) — nobody to escalate to
 		const headless = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
 		assert.match(headless, /exocom peers/, "the peer brief is present at all");
-		assert.match(headless, /settle it yourself/, "a `pi -p` run is told to settle it, not to ask");
-		assert.doesNotMatch(headless, /ask your human/, "there is no human on a headless run");
+		assert.match(headless, /answer once and close it, or send nothing/, "a `pi -p` run still gets a performable stop action");
+		// Not /your human/ wholesale: the drift REFERENT legitimately names "your human's request"
+		// even here. Only the ESCALATION must be absent, so match the clause, not the noun.
+		assert.doesNotMatch(headless, /escalate to your human/, "there is no human on a headless run");
 
 		// interactive — the escalation has an addressee again
 		const uiCtx = { ...ctx, hasUI: true };
 		const interactive = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
-		assert.match(interactive, /decide it yourself or ask your human/);
-		assert.doesNotMatch(interactive, /settle it yourself/);
+		assert.match(interactive, /escalate to your human only when the call is genuinely theirs/);
+		assert.match(interactive, /answer once and close it, or send nothing/, "the same performable action, plus an addressee");
 		assert.match(interactive, /goes to a sub-agent/, "an unrestricted run may hand specifiable work off");
 
 		// bus without `delegate`: the hand-off clause must drop, the rest of the bound must not
@@ -3516,7 +3518,165 @@ test("the exocom brief's conditional clauses are wired to the live run, not to a
 		const busOnly = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
 		assert.match(busOnly, /exocom peers/, "the persona still holds the bus");
 		assert.doesNotMatch(busOnly, /goes to a sub-agent/, "a persona denied `delegate` is not told to hand off");
-		assert.match(busOnly, /no longer moves your human's original request/, "only the hand-off clause drops");
+		assert.match(busOnly, /no longer moves the work this turn is for/, "only the hand-off clause drops");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// `canDelegate` at the call site is a CONJUNCTION: the persona must hold `delegate` AND at least
+// one INSTALLED agent must survive its `delegate` allowlist. `canFanOut` sees only the first half,
+// and the busonly fixture above fails exactly that half — so a persona that keeps the tool while its
+// allowlist names an agent nobody installed is the only shape that exercises the second. It is a
+// reachable shape (an agent renamed or removed out from under a persona lands there), and there the
+// delegate gate refuses every target, so offering the hand-off would push the model at a call that
+// cannot succeed.
+test("the exocom hand-off follows reachable delegate TARGETS, not merely holding the tool", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	// Two personas identical but for the allowlist: one names a seeded agent, the other an agent
+	// that does not exist in this registry.
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "widedel.md"),
+		"---\nname: widedel\nlabel: Widedel\npersona: true\ndelegate:\n  allow: [scout]\n---\nDelegating supervisor.",
+	);
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "narrowdel.md"),
+		"---\nname: narrowdel\nlabel: Narrowdel\npersona: true\ndelegate:\n  allow: [ghostwriter]\n---\nSupervisor whose allowlist points at nothing installed.",
+	);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "xtargets-session");
+	const uiCtx = { ...ctx, hasUI: true };
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: "xtargets-peer",
+			name: "orion",
+			persona: "dev",
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, "xtargets-peer", process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+
+		await m.cmd("persona", "widedel", uiCtx);
+		const reachable = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
+		assert.match(reachable, /goes to a sub-agent/, "`scout` is installed and allowed — the hand-off is real");
+
+		await m.cmd("persona", "narrowdel", uiCtx);
+		const unreachable = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
+		assert.match(unreachable, /exocom peers/, "the persona still holds the bus");
+		assert.doesNotMatch(
+			unreachable,
+			/goes to a sub-agent/,
+			"holding `delegate` with no reachable target is not a hand-off the gate would allow",
+		);
+		assert.match(unreachable, /no longer moves the work this turn is for/, "only the hand-off clause drops");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// With no persona active there are no capabilities to consult, and the call site falls back to "is
+// any sub-agent installed at all". The test above and the wiring test cover the branch where one is;
+// this is the other side, and the state every fresh install starts in: nothing seeded, so `delegate`
+// would fail "unknown agent" on the first call. The peer brief must not send the model there.
+test("with no persona and an empty registry the exocom brief offers no sub-agent hand-off", async () => {
+	const prevExocom = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const prevAgentDir = process.env.PI_AGENT_DIR as string;
+	// A user dir nobody ever seeded — the file-wide one is seeded up front, which is what makes
+	// every other run here see a roster.
+	const agentDir = tempDir("pi-persona-exo-unseeded-");
+	process.env.PI_AGENT_DIR = agentDir;
+	const cwd = exocomWorkspace();
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "xfresh-session");
+	const uiCtx = { ...ctx, hasUI: true };
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: "xfresh-peer",
+			name: "orion",
+			persona: "dev",
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, "xfresh-peer", process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+
+		const brief = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
+		assert.match(brief, /exocom peers/, "peers are live whether or not anything is installed");
+		assert.doesNotMatch(brief, /goes to a sub-agent/, "nothing is installed — `delegate` would fail 'unknown agent'");
+		assert.match(brief, /no longer moves the work this turn is for/, "only the hand-off clause drops");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		process.env.PI_AGENT_DIR = prevAgentDir;
+		if (prevExocom === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prevExocom;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// The peer ROSTER is the other half of what the call site feeds the brief, and it was pinned only
+// through the pure function — leaving both of its fields hardcodable here with the suite green.
+// `displayName` (not the raw `.name`) is what must reach the prompt: two peers may share a call-sign
+// and the registry only disambiguates at DISPLAY time, so passing `.name` renders two identical
+// roster rows and the model cannot address the second one. `persona` is the "+ their specialization"
+// half of the brief's stated job — dropping it costs the model the only signal it has for WHICH peer
+// to ask.
+test("the peer roster carries display-deduped call-signs and each peer's specialization", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "xroster-session");
+	const uiCtx = { ...ctx, hasUI: true };
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		// Two live peers that chose the SAME call-sign, plus one that did not. Ties break on
+		// `session_id`, so `xroster-peer-a` keeps "orion" and `xroster-peer-b` becomes "orion#2".
+		for (const [session, name, persona] of [
+			["xroster-peer-a", "orion", "dev"],
+			["xroster-peer-b", "orion", "reviewer"],
+			["xroster-peer-c", "vega", "writer"],
+		] as const) {
+			writeEntry(agentDir, hash, registryEntryFixture({
+				session_id: session,
+				name,
+				persona,
+				pid: process.pid,
+				endpoint: endpointFor(agentDir, hash, session, process.platform),
+				cwd,
+				heartbeat_at: new Date().toISOString(),
+			}));
+		}
+
+		const brief = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
+		assert.match(brief, /^- orion \(dev\)$/m, "the first of the twins keeps the bare call-sign");
+		assert.match(brief, /^- orion#2 \(reviewer\)$/m, "the twin is addressable — the raw `.name` would render two identical rows");
+		assert.match(brief, /^- vega \(writer\)$/m, "an uncontested peer is listed with its specialization");
+		assert.equal(
+			(brief.match(/^- orion \(dev\)$/gm) ?? []).length,
+			1,
+			"passing the stored `.name` instead of `displayName` would collapse the twins into one label",
+		);
 	} finally {
 		await m.fire("session_shutdown", undefined, ctx);
 		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
