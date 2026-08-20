@@ -281,7 +281,15 @@ exocom_name({ name: "atlas" }) // rebrand your own call-sign; routing still keys
 | Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` or `PI_PERSONA_EXOCOM=1` |
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 
-Both planes are asynchronous and keep inbound text fenced. See
+Both planes are asynchronous and keep inbound text fenced. On exocom, **replying is the exception,
+not the default**: an inbound peer message lands with a hint that says to reply only if it changes
+what someone does, and otherwise to send nothing. The per-turn peer brief bounds an exchange the
+same way — on **relevance**: stop once a round no longer moves the work the turn is for (your
+human's request, or the peer message that started it). It is deliberately *not* a round cap:
+back-and-forth is often how a hard point gets settled, and what wastes tokens is a round that
+stopped serving the work — which a counter cannot see. `hops` is a separate, narrower bound: it
+caps a *threaded* reply chain (`in_reply_to`), and two peers alternating fresh sends carry
+`hops: 0` throughout, so the transport does not bound that case at all. See
 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) for lifecycle, trust boundaries, and transport details, and
 [`STRATEGIES.md`](docs/STRATEGIES.md) for orchestration shapes.
 

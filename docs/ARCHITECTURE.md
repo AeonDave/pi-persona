@@ -138,7 +138,9 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
 - **`src/core/`** — pure kernel (no Pi imports, unit-tested): `frontmatter`, `permissions` +
   `capabilities`, `contract` (+`parseContract`), `config`, `discovery`, `seed`, `fence`
   (`fenceUntrusted` / `attributeInbound`), `models`, `brief` (`buildDelegationBrief` — the per-turn
-  delegation brief: live roster + standing hand-off default, rendered to the system-prompt tail),
+  delegation brief: live roster + standing hand-off default, rendered to the system-prompt tail; and
+  `buildExocomBrief` — the per-turn peer brief: live exocom peers as bounded identifiers, the
+  peer-vs-sub-agent split, and the relevance bound on an exchange),
   `nudge` (the two runtime-reinforcement state machines, `DelegationNudge` + `PersistenceNudge`),
   `display-label` (`sanitizeDisplayLabel` — an untrusted name reduced to bounded identifier metadata
   before it is interpolated outside a fence),
@@ -377,7 +379,11 @@ external comm.)
 - **Reply routing is session-stable.** `exocom_list` keeps human display names (`name`/`name#2`),
   while inbound reply hints use `name@<96-bit session hash>`. The authenticated registry entry
   (endpoint and signing key) is cached with the bounded inbound context, so a stale/pruned sender
-  cannot be retargeted to a same-name twin and its live socket can still receive the reply.
+  cannot be retargeted to a same-name twin and its live socket can still receive the reply. The hint
+  is CONDITIONAL, not an invitation: it carries the target and the correlation id under "reply only
+  if it changes what someone does, otherwise send nothing". A delivery is a fresh prompt on the
+  receiver, and a bare `Reply:` would make answering the default and silence the exception — which
+  is how a settled point keeps running on agreement and thanks.
 - **Identity is session-stable, persona is presence metadata.** Each instance starts with a
   collision-aware call-sign (`orion`, `vega`, …) derived from its session id and independent of
   persona; `exocom_name` replaces that display label only — the registry entry stays keyed by the
@@ -401,9 +407,19 @@ external comm.)
   between the inline cap and `ARTIFACT_MAX_BYTES`; anything else is NACKed to the sender rather than
   advertised as readable. The per-sender byte window charges only what crossed the wire, not a spill's
   declared size, so a legitimate large spill is delivered instead of being refused as "budget".
-  Guardrails: a hop cap, a per-sender rate+byte budget, and a (sender, msg_id)
+  Transport guardrails — enforced at the boundary, and not the whole discipline: a hop cap, a
+  per-sender rate+byte budget, and a (sender, msg_id)
   dedup set so an at-least-once resend can't double-trigger a turn. Reply-hop history is keyed by
   that same sender identity, so two peers reusing a `msg_id` cannot reset each other's loop depth.
+  The fencing and registry attribution above are part of the same set, and an exchange's LENGTH is
+  bounded prompt-side instead: the per-turn peer brief (`core/brief.ts`) carries a relevance bound —
+  send only what changes what someone does, stop once a round no longer moves the work the turn is
+  for — plus the peer/sub-agent split (a peer for judgement you cannot specify, a sub-agent for work
+  you can; the sub-agent half is rendered only where this persona can actually reach one).
+  Deliberately not a round count: rounds are often how a hard point gets settled, and a counter
+  cannot see whether one still serves the work. `hops` is not the reason — it bounds a THREADED
+  reply chain only (it is derived from the inbound context when `in_reply_to` is set and is `0`
+  otherwise), so two peers alternating untreaded sends are not depth-bounded by the transport.
   Registry cleanup is ownership-aware (`session_id` + endpoint + signing key) and atomically claims
   an entry before deletion, so a failed/replaced session cannot erase the live replacement's slot;
   socket-file cleanup is likewise conditional on that plane having completed the bind itself.

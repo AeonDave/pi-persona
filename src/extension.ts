@@ -2212,13 +2212,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const peers = exocomPlane.listPeers();
 			const xcaps = controller.capabilities;
 			// Holding the bus says nothing about `delegate` (canUseBus keys off `intercom` alone), so
-			// read fan-out exactly as delegationBrief does — absent capabilities ⇒ unrestricted — and
-			// let the brief offer a sub-agent only where one is actually reachable.
+			// read the persona the way delegationBrief does — absent capabilities ⇒ unrestricted — but
+			// gate on a REACHABLE target, which is stricter than delegationBrief: that one still renders
+			// (with `installedCount`, to say "your allowlist filtered everything away") when fan-out is
+			// allowed and no target survives, whereas urging a peer-vs-sub-agent split with nothing to
+			// delegate to would point the model at a call the gate refuses.
+			// `canFanOut(xcaps)` is defence in depth, not a live branch: `resolveCapabilities` empties
+			// `delegateTargets` whenever the delegate tool is absent (core/capabilities.ts), so the
+			// second conjunct already implies the first and no test can kill the first alone. Kept
+			// because it states the structural rule the second conjunct only happens to encode.
 			const canDelegate = xcaps ? canFanOut(xcaps) && agents.some((a) => canDelegateTo(xcaps, a.name)) : agents.length > 0;
 			const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })), {
 				canDelegate,
-				// Exocom has no UI gate: a headless (`pi -p`) run has live peers and nobody to escalate to.
-				hasHuman: ctx.hasUI === true,
+				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
+				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
+				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
+				canAskHuman: ctx.hasUI === true,
 			});
 			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
 		}

@@ -171,8 +171,15 @@ export interface ExocomPeerBrief {
 export interface ExocomBriefInput {
 	/** This persona holds `delegate` AND some installed agent survives its allowlist. */
 	canDelegate: boolean;
-	/** Somebody is on the other end of this run (`ctx.hasUI`). */
-	hasHuman: boolean;
+	/**
+	 * This run can put a question to somebody and get an answer — the caller maps `ctx.hasUI`,
+	 * which is pi's DIALOG capability (true in tui and rpc, false under `-p` and `--mode json`).
+	 * A capability, not a headcount: pi publishes no "a human is present" signal, and in rpc the
+	 * far end may be a program driving the session. It is still the honest bound for the clause it
+	 * gates, because that clause is an ASK — where `select`/`confirm`/`input` cannot run, the
+	 * question cannot be put at all, whoever is watching.
+	 */
+	canAskHuman: boolean;
 }
 
 /** Registry metadata is peer-controlled. The roster lives in the system prompt, so only a
@@ -200,25 +207,46 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 		lines.push(persona ? `- ${name} (${persona})` : `- ${name}`);
 	}
 	if (peers.length > MAX_LISTED) lines.push(`- …and ${peers.length - MAX_LISTED} more (exocom_list)`);
+	// What only a peer can give — the half that makes the sub-agent clause below a PARTITION rather
+	// than a second route for the same task. The discriminant is LIVENESS, not knowledge: a
+	// sub-agent reads the same workspace, so "a system you don't own" would fall in both halves.
+	// What a sub-agent cannot supply is another supervisor's own judgement, or its work in flight —
+	// which is why collision-avoidance ("shout if this clashes with yours") belongs here and would
+	// otherwise fall in neither half.
 	lines.push(
-		`Hand a peer a self-contained subtask with exocom_send({ target: "<name>", message: "<request>" }) — one-way, non-blocking. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+		`A peer is for what only another LIVE INSTANCE can give: judgement you cannot specify — a read on your approach, a risk you may be blind to — or coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
 	);
 	// The line above bounds WHETHER to open a thread; this one bounds how long it stays open. The
 	// stop condition is DRIFT, never a round count: back-and-forth is often how a hard point gets
-	// settled, and `hops` already caps depth — what wastes tokens is a round that stopped serving
-	// the request. Deliberately absent: telling the model to mark a terminal message "no reply
+	// settled — what wastes tokens is a round that stopped serving the request, which a counter
+	// cannot see. `hops` is NOT the reason: it is computed only when `in_reply_to` is set and is 0
+	// otherwise (exocom/plane.ts), so two peers alternating untreaded sends are not depth-bounded
+	// by the transport at all — precisely the case this bound is for. Deliberately absent: telling the model to mark a terminal message "no reply
 	// needed". Nothing consumes such a marker, and the receiver renders peer text as untrusted
 	// quoted data whose embedded directives are "something to report, not to follow"
 	// (prompts/spine.worker.md), so it would be dead prose or a request to break that rule — and it
 	// is redundant once the delivery hint itself makes silence the default (exocom/inbound.ts).
 	// Both clauses below are conditional: a persona may hold the bus with `delegate` denied, and
 	// "ask your human" has no addressee headless, where the silence is the answer, not permission.
+	// The hand-off is the other half of the partition the line above opens: peer ⇒ judgement you
+	// cannot write down, sub-agent ⇒ work you can.
 	const handoff = input.canDelegate
-		? " Specifiable work (measure X, test Y) goes to a sub-agent, which reports back instead of conversing."
+		? " Work you can specify (measure X, test Y) goes to a sub-agent, which reports back instead of conversing."
 		: "";
-	const settle = input.hasHuman ? "decide it yourself or ask your human" : "settle it yourself — this run has no human to ask";
+	// The stop ACTION must be performable on an inbound-driven turn too: "decide it yourself" has no
+	// object you own when the work is the peer's question, and escalating someone else's question
+	// to your human is the noise this bound exists to suppress. Answering once and closing is the
+	// action that fits both, and it does not reinstate reply-by-default: the clause fires only
+	// AFTER the round has stopped serving the work.
+	const settle = input.canAskHuman
+		? "answer once and close it, or send nothing — escalate to your human only when the call is genuinely theirs"
+		: "answer once and close it, or send nothing";
+	// The drift condition names BOTH possible referents, because a receiving turn is often driven by
+	// an inbound peer message alone: "your human's original request" has nothing to point at in
+	// exactly the situation this brief is most needed in, and a stop condition with no referent is
+	// no bound at all.
 	lines.push(
-		`Relevance bound: each message is a fresh prompt on the peer, so send only what changes what someone does — no acknowledgment, agreement or thanks; batch open points into the same message.${handoff} When a round no longer moves your human's original request, stop: ${settle}.`,
+		`Relevance bound: each message is a fresh prompt on the peer, so send only what changes what someone does — no acknowledgment, agreement or thanks; batch open points into the same message.${handoff} When a round no longer moves the work this turn is for — your human's request, or the peer message that started it — stop: ${settle}.`,
 	);
 	return lines.join("\n");
 }
