@@ -61,6 +61,15 @@ test("activate restricts tools and sets status; deactivate restores the full reg
 	assert.equal(host.status, undefined);
 });
 
+test("activate sanitizes and clamps an untrusted persona status label", async () => {
+	const host = new MockHost();
+	const c = new PersonaController(host, true);
+	await c.activate(p(`name: hostile\nlabel: \u001b[31m${"x".repeat(120)}\npersona: true`));
+	assert.ok(host.status);
+	assert.ok(host.status!.length <= 80, "status labels stay bounded");
+	assert.doesNotMatch(host.status!, /\u001b|\n|\r/);
+});
+
 test("model + thinking are overridden on activate and restored on deactivate", async () => {
 	const host = new MockHost();
 	const c = new PersonaController(host, true);

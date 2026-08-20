@@ -9,14 +9,21 @@
  * params: { rounds?: number (default 3), bestOf?: number (default = majority of the roster), aggregate? }
  */
 
-import { sumUsage } from "../reducers.ts";
+import { fenceUntrusted } from "../../core/fence.ts";
+import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 import type { ReducerResult } from "../voting.ts";
 
-function render(decision: ReducerResult, round: number, bestOf: number, usages: AgentResult["usage"][]): AgentResult {
+function render(
+	decision: ReducerResult,
+	round: number,
+	bestOf: number,
+	usages: AgentResult["usage"][],
+	candidates: AgentResult[],
+): AgentResult {
 	const lines: string[] = [];
 	lines.push(
 		`COUNCIL ruling after ${round} round(s), best-of-${bestOf}: ${decision.status}${
@@ -31,7 +38,7 @@ function render(decision: ReducerResult, round: number, bestOf: number, usages: 
 		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 	}
 	const headline = decision.winner ? rulingHeadline(decision.winner) : undefined;
-	return {
+	const result: AgentResult = {
 		agent: "council",
 		output: lines.join("\n"),
 		structured: {
@@ -44,6 +51,19 @@ function render(decision: ReducerResult, round: number, bestOf: number, usages: 
 		usage: sumUsage(usages),
 		ok: decision.winner !== undefined,
 	};
+	if (!result.ok) {
+		const cause = summarizeFailedResults(candidates, "council produced no ruling");
+		result.error = cause.error;
+		result.failureKind = cause.failureKind;
+	}
+	return result;
+}
+
+const DEFAULT_ROUNDS = 3;
+
+function positiveInteger(value: unknown, fallback: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
+	return Math.max(1, Math.floor(value));
 }
 
 /** A deliberation the run cancelled — distinct from one that finished without a ruling, so a
@@ -70,8 +90,8 @@ export const councilRounds: Strategy = {
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("council-rounds: a roster is required");
-		const maxRounds = typeof input.params.rounds === "number" && input.params.rounds > 0 ? input.params.rounds : 3;
-		const bestOf = typeof input.params.bestOf === "number" ? input.params.bestOf : Math.floor(team.length / 2) + 1;
+		const maxRounds = positiveInteger(input.params.rounds, DEFAULT_ROUNDS);
+		const bestOf = positiveInteger(input.params.bestOf, Math.floor(team.length / 2) + 1);
 		const aggregate = input.params.aggregate === "unanimity" ? "unanimity" : "majority";
 
 		const usages: AgentResult["usage"][] = [];
@@ -84,7 +104,7 @@ export const councilRounds: Strategy = {
 			const task =
 				round === 1
 					? input.task
-					: `${input.task}\n\n--- round ${round - 1} debate ---\n${debate}\n\nReconsider in light of the above and cast your vote again.`;
+				: `${input.task}\n\n--- round ${round - 1} debate ---\n${fenceUntrusted(debate)}\n\nReconsider in light of the above and cast your vote again.`;
 			const candidates = await sdk.parallel(
 				team.map((m) => () => sdk.agent({ ...rosterSpec(m), task, outputContract: "default" })),
 			);
@@ -96,13 +116,13 @@ export const councilRounds: Strategy = {
 			if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) return cancelled(round - 1, usages);
 			const lastRound = round === maxRounds;
 			last = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: lastRound });
-			if (last.status === "winner" || lastRound) return render(last, round, bestOf, usages);
+			if (last.status === "winner" || lastRound) return render(last, round, bestOf, usages, candidates);
 			debate = candidates
 				.filter((c) => c.ok)
 				.map((c) => `[${c.agent}] ${c.output}`)
 				.join("\n");
 		}
 		// Unreachable: the loop always returns on the final round. Satisfies the type checker.
-		return render(last as ReducerResult, maxRounds, bestOf, usages);
+		return render(last as ReducerResult, maxRounds, bestOf, usages, []);
 	},
 };

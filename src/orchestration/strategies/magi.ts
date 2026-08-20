@@ -13,7 +13,8 @@
  * Set `reflect: false` for a pure independent poll (uncorrelated errors, cheapest).
  */
 
-import { sumUsage } from "../reducers.ts";
+import { fenceUntrusted } from "../../core/fence.ts";
+import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { dissentLine, readableRuling as readable } from "../render.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
@@ -70,7 +71,7 @@ export const magi: Strategy = {
 			// unless genuinely moved, so this informs without manufacturing false consensus.
 			const positions = round1
 				.filter((c) => c.ok)
-				.map((c, i) => `[Position ${LABELS[i] ?? `#${i + 1}`}]\n${readable(c)}`)
+				.map((c, i) => `[Position ${LABELS[i] ?? `#${i + 1}`}]\n${fenceUntrusted(readable(c))}`)
 				.join("\n\n");
 			const reflectTask =
 				`${input.task}\n\n--- the panel's positions so far (anonymised — judge them on merit, not source) ---\n${positions}\n\n` +
@@ -113,12 +114,18 @@ export const magi: Strategy = {
 
 		// Usage sums BOTH rounds (round1 is separate from candidates when reflection ran).
 		const allRuns: AgentResult[] = reflect && okCount >= 2 ? [...round1, ...candidates] : candidates;
-		return {
+		const result: AgentResult = {
 			agent: "magi",
 			output: lines.join("\n"),
 			structured: { status: decision.status, tally: decision.tally, usedFallback: decision.usedFallback, reflected: reflect && okCount >= 2, headline },
 			usage: sumUsage(allRuns.map((c) => c.usage)),
 			ok: decision.winner !== undefined,
 		};
+		if (!result.ok) {
+			const cause = summarizeFailedResults(candidates, "magi produced no ruling");
+			result.error = cause.error;
+			result.failureKind = cause.failureKind;
+		}
+		return result;
 	},
 };

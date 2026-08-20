@@ -337,8 +337,6 @@ test("reply hop history is scoped by sender, even when two peers reuse a msg_id"
 			budget: new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES }),
 			seen: new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS }),
 			injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
-			fence: (text) => text,
-			attribute: (_label, text) => text,
 		});
 		assert.deepEqual(guarded, { drop: "hops" }, "the normal inbound guard rejects the over-cap reply");
 	} finally {

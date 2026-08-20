@@ -1,11 +1,10 @@
 /**
  * Model provider-fallback decorator. Wraps a `StrategyEngine` so a run that fails with a
  * PROVIDER error (the model's provider rejected or broke — auth, outage, 5xx, model-not-
- * supported) is retried on the SAME model id under another authenticated provider, walking
- * the whole candidate chain until one responds or it's exhausted. This is the runtime half
- * of "priority to the supervisor's provider, but try others and switch on error": the
- * engine picks the intended model first; only when its provider *fails at call time* does
- * this reroute — silently and transparently (the working `modelUsed` shows in the tree).
+ * supported) may be retried on the SAME model id through a family-compatible provider route.
+ * An unpinned selection may reroute when its provider fails at call time. A provider-qualified
+ * `spec.model` is an explicit billing/provider pin and is strict by default; callers must opt it
+ * into cross-provider recovery.
  *
  * Only `failureKind === "provider"` retries. abort / timeout / contract / unknown-agent /
  * unknown-model / agent failures pass straight through (a different provider can't fix
@@ -15,8 +14,8 @@
  * so it's testable with a stub engine and a fake registry — no live model.
  */
 
-import type { ModelLite } from "../core/models.ts";
-import { providerFallbacks } from "../core/models.ts";
+import type { ModelLite, ModelRoutingPolicy } from "../core/models.ts";
+import { DEFAULT_MODEL_ROUTING_POLICY, providerFallbacks } from "../core/models.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 
 export interface FallbackDeps {
@@ -24,6 +23,10 @@ export interface FallbackDeps {
 	models: ModelLite[];
 	/** The session/loader provider — tried first among alternates (most likely authed). */
 	preferProvider?: string;
+	/** Optional deployment policy for automatic fallback; safe first-party defaults otherwise. */
+	routingPolicy?: ModelRoutingPolicy;
+	/** Explicitly opt a provider-qualified model into cross-provider recovery. */
+	allowCrossProviderFallback?: boolean;
 	/** Notified on each reroute, for transparency (a tree/log breadcrumb). */
 	onFallback?: (info: { from: string; to: string; agent: string }) => void;
 }
@@ -34,10 +37,12 @@ export function withModelFallback(engine: StrategyEngine, deps: FallbackDeps): S
 			const tried = new Set<string>();
 			let result = await engine.run(spec, onProgress, signal, onSteerable);
 			if (result.modelUsed) tried.add(result.modelUsed);
-			while (result.failureKind === "provider" && !signal?.aborted) {
+			const providerPinned = spec.model?.includes("/") === true;
+			const mayCrossProvider = !providerPinned || deps.allowCrossProviderFallback === true;
+			while (mayCrossProvider && result.failureKind === "provider" && !signal?.aborted) {
 				const from = result.modelUsed ?? spec.model;
 				if (!from) break;
-				const next = providerFallbacks(from, deps.models, deps.preferProvider).find((r) => !tried.has(r));
+				const next = providerFallbacks(from, deps.models, deps.preferProvider, deps.routingPolicy ?? DEFAULT_MODEL_ROUTING_POLICY).find((r) => !tried.has(r));
 				if (!next) break;
 				tried.add(next);
 				deps.onFallback?.({ from, to: next, agent: spec.agent });

@@ -8,6 +8,7 @@
  * with a stub.
  */
 
+import { fenceUntrusted } from "../core/fence.ts";
 import { emptyUsage } from "../engine/stream.ts";
 import type { FlowPhase, FlowSpec } from "./flow.ts";
 import type { AgentResult, FailureKind } from "./types.ts";
@@ -117,7 +118,7 @@ function buildPhaseTask(baseTask: string, spec: FlowSpec, phase: FlowPhase, upst
 	const ups = Object.entries(upstream);
 	if (ups.length > 0) {
 		parts.push("\nUpstream results to build on:");
-		for (const [id, r] of ups) parts.push(`\n--- ${id} ---\n${r.output}`);
+		for (const [id, r] of ups) parts.push(`\n--- ${id} ---\n${fenceUntrusted(r.output)}`);
 	}
 	return parts.join("\n");
 }
@@ -144,6 +145,10 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 	const needFailed = (n: string): boolean => (done.has(n) && !done.get(n)?.ok) || gateState.get(n) === "rejected";
 	let remaining = spec.phases.filter((p) => !done.has(p.id));
 	let cancelled = false;
+	// Keep blocked dependents distinct from phases that actually ran and failed. The flow's
+	// declaration order is not necessarily topological, so a dependent can appear before the
+	// root failure in `spec.phases`; it must never hide that root cause in the final outcome.
+	const blockedPhaseIds = new Set<string>();
 
 	while (remaining.length > 0) {
 		if (deps.signal?.aborted) {
@@ -157,6 +162,7 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		// A phase whose any need FAILED or whose gate was REJECTED is blocked — record, don't run.
 		const blocked = ready.filter((p) => (p.needs ?? []).some((n) => needFailed(n)));
 		for (const p of blocked) {
+			blockedPhaseIds.add(p.id);
 			const gateReject = (p.needs ?? []).some((n) => gateState.get(n) === "rejected");
 			const error = gateReject ? "blocked: a checkpoint gate was not approved" : "blocked: an upstream phase failed";
 			const r: AgentResult = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error };
@@ -256,13 +262,14 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 	const failures = spec.phases
 		.map((phase) => ({ phase, result: done.get(phase.id) }))
 		.filter((entry): entry is { phase: FlowPhase; result: AgentResult } => entry.result !== undefined && !entry.result.ok);
+	const rootFailures = failures.filter((entry) => !blockedPhaseIds.has(entry.phase.id));
 	const cancellation = cancelled;
 	// Cancellation is authoritative: a normal failure from an earlier phase must not replace the
 	// user's stop with an ordinary failure classification. Prefer an explicitly aborted phase when
 	// one settled, otherwise keep the cancellation at flow level without inventing a failed phase.
 	const failure = cancellation
 		? failures.find((entry) => entry.result.failureKind === "abort")
-		: failures[0];
+		: rootFailures[0] ?? failures[0];
 	const failedPhase = failure?.phase.id;
 	const error = cancellation ? (failure?.result.error ?? CANCELLED_ERROR) : failure?.result.error;
 	const failureKind = cancellation ? "abort" as const : failure?.result.failureKind;

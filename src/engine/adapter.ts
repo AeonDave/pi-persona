@@ -107,8 +107,21 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			}
 
 			// Resolved (and pinned) up front: the SAME def both instructs the member and
-			// validates its output — an instruction/validation drift is impossible.
-			const contractDef = spec.outputContract && deps.contracts ? pinnedDef(spec.outputContract) : undefined;
+			// validates its output — an instruction/validation drift is impossible. A named
+			// contract that cannot be resolved is a hard configuration error: running the leg
+			// without its requested guard would silently turn a constrained call into prose.
+			const requestedContract = spec.outputContract?.trim();
+			const contractDef = requestedContract ? pinnedDef(requestedContract) : undefined;
+			if (requestedContract && !contractDef) {
+				return {
+					agent: spec.agent,
+					output: "",
+					usage: emptyUsage(),
+					ok: false,
+					error: `[${spec.agent}] output contract "${requestedContract}" not found`,
+					failureKind: "contract",
+				};
+			}
 			const withSkills =
 				spec.skills && spec.skills.length > 0
 					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`

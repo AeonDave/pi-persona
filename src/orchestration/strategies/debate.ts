@@ -9,7 +9,7 @@
  * params: { bestOf?: number (default = majority of the roster), aggregate? }
  */
 
-import { sumUsage } from "../reducers.ts";
+import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
@@ -26,7 +26,13 @@ const PROTOCOL = [
 	"finalize on the output contract (result + vote + confidence). Do not stall waiting for replies.",
 ].join(" ");
 
-function render(decision: ReducerResult, members: number, bestOf: number, usages: AgentResult["usage"][]): AgentResult {
+function render(
+	decision: ReducerResult,
+	members: number,
+	bestOf: number,
+	usages: AgentResult["usage"][],
+	candidates: AgentResult[],
+): AgentResult {
 	const lines: string[] = [];
 	lines.push(
 		`DEBATE ruling (${members} members, live peer exchange, best-of-${bestOf}): ${decision.status}${
@@ -41,7 +47,7 @@ function render(decision: ReducerResult, members: number, bestOf: number, usages
 		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 	}
 	const headline = decision.winner ? rulingHeadline(decision.winner) : undefined;
-	return {
+	const result: AgentResult = {
 		agent: "debate",
 		output: lines.join("\n"),
 		structured: {
@@ -53,6 +59,12 @@ function render(decision: ReducerResult, members: number, bestOf: number, usages
 		usage: sumUsage(usages),
 		ok: decision.winner !== undefined,
 	};
+	if (!result.ok) {
+		const cause = summarizeFailedResults(candidates, "debate produced no ruling");
+		result.error = cause.error;
+		result.failureKind = cause.failureKind;
+	}
+	return result;
 }
 
 /** A panel the run cancelled — distinct from one that finished without a ruling, so a
@@ -108,6 +120,6 @@ export const debate: Strategy = {
 			return cancelled(candidates.map((c) => c.usage));
 		}
 		const decision = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: true });
-		return render(decision, team.length, bestOf, candidates.map((c) => c.usage));
+		return render(decision, team.length, bestOf, candidates.map((c) => c.usage), candidates);
 	},
 };

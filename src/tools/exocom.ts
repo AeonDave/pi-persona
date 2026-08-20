@@ -23,6 +23,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { fencePeer } from "../core/fence.ts";
 import { ExocomPeerRejection, type DisplayPeer, type ExocomPlane } from "../exocom/plane.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
+import { compactInlineText } from "../ui/presentation.ts";
 
 const COLLAPSED_PEER_LIMIT = 8;
 /** Model-facing presence is a sample, not a dump. Keep the count and a refresh action below. */
@@ -71,15 +72,27 @@ function peerWord(count: number): string {
 	return `${count} peer${count === 1 ? "" : "s"}`;
 }
 
-function peerRow(peer: ExocomPeerSummary): string {
-	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}%`;
+/** Human-facing rows are bounded in terminal columns. Expanded mode spends a second line on the
+ * model so it can retain useful detail without turning one peer into a 300-column wall. */
+function peerRows(peer: ExocomPeerSummary, expanded: boolean): string[] {
+	const context = `${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}%`;
+	if (expanded) {
+		const name = compactInlineText(peer.displayName, { maxChars: 48 }) || "peer";
+		const persona = compactInlineText(peer.persona, { maxChars: 32 }) || "unknown";
+		const model = compactInlineText(peer.model, { maxChars: 88 }) || "unknown";
+		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${model}`];
+	}
+	const name = compactInlineText(peer.displayName, { maxChars: 24 }) || "peer";
+	const persona = compactInlineText(peer.persona, { maxChars: 18 }) || "unknown";
+	const model = compactInlineText(peer.model, { maxChars: 36 }) || "unknown";
+	return [`- ${name} · ${persona} · ${model} · ctx ${context}`];
 }
 
 /** The model-facing row carries the ROUTE as well as the human label: a display name is
  *  recomputed from the live set on every call, so the label a roster showed can belong to a
  *  different session by the time the model sends. The TUI row above stays human-sized. */
 function modelPeerRow(peer: ExocomPeerSummary): string {
-	return `${peerRow(peer)} · target: ${normalizeMetadataText(peer.target, 80, "peer")}`;
+	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}% · target: ${normalizeMetadataText(peer.target, 80, "peer")}`;
 }
 
 /** One readable line per live peer: `displayName` (not the possibly-shared `.name`) disambiguates
@@ -103,13 +116,26 @@ function formatPeers(peers: DisplayPeer[], offset = 0, limit = MAX_MODEL_PEER_RO
 	return lines.join("\n");
 }
 
-function renderListResult(peers: ExocomPeerSummary[], expanded: boolean, total = peers.length): string {
+function renderListResult(
+	peers: ExocomPeerSummary[],
+	expanded: boolean,
+	total = peers.length,
+	offset = 0,
+	nextOffset?: number,
+): string {
 	if (total === 0) return "Exocom · 0 peers · no reachable peers";
 	const shown = expanded ? peers : peers.slice(0, COLLAPSED_PEER_LIMIT);
-	const lines = [`Exocom · ${peerWord(total)} (presence only)`];
-	lines.push(...shown.map(peerRow));
-	if (!expanded && total > shown.length) lines.push(`…and ${total - shown.length} more`);
+	const pageEnd = Math.min(total, offset + shown.length);
+	const paged = offset > 0 || pageEnd < total;
+	const page = paged
+		? shown.length === 0 ? `; showing none of ${total}` : `; showing ${offset + 1}–${pageEnd} of ${total}`
+		: "";
+	const lines = [`Exocom · ${peerWord(total)} (presence only${page})`];
+	for (const peer of shown) lines.push(...peerRows(peer, expanded));
+	if (offset > 0) lines.push(`…and ${offset} peers before this page`);
+	if (pageEnd < total) lines.push(`…and ${total - pageEnd} more peers after this page`);
 	if (!expanded && total > shown.length) lines.push(`(${keyHint("app.tools.expand", "to expand")})`);
+	if (nextOffset !== undefined && nextOffset < total) lines.push(`next offset: ${nextOffset}`);
 	return lines.join("\n");
 }
 
@@ -175,7 +201,7 @@ export function registerExocomTools(
 			const plane = getPlane();
 			if (!plane) throw new Error("exocom is not active for this persona");
 			const peers = plane.listPeers();
-			const offset = Math.max(0, Math.floor(params?.offset ?? 0));
+			const offset = Math.min(peers.length, Math.max(0, Math.floor(params?.offset ?? 0)));
 			const limit = Math.max(1, Math.min(MAX_MODEL_PEER_ROWS, Math.floor(params?.limit ?? MAX_MODEL_PEER_ROWS)));
 			const shown: ExocomPeerSummary[] = peers.slice(offset, offset + limit).map((peer) => ({
 				displayName: normalizeMetadataText(peer.displayName, 80, "peer"),
@@ -200,14 +226,21 @@ export function registerExocomTools(
 			return new Text(theme.fg("toolTitle", theme.bold("Exocom List")), 0, 0);
 		},
 		renderResult(result, { expanded }, theme) {
-			const details = result.details as unknown as { peers?: ExocomPeerSummary[]; total?: number } | undefined;
+			const details = result.details as unknown as {
+				peers?: ExocomPeerSummary[];
+				total?: number;
+				offset?: number;
+				nextOffset?: number;
+			} | undefined;
 			if (!details || !Array.isArray(details.peers)) {
 				const first = result.content.find((item) => item.type === "text");
 				return new Text(theme.fg("error", first?.type === "text" ? first.text : "Exocom list failed"), 0, 0);
 			}
 			const peers = details.peers;
 			const total = typeof details.total === "number" ? details.total : peers.length;
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total)), 0, 0);
+			const offset = typeof details.offset === "number" ? Math.max(0, details.offset) : 0;
+			const nextOffset = typeof details.nextOffset === "number" ? details.nextOffset : undefined;
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset)), 0, 0);
 		},
 	});
 

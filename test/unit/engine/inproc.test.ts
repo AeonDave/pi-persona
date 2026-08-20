@@ -36,6 +36,26 @@ interface Spy {
 	promptText?: string;
 }
 
+test("inproc session receives the host model runtime for shared auth/provider state", async () => {
+	const runtime = { getAuth: async () => undefined, getModel: () => stubModel, stream: () => undefined };
+	const registry = {
+		find: () => stubModel,
+		getAll: () => [stubModel],
+		runtime,
+	} as unknown as ModelRegistry;
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: registry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("done")], spy),
+	});
+
+	await engine.run({ agent: "a", task: "probe" });
+	assert.equal(spy.opts?.modelRuntime, runtime, "the child session must reuse the host runtime");
+});
+
 /** Build a fake in-process session that replays scripted events when prompted. */
 function fakeSession(events: unknown[], spy?: Spy): InProcSession {
 	let listener: ((e: unknown) => void) | undefined;
@@ -199,6 +219,25 @@ test("inproc engine validates the output contract in-process (fenced JSON parses
 	const r = await engine.run({ agent: "a", task: "decide", outputContract: "default" });
 	assert.equal(r.ok, true);
 	assert.equal(r.structured?.vote, "json");
+});
+
+test("inproc engine fails closed when a requested contract is missing", async () => {
+	let created = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts: () => undefined,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => {
+			created = true;
+			return fakeSession([msgEnd("unconstrained")]);
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "decide", outputContract: "missing" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "contract");
+	assert.match(r.error ?? "", /output contract [\"']missing[\"'] not found/);
+	assert.equal(created, false, "a missing contract must not create an unconstrained session");
 });
 
 test("inproc engine appends the contract format to the task (and only when one is requested)", async () => {

@@ -1,7 +1,7 @@
 /**
  * Live control-ops harness — drives the in-process engine with REAL model calls to prove
  * the supervisor controls a running sub-agent: STEER (inject mid-run), STOP (abort mid-run),
- * and RESUME (a flow skips journaled phases). Free model. Run foreground.
+ * and RESUME (a flow skips journaled phases). Run foreground; LIVE_MODEL overrides the default.
  */
 import * as fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -14,7 +14,7 @@ import { flowHash, parseFlow } from "../src/orchestration/flow.ts";
 import { journalWriter, parseJournal } from "../src/orchestration/flow-journal.ts";
 import { runFlow } from "../src/orchestration/flow-run.ts";
 
-const MODEL = process.env.LIVE_MODEL || "openrouter/openrouter/owl-alpha";
+const MODEL = process.env.LIVE_MODEL || "openai-codex/gpt-5.6-luna";
 const { session: probe } = await createAgentSession({});
 const op = { name: "operator", model: MODEL, systemPrompt: "Follow instructions EXACTLY. Work ONE file per turn — never batch.", source: "h", tools: ["read"] };
 const engine = makeInProcessEngine({

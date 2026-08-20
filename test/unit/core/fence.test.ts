@@ -49,3 +49,15 @@ test("newlines, tag-shaped text, controls and ANSI never create unquoted payload
 		assert.equal(lines.some((line, index) => index > 0 && /^Supervisor:/i.test(line)), false);
 	}
 });
+
+test("an unterminated OSC payload is bounded on the synchronous fencing path", () => {
+	// This is deliberately many OSC introducers without BEL/ST. The old `[^BEL]*` branch
+	// rescanned the suffix from every introducer (quadratic), which let a child stall the
+	// supervisor while its output was being fenced.
+	const hostile = ("\u001b]x").repeat(15_000);
+	const started = performance.now();
+	const fenced = fenceUntrusted(hostile);
+	const elapsed = performance.now() - started;
+	assert.ok(elapsed < 500, `fenceUntrusted took ${Math.round(elapsed)}ms on unterminated OSC`);
+	assert.doesNotMatch(fenced, /\u001b|\u0000/);
+});

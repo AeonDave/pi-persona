@@ -1,6 +1,6 @@
 /**
  * Live flow harness — drives `runFlow` directly (no TUI) with the real in-process engine
- * and a free model, to prove the DAG runs in dependency order, threads each phase's output
+ * and a real model, to prove the DAG runs in dependency order, threads each phase's output
  * into its dependents, and journals. `/flow` itself is a slash command (interactive); this
  * exercises the same runner headlessly.
  *
@@ -18,7 +18,7 @@ import { flowHash, parseFlow } from "../src/orchestration/flow.ts";
 import { journalWriter } from "../src/orchestration/flow-journal.ts";
 import { runFlow } from "../src/orchestration/flow-run.ts";
 
-const MODEL = "openrouter/openrouter/owl-alpha";
+const MODEL = process.env.LIVE_MODEL || "openai-codex/gpt-5.6-luna";
 const MARKER = "MARKER-ZQ42";
 
 const { session: probe } = await createAgentSession({});

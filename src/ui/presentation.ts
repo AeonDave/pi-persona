@@ -49,6 +49,7 @@ const PRESENTATION_WRAPPERS = new Set([
 
 export interface CompactVisibleTextOptions {
 	maxLines?: number;
+	/** Historical option name; the bound is terminal display columns, not JS string length. */
 	maxLineChars?: number;
 }
 
@@ -62,6 +63,9 @@ export interface CompactVisibleTextResult {
 export interface CompactInlineTextOptions {
 	maxChars?: number;
 }
+
+/** Hard ceiling for one-line collapsed card chrome and previews. */
+export const MAX_COLLAPSED_CARD_COLUMNS = 100;
 
 /**
  * Clip to at most `units` code units without cutting an astral character in half. A lone
@@ -88,6 +92,13 @@ export function compactInlineText(input: string, opts: CompactInlineTextOptions 
 	if (visibleWidth(clipped) <= maxChars) return clipped;
 	// pi-tui's truncateToWidth would splice in ANSI resets, and chrome must stay escape-free.
 	return `${sliceByColumn(clipped, 0, maxChars - 1, true)}…`;
+}
+
+/** Clip an already-composed terminal row without counting wide glyphs as one column. */
+export function compactVisibleLine(input: string, maxColumns = MAX_COLLAPSED_CARD_COLUMNS): string {
+	const limit = Math.max(16, Math.floor(maxColumns));
+	if (visibleWidth(input) <= limit) return input;
+	return `${sliceByColumn(input, 0, limit - visibleWidth("…"), true)}…`;
 }
 
 /** Bound a persistent widget: one stable header, a fair prefix of rows, then one drill-down row. */
@@ -125,7 +136,7 @@ export function compactVisibleText(
 	opts: CompactVisibleTextOptions = {},
 ): CompactVisibleTextResult {
 	const maxLines = Math.max(1, Math.floor(opts.maxLines ?? 4));
-	const maxLineChars = Math.max(16, Math.floor(opts.maxLineChars ?? 160));
+	const maxLineColumns = Math.max(16, Math.floor(opts.maxLineChars ?? 160));
 	const sanitized = sanitizeTerminalText(input);
 	const source = sanitized
 		.split("\n")
@@ -134,9 +145,9 @@ export function compactVisibleText(
 
 	let lineTruncated = false;
 	const clamp = (line: string): string => {
-		if (line.length <= maxLineChars) return line;
+		if (visibleWidth(line) <= maxLineColumns) return line;
 		lineTruncated = true;
-		return `${clipCodeUnits(line, maxLineChars - 1)}…`;
+		return `${sliceByColumn(line, 0, maxLineColumns - visibleWidth("…"), true)}…`;
 	};
 
 	let omittedLines = 0;

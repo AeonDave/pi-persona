@@ -22,6 +22,8 @@ export interface LoadResult {
 	personas: Persona[];
 	agents: AgentConfig[];
 	shadowed: DiscoveredFile[];
+	/** Ambiguous names found in the shared persona/agent namespace. These entries are omitted. */
+	collisions: Array<{ name: string; persona: DiscoveredFile; agent: DiscoveredFile }>;
 }
 
 /** List `*.md` files in a directory (name without extension + full path). */
@@ -46,10 +48,10 @@ function readSafe(path: string): string | undefined {
 }
 
 /**
- * Load + classify all definitions across dirs. Personas (`persona: true`) and
- * agents live in SEPARATE namespaces — a persona and an agent may share a name
- * without colliding — and each is merged by precedence independently (later dirs
- * win same names within a namespace).
+ * Load + classify all definitions across dirs. Personas (`persona: true`) and agents share one
+ * runtime namespace: a name collision is returned as a diagnostic and omitted from both effective
+ * registries, so activation cannot silently choose a different definition for delegate vs persona.
+ * Each kind is still merged by precedence independently before the collision check.
  */
 export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 	const personaLayers: DiscoveredFile[][] = [];
@@ -78,19 +80,28 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 
 	const personaMerge = mergeByPrecedence(personaLayers);
 	const agentMerge = mergeByPrecedence(agentLayers);
+	const agentByName = new Map(agentMerge.resolved.map((f) => [f.name, f]));
+	const collisions: LoadResult["collisions"] = [];
+	for (const persona of personaMerge.resolved) {
+		const agent = agentByName.get(persona.name);
+		if (agent) collisions.push({ name: persona.name, persona, agent });
+	}
+	const collisionNames = new Set(collisions.map((c) => c.name));
 
 	const personas: Persona[] = [];
 	for (const f of personaMerge.resolved) {
+		if (collisionNames.has(f.name)) continue;
 		const persona = parsedPersonas.get(f.path);
 		if (persona) personas.push(persona);
 	}
 	const agents: AgentConfig[] = [];
 	for (const f of agentMerge.resolved) {
+		if (collisionNames.has(f.name)) continue;
 		const agent = parseAgent(content.get(f.path) ?? "", f.path);
 		if (agent) agents.push(agent);
 	}
 
-	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed] };
+	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed], collisions };
 }
 
 /** Discover `*.contract.json` files across dirs into a name→ContractDef map (later dirs win,

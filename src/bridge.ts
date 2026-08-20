@@ -110,26 +110,45 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	pi.registerTool(makeContactSupervisorTool(bus, handle, SUPERVISOR_HANDLE, { allowBlocking }));
 
 	// The engine-scoped peer roster (B7): fetched from the host's `list` frame and cached —
-	// `contact_peer`'s `listPeers` is synchronous, a wire round-trip is not, so each call
-	// returns the last-known roster and kicks off a refresh for the next one.
+	// `contact_peer` accepts an awaitable provider, so the first call can wait for the initial
+	// wire round-trip instead of reporting the empty pre-refresh cache. Refreshes are coalesced
+	// while one is in flight; a generation guard prevents a future overlapping transport change
+	// from applying an older response over a newer roster.
 	let peerCache: PeerInfo[] = [];
-	const refreshPeers = (): void => {
-		if (!bus.connected) return;
-		client.list().then(
-			(peers) => {
-				peerCache = peers;
-			},
-			() => {
-				/* best-effort — keep the stale cache rather than clearing a known roster */
-			},
-		);
+	let bridgeReady: Promise<void> | undefined;
+	let peerRefresh: Promise<PeerInfo[]> | undefined;
+	let peerRefreshGeneration = 0;
+	const refreshPeers = (): Promise<PeerInfo[]> => {
+		if (!bus.connected) {
+			const registration = bridgeReady;
+			return registration ? registration.then(() => refreshPeers(), () => peerCache) : Promise.resolve(peerCache);
+		}
+		if (peerRefresh) return peerRefresh;
+		const generation = ++peerRefreshGeneration;
+		let request: Promise<PeerInfo[]>;
+		try {
+			request = Promise.resolve(client.list()).then(
+				(peers) => {
+					if (generation === peerRefreshGeneration) peerCache = peers;
+					return peers;
+				},
+				() => {
+					/* best-effort — keep the stale cache rather than clearing a known roster */
+					return peerCache;
+				},
+			);
+		} catch {
+			request = Promise.resolve(peerCache);
+		}
+		const shared = request.finally(() => {
+			if (peerRefresh === shared) peerRefresh = undefined;
+		});
+		peerRefresh = shared;
+		return shared;
 	};
 	pi.registerTool(
 		makeContactPeerTool(bus, handle, {
-			listPeers: () => {
-				refreshPeers();
-				return peerCache;
-			},
+			listPeers: () => refreshPeers(),
 		}),
 	);
 
@@ -151,7 +170,7 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 		sendFollowUp(pi, `[steer from your supervisor]\n${trimmed}`);
 	});
 
-	client.register().then(
+	bridgeReady = client.register().then(
 		() => {
 			bus.connected = true;
 			refreshPeers();

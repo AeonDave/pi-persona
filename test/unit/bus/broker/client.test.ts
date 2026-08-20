@@ -108,6 +108,7 @@ async function waitFor(pred: () => boolean, timeoutMs = 1000): Promise<void> {
 async function connectedClient(deps: Partial<Parameters<typeof makeBrokerClient>[0]> = {}): Promise<{
 	client: BrokerClient;
 	host: { send: (f: Frame) => void; frames: Frame[] };
+	hostSide: FakeSocket;
 }> {
 	const { net, hostSide } = fakeNet();
 	const host = wireHost(hostSide);
@@ -116,7 +117,7 @@ async function connectedClient(deps: Partial<Parameters<typeof makeBrokerClient>
 	await waitFor(() => host.frames.some((f) => f.t === "register"));
 	host.send({ t: "registered", handle: "child#1" });
 	await registerPromise;
-	return { client, host };
+	return { client, host, hostSide };
 }
 
 test("register connects and completes the register/registered handshake", async () => {
@@ -285,6 +286,39 @@ test("list resolves with the peers frame's roster", async () => {
 		host.send({ t: "peers", reqId: listFrame.reqId, peers: [{ handle: "reviewer#1", label: "reviewer" }] });
 		assert.deepEqual(await listPromise, [{ handle: "reviewer#1", label: "reviewer" }]);
 	} finally {
+		client.close();
+	}
+});
+
+test("a disconnected client rejects pending ask and list requests promptly", { timeout: 1000 }, async () => {
+	const { client, host, hostSide } = await connectedClient();
+	const askPromise = client.ask("supervisor", "decision", "continue?");
+	await waitFor(() => host.frames.some((f) => f.t === "send" && f.expectsReply === true));
+	const listPromise = client.list();
+	await waitFor(() => host.frames.some((f) => f.t === "list"));
+	// The host-side close is the failure signal: both pending operations must settle without
+	// waiting for the ask's ten-minute cap or leaving a list promise forever pending.
+	hostSide.destroy();
+	await assert.rejects(() => askPromise, /connection closed|broker/i);
+	await assert.rejects(() => listPromise, /connection closed|broker/i);
+	client.close();
+});
+
+test("list rejects at its cap and clears its pending request", async (t) => {
+	const { client } = await connectedClient();
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const listPromise = client.list();
+		let rejection = "";
+		void listPromise.catch((error: unknown) => { rejection = error instanceof Error ? error.message : String(error); });
+		t.mock.timers.tick(9_999);
+		await Promise.resolve();
+		assert.equal(rejection, "", "a healthy local round-trip gets the full short window");
+		t.mock.timers.tick(1);
+		await Promise.resolve();
+		assert.match(rejection, /list timeout after 10000ms/);
+	} finally {
+		t.mock.timers.reset();
 		client.close();
 	}
 });

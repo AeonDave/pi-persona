@@ -27,7 +27,10 @@ import { isThinkingLevel } from "./core/types.ts";
 import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
 import {
 	inspectLegacySeededSpines,
+	migratePristineSeededDefaults,
 	seedDefaults,
+	type SeedMigrationOptions,
+	type SeedMigrationResult,
 	type SeedResult,
 	type SpineLegacyIO,
 	type SpineLegacyResult,
@@ -36,7 +39,7 @@ import {
 import { buildDelegationBrief, buildExocomBrief } from "./core/brief.ts";
 import { buildSessionAnchor } from "./core/time.ts";
 import { canDelegateTo, canFanOut, EXOCOM_TOOL_NAMES, type RunLimits } from "./core/capabilities.ts";
-import { attributePeer, fenceUntrusted } from "./core/fence.ts";
+import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
@@ -55,7 +58,7 @@ import { endpoint as exocomEndpointFor, workspaceHash } from "./exocom/paths.ts"
 import { ExocomPlane, type DisplayPeer, type ExocomInboundResult } from "./exocom/plane.ts";
 import { prune as pruneExocom, type RegistryEntry } from "./exocom/registry.ts";
 import { registerExocomTools } from "./tools/exocom.ts";
-import { loadContracts, loadDefinitions, loadPresets, loadTeams, type ScopedDir } from "./loader.ts";
+import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
 import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
 import { journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
@@ -121,6 +124,31 @@ const STALL_FLAG_MS = 90_000;
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = "persona";
 
+/**
+ * Pi 0.84.x deliberately ignores an `isError` property returned by a tool's `execute()`.
+ * Recoverable pi-persona failures still need their rich `details` for the compact renderers, so
+ * throwing would discard useful operator context. Mark the result in details and repair the
+ * host-visible error bit from the `tool_result` hook, where Pi explicitly supports it.
+ */
+const PI_PERSONA_TOOL_ERROR = "__piPersonaToolError";
+
+function failureDetails<T extends object>(details: T): T & { __piPersonaToolError: true } {
+	return { ...details, [PI_PERSONA_TOOL_ERROR]: true };
+}
+
+export function piPersonaToolErrorPatch(details: unknown): { isError: true; details: Record<string, unknown> } | undefined {
+	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+	const record = details as Record<string, unknown>;
+	if (record[PI_PERSONA_TOOL_ERROR] !== true) return undefined;
+	const clean = { ...record };
+	delete clean[PI_PERSONA_TOOL_ERROR];
+	return { isError: true, details: clean };
+}
+
+export function canDeliverPersonaNotification(orchestrating: boolean, processingDeferred: boolean, hostIdle: boolean): boolean {
+	return !orchestrating && !processingDeferred && hostIdle;
+}
+
 /** The Pi global agent dir, overridable via PI_AGENT_DIR (handy for tests/sandboxes). */
 function userAgentDir(): string {
 	return process.env.PI_AGENT_DIR || getAgentDir();
@@ -149,12 +177,10 @@ export function listPeersForGroup(brokerPeers: ReadonlyMap<string, { label: stri
 }
 
 /** exocom attribution-label sanitizer (I2): the resolved label is PEER-CONTROLLED registry data
- *  (`fromEntry.name`/`persona` — a peer writes its own registry entry) and `attributePeer`
- *  places it OUTSIDE the fence by design (the label is normally supervisor-generated and
- *  trusted; see core/fence.ts) — so a CR/LF-laden name could otherwise inject pseudo-instructions
- *  into the supervisor's context, outside the "treat as data" fence. Collapse any run of
- *  CR/LF/tab to a single space and clamp to a sane display length before the label ever reaches
- *  `attributePeer`. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
+ *  (`fromEntry.name`/`persona` — a peer writes its own registry entry) and is rendered OUTSIDE
+ *  the quoted body. A CR/LF-laden name could otherwise inject pseudo-instructions into the
+ *  supervisor's context. Reduce it to a bounded identifier before it reaches the canonical
+ *  inbound builder. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
 function sanitizePeerField(value: string, max: number): string {
 	return value
 		.normalize("NFKC")
@@ -399,6 +425,8 @@ export interface PiPersonaOptions {
 	engineFactories?: EngineFactories;
 	/** Activation-local test seam for read-only legacy-spine inspection. */
 	spineLegacyIO?: SpineLegacyIO;
+	/** Activation-local test seam for exact seeded-default migrations. */
+	seedMigration?: SeedMigrationOptions;
 }
 
 export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = {}): void {
@@ -474,6 +502,44 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		supervisor: config.spine === "on",
 		worker: config.spineLegs === "on",
 	});
+	const migrateSeededDefaults = (): SeedMigrationResult => {
+		try {
+			return migratePristineSeededDefaults(BUNDLED_DIR, personaDataDir(), options.seedMigration);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { migrated: [], installed: [], skipped: [], warnings: [`seed migration failed: ${message}`] };
+		}
+	};
+	// Version migrations are byte-exact and independent of first-run seeding. Run before the first
+	// definition discovery so a pristine old built-in can never become the active prompt for even
+	// one turn; custom bytes, unknown files and unsafe filesystem shapes remain untouched.
+	let seedMigration = migrateSeededDefaults();
+	const refreshSeedMigration = (): SeedMigrationResult => {
+		const current = migrateSeededDefaults();
+		seedMigration = {
+			migrated: [...new Set([...seedMigration.migrated, ...current.migrated])],
+			installed: [...new Set([...seedMigration.installed, ...current.installed])],
+			skipped: current.skipped,
+			warnings: current.warnings,
+		};
+		return current;
+	};
+	const reportSeedMigration = (ctx: ExtensionContext, result: SeedMigrationResult): void => {
+		if (result.migrated.length > 0) {
+			const message = `pi-persona: upgraded ${result.migrated.length} exact pristine seeded default(s): ${result.migrated.join(", ")}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "info");
+			else process.stderr.write(`${message}\n`);
+		}
+		if (result.installed.length > 0) {
+			const message = `pi-persona: installed ${result.installed.length} required default dependency file(s): ${result.installed.join(", ")}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "info");
+			else process.stderr.write(`${message}\n`);
+		}
+		for (const warning of result.warnings) {
+			if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+			else process.stderr.write(`${warning}\n`);
+		}
+	};
 	// v1.8.1 rewrote the spine pair, but `on` deliberately prefers a seeded user copy and the
 	// one-shot seed marker means a normal package upgrade never calls runSeed(). Detect ONLY the
 	// exact v1.8.0 bytes and bypass them during `on` resolution; never rewrite a user-controlled file
@@ -664,6 +730,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let teams: Record<string, RosterMember[]> = {};
 	let contractDefs: Record<string, ContractDef> = {};
 	let shadowed: Array<{ name: string; scope: string; path: string }> = [];
+	let definitionCollisions: LoadResult["collisions"] = [];
+	let seedSourceCollisions: string[] = [];
 
 	// Remembered selection lives in the persona data folder; only user gestures write it.
 	const stateFile = config.stateFile ?? join(personaDataDir(), "state.json");
@@ -715,6 +783,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		personas = result.personas.map((p) => (p.council?.preset ? { ...p, council: expandCouncilPreset(p.council, presets) } : p));
 		agents = result.agents;
 		shadowed = result.shadowed.map((f) => ({ name: f.name, scope: f.scope, path: f.path }));
+		definitionCollisions = result.collisions;
 		teams = loadTeams(teamFiles(cwd));
 		contractDefs = loadContracts(contractDirs(cwd));
 	}
@@ -727,6 +796,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const seedMarker = (): string => join(personaDataDir(), ".pi-persona-seeded");
 	function runSeed(force: boolean): SeedResult {
 		const result = seedDefaults(BUNDLED_DIR, personaDataDir(), force);
+		seedSourceCollisions = result.collisions ?? [];
 		try {
 			mkdirSync(personaDataDir(), { recursive: true });
 			writeFileSync(seedMarker(), "pi-persona: bundled defaults seeded. Delete this file to re-seed on next start.\n");
@@ -734,6 +804,21 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			/* marker is best-effort */
 		}
 		return result;
+	}
+
+	function reportDefinitionCollisions(ctx: ExtensionContext): void {
+		if (definitionCollisions.length === 0) return;
+		const names = definitionCollisions.map((collision) => collision.name).join(", ");
+		const message = `pi-persona: ${definitionCollisions.length} persona/agent definition collision(s) were omitted: ${names}. Run /doctor for source paths.`;
+		if (ctx.hasUI) ctx.ui.notify(message, "warning");
+		else process.stderr.write(`${message}\n`);
+	}
+
+	function reportSeedSourceCollisions(ctx: ExtensionContext, result: SeedResult): void {
+		if (!result.collisions?.length) return;
+		const message = `pi-persona: bundled persona/agent name collision(s): ${result.collisions.join(", ")}. The persona file was seeded; the ambiguous agent was omitted.`;
+		if (ctx.hasUI) ctx.ui.notify(message, "warning");
+		else process.stderr.write(`${message}\n`);
 	}
 
 	const host: PersonaHost = {
@@ -825,7 +910,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// the supervisor as a fresh turn instead of stranding as orphaned "sticky" follow-ups in pi's
 	// queue (pi only drains that queue from an active turn, one-at-a-time, skipping errored turns).
 	const idleDelivery = {
-		isIdle: () => !processingDeferredOrchestration && lastCtx?.isIdle?.() === true,
+		isIdle: () => canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true),
 		deliver: (message: string) => sendPersonaFollowUp(pi, message),
 		setTimer: (fn: () => void, ms: number) => {
 			const h = setTimeout(fn, ms);
@@ -958,7 +1043,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			// Only peek a free, unqueued supervisor: an idle delivery triggers a clean turn, while a
 			// busy one would pile up as a sticky follow-up. Skipping is safe — the next tick re-surfaces.
-			if (lastCtx?.isIdle?.() !== true || lastCtx?.hasPendingMessages?.() === true) return;
+			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true) || lastCtx?.hasPendingMessages?.() === true) return;
 			// The peek is NOT a poll. Two signals, two cadences: (1) the FAST wakeup (PI_PERSONA_PEEK_MS) —
 			// a leg that NEWLY crossed the stall window, or an unread sub-agent message — the "is it dead or
 			// wedged" check; (2) the SLOW routine check-in (PI_PERSONA_CHECKIN_MS) — a progress digest that
@@ -1226,7 +1311,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
 			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
 			exocomNotifier = new IdleCoalescingNotifier<string>({
-				isIdle: () => !processingDeferredOrchestration && lastCtx?.isIdle?.() === true,
+				isIdle: () => canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true),
 				deliver: (message) => sendPersonaFollowUp(pi, message, "exocom_received"),
 				// A burst of independent peers must not turn one idle wake into an unbounded model
 				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;
@@ -1311,7 +1396,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// Attribution from the REGISTRY entry keyed by the connecting session — never from
 					// msg.from_name (the envelope's own self-report, not to be trusted; see inbound.ts).
 					// Sanitized (I2): fromEntry.name/persona are PEER-WRITTEN registry fields, and
-					// attributePeer places this label OUTSIDE the fence — a CR/LF-laden name must
+					// The inbound builder places this label OUTSIDE the quote — a CR/LF-laden name must
 					// not be able to inject pseudo-instructions there.
 					const peerName = sanitizePeerField(
 						fromEntry ? (exocomPlane?.humanDisplayLabelFor(fromEntry) ?? fromEntry.name) : msg.from_session,
@@ -1330,12 +1415,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						seen: exocomSeen!,
 						injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
 						...(replyTarget ? { replyTarget } : {}),
-						// attributePeer already fences internally (peer wording — a peer is NOT a
-						// sub-agent, see core/fence.ts), so `fence` here is a pass-through:
-						// attribute(label, fence(text)) still ends up exactly
-						// `[exocom message from label]\n${fencePeer(text)}`, fenced exactly once.
-						fence: (t) => t,
-						attribute: attributePeer,
 					});
 					const disposition = exocomInboundDisposition(decision);
 					if ("deliver" in decision) {
@@ -1707,20 +1786,34 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return { ...result, output: `${result.output.trimEnd()}${block}` };
 	}
 
-	// The models the user actually has configured (authenticated) — NOT every model in
-	// the registry. `getAvailable()` is the registry's "has auth configured" filter; we
-	// fall back to `getAll()` only if it's unexpectedly empty, so a picker is never blank.
-	// This is why the per-agent model popup lists only your providers, and why a loose
-	// name like "sonnet" can't resolve to an unconfigured Bedrock look-alike.
+	// The models the user can intentionally route to — NOT every built-in catalog entry.
+	// `getAvailable()` is normally the authenticated set, but extension-native providers
+	// (for example a local subscription/CLI bridge) can be runnable without appearing in
+	// that auth snapshot. Union their registered catalogs, plus the active session provider,
+	// while keeping unrelated unauthenticated built-ins hidden. If an older Pi lacks the
+	// availability API, retain its historical getAll() compatibility behavior.
 	function configuredModels(ctx: ExtensionContext): Array<{ provider: string; id: string }> {
 		const reg = ctx.modelRegistry;
-		let list = reg.getAll();
+		const all = reg.getAll();
+		let available: typeof all;
 		try {
-			const avail = reg.getAvailable();
-			if (avail.length > 0) list = avail;
+			available = reg.getAvailable();
 		} catch {
-			/* older pi without getAvailable() → keep getAll() */
+			return all.map((m) => ({ provider: m.provider, id: m.id }));
 		}
+		const trustedProviders = new Set<string>();
+		if (ctx.model?.provider) trustedProviders.add(ctx.model.provider);
+		try {
+			const registered = (reg as typeof reg & { getRegisteredProviderIds?: () => string[] }).getRegisteredProviderIds?.() ?? [];
+			for (const provider of registered) trustedProviders.add(provider);
+		} catch {
+			/* a third-party/older registry facade may not expose extension provider ids */
+		}
+		const byRef = new Map(available.map((m) => [`${m.provider}\0${m.id}`, m]));
+		for (const model of all) {
+			if (trustedProviders.has(model.provider)) byRef.set(`${model.provider}\0${model.id}`, model);
+		}
+		const list = [...byRef.values()];
 		return list.map((m) => ({ provider: m.provider, id: m.id }));
 	}
 
@@ -1951,17 +2044,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					});
 					return r ?? { agent: phase.id, output: `unknown strategy: ${phase.strategy}`, usage: emptyUsage(), ok: false, error: "unknown strategy" };
 				},
-				// Checkpoint gate: pause for the user's approval before the gated phase's
-				// dependents run. Headless/no-UI ⇒ auto-approve (informational). Approval is
-				// journaled so a resume doesn't re-prompt.
+				// Checkpoint gate: only an explicit interactive approval may release dependents.
+				// Headless, dismissal, and UI failure all reject: a human checkpoint is a safety
+				// boundary, never an informational prompt. Approval is journaled for resume.
 				approveGate: async (phase, result) => {
-					if (!ctx.hasUI) return true;
+					if (!ctx.hasUI) return false;
 					const preview = result.output.replace(/\s+/g, " ").slice(0, 160);
 					try {
 						const pick = await ctx.ui.select(`Checkpoint "${phase.id}" — approve and continue the flow?\n${preview}`, ["Approve", "Reject"]);
-						return pick !== "Reject";
+						return pick === "Approve";
 					} catch {
-						return true; // dismissed ⇒ don't wedge the flow
+						return false;
 					}
 				},
 			});
@@ -2053,8 +2146,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		for (const warning of currentSpineWarnings()) {
 			lines.push(warning.startsWith("spine legacy inspection warning:") ? warning : `spine warning: ${warning}`);
 		}
+		if (seedMigration.migrated.length > 0) {
+			lines.push(`seed migration: upgraded ${seedMigration.migrated.join(", ")} (exact known-pristine defaults only)`);
+		}
+		if (seedMigration.installed.length > 0) {
+			lines.push(`seed migration dependencies: installed ${seedMigration.installed.join(", ")}`);
+		}
+		for (const warning of seedMigration.warnings) {
+			lines.push(warning.startsWith("seed migration") ? warning : `seed migration warning: ${warning}`);
+		}
 		lines.push(`personas (${personas.length}): ${personas.map((p) => p.name).join(", ") || "—"}`);
 		lines.push(`agents (${agents.length}): ${agents.map((a) => a.name).join(", ") || "—"}`);
+		if (definitionCollisions.length > 0) {
+			lines.push(`definition collisions (${definitionCollisions.length}, omitted): ${definitionCollisions.map((collision) => collision.name).join(", ")}`);
+			for (const collision of definitionCollisions) {
+				lines.push(`  - ${collision.name}: persona=${collision.persona.path}; agent=${collision.agent.path}`);
+			}
+		}
+		if (seedSourceCollisions.length > 0) {
+			lines.push(`bundled seed collisions (${seedSourceCollisions.length}): ${seedSourceCollisions.join(", ")}`);
+		}
 		const teamNames = Object.keys(teams);
 		lines.push(`teams (${teamNames.length}): ${teamNames.join(", ") || "—"}`);
 		const flows = lastCtx ? listFlows(lastCtx.cwd) : [];
@@ -2099,6 +2210,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (config.seed && !existsSync(seedMarker())) {
 			try {
 				const r = runSeed(false);
+				reportSeedSourceCollisions(ctx, r);
 				// Resolution happened before session_start, when a fresh install had no user copy. Refresh
 				// now so this very process uses what auto-seed just created and reports only post-seed state.
 				refreshSpineAfterSeed();
@@ -2111,8 +2223,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				inspectEnabledLegacySpines();
 			}
 		}
+		reportSeedMigration(ctx, seedMigration);
 		reportSpineWarning(ctx);
 		reload(ctx.cwd);
+		reportDefinitionCollisions(ctx);
 		personaConfigs = readConfigStore();
 		// Restore order: --persona flag > env pin (PI_PERSONA_DEFAULT) > remembered-on-disk. Read-only.
 		const flagPersona = ((pi.getFlag("persona") as string) || "").trim();
@@ -2277,22 +2391,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// resets the run.
 	pi.on("tool_result", (event, ctx) => {
 		lastCtx = ctx;
-		if (!config.nudge) return undefined;
+		const errorPatch = piPersonaToolErrorPatch(event.details);
+		if (!config.nudge) return errorPatch;
 		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
-		if (!controller.capabilities?.tools.has("delegate")) return undefined;
+		if (!controller.capabilities?.tools.has("delegate")) return errorPatch;
 		const notes: string[] = [];
 		// Grinding-by-hand reminder: a RUN of substantive hands-on commands on the supervisor's own
 		// tools (delegate/council reset the run). `size` classifies substantive vs glue + fat dump.
-		const size = event.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0);
-		const sweepNote = delegationNudge.observe(event.toolName, size, event.isError !== true);
+		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
+		const size = text.length;
+		const sweepNote = delegationNudge.observe(event.toolName, size, !errorPatch && event.isError !== true, text);
 		if (sweepNote) notes.push(sweepNote);
 		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
 		// results only; because delegate/council reset the run the two never fire on one event).
-		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
 		const surrender = persistenceNudge.observe(event.toolName, text);
 		if (surrender) notes.push(surrender);
-		if (notes.length === 0) return undefined;
-		return { content: [...event.content, { type: "text", text: notes.join("\n\n") }] };
+		if (notes.length === 0) return errorPatch;
+		return { ...errorPatch, content: [...event.content, { type: "text", text: notes.join("\n\n") }] };
 	});
 
 	// Mandatory orchestration: when the active persona declares a strategy/parallel/
@@ -2684,7 +2799,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			if (policy?.requireBrief) {
 				const briefError = validateDelegationBrief(params);
-				if (briefError) return { content: [{ type: "text", text: briefError }], details: {}, isError: true };
+				if (briefError) return { content: [{ type: "text", text: briefError }], details: failureDetails({}), isError: true };
 			}
 			if (params.tasks && params.tasks.length > 0) {
 				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, RUN_LIMITS.maxConcurrency);
@@ -2692,6 +2807,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const writing = classified.filter((entry) => entry.mayWrite);
 				if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
 					const verifierNames = new Set(policy.verificationAgents);
+					const droppedVerifiers = params.tasks
+						.slice(RUN_LIMITS.maxChildren)
+						.filter((task) => verifierNames.has(task.agent));
+					if (droppedVerifiers.length > 0) {
+						const names = [...new Set(droppedVerifiers.map((task) => `"${task.agent}"`))].join(", ");
+						const message =
+							`delegate: the max-children limit (${RUN_LIMITS.maxChildren}) would truncate declared fresh verifier ${names}. ` +
+							"Split the mutations into smaller batches and run every verifier after the final material mutation; no partial batch was started.";
+						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
+					}
 					const verifiers = classified.filter(({ task }) => verifierNames.has(task.agent));
 					// A declared verifier may itself have `bash` for running tests; that makes it a
 					// potential filesystem writer for ownership purposes, but not the material mutation
@@ -2705,7 +2830,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 							? "would overlap a material mutation"
 							: "is ordered before a material mutation";
 						const message = `delegate: fresh verification must run after every material mutation; ${names} ${reason}. Serialize the batch with every writer first and every declared verifier last, or start the verifier in a later call once every writer has SETTLED (its completion follow-up, or intercom { action:"wait", to:"<run-id>" }) — a later call while a writer is still running is rejected the same way.`;
-						return { content: [{ type: "text", text: message }], details: {}, isError: true };
+						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 					}
 				}
 				if (effectiveConcurrency > 1) {
@@ -2714,12 +2839,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 							const missing = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim())).map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
 							if (missing.length > 0) {
 								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths, split the scopes, or serialize the writers.`;
-								return { content: [{ type: "text", text: message }], details: {}, isError: true };
+								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 							}
 						}
 					}
 					const writeSetError = validateParallelWriteSets(params.tasks);
-					if (writeSetError) return { content: [{ type: "text", text: writeSetError }], details: {}, isError: true };
+					if (writeSetError) return { content: [{ type: "text", text: writeSetError }], details: failureDetails({}), isError: true };
 				}
 			}
 			// The gate above sees ONE call. Interactive delegate is background by default, so the
@@ -2742,12 +2867,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						const message =
 							`delegate: fresh verification must run after every material mutation; ${verifierList} cannot start while ${inFlight} ${liveMutations.length === 1 ? "is" : "are"} still mutating. ` +
 							`Wait for the completion follow-up (or intercom { action:"wait", to:"${liveMutations[0]?.id}" }), then start the verifier against the resulting state.`;
-						return { content: [{ type: "text", text: message }], details: {}, isError: true };
+						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 					}
 				}
 			}
 			const modelErr = resolveDelegateModels(params, ctx);
-			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: {}, isError: true };
+			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: failureDetails({}), isError: true };
 			// Pre-spawn agent validation (mirrors the model path): a wrong name returns the
 			// installed list instead of spawning into a bare engine failure, and a typo never
 			// counts toward the ledger's 2-strike veto.
@@ -2755,7 +2880,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				params.tasks && params.tasks.length > 0 ? params.tasks.map((t) => t.agent) : params.agent ? [params.agent] : [],
 				agents.map((a) => a.name),
 			);
-			if (agentErr) return { content: [{ type: "text", text: agentErr }], details: {}, isError: true };
+			if (agentErr) return { content: [{ type: "text", text: agentErr }], details: failureDetails({}), isError: true };
 			// Anti-loop veto (after model canonicalisation, so keys match retries): an
 			// identical delegation that already failed twice does not spawn again.
 			const requested =
@@ -2781,7 +2906,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 							]
 						: [];
 			const veto = ledger.vet(requested);
-			if (veto) return { content: [{ type: "text", text: veto }], details: {}, isError: true };
+			if (veto) return { content: [{ type: "text", text: veto }], details: failureDetails({}), isError: true };
 			// Background by default in interactive sessions: the supervisor stays free and results
 			// return as follow-ups (the idle-gated push path). Headless (`pi -p`) defaults to sync —
 			// the single turn must carry the result, and nothing drains a follow-up after the
@@ -2847,10 +2972,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					(views) => {
 						views.forEach((v, i) => {
 							const id = `${delRoot}/${i}`;
-						if (!v.running) {
-							stopRegistry.delete(id);
-							stopRequested.delete(id);
-							steerRegistry.delete(id);
+							if (!v.running) {
+								stopRegistry.delete(id);
+								stopRequested.delete(id);
+								steerRegistry.delete(id);
 							}
 							const status = agentNodeStatusForDelegate(v);
 							const node: AddNodeInput = { id, label: v.label, parentId: delRoot, status };
@@ -2877,7 +3002,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// before it reaches the supervisor) — the async path already fences via
 					// buildCompletionReport; the sync path must match.
 					content: [{ type: "text", text: `${fenceUntrusted(outcome.text)}${drainBusBlock()}` }],
-					details: { views: outcome.views },
+					details: outcome.ok ? { views: outcome.views } : failureDetails({ views: outcome.views }),
 					isError: !outcome.ok,
 				};
 			} finally {
@@ -2943,9 +3068,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					container.addChild(new Text(theme.fg("toolOutput", body), 0, 0));
 					continue;
 				}
-				const preview = compactVisibleText(body, { maxLines: 1, maxLineChars: 72 });
+				// Keep the collapsed semantic row below 100 columns even on a very wide terminal.
+				// Usage remains one keystroke away in expanded mode; the collapsed card prioritizes
+				// identity + outcome instead of wrapping one result into several pseudo-rows.
+				const preview = compactVisibleText(body, { maxLines: 1, maxLineChars: 60 });
 				container.addChild(
-					new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 96 }) || "agent")}${usage} · ${theme.fg("toolOutput", preview.text)}`, 0, 0),
+					new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 28 }) || "agent")} · ${theme.fg("toolOutput", preview.text)}`, 0, 0),
 				);
 			}
 			if (!expanded) {
@@ -3043,16 +3171,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			if (params.action === "result") {
 				if (!params.to) {
-					return { content: [{ type: "text", text: "intercom result needs { to: <run id> }." }], details: { action: "result", ok: false }, isError: true };
+					return { content: [{ type: "text", text: "intercom result needs { to: <run id> }." }], details: failureDetails({ action: "result", ok: false }), isError: true };
 				}
 				const run = tracker.peek(params.to);
 				if (!run) {
-					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: { action: "result", ok: false }, isError: true };
+					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: failureDetails({ action: "result", ok: false }), isError: true };
 				}
 				if (run.status === "running") {
 					return {
 						content: [{ type: "text", text: `${displayTarget} is still running. Use intercom peek/wait, or request result after it settles.` }],
-						details: { action: "result", ok: false, status: run.status },
+						details: failureDetails({ action: "result", ok: false, status: run.status }),
 						isError: true,
 					};
 				}
@@ -3081,7 +3209,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// No `to` → wait on running legs AND collect settled legs still queued for follow-up
 				// delivery, so a wait in the settle→deliver gap returns their results (not "nothing").
 				if (params.to && !tracker.peek(params.to)) {
-					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: { action: "wait", ok: false }, isError: true };
+					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: failureDetails({ action: "wait", ok: false }), isError: true };
 				}
 				const ids = params.to
 					? [params.to]
@@ -3115,13 +3243,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			if (params.action === "steer") {
 				if (!params.to || params.message === undefined) {
-					return { content: [{ type: "text", text: "intercom steer needs { to: <run id>, message }." }], details: { action: "steer", ok: false }, isError: true };
+					return { content: [{ type: "text", text: "intercom steer needs { to: <run id>, message }." }], details: failureDetails({ action: "steer", ok: false }), isError: true };
 				}
 				const nodeId = `async:${params.to}`;
 				if (!steerRegistry.has(nodeId)) {
 					return {
 						content: [{ type: "text", text: `Cannot steer "${displayTarget}" — no live steer handle is available (the run may have finished or not started yet, or its engine/broker does not expose steering).` }],
-						details: { action: "steer", ok: false },
+						details: failureDetails({ action: "steer", ok: false }),
 						isError: true,
 					};
 				}
@@ -3129,11 +3257,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const steered = steerAgent(nodeId, params.message);
 				return steered
 					? { content: [{ type: "text", text: `Steered ${displayTarget} (soft request; use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false }
-					: { content: [{ type: "text", text: `Could not steer "${displayTarget}" — it may have just finished, or the message was empty.` }], details: { action: "steer", ok: false }, isError: true };
+					: { content: [{ type: "text", text: `Could not steer "${displayTarget}" — it may have just finished, or the message was empty.` }], details: failureDetails({ action: "steer", ok: false }), isError: true };
 			}
 			if (params.action === "stop") {
 				if (!params.to) {
-					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: { action: "stop", ok: false }, isError: true };
+					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: failureDetails({ action: "stop", ok: false }), isError: true };
 				}
 				// HARD stop: aborts the run's signal → the engine calls the sub-agent's agent.abort()
 				// (child.ts escalates SIGTERM → force tree-kill, so this DOES kill a child-engine process).
@@ -3155,7 +3283,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				}
 				return {
 					content: [{ type: "text", text: `Cannot stop "${displayTarget}" — no such running run (it already finished).` }],
-					details: { action: "stop", ok: false },
+					details: failureDetails({ action: "stop", ok: false }),
 					isError: true,
 				};
 			}
@@ -3172,7 +3300,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if ((params.action === "list" || params.action === "inbox") && !controller.activePersona?.coaching) {
 				text += `\n\n${coachingDisabledHint(controller.activePersona?.name)}`;
 			}
-			return { content: [{ type: "text", text }], details: out.details, isError: !out.details.ok };
+			return { content: [{ type: "text", text }], details: out.details.ok ? out.details : failureDetails(out.details), isError: !out.details.ok };
 		},
 		renderCall(args, theme) {
 			const action = compactInlineText(args.action ?? "?", { maxChars: 24 }) || "?";
@@ -3244,12 +3372,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			if (params.action === "cancel") {
 				if (!params.id) {
-					return { content: [{ type: "text", text: "timer cancel needs { id } (see `list`)." }], details: { action: "cancel", ok: false }, isError: true };
+					return { content: [{ type: "text", text: "timer cancel needs { id } (see `list`)." }], details: failureDetails({ action: "cancel", ok: false }), isError: true };
 				}
 				const cancelled = timerScheduler.cancel(params.id);
 				return cancelled
 					? { content: [{ type: "text", text: `Cancelled ${params.id}.` }], details: { action: "cancel", ok: true }, isError: false }
-					: { content: [{ type: "text", text: `No armed timer with id "${params.id}" (it may have already fired or been cancelled).` }], details: { action: "cancel", ok: false }, isError: true };
+					: { content: [{ type: "text", text: `No armed timer with id "${params.id}" (it may have already fired or been cancelled).` }], details: failureDetails({ action: "cancel", ok: false }), isError: true };
 			}
 			// action === "arm"
 			const arm: { message: string; label?: string; delayMs?: number; atEpochMs?: number } = { message: params.message ?? "" };
@@ -3257,14 +3385,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (params.atIso !== undefined) {
 				const at = Date.parse(params.atIso);
 				if (!Number.isFinite(at)) {
-					return { content: [{ type: "text", text: `timer atIso "${params.atIso}" is not a valid ISO-8601 time.` }], details: { action: "arm", ok: false }, isError: true };
+					return { content: [{ type: "text", text: `timer atIso "${params.atIso}" is not a valid ISO-8601 time.` }], details: failureDetails({ action: "arm", ok: false }), isError: true };
 				}
 				arm.atEpochMs = at;
 			}
 			if (params.delaySeconds !== undefined) arm.delayMs = Math.round(params.delaySeconds * 1000);
 			const r = timerScheduler.arm(arm);
 			if (!r.ok || !r.entry) {
-				return { content: [{ type: "text", text: r.error ?? "timer arm failed." }], details: { action: "arm", ok: false }, isError: true };
+				return { content: [{ type: "text", text: r.error ?? "timer arm failed." }], details: failureDetails({ action: "arm", ok: false }), isError: true };
 			}
 			const e = r.entry;
 			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(e.fireAtEpochMs - Date.now())} [${new Date(e.fireAtEpochMs).toISOString()}]. On fire I'll be woken with: "${e.message}". You can end this turn now.`;
@@ -3324,7 +3452,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (!resolved.ok) {
 				return {
 					content: [{ type: "text", text: `council failed: ${resolved.error}` }],
-					details: { error: resolved.error, persona: params.persona },
+					details: failureDetails({ error: resolved.error, persona: params.persona }),
 					isError: true,
 				};
 			}
@@ -3353,28 +3481,30 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const ruling = result?.output ?? "(the council returned no ruling)";
 				const uiBody = result ? (humanizeAggregateResult(result) ?? result.output) : "";
 				const headline = s.headline ?? (typeof s.count === "number" ? `${s.count} member results` : s.status ?? "");
+				const ok = result?.ok ?? false;
+				const details = {
+					ok,
+					headline,
+					status: s.status,
+					tally: s.tally,
+					usedFallback: s.usedFallback,
+					body: uiBody,
+					strategy,
+					roster,
+					persona,
+					...(result?.error ? { error: result.error } : {}),
+					...(result?.failureKind ? { failureKind: result.failureKind } : {}),
+				};
 				return {
 					// The ruling is sub-agent (council member) text — fence it like every other
 					// path that hands sub-agent output to the supervisor.
 					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${paramNote}${drainBusBlock()}` }],
-					details: {
-						ok: result?.ok ?? false,
-						headline,
-						status: s.status,
-						tally: s.tally,
-						usedFallback: s.usedFallback,
-						body: uiBody,
-						strategy,
-						roster,
-						persona,
-						...(result?.error ? { error: result.error } : {}),
-						...(result?.failureKind ? { failureKind: result.failureKind } : {}),
-					},
-					isError: !(result?.ok ?? false),
+					details: ok ? details : failureDetails(details),
+					isError: !ok,
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text", text: `council failed: ${message}` }], details: { error: message, strategy, roster }, isError: true };
+				return { content: [{ type: "text", text: `council failed: ${message}` }], details: failureDetails({ error: message, strategy, roster }), isError: true };
 			}
 		},
 		renderCall(args, theme) {
@@ -3443,26 +3573,35 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (!parsed) {
 				const installed = listFlows(ctx.cwd);
 				const hint = installed.length > 0 ? `Installed flows: ${installed.join(", ")}.` : "No flows are installed — add a *.flow.json under .pi/flows/.";
-				return { content: [{ type: "text", text: `no flow named "${params.name}". ${hint}` }], details: {}, isError: true };
+				return {
+					content: [{ type: "text", text: `no flow named "${params.name}". ${hint}` }],
+					details: failureDetails({ ok: false, error: `no flow named "${params.name}"` }),
+					isError: true,
+				};
 			}
 			if (!parsed.ok) {
-				return { content: [{ type: "text", text: `flow "${params.name}" is invalid: ${parsed.error}` }], details: {}, isError: true };
+				return {
+					content: [{ type: "text", text: `flow "${params.name}" is invalid: ${parsed.error}` }],
+					details: failureDetails({ ok: false, failureKind: "contract", error: parsed.error }),
+					isError: true,
+				};
 			}
 			try {
 				const outcome = await runFlowVisible(ctx, parsed.flow, params.task, signal);
+				const details = {
+					ok: outcome.ok,
+					failedPhase: outcome.failedPhase,
+					failureKind: outcome.failureKind,
+					error: outcome.error,
+				};
 				return {
 					content: [{ type: "text", text: fenceUntrusted(outcome.output || "(flow produced no output)") }],
-					details: {
-						ok: outcome.ok,
-						failedPhase: outcome.failedPhase,
-						failureKind: outcome.failureKind,
-						error: outcome.error,
-					},
+					details: outcome.ok ? details : failureDetails(details),
 					isError: !outcome.ok,
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text", text: `flow failed: ${message}` }], details: { error: message }, isError: true };
+				return { content: [{ type: "text", text: `flow failed: ${message}` }], details: failureDetails({ ok: false, error: message }), isError: true };
 			}
 		},
 		renderCall(args, theme) {
@@ -3527,12 +3666,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			if (arg === "reload") {
 				const activeName = controller.activePersona?.name;
+				const migration = refreshSeedMigration();
 				reload(ctx.cwd);
 				// Resolve-once-per-session is what keeps two turns of one conversation under the
 				// same rules; an explicit reload is the user asking for exactly this file to be
 				// re-read, so the spine comes along with the personas.
 				inspectEnabledLegacySpines();
 				reportSpineWarning(ctx);
+				reportSeedMigration(ctx, migration);
+				reportDefinitionCollisions(ctx);
 				if (activeName) {
 					const fresh = personas.find((p) => p.name === activeName);
 					if (fresh) await controller.activate(fresh);
@@ -3547,12 +3689,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (arg === "seed" || arg === "restore") {
 				const force = arg === "restore";
 				const r = runSeed(force);
+				reportSeedSourceCollisions(ctx, r);
+				const migration = refreshSeedMigration();
 				// These commands can create, migrate, preserve, or overwrite either prompt file. Refresh
 				// both cached roles now so the very next supervisor turn and delegated leg agree without
 				// requiring a second `/persona reload` or a process restart.
 				refreshSpineAfterSeed();
 				reportSpineWarning(ctx);
+				reportSeedMigration(ctx, migration);
 				reload(ctx.cwd);
+				reportDefinitionCollisions(ctx);
 				// Re-apply the active persona so a restored definition takes effect immediately.
 				const active = controller.activePersona?.name;
 				const fresh = active ? personas.find((p) => p.name === active) : undefined;
@@ -3671,7 +3817,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return { content: [{ type: "text", text }], details: { total }, isError: false };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("models "))}${theme.fg("dim", args.query ?? "(all)")}`, 0, 0);
+			const query = compactInlineText(args.query ?? "(all)", { maxChars: 96 }) || "(all)";
+			return new Text(`${theme.fg("toolTitle", theme.bold("models "))}${theme.fg("dim", query)}`, 0, 0);
 		},
 	});
 

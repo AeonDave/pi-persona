@@ -84,6 +84,24 @@ test("a failed delegate remains actionable and does not erase the by-hand run", 
 	assert.ok(n.observe("bash", 50), "the failed hand-off did not buy a false reset");
 });
 
+test("a repeated failed hand-off is backoff-suppressed without hiding a distinct failure", () => {
+	const repeated = mk();
+	const first = repeated.observe("delegate", 500, false, "same failure");
+	assert.match(first ?? "", /failed.*hand-off|re-dispatch/i);
+	assert.equal(repeated.observe("delegate", 500, false, "same failure"), undefined, "the identical immediate reminder is suppressed");
+	const distinct = mk();
+	assert.ok(distinct.observe("delegate", 500, false, "same failure"));
+	assert.ok(distinct.observe("delegate", 500, false, "other failure"), "a distinct same-size failure still gets an actionable reminder");
+});
+
+test("failed hand-off backoff is controlled by the thresholds", () => {
+	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 4, minStepChars: 10, failedHandoffBackoff: 2 });
+	assert.ok(n.observe("delegate", 500, false, "same failure"));
+	assert.equal(n.observe("delegate", 500, false, "same failure"), undefined);
+	assert.equal(n.observe("delegate", 500, false, "same failure"), undefined);
+	assert.ok(n.observe("delegate", 500, false, "same failure"), "the configured window eventually re-arms the reminder");
+});
+
 test("council is also a hand-off and resets the run", () => {
 	const n = mk();
 	n.observe("bash", 50);

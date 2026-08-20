@@ -10,6 +10,7 @@
  */
 
 import { type CapabilityPermissions, type EffectiveCapabilities, resolveCapabilities } from "../core/capabilities.ts";
+import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { type GateResult, gateToolCall } from "./gating.ts";
 import { composeSystemPrompt, type Persona } from "./persona.ts";
@@ -57,7 +58,7 @@ export class PersonaController {
 	async activate(persona: Persona): Promise<void> {
 		this.active = persona;
 		this.caps = this.resolveCaps(persona);
-		this.host.setStatus(persona.label);
+		this.host.setStatus(sanitizeDisplayLabel(persona.label, persona.name));
 		await this.applyModel(persona);
 		this.applyThinking(persona);
 		this.applyTools(persona);

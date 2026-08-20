@@ -146,3 +146,27 @@ test("a save MERGES — an assignment left out of the store is preserved, not re
 	writePersonaConfigs(file, { magi: { models: { melchior: "prov/a" } } }); // casper dropped by the caller
 	assert.equal(personaModels(readPersonaConfigs(file), "magi").casper, "prov/c", "removal is not expressible");
 });
+
+test("a save holds one lock across its read/merge/write transaction", () => {
+	const dir = tempDir("pi-persona-cfg-");
+	const file = join(dir, "config.json");
+	let locked = false;
+	let released = false;
+	writePersonaConfigs(file, withPersonaModels({}, "magi", { melchior: "prov/a" }), {
+		acquireLock: () => {
+			assert.equal(locked, false);
+			locked = true;
+			return () => {
+				locked = false;
+				released = true;
+			};
+		},
+		rename: (from, to) => {
+			assert.equal(locked, true, "the lock covers the read/merge/write critical section");
+			renameSync(from, to);
+		},
+		sleep: () => {},
+	});
+	assert.equal(locked, false);
+	assert.equal(released, true);
+});

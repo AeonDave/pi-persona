@@ -59,7 +59,7 @@ export function aggregateResults(results: AgentResult[]): AgentResult {
 		const cause = !r.ok && r.error && r.output && r.error !== r.output ? `\n\nError: ${r.error}` : "";
 		return `### [${r.agent}] ${status}\n\n${body}${cause}`;
 	});
-	return {
+	const aggregate: AgentResult = {
 		agent: "aggregate",
 		output: sections.join("\n\n---\n\n"),
 		structured: {
@@ -76,4 +76,10 @@ export function aggregateResults(results: AgentResult[]): AgentResult {
 		usage: sumUsage(results.map((r) => r.usage)),
 		ok: results.every((r) => r.ok),
 	};
+	if (!aggregate.ok) {
+		const cause = summarizeFailedResults(results, "one or more agents failed", "agent");
+		aggregate.error = cause.error;
+		aggregate.failureKind = cause.failureKind;
+	}
+	return aggregate;
 }

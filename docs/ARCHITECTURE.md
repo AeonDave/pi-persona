@@ -213,10 +213,13 @@ an isolation fallback. The generated diff is returned to the supervisor before t
 removed.
 
 `buildEngine` wraps the chosen backend with **provider fallback** (`engine/fallback.ts`): a run whose
-model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) is retried on the same model
-id under another authenticated provider, walking the whole chain (session provider first). Only
+model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) can retry the same model id
+only when the selection was unpinned/default, and only through the data-driven provider policy for
+that model family. A provider-qualified `spec.model` is an explicit provider and billing pin, so it is
+strict by default; callers must deliberately opt it into cross-provider recovery. Only
 `failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal — engines
-classify the cause on the `AgentResult`.
+classify the cause on the `AgentResult`. This prevents an explicitly selected OpenAI or native Claude
+leg from silently moving to an unrelated paid provider.
 
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 
@@ -535,12 +538,18 @@ persona directive lives at the TOP of the prompt and its pull decays as recent t
 
 - **Precedence (all file kinds):** `builtin < user (~/.pi/agent/persona/…) < project (<root>/.pi/…)`; project
   wins collisions. Personas and agents **share a folder**, split by the `persona: true` marker (a
-  persona and an agent must not share a name).
+  persona and an agent must not share a name). The loader reports a same-name collision and omits
+  both ambiguous definitions from the effective registries, so a malformed install fails closed
+  instead of silently routing persona selection and delegation to different files.
 - **Personas/agents load ONLY from the user and project dirs.** The bundled `personas/`+`agents/` are a
   **seed source, not a live discovery layer** — a fresh install shows NO personas until installed.
   `/persona seed` copies missing defaults, `/persona restore` force-restores originals (`core/seed.ts`);
-  first-run auto-install is opt-in (`PI_PERSONA_SEED=on`, guarded by a marker). Contracts/presets/teams
-  keep a builtin layer (they aren't personas).
+  first-run auto-install is opt-in (`PI_PERSONA_SEED=on`, guarded by a marker). When a release changes
+  a bundled default, activation may call the exact-size/hash migration helper: it upgrades only a known
+  pristine prior copy and preserves edited, linked, or unknown files. A migration can declare a bundled
+  agent dependency; that missing file is installed first with no-clobber atomic creation, or the parent
+  remains on its old bytes. Upgrades, dependency installs, and warnings are exposed in `/doctor`.
+  Contracts/presets/teams keep a builtin layer (they aren't personas).
 
 ## Cross-OS constructs
 

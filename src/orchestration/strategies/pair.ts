@@ -10,7 +10,8 @@
  * roster = [driver, navigator] · result = the driver's work + the navigator's review
  */
 
-import { sumUsage } from "../reducers.ts";
+import { sumUsage, summarizeFailedResults } from "../reducers.ts";
+import type { AgentResult } from "../types.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 
@@ -54,12 +55,18 @@ export const pair: Strategy = {
 		// produced one, and its failure only degrades the pair to a solo run.
 		const lines = [work.output];
 		if (review.ok && review.output.trim()) lines.push(`\n--- navigator review (${navigator.agent}) ---\n${review.output.trim()}`);
-		return {
+		const result: AgentResult = {
 			agent: "pair",
 			output: lines.join("\n"),
 			structured: { driver: driver.agent, navigator: navigator.agent, driverOk: work.ok, navigatorOk: review.ok },
 			usage: sumUsage([work, review].map((r) => r.usage)),
 			ok: work.ok,
 		};
+		if (!work.ok) {
+			const cause = summarizeFailedResults([work], "the driver failed");
+			result.error = cause.error;
+			result.failureKind = cause.failureKind;
+		}
+		return result;
 	},
 };

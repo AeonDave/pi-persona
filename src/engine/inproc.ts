@@ -45,6 +45,8 @@ export interface InProcSession {
 export interface CreateSessionOptions {
 	model: unknown;
 	modelRegistry: ModelRegistry;
+	/** The host's canonical runtime (Pi >=0.81); shared so auth/provider registrations survive. */
+	modelRuntime?: unknown;
 	cwd: string;
 	/** Pi's global agent dir (~/.pi/agent) for the sub-agent's resource loader. */
 	agentDir: string;
@@ -58,6 +60,23 @@ export interface CreateSessionOptions {
 }
 
 export type CreateInProcSession = (opts: CreateSessionOptions) => Promise<InProcSession>;
+
+/**
+ * Pi 0.81 moved the canonical auth/provider state from the extension-facing
+ * ModelRegistry to a ModelRuntime passed directly to createAgentSession. The
+ * compatibility facade still owns that runtime, but intentionally keeps it
+ * private in its public TypeScript API. Read the runtime only when the expected
+ * methods are present; old Pi versions and test facades then retain the legacy
+ * modelRegistry path.
+ */
+function sharedModelRuntime(registry: ModelRegistry): unknown {
+	const candidate = (registry as unknown as { runtime?: unknown }).runtime;
+	if (!candidate || typeof candidate !== "object") return undefined;
+	const runtime = candidate as { getAuth?: unknown; getModel?: unknown; stream?: unknown };
+	return typeof runtime.getAuth === "function" && typeof runtime.getModel === "function" && typeof runtime.stream === "function"
+		? candidate
+		: undefined;
+}
 
 export interface InProcessDeps {
 	resolveAgent: (name: string) => AgentConfig | undefined;
@@ -154,22 +173,23 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	// otherwise the allowlist would filter them out of the child's active set.
 	const customNames = (opts.customTools ?? []).map((t) => t.name);
 	const tools = mergeSessionToolAllowlist(opts.tools, customNames);
-	// Forward-compat with the model-runtime migration (pi > 0.80.7). pi ≤ 0.80.7 reads
+	// Forward-compat with the model-runtime migration (pi > 0.80.7). pi <= 0.80.7 reads
 	// `CreateAgentSessionOptions.modelRegistry` to share the host's auth/model registry with the
-	// sub-session; the migration DROPS that create option in favour of an async `modelRuntime`, where
-	// the sub-session self-builds a ModelRuntime from `agentDir/{auth,models}.json`. Two moves keep
-	// this correct on BOTH SDKs: (1) pass `agentDir` (a valid option on both) so the self-built runtime
-	// resolves the SAME on-disk credentials the host uses — disk-configured delegation stays correct
-	// after the migration; (2) attach the legacy `modelRegistry` OFF the object literal, so the newer
-	// SDK types (which no longer declare it) don't turn it into an excess-property compile error. On
-	// older pi the key is still read (full host-registry sharing); on newer pi it is simply ignored
-	// (only host-only in-memory providers — not persisted to auth.json — would not be inherited).
+	// sub-session; newer pi takes the canonical `modelRuntime` instead. The extension-facing
+	// ModelRegistry keeps that runtime private in its type surface, so `sharedModelRuntime()` above
+	// recovers it only when the runtime shape is present. Passing it is important even when auth is
+	// on disk: native providers and runtime credentials can exist only in the supervisor's memory.
+	// `agentDir` remains a valid fallback for older/standalone SDKs, and the legacy key stays outside
+	// the object literal so current SDK types do not reject it.
 	const sessionOptions: NonNullable<Parameters<typeof createAgentSession>[0]> = {
 		model: opts.model as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["model"]>,
 		sessionManager: SessionManager.inMemory(opts.cwd),
 		resourceLoader: loader,
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
+		...(opts.modelRuntime !== undefined
+			? { modelRuntime: opts.modelRuntime as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["modelRuntime"]> }
+			: {}),
 		excludeTools: [...new Set([...ORCHESTRATION_TOOLS, ...(opts.excludeTools ?? [])])],
 		...(tools !== undefined ? { tools } : {}),
 		...(opts.customTools && opts.customTools.length > 0 ? { customTools: opts.customTools } : {}),
@@ -266,6 +286,20 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				const hint = known.length > 0 ? ` — installed agents: ${known.slice(0, 12).join(", ")}${known.length > 12 ? ", …" : ""}` : "";
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)${hint}`, failureKind: "unknown-agent" };
 			}
+			// A requested contract is a runtime guard, not merely prompt decoration. Resolve it
+			// before model/session construction so a missing name can never run unconstrained.
+			const requestedContract = spec.outputContract?.trim();
+			const requestedDef = requestedContract ? pinnedDef(requestedContract) : undefined;
+			if (requestedContract && !requestedDef) {
+				return {
+					agent: spec.agent,
+					output: "",
+					usage: emptyUsage(),
+					ok: false,
+					error: `[${spec.agent}] output contract "${requestedContract}" not found`,
+					failureKind: "contract",
+				};
+			}
 
 			const ref = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model ?? deps.defaultModel;
 			const model = resolveModel(deps.modelRegistry, ref);
@@ -313,9 +347,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted`, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), failureKind: "abort" };
 			}
 
+			const modelRuntime = sharedModelRuntime(deps.modelRegistry);
 			const sessionOpts: CreateSessionOptions = {
 				model,
 				modelRegistry: deps.modelRegistry,
+				...(modelRuntime !== undefined ? { modelRuntime } : {}),
 				cwd: deps.cwd,
 				agentDir: deps.agentDir ?? deps.cwd,
 			};
@@ -497,7 +533,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				aborted = true;
 				abortSession();
 			};
-			let contractDef: ContractDef | undefined;
+			let contractDef: ContractDef | undefined = requestedDef;
 			let task: string;
 			try {
 				unsub = session.subscribe((ev) => {
@@ -571,7 +607,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					spec.skills && spec.skills.length > 0
 						? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n`
 						: "";
-				contractDef = spec.outputContract && deps.contracts ? pinnedDef(spec.outputContract) : undefined;
 				const contractTail = contractDef ? `\n\n${contractInstructions(contractDef)}` : "";
 				task = `${skillsPreamble}Task: ${spec.task}${contractTail}`;
 			} catch (e) {

@@ -39,7 +39,7 @@ const provider = (): Partial<AgentResult> => ({ ok: false, failureKind: "provide
 
 test("a provider failure reroutes to the same id under another provider and succeeds", async () => {
 	const { engine, calls } = stubEngine([provider(), { ok: true, modelUsed: "amazon-bedrock/m", output: "done" }]);
-	const wrapped = withModelFallback(engine, { models: MODELS, preferProvider: "anthropic" });
+	const wrapped = withModelFallback(engine, { models: MODELS, preferProvider: "anthropic", allowCrossProviderFallback: true });
 	const r = await wrapped.run({ agent: "x", task: "t", model: "anthropic/m" });
 	assert.equal(r.ok, true);
 	assert.equal(r.modelUsed, "amazon-bedrock/m");
@@ -51,7 +51,7 @@ test("a NON-provider failure (agent/contract/abort/timeout) is never retried", a
 	for (const kind of ["agent", "contract", "abort", "timeout", "unknown-model"] as FailureKind[]) {
 		const { engine, calls } = stubEngine([{ ok: false, failureKind: kind, modelUsed: "anthropic/m", error: kind }]);
 		const wrapped = withModelFallback(engine, { models: MODELS, preferProvider: "anthropic" });
-		const r = await wrapped.run({ agent: "x", task: "t", model: "anthropic/m" });
+		const r = await wrapped.run({ agent: "x", task: "t", model: "m" });
 		assert.equal(r.ok, false);
 		assert.equal(calls.length, 1, `${kind} must not reroute`);
 	}
@@ -60,7 +60,7 @@ test("a NON-provider failure (agent/contract/abort/timeout) is never retried", a
 test("aggressive: it walks the WHOLE chain, then returns the last provider failure", async () => {
 	// every attempt fails at the provider → try anthropic, bedrock, copilot, then give up.
 	const { engine, calls } = stubEngine([provider()]); // stub echoes spec.model into modelUsed for the rest
-	const wrapped = withModelFallback(engine, { models: MODELS, preferProvider: "anthropic" });
+	const wrapped = withModelFallback(engine, { models: MODELS, preferProvider: "anthropic", allowCrossProviderFallback: true });
 	const r = await wrapped.run({ agent: "x", task: "t", model: "anthropic/m" });
 	assert.equal(r.ok, false);
 	assert.equal(r.failureKind, "provider");
@@ -83,6 +83,7 @@ test("onFallback is notified for each reroute (transparency breadcrumb)", async 
 	const wrapped = withModelFallback(engine, {
 		models: MODELS,
 		preferProvider: "anthropic",
+		allowCrossProviderFallback: true,
 		onFallback: ({ from, to }) => seen.push({ from, to }),
 	});
 	await wrapped.run({ agent: "x", task: "t", model: "anthropic/m" });
@@ -90,4 +91,29 @@ test("onFallback is notified for each reroute (transparency breadcrumb)", async 
 		{ from: "anthropic/m", to: "amazon-bedrock/m" },
 		{ from: "amazon-bedrock/m", to: "copilot/m" },
 	]);
+});
+
+test("provider fallback does not route a paid OpenAI model through OpenCode", async () => {
+	const models: ModelLite[] = [
+		{ provider: "openai-codex", id: "gpt-5.6-luna" },
+		{ provider: "opencode", id: "gpt-5.6-luna" },
+		{ provider: "openrouter", id: "gpt-5.6-luna" },
+	];
+	const { engine, calls } = stubEngine([provider(), { ok: true, modelUsed: "opencode/gpt-5.6-luna" }]);
+	const wrapped = withModelFallback(engine, { models });
+	const r = await wrapped.run({ agent: "x", task: "t", model: "openai-codex/gpt-5.6-luna" });
+	assert.equal(r.ok, false, "the forbidden fallback must not be attempted");
+	assert.deepEqual(calls, ["openai-codex/gpt-5.6-luna"]);
+});
+
+test("a provider-qualified model can opt into cross-provider recovery", async () => {
+	const models: ModelLite[] = [
+		{ provider: "openai-codex", id: "gpt-5.6-luna" },
+		{ provider: "openai", id: "gpt-5.6-luna" },
+	];
+	const { engine, calls } = stubEngine([provider(), { ok: true, modelUsed: "openai/gpt-5.6-luna" }]);
+	const wrapped = withModelFallback(engine, { models, allowCrossProviderFallback: true });
+	const r = await wrapped.run({ agent: "x", task: "t", model: "openai-codex/gpt-5.6-luna" });
+	assert.equal(r.ok, true);
+	assert.deepEqual(calls, ["openai-codex/gpt-5.6-luna", "openai/gpt-5.6-luna"]);
 });

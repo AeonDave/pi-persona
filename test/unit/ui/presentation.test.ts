@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { boundDisplayRows, compactInlineText, compactVisibleText, sanitizeTerminalText } from "../../../src/ui/presentation.ts";
+import { boundDisplayRows, compactInlineText, compactVisibleLine, compactVisibleText, sanitizeTerminalText } from "../../../src/ui/presentation.ts";
+
+test("compactVisibleLine caps a composed card row in terminal columns", () => {
+	const clipped = compactVisibleLine(`✗ ${"漢".repeat(200)} · ${"x".repeat(200)}`);
+	assert.ok(visibleWidth(clipped) <= 100, `card row occupied ${visibleWidth(clipped)} columns`);
+	assert.match(clipped, /…$/);
+	assert.equal(compactVisibleLine("short row"), "short row");
+});
 
 test("compactVisibleText removes fence boilerplate and bounds lines and width", () => {
 	const input = [
@@ -113,6 +120,12 @@ test("compactVisibleText makes one enormous line safe for a collapsed card", () 
 	assert.equal(preview.originalChars, 100_000);
 });
 
+test("compactVisibleText clamps each preview line in terminal columns", () => {
+	const preview = compactVisibleText("漢".repeat(200), { maxLines: 2, maxLineChars: 40 });
+	assert.ok(visibleWidth(preview.text) <= 40, `preview occupied ${visibleWidth(preview.text)} terminal columns`);
+	assert.match(preview.text, /…$/);
+});
+
 test("boundDisplayRows keeps a live widget stable while exposing the full-list action", () => {
 	const rows = Array.from({ length: 20 }, (_, index) => `peer-${index}`);
 	const bounded = boundDisplayRows("local", rows, 7, "exocom_list for the full pool");
@@ -121,4 +134,3 @@ test("boundDisplayRows keeps a live widget stable while exposing the full-list a
 	assert.match(bounded.at(-1) ?? "", /\+15 more/);
 	assert.match(bounded.at(-1) ?? "", /exocom_list/);
 });
-

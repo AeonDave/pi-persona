@@ -33,7 +33,7 @@ export interface PeerInfo {
 
 export interface ContactPeerDeps {
 	/** The live peers of THIS run (excluding self) — scoped by the engine, never the whole bus. */
-	listPeers: () => PeerInfo[];
+	listPeers: () => PeerInfo[] | Promise<PeerInfo[]>;
 	/** Override the send budget (tests). Default {@link MAX_PEER_SENDS}. */
 	maxSends?: number;
 }
@@ -72,7 +72,7 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 		parameters: PeerParams,
 		async execute(_toolCallId, params: Static<typeof PeerParams>, _signal, _onUpdate, _ctx) {
 			if (params.action === "list") {
-				const peers = deps.listPeers();
+				const peers = await deps.listPeers();
 				return result(
 					peers.length > 0
 						? `Reachable peers:\n${peers.map((p) => `• ${p.label}`).join("\n")}`
@@ -94,7 +94,7 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 			// not one of THIS run's peers (e.g. "supervisor", or another run's child) never gets
 			// bus.send called at all — same "gone" wording as an actually-finished peer, so the
 			// tool result gives no signal either way about what exists outside this run's scope.
-			const inScope = deps.listPeers().some((p) => p.handle === params.to);
+			const inScope = (await deps.listPeers()).some((p) => p.handle === params.to);
 			const delivered = inScope && bus.send(selfHandle, params.to, params.message, "progress");
 			return result(
 				delivered

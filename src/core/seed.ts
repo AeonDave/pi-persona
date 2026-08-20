@@ -7,24 +7,28 @@
  * Layout mirrors discovery: personas + agents live together under `<user>/agents` (classified
  * by `persona: true`), teams in `<user>/teams.yaml`, the spine pair flat in `<user>` (bundled
  * under `prompts/`, but that is where `resolveSpine` looks), and flows/contracts/presets in
- * their own `<user>/<kind>` dirs. Should a persona and an agent ever share a name, in one folder
- * only one file can win, so the PERSONA owns it and the colliding builtin agent still loads.
+ * their own `<user>/<kind>` dirs. Persona and agent names are one shared namespace at runtime; a
+ * colliding seed is reported and the persona wins the single shared user file. The loader then
+ * reports the ambiguity instead of silently splitting the namespaces.
  *
  * Pure over node:fs (no Pi imports), so the copy/skip logic is unit-tested with temp dirs.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	constants,
 	copyFileSync,
 	existsSync,
 	fstatSync,
+	linkSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	readSync,
 	readdirSync,
+	renameSync,
+	rmSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -80,6 +84,56 @@ export interface SeedResult {
 	copied: string[];
 	/** Absolute paths left untouched (already existed, or a persona owned a colliding name). */
 	skipped: string[];
+	/** Basenames present in both bundled persona and agent sources; the persona wins seeding. */
+	collisions?: string[];
+}
+
+/** Exact bytes from the last release whose seeded copies are known to be stale. A user file is
+ * eligible only when BOTH size and digest match. Keep this explicit allow-list deliberately
+ * small: it is a migration policy, not a fuzzy upgrader. */
+export interface SeededDefaultSpec {
+	size: number;
+	sha256: string;
+	/** Bundled agent files that must exist before this parent default may be migrated. */
+	requiredAdditions?: readonly string[];
+}
+
+export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultSpec>> = {
+	"personas/dev.md": { size: 3985, sha256: "fb02263d97c53d6c10b6089c9c65ae7fad27a77c28434b5c892dbb87dd285e5b" },
+	"personas/elite.md": {
+		size: 15970,
+		sha256: "073f3c05f134df5d5daf8cd05df51dc15916300977a19d8b6dda3c8dd36abd1c",
+		requiredAdditions: ["agents/evidence-verifier.md"],
+	},
+};
+
+export interface SeedMigrationResult {
+	/** Absolute user paths upgraded from an exact, known-pristine old default. */
+	migrated: string[];
+	/** Absolute user paths installed as required additions during an eligible migration. */
+	installed: string[];
+	/** Absolute user paths intentionally left alone (edited, unknown, absent, or unchanged). */
+	skipped: string[];
+	/** Absolute paths that could not be inspected or replaced safely. */
+	warnings: string[];
+}
+
+export interface SeedMigrationOptions {
+	/** Override the built-in allow-list in tests or for a future explicitly supported release. */
+	legacyDefaults?: Readonly<Record<string, SeededDefaultSpec>>;
+	/** Filesystem seams for bounded inspection and no-clobber replacement tests. */
+	io?: SeedMigrationIO;
+	/** Test-only race hook, called after the old target is moved to backup and before install. */
+	beforeInstall?: (target: string, backup: string, staged: string) => void;
+	/** Test seam for making the random staging suffix deterministic. Production uses randomUUID. */
+	idFactory?: () => string;
+}
+
+export interface SeedMigrationIO extends SpineLegacyIO {
+	copyFile?: (from: string, to: string, flags?: number) => void;
+	link?: (from: string, to: string) => void;
+	rename?: (from: string, to: string) => void;
+	remove?: (path: string) => void;
 }
 
 function listByExt(dir: string, ext: string): string[] {
@@ -208,27 +262,324 @@ export function inspectLegacySeededSpines(
 	return result;
 }
 
+type SeedInspection =
+	| { kind: "legacy"; fingerprint: SpineFingerprint }
+	| { kind: "skip" }
+	| { kind: "warning"; detail: string };
+
+interface ResolvedSeedMigrationIO extends ResolvedSpineLegacyIO {
+	copyFile(from: string, to: string, flags?: number): void;
+	link(from: string, to: string): void;
+	rename(from: string, to: string): void;
+	remove(path: string): void;
+}
+
+function resolveSeedMigrationIO(io: SeedMigrationIO): ResolvedSeedMigrationIO {
+	return {
+		...resolveLegacyIO(io),
+		copyFile: io.copyFile ?? copyFileSync,
+		link: io.link ?? linkSync,
+		rename: io.rename ?? renameSync,
+		remove: io.remove ?? ((path) => rmSync(path, { force: true })),
+	};
+}
+
+/** Inspect one explicitly allowlisted target through a bounded descriptor. Unrelated user files
+ * never enter this function: the migration loop is keyed only by the explicit allow-list. */
+function inspectPristineSeededDefault(path: string, spec: SeededDefaultSpec, io: ResolvedSpineLegacyIO): SeedInspection {
+	let before: SpineLegacyStat;
+	try {
+		before = io.lstat(path);
+	} catch {
+		return { kind: "skip" };
+	}
+	if (!safeLegacyShape(before, spec.size)) return { kind: "skip" };
+	let fd: number;
+	try {
+		fd = io.open(path);
+	} catch (error) {
+		return { kind: "warning", detail: `open failed: ${errorText(error)}` };
+	}
+	try {
+		const opened = io.fstat(fd);
+		if (!safeLegacyShape(opened, spec.size) || !sameFingerprint(fingerprint(before), fingerprint(opened))) return { kind: "skip" };
+		const bytes = io.read(fd, spec.size + 1);
+		const after = io.fstat(fd);
+		if (!safeLegacyShape(after, spec.size) || !sameFingerprint(fingerprint(opened), fingerprint(after))) return { kind: "skip" };
+		// The sentinel byte rejects growth without ever hashing/retaining unbounded user data.
+		if (bytes.byteLength !== spec.size) return { kind: "skip" };
+		if (createHash("sha256").update(bytes).digest("hex") !== spec.sha256) return { kind: "skip" };
+		return { kind: "legacy", fingerprint: fingerprint(after) };
+	} catch (error) {
+		return { kind: "warning", detail: `inspection failed: ${errorText(error)}` };
+	} finally {
+		try {
+			io.close(fd);
+		} catch {
+			// A descriptor close failure cannot make an inspected file safe to replace.
+		}
+	}
+}
+
+function isMissing(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function restoreBackupIfTargetMissing(target: string, backup: string, io: ResolvedSeedMigrationIO): boolean {
+	try {
+		io.lstat(target);
+		return false;
+	} catch (error) {
+		if (!isMissing(error)) return false;
+	}
+	try {
+		io.rename(backup, target);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+type AdditionInstallResult = { kind: "installed" | "present" } | { kind: "failed"; detail: string };
+
+function userAgentTarget(userDir: string, relative: string): string | undefined {
+	const normalized = relative.replaceAll("\\", "/");
+	if (!normalized.startsWith("agents/") || normalized.includes("/../") || normalized.endsWith("/..") || normalized.includes("/./")) return undefined;
+	const name = normalized.slice("agents/".length);
+	if (!name || name.includes("/")) return undefined;
+	return join(userDir, "agents", name);
+}
+
+function installMissingAddition(
+	source: string,
+	target: string,
+	io: ResolvedSeedMigrationIO,
+	idFactory: () => string,
+): AdditionInstallResult {
+	try {
+		io.lstat(target);
+		return { kind: "present" };
+	} catch (error) {
+		if (!isMissing(error)) return { kind: "failed", detail: `target inspection failed: ${errorText(error)}` };
+	}
+	const staged = `${target}.pi-persona-migrate-${process.pid}-${idFactory()}.tmp`;
+	let stagedOwned = false;
+	try {
+		try {
+			io.copyFile(source, staged, constants.COPYFILE_EXCL);
+			stagedOwned = true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") return { kind: "failed", detail: `staging path already exists; preserved: ${staged}` };
+			return { kind: "failed", detail: `staging failed: ${errorText(error)}` };
+		}
+		try {
+			io.link(staged, target);
+			return { kind: "installed" };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") return { kind: "present" };
+			return { kind: "failed", detail: `install failed: ${errorText(error)}` };
+		}
+	} finally {
+		if (stagedOwned) {
+			try {
+				io.remove(staged);
+			} catch {
+				// The addition is already linked; a stale temp is recoverable and diagnosed by parent.
+			}
+		}
+	}
+}
+
+/**
+ * Upgrade bundled persona/agent files whose user copy is byte-for-byte one of the explicitly
+ * known pristine defaults from an older release. This operation is intentionally separate from
+ * {@link seedDefaults}: normal seeding preserves every existing file, while activation may call
+ * this function once to pick up a security/behavioral default without overwriting user work.
+ *
+ * The target is checked as a single-link regular file before and after reading, and is checked
+ * once more immediately before replacement. A changed file, symlink, hard-link, missing asset,
+ * or replacement error is skipped/reported rather than overwritten. The result is suitable for
+ * `/doctor` and activation diagnostics; this function never throws for a per-file race.
+ */
+export function migratePristineSeededDefaults(
+	bundledDir: string,
+	userDir: string,
+	options: SeedMigrationOptions = {},
+): SeedMigrationResult {
+	const migrated: string[] = [];
+	const installed: string[] = [];
+	const skipped: string[] = [];
+	const warnings: string[] = [];
+	const legacyDefaults = options.legacyDefaults ?? LEGACY_SEEDED_DEFAULTS;
+	const io = resolveSeedMigrationIO(options.io ?? {});
+	const idFactory = options.idFactory ?? randomUUID;
+	for (const [relative, spec] of Object.entries(legacyDefaults)) {
+		const source = join(bundledDir, relative);
+		const name = relative.replace(/^.*[\\/]/, "");
+		const target = join(userDir, "agents", name);
+		if (!existsSync(source)) {
+			skipped.push(target);
+			continue;
+		}
+		const inspection = inspectPristineSeededDefault(target, spec, io);
+		if (inspection.kind === "warning") {
+			warnings.push(`seed migration inspection warning: ${target}: ${inspection.detail}`);
+			continue;
+		}
+		if (inspection.kind !== "legacy") {
+			skipped.push(target);
+			continue;
+		}
+		let additionsReady = true;
+		for (const addition of spec.requiredAdditions ?? []) {
+			const additionTarget = userAgentTarget(userDir, addition);
+			if (!additionTarget) {
+				warnings.push(`seed migration required addition is invalid: ${addition}`);
+				additionsReady = false;
+				break;
+			}
+			const additionSource = join(bundledDir, addition);
+			if (!existsSync(additionSource)) {
+				warnings.push(`seed migration required addition missing from bundle: ${additionSource}`);
+				additionsReady = false;
+				break;
+			}
+			const additionResult = installMissingAddition(additionSource, additionTarget, io, idFactory);
+			if (additionResult.kind === "failed") {
+				warnings.push(`seed migration required addition failed for ${target}: ${additionResult.detail}`);
+				additionsReady = false;
+				break;
+			}
+			if (additionResult.kind === "installed") installed.push(additionTarget);
+		}
+		if (!additionsReady) {
+			skipped.push(target);
+			continue;
+		}
+		const suffix = `${process.pid}-${idFactory()}`;
+		const staged = `${target}.pi-persona-migrate-${suffix}.tmp`;
+		const backup = `${target}.pi-persona-migrate-${suffix}.bak`;
+		let stagedOwned = false;
+		try {
+			// Stage the trusted bundled bytes beside the target with exclusive creation. A stale
+			// temp from a crashed prior run is never followed, overwritten, or removed by us.
+			try {
+				io.copyFile(source, staged, constants.COPYFILE_EXCL);
+				stagedOwned = true;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+					warnings.push(`seed migration staging path already exists; preserved: ${staged}`);
+					skipped.push(target);
+					continue;
+				}
+				throw error;
+			}
+			let current: SpineLegacyStat;
+			try {
+				current = io.lstat(target);
+			} catch {
+				skipped.push(target);
+				continue;
+			}
+			if (!safeLegacyShape(current, spec.size) || !sameFingerprint(inspection.fingerprint, fingerprint(current))) {
+				skipped.push(target);
+				continue;
+			}
+			// Move the old inode to a recoverable backup. Installing with a hard-link below makes
+			// target creation atomic-visible and no-clobber: a concurrent writer that claims the
+			// path causes link() to fail with EEXIST rather than replacing its bytes. Both paths
+			// are siblings, so this is same-volume on POSIX and Windows/NTFS alike.
+			io.rename(target, backup);
+			const backupInspection = inspectPristineSeededDefault(backup, spec, io);
+			if (backupInspection.kind !== "legacy") {
+				if (!restoreBackupIfTargetMissing(target, backup, io)) warnings.push(`seed migration backup preserved: ${backup}`);
+				warnings.push(`seed migration target changed before replacement: ${target}`);
+				skipped.push(target);
+				continue;
+			}
+			options.beforeInstall?.(target, backup, staged);
+			try {
+				io.link(staged, target);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+					// A concurrent custom edit won the path. Leave it untouched and discard only
+					// the old known-pristine backup.
+					io.remove(backup);
+					warnings.push(`seed migration target changed during migration; preserved: ${target}`);
+					skipped.push(target);
+					continue;
+				}
+				if (!restoreBackupIfTargetMissing(target, backup, io)) warnings.push(`seed migration backup preserved: ${backup}`);
+				throw error;
+			}
+			io.remove(backup);
+			migrated.push(target);
+		} catch (error) {
+			warnings.push(`seed migration replacement warning: ${target}: ${errorText(error)}`);
+		} finally {
+			if (stagedOwned) {
+				try {
+					io.remove(staged);
+				} catch {
+					warnings.push(`seed migration temporary file remains: ${staged}`);
+				}
+			}
+		}
+	}
+	return { migrated, installed, skipped, warnings };
+}
+
 /** Copy the bundled defaults under `bundledDir` into `userDir`. Returns what changed. */
 export function seedDefaults(bundledDir: string, userDir: string, force: boolean): SeedResult {
 	const copied: string[] = [];
 	const skipped: string[] = [];
+	const collisions: string[] = [];
 	const place = (src: string, dst: string): void => {
-		if (!force && existsSync(dst)) {
-			skipped.push(dst);
+		mkdirSync(dirname(dst), { recursive: true });
+		if (!force) {
+			// `existsSync` follows symlinks and leaves a TOCTOU window. Inspect the directory entry,
+			// then still use exclusive creation so an editor/process that wins the race is preserved.
+			try {
+				lstatSync(dst);
+				skipped.push(dst);
+				return;
+			} catch (error) {
+				if (!isMissing(error)) throw error;
+			}
+			try {
+				copyFileSync(src, dst, constants.COPYFILE_EXCL);
+				copied.push(dst);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+				skipped.push(dst);
+			}
 			return;
 		}
-		mkdirSync(dirname(dst), { recursive: true });
-		copyFileSync(src, dst);
-		copied.push(dst);
+
+		// Restore is explicitly destructive for THIS directory entry, but must never write through
+		// a user symlink/hard-link. Stage complete bytes beside it and atomically replace the entry;
+		// readers see either old or new content, and another link to the old inode stays untouched.
+		const staged = `${dst}.pi-persona-restore-${process.pid}-${randomUUID()}.tmp`;
+		let stagedOwned = false;
+		try {
+			copyFileSync(src, staged, constants.COPYFILE_EXCL);
+			stagedOwned = true;
+			renameSync(staged, dst);
+			stagedOwned = false;
+			copied.push(dst);
+		} finally {
+			if (stagedOwned) rmSync(staged, { force: true });
+		}
 	};
 
-	// personas + agents share <user>/agents. Seed personas first and let them OWN a shared name;
-	// the builtin agent of that name still loads (it is just not seeded into the user dir).
+	// Personas + agents share <user>/agents. Seed personas first so a colliding basename has one
+	// deterministic on-disk owner; seedDefaults returns the collision names for diagnostics.
 	const personaFiles = listByExt(join(bundledDir, "personas"), ".md");
 	const ownedByPersona = new Set(personaFiles);
 	for (const f of personaFiles) place(join(bundledDir, "personas", f), join(userDir, "agents", f));
 	for (const f of listByExt(join(bundledDir, "agents"), ".md")) {
 		if (ownedByPersona.has(f)) {
+			collisions.push(f.slice(0, -3));
 			skipped.push(join(userDir, "agents", f));
 			continue;
 		}
@@ -258,5 +609,5 @@ export function seedDefaults(bundledDir: string, userDir: string, force: boolean
 	const teamsSrc = join(bundledDir, "teams.yaml");
 	if (existsSync(teamsSrc)) place(teamsSrc, join(userDir, "teams.yaml"));
 
-	return { copied, skipped };
+	return { copied, skipped, ...(collisions.length > 0 ? { collisions } : {}) };
 }

@@ -1066,6 +1066,16 @@ test("renderCompletion appends the surrender note when a DONE leg reports a bloc
 	assert.match(out, /recovery pass/i, "the persistence note rides the completion report");
 });
 
+test("renderCompletion scans the fallback progress output it actually renders", () => {
+	const run = {
+		...doneRun("run-progress-blocked", "operator", ""),
+		progress: { output: "[BLOCKED: tool unavailable]", turns: 1, tokens: 1 },
+	};
+	const out = renderCompletion([run], (t) => t, surrenderScan);
+	assert.match(out, /\[BLOCKED: tool unavailable\]/, "the visible completion body comes from progress");
+	assert.match(out, /recovery pass/i, "the persistence note scans the same fallback body");
+});
+
 test("renderCompletion leaves a clean batch untouched — identical to the plain report", () => {
 	const runs = [doneRun("run-1", "scout", "found it — file:line list attached")];
 	const out = renderCompletion(runs, (t) => t, surrenderScan);

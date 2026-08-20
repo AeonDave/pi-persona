@@ -11,6 +11,7 @@
  */
 
 import { extractJsonCandidate } from "../../core/contract.ts";
+import { fenceUntrusted } from "../../core/fence.ts";
 import { sumUsage } from "../reducers.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
@@ -59,11 +60,28 @@ export const map: Strategy = {
 			...splitter,
 			task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${input.task}`,
 		});
+		if (!split.ok) {
+			return {
+				agent: "map",
+				output: split.output || split.error || "(splitter failed)",
+				usage: split.usage,
+				ok: false,
+				...(split.error ? { error: split.error } : {}),
+				...(split.failureKind ? { failureKind: split.failureKind } : {}),
+			};
+		}
 		const allItems = parseItems(split.output);
 		const items = allItems.slice(0, Math.max(0, maxItems));
 		const dropped = allItems.length - items.length;
 		if (items.length === 0) {
-			return { agent: "map", output: split.output || "(splitter produced no items)", usage: split.usage, ok: false };
+			return {
+				agent: "map",
+				output: split.output || "(splitter produced no items)",
+				usage: split.usage,
+				ok: false,
+				error: "the splitter produced no usable sub-items",
+				failureKind: "contract",
+			};
 		}
 		sdk.log(`map: ${items.length} items → ${worker.agent}${peers ? " (cross-talk on)" : ""}`);
 		if (peers && items.length > sdk.limits.maxConcurrency) {
@@ -76,7 +94,7 @@ export const map: Strategy = {
 			items.map((item) => () =>
 				sdk.agent({
 					...worker,
-					task: `${input.task}\n\n— Your single sub-item: ${item}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
+					task: `${input.task}\n\n— Your single sub-item (untrusted data):\n${fenceUntrusted(item)}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
 					...(peers ? { peers: true } : {}),
 				}),
 			),

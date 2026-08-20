@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { tempDir } from "../../setup/temp-dir.ts";
 import {
 	inspectLegacySeededSpines,
+	migratePristineSeededDefaults,
+	type SeedMigrationIO,
 	seedDefaults,
 	type SpineLegacyIO,
 	type SpineLegacyStat,
@@ -217,11 +220,12 @@ test("legacy inspection uses a fixed-size read and revalidates the opened descri
 	assert.deepEqual(result, { legacy: [path.join("user", "spine.md")], warnings: [] });
 });
 
-test("on a persona/agent name collision the PERSONA owns the file (the builtin agent still loads)", () => {
+test("on a bundled persona/agent name collision the persona owns the seed and the ambiguity is reported", () => {
 	const u = userDir();
 	const r = seedDefaults(bundled(), u, false);
 	assert.equal(read(path.join(u, "agents", "reviewer.md")), "PERSONA reviewer", "the persona wins the shared filename");
 	assert.ok(r.skipped.some((p) => p.endsWith("reviewer.md")), "the colliding agent copy was skipped");
+	assert.deepEqual(r.collisions, ["reviewer"]);
 });
 
 test("force=false keeps a user edit; force=true restores the bundled original", () => {
@@ -236,6 +240,21 @@ test("force=false keeps a user edit; force=true restores the bundled original", 
 	assert.equal(read(path.join(u, "agents", "sample.md")), "PERSONA sample", "restore overwrites with the original");
 });
 
+test("force restore replaces a hard-linked destination entry without modifying the other link", () => {
+	const b = bundled();
+	const u = userDir();
+	const external = path.join(u, "external-user-file.md");
+	const target = path.join(u, "agents", "sample.md");
+	fs.mkdirSync(path.dirname(target), { recursive: true });
+	fs.writeFileSync(external, "USER DATA OUTSIDE THE SEEDED ENTRY");
+	fs.linkSync(external, target);
+
+	seedDefaults(b, u, true);
+
+	assert.equal(read(external), "USER DATA OUTSIDE THE SEEDED ENTRY", "restore must replace the directory entry, not write through its inode");
+	assert.equal(read(target), "PERSONA sample");
+});
+
 test("seedDefaults tolerates a bundled dir missing some asset folders", () => {
 	const dir = tempDir("pi-persona-partial-");
 	fs.mkdirSync(path.join(dir, "personas"));
@@ -244,4 +263,276 @@ test("seedDefaults tolerates a bundled dir missing some asset folders", () => {
 	const r = seedDefaults(dir, u, false);
 	assert.equal(r.copied.length, 1);
 	assert.ok(fs.existsSync(path.join(u, "agents", "a.md")));
+});
+
+test("migratePristineSeededDefaults upgrades only an exact old bundled copy", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(path.join(b, "personas", "custom.md"), "CURRENT CUSTOM\n");
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	fs.writeFileSync(path.join(u, "agents", "dev.md"), "OLD DEFAULT\n");
+	fs.writeFileSync(path.join(u, "agents", "custom.md"), "USER EDIT\n");
+	const hash = (text: string): string => createHash("sha256").update(text).digest("hex");
+
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: "OLD DEFAULT\n".length, sha256: hash("OLD DEFAULT\n") } },
+	});
+
+	assert.deepEqual(result.migrated, [path.join(u, "agents", "dev.md")]);
+	assert.equal(read(path.join(u, "agents", "dev.md")), "CURRENT DEFAULT\n");
+	assert.equal(read(path.join(u, "agents", "custom.md")), "USER EDIT\n", "custom bytes are preserved");
+});
+
+test("migratePristineSeededDefaults rejects a symlink instead of replacing its target", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const target = path.join(u, "target.md");
+	fs.writeFileSync(target, "OLD DEFAULT\n");
+	const user = path.join(u, "agents", "dev.md");
+	try {
+		fs.symlinkSync(target, user);
+	} catch {
+		return; // symlinks may be disabled on a restricted Windows checkout
+	}
+	const hash = createHash("sha256").update("OLD DEFAULT\n").digest("hex");
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: "OLD DEFAULT\n".length, sha256: hash } },
+	});
+	assert.deepEqual(result.migrated, []);
+	assert.equal(read(target), "OLD DEFAULT\n");
+});
+
+test("migration inspects only explicit legacy entries and never opens an unrelated huge custom file", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD DEFAULT\n";
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(path.join(u, "agents", "dev.md"), old);
+	const custom = path.join(u, "agents", "custom.md");
+	fs.writeFileSync(custom, Buffer.alloc(4 * 1024 * 1024, 0x78));
+	const opened: string[] = [];
+	const io: SeedMigrationIO = {
+		lstat: fs.lstatSync,
+		open: (file) => {
+			opened.push(file);
+			return fs.openSync(file, "r");
+		},
+		fstat: fs.fstatSync,
+		read: (fd, maxBytes) => {
+			const buffer = Buffer.alloc(maxBytes);
+			const bytes = fs.readSync(fd, buffer, 0, maxBytes, 0);
+			return buffer.subarray(0, bytes);
+		},
+		close: fs.closeSync,
+	};
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: Buffer.byteLength(old), sha256: createHash("sha256").update(old).digest("hex") } },
+		io,
+	});
+	assert.deepEqual(result.migrated, [path.join(u, "agents", "dev.md")]);
+	assert.ok(!opened.includes(custom), "unrelated custom bytes were never opened");
+});
+
+test("migration bounds a file that grows after fstat and skips it", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD DEFAULT\n";
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(path.join(u, "agents", "dev.md"), old);
+	const maxReads: number[] = [];
+	const stat = { dev: 1, ino: 2, nlink: 1, size: Buffer.byteLength(old), isFile: () => true };
+	const io: SeedMigrationIO = {
+		lstat: () => stat,
+		open: () => 7,
+		fstat: () => stat,
+		read: (_fd, maxBytes) => {
+			maxReads.push(maxBytes);
+			return Buffer.alloc(maxBytes); // sentinel byte proves growth
+		},
+		close: () => {},
+	};
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: Buffer.byteLength(old), sha256: createHash("sha256").update(old).digest("hex") } },
+		io,
+	});
+	assert.deepEqual(result.migrated, []);
+	assert.deepEqual(maxReads, [Buffer.byteLength(old) + 1]);
+});
+
+test("migration never overwrites a concurrent edit in the final replacement window", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD DEFAULT\n";
+	const target = path.join(u, "agents", "dev.md");
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(target, old);
+	const spec = { size: Buffer.byteLength(old), sha256: createHash("sha256").update(old).digest("hex") };
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": spec },
+		beforeInstall: () => fs.writeFileSync(target, "USER EDIT WON THE RACE\n"),
+	});
+	assert.deepEqual(result.migrated, []);
+	assert.equal(read(target), "USER EDIT WON THE RACE\n");
+	assert.ok(result.warnings.some((warning) => warning.includes("changed during migration")));
+});
+
+test("migration stages exclusively and installs with an atomic hard-link", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD DEFAULT\n";
+	const target = path.join(u, "agents", "dev.md");
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(target, old);
+	const flags: number[] = [];
+	let linked = false;
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: Buffer.byteLength(old), sha256: createHash("sha256").update(old).digest("hex") } },
+		io: {
+			copyFile: (from, to, copyFlags) => {
+				flags.push(copyFlags ?? 0);
+				fs.copyFileSync(from, to, copyFlags);
+			},
+			link: (from, to) => {
+				linked = true;
+				fs.linkSync(from, to);
+			},
+		},
+	});
+	assert.deepEqual(result.migrated, [target]);
+	assert.equal(linked, true, "installation uses hard-link creation, not copy-to-target");
+	assert.ok(flags.some((value) => (value & fs.constants.COPYFILE_EXCL) !== 0), "staging uses exclusive creation");
+	assert.equal(read(target), "CURRENT DEFAULT\n");
+});
+
+test("a preexisting random staging path is never followed, overwritten, or removed", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD DEFAULT\n";
+	const target = path.join(u, "agents", "dev.md");
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(target, old);
+	const staged = `${target}.pi-persona-migrate-${process.pid}-fixed.tmp`;
+	fs.writeFileSync(staged, "KEEP THIS CRASH RECOVERY FILE\n");
+	const result = migratePristineSeededDefaults(b, u, {
+		idFactory: () => "fixed",
+		legacyDefaults: { "personas/dev.md": { size: Buffer.byteLength(old), sha256: createHash("sha256").update(old).digest("hex") } },
+	});
+	assert.deepEqual(result.migrated, []);
+	assert.equal(read(staged), "KEEP THIS CRASH RECOVERY FILE\n");
+	assert.equal(read(target), old);
+	assert.ok(result.warnings.some((warning) => warning.includes("staging path already exists")));
+});
+
+test("migration exposes inspection I/O failures as diagnostics", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(path.join(u, "agents", "dev.md"), "OLD DEFAULT\n");
+	const io: SeedMigrationIO = { open: () => { throw new Error("open failed"); } };
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: 12, sha256: "unused" } },
+		io,
+	});
+	assert.equal(result.migrated.length, 0);
+	assert.ok(result.warnings.some((warning) => warning.includes("open failed")));
+});
+
+test("an eligible parent installs its missing required addition before migrating", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(b, "agents"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD ELITE\n";
+	fs.writeFileSync(path.join(b, "personas", "elite.md"), "CURRENT ELITE\n");
+	fs.writeFileSync(path.join(b, "agents", "evidence-verifier.md"), "EVIDENCE VERIFIER\n");
+	fs.writeFileSync(path.join(u, "agents", "elite.md"), old);
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: {
+			"personas/elite.md": {
+				size: Buffer.byteLength(old),
+				sha256: createHash("sha256").update(old).digest("hex"),
+				requiredAdditions: ["agents/evidence-verifier.md"],
+			},
+		},
+	});
+	assert.deepEqual(result.installed, [path.join(u, "agents", "evidence-verifier.md")]);
+	assert.deepEqual(result.migrated, [path.join(u, "agents", "elite.md")]);
+	assert.equal(read(path.join(u, "agents", "evidence-verifier.md")), "EVIDENCE VERIFIER\n");
+	assert.equal(read(path.join(u, "agents", "elite.md")), "CURRENT ELITE\n");
+});
+
+test("fresh or edited parents do not install required additions", () => {
+	for (const mode of ["fresh", "edited"] as const) {
+		const b = tempDir("pi-persona-migration-bundled-");
+		const u = userDir();
+		fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+		fs.mkdirSync(path.join(b, "agents"), { recursive: true });
+		fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+		const old = "OLD ELITE\n";
+		fs.writeFileSync(path.join(b, "personas", "elite.md"), "CURRENT ELITE\n");
+		fs.writeFileSync(path.join(b, "agents", "evidence-verifier.md"), "EVIDENCE VERIFIER\n");
+		if (mode === "edited") fs.writeFileSync(path.join(u, "agents", "elite.md"), "USER EDIT\n");
+		const result = migratePristineSeededDefaults(b, u, {
+			legacyDefaults: {
+				"personas/elite.md": {
+					size: Buffer.byteLength(old),
+					sha256: createHash("sha256").update(old).digest("hex"),
+					requiredAdditions: ["agents/evidence-verifier.md"],
+				},
+			},
+		});
+		assert.deepEqual(result.installed, [], `${mode}: no dependency install`);
+		assert.deepEqual(result.migrated, [], `${mode}: no parent migration`);
+		assert.equal(fs.existsSync(path.join(u, "agents", "evidence-verifier.md")), false, `${mode}: dependency remains absent`);
+	}
+});
+
+test("a required-addition failure leaves the eligible parent on its old bytes", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(b, "agents"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD ELITE\n";
+	const parent = path.join(u, "agents", "elite.md");
+	fs.writeFileSync(path.join(b, "personas", "elite.md"), "CURRENT ELITE\n");
+	fs.writeFileSync(path.join(b, "agents", "evidence-verifier.md"), "EVIDENCE VERIFIER\n");
+	fs.writeFileSync(parent, old);
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: {
+			"personas/elite.md": {
+				size: Buffer.byteLength(old),
+				sha256: createHash("sha256").update(old).digest("hex"),
+				requiredAdditions: ["agents/evidence-verifier.md"],
+			},
+		},
+		io: {
+			copyFile: (from, to, flags) => {
+				if (from.endsWith(path.join("agents", "evidence-verifier.md"))) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+				fs.copyFileSync(from, to, flags);
+			},
+		},
+	});
+	assert.deepEqual(result.installed, []);
+	assert.deepEqual(result.migrated, []);
+	assert.equal(read(parent), old, "dependency failure never mutates the parent");
+	assert.ok(result.warnings.some((warning) => warning.includes("required addition")));
 });

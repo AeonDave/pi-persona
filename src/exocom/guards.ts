@@ -35,4 +35,11 @@ export class SeenMessages {
 		if (this.seen.size > 4096) for (const [k, ts] of this.seen) { if (t - ts >= this.ttlMs) this.seen.delete(k); }
 		return false;
 	}
+
+	/** Undo a reservation made by seenBefore when a later guard rejects the message.
+	 * A sender may retry the same id after a transient budget window; recording it before
+	 * charging the budget would turn that legitimate retry into a permanent duplicate. */
+	forget(sender: string, msgId: string): void {
+		this.seen.delete(`${sender}\x1f${msgId}`);
+	}
 }
