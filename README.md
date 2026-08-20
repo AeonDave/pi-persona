@@ -80,6 +80,12 @@ An active persona can also borrow another installed persona's declared council f
 - **Decide, then do.** A council persona consults its ensemble through the `council` tool, gets a
   ruling (winner + tally + recorded dissent), then executes it with its own tools and re-convenes
   when execution raises a new decision — state → decision → execution.
+- **Time-aware.** Pi's base prompt has no clock, so a supervisor cannot tell five minutes of work
+  from five hours. Every settled leg now reports its wall time, an inbound peer message says how
+  long ago it was sent, and the system prompt carries a session anchor — read from the session
+  file's own start, so it survives compaction *and* restart. The anchor is deliberately coarse
+  (quarter hours, then hours): a minute-granular clock in the prompt would rewrite the cached
+  prefix every minute for a reading nobody paces on.
 - **Model-aware.** A loose `model` name ("sonnet") resolves to your own session provider's id (not a
   look-alike you're not logged into); an ensemble runs its cores on *different* models for diverse
   blind spots. `/models [query]` searches the installed models.

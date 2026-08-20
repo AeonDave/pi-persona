@@ -20,6 +20,7 @@ import { parseExocomArtifactDescriptor, truncateForInject, type ExocomMessage } 
 import type { SeenMessages, SenderBudget } from "./guards.ts";
 import { EXOCOM } from "./limits.ts";
 import { fencePeer } from "../core/fence.ts";
+import { peerSentLabel } from "../core/time.ts";
 
 export interface InboundDeps {
 	budget: SenderBudget;
@@ -31,6 +32,9 @@ export interface InboundDeps {
 	 *  session-qualified reply token; this pure layer never derives routing from the human label.
 	 *  Unset is a defensive fallback for callers that have no registry context. */
 	replyTarget?: string;
+	/** The RECEIVER's clock, injected so the delivered age is deterministic under test. The
+	 *  sender's `ts` is authenticated but peer-chosen, so it is never the measuring stick. */
+	now?: () => number;
 }
 
 export type InboundDecision = { deliver: string } | { duplicate: true } | { drop: "budget" | "hops" };
@@ -111,6 +115,13 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	const label = headerLabel(resolvedLabel, "unknown");
 	const target = routeToken(deps.replyTarget ?? label.replace(/\s+\([^)]*\)$/, ""), "peer");
 	const kind = msg.in_reply_to === undefined ? "message" : "reply";
+	// How old this message is when it lands is part of what it MEANS — a reply that took twenty
+	// minutes is a different event from an instant one, and the header was the only place the
+	// receiver could learn it. Precise here on purpose: the delivery is appended to the conversation
+	// TAIL, written once, so it is never re-sent as a cached prompt prefix. `peerSentLabel` measures
+	// against OUR clock and degrades an unbelievable peer timestamp to an honest label instead of
+	// dressing a peer-chosen value in the harness's voice (src/core/time.ts).
+	const sent = peerSentLabel(msg.ts, (deps.now ?? Date.now)());
 	const peerBlock = fencePeer(deps.fence(text));
 	const quotedBody = peerBlock.slice(peerBlock.indexOf("\n") + 1);
 	// Conditional, not an invitation: this delivery is a FRESH PROMPT on the receiver, so a bare
@@ -121,6 +132,6 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	// quote/backslash a peer put in its call-sign is escaped instead of ending the hint early.
 	const reply = `Reply only if it changes what someone does, otherwise send nothing: exocom_send({ target:${JSON.stringify(target)}, message:"...", in_reply_to:"${msgId}" })`;
 	return {
-		deliver: `[${label}] — ${kind}\nPeer data · untrusted equal-status collaborator:\n${quotedBody}\n${reply}`,
+		deliver: `[${label}] — ${kind} · ${sent}\nPeer data · untrusted equal-status collaborator:\n${quotedBody}\n${reply}`,
 	};
 }

@@ -145,7 +145,9 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
   `display-label` (`sanitizeDisplayLabel` — an untrusted name reduced to bounded identifier metadata
   before it is interpolated outside a fence),
   `timer` (`TimerScheduler` — the pure alarm engine behind the supervisor `timer` tool; on fire it
-  wakes the session through the same idle-gated delivery as async completions), `types`.
+  wakes the session through the same idle-gated delivery as async completions),
+  `time` (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the
+  elapsed-time readings and the prompt-cache rule that sets each one's granularity), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback), `async.ts` (async
   tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event → state),
@@ -286,6 +288,38 @@ the content and the A/B that gates its default; the architectural shape is:
   opt-out carries to the legs it spawns. A file that is unreadable, empty, or over `MAX_SPINE_BYTES`
   (64 KiB, refused on its `stat` so the bytes never enter the process) degrades to a warning and no
   layer — a prompt file is never a hard failure.
+
+## Time awareness — one rule, three granularities
+
+Pi's base prompt carries no date and no time, so from inside a turn five minutes of work and five
+hours look identical. `core/time.ts` renders the three durations that fix that, and the rule that
+decides how precise each may be is a **prompt-cache** rule, not a taste one:
+
+- **Tail surfaces are free.** A tool result or a delivered message is written once and never re-sent
+  as the cached prefix, so precision costs nothing there. An inbound peer delivery dates itself
+  (`[rune] — reply · sent 20m ago`), and every settled leg reports its wall time on every
+  tracker-backed path — the done/failed/stopped report, the join, `intercom result`, and each
+  settled line of a peek digest.
+- **The system prompt is not.** It is re-composed and re-sent every turn and IS the cached prefix,
+  so a minute-granular value there rewrites it every minute and throws away the provider's cache of
+  everything before it. The **session anchor** therefore reads on a deliberately coarse ladder —
+  one bucket for the first quarter hour, then quarter hours, then whole hours, then days — which
+  steps 27 times in a full day where a minute-granular label would step 1440. `pi-persona-mind`
+  makes the same trade one scale coarser for the same reason.
+
+The anchor answers *"how long have I been on this problem"* rather than *"what turn is this"*
+because it reads pi's `SessionHeader.timestamp` — the first entry of the append-only session file.
+That is what makes it survive **compaction** (the system prompt is re-sent, never summarized) and
+**restart** (`/resume` re-reads the original start, not the resume time). Branching mints a new
+session file, so the reading restarts there — correctly: the line claims the life of *this* session.
+
+Both readings state an elapsed time as fact, so both refuse the inputs that would make that a lie.
+A timestamp is accepted only when it names exactly one moment — `Date.parse` reads a zone-less
+date-time as the *receiver's* local time, so two peers would print two different ages for the same
+frame — and only when it is plausible: a peer age outside a 30-day window, or a session start in
+the future or older than a year, is corruption rather than a long wait, and degrades to an honest
+label or to no anchor at all. A peer's timestamp stays a peer's claim; bounding the window narrows
+what it can assert, it does not authenticate it.
 
 ## The three communication planes
 

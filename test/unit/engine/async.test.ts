@@ -10,7 +10,7 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, buildRetentionOverflowNote, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildPeekAlert, buildRetentionOverflowNote, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion, runDurationLabel } from "../../../src/engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { PersistenceNudge } from "../../../src/core/nudge.ts";
@@ -1113,4 +1113,79 @@ test("a listener that unsubscribes while settling does not skip the next listene
 	tracker.launch({ agent: "a", task: "t" }, async () => ({ agent: "a", output: "x", usage: usage(), ok: true }));
 	await tick();
 	assert.equal(reached, true, "the second join still saw the settle");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Leg duration — "how long did that take" on every surface a settled run reaches the supervisor
+// through. These ride tool results / follow-ups (conversation TAIL, written once), so the reading
+// is precise: unlike the system-prompt session anchor, nothing here is a cached prompt prefix.
+
+test("the tracker stamps start and settle from its injected clock", async () => {
+	let clock = 1_000;
+	const tracker = new AsyncRunTracker({ now: () => clock });
+	let release!: (r: AgentResult) => void;
+	const id = tracker.launch({ agent: "scout", task: "t" }, () => new Promise<AgentResult>((r) => {
+		release = r;
+	}));
+	assert.equal(tracker.peek(id)?.startedAt, 1_000);
+	clock = 126_000;
+	release({ agent: "scout", output: "ok", usage: usage(), ok: true });
+	await tick();
+	const run = tracker.peek(id);
+	assert.equal(run?.settledAt, 126_000, "the settle stamp comes from the same injected clock — no real time passes here");
+	assert.equal(runDurationLabel(run!), "2m 5s");
+});
+
+test("a completion report says how long each settled leg took", () => {
+	const stamp = (run: AsyncRun, ms: number): AsyncRun => ({ ...run, startedAt: 1_000, settledAt: 1_000 + ms });
+	const report = buildCompletionReport(
+		[
+			stamp(doneRun("run-1", "scout", "found it"), 125_000),
+			stamp(failedRun("run-2", "operator", "boom"), 45_000),
+			stamp({ ...failedRun("run-3", "operator", "stopped by supervisor"), status: "stopped" }, 2 * 3_600_000),
+		],
+		(t) => t,
+	);
+	assert.match(report, /✅ run-1 \(scout\) done in 2m 5s:/);
+	assert.match(report, /• run-2 \(operator\) after 45s: boom/);
+	assert.match(report, /• run-3 \(operator\) after 2h: stopped by supervisor/);
+});
+
+test("the duration rides renderCompletion, so it reaches the supervisor on the background and wait paths alike", () => {
+	// Both delivery paths (the idle completion notifier and the `intercom wait` join) render
+	// through renderCompletion — pinning it here is what makes "every path" true of both.
+	const run = { ...doneRun("run-1", "scout", "found it"), startedAt: 1_000, settledAt: 1_000 + 90_000 };
+	assert.match(renderCompletion([run], (t) => t, surrenderScan), /done in 1m 30s/);
+});
+
+test("a peek digest shows a settled leg's duration too", () => {
+	const digest = buildPeekDigest([
+		{ ...doneRun("run-1", "scout", "x"), startedAt: 0, settledAt: 43_000 },
+		{ ...failedRun("run-2", "operator", "boom"), startedAt: 0, settledAt: 5_000 },
+		// A stopped leg has no result to point at, so it renders as the bare head — which must carry
+		// the duration too: "how long did it run before I killed it" is the whole question there.
+		{ id: "run-3", agent: "operator", task: "t", status: "stopped", progress: { output: "", turns: 0, tokens: 0 }, startedAt: 0, settledAt: 60_000 },
+	]);
+	assert.match(digest, /\[run-1\] scout — done in 43s:/);
+	assert.match(digest, /\[run-2\] operator — failed in 5s:/);
+	assert.match(digest, /^\[run-3\] operator — stopped in 1m$/m);
+});
+
+test("a run carrying no duration stamps renders exactly as it did before", () => {
+	// Runs reach these renderers from places that never stamped them (a hand-built view, an older
+	// retained entry). Absent stamps must mean SILENCE, not "in ?" or "in NaNs".
+	const plain = doneRun("run-1", "scout", "found it");
+	assert.equal(runDurationLabel(plain), undefined);
+	assert.match(buildCompletionReport([plain], (t) => t), /✅ run-1 \(scout\) done:/);
+	assert.match(buildPeekDigest([plain]), /\[run-1\] scout — done:/);
+	assert.equal(runDurationLabel({ ...plain, startedAt: 5_000, settledAt: 1_000 }), undefined, "a settle before the start is not a duration");
+	// HALF-stamped is the shape a hand-built view actually produces (both stamps are optional on the
+	// type). Each missing half must mean silence on its own — subtracting an absent stamp yields NaN,
+	// which formatDuration would render as a literal "in ?" on every completion surface.
+	assert.equal(runDurationLabel({ ...plain, settledAt: 5_000 }), undefined, "a settle with no start is not a duration");
+	assert.equal(runDurationLabel({ ...plain, startedAt: 1_000 }), undefined, "and a start with no settle is not one either");
+	for (const half of [{ ...plain, settledAt: 5_000 }, { ...plain, startedAt: 1_000 }]) {
+		assert.doesNotMatch(buildCompletionReport([half], (t) => t), / in \?/, "a half-stamped run never reports 'in ?'");
+		assert.doesNotMatch(buildPeekDigest([half]), / in \?/);
+	}
 });
