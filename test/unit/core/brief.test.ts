@@ -221,135 +221,44 @@ test("buildExocomBrief: the relevance bound names the cost, bans courtesy traffi
 	assert.match(brief, /the peer message that started it/i, "an inbound-driven turn needs a referent as well");
 });
 
-// A round COUNT is the wrong bound here — `hops` already caps depth and back-and-forth is often how
-// a hard point gets settled — so the brief must never acquire one, in any phrasing. A guard that
-// only knows the phrasings its author thought of is the same vacuous guard in a new costume, so
-// three shapes are recognised, per sentence (a verb and a noun that merely coexist in the brief
-// must not indict each other): a count NEAR a conversational noun (up to four words apart, so
-// "three quiet productive extra rounds" cannot walk past it), the same with a roman numeral, and a
-// limiting verb sharing a sentence with either a count or a noun ("twice at most", "cap the thread
-// at 3"). Counts and numerals are GENERATED rather than typed out — a hand-written list is how a
-// guard quietly stops covering what it claims to — though only the COUNTS were rescued that way:
-// CAP_NOUN and CAP_VERB below are still hand-written lists, which is the guard largest remaining
-// hole and not the one you would guess. It stays a tripwire on the shapes a regression would
-// plausibly reach for, not a parser. Measured, four kinds of real cap walk past it:
-//   1. a noun outside CAP_NOUN, even with a count touching it — "five shots at this peer",
-//      "the number of times you may write", "the fourth time you reach for exocom_send";
-//   2. a count that TRAILS its noun — the pattern only ever reads count-then-noun, so
-//      "your last message to a peer should be your second" is invisible;
-//   3. a count standing more than four words from its noun — "three strikes and you drop the
-//      thread" (five words);
-//   4. a limit implied with none of these words at all — "trade a question and an answer, and
-//      that is the whole of it".
-// (1) and (2) are the ones to fix first if this ever has to bite harder: both are cheap, and both
-// are shapes an edit written in ordinary English lands on by accident. Every alternative below is
-// pinned by the self-check at the bottom.
-const UNITS = "one|two|three|four|five|six|seven|eight|nine";
-const UNIT_ORDINALS = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth";
-const TEENS = "ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen";
-const TEEN_ORDINALS = "tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth";
-const TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety";
-const TEN_ORDINALS = "twentieth|thirtieth|fortieth|fiftieth|sixtieth|seventieth|eightieth|ninetieth";
-const CAP_COUNT = [
-	String.raw`\d+(?:st|nd|rd|th)?`,
-	// A SHAPE, not a list: "twenty-seventh" is covered without anyone enumerating that far.
-	`(?:${TENS})-(?:${UNITS}|${UNIT_ORDINALS})`,
-	TEEN_ORDINALS,
-	TEN_ORDINALS,
-	TEENS,
-	TENS,
-	UNIT_ORDINALS,
-	UNITS,
-	"hundred(?:th)?|dozen|single|couple|pair|handful|once|twice|thrice",
-].join("|");
+// A round COUNT is the wrong bound here — back-and-forth is often how a hard point gets settled,
+// and what wastes tokens is a round that stopped serving the work, which a counter cannot see. So
+// the brief must never acquire one, in ANY phrasing.
+//
+// This was first guarded by a detector that tried to RECOGNISE a cap in prose. That is the wrong
+// shape: a classifier over English only knows the phrasings its author thought of, and successive
+// widenings still let "five shots at this peer" and "your last message should be your second"
+// through. A guard that documents its own holes is still a guard that does not hold.
+//
+// So the bound is pinned by EQUALITY instead. Equality cannot leak: any edit to this text fails
+// here, whatever it says, and an author who means to change the wording must say so by updating
+// the expectation. The prose IS the product on this line, so that friction is the point rather
+// than a cost. The clause-level tests below still say WHY each part exists — they give a readable
+// failure; this one gives a complete one.
+const BOUND_OPENING =
+	"Relevance bound: each message is a fresh prompt on the peer, so send only what changes what someone does — no acknowledgment, agreement or thanks; batch open points into the same message.";
+const BOUND_HANDOFF =
+	" Work you can specify (measure X, test Y) goes to a sub-agent, which reports back instead of conversing.";
+const BOUND_DRIFT =
+	" When a round no longer moves the work this turn is for — your human's request, or the peer message that started it — stop: answer once and close it, or send nothing";
+const BOUND_ESCALATION = " — escalate to your human only when the call is genuinely theirs.";
 
-/** Every roman numeral up to 100, generated — an alternation that cannot fall behind the claim the
- *  way a typed list does. Two characters or more, plus the bare L and C: a lone I/V/X is ordinary
- *  prose (the brief itself says "measure X, test Y"), while a bare L or C never is. */
-function roman(value: number): string {
-	const table: Array<[number, string]> = [
-		[100, "C"], [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
-	];
-	let rest = value;
-	let out = "";
-	for (const [size, symbol] of table) {
-		while (rest >= size) {
-			out += symbol;
-			rest -= size;
-		}
-	}
-	return out;
-}
-const CAP_ROMAN = Array.from({ length: 100 }, (_, i) => roman(i + 1))
-	.filter((r) => r.length > 1 || r === "L" || r === "C")
-	.sort((a, b) => b.length - a.length)
-	.join("|");
-const CAP_NOUN = String.raw`rounds?|repl(?:y|ies)|exchanges?|messages?|turns?|asks?|pings?|back-and-forths?|responses?|follow-?ups?|iterations?|volleys?|round-?trips?|threads?|conversations?`;
-const CAP_VERB = String.raw`at most|(?:no|not) (?:more|further) than|no further|cap(?:ped|s)?\b|limit(?:ed|s)?\b|maximum|max\b|budget|exceed|beyond|ceiling|quota|allowance|up to|stop(?:ping)? after|after the|by the|keep (?:it|them|the \w+) to|hold (?:it|them|the \w+) to|restrict(?:ed)? to|confine(?:d)? to|at the outside|tops\b|wrap (?:it )?up|once you have`;
-const nearNoun = (count: string) => new RegExp(String.raw`\b(?:${count})\b(?:\W+\w+){0,4}\W+(?:${CAP_NOUN})\b`, "i");
-const countCap = nearNoun(CAP_COUNT);
-const romanCap = nearNoun(CAP_ROMAN);
-const verbCap = new RegExp(String.raw`\b(?:${CAP_VERB})`, "i");
-const capNoun = new RegExp(String.raw`\b(?:${CAP_NOUN})\b`, "i");
-const capCount = new RegExp(String.raw`\b(?:${CAP_COUNT})\b`, "i");
-
-function arithmeticCap(text: string): string | undefined {
-	return text
-		.split(/\n|(?<=[.;:])\s+/)
-		.find((s) => countCap.test(s) || romanCap.test(s) || (verbCap.test(s) && (capNoun.test(s) || capCount.test(s))));
+/** The bound line as rendered for one configuration. */
+function expectedBound(canDelegate: boolean, canAskHuman: boolean): string {
+	return BOUND_OPENING + (canDelegate ? BOUND_HANDOFF : "") + BOUND_DRIFT + (canAskHuman ? BOUND_ESCALATION : ".");
 }
 
-test("buildExocomBrief: the bound stays drift, never regresses into an arithmetic cap", () => {
-	// Every reachable rendering, including the overflow line, which carries a live number.
+test("buildExocomBrief: the bound is pinned verbatim, so it cannot drift into a round cap", () => {
+	// Every reachable rendering, including the overflow line, which carries a live number and must
+	// not perturb the bound itself.
 	for (const canDelegate of [true, false]) {
 		for (const canAskHuman of [true, false]) {
 			for (const peers of [PEERS, Array.from({ length: 20 }, (_, i) => ({ name: `p${i}`, persona: "dev" }))]) {
 				const brief = buildExocomBrief(peers, { canDelegate, canAskHuman }) ?? "";
-				assert.equal(arithmeticCap(brief), undefined, `the brief counts rounds: ${arithmeticCap(brief)}`);
+				const bound = brief.split(/\r?\n/).find((l) => l.startsWith("Relevance bound:"));
+				assert.equal(bound, expectedBound(canDelegate, canAskHuman));
 			}
 		}
-	}
-	// …and the detector has to bite, or the assertion above passes on any cap at all. These are
-	// phrasings a future edit would plausibly reach for, not only the ones this list was written
-	// around: number words, digits, ordinals, roman numerals, quantifiers, and bare limit verbs.
-	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
-	for (const cap of [
-		"Stop after at most 3 exchanges.",
-		"Do not exceed two more replies per peer.",
-		"Cap the conversation at four turns, then decide.",
-		"Budget one ask per peer.",
-		"Wrap it up by the third round.",
-		"Send no more than a handful of replies.",
-		"Keep the thread to III rounds.",
-		"Answer a peer twice at most.",
-		"Send a couple of replies, then decide.",
-		"Cap the thread at 3, then decide it yourself.",
-		"After the fourth follow-up, close the thread.",
-		"Allow three short rounds per peer.",
-		"Stop once you have sent four responses.",
-		"Wrap it up by the sixth round.",
-		"Two peer messages is the ceiling.",
-		"Never send more than a dozen replies.",
-		"Reply at most twice.",
-		"Hold the thread to two volleys.",
-		"Limit yourself to a pair of exchanges.",
-		"Stop after your 2nd reply.",
-		"Do not go beyond three rounds.",
-		"A single round is usually enough.",
-		"Your third message must be the last.",
-		"Allow yourself two further pings.",
-		// Shapes no enumerated list caught: romans past XII, the bare numerals, ordinals past the
-		// tenth, and a count standing several words off the noun it limits.
-		"XIII rounds is where you stop.",
-		"XXV exchanges is already too many.",
-		"L replies is plenty for any peer.",
-		"C messages later, you are still talking.",
-		"The twenty-fifth message is your last.",
-		"Your fifteenth reply settles it.",
-		"Fourteen pings is the point of absurdity.",
-		"Three quiet productive extra rounds are fine.",
-	]) {
-		assert.equal(arithmeticCap(`${brief}\n${cap}`), cap, `an arithmetic cap phrased "${cap}" would slip through`);
 	}
 });
 
