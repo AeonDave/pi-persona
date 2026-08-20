@@ -3465,6 +3465,66 @@ test("an inbound peer message tells the supervisor to reply to the stable qualif
 	}
 });
 
+// buildExocomBrief's two conditional clauses are only as true as the facts the CALL SITE feeds it,
+// and that wiring is one line in before_agent_start: `canDelegate` must be read from the live
+// persona (holding the bus says nothing about `delegate` — `canUseBus` keys off `intercom` alone)
+// and `hasHuman` from `ctx.hasUI` (exocom has no UI gate, so a `pi -p` run has peers and nobody to
+// escalate to). Pinning them only through the pure function leaves both hardcodable at the call
+// site with the suite still green, which is exactly the failure this brief exists to avoid.
+test("the exocom brief's conditional clauses are wired to the live run, not to a default", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	// A persona that keeps the peer bus (`intercom` untouched) but cannot fan out.
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "busonly.md"),
+		"---\nname: busonly\nlabel: Busonly\npersona: true\ntools:\n  deny: [delegate]\n---\nBus-only supervisor.",
+	);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "xbrief-session");
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: "xbrief-peer",
+			name: "orion",
+			persona: "dev",
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, "xbrief-peer", process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+
+		// headless (`makeCtx` is hasUI:false) — nobody to escalate to
+		const headless = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
+		assert.match(headless, /exocom peers/, "the peer brief is present at all");
+		assert.match(headless, /settle it yourself/, "a `pi -p` run is told to settle it, not to ask");
+		assert.doesNotMatch(headless, /ask your human/, "there is no human on a headless run");
+
+		// interactive — the escalation has an addressee again
+		const uiCtx = { ...ctx, hasUI: true };
+		const interactive = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
+		assert.match(interactive, /decide it yourself or ask your human/);
+		assert.doesNotMatch(interactive, /settle it yourself/);
+		assert.match(interactive, /goes to a sub-agent/, "an unrestricted run may hand specifiable work off");
+
+		// bus without `delegate`: the hand-off clause must drop, the rest of the bound must not
+		await m.cmd("persona", "busonly", uiCtx);
+		const busOnly = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
+		assert.match(busOnly, /exocom peers/, "the persona still holds the bus");
+		assert.doesNotMatch(busOnly, /goes to a sub-agent/, "a persona denied `delegate` is not told to hand off");
+		assert.match(busOnly, /no longer moves your human's original request/, "only the hand-off clause drops");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("a sender the pool read prunes still gets a reply hint the transport can resolve", async () => {
 	const prev = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";

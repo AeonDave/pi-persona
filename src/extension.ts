@@ -2210,7 +2210,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// whenever exocom is off, matching every other opt-in surface in this file.
 		if (exocomPlane) {
 			const peers = exocomPlane.listPeers();
-			const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })));
+			const xcaps = controller.capabilities;
+			// Holding the bus says nothing about `delegate` (canUseBus keys off `intercom` alone), so
+			// read fan-out exactly as delegationBrief does — absent capabilities ⇒ unrestricted — and
+			// let the brief offer a sub-agent only where one is actually reachable.
+			const canDelegate = xcaps ? canFanOut(xcaps) && agents.some((a) => canDelegateTo(xcaps, a.name)) : agents.length > 0;
+			const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })), {
+				canDelegate,
+				// Exocom has no UI gate: a headless (`pi -p`) run has live peers and nobody to escalate to.
+				hasHuman: ctx.hasUI === true,
+			});
 			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
 		}
 		if (pendingOrchestration) {
