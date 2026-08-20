@@ -34,6 +34,7 @@ import {
 	type SpineLegacySelection,
 } from "./core/seed.ts";
 import { buildDelegationBrief, buildExocomBrief } from "./core/brief.ts";
+import { buildSessionAnchor } from "./core/time.ts";
 import { canDelegateTo, canFanOut, EXOCOM_TOOL_NAMES, type RunLimits } from "./core/capabilities.ts";
 import { attributePeer, fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
@@ -42,7 +43,7 @@ import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./
 import { withModelFallback } from "./engine/fallback.ts";
 import { captureWorktreeArtifact, defaultGitExec, withWorktree, worktreePreflight } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion, runDurationLabel } from "./engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -2202,6 +2203,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// prompt + the layer. Off ⇒ `spineText` is empty and this is `event.systemPrompt` itself.
 		const noPersona = spineText ? `${event.systemPrompt}\n\n${spineText}` : event.systemPrompt;
 		let prompt = controller.composePrompt(event.systemPrompt, spineText) ?? noPersona;
+		// The session time anchor (core/time.ts). Unconditional, unlike both briefs below: a supervisor
+		// that has been working for hours needs to know it whether or not agents or peers exist. It goes
+		// in the SYSTEM prompt because the prompt is re-composed and re-sent every turn rather than
+		// summarized, so an anchor placed here cannot be compacted away — the same fact in the
+		// conversation tail would be. Its start comes from the session HEADER, the first entry of the
+		// append-only session file, so after /resume it is still the ORIGINAL start: that is what makes it
+		// answer "how long have I been on this problem" across restarts and not merely across turns.
+		// Placed BEFORE the briefs so the standing hand-off default keeps the last word at the tail; the
+		// elapsed reading is bucketed so this block stays byte-identical across an hour of turns.
+		const anchor = buildSessionAnchor(ctx.sessionManager?.getHeader?.() ?? null, Date.now());
+		if (anchor) prompt = `${prompt}\n\n${anchor}`;
 		const brief = delegationBrief(ctx);
 		if (brief) prompt = `${prompt}\n\n${brief}`;
 		// Per-turn exocom peer AWARENESS (mirrors the delegation brief above): regenerated from the
@@ -3056,8 +3068,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// metadata, but put the diagnostic inside the same untrusted fence as the payload.
 				const cause = run.error ? `\nFailure detail:\n${fenceUntrusted(run.error)}` : "";
 				const displayRun = sanitizeDisplayLabel(run.label ?? run.agent);
+				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
+				// the supervisor through, so it carries the same reading the passive/join reports do.
+				const took = runDurationLabel(run);
 				return {
-					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${cause}\n${body}` }],
+					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${cause}\n${body}` }],
 					details: { action: "result", ok: true, status: run.status, runId: run.id },
 					isError: false,
 				};

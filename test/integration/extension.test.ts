@@ -3922,3 +3922,85 @@ test("a shutdown landing mid-start leaves no ghost plane either (teardown is on 
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+// ---------------------------------------------------------------------------------------------
+// Session time anchor — the model has no clock, so "how long have I been on this problem" has no
+// answer from inside a turn. The anchor lives in the SYSTEM prompt (re-sent every turn, never
+// summarized ⇒ compaction cannot take it) and reads the session HEADER's timestamp (first entry of
+// the append-only session file ⇒ /resume still reports the ORIGINAL start).
+
+function ctxWithSessionStart(base: ReturnType<typeof makeCtx>["ctx"], startedAt: string | undefined) {
+	return {
+		...base,
+		sessionManager: {
+			getSessionId: () => "anchor-session",
+			getHeader: () => (startedAt === undefined ? null : { type: "session", id: "anchor-session", timestamp: startedAt, cwd: base.cwd }),
+		},
+	};
+}
+
+test("every turn carries a session time anchor: absolute start plus a coarse elapsed reading", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(os.tmpdir());
+	const started = new Date(Date.now() - 3 * 3_600_000).toISOString();
+	const ctx = ctxWithSessionStart(base, started);
+	await m.fire("session_start", undefined, ctx);
+
+	const turn = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
+	assert.ok(turn.includes(`[pi-persona] Session clock — this session started ${started.slice(0, 16)}Z`), `no anchor in: ${turn.slice(-400)}`);
+	assert.match(turn, /you have been on it 3h\./, "hours of work must read as hours, not as an unknowable now");
+	// The reason the reading is bucketed at all: this block is the provider's cached prefix.
+	assert.equal(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt, turn, "a second turn re-sends byte-identical bytes");
+	// It is unconditional — unlike both briefs, which need agents / live peers to say anything.
+	assert.equal(turn.split("[pi-persona] Session clock").length - 1, 1, "exactly one anchor per turn");
+	// ORDER is a design claim, not an accident: the anchor is appended BEFORE both briefs so the
+	// standing hand-off default still holds the tail of the prompt in the recency tug-of-war the
+	// delegation brief exists to win. Nothing else pins it, so a later append would silently reverse it.
+	assert.ok(
+		turn.indexOf("[pi-persona] Session clock") < turn.indexOf("[pi-persona] Sub-agents:"),
+		"the anchor precedes the delegation brief, which must keep the last word",
+	);
+});
+
+test("no believable session start ⇒ no anchor at all, and the rest of the prompt is untouched", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, base);
+	// A fresh in-memory session (no header) and a session manager the host never provided: an
+	// invented start would be worse than none, since the model would pace itself by a lie.
+	const noHeader = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctxWithSessionStart(base, undefined)).systemPrompt;
+	const noManager = m.fire("before_agent_start", { systemPrompt: "BASE" }, base).systemPrompt;
+	const unparseable = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctxWithSessionStart(base, "whenever")).systemPrompt;
+	for (const prompt of [noHeader, noManager, unparseable]) {
+		assert.doesNotMatch(prompt, /Session clock/);
+		assert.doesNotMatch(prompt, /\bundefined\b/, "a missing anchor appends NOTHING — not an empty block, not a stringified undefined");
+		assert.match(prompt, /\[pi-persona\] Sub-agents:/, "and everything else about the turn is unchanged");
+	}
+	assert.equal(noHeader, noManager);
+	assert.equal(noHeader, unparseable);
+});
+
+test("an explicitly collected async result reports how long the leg took", async () => {
+	const stub: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: "report body", usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	const launched = await delegate.execute("async-duration", { agent: "scout", task: "quick look", async: true }, undefined, undefined, ctx);
+	const id = launched.details?.runId as string;
+	let result: { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
+	for (let i = 0; i < 30; i++) {
+		result = await intercom.execute("result-duration", { action: "result", to: id }, undefined, undefined, ctx);
+		if (result && !result.isError) break;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	// Whatever this stub leg actually took, the header states it — the assertion pins the FIELD,
+	// never a wall-clock value, so nothing here waits on real time.
+	assert.match(String(result?.content?.[0]?.text ?? ""), /^run-\d+ \(scout\) · done · (?:<1s|\d+(?:s|m|h|d)\b)/);
+});

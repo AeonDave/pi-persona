@@ -12,6 +12,7 @@
 import type { ProgressSnapshot } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel } from "../core/display-label.ts";
+import { formatDuration } from "../core/time.ts";
 
 export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
 
@@ -30,6 +31,12 @@ export interface AsyncRun {
 	/** The already-shortened model (e.g. "sonnet") this run was launched with — kept pre-shortened
 	 *  so this module needs no import from delegate.ts just to render it. */
 	model?: string;
+	/** Clock (ms) this run was launched at, and the clock it settled at — the pair the supervisor's
+	 *  "that leg took 2m 5s" reading is computed from. Both come from the tracker's INJECTED clock,
+	 *  so a test can settle a two-hour run without waiting. Optional because runs also reach the
+	 *  renderers from call sites that never stamped them; absent ⇒ no duration is claimed. */
+	startedAt?: number;
+	settledAt?: number;
 	/** Clock (ms) of the last time `progress` actually *advanced* (output grew, or turns/tokens
 	 *  rose) — NOT merely the last event. A worker looping without headway keeps emitting but
 	 *  never bumps this, so `now - lastAdvanceAt` is what tells "working" from "stuck". */
@@ -80,13 +87,15 @@ export class AsyncRunTracker {
 	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
+		const startedAt = this.now(); // one clock read, so the launch and stall stamps cannot disagree
 		const entry: AsyncRun = {
 			id,
 			agent: meta.agent,
 			task: meta.task,
 			status: "running",
 			progress: { output: "", turns: 0, tokens: 0 },
-			lastAdvanceAt: this.now(),
+			startedAt,
+			lastAdvanceAt: startedAt,
 		};
 		if (meta.mutates) entry.mutates = true;
 		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
@@ -140,6 +149,9 @@ export class AsyncRunTracker {
 	private settleOnce(entry: AsyncRun): void {
 		if (entry.settled) return;
 		entry.settled = true;
+		// Stamped HERE, not on the result: this is the one point both the natural resolution and a
+		// forceSettle pass through, so every settled run gets a duration by the same rule.
+		entry.settledAt = this.now();
 		this.settledOrder.push(entry.id);
 		this.prune();
 		// Iterate a SNAPSHOT: a waitFor join unsubscribes from inside its own listener, and
@@ -316,6 +328,26 @@ function runDisplayName(run: AsyncRun): string {
 	return `${sanitizeDisplayLabel(run.label ?? run.agent, "agent", nameLimit)}${suffix}`;
 }
 
+/**
+ * How long a settled leg actually took, or undefined when this run carries no usable stamps.
+ *
+ * Wall time is the supervisor's cheapest signal about a delegation — whether the leg it is reading
+ * came back in seconds or ground for two hours changes what to do next — and no completion surface
+ * used to say it. Undefined (rather than "?" or "0s") when the pair is missing or inverted, so an
+ * unstamped run renders exactly as it did before instead of gaining a fabricated reading.
+ */
+export function runDurationLabel(run: AsyncRun): string | undefined {
+	const { startedAt, settledAt } = run;
+	if (startedAt === undefined || settledAt === undefined || settledAt < startedAt) return undefined;
+	return formatDuration(settledAt - startedAt);
+}
+
+/** The " in 2m 5s" / " after 2m 5s" fragment for a settled leg, or "" when it has no duration. */
+function durationSuffix(run: AsyncRun, preposition: "in" | "after"): string {
+	const label = runDurationLabel(run);
+	return label === undefined ? "" : ` ${preposition} ${label}`;
+}
+
 // Completion reports are automatic follow-ups, so they must remain bounded even when a healthy
 // child returns a very large report. The full payload stays available through the result action;
 // these limits only govern the notification/digest surface.
@@ -438,9 +470,10 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		// routine follow-up. Never put child-authored output or error text on this path: even a short
 		// preview is an untrusted prompt-injection carrier. The explicit result action is the fenced,
 		// on-demand surface for details.
-		if (r.status === "failed") return `${head}: failure details available via intercom result (to: ${r.id})`;
-		if (r.result) return `${head}: full result available via intercom result (to: ${r.id})`;
-		return head;
+		const took = durationSuffix(r, "in");
+		if (r.status === "failed") return `${head}${took}: failure details available via intercom result (to: ${r.id})`;
+		if (r.result) return `${head}${took}: full result available via intercom result (to: ${r.id})`;
+		return `${head}${took}`;
 	});
 	const omitted = runs.length - visibleRuns.length;
 	if (omitted > 0) lines.push(`… ${omitted} additional async runs omitted from this bounded status view.`);
@@ -554,10 +587,10 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 		// as clutter).
 		const full = getFullRunOutput(r);
 		const body = full !== "(no output)" ? fence(clipRunOutput(full, r.id, fairRunChars)) : "(no output)";
-		blocks.push(`\n✅ ${r.id} (${runDisplayName(r)}) done:\n${body}`);
+		blocks.push(`\n✅ ${r.id} (${runDisplayName(r)}) done${durationSuffix(r, "in")}:\n${body}`);
 	}
 	if (stopped.length > 0) {
-		const reasons = stopped.map((r) => `• ${r.id} (${runDisplayName(r)}): ${r.error ?? "stopped by supervisor"}`).join("\n");
+		const reasons = stopped.map((r) => `• ${r.id} (${runDisplayName(r)})${durationSuffix(r, "after")}: ${r.error ?? "stopped by supervisor"}`).join("\n");
 		blocks.push(`\n⏹ ${stopped.length} stopped:\n${fence(reasons)}`);
 		// A deliberate stop is not a failure and must not trigger retry guidance. Its accumulated
 		// output is still valuable, so preserve the same bounded, fenced salvage guarantee.
@@ -569,7 +602,7 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 		}
 	}
 	if (failed.length > 0) {
-		const reasons = failed.map((r) => `• ${r.id} (${runDisplayName(r)}): ${r.error ?? "(no detail)"}`).join("\n");
+		const reasons = failed.map((r) => `• ${r.id} (${runDisplayName(r)})${durationSuffix(r, "after")}: ${r.error ?? "(no detail)"}`).join("\n");
 		blocks.push(
 			`\n❌ ${failed.length} failed:\n${fence(clipRunOutput(reasons, "failures", fairRunChars))}\n\n` +
 				"Handle each failure deliberately: retry ONCE with a different model or approach, or report it to the user. " +
