@@ -3242,7 +3242,8 @@ test("switching persona clears the by-hand delegation run instead of billing it 
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "dev", ctx);
 	// A substantive (non-glue) hands-on result; 5 in a row is the sweep threshold.
-	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(300) }] };
+	// Size 2000 per step so 5 × 2000 = 10k burn exceeds the 8k minSweepBurnChars floor.
+	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
 	const sweep = (): number => {
 		let fired = 0;
 		for (let i = 0; i < 5; i++) if (m.fire("tool_result", heavy, ctx) !== undefined) fired++;
@@ -3265,7 +3266,8 @@ test("a failed delegate call does not silently reset the supervisor's by-hand nu
 	const { ctx } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "dev", ctx);
-	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(300) }] };
+	// Size 2000 per step so 5 × 2000 = 10k burn exceeds the 8k minSweepBurnChars floor.
+	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
 	for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
 	const failed = m.fire(
 		"tool_result",

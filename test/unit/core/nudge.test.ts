@@ -5,7 +5,9 @@ import { DEFAULT_NUDGE_THRESHOLDS, DelegationNudge, PersistenceNudge } from "../
 
 // Small explicit thresholds keep these tests independent of the tunable defaults:
 // a run of 4 substantive commands = a sweep; a command under 10 chars is glue.
-const mk = () => new DelegationNudge({ singleHeavyChars: 100, runLength: 4, minStepChars: 10 });
+// minSweepBurnChars 0 disables the burn floor so the existing run-length tests stay
+// pure: they test repetition counting, not cumulative volume.
+const mk = () => new DelegationNudge({ singleHeavyChars: 100, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
 
 test("stays quiet while the run of hands-on commands is below the sweep threshold", () => {
 	const n = mk();
@@ -26,7 +28,7 @@ test("fires on a RUN of substantive hands-on commands (a by-hand sweep)", () => 
 });
 
 test("one big read is NOT a sweep — volume alone never fires (grep-first, not delegate)", () => {
-	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10 });
+	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
 	// A single huge result: high volume, run of 1. The old volume trigger fired here; repetition doesn't.
 	assert.equal(n.observe("read", 50_000), undefined, "a lone big read is reading-budget, not delegation");
 });
@@ -37,13 +39,13 @@ test("trivial commands (orchestration glue) don't advance the run", () => {
 });
 
 test("short edit/write results still count as hands-on coding work", () => {
-	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 200 });
+	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 200, minSweepBurnChars: 0 });
 	assert.equal(n.observe("edit", 20), undefined);
 	assert.equal(n.observe("write", 20), undefined);
 	assert.equal(n.observe("apply_patch", 20), undefined);
 	assert.ok(n.observe("edit", 20), "four terse mutations are a coding grind even when each tool result is tiny");
 
-	const control = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 200 });
+	const control = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 200, minSweepBurnChars: 0 });
 	for (let i = 0; i < 10; i++) assert.equal(control.observe("read", 20), undefined, "short read/glue output remains non-substantive");
 });
 
@@ -57,7 +59,7 @@ test("a glue command mid-sweep doesn't reset the run", () => {
 });
 
 test("fires on a single very heavy result (a fat one-shot dump like linpeas/ffuf)", () => {
-	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 99, minStepChars: 10 });
+	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 99, minStepChars: 10, minSweepBurnChars: 0 });
 	const nudge = n.observe("bash", 120); // >= singleHeavyChars → fires on its own despite run of 1
 	assert.ok(nudge, "a single huge result nudges immediately");
 	assert.match(nudge ?? "", /in one result/i);
@@ -95,7 +97,7 @@ test("a repeated failed hand-off is backoff-suppressed without hiding a distinct
 });
 
 test("failed hand-off backoff is controlled by the thresholds", () => {
-	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 4, minStepChars: 10, failedHandoffBackoff: 2 });
+	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 4, minStepChars: 10, minSweepBurnChars: 0, failedHandoffBackoff: 2 });
 	assert.ok(n.observe("delegate", 500, false, "same failure"));
 	assert.equal(n.observe("delegate", 500, false, "same failure"), undefined);
 	assert.equal(n.observe("delegate", 500, false, "same failure"), undefined);
@@ -123,7 +125,7 @@ test("backoff: each un-actioned nudge widens the next run window (early reminder
 });
 
 test("a sweep nudge names the run, not a single dump, and acknowledges non-delegable work", () => {
-	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10 });
+	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
 	let note: string | undefined;
 	for (let i = 0; i < 4 && !note; i++) note = n.observe("bash", 1_000); // 4 substantive, none single-heavy
 	assert.ok(note, "a run of substantive commands nudges");
@@ -135,7 +137,7 @@ test("a sweep nudge names the run, not a single dump, and acknowledges non-deleg
 });
 
 test("the single-dump nudge names the burn in tokens and points at delegate", () => {
-	const n = new DelegationNudge({ singleHeavyChars: 40_000, runLength: 99, minStepChars: 200 });
+	const n = new DelegationNudge({ singleHeavyChars: 40_000, runLength: 99, minStepChars: 200, minSweepBurnChars: 0 });
 	const nudge = n.observe("bash", 48_000); // ~12k tokens single dump
 	assert.ok(nudge);
 	assert.match(nudge ?? "", /~12k tokens/);
@@ -152,10 +154,26 @@ test("reset() clears the run (new session / persona switch)", () => {
 	assert.equal(n.observe("bash", 50), undefined, "run counts from zero after reset");
 });
 
-test("default thresholds: a sweep is 5 substantive commands; glue is under 200 chars", () => {
+test("default thresholds: a sweep is 5 substantive commands; glue is under 200 chars; burn floor 8k", () => {
 	assert.equal(DEFAULT_NUDGE_THRESHOLDS.singleHeavyChars, 40_000);
 	assert.equal(DEFAULT_NUDGE_THRESHOLDS.runLength, 5);
 	assert.equal(DEFAULT_NUDGE_THRESHOLDS.minStepChars, 200);
+	assert.equal(DEFAULT_NUDGE_THRESHOLDS.minSweepBurnChars, 8_000);
+});
+
+test("sweep does not fire when burn is below minSweepBurnChars (cheap triage is not a grind)", () => {
+	// 4 commands × 250 chars each = 1000 chars total burn, well below the 2000 floor.
+	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10, minSweepBurnChars: 2_000 });
+	for (let i = 0; i < 3; i++) assert.equal(n.observe("bash", 250), undefined);
+	assert.equal(n.observe("bash", 250), undefined, "run length met but burn too low — no nudge");
+	// One more meaty command pushes burn over 2000 → fires.
+	assert.ok(n.observe("bash", 1500), "burn floor exceeded → sweep fires");
+});
+
+test("the default burn floor prevents a ~0k-token sweep nudge on cheap git/grep triage", () => {
+	// Simulates the live bug: 5 commands × 250 chars = 1250 total < 8000 default floor.
+	const n = new DelegationNudge(); // full defaults
+	for (let i = 0; i < 10; i++) assert.equal(n.observe("bash", 250), undefined);
 });
 
 // --- PersistenceNudge: the premature-surrender counterweight -----------------------------------

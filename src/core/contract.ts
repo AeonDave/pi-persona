@@ -99,26 +99,105 @@ export function parseContract(content: string): ContractParse {
 	return { ok: true, def: { name: o.name, fields } };
 }
 
+/** Does this text parse as JSON? The only honest test of a candidate. */
+function parses(candidate: string): boolean {
+	if (candidate.length === 0) return false;
+	try {
+		JSON.parse(candidate);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Every fenced code block in the text, last one first. The contract asks for the JSON at
+ * the END ("prose before it is fine, nothing after it"), so the last fence is the answer
+ * and any earlier fence is quoted evidence in the report.
+ */
+function fencedBlocks(s: string): string[] {
+	const out: string[] = [];
+	const re = /```[^\n`]*\n([\s\S]*?)```/g;
+	let m = re.exec(s);
+	while (m !== null) {
+		if (m[1] !== undefined) out.push(m[1].trim());
+		m = re.exec(s);
+	}
+	return out.reverse();
+}
+
+/**
+ * Scan backwards for a BALANCED object/array: walk from the last closer to its matching
+ * opener, tracking string state so a brace inside a string value never miscounts. This is
+ * what survives prose that itself contains braces (a report quoting code or a `${…}`),
+ * where a naive first-`{` scan slices from the prose and yields garbage.
+ */
+function balancedFromEnd(s: string): string | undefined {
+	const close = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
+	if (close < 0) return undefined;
+	const open = s[close] === "}" ? "{" : "[";
+	const shut = s[close];
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	// Walk backwards. `escaped` needs a forward look: a quote is literal when preceded by an
+	// ODD number of backslashes, so count them rather than tracking a single flag.
+	for (let i = close; i >= 0; i--) {
+		const ch = s[i];
+		if (ch === '"') {
+			let backslashes = 0;
+			for (let j = i - 1; j >= 0 && s[j] === "\\"; j--) backslashes++;
+			escaped = backslashes % 2 === 1;
+			if (!escaped) inString = !inString;
+			continue;
+		}
+		if (inString) continue;
+		if (ch === shut) depth++;
+		else if (ch === open) {
+			depth--;
+			if (depth === 0) return s.slice(i, close + 1);
+		}
+	}
+	return undefined;
+}
+
 /**
  * Pull a JSON candidate out of an LLM reply before parsing. Models very often wrap
  * structured output in a ```json fence or surround it with prose ("Here you go: {…}"),
  * which makes a raw `JSON.parse` throw and silently fails the whole contract (the magi
- * bug: every member's vote excluded as "invalid output"). This strips a fenced code
- * block and narrows to the outermost {…}/[…]. Returns the trimmed input unchanged when
- * no object/array is found, so genuinely-malformed output still fails parsing naturally.
+ * bug: every member's vote excluded as "invalid output").
+ *
+ * Candidates are tried most-specific first and the FIRST ONE THAT ACTUALLY PARSES wins,
+ * so a heuristic can never win by producing confident garbage:
+ *   1. the whole text (already-clean JSON);
+ *   2. each fenced block, last fence first (the contract puts the answer last, so an
+ *      earlier fence is quoted evidence);
+ *   3. a balanced object/array scanned backwards from the last closer, string-aware.
+ * Falls back to the legacy outermost-slice so genuinely-malformed output still fails
+ * parsing naturally with the same shape of error as before.
+ *
+ * Regression this closes: a report whose PROSE contains a brace (quoted code, a `${…}`)
+ * followed by the fenced answer. The old path only unwrapped a fence spanning the ENTIRE
+ * output, then sliced from the FIRST brace — landing inside the prose and failing a leg
+ * whose work was correct ("contract <name> failed: output was not valid JSON").
  */
 export function extractJsonCandidate(text: string): string {
-	let s = text.trim();
-	// 1) Unwrap a fenced code block: ```json\n…\n``` or ```\n…\n``` (language tag optional).
-	const fence = s.match(/^```[^\n`]*\n([\s\S]*?)```\s*$/);
-	if (fence?.[1] !== undefined) s = fence[1].trim();
-	// 2) Narrow to the outermost object/array if prose surrounds it. lastIndexOf finds the
-	//    final closer, so a `}`/`]` inside a string value doesn't truncate the object.
+	const s = text.trim();
+	if (parses(s)) return s;
+	for (const block of fencedBlocks(s)) {
+		if (parses(block)) return block;
+		// A fence may itself hold prose around the object ("Result:\n{…}").
+		const inner = balancedFromEnd(block);
+		if (inner !== undefined && parses(inner)) return inner;
+	}
+	const balanced = balancedFromEnd(s);
+	if (balanced !== undefined && parses(balanced)) return balanced;
+	// Legacy fallback: outermost slice. Nothing parsed, so this only shapes the error.
 	const starts = [s.indexOf("{"), s.indexOf("[")].filter((i) => i >= 0);
 	if (starts.length > 0) {
 		const start = Math.min(...starts);
 		const end = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
-		if (end > start) s = s.slice(start, end + 1);
+		if (end > start) return s.slice(start, end + 1);
 	}
 	return s;
 }
