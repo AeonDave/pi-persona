@@ -52,6 +52,12 @@ export interface NudgeThresholds {
 	/** A command whose output is below this many chars is orchestration glue (echo/cd/one-line
 	 *  check), not a sweep step: it does not advance the run counter. */
 	minStepChars: number;
+	/** Minimum cumulative burn (chars since last hand-off) before a sweep run can fire. Without
+	 *  this, 5 tiny git/grep commands (200 chars each = 1000 total ≈ 0k tokens) trip the nudge
+	 *  and renderNudge prints "~0k tokens" — advice to "delegate what burns context" when nothing
+	 *  burned. This floor gates the sweep so it only fires when the burn is substantive.
+	 *  Defaults to `DEFAULT_NUDGE_THRESHOLDS.minSweepBurnChars` when omitted. */
+	minSweepBurnChars?: number;
 	/** Number of identical consecutive failed hand-off reminders to suppress before repeating one. */
 	failedHandoffBackoff?: number;
 }
@@ -62,6 +68,7 @@ export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
 	// The standing delegation brief (core/brief.ts) carries the default every turn; this is the
 	// reactive backstop for the supervisor who grinds a sweep through it anyway.
 	minStepChars: 200, // below this a command is glue, not a sweep step
+	minSweepBurnChars: 8_000, // ~2k tokens cumulative — below this the sweep is cheap triage, not a grind
 	failedHandoffBackoff: 1, // suppress one identical immediate repair reminder; the failure remains visible
 };
 
@@ -150,7 +157,8 @@ export class DelegationNudge {
 		// session-bound loop is reminded ONCE then left alone; a real runaway grind still trips the
 		// widened window; a hand-off resets it.
 		const window = this.t.runLength * (this.nudges + 1);
-		const sweep = this.run - this.lastNudgeRun >= window;
+		const burnFloor = this.t.minSweepBurnChars ?? DEFAULT_NUDGE_THRESHOLDS.minSweepBurnChars ?? 0;
+		const sweep = this.run - this.lastNudgeRun >= window && this.burn >= burnFloor;
 		if (!single && !sweep) return undefined;
 		this.lastNudgeRun = this.run;
 		this.nudges += 1;

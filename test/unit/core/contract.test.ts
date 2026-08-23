@@ -59,6 +59,36 @@ test("extractJsonCandidate unwraps fenced / prose-wrapped JSON so JSON.parse sur
 	assert.deepEqual(JSON.parse(extractJsonCandidate('{"result": "use } here"}')), { result: "use } here" });
 });
 
+test("extractJsonCandidate: prose with braces BEFORE a fenced JSON block (the verifier bug)", () => {
+	// Regression: a report quoting code with ${x} or {brace} in prose, followed by a fenced JSON answer.
+	// The old regex only unwrapped a fence spanning the ENTIRE output; the fallback then sliced from the
+	// first brace found in the prose, yielding invalid JSON and failing a correct leg.
+	const proseWithBraces = 'Ran `${x}` interpolation and a {brace} in prose.\n\n```json\n{"result":"ok","confidence":0.9}\n```';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(proseWithBraces)), { result: "ok", confidence: 0.9 });
+
+	// Multiple fences: the LAST one is the answer (contract says "prose before it is fine, nothing after").
+	const multiFence = '```js\nconst x = { a: 1 };\n```\n\nReport done.\n\n```json\n{"result":"ship it"}\n```';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(multiFence)), { result: "ship it" });
+
+	// A markdown table (which contains `|` not braces) before the fenced JSON.
+	const tableBeforeFence = '| cmd | code |\n|---|---|\n| a | 0 |\n\n```json\n{"result":"ok"}\n```';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(tableBeforeFence)), { result: "ok" });
+
+	// Fenced JSON with trailing prose (the agent accidentally added text after the closing fence).
+	const trailingProse = '```json\n{"result":"ok"}\n```\n\nDone.';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(trailingProse)), { result: "ok" });
+});
+
+test("extractJsonCandidate: balanced scan handles nested/escaped braces in JSON values", () => {
+	// Nested braces inside a JSON object value.
+	const nested = 'some prose {not json}.\n{"data":{"inner":{"deep":true}}}';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(nested)), { data: { inner: { deep: true } } });
+
+	// Prose with braces around a bare JSON object (no fence, braces in both places).
+	const bareMixed = 'Code: if (x) { y() }\n\n{"result":"pass"}';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(bareMixed)), { result: "pass" });
+});
+
 test("DEFAULT_CONTRACT requires result and declares the voting/judging fields", () => {
 	assert.equal(DEFAULT_CONTRACT.name, "default");
 	assert.equal(DEFAULT_CONTRACT.fields.result?.required, true);
