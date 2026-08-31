@@ -55,6 +55,11 @@ An active persona can also borrow another installed persona's declared council f
   ↑↓ move, ⏎ read an agent's chronological log, `x` stop, `s` steer — `x`/`s` act only on the agent
   still under the ▸ marker, so if it settled first the keypress just re-anchors. `/flow` and `/orchestrate`
   outcomes are durable expandable transcript cards rather than unbounded toast walls.
+- **Plugin-neutral telemetry v2** — the pi-persona producer emits and persists bounded, allowlisted
+  lifecycle metadata for pi-persona-flow and future plugins, scoped by `producerId` under
+  `telemetry/v2/<workspace>/<producerId>/`. It never stores prompts/tasks, model output, tool
+  arguments, paths, secrets, or message bodies, and it cannot route, steer, or control a run. See
+  [`docs/TELEMETRY.md`](docs/TELEMETRY.md).
 
 ## Concepts
 
@@ -88,7 +93,11 @@ An active persona can also borrow another installed persona's declared council f
   prefix every minute for a reading nobody paces on.
 - **Model-aware.** A loose `model` name ("sonnet") resolves to your own session provider's id (not a
   look-alike you're not logged into); an ensemble runs its cores on *different* models for diverse
-  blind spots. `/models [query]` searches the installed models.
+  blind spots. At the engine layer, provider-qualified choices are strict provider/billing pins by
+  default. Within MAGI, a core that still ends in a provider/unknown-model failure may be recovered
+  once on a model already proven healthy in that council; abort, timeout, contract, and agent failures
+  remain terminal.
+  `/models [query]` searches the installed models.
 
 ## Bundled personas, agents & teams
 
@@ -96,6 +105,7 @@ Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch 
 These are examples, not runtime identities: no code branch checks for `elite`, `dev`, or any other
 persona name. A user/project persona can declare the same delegation policy, council, strategy, team,
 flow, contracts, tools, and coaching behavior in its own frontmatter.
+
 **Personas** — the supervisor you become:
 
 | Persona | What it's for |
@@ -296,13 +306,15 @@ exocom_name({ name: "atlas" }) // rebrand your own call-sign; routing still keys
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 
 Both planes are asynchronous and keep inbound text fenced. Exocom collaboration is prompt-level grammar
-over this one-way transport, not a task/run workflow runtime. On exocom, **replying is the exception,
-not the default**: an inbound peer message lands with a hint that says to reply only if it changes
-what someone does, and otherwise to send nothing. The per-turn peer brief bounds an exchange the
-same way — on **relevance**: stop once a round no longer moves the work the turn is for (your
-human's request, or the peer message that started it). It is deliberately *not* a round cap:
-back-and-forth is often how a hard point gets settled, and what wastes tokens is a round that
-stopped serving the work — which a counter cannot see. `hops` is a separate, narrower bound: it
+over this one-way transport, not a task/run workflow runtime. A bounded exchange names a stable work
+key, question, owner, expected evidence, and stop condition; `in_reply_to` continues its thread, and
+a missed message is resent under the same key before peers reconcile the current facts. On exocom,
+**replying is the exception, not the default**: an inbound peer message lands with a hint that says to
+reply only if it changes what someone does, and otherwise to send nothing. The per-turn peer brief
+bounds an exchange the same way — on **relevance**: stop once a round no longer moves the work the
+turn is for (your human's request, or the peer message that started it). It is deliberately *not* a
+round cap: back-and-forth is often how a hard point gets settled, and what wastes tokens is a round
+that stopped serving the work — which a counter cannot see. `hops` is a separate, narrower bound: it
 caps a *threaded* reply chain (`in_reply_to`), and two peers alternating fresh sends carry
 `hops: 0` throughout, so the transport does not bound that case at all. See
 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) for lifecycle, trust boundaries, and transport details, and
@@ -512,8 +524,9 @@ npm run typecheck   # strict tsc --noEmit
 npm test            # node --test
 ```
 
-Binding design notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the design contract)
-and [`docs/STRATEGIES.md`](docs/STRATEGIES.md) (the orchestration layer, in depth).
+Binding design notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the design contract),
+[`docs/STRATEGIES.md`](docs/STRATEGIES.md) (the orchestration layer, in depth), and
+[`docs/TELEMETRY.md`](docs/TELEMETRY.md) (the generic observer/export wire contract).
 
 ### Pi compatibility
 
