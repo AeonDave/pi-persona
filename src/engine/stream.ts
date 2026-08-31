@@ -19,6 +19,14 @@ export interface ChildUsage {
 	turns: number;
 }
 
+/** Structured lifecycle transition for one runtime tool call. Deliberately excludes arguments and output. */
+export interface ToolEvent {
+	phase: "start" | "end";
+	callId: string;
+	name: string;
+	failed?: boolean;
+}
+
 export interface StreamState {
 	/** The last assistant text content seen (the agent's answer — the returned result). */
 	output: string;
@@ -50,6 +58,13 @@ export interface StreamState {
 	sawAssistant: boolean;
 	/** The tool the child is currently running (e.g. "grep src/…"), or undefined. */
 	activity?: string;
+	/** Calls whose start was surfaced but whose end has not arrived. This is not a retention
+	 *  cache: active ids are never evicted merely because completed calls churn. */
+	activeToolCalls?: Set<string>;
+	/** Recently completed call ids whose start/end phase was surfaced. Both caches are bounded;
+	 *  they suppress duplicate wire events without growing for the lifetime of a long run. */
+	seenToolStarts?: Set<string>;
+	seenToolEnds?: Set<string>;
 }
 
 export function emptyUsage(): ChildUsage {
@@ -57,7 +72,30 @@ export function emptyUsage(): ChildUsage {
 }
 
 export function createStreamState(): StreamState {
-	return { output: "", transcript: "", partial: "", deltaParts: [], deltaLive: "", deltaTail: -1, usage: emptyUsage(), sawAssistant: false };
+	return {
+		output: "",
+		transcript: "",
+		partial: "",
+		deltaParts: [],
+		deltaLive: "",
+		deltaTail: -1,
+		usage: emptyUsage(),
+		sawAssistant: false,
+		activeToolCalls: new Set(),
+		seenToolStarts: new Set(),
+		seenToolEnds: new Set(),
+	};
+}
+
+const TOOL_EVENT_DEDUPE_CACHE_MAX = 1_024;
+
+function rememberRecent(cache: Set<string>, callId: string): void {
+	cache.add(callId);
+	while (cache.size > TOOL_EVENT_DEDUPE_CACHE_MAX) {
+		const oldest = cache.values().next().value as string | undefined;
+		if (oldest === undefined) break;
+		cache.delete(oldest);
+	}
 }
 
 /** Start the next message's delta assembly from an empty slate (parts AND their cache). */
@@ -196,9 +234,10 @@ function appendTranscript(state: StreamState, chunk: string, sep: string): void 
 	}
 }
 
-/** Fold one parsed stream event into the accumulating state (in place). */
-export function applyEvent(state: StreamState, event: unknown): void {
-	if (!isObject(event)) return;
+/** Fold one parsed stream event into the accumulating state (in place), returning a
+ * deduplicated structured lifecycle transition when the runtime supplied a stable call id. */
+export function applyEvent(state: StreamState, event: unknown): ToolEvent | undefined {
+	if (!isObject(event)) return undefined;
 
 	// Track the current tool so the UI can show "running: grep src/…" while a
 	// tool-heavy agent reads before it has written any text. The tool line also goes
@@ -207,11 +246,29 @@ export function applyEvent(state: StreamState, event: unknown): void {
 	if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
 		state.activity = toolActivity(event.toolName, event.args);
 		appendTranscript(state, `⚙ ${state.activity}`, "\n");
-		return;
+		const callId = event.toolCallId;
+		if (typeof callId !== "string" || callId.length === 0) return undefined;
+		const active = state.activeToolCalls ??= new Set();
+		const seenStarts = state.seenToolStarts ??= new Set();
+		const seenEnds = state.seenToolEnds ??= new Set();
+		if (active.has(callId) || seenStarts.has(callId) || seenEnds.has(callId)) return undefined;
+		active.add(callId);
+		return { phase: "start", callId, name: event.toolName };
 	}
 	if (event.type === "tool_execution_end") {
 		delete state.activity;
-		return;
+		const callId = event.toolCallId;
+		const name = event.toolName;
+		if (typeof callId !== "string" || callId.length === 0 || typeof name !== "string") return undefined;
+		const seenEnds = state.seenToolEnds ??= new Set();
+		if (seenEnds.has(callId)) return undefined;
+		const active = state.activeToolCalls ??= new Set();
+		const wasActive = active.delete(callId);
+		rememberRecent(seenEnds, callId);
+		if (wasActive) rememberRecent(state.seenToolStarts ??= new Set(), callId);
+		const toolEvent: ToolEvent = { phase: "end", callId, name };
+		if (typeof event.isError === "boolean") toolEvent.failed = event.isError;
+		return toolEvent;
 	}
 
 	// Live partial: pi streams the growing message as `message_update` events. Surface
@@ -284,9 +341,11 @@ export interface ProgressSnapshot {
 	tokens: number;
 	/** The tool currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
+	/** One authoritative runtime tool lifecycle transition, when this snapshot is event-driven. */
+	toolEvent?: ToolEvent;
 }
 
-export function snapshot(state: StreamState): ProgressSnapshot {
+export function snapshot(state: StreamState, toolEvent?: ToolEvent): ProgressSnapshot {
 	const snap: ProgressSnapshot = {
 		// The live view shows completed messages (transcript) plus the in-progress one
 		// (partial), falling back to the last text before anything has accumulated.
@@ -295,6 +354,7 @@ export function snapshot(state: StreamState): ProgressSnapshot {
 		tokens: state.usage.input + state.usage.output,
 	};
 	if (state.activity !== undefined) snap.activity = state.activity;
+	if (toolEvent !== undefined) snap.toolEvent = toolEvent;
 	return snap;
 }
 

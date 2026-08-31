@@ -37,6 +37,31 @@ test("specOf and runDelegate preserve an explicit empty tool allowlist", async (
 	assert.deepEqual(seen, [[]]);
 });
 
+test("runDelegate forwards authoritative per-leg tool lifecycle without display parsing", async () => {
+	const events: Array<{ index: number; phase: string; callId: string; name: string }> = [];
+	const engine: StrategyEngine = {
+		run: async (spec, onProgress) => {
+			onProgress?.({ output: "", toolEvent: { phase: "start", callId: "call-7", name: "read" } });
+			onProgress?.({ output: "done", toolEvent: { phase: "end", callId: "call-7", name: "read" } });
+			return { agent: spec.agent, output: "done", usage: usage(), ok: true };
+		},
+	};
+	await runDelegate(
+		{ agent: "scout", task: "inspect" },
+		engine,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(index, event) => events.push({ index, phase: event.phase, callId: event.callId, name: event.name }),
+	);
+	assert.deepEqual(events, [
+		{ index: 0, phase: "start", callId: "call-7", name: "read" },
+		{ index: 0, phase: "end", callId: "call-7", name: "read" },
+	]);
+});
+
 test("validateDelegationBrief reports every missing/non-empty field with a repair hint", () => {
 	const error = validateDelegationBrief({
 		tasks: [{ agent: "a", task: "t", brief: { ...completeBrief(), objective: "", constraints: [] } }],

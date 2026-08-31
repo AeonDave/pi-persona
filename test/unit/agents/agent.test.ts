@@ -90,3 +90,29 @@ test("parseAgent leaves optional fields undefined when absent", () => {
 	assert.equal(a?.excludeTools, undefined);
 	assert.equal(a?.systemPrompt, "Just a prompt.");
 });
+
+test("parseAgent reads a core's declared verticalization, and tolerates its absence", () => {
+	const withPurpose = parseAgent(
+		["---", "name: melchior", "description: MAGI core", "purpose: Propulsore", "---", "body"].join("\n"),
+		"/a/melchior.md",
+	);
+	assert.equal(withPurpose?.purpose, "Propulsore");
+
+	// An agent that declares no lens is ordinary — the label just omits it.
+	const without = parseAgent(["---", "name: scout", "---", "body"].join("\n"), "/a/scout.md");
+	assert.equal(without?.purpose, undefined);
+
+	// Whitespace-only is not a purpose.
+	const blank = parseAgent(["---", "name: scout", "purpose: '   '", "---", "body"].join("\n"), "/a/scout.md");
+	assert.equal(blank?.purpose, undefined);
+});
+
+test("the shipped MAGI cores each declare their verticalization", () => {
+	// The council's whole readability rests on these three: a roster of names says nothing about
+	// which lens argued what, and the tree/picker both render this field.
+	const dir = new URL("../../../agents/", import.meta.url);
+	for (const [file, purpose] of [["melchior.md", "Propulsore"], ["balthasar.md", "Conservatore"], ["casper.md", "Catalizzatore"]] as const) {
+		const parsed = parseAgent(readFileSync(new URL(file, dir), "utf8"), file);
+		assert.equal(parsed?.purpose, purpose, `${file} must declare purpose: ${purpose}`);
+	}
+});

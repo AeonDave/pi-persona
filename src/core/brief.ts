@@ -214,7 +214,18 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 	// which is why collision-avoidance ("shout if this clashes with yours") belongs here and would
 	// otherwise fall in neither half.
 	lines.push(
-		`A peer is for what only another LIVE INSTANCE can give: judgement you cannot specify — a read on your approach, a risk you may be blind to — or coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+		`A peer is for what only another LIVE INSTANCE can give: judgement you cannot specify — a read on your approach, a risk you may be blind to — or coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. exocom_send({ target: "*" }) reaches every reachable peer at once — use it to announce what you are taking before you take it, and to raise a problem that changes what the others are doing. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+	);
+	lines.push(
+		`For bounded collaboration, name a stable work key, the bounded question, owner, expected evidence and stop condition in the first message. Messages are one-way and non-blocking; use in_reply_to when continuing the same thread. Acknowledge only when it changes ownership, evidence, or the next action. The owner stays accountable, hands off a specific bounded slice, and asks for evidence rather than a team-DONE claim. If a message or reply is missed, retry with the same work key and a concise restatement, then reconcile the current facts in the next message. Stop when the work converges or the next action is clear; ordinary exocom_send remains flat collaboration.`,
+	);
+	// A broadcast is N independent sends and the wire carries no fan-out marker, so the receiver's
+	// header reads exactly like a private message. Nothing below can be enforced — this is the
+	// prompt half of the transport's deliberate flatness — but each clause answers a failure this
+	// shape actually produces: N peers each answering as if asked personally, or all staying silent
+	// assuming another will, and an answer the whole pool needs dying inside one private thread.
+	lines.push(
+		`When you broadcast, say it is a broadcast and to how many, and name the work key: the receiver's copy looks exactly like a private message, so only you can tell them it went to everyone. Ask for one owner to claim a piece rather than an answer from each peer, so a question does not come back N times — and if a broadcast asked something only one peer can settle, say who you expect it from. Replies come back to you alone: when the outcome changes what the others should do, re-broadcast it once under the same work key instead of leaving it in a private thread. A blocking problem is exactly the case where silence is wrong — it changes what everyone does.`,
 	);
 	// The line above bounds WHETHER to open a thread; this one bounds how long it stays open. The
 	// stop condition is DRIFT, never a round count: back-and-forth is often how a hard point gets

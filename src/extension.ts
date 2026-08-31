@@ -47,7 +47,7 @@ import { withModelFallback } from "./engine/fallback.ts";
 import { captureWorktreeArtifact, defaultGitExec, withWorktree, worktreePreflight } from "./engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
 import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion, runDurationLabel } from "./engine/async.ts";
-import { emptyUsage, type ProgressSnapshot } from "./engine/stream.ts";
+import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
@@ -73,6 +73,8 @@ import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.t
 import { expandCouncilPreset, resolveCouncilInvocation, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
 import { bundledSpinePath, bundledWorkerSpinePath, readSpineFile, resolveSpine, type SpineSources } from "./persona/spine.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
+import { TELEMETRY_EVENT_NAME, type AgentKind as TelemetryAgentKind, type AgentStatus as TelemetryAgentStatus, type InstanceDescriptor, type PeerDescriptor, type TelemetryEvent } from "./telemetry/contract.ts";
+import { TelemetryProducer, type TelemetryAgentInput } from "./telemetry/producer.ts";
 import {
 	type PersonaConfigStore,
 	personaModels,
@@ -98,7 +100,7 @@ import {
 import { formatInbox, type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS, runIntercom } from "./tools/intercom.ts";
 import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, AgentTree, type AgentNodeStatus, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
 import { boundDisplayRows, compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
 import { formatUsage } from "./ui/usage.ts";
@@ -153,6 +155,12 @@ export function canDeliverPersonaNotification(orchestrating: boolean, processing
 function userAgentDir(): string {
 	return process.env.PI_AGENT_DIR || getAgentDir();
 }
+/** A spawned Pi resolves its global settings/auth from PI_CODING_AGENT_DIR, while pi-persona's
+ * test/user override is PI_AGENT_DIR. Pin the child to the same resolved directory the in-process
+ * createAgentSession receives, otherwise retry/provider settings diverge between engine backends. */
+function childPiSettingsEnv(): Record<string, string> {
+	return { PI_CODING_AGENT_DIR: userAgentDir() };
+}
 function personaDataDir(): string {
 	return join(userAgentDir(), DATA_DIR);
 }
@@ -192,6 +200,31 @@ function sanitizePeerField(value: string, max: number): string {
 
 export function sanitizeLabel(s: string): string {
 	return sanitizePeerField(s, 80) || "peer";
+}
+
+/** The tail every routing token carries — the shape `ExocomPlane`'s own `isRoutingToken` tests
+ * (exocom/plane.ts, private to that module). Deliberately un-anchored, exactly as there: a
+ * call-sign may itself contain `@`, and the token built from it keeps the same protection. */
+const EXOCOM_ROUTING_TOKEN = /@[a-f0-9]{24}$/i;
+
+/** Resolve an exocom tool target into the stable session ids used by the telemetry graph.
+ * Routing tokens contain only a hash of that id, so the dashboard must never guess by slicing
+ * the token. Unknown/stale targets intentionally produce no edge; tool lifecycle still records
+ * the failed call. */
+export function canonicalExocomTelemetryTargets(
+	peers: ReadonlyArray<Pick<DisplayPeer, "session_id" | "displayName" | "target">>,
+	target: string,
+): string[] {
+	if (target === "*") return peers.map((peer) => peer.session_id);
+	const exact = peers.find((peer) => peer.target === target);
+	if (exact) return [exact.session_id];
+	// `ExocomPlane.send`'s precedence, not a looser one: a routing token names ONE session and
+	// never degrades to a display name, because call-signs are unreserved (`normalizePeerName`
+	// keeps `@`) — a peer can register another's published token as its own label and would
+	// otherwise collect that peer's edge, message size included, for a message it never received.
+	if (EXOCOM_ROUTING_TOKEN.test(target)) return [];
+	const display = peers.find((peer) => peer.displayName === target);
+	return display ? [display.session_id] : [];
 }
 
 /** Translate the local guard decision into the transport ACK contract. An ACK means queued (or an
@@ -640,6 +673,99 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
+	// Explicit telemetry is the public observability seam consumed by pi-persona-flow. It is
+	// session-scoped and starts only after persona + exocom reconciliation in session_start.
+	let telemetry: TelemetryProducer | undefined;
+	// callId → the open supervisor tool call. The NAME rides along because the close may happen at
+	// the turn boundary rather than on a tool_result, where the event that carries it is gone.
+	const telemetryToolStartedAt = new Map<string, { startedAt: number; name: string }>();
+	// ask envelope id → who asked, so a supervisor reply is attributed to the child it answers
+	// rather than to a "subagent" literal that names nobody. Bounded; cleared on teardown.
+	const telemetryAskSenders = new Map<string, string>();
+	const MAX_TRACKED_ASK_SENDERS = 256;
+	type PendingExocomTelemetry = { id: string; sessionId: string; target: string; size: number };
+	const telemetryExocomPending = new Map<string, PendingExocomTelemetry[]>();
+	// …and the same for intercom: both channels open at tool_call and close at tool_result, so both are
+	// left hanging when Pi resolves a call as "immediate" and never reaches a result.
+	type PendingIntercomTelemetry = { kind: string; to: string; size: number; replyTo?: string };
+	const telemetryIntercomPending = new Map<string, PendingIntercomTelemetry>();
+	function telemetryKind(node: AgentNode): TelemetryAgentKind {
+		if (node.kind) return node.kind;
+		if (node.id.startsWith("flow:")) return "flow";
+		if (node.id.startsWith("strategy:") || node.id.startsWith("council:")) return "council";
+		if (node.id.startsWith("delegate:")) return "delegate";
+		return "subagent";
+	}
+	function telemetryStatus(node: AgentNode): TelemetryAgentStatus {
+		if (node.status !== "running") return node.status;
+		// "queued" is a marker WE set (the seeded roster / a launched async run), so it is a real
+		// state. Nothing ever sets `detail` to a waiting state — it is a usage string, an error, or
+		// `toolActivity(name, args)`, which splices the tool's own argument text — so a substring
+		// test for "waiting" could only ever fire on a leg that is running normally.
+		if (node.detail?.trim().toLowerCase() === "queued") return "queued";
+		return "running";
+	}
+	function telemetryAgent(node: AgentNode): TelemetryAgentInput {
+		return {
+			id: node.id,
+			label: node.label,
+			kind: telemetryKind(node),
+			status: telemetryStatus(node),
+			...(node.parentId !== undefined ? { parentId: node.parentId } : {}),
+			...(node.agent !== undefined ? { agent: node.agent } : {}),
+			...(node.model !== undefined ? { model: node.model } : {}),
+		};
+	}
+	/** Who an intercom action actually addresses. A REPLY carries no `to` — it goes back to the
+	 *  child whose ask it answers — so the "subagent" literal it would otherwise fall back to names
+	 *  nobody and merges every child's replies into one node. */
+	function intercomRecipient(input: Record<string, unknown>, askId: string | undefined): string {
+		const asked = askId !== undefined ? telemetryAskSenders.get(askId) : undefined;
+		if (asked) return asked;
+		return typeof input.to === "string" && input.to ? input.to : "subagent";
+	}
+	function publishAgentTool(agentId: string, event: ToolEvent): void {
+		const callId = `${agentId}/${event.callId}`;
+		telemetry?.publish(event.phase === "start" ? "tool.started" : "tool.finished", {
+			callId,
+			agentId,
+			name: event.name,
+			status: event.phase === "start" ? "running" : event.failed ? "failed" : "done",
+		});
+	}
+
+	// node id → the last projection published for it. The tree emits "updated" whenever `detail` or
+	// `output` moves — every streamed token delta — while the projection keeps neither, so an
+	// unfiltered publish appends one byte-identical duplicate per chunk: a 5k-chunk leg writes
+	// ~1.5MB of them and evicts genuine history from the producer's file budget.
+	const lastAgentProjection = new Map<string, string>();
+	function publishAgentTreeChange(change: AgentTreeChange): void {
+		const producer = telemetry;
+		if (!producer) return;
+		if (change.type === "added") {
+			lastAgentProjection.set(change.node.id, JSON.stringify(telemetryAgent(change.node)));
+			producer.publishAgentAdded(telemetryAgent(change.node));
+			return;
+		}
+		if (change.type === "updated") {
+			const projection = JSON.stringify(telemetryAgent(change.node));
+			if (lastAgentProjection.get(change.node.id) === projection) return;
+			lastAgentProjection.set(change.node.id, projection);
+			producer.publishAgentUpdated(change.node.id, telemetryAgent(change.node));
+			return;
+		}
+		if (change.type === "removed") {
+			for (const node of change.nodes) {
+				lastAgentProjection.delete(node.id);
+				const status = node.status === "running" ? "stopped" : telemetryStatus(node);
+				producer.publish("agent.removed", { id: node.id, status });
+			}
+			return;
+		}
+		lastAgentProjection.clear();
+		producer.publish("agent.cleared", {});
+	}
+	agentTree.onChange(publishAgentTreeChange);
 	// Delegation nudge: watches the supervisor's OWN tool-result stream and reminds it to hand off
 	// when it grinds heavy work by hand (config.nudge; gated to delegating personas at the hook).
 	const delegationNudge = new DelegationNudge();
@@ -983,6 +1109,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
 	const peekWatcher = new PeekWatcher();
 	tracker.onComplete((run) => {
+		agentTree.update(`async:${run.id}`, { status: run.status, detail: run.error ?? run.result?.error ?? "" });
 		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
@@ -1001,7 +1128,24 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// Event wake (default on): a child's BLOCKING question (decision/interview) surfaces at once
 	// as a follow-up so the free (async) supervisor can answer it via the `intercom` tool.
 	bus.onMessage((env) => {
+		telemetry?.publish("message.received", {
+			id: env.id,
+			channel: "intercom",
+			from: env.from,
+			to: env.to,
+			kind: env.kind,
+			status: "delivered",
+			expectsReply: env.expectsReply,
+			size: Buffer.byteLength(env.text, "utf8"),
+		});
 		if (disposed || env.to !== SUPERVISOR || !env.expectsReply) return;
+		// Only an ask can be replied to, so only an ask needs its sender remembered. Oldest first
+		// out: a long session must not grow this without bound.
+		if (telemetryAskSenders.size >= MAX_TRACKED_ASK_SENDERS) {
+			const oldest = telemetryAskSenders.keys().next();
+			if (!oldest.done) telemetryAskSenders.delete(oldest.value);
+		}
+		telemetryAskSenders.set(env.id, env.from);
 		// Idle-gated so the ask reaches the (free) supervisor as a turn it can answer via the
 		// intercom tool, rather than stranding mid-stream as a sticky follow-up.
 		intercomNotifier.notify({
@@ -1196,6 +1340,56 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return CODENAMES[start]!;
 	}
 
+	function telemetrySessionId(ctx: ExtensionContext): string {
+		return (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? `legacy-${process.pid}`;
+	}
+
+	function currentTelemetryInstance(ctx: ExtensionContext): InstanceDescriptor {
+		const runtimeCtx = ctx as ExtensionContext & {
+			sessionManager?: { getSessionId?: () => string };
+			isIdle?: () => boolean;
+			getContextUsage?: () => { percent?: number } | undefined;
+		};
+		const sessionId = telemetrySessionId(ctx);
+		const displayName = exocomName || exocomCodename(sessionId, new Set());
+		return {
+			displayName,
+			persona: controller.activePersona?.name ?? "",
+			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
+			status: runtimeCtx.isIdle?.() === true ? "idle" : "active",
+			pid: process.pid,
+			// Clamped HERE, not merely in the producer's `sanitizeInstance`: that one runs only for
+			// `instance.started`, so an out-of-range reading would ride `instance.updated` and
+			// `instance.heartbeat` out to consumers, where the contract rejects the WHOLE event over
+			// the one bad field.
+			contextPercent: Math.max(0, Math.min(100, Math.round(runtimeCtx.getContextUsage?.()?.percent ?? 0))),
+			exocomEnabled: exocomPlane !== undefined,
+			color: exocomColorFor(displayName),
+		};
+	}
+
+	function publishTelemetryPeers(peers?: DisplayPeer[]): void {
+		const producer = telemetry;
+		if (!producer) return;
+		let pool = peers;
+		if (!pool) {
+			try { pool = exocomPlane?.listPeers() ?? []; } catch { pool = []; }
+		}
+		const now = Date.now();
+		const payload: PeerDescriptor[] = pool.map((peer) => ({
+			sessionId: peer.session_id,
+			displayName: peer.displayName,
+			persona: peer.persona,
+			model: peer.model,
+			contextPercent: peer.context_pct,
+			status: now - Date.parse(peer.heartbeat_at) > EXOCOM.QUIET_AFTER_MS ? "idle" : "online",
+			...(peer.color ? { color: peer.color } : {}),
+			sent: exocomPlane?.sentToPeer(peer.session_id) ?? 0,
+			received: exocomPlane?.receivedFromPeer(peer.session_id) ?? 0,
+		}));
+		producer.publish("peers.snapshot", { peers: payload });
+	}
+
 	// One row per live peer (the registry read itself IS the pool — each peer refreshes its
 	// own entry on its own heartbeat, so no ping fan-out is needed here). Best-effort/cosmetic,
 	// mirrors renderAgentWidget above.
@@ -1211,6 +1405,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		} catch {
 			return;
 		}
+		publishTelemetryPeers(peers);
 		try {
 			const now = Date.now();
 			const selfPersona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
@@ -1373,13 +1568,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					inbox: exocomNotifier?.peekPending().length ?? 0,
 				}),
 				onInbound: (msg, fromEntry) => {
-					// A full inbox is REFUSED, never silently queued forever: the sender's budget
-					// (SENDER_MAX_MSGS per sender, unbounded senders) can outrun what an idle-gated
-					// receiver drains, and an unbounded queue would grow monotonically, delay every fresh
-					// message behind the backlog, and lose the lot at the next teardown. The nack tells
-					// the peer its message did not land, so it can retry — checked BEFORE
-					// buildInboundDelivery so the refused message is not recorded as seen and the retry
-					// is not swallowed as a duplicate.
 					const queued = exocomNotifier?.peekPending().length ?? 0;
 					if (queued >= EXOCOM_INBOX_MAX) {
 						if (!exocomInboxFull) {
@@ -1417,6 +1605,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						...(replyTarget ? { replyTarget } : {}),
 					});
 					const disposition = exocomInboundDisposition(decision);
+					telemetry?.publish("message.received", {
+						id: msg.msg_id,
+						channel: "exocom",
+						from: fromEntry?.session_id ?? msg.from_session,
+						to: sessionId,
+						kind: "message",
+						status: disposition.accepted ? "delivered" : "rejected",
+						expectsReply: false,
+						size: Buffer.byteLength(msg.text, "utf8"),
+						...(msg.in_reply_to ? { replyTo: msg.in_reply_to } : {}),
+					});
 					if ("deliver" in decision) {
 						exocomNotifier?.notify(decision.deliver);
 						// Never inject peer text into a live model turn. A compact human-only toast makes
@@ -1650,7 +1849,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			deps.listAgents = () => agents.map((a) => a.name);
 			if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 			if (signal) deps.signal = signal;
-			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs };
+			deps.childOptions = {
+				timeoutMs: RUN_LIMITS.timeoutMs,
+				hardTimeoutMs: config.agentHardTimeoutMs,
+				startupTimeoutMs: config.agentStartupTimeoutMs,
+				env: childPiSettingsEnv(),
+			};
 			// Feed progress here too (mirrors the plain-child branch): without it a worktree/mcp async leg
 			// never advances its tracker snapshot, so lastAdvanceAt freezes at launch and the leg is falsely
 			// flagged stalled while a genuine later wedge goes undetected.
@@ -1696,7 +1900,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 			if (signal) deps.signal = signal;
 			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
-			deps.childOptions = { timeoutMs: RUN_LIMITS.timeoutMs, hardTimeoutMs: config.agentHardTimeoutMs, startupTimeoutMs: config.agentStartupTimeoutMs }; // idle watchdog + hard cap + startup deadline on every child
+			deps.childOptions = {
+				timeoutMs: RUN_LIMITS.timeoutMs,
+				hardTimeoutMs: config.agentHardTimeoutMs,
+				startupTimeoutMs: config.agentStartupTimeoutMs,
+				env: childPiSettingsEnv(),
+			}; // idle watchdog + hard cap + startup deadline on every child; same Pi settings dir as inproc
 			if (onProgress) deps.childOptions.onProgress = onProgress;
 			const brokerDeps = getBrokerDeps();
 			if (brokerDeps) deps.broker = brokerDeps;
@@ -1837,7 +2046,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const chosen: Record<string, string> = {};
 		try {
 			for (const agent of missing) {
-				const title = `Model for "${agent}"  ·  ${persona}`;
+				// Name the core's verticalization in the picker too: choosing a model for "the
+				// Conservatore" is a different judgement than choosing one for a bare "balthasar".
+				const purpose = corePurpose(agent);
+				const title = `Model for "${agent}"${purpose ? ` (${purpose})` : ""}  ·  ${persona}`;
 				// In the TUI: a searchable picker (type to filter) whose viewport follows the
 				// selection — the built-in select can't scroll a hundreds-long provider list
 				// usefully. Outside the TUI (RPC), fall back to the built-in select.
@@ -1869,16 +2081,39 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	}
 
+	/** A core's declared verticalization ("Propulsore", "Critico") — the lens it argues from, so a
+	 *  council reads as a set of ROLES rather than a set of names. Absent for an agent that declares
+	 *  none, and the label simply omits it. */
+	function corePurpose(agent: string): string | undefined {
+		return agents.find((a) => a.name === agent)?.purpose;
+	}
+
+	/** The session's own model, for a strategy's last-resort recovery of a member whose model broke
+	 *  with no healthy peer to borrow from (`orchestration/model-retry.ts`). */
+	function sessionModelDep(ctx: ExtensionContext): { sessionModel?: string } {
+		return ctx.model ? { sessionModel: `${ctx.model.provider}/${ctx.model.id}` } : {};
+	}
+
 	// Each core's model beside its name: per-persona assignment → agent default → session.
-	function coreLabel(ctx: ExtensionContext, agent: string, key: string = agent): string {
+	function coreModel(ctx: ExtensionContext, agent: string): string | undefined {
 		const persona = controller.activePersona?.name;
 		const configured = persona ? personaModels(personaConfigs, persona) : {};
-		const model =
-			configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
-		const short = shortModel(model);
+		return configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+	}
+	function coreTelemetryMeta(ctx: ExtensionContext, agent: string): { agent: string; model?: string } {
+		const model = coreModel(ctx, agent);
+		return { agent, ...(model ? { model } : {}) };
+	}
+	function coreLabel(ctx: ExtensionContext, agent: string, key: string = agent): string {
+		const short = shortModel(coreModel(ctx, agent));
 		// `key` is the disambiguated node id (`agent` for a solo member, `agent · HINT` for a
-		// roster-role one) — display that + the model, so three `reviewer` lenses read distinctly.
-		return short ? `${key} · ${short}` : key;
+		// roster-role one) — display that + what the core is FOR + the model, so a watcher reads the
+		// council as roles rather than names, and three `reviewer` lenses still read distinctly.
+		// A roster-ROLE member already carries its lens in `key` (`agent · HINT`) and its standing
+		// purpose would repeat it — but a plain repeat (`melchior#2`) is the same core twice and
+		// still wants its lens, so key off the role separator, not off `key !== agent`.
+		const purpose = key.includes(" · ") ? undefined : corePurpose(agent);
+		return [key, purpose, short].filter(Boolean).join(" · ");
 	}
 
 	// The SDK lifecycle callbacks that drive the unified tree for one strategy run rooted at
@@ -1897,7 +2132,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const id = `${rootId}/${nodeKey}`;
 				if (st === "running") {
 					// detail "" clears the seeded "queued" marker — this core is actually live now.
-					agentTree.add({ id, label: coreLabel(ctx, agent, nodeKey), parentId: rootId, status: "running", detail: "" });
+					agentTree.add({ id, label: coreLabel(ctx, agent, nodeKey), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, agent), detail: "" });
 					return;
 				}
 				stopRegistry.delete(id);
@@ -1912,6 +2147,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			},
 			onAgentProgress: (agent: string, p: AgentProgress, key?: string) => {
 				const id = `${rootId}/${key ?? agent}`;
+				if (p.toolEvent) publishAgentTool(id, p.toolEvent);
 				const patch: { output?: string; detail?: string } = {
 					detail: p.activity || (p.tokens ? `${compactTokens(p.tokens)} tok` : ""),
 				};
@@ -1934,20 +2170,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const roster = orch.roster ? (teams[orch.roster] ?? []) : [];
 		await ensurePersonaModels(ctx, roster);
 		const rootId = nextRootId(`${idPrefix}:${label}`);
-		agentTree.add({ id: rootId, label, status: "running" });
+		agentTree.add({ id: rootId, label, status: "running", kind: "council" });
 		// Seed the whole roster at once (cores show by name immediately); "queued" until the
 		// engine actually starts each one — an honest view under the concurrency limit.
 		const seedKeys = rosterNodeKeys(roster);
 		roster.forEach((m, i) => {
 			const a = rosterSpec(m).agent;
 			const key = seedKeys[i] ?? a;
-			agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key), parentId: rootId, status: "running", detail: "queued" });
+			agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, a), detail: "queued" });
 		});
 		try {
 			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
 			// cooperatively between rounds, so an aborted run stops convening instead of running every
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
-			return await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId) });
+			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId) });
+			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
+			return result;
+		} catch (error) {
+			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : "failed" });
+			throw error;
 		} finally {
 			clearStops(rootId);
 			clearSteers(rootId);
@@ -2003,10 +2244,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		await ensurePersonaModels(ctx, rosterMembers);
 
 		const flowRoot = nextRootId(`flow:${spec.name}`);
-		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running" });
+		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running", kind: "flow" });
 		for (const p of spec.phases) {
 			const pid = `${flowRoot}/${p.id}`;
-			const node: AddNodeInput = { id: pid, label: `${p.id} · ${p.strategy}`, parentId: flowRoot, status: resume[p.id] ? "done" : "running" };
+			const node: AddNodeInput = { id: pid, label: `${p.id} · ${p.strategy}`, parentId: flowRoot, status: resume[p.id] ? "done" : "running", kind: "phase" };
 			if (resume[p.id]) node.detail = "resumed";
 			agentTree.add(node);
 		}
@@ -2031,7 +2272,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					roster.forEach((m, i) => {
 						const a = rosterSpec(m).agent;
 						const key = seedKeys[i] ?? a;
-						agentTree.add({ id: `${pid}/${key}`, label: coreLabel(ctx, a, key), parentId: pid, status: "running", detail: "queued" });
+					agentTree.add({ id: `${pid}/${key}`, label: coreLabel(ctx, a, key), parentId: pid, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, a), detail: "queued" });
 					});
 					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
 					if (phase.roster) orch.roster = phase.roster;
@@ -2039,6 +2280,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						engine: buildEngine(signal),
 						teams,
 						limits: RUN_LIMITS,
+						...sessionModelDep(ctx),
 						...(signal ? { signal } : {}), // cooperative per-round abort inside the phase's strategy, not just the engine
 						...strategyTreeDeps(ctx, pid),
 					});
@@ -2065,7 +2307,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					/* ignore */
 				}
 			}
+			agentTree.update(flowRoot, { status: signal?.aborted ? "stopped" : outcome.ok ? "done" : "failed" });
 			return outcome;
+		} catch (error) {
+			agentTree.update(flowRoot, { status: signal?.aborted ? "stopped" : "failed" });
+			throw error;
 		} finally {
 			clearStops(flowRoot);
 			clearSteers(flowRoot);
@@ -2252,9 +2498,35 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			host.setStatus(controller.activePersona?.label);
 		}
 		await reconcileExocom(ctx); // after persona activation, so plane + active tools share one gate
+		await telemetry?.stop("session-replaced");
+		telemetry = undefined;
+		const sessionManager = (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager;
+		const sessionId = sessionManager?.getSessionId?.();
+		if (sessionId) {
+			const eventBus = (pi as unknown as { events?: { emit?: (name: string, event: TelemetryEvent) => void } }).events;
+			telemetry = new TelemetryProducer({
+				agentDir: userAgentDir(),
+				cwd: ctx.cwd,
+				sessionId,
+				emit: (event) => eventBus?.emit?.(TELEMETRY_EVENT_NAME, event),
+				heartbeat: () => currentTelemetryInstance(lastCtx ?? ctx),
+				...(process.env.PI_PERSONA_DEBUG
+					? { onError: (error: unknown) => { process.stderr.write(`[pi-persona] telemetry: ${error instanceof Error ? error.message : String(error)}\n`); } }
+					: {}),
+			});
+			telemetry.start(currentTelemetryInstance(ctx));
+			// Re-seeded with the replay, so the dedupe below always mirrors what THIS producer last
+			// published — a session start that follows no teardown carries no stale projection.
+			lastAgentProjection.clear();
+			for (const node of agentTree.snapshot()) {
+				lastAgentProjection.set(node.id, JSON.stringify(telemetryAgent(node)));
+				telemetry.publishAgentAdded(telemetryAgent(node));
+			}
+			publishTelemetryPeers();
+		}
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async (event, ctx) => {
 		lastCtx = ctx;
 		disposed = true; // gate any late async-run onComplete from touching the next session's instance
 		deferredOrchestrations.length = 0;
@@ -2298,12 +2570,64 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			brokerHostPromise = undefined;
 			brokerPeers.clear();
 		}
+		await telemetry?.stop(event?.reason);
+		telemetry = undefined;
+		telemetryToolStartedAt.clear();
+		telemetryExocomPending.clear();
+		telemetryIntercomPending.clear();
+		telemetryAskSenders.clear(); // …and no ask attribution leaks into the next session
+		lastAgentProjection.clear();
 	});
 
 	// Pi marks the session idle before emitting agent_settled. A deferred mandatory input owns this
 	// idle window first; its replay starts the next run and the remaining FIFO entries follow one per
 	// settlement. With no deferred input, flush ordinary wakes immediately.
 	pi.on("agent_settled", async () => {
+		if (lastCtx) telemetry?.publish("instance.updated", { ...currentTelemetryInstance(lastCtx), status: "idle" });
+		// Pi's `prepareToolCall` returns {kind:"immediate"} when the abort signal is already set
+		// after beforeToolCall — skipping afterToolCall, and so our tool_result hook. Those calls
+		// would otherwise stay "running" until session_shutdown (press Esc mid-fan-out and every
+		// call that had not yet started is orphaned). The turn boundary is where they end.
+		for (const [callId, open] of telemetryToolStartedAt) {
+			telemetry?.publish("tool.finished", {
+				callId,
+				agentId: "supervisor",
+				name: open.name,
+				status: "failed",
+				durationMs: Math.max(0, Date.now() - open.startedAt),
+			});
+		}
+		telemetryToolStartedAt.clear(); // a late result for a drained call must not close it twice
+		// An exocom send orphaned on that same path left its recipients at "queued" forever. They are
+		// reported failed, never delivered: the call never reached a result, so nothing observed a send.
+		for (const pending of telemetryExocomPending.values()) {
+			for (const message of pending) telemetry?.publish("message.sent", {
+				id: message.id,
+				channel: "exocom",
+				// A session id, like every other exocom publish site — never an agentId literal in this slot.
+				from: lastCtx ? telemetrySessionId(lastCtx) : `legacy-${process.pid}`,
+				to: message.sessionId,
+				kind: "message",
+				status: "failed",
+				expectsReply: false,
+				size: message.size,
+			});
+		}
+		telemetryExocomPending.clear();
+		for (const [callId, message] of telemetryIntercomPending) {
+			telemetry?.publish(message.kind === "reply" ? "message.replied" : "message.sent", {
+				id: callId,
+				channel: "intercom",
+				from: "supervisor",
+				to: message.to,
+				kind: message.kind,
+				status: "failed",
+				expectsReply: false,
+				size: message.size,
+				...(message.replyTo ? { replyTo: message.replyTo } : {}),
+			});
+		}
+		telemetryIntercomPending.clear();
 		if (await processNextDeferredOrchestration()) return;
 		completionNotifier.kick();
 		intercomNotifier.kick();
@@ -2313,6 +2637,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	pi.on("before_agent_start", (event, ctx) => {
 		lastCtx = ctx;
+		telemetry?.publish("instance.updated", { ...currentTelemetryInstance(ctx), status: "active" });
 		// The spine lifts persona-less turns too: with nothing active the composition is Pi's base
 		// prompt + the layer. Off ⇒ `spineText` is empty and this is `event.systemPrompt` itself.
 		const noPersona = spineText ? `${event.systemPrompt}\n\n${spineText}` : event.systemPrompt;
@@ -2380,7 +2705,71 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	pi.on("tool_call", (event, ctx) => {
 		lastCtx = ctx;
-		return controller.gate(event.toolName, event.input);
+		const startedAt = Date.now();
+		telemetryToolStartedAt.set(event.toolCallId, { startedAt, name: event.toolName });
+		telemetry?.publish("tool.started", {
+			callId: event.toolCallId,
+			agentId: "supervisor",
+			name: event.toolName,
+			status: "running",
+		});
+		const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
+		const gate = controller.gate(event.toolName, event.input);
+		if (gate) {
+			telemetryToolStartedAt.delete(event.toolCallId);
+			telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
+			return gate;
+		}
+		if (event.toolName === "intercom") {
+			const action = typeof input.action === "string" ? input.action : "message";
+			if (action === "send" || action === "reply") {
+				const text = typeof input.message === "string" ? input.message : "";
+				const askId = typeof input.askId === "string" ? input.askId : undefined;
+				telemetryIntercomPending.set(event.toolCallId, {
+					kind: action,
+					to: intercomRecipient(input, askId),
+					size: Buffer.byteLength(text, "utf8"),
+					...(askId ? { replyTo: askId } : {}),
+				});
+				telemetry?.publish(action === "reply" ? "message.replied" : "message.sent", {
+					id: event.toolCallId,
+					channel: "intercom",
+					from: "supervisor",
+					to: intercomRecipient(input, askId),
+					kind: action,
+					status: "queued",
+					expectsReply: false,
+					size: Buffer.byteLength(text, "utf8"),
+					...(askId ? { replyTo: askId } : {}),
+				});
+			}
+		}
+		if (event.toolName === "exocom_send") {
+			const text = typeof input.message === "string" ? input.message : "";
+			const target = typeof input.target === "string" ? input.target : "";
+			let peers: DisplayPeer[] = [];
+			try { peers = exocomPlane?.listPeers() ?? []; } catch { /* telemetry cannot break the tool */ }
+			const sessions = canonicalExocomTelemetryTargets(peers, target);
+			const size = Buffer.byteLength(text, "utf8");
+			const pending = sessions.map((sessionId) => ({
+				id: sessions.length === 1 ? event.toolCallId : `${event.toolCallId}:${sessionId}`,
+				sessionId,
+				target: target === "*" ? (peers.find((peer) => peer.session_id === sessionId)?.target ?? sessionId) : target,
+				size,
+			}));
+			if (pending.length > 0) telemetryExocomPending.set(event.toolCallId, pending);
+			for (const message of pending) telemetry?.publish("message.sent", {
+				id: message.id,
+				channel: "exocom",
+				from: telemetrySessionId(ctx),
+				to: message.sessionId,
+				kind: "message",
+				status: "queued",
+				expectsReply: false,
+				size: message.size,
+			});
+		}
+		return undefined;
 	});
 
 	// Delegation nudge (config.nudge; delegating personas only): when the supervisor grinds a RUN of
@@ -2391,6 +2780,66 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// resets the run.
 	pi.on("tool_result", (event, ctx) => {
 		lastCtx = ctx;
+		const open = telemetryToolStartedAt.get(event.toolCallId);
+		telemetryToolStartedAt.delete(event.toolCallId);
+		if (open !== undefined) {
+			telemetry?.publish("tool.finished", {
+				callId: event.toolCallId,
+				agentId: "supervisor",
+				name: event.toolName,
+				status: event.isError ? "failed" : "done",
+				durationMs: Math.max(0, Date.now() - open.startedAt),
+			});
+		}
+		const telemetryInput = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
+		if (event.toolName === "exocom_send") {
+			const pending = telemetryExocomPending.get(event.toolCallId) ?? [];
+			telemetryExocomPending.delete(event.toolCallId);
+			const details = event.details && typeof event.details === "object" && !Array.isArray(event.details)
+				? event.details as { failed?: Array<{ target?: unknown }>; failedCount?: unknown; omittedFailures?: unknown }
+				: undefined;
+			const sampledFailures = details?.failed ?? [];
+			const failedTargets = new Set(sampledFailures.flatMap((failure) => typeof failure.target === "string" ? [failure.target] : []));
+			// A broadcast samples its failures (`MAX_BROADCAST_DETAIL_ITEMS` in tools/exocom.ts) and
+			// reports the rest as a count, so the sample alone CLEARS nobody: with more failures than
+			// the sample holds, a recipient we cannot find in it is unknown, never delivered.
+			const declaredFailures = typeof details?.failedCount === "number" ? details.failedCount : sampledFailures.length;
+			const omittedFailures = Math.max(
+				typeof details?.omittedFailures === "number" ? details.omittedFailures : 0,
+				declaredFailures - sampledFailures.length,
+			);
+			for (const message of pending) telemetry?.publish("message.sent", {
+				id: message.id,
+				channel: "exocom",
+				from: telemetrySessionId(ctx),
+				to: message.sessionId,
+				kind: "message",
+				status: event.isError || failedTargets.has(message.target) ? "failed" : omittedFailures > 0 ? "unknown" : "delivered",
+				expectsReply: false,
+				size: message.size,
+			});
+		}
+		if (event.toolName === "intercom") {
+			const action = typeof telemetryInput.action === "string" ? telemetryInput.action : "";
+			// The open entry is the right to publish a terminal: once the turn-boundary drain has closed
+			// this call, a late result must not report it a second time.
+			const open = telemetryIntercomPending.delete(event.toolCallId);
+			if (open && (action === "send" || action === "reply")) {
+				const text = typeof telemetryInput.message === "string" ? telemetryInput.message : "";
+				const askId = typeof telemetryInput.askId === "string" ? telemetryInput.askId : undefined;
+				telemetry?.publish(action === "reply" ? "message.replied" : "message.sent", {
+					id: event.toolCallId,
+					channel: "intercom",
+					from: "supervisor",
+					to: intercomRecipient(telemetryInput, askId),
+					kind: action,
+					status: event.isError ? "failed" : action === "reply" ? "replied" : "delivered",
+					expectsReply: false,
+					size: Buffer.byteLength(text, "utf8"),
+					...(askId ? { replyTo: askId } : {}),
+				});
+			}
+		}
 		const errorPatch = piPersonaToolErrorPatch(event.details);
 		if (!config.nudge) return errorPatch;
 		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
@@ -2716,6 +3165,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						undefined,
 						(snap) => {
 							onProgress(snap);
+							if (snap.toolEvent) publishAgentTool(nodeId, snap.toolEvent);
 							const patch: { output?: string; detail?: string } = {};
 							if (snap.output) patch.output = snap.output;
 							// Mirrors the main subscription's onAgentProgress fallback: activity (e.g. the
@@ -2763,7 +3213,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// "queued" until the semaphore grants a slot and the engine reports it steerable. Every
 		// `async:*` node IS async by construction, so no "(async)" tag is needed — fold in the
 		// model instead, matching the canonical `<codename> · <model>` name shown elsewhere.
-		agentTree.add({ id: nodeId, label: model ? `${label} · ${model}` : label, status: "running", detail: "queued" });
+		agentTree.add({
+			id: nodeId,
+			label: model ? `${label} · ${model}` : label,
+			status: "running",
+			kind: "subagent",
+			agent,
+			...(runSpec.model ? { model: runSpec.model } : {}),
+			detail: "queued",
+		});
 		startPeek(); // arm the timed supervisor wakeup while this run is in flight (no-op if PI_PERSONA_PEEK_MS=0)
 		return id;
 	}
@@ -2962,7 +3420,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				};
 			}
 			const delRoot = `delegate:${_toolCallId}`;
-			agentTree.add({ id: delRoot, label: "delegate", status: "running" });
+			agentTree.add({ id: delRoot, label: "delegate", status: "running", kind: "delegate" });
 			try {
 				const delegateLimits = { maxConcurrency: RUN_LIMITS.maxConcurrency, maxChildren: RUN_LIMITS.maxChildren };
 				const outcome = await runDelegate(
@@ -2978,7 +3436,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 								steerRegistry.delete(id);
 							}
 							const status = agentNodeStatusForDelegate(v);
-							const node: AddNodeInput = { id, label: v.label, parentId: delRoot, status };
+							const spec = requested[i];
+							const node: AddNodeInput = {
+								id,
+								label: v.label,
+								parentId: delRoot,
+								status,
+								kind: "subagent",
+								...(spec?.agent ? { agent: spec.agent } : {}),
+								...(spec?.model ? { model: spec.model } : {}),
+							};
 							node.detail = v.running ? v.activity : formatUsage(v.usage);
 							if (v.output) node.output = v.output;
 							agentTree.add(node);
@@ -2991,12 +3458,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// The same run signal the engine was built with: a leg whose engine REJECTS under a
 					// whole-run stop must file as "abort", not as an agent failure the user never caused.
 					signal,
+					(i, event) => publishAgentTool(`${delRoot}/${i}`, event),
 				);
 				// Feed the anti-loop ledger (results align with the requested tasks by index).
 				outcome.results.forEach((r, i) => {
 					const t = requested[i];
 					if (t && shouldRecordDelegationOutcome(r)) ledger.record(t, r.ok);
 				});
+				agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : outcome.ok ? "done" : "failed" });
 				return {
 					// Sub-agent text is untrusted even as a tool result (guardrails §: fence
 					// before it reaches the supervisor) — the async path already fences via
@@ -3005,6 +3474,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					details: outcome.ok ? { views: outcome.views } : failureDetails({ views: outcome.views }),
 					isError: !outcome.ok,
 				};
+			} catch (error) {
+				agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : "failed" });
+				throw error;
 			} finally {
 				clearStops(delRoot);
 				clearSteers(delRoot);

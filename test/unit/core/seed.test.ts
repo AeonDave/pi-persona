@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { tempDir } from "../../setup/temp-dir.ts";
 import {
 	inspectLegacySeededSpines,
+	LEGACY_SEEDED_DEFAULTS,
 	migratePristineSeededDefaults,
 	type SeedMigrationIO,
 	seedDefaults,
@@ -285,6 +286,57 @@ test("migratePristineSeededDefaults upgrades only an exact old bundled copy", ()
 	assert.equal(read(path.join(u, "agents", "custom.md")), "USER EDIT\n", "custom bytes are preserved");
 });
 
+test("migration accepts multiple exact historical versions for one seeded default", () => {
+	const hash = (text: string): string => createHash("sha256").update(text).digest("hex");
+	const historical = ["OLD A\n", "OLD B\n"] as const;
+	const candidates = historical.map((text) => ({ size: Buffer.byteLength(text), sha256: hash(text) }));
+
+	for (const old of historical) {
+		const b = tempDir("pi-persona-migration-bundled-");
+		const u = userDir();
+		fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+		fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+		fs.writeFileSync(path.join(b, "personas", "elite.md"), "CURRENT ELITE\n");
+		fs.writeFileSync(path.join(u, "agents", "elite.md"), old);
+
+		const result = migratePristineSeededDefaults(b, u, {
+			legacyDefaults: { "personas/elite.md": candidates },
+		});
+
+		assert.deepEqual(result.migrated, [path.join(u, "agents", "elite.md")], `migrates ${old.trim()}`);
+		assert.equal(read(path.join(u, "agents", "elite.md")), "CURRENT ELITE\n");
+	}
+});
+
+test("migration applies dependencies from the historical version that actually matched", () => {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(b, "agents"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const short = "OLD\n";
+	const matched = "A DIFFERENT, LONGER OLD DEFAULT\n";
+	const spec = (text: string, addition: string) => ({
+		size: Buffer.byteLength(text),
+		sha256: createHash("sha256").update(text).digest("hex"),
+		requiredAdditions: [`agents/${addition}`],
+	});
+	fs.writeFileSync(path.join(b, "personas", "elite.md"), "CURRENT ELITE\n");
+	fs.writeFileSync(path.join(b, "agents", "short-only.md"), "SHORT\n");
+	fs.writeFileSync(path.join(b, "agents", "matched-only.md"), "MATCHED\n");
+	fs.writeFileSync(path.join(u, "agents", "elite.md"), matched);
+
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: {
+			"personas/elite.md": [spec(short, "short-only.md"), spec(matched, "matched-only.md")],
+		},
+	});
+
+	assert.deepEqual(result.installed, [path.join(u, "agents", "matched-only.md")]);
+	assert.equal(fs.existsSync(path.join(u, "agents", "short-only.md")), false);
+	assert.equal(read(path.join(u, "agents", "elite.md")), "CURRENT ELITE\n");
+});
+
 test("migratePristineSeededDefaults rejects a symlink instead of replacing its target", () => {
 	const b = tempDir("pi-persona-migration-bundled-");
 	const u = userDir();
@@ -535,4 +587,29 @@ test("a required-addition failure leaves the eligible parent on its old bytes", 
 	assert.deepEqual(result.migrated, []);
 	assert.equal(read(parent), old, "dependency failure never mutates the parent");
 	assert.ok(result.warnings.some((warning) => warning.includes("required addition")));
+});
+
+test("no legacy digest matches a CURRENTLY shipped file — an entry that did would migrate nothing", () => {
+	// The table records the bytes of PREVIOUS releases, hashed in the repository's canonical LF form
+	// (.gitattributes pins `eol=lf`, which is what ships). Hashing the working copy instead — CRLF on
+	// Windows, or simply the current file — produces an entry that can never match a user's stale copy
+	// and silently ships the change inert. This catches both mistakes at once.
+	const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+	for (const [asset, entry] of Object.entries(LEGACY_SEEDED_DEFAULTS)) {
+		const file = path.join(repoRoot, asset);
+		if (!fs.existsSync(file)) continue;
+		const shipped = fs.readFileSync(file).toString("utf8").split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10));
+		const digest = createHash("sha256").update(shipped, "utf8").digest("hex");
+		for (const spec of Array.isArray(entry) ? entry : [entry]) {
+			assert.notEqual(spec.sha256, digest, `${asset}: a legacy digest equals the file being shipped, so nothing would ever be migrated`);
+		}
+	}
+});
+
+test("the MAGI cores carry a legacy digest, so an existing install gains their verticalization", () => {
+	// Agents are seeded COPIES, not a live layer read from the package: without an entry here the
+	// `purpose:` added to the three cores reaches only brand-new installs.
+	for (const core of ["agents/melchior.md", "agents/balthasar.md", "agents/casper.md"]) {
+		assert.ok(LEGACY_SEEDED_DEFAULTS[core], `${core} has no legacy digest — its update would ship inert`);
+	}
 });

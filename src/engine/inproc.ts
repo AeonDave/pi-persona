@@ -529,6 +529,16 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let unsub: (() => void) | undefined;
 			let unsubBridge: (() => void) | undefined;
 			let aborted = false;
+			// Calls whose start crossed the progress seam but whose end has not. The tool NAME rides
+			// beside the id because the synthetic close below has to carry it, and stream.ts tracks
+			// only the ids. Mirrors the child engine's `openToolCalls`.
+			const openToolCalls = new Map<string, string>();
+			// One progress tick, routed exactly as the subscription routes them: the per-call sink
+			// takes the AgentProgress shape (no `turns`), else the construction-time sink.
+			const emitProgress = (snap: ProgressSnapshot): void => {
+				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+				else if (deps.onProgress) deps.onProgress(snap);
+			};
 			const onAbort = (): void => {
 				aborted = true;
 				abortSession();
@@ -538,11 +548,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			try {
 				unsub = session.subscribe((ev) => {
 					armIdle(); // any event = activity → reset the idle clock
-					applyEvent(state, ev);
+					const toolEvent = applyEvent(state, ev);
+					// Track the open calls so an abandoned one can be closed once the run settles.
+					if (toolEvent) {
+						if (toolEvent.phase === "start") openToolCalls.set(toolEvent.callId, toolEvent.name);
+						else openToolCalls.delete(toolEvent.callId);
+					}
 					noteStartupProgress(); // first real progress cancels the startup deadline
-					const snap = snapshot(state);
-					if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
-					else if (deps.onProgress) deps.onProgress(snap);
+					emitProgress(snapshot(state, toolEvent));
 				});
 
 				if (signal) {
@@ -651,6 +664,29 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 			const ok =
 				!aborted && !timedOut && !hardTimedOut && !startupTimedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
+			// A session torn down mid-flight (abort, timeout, provider throw) never delivers the
+			// tool_execution_end for whatever it was running: pi emits that end only once the tool has
+			// unwound (a macrotask or more later, e.g. bash killing its tree then awaiting close), by which
+			// time the teardown above has dropped the listener. Close each abandoned call here, as the child
+			// engine's finish() does — otherwise the consumer shows that tool "running" forever and its
+			// telemetry record stays pinned. Two rules keep the synthesis honest:
+			//  * a run that SETTLED NORMALLY is left alone. pi notifies subscribers behind the agent
+			//    (_handleAgentEvent awaits the extension runner before it fans out), so a green run's last
+			//    end can land after waitForIdle() resolved — closing it `failed` would report a tool that
+			//    actually completed as failed. Leaving it open is the older, honest gap.
+			//  * it runs AFTER the teardown and each tick is guarded, because emitProgress calls consumer
+			//    code: inside the finally an onProgress throw skipped the handle release, the unsubscribes
+			//    and dispose(). Dropping the tick mirrors deliver()'s contract for a throwing steer().
+			if (!ok) {
+				for (const [callId, name] of openToolCalls) {
+					try {
+						emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
+					} catch {
+						/* the consumer's sink threw; the tick is lost, the run still settles */
+					}
+				}
+			}
+
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
 			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;

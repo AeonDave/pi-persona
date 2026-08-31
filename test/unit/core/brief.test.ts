@@ -248,6 +248,35 @@ function expectedBound(canDelegate: boolean, canAskHuman: boolean): string {
 	return BOUND_OPENING + (canDelegate ? BOUND_HANDOFF : "") + BOUND_DRIFT + (canAskHuman ? BOUND_ESCALATION : ".");
 }
 
+test("buildExocomBrief: teaches bounded conversational collaboration without runtime workflow state", () => {
+	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
+	assert.match(brief, /bounded question, owner, expected evidence and stop condition/i);
+	assert.match(brief, /stable work key/i, "retries need a prompt-level idempotency key");
+	assert.match(brief, /one-way and non-blocking/i);
+	assert.match(brief, /in_reply_to/i);
+	assert.match(brief, /acknowledge only when it changes ownership, evidence, or the next action/i);
+	assert.match(brief, /owner.*hands off/i);
+	assert.match(brief, /retry with.*concise restatement.*reconcile/i);
+	assert.match(brief, /stop.*converges/i);
+	assert.doesNotMatch(brief, /exocom_(run|task)|RUN_OPEN|TASK_ASSIGN/i);
+});
+
+test("buildExocomBrief: broadcast is taught, with the reply discipline a fan-out needs", () => {
+	// `exocom_send({target:"*"})` has always existed on the transport, but only in the tool schema —
+	// the per-turn brief named a single peer, so a supervisor going by the brief (the half that
+	// survives compaction) never knew it could address the pool at all.
+	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
+	assert.match(brief, /target: ?"\*"/, "the brief must name the broadcast form, not just single-peer send");
+
+	// A broadcast is N independent sends: the wire carries no fan-out marker, so the RECEIVER cannot
+	// tell one from a private message. Saying so in the opening line is what stops five peers from
+	// each answering as if asked personally — or all staying silent assuming another will.
+	assert.match(brief, /say it is a broadcast/i, "the receiver cannot distinguish a broadcast unless the sender says so");
+
+	// A reply goes only to the sender, so an answer the whole pool needs dies in a private thread.
+	assert.match(brief, /re-?broadcast/i, "an outcome everyone needs must go back out to everyone");
+});
+
 test("buildExocomBrief: the bound is pinned verbatim, so it cannot drift into a round cap", () => {
 	// Every reachable rendering, including the overflow line, which carries a live number and must
 	// not perturb the bound itself.

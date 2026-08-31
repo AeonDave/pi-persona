@@ -278,4 +278,25 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 		assert.match(elite.body, new RegExp(`\\b${field}\\b`));
 	}
 	assert.match(elite.body, /outputContract:\s*"finding"/);
+	assert.match(elite.body, /target egress/i, "Elite makes the target's network egress an explicit invariant");
+	assert.match(
+		elite.body,
+		/local (?:CLI|process|stdio).*not (?:proof|evidence) of local (?:target )?egress/is,
+		"Elite does not confuse a local launcher with a locally-originated target request",
+	);
+	assert.match(
+		elite.body,
+		/UNKNOWN[\s\S]*do not (?:use|touch).*target/i,
+		"Elite fails closed when a network-capable tool's target egress is unknown",
+	);
+	assert.match(
+		elite.body,
+		/Propagate the invariant into every delegation:[\s\S]*scopeRoe[\s\S]*constraints[\s\S]*(?:local\/VPN|local.*VPN)/i,
+		"Elite propagates the local/VPN-only boundary into delegated legs",
+	);
+	assert.doesNotMatch(
+		elite.body,
+		/\bretr(?:y|ies|ied|ying)\b|\bjitter\b/i,
+		"retry policy belongs to Pi's runtime, not the Elite prompt",
+	);
 });

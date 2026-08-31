@@ -88,7 +88,7 @@ export interface SeedResult {
 	collisions?: string[];
 }
 
-/** Exact bytes from the last release whose seeded copies are known to be stale. A user file is
+/** Exact bytes from earlier releases whose seeded copies are known to be stale. A user file is
  * eligible only when BOTH size and digest match. Keep this explicit allow-list deliberately
  * small: it is a migration policy, not a fuzzy upgrader. */
 export interface SeededDefaultSpec {
@@ -98,13 +98,75 @@ export interface SeededDefaultSpec {
 	requiredAdditions?: readonly string[];
 }
 
-export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultSpec>> = {
+/** One seeded asset can have several known-pristine historical byte sequences. */
+export type SeededDefaultEntry = SeededDefaultSpec | readonly SeededDefaultSpec[];
+
+const ELITE_REQUIRED_ADDITIONS = ["agents/evidence-verifier.md"] as const;
+
+export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>> = {
 	"personas/dev.md": { size: 3985, sha256: "fb02263d97c53d6c10b6089c9c65ae7fad27a77c28434b5c892dbb87dd285e5b" },
-	"personas/elite.md": {
-		size: 15970,
-		sha256: "073f3c05f134df5d5daf8cd05df51dc15916300977a19d8b6dda3c8dd36abd1c",
-		requiredAdditions: ["agents/evidence-verifier.md"],
-	},
+	// The MAGI cores gained `purpose:` (their verticalization) in v1.10.6. Agents are seeded COPIES,
+	// not a live layer read from the package, so without these an existing install keeps three cores
+	// that render as bare names — the label feature would ship inert for everyone who already has them.
+	"agents/melchior.md": { size: 1503, sha256: "aa7a69296640f1023e00e2f2285b12cfdee158bb89f7b0b3d8c03a6317de9508" },
+	"agents/balthasar.md": { size: 1527, sha256: "27273ed49ea265f528efad4724e6abec6d051fa60d1f4fa678982e7383364981" },
+	"agents/casper.md": { size: 1508, sha256: "5074341b7e1ae7e9a44bc71de0405a17ccb404eacfaeb2fcf40f2ac4c23828ea" },
+	"personas/elite.md": [
+		{
+			// v1.0.0
+			size: 10489,
+			sha256: "a898364924b2f8fd2a60e8bd170650bc851c972f330f51f351be7390986629de",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.1.0
+			size: 10325,
+			sha256: "c3d9f969ad31bb6ecb2fef5ccc9e30fc88bfd8a215a865b91c66496976af78aa",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.2.0–v1.3.0
+			size: 11162,
+			sha256: "df2b01eed543eee7064006611e84c08e9c01498d7d18b37b1cd596bf604801ed",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.4.0
+			size: 12001,
+			sha256: "2aca09540abadfaebe4cd52a0803b31694406b9a5795419c43a52a92d53068c9",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.5.1–v1.5.2
+			size: 12043,
+			sha256: "a37f8130c04ab404101a36a145dcf5c27f91e5204562af15addd592849113ec7",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.6.0–v1.6.1
+			size: 12739,
+			sha256: "e688c82b41f8a6d0040c9c9523e7c109c2e3585194af1b43b99b8629be339eda",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.6.2–v1.6.3
+			size: 13994,
+			sha256: "3e1e841da9ddb0c478cbe5e3238fbf17ea032b07c03f319da5b45a1b1add59b2",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.7.0–v1.8.1
+			size: 15970,
+			sha256: "073f3c05f134df5d5daf8cd05df51dc15916300977a19d8b6dda3c8dd36abd1c",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.9.0–v1.10.5: migrate only untouched copies to the current hardened prompt.
+			size: 16521,
+			sha256: "e0ab767934b62e25e712ec31ebbc97dc780dff93d2e3855181f8bbe0086a4940",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+	],
 };
 
 export interface SeedMigrationResult {
@@ -120,7 +182,7 @@ export interface SeedMigrationResult {
 
 export interface SeedMigrationOptions {
 	/** Override the built-in allow-list in tests or for a future explicitly supported release. */
-	legacyDefaults?: Readonly<Record<string, SeededDefaultSpec>>;
+	legacyDefaults?: Readonly<Record<string, SeededDefaultEntry>>;
 	/** Filesystem seams for bounded inspection and no-clobber replacement tests. */
 	io?: SeedMigrationIO;
 	/** Test-only race hook, called after the old target is moved to backup and before install. */
@@ -263,7 +325,7 @@ export function inspectLegacySeededSpines(
 }
 
 type SeedInspection =
-	| { kind: "legacy"; fingerprint: SpineFingerprint }
+	| { kind: "legacy"; fingerprint: SpineFingerprint; spec: SeededDefaultSpec }
 	| { kind: "skip" }
 	| { kind: "warning"; detail: string };
 
@@ -284,16 +346,23 @@ function resolveSeedMigrationIO(io: SeedMigrationIO): ResolvedSeedMigrationIO {
 	};
 }
 
+function seededDefaultSpecs(entry: SeededDefaultEntry): readonly SeededDefaultSpec[] {
+	return Array.isArray(entry) ? entry : [entry as SeededDefaultSpec];
+}
+
 /** Inspect one explicitly allowlisted target through a bounded descriptor. Unrelated user files
- * never enter this function: the migration loop is keyed only by the explicit allow-list. */
-function inspectPristineSeededDefault(path: string, spec: SeededDefaultSpec, io: ResolvedSpineLegacyIO): SeedInspection {
+ * never enter this function: the migration loop is keyed only by the explicit allow-list. Multiple
+ * historical digests of the same size share one bounded read. */
+function inspectPristineSeededDefault(path: string, entry: SeededDefaultEntry, io: ResolvedSpineLegacyIO): SeedInspection {
 	let before: SpineLegacyStat;
 	try {
 		before = io.lstat(path);
 	} catch {
 		return { kind: "skip" };
 	}
-	if (!safeLegacyShape(before, spec.size)) return { kind: "skip" };
+	const candidates = seededDefaultSpecs(entry).filter((spec) => safeLegacyShape(before, spec.size));
+	const expectedSize = candidates[0]?.size;
+	if (expectedSize === undefined) return { kind: "skip" };
 	let fd: number;
 	try {
 		fd = io.open(path);
@@ -302,14 +371,16 @@ function inspectPristineSeededDefault(path: string, spec: SeededDefaultSpec, io:
 	}
 	try {
 		const opened = io.fstat(fd);
-		if (!safeLegacyShape(opened, spec.size) || !sameFingerprint(fingerprint(before), fingerprint(opened))) return { kind: "skip" };
-		const bytes = io.read(fd, spec.size + 1);
+		if (!safeLegacyShape(opened, expectedSize) || !sameFingerprint(fingerprint(before), fingerprint(opened))) return { kind: "skip" };
+		const bytes = io.read(fd, expectedSize + 1);
 		const after = io.fstat(fd);
-		if (!safeLegacyShape(after, spec.size) || !sameFingerprint(fingerprint(opened), fingerprint(after))) return { kind: "skip" };
+		if (!safeLegacyShape(after, expectedSize) || !sameFingerprint(fingerprint(opened), fingerprint(after))) return { kind: "skip" };
 		// The sentinel byte rejects growth without ever hashing/retaining unbounded user data.
-		if (bytes.byteLength !== spec.size) return { kind: "skip" };
-		if (createHash("sha256").update(bytes).digest("hex") !== spec.sha256) return { kind: "skip" };
-		return { kind: "legacy", fingerprint: fingerprint(after) };
+		if (bytes.byteLength !== expectedSize) return { kind: "skip" };
+		const digest = createHash("sha256").update(bytes).digest("hex");
+		const matched = candidates.find((spec) => spec.sha256 === digest);
+		if (!matched) return { kind: "skip" };
+		return { kind: "legacy", fingerprint: fingerprint(after), spec: matched };
 	} catch (error) {
 		return { kind: "warning", detail: `inspection failed: ${errorText(error)}` };
 	} finally {
@@ -413,7 +484,7 @@ export function migratePristineSeededDefaults(
 	const legacyDefaults = options.legacyDefaults ?? LEGACY_SEEDED_DEFAULTS;
 	const io = resolveSeedMigrationIO(options.io ?? {});
 	const idFactory = options.idFactory ?? randomUUID;
-	for (const [relative, spec] of Object.entries(legacyDefaults)) {
+	for (const [relative, entry] of Object.entries(legacyDefaults)) {
 		const source = join(bundledDir, relative);
 		const name = relative.replace(/^.*[\\/]/, "");
 		const target = join(userDir, "agents", name);
@@ -421,7 +492,7 @@ export function migratePristineSeededDefaults(
 			skipped.push(target);
 			continue;
 		}
-		const inspection = inspectPristineSeededDefault(target, spec, io);
+		const inspection = inspectPristineSeededDefault(target, entry, io);
 		if (inspection.kind === "warning") {
 			warnings.push(`seed migration inspection warning: ${target}: ${inspection.detail}`);
 			continue;
@@ -430,6 +501,7 @@ export function migratePristineSeededDefaults(
 			skipped.push(target);
 			continue;
 		}
+		const spec = inspection.spec;
 		let additionsReady = true;
 		for (const addition of spec.requiredAdditions ?? []) {
 			const additionTarget = userAgentTarget(userDir, addition);

@@ -215,10 +215,22 @@ export async function runChildAgent(
 			let startupTimer: ReturnType<typeof setTimeout> | undefined;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
+			// Calls whose start crossed the progress seam but whose end has not. The tool NAME is kept
+			// beside the id because a synthetic close in finish() has to carry it.
+			const openToolCalls = new Map<string, string>();
+
 			const onLine = (line: string) => {
 				if (!line.trim()) return;
 				try {
-					applyEvent(state, JSON.parse(line));
+					const toolEvent = applyEvent(state, JSON.parse(line));
+					// Ordinary stream progress stays coalesced to one snapshot per stdout chunk below.
+					// Tool lifecycle transitions are the exception: several can share one chunk and each
+					// authoritative transition must cross the progress seam exactly once.
+					if (toolEvent) {
+						if (toolEvent.phase === "start") openToolCalls.set(toolEvent.callId, toolEvent.name);
+						else openToolCalls.delete(toolEvent.callId);
+						opts.onProgress?.(snapshot(state, toolEvent));
+					}
 				} catch {
 					/* ignore non-JSON noise */
 				}
@@ -269,6 +281,13 @@ export async function runChildAgent(
 				if (graceTimer) clearTimeout(graceTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
 				if (buffer.trim()) onLine(buffer);
+				// A killed child (UI stop, idle/hard/startup deadline) never emits the
+				// tool_execution_end for whatever it was running, so close each abandoned call here —
+				// exactly once, mirroring what applyEvent would have produced. Without it the consumer
+				// shows that tool "running" forever and its telemetry record is pinned by the replay
+				// seed. A child that ended normally has nothing open, so nothing is double-closed.
+				for (const [callId, name] of openToolCalls) opts.onProgress?.(snapshot(state, { phase: "end", callId, name, failed: true }));
+				openToolCalls.clear();
 				opts.onProgress?.(snapshot(state));
 				resolveP(code);
 			};

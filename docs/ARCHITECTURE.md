@@ -163,6 +163,8 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
   `paths.ts` (pure path layout), `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
   delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
   `guards.ts` (`SenderBudget`/`SeenMessages`).
+- **`src/telemetry/`** — a generic, versioned observer/export contract for future plugins: projected
+  lifecycle metadata only, never an agent-message router or control surface.
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
   `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`, `state.ts` (last-selected persona),
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
@@ -211,6 +213,13 @@ worktree creation failure, successful leg without a real unified-diff artifact, 
 bounded return limit fails the leg; the base engine is never invoked against the user's real tree as
 an isolation fallback. The generated diff is returned to the supervisor before the temporary tree is
 removed.
+
+Transient retries inside one agent session belong to the host **Pi runtime** and its `retry.*`
+settings. pi-persona neither parses retry notation from prompts nor schedules its own backoff. Both
+backends read those settings from the same resolved global agent directory: the in-process backend
+passes it to `createAgentSession`, and spawned child Pi processes receive it as
+`PI_CODING_AGENT_DIR`. Exact attempt counts and delays therefore follow the installed Pi version and
+configuration, not a persona contract.
 
 `buildEngine` wraps the chosen backend with **provider fallback** (`engine/fallback.ts`): a run whose
 model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) can retry the same model id
@@ -338,6 +347,10 @@ never simultaneously a telemetry event, a routed message, and a UI source of tru
 
 Steering is always a Bus action; the peek digest is always a read-only ProgressView.
 
+External telemetry is not a fourth communication plane: it is a generic observer/export contract that
+future plugins may consume or produce, not an exclusive pi-persona protocol. It observes projected
+events and cannot route, reply, steer, or otherwise control agents.
+
 ## The comm plane in practice
 
 - **In-process bus** (`bus/inproc.ts`) — a handle-based mailbox: `send` (one-way), `ask` (blocks for a
@@ -397,6 +410,11 @@ that supervisor's session id, talking to children *it* spawned. **exocom is flat
 independent, top-level pi instances sharing a workspace — no parent/child relationship — discover each
 other and message peer-to-peer. (The names encode the split: intercom = internal comm; exocom =
 external comm.)
+
+Exocom supplies fenced, one-way transport and presence; its collaboration grammar lives in the
+per-turn `buildExocomBrief` prompt guidance (identify the bounded question/owner/evidence/stop,
+use `in_reply_to` for a continued thread, retry and reconcile conversationally). It deliberately has
+no task/run workflow runtime.
 
 - **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or `--exocom` (a `pi.registerFlag`
   convenience); additionally gated by the active persona's `canUseBus`, re-evaluated on every persona

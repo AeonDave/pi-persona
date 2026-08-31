@@ -7,6 +7,12 @@ import { runChildAgent } from "../../src/engine/child.ts";
 const FAKE = fileURLToPath(new URL("../fixtures/fake-pi.mjs", import.meta.url));
 const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAKE, ...args] });
 
+function resolveJsonBurst(events: unknown[]): () => { command: string; args: string[] } {
+	const payload = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+	const script = `process.stdout.write(${JSON.stringify(payload)})`;
+	return () => ({ command: process.execPath, args: ["-e", script] });
+}
+
 test("runChildAgent spawns a child, parses output + usage, and reports success", async () => {
 	const r = await runChildAgent({ task: "do the thing" }, undefined, { resolveInvocation: resolveFake });
 	assert.equal(r.ok, true);
@@ -65,6 +71,43 @@ test("runChildAgent reports live progress via onProgress", async () => {
 	assert.equal(r.ok, true);
 	assert.ok(snaps.length >= 1, "onProgress called at least once");
 	assert.match(snaps[snaps.length - 1]!.output, /echo: Task: do it/);
+});
+
+test("runChildAgent coalesces one non-tool stdout chunk to one live update plus the final settle", async () => {
+	const events = Array.from({ length: 32 }, (_, i) => ({
+		type: "message_update",
+		message: { role: "assistant", content: [{ type: "text", text: `partial-${i}` }] },
+	}));
+	const snaps: unknown[] = [];
+	const result = await runChildAgent({ task: "burst" }, undefined, {
+		resolveInvocation: resolveJsonBurst(events),
+		onProgress: (snap) => snaps.push(snap),
+	});
+
+	assert.equal(result.ok, true);
+	assert.equal(snaps.length, 2, "the 32 parsed lines share one chunk update; finish adds one terminal snapshot");
+});
+
+test("runChildAgent emits each lifecycle tool transition exactly once without per-line noise", async () => {
+	const events = [
+		{ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "working" }] } },
+		{ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "secret" } },
+		{ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "secret" } },
+		{ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: { output: "secret" }, isError: false },
+		{ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: { output: "secret" }, isError: false },
+	];
+	const snaps: Array<{ toolEvent?: unknown }> = [];
+	const result = await runChildAgent({ task: "tool burst" }, undefined, {
+		resolveInvocation: resolveJsonBurst(events),
+		onProgress: (snap) => snaps.push(snap),
+	});
+
+	assert.equal(result.ok, true);
+	assert.deepEqual(snaps.flatMap((snap) => snap.toolEvent ? [snap.toolEvent] : []), [
+		{ phase: "start", callId: "call-1", name: "read" },
+		{ phase: "end", callId: "call-1", name: "read", failed: false },
+	]);
+	assert.equal(snaps.length, 4, "two lifecycle transitions + one coalesced chunk update + final settle");
 });
 
 test("runChildAgent surfaces an error stop reason as a failure", async () => {
@@ -229,4 +272,31 @@ test("runChildAgent aborts a running child via the AbortSignal", async () => {
 	const r = await p;
 	assert.equal(r.aborted, true);
 	assert.equal(r.ok, false);
+});
+
+test("runChildAgent closes every still-running tool when the child is killed mid-tool", async () => {
+	// A killed child never emits the tool_execution_end for whatever it was running, so without a
+	// synthetic close the consumer shows that tool "running" forever.
+	const payload = [
+		{ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "secret" } },
+		{ type: "tool_execution_start", toolCallId: "call-2", toolName: "bash", args: { cmd: "build" } },
+		{ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: { output: "secret" }, isError: false },
+	].map((event) => `${JSON.stringify(event)}\n`).join("");
+	// Emit the burst, then hang: only the idle watchdog can settle this child.
+	const script = `process.stdout.write(${JSON.stringify(payload)});setInterval(() => {}, 1000)`;
+	const snaps: Array<{ toolEvent?: unknown }> = [];
+	const r = await runChildAgent({ task: "hang mid-tool" }, undefined, {
+		resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+		killGraceMs: 200,
+		timeoutMs: 250,
+		onProgress: (snap) => snaps.push(snap),
+	});
+
+	assert.equal(r.timedOut, true);
+	assert.deepEqual(snaps.flatMap((snap) => snap.toolEvent ? [snap.toolEvent] : []), [
+		{ phase: "start", callId: "call-1", name: "read" },
+		{ phase: "start", callId: "call-2", name: "bash" },
+		{ phase: "end", callId: "call-1", name: "read", failed: false },
+		{ phase: "end", callId: "call-2", name: "bash", failed: true },
+	], "the call that really ended keeps its own outcome; only the abandoned one is synthesised as failed");
 });
