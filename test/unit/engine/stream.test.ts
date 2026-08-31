@@ -19,6 +19,33 @@ test("applyEvent captures the current tool as activity, and clears it when the t
 	assert.equal(st.activity, undefined, "activity clears when the tool ends");
 });
 
+test("tool lifecycle dedupe stays bounded without evicting a still-active call", () => {
+	const st = createStreamState();
+	const cacheMax = 1_024;
+	assert.deepEqual(
+		applyEvent(st, { type: "tool_execution_start", toolCallId: "active", toolName: "read", args: {} }),
+		{ phase: "start", callId: "active", name: "read" },
+	);
+	for (let i = 0; i < cacheMax + 32; i++) {
+		const callId = `done-${i}`;
+		applyEvent(st, { type: "tool_execution_start", toolCallId: callId, toolName: "read", args: {} });
+		applyEvent(st, { type: "tool_execution_end", toolCallId: callId, toolName: "read", result: {}, isError: false });
+	}
+
+	assert.ok((st.seenToolStarts?.size ?? 0) <= cacheMax, "completed start ids are retained only in a bounded cache");
+	assert.ok((st.seenToolEnds?.size ?? 0) <= cacheMax, "completed end ids are retained only in a bounded cache");
+	assert.equal(
+		applyEvent(st, { type: "tool_execution_start", toolCallId: "active", toolName: "read", args: {} }),
+		undefined,
+		"cache churn must not forget an active call and re-emit its duplicate start",
+	);
+	assert.deepEqual(
+		applyEvent(st, { type: "tool_execution_end", toolCallId: "active", toolName: "read", result: {}, isError: false }),
+		{ phase: "end", callId: "active", name: "read", failed: false },
+		"the original active call still completes normally after cache churn",
+	);
+});
+
 test("applyEvent accumulates assistant text, usage, model, and stop reason", () => {
 	const s = createStreamState();
 	applyEvent(s, {

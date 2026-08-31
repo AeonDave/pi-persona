@@ -9,17 +9,29 @@ import { compactInlineText } from "./presentation.ts";
  */
 
 export type AgentNodeStatus = "running" | "done" | "failed" | "stopped";
+export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase";
 
 export interface AgentNode {
 	id: string;
 	label: string;
 	parentId: string | undefined;
 	status: AgentNodeStatus;
+	/** Semantic role in the orchestration graph; omitted by legacy callers. */
+	kind?: AgentNodeKind;
+	/** Configured agent definition (operator/reviewer/…), if known. */
+	agent?: string;
+	model?: string;
 	/** A short trailing annotation (usage, current activity), shown after the label. */
 	detail: string | undefined;
 	/** The agent's output buffer, shown when the user drills into the node. */
 	output?: string;
 }
+
+export type AgentTreeChange =
+	| { type: "added"; node: AgentNode }
+	| { type: "updated"; node: AgentNode }
+	| { type: "removed"; nodes: AgentNode[] }
+	| { type: "cleared"; nodes: AgentNode[] };
 
 export interface FlatRow {
 	node: AgentNode;
@@ -107,6 +119,18 @@ export interface AddNodeInput {
 	label: string;
 	parentId?: string;
 	status?: AgentNodeStatus;
+	kind?: AgentNodeKind;
+	agent?: string;
+	model?: string;
+	detail?: string;
+	output?: string;
+}
+
+export interface AgentNodePatch {
+	status?: AgentNodeStatus;
+	kind?: AgentNodeKind;
+	agent?: string;
+	model?: string;
 	detail?: string;
 	output?: string;
 }
@@ -114,38 +138,50 @@ export interface AddNodeInput {
 /** A small mutable registry with change notification. The extension owns one. */
 export class AgentTree {
 	private nodes: AgentNode[] = [];
-	private listeners = new Set<() => void>();
+	private listeners = new Set<(change: AgentTreeChange) => void>();
 
 	/** Insert a node, or upsert (relabel / restatus / reparent) when the id already exists. */
 	add(input: AddNodeInput): void {
 		const existing = this.nodes.find((n) => n.id === input.id);
 		if (existing) {
+			const before = { ...existing };
 			existing.label = input.label;
 			if (input.parentId !== undefined) existing.parentId = input.parentId;
 			if (input.status) existing.status = input.status;
+			if (input.kind !== undefined) existing.kind = input.kind;
+			if (input.agent !== undefined) existing.agent = input.agent;
+			if (input.model !== undefined) existing.model = input.model;
 			if (input.detail !== undefined) existing.detail = input.detail;
 			if (input.output !== undefined) existing.output = input.output;
-		} else {
-			const node: AgentNode = {
-				id: input.id,
-				label: input.label,
-				parentId: input.parentId,
-				status: input.status ?? "running",
-				detail: input.detail,
-			};
-			if (input.output !== undefined) node.output = input.output;
-			this.nodes.push(node);
+			if (!sameNode(before, existing)) this.emit({ type: "updated", node: { ...existing } });
+			return;
 		}
-		this.emit();
+		const node: AgentNode = {
+			id: input.id,
+			label: input.label,
+			parentId: input.parentId,
+			status: input.status ?? "running",
+			detail: input.detail,
+			...(input.kind !== undefined ? { kind: input.kind } : {}),
+			...(input.agent !== undefined ? { agent: input.agent } : {}),
+			...(input.model !== undefined ? { model: input.model } : {}),
+			...(input.output !== undefined ? { output: input.output } : {}),
+		};
+		this.nodes.push(node);
+		this.emit({ type: "added", node: { ...node } });
 	}
 
-	update(id: string, patch: { status?: AgentNodeStatus; detail?: string; output?: string }): void {
+	update(id: string, patch: AgentNodePatch): void {
 		const node = this.nodes.find((n) => n.id === id);
 		if (!node) return;
+		const before = { ...node };
 		if (patch.status) node.status = patch.status;
+		if (patch.kind !== undefined) node.kind = patch.kind;
+		if (patch.agent !== undefined) node.agent = patch.agent;
+		if (patch.model !== undefined) node.model = patch.model;
 		if (patch.detail !== undefined) node.detail = patch.detail;
 		if (patch.output !== undefined) node.output = patch.output;
-		this.emit();
+		if (!sameNode(before, node)) this.emit({ type: "updated", node: { ...node } });
 	}
 
 	/** Remove a node and all its descendants. */
@@ -160,14 +196,17 @@ export class AgentTree {
 				}
 			}
 		}
+		const removed = this.nodes.filter((n) => doomed.has(n.id)).map((n) => ({ ...n }));
+		if (removed.length === 0) return;
 		this.nodes = this.nodes.filter((n) => !doomed.has(n.id));
-		this.emit();
+		this.emit({ type: "removed", nodes: removed });
 	}
 
 	clear(): void {
 		if (this.nodes.length === 0) return;
+		const removed = this.snapshot();
 		this.nodes = [];
-		this.emit();
+		this.emit({ type: "cleared", nodes: removed });
 	}
 
 	snapshot(): AgentNode[] {
@@ -182,14 +221,19 @@ export class AgentTree {
 		return this.nodes.some((n) => n.status === "running");
 	}
 
-	onChange(fn: () => void): () => void {
+	onChange(fn: (change: AgentTreeChange) => void): () => void {
 		this.listeners.add(fn);
 		return () => {
 			this.listeners.delete(fn);
 		};
 	}
 
-	private emit(): void {
-		for (const fn of this.listeners) fn();
+	private emit(change: AgentTreeChange): void {
+		for (const fn of this.listeners) fn(change);
 	}
+}
+
+function sameNode(a: AgentNode, b: AgentNode): boolean {
+	const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+	return [...keys].every((key) => a[key as keyof AgentNode] === b[key as keyof AgentNode]);
 }

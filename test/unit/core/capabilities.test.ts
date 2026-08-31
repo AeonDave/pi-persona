@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { canCallTool, canDelegateTo, canFanOut, resolveCapabilities } from "../../../src/core/capabilities.ts";
+import { canCallTool, canDelegateTo, canFanOut, EXOCOM_TOOL_NAMES, resolveCapabilities } from "../../../src/core/capabilities.ts";
 
 const TOOLS = ["read", "grep", "bash", "write", "delegate", "web_search"];
 const AGENTS = ["scout", "researcher", "planner"];
@@ -44,15 +44,13 @@ test("exocom tools follow canUseBus, not the general allowlist (like delegate)",
 	const caps = resolveCapabilities(base({ permissions: { tools: { allow: ["read"] } } }));
 	assert.equal(canCallTool(caps, "read"), true);
 	assert.equal(canCallTool(caps, "bash"), false, "the allowlist still restricts ordinary tools");
-	assert.equal(canCallTool(caps, "exocom_send"), true, "exocom_send is granted via canUseBus");
-	assert.equal(canCallTool(caps, "exocom_list"), true);
-	assert.equal(canCallTool(caps, "exocom_name"), true);
+	for (const tool of EXOCOM_TOOL_NAMES) assert.equal(canCallTool(caps, tool), true, `${tool} is granted via canUseBus`);
 });
 
 test("denying the bus (intercom) also denies the exocom tools", () => {
 	const caps = resolveCapabilities(base({ permissions: { tools: { deny: ["intercom"] } } }));
 	assert.equal(caps.canUseBus, false);
-	assert.equal(canCallTool(caps, "exocom_send"), false, "no bus ⇒ no external-bus tools either");
+	for (const tool of EXOCOM_TOOL_NAMES) assert.equal(canCallTool(caps, tool), false, `no bus ⇒ ${tool} is denied`);
 });
 
 test("the exocom grant does not inflate the resolved tool set (canUseBus-gated at call time)", () => {

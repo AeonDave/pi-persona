@@ -108,6 +108,22 @@ council. They are enforced structurally, not by convention.
   failures stay excluded) — so `magi`/`council-rounds`/`debate` degrade to the strongest single
   response rather than returning `ok: false`. The "N invalid excluded" footer counts only
   genuinely-dropped candidates, not the surfaced prose.
+- **A broken MODEL costs a member, not its vote.** A core that fails because its model broke —
+  `failureKind: "provider"` (the provider rejected or is down) or `"unknown-model"` (the ref does not
+  resolve) — is re-run ONCE on a model this same run proved works: a healthy peer's, preferring the
+  session's own when a peer used it, and falling back to the session model when the failing core is
+  the first or the only one left (`orchestration/model-retry.ts`, applied by `magi`). Every other
+  failure passes straight through: an `abort`, `timeout`, `contract` or agent error reproduces on any
+  model, and a retried abort would be a stop that does not stop. This is a roster-level complement to
+  `engine/fallback.ts`, which reroutes the SAME model id across providers and knows nothing about the
+  other members; the engine exhausts provider routes first, and only a still-broken run reaches here.
+  It is deliberately a recovery and never a preference — a council's value is UNCORRELATED errors from
+  distinct reasoners, so each recovery is named in the ruling's footer (`· 1 core recovered on
+  <model>`) and usage bills every attempt. It is also bounded by the run's own `maxChildren` and
+  observed token spend: recovery attempts run serially so each completion can close the token gate
+  before another billed leg starts, and reflection starts only when the remaining observable budget
+  can fund the whole panel. A retry or reflection it cannot afford is stated rather than silently
+  skipped.
 - **The contract instructs as well as validates.** An engine that receives `outputContract` appends
   the format block (`contractInstructions`, derived from the same pinned def it validates against)
   to the member's task — a bare generic agent votes as reliably as one whose `.md` spells the JSON

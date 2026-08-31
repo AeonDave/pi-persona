@@ -96,7 +96,6 @@ Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch 
 These are examples, not runtime identities: no code branch checks for `elite`, `dev`, or any other
 persona name. A user/project persona can declare the same delegation policy, council, strategy, team,
 flow, contracts, tools, and coaching behavior in its own frontmatter.
-
 **Personas** — the supervisor you become:
 
 | Persona | What it's for |
@@ -242,6 +241,15 @@ children it spawned, in two layers, deliberately separate:
 > supervisor capability: do the MCP work up top and hand sub-agents the artifacts. See
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 >
+> **CTF/source-IP rule.** A local tool registration, stdio MCP process, or loopback MCP endpoint is
+> not proof of local target egress: its backend may relay the operation to a hosted service. When
+> the ROE binds target traffic to your workstation/VPN, use Pi's built-in `bash` or another executor
+> whose source IP you verified against your own canary; keep hosted/remote/unknown tools away from
+> target identifiers and target-facing actions. The bundled Elite prompt instructs the supervisor to
+> propagate that invariant into every delegated leg; this is a behavioral safeguard, not a network
+> sandbox. A hard guarantee still requires disabling remote-capable tools or enforcing egress outside
+> pi-persona.
+>
 > **Pre-authenticate first (headless caveat).** The `mcp: true` leg is a *fresh, UI-less* `pi -p`
 > child: it can only use MCP servers that initialize **non-interactively**. A server that needs
 > interactive OAuth cannot authenticate without a UI, so the child stalls at startup. pi-persona
@@ -287,7 +295,8 @@ exocom_name({ name: "atlas" }) // rebrand your own call-sign; routing still keys
 | Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` or `PI_PERSONA_EXOCOM=1` |
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 
-Both planes are asynchronous and keep inbound text fenced. On exocom, **replying is the exception,
+Both planes are asynchronous and keep inbound text fenced. Exocom collaboration is prompt-level grammar
+over this one-way transport, not a task/run workflow runtime. On exocom, **replying is the exception,
 not the default**: an inbound peer message lands with a hint that says to reply only if it changes
 what someone does, and otherwise to send nothing. The per-turn peer brief bounds an exchange the
 same way — on **relevance**: stop once a round no longer moves the work the turn is for (your
@@ -408,6 +417,12 @@ omit it to inherit the session tool set, while `tools: []` explicitly grants no 
 `--exclude-tools` grant. `model`, `isolation: worktree`, and `mcp: true` are optional too. The body
 is the prompt; the live supervisor brief shows `name`, `description`, effective tool metadata, MCP,
 and worktree isolation so routing does not depend on guessing from an agent's name.
+
+`purpose:` is an optional one- or two-word **verticalization** — the lens this agent argues from
+(`Propulsore`, `Conservatore`, `Critico`, `Scienziato`). It is not prompt text; it labels the agent
+wherever a human meets it as a council member: beside its name in the live tree
+(`melchior · Propulsore · opus-4-6`) and in the per-core model picker, so a roster reads as a set of
+ROLES rather than a set of names. The bundled MAGI cores declare theirs.
 
 ```markdown
 <!-- agents/hardener.md -->

@@ -36,6 +36,9 @@ export interface RunStrategyDeps {
 	teams: Record<string, RosterMember[]>;
 	limits: RunLimits;
 	signal?: AbortSignal;
+	/** The session's own model (`provider/id`) — a strategy's last-resort recovery model for a
+	 *  member whose own model broke with no healthy peer to borrow from. */
+	sessionModel?: string;
 	log?: (message: string) => void;
 	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result).
 	 *  `key` is a run-unique display id (disambiguates same-agent roster-role members). */
@@ -63,6 +66,7 @@ export async function runPersonaStrategy(
 
 	const sdkDeps: SDKDeps = { engine: deps.engine, roster: makeRoster(deps.teams), limits: deps.limits };
 	if (deps.signal) sdkDeps.signal = deps.signal;
+	if (deps.sessionModel) sdkDeps.sessionModel = deps.sessionModel;
 	if (deps.log) sdkDeps.log = deps.log;
 	if (deps.onAgentStatus) sdkDeps.onAgentStatus = deps.onAgentStatus;
 	if (deps.onAgentProgress) sdkDeps.onAgentProgress = deps.onAgentProgress;

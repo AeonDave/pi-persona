@@ -6,7 +6,7 @@
  */
 
 import type { RunLimits } from "../core/capabilities.ts";
-import { emptyUsage } from "../engine/stream.ts";
+import { emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { mapWithConcurrency } from "./parallel.ts";
 import { aggregateResults } from "./reducers.ts";
@@ -61,6 +61,8 @@ export interface AgentProgress {
 	tokens?: number;
 	/** The tool the agent is currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
+	/** One authoritative runtime tool lifecycle transition; never contains tool args or output. */
+	toolEvent?: ToolEvent;
 }
 
 /** Inject a steering message into a running agent (in-process engine only). */
@@ -95,6 +97,10 @@ export interface StrategySDK {
 	};
 	roster: Roster;
 	signal: AbortSignal | undefined;
+	/** The model the user's own session runs on (`provider/id`), when known. A strategy needs it
+	 *  to recover a member whose model broke and that has no healthy peer to borrow from — see
+	 *  `model-retry.ts`. Never a default for a run: members get their roster/persona model. */
+	sessionModel: string | undefined;
 	log(message: string): void;
 	limits: RunLimits;
 }
@@ -129,6 +135,8 @@ export interface SDKDeps {
 	roster: Roster;
 	limits: RunLimits;
 	signal?: AbortSignal;
+	/** See `StrategySDK.sessionModel`. */
+	sessionModel?: string;
 	log?: (message: string) => void;
 	/** Per-agent lifecycle, for live UI. The result is passed on done/failed so the
 	 *  UI can capture each agent's output/usage. `key` is a run-unique display id (the
@@ -248,6 +256,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 		reduce: { aggregate: aggregateResults, vote: voteReduce, judge: prepareJudge },
 		roster: deps.roster,
 		signal: deps.signal,
+		sessionModel: deps.sessionModel,
 		log: deps.log ?? (() => {}),
 		limits: deps.limits,
 	};

@@ -102,6 +102,33 @@ const msgEnd = (text: string, usage?: Record<string, unknown>): unknown => ({
 });
 const update = (text: string): unknown => ({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text }] } });
 
+test("inproc engine propagates each authoritative tool lifecycle event once without args or output", async () => {
+	const events: unknown[] = [];
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([
+			{ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "secret.txt" } },
+			{ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "secret.txt" } },
+			{ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: { content: "sensitive" }, isError: false },
+			{ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: { content: "sensitive" }, isError: false },
+			msgEnd("done"),
+		]),
+	});
+	const result = await engine.run({ agent: "a", task: "inspect" }, (progress) => {
+		if (progress.toolEvent) events.push(progress.toolEvent);
+	});
+	assert.equal(result.ok, true);
+	assert.deepEqual(events, [
+		{ phase: "start", callId: "call-1", name: "read" },
+		{ phase: "end", callId: "call-1", name: "read", failed: false },
+	]);
+	assert.equal(JSON.stringify(events).includes("secret.txt"), false, "tool args are not propagated");
+	assert.equal(JSON.stringify(events).includes("sensitive"), false, "tool output is not propagated");
+});
+
 test("inproc engine folds the session event stream into output + usage (no live model)", async () => {
 	const spy: Spy = {};
 	const engine = makeInProcessEngine({
@@ -469,6 +496,174 @@ test("inproc engine idle-kills a session that emits NO events after timeoutMs (t
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /timed out/);
 	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
+});
+
+test("inproc engine closes a tool abandoned by an abort (the late end is lost with the subscription)", async () => {
+	// pi DOES emit tool_execution_end for an aborted call, but only once the tool has
+	// unwound (bash kills its tree, then awaits close) — a macrotask after abort(), by which
+	// time the engine has already run unsub()/dispose(). Without a synthetic close the
+	// consumer keeps that tool "running" forever. Mirrors the child engine's finish().
+	const events: unknown[] = [];
+	const ac = new AbortController();
+	let markToolRunning!: () => void;
+	const toolRunning = new Promise<void>((resolve) => {
+		markToolRunning = resolve;
+	});
+	const never = new Promise<void>(() => {});
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => {
+			let listener: ((e: unknown) => void) | undefined;
+			return {
+				subscribe: (l) => {
+					listener = l;
+					return () => {
+						listener = undefined;
+					};
+				},
+				prompt: async () => {
+					listener?.({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "sleep 300" } });
+					markToolRunning();
+					await never; // the tool is still running when the abort lands
+				},
+				agent: {
+					abort: () => {
+						setTimeout(() => listener?.({ type: "tool_execution_end", toolCallId: "call-1", toolName: "bash", isError: true }), 0);
+					},
+					waitForIdle: () => never,
+					steer: () => {},
+				},
+				dispose: () => {},
+			};
+		},
+	});
+	const pending = engine.run(
+		{ agent: "a", task: "t" },
+		(progress) => {
+			if (progress.toolEvent) events.push(progress.toolEvent);
+		},
+		ac.signal,
+	);
+	await toolRunning;
+	ac.abort();
+	const r = await pending;
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "abort");
+	assert.deepEqual(events, [
+		{ phase: "start", callId: "call-1", name: "bash" },
+		{ phase: "end", callId: "call-1", name: "bash", failed: true },
+	]);
+	assert.equal(JSON.stringify(events).includes("sleep 300"), false, "the synthetic close carries no tool args");
+});
+
+test("a consumer that throws on the synthetic tool close still gets the full teardown", async () => {
+	// The close tick calls consumer code. While it ran inside the run's cleanup, a throwing
+	// consumer took the exception straight out of the `finally` and every step after it — the bus
+	// handle, the subscription, the session — was skipped, stranding all three for the rest of the
+	// supervisor's session. Mirrors deliver()'s contract for a throwing steer(): drop the tick.
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const ac = new AbortController();
+	let disposed = false;
+	let unsubscribed = false;
+	let markToolRunning!: () => void;
+	const toolRunning = new Promise<void>((resolve) => {
+		markToolRunning = resolve;
+	});
+	const never = new Promise<void>(() => {});
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		coaching: true,
+		createSession: async () => {
+			let listener: ((e: unknown) => void) | undefined;
+			return {
+				subscribe: (l) => {
+					listener = l;
+					return () => {
+						listener = undefined;
+						unsubscribed = true;
+					};
+				},
+				prompt: async () => {
+					listener?.({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "sleep 300" } });
+					listener?.({ type: "tool_execution_start", toolCallId: "call-2", toolName: "read", args: { path: "notes.md" } });
+					markToolRunning();
+					await never; // both tools are still running when the abort lands
+				},
+				agent: { abort: () => {}, waitForIdle: () => never, steer: () => {} },
+				dispose: () => {
+					disposed = true;
+				},
+			};
+		},
+	});
+	const closed: string[] = [];
+	const pending = engine.run(
+		{ agent: "a", task: "t" },
+		(progress) => {
+			if (progress.toolEvent?.phase !== "end") return;
+			if (progress.toolEvent.callId === "call-1") throw new Error("consumer exploded");
+			closed.push(progress.toolEvent.callId);
+		},
+		ac.signal,
+	);
+	await toolRunning;
+	ac.abort();
+	const r = await pending;
+	assert.equal(r.failureKind, "abort");
+	assert.deepEqual(closed, ["call-2"], "one throwing tick must not swallow the closes that follow it");
+	assert.equal(disposed, true, "the session is disposed even when the close tick throws");
+	assert.equal(unsubscribed, true, "the subscription is dropped even when the close tick throws");
+	assert.deepEqual(bus.participants(), ["supervisor"], "the child handle is released even when the close tick throws");
+});
+
+test("a normally settled run never reports a completed tool as failed", async () => {
+	// pi notifies session subscribers BEHIND the agent (_handleAgentEvent awaits the extension
+	// runner before it fans out), so the last tool_execution_end of a green run can land after
+	// waitForIdle() resolved and the engine tore down. Synthesizing a close for whatever is still
+	// open then marks a tool that actually completed `failed` on a fully successful run.
+	const events: unknown[] = [];
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => {
+			let listener: ((e: unknown) => void) | undefined;
+			return {
+				subscribe: (l) => {
+					listener = l;
+					return () => {
+						listener = undefined;
+					};
+				},
+				prompt: async () => {
+					listener?.({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "notes.md" } });
+					// The end is dispatched a macrotask behind the agent's own idle transition.
+					setTimeout(() => listener?.({ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", isError: false }), 0);
+					listener?.(msgEnd("done"));
+				},
+				agent: { abort: () => {}, waitForIdle: async () => {}, steer: () => {} },
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t" }, (progress) => {
+		if (progress.toolEvent) events.push(progress.toolEvent);
+	});
+	assert.equal(r.ok, true);
+	assert.deepEqual(
+		events,
+		[{ phase: "start", callId: "call-1", name: "read" }],
+		"a run that settled normally must not invent a failed close for a call whose end raced its teardown",
+	);
 });
 
 test("inproc external abort settles and disposes even when prompt never resolves", async () => {

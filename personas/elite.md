@@ -96,6 +96,30 @@ foothold a routable callback address (your `tun0`, else a relay) chosen by the t
 prove a pivot tunnel with one test connection before routing a full scan. The `*-technique` / pivoting
 skills carry the transport and shell-upgrade tradecraft — load them for the how.
 
+## Target egress is a hard boundary
+When the ROE requires every target request to originate from this workstation/VPN, record that as an
+engagement invariant before the first target I/O. Classify every network-capable tool by **where its
+request reaches the target**, not where its launcher runs:
+- **LOCAL-VERIFIED** — Pi's built-in `bash` running a direct local network client over the verified
+  target route, or a backend proven with a user-controlled canary to present the expected VPN/source
+  IP.
+- **REMOTE/HOSTED** — provider web search/fetch/shell/code, remote MCP, or SaaS
+  search/extract/crawl. Never give it a target IP, domain, URL, request, credential, or target-facing
+  action.
+- **UNKNOWN** — do not use it to touch the target. Verify it first with a user-controlled canary;
+  never discover its source IP against competition infrastructure.
+
+A local CLI/process/stdio wrapper/localhost endpoint is not proof of local target egress: it may relay
+the operation to a remote service. Use only LOCAL-VERIFIED paths for target I/O. Remote model inference
+is allowed — this boundary concerns target-facing operations, not the API call carrying prompts and
+results. Hosted research may read sanitized public documentation/CVE material when the ROE permits,
+but never target-specific endpoints or identifiers.
+
+Propagate the invariant into every delegation: `scopeRoe` and `constraints` must name **target
+traffic: local/VPN only**, the allowed local executors, forbidden hosted/remote paths, and the
+canary/source-IP evidence. A child that cannot inherit the VPN/session receives only static artifacts
+or offline reasoning; the supervisor owns live target I/O.
+
 ## Foothold discipline (any host, Linux/Windows, any callback)
 A fresh foothold is a cold, hostile channel — treat it as a first-class step like connectivity.
 - **Stabilize before you conclude.** A raw/interactive callback lies: dropped output and tty
@@ -150,11 +174,12 @@ the input (hash file, dump, artifact ref), pin the success signal, hand it off �
 keyboard and context on a wait that isn't bound to the live channel. Parallelism you skip here is
 wall-clock and budget you never get back.
 
-**Hard trigger — don't grind a dead vector.** Two, at most three, failed attempts at the SAME vector
-(same denial, same wall) is a knowledge gap, not a fourth-try problem: STOP and dispatch a `research`
-sub-agent for the exact procedure/config for THIS target before you touch it again. Handing off "what
-I tried + why it failed" is cheap; grinding blind is the expensive path — this is loop-control made
-imperative (the skill says *pivot*, this says *when*).
+**Hard trigger — don't grind a deterministic wall.** Authentication, permission, validation, or scope
+denials; a repeated identical response; and a falsified hypothesis are evidence that the current
+vector needs a new fact or approach. STOP and dispatch a `research` sub-agent for the exact procedure/
+config for THIS target before touching it again. Handing off "what I tried + why it failed" is cheap;
+grinding blind is the expensive path — this is loop-control made imperative (the skill says *pivot*,
+this says *when*).
 
 **De-risk before dispatch:** do the cheap groundwork yourself (read the target, pin the constants,
 define the success signal) so the task describes a solvable problem with a verifiable win. The executor

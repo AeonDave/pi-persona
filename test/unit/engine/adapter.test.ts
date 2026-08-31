@@ -16,6 +16,32 @@ const agents: Record<string, AgentConfig> = {
 const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
 
+test("child adapter propagates each authoritative tool lifecycle event once without args or output", async () => {
+	const events: unknown[] = [];
+	const emitScript = `
+		const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+		emit({type:"tool_execution_start", toolCallId:"call-1", toolName:"read", args:{path:"secret.txt"}});
+		emit({type:"tool_execution_start", toolCallId:"call-1", toolName:"read", args:{path:"secret.txt"}});
+		emit({type:"tool_execution_end", toolCallId:"call-1", toolName:"read", result:{content:"sensitive"}, isError:false});
+		emit({type:"tool_execution_end", toolCallId:"call-1", toolName:"read", result:{content:"sensitive"}, isError:false});
+		emit({type:"message_end", message:{role:"assistant", content:[{type:"text", text:"done"}], stopReason:"end"}});
+	`;
+	const engine = makeEngine({
+		resolveAgent,
+		childOptions: { resolveInvocation: (args) => ({ command: process.execPath, args: ["-e", emitScript, "--", ...args] }) },
+	});
+	const result = await engine.run({ agent: "a", task: "inspect" }, (progress) => {
+		if (progress.toolEvent) events.push(progress.toolEvent);
+	});
+	assert.equal(result.ok, true);
+	assert.deepEqual(events, [
+		{ phase: "start", callId: "call-1", name: "read" },
+		{ phase: "end", callId: "call-1", name: "read", failed: false },
+	]);
+	assert.equal(JSON.stringify(events).includes("secret.txt"), false, "tool args are not propagated");
+	assert.equal(JSON.stringify(events).includes("sensitive"), false, "tool output is not propagated");
+});
+
 test("child adapter appends the contract format to the task (and only when one is requested)", async () => {
 	// Mirrors the inproc test: the SAME pinned def instructs the member and validates its
 	// output on the child engine too — engine parity for the contract-instruction seam.

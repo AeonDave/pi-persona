@@ -33,7 +33,9 @@ import piPersona, {
 	sendPersonaFollowUp,
 } from "../../src/extension.ts";
 import { type DelegateView, shouldRecordDelegationOutcome } from "../../src/tools/delegate.ts";
+import { MAX_BROADCAST_DETAIL_ITEMS } from "../../src/tools/exocom.ts";
 import { MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS } from "../../src/tools/intercom.ts";
+import { parseTelemetryEvent } from "../../src/telemetry/contract.ts";
 import type { EngineAdapterDeps } from "../../src/engine/adapter.ts";
 import type { InProcessDeps } from "../../src/engine/inproc.ts";
 import { emptyUsage } from "../../src/engine/stream.ts";
@@ -292,6 +294,215 @@ test("Pi's tool_result boundary marks recoverable pi-persona failures as real to
 	const card = renderComponent(flow.renderResult(raw, { expanded: false }, traceTheme));
 	assert.match(card, /flow failed/i, "the same pre-run failure must never render as a green completion");
 	assert.doesNotMatch(card, /flow complete/i);
+});
+
+test("telemetry closes a tool exactly once at the extension hook boundary", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const cwd = projectCwdWithLockedPersona();
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-hook-session" } };
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "locked", ctx);
+	const blocked = m.fire("tool_call", { toolCallId: "call-1", toolName: "delegate", input: { agent: "ghost", task: "private secret" } }, ctx);
+	assert.equal(blocked?.block, true);
+	// Some Pi hosts still surface a tool_result for a gated call. The gate already closed the
+	// lifecycle, so that late boundary must not append a second terminal event.
+	m.fire("tool_result", { toolCallId: "call-1", toolName: "delegate", input: { agent: "ghost", task: "private secret" }, content: [], isError: true }, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+	const root = path.join(process.env.PI_AGENT_DIR!, "telemetry", "v2", workspaceHash(cwd), "pi-persona");
+	const files = fs.readdirSync(root).filter((name) => name.endsWith(".jsonl"));
+	const events = files.flatMap((name) => fs.readFileSync(path.join(root, name), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type: string; payload?: Record<string, unknown> }));
+	const toolEvents = events.filter((event) => event.type === "tool.started" || event.type === "tool.finished");
+	assert.equal(toolEvents.filter((event) => event.type === "tool.started").length, 1);
+	assert.equal(toolEvents.filter((event) => event.type === "tool.finished").length, 1);
+	assert.equal((toolEvents.find((event) => event.type === "tool.finished")?.payload as Record<string, unknown>).status, "failed");
+	assert.doesNotMatch(JSON.stringify(events), /private secret|task/);
+});
+
+/** Every event this session appended, in file order. The producer keys its file by session, so a
+ *  per-test `cwd` (and therefore workspace id) keeps one test's bus out of another's. */
+function readTelemetryEvents(cwd: string): Array<{ type: string; payload: Record<string, unknown> }> {
+	const root = path.join(process.env.PI_AGENT_DIR!, "telemetry", "v2", workspaceHash(cwd), "pi-persona");
+	return fs
+		.readdirSync(root)
+		.filter((name) => name.endsWith(".jsonl"))
+		.flatMap((name) =>
+			fs
+				.readFileSync(path.join(root, name), "utf8")
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> }),
+		);
+}
+
+function agentEventStatus(event: { type: string; payload: Record<string, unknown> }): unknown {
+	return event.type === "agent.added" ? event.payload.status : (event.payload.patch as Record<string, unknown> | undefined)?.status;
+}
+
+test("a streaming leg publishes one agent.updated per real change, not one per token", async () => {
+	// The tree emits "updated" on every detail/output delta, while the projected patch carries only
+	// label/kind/status/parentId/agent/model — so an unfiltered publish writes one byte-identical
+	// duplicate per streamed chunk and evicts genuine history from the producer's file budget.
+	const CHUNKS = 200;
+	const stub: StrategyEngine = {
+		run: async (spec, onProgress) => {
+			for (let i = 1; i <= CHUNKS; i++) onProgress?.({ output: "x".repeat(i) });
+			return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const cwd = tempDir("pi-persona-telemetry-flood-");
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-flood-session" } };
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	await delegate.execute("flood", { agent: "scout", task: "stream", sync: true }, undefined, undefined, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+
+	const events = readTelemetryEvents(cwd);
+	const legUpdates = events.filter((event) => event.type === "agent.updated" && event.payload.id === "delegate:flood/0");
+	const distinct = new Set(legUpdates.map((event) => JSON.stringify(event.payload)));
+	assert.equal(
+		distinct.size,
+		legUpdates.length,
+		`every published agent.updated must move the projection: ${legUpdates.length} events, ${distinct.size} distinct`,
+	);
+	assert.ok(legUpdates.length <= 4, `a ${CHUNKS}-chunk stream must not publish one event per chunk (published ${legUpdates.length})`);
+});
+
+test("an intercom reply is its own telemetry entity, addressed to the child that asked", async () => {
+	// A real `contact_supervisor` ask needs a real child; the broker host is this harness's one door
+	// into the extension's private bus (see the ask/inbox test below for the same setup).
+	const prevBroker = process.env.PI_PERSONA_BROKER;
+	const prevEngine = process.env.PI_PERSONA_ENGINE;
+	process.env.PI_PERSONA_BROKER = "1";
+	process.env.PI_PERSONA_ENGINE = "child";
+	const cwd = tempDir("pi-persona-telemetry-reply-");
+	const sessionId = randomUUID();
+	let client: ReturnType<typeof makeBrokerClient> | undefined;
+	const m = makeMockPi();
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => sessionId } };
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		const council = m.tool("council") as { execute: AnyFn };
+		await council.execute("ask-host", { question: "q", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, ctx);
+		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon" });
+		await client.register();
+		const decision = client.ask("supervisor", "decision", "ship it or hold?");
+		await waitUntil(() => m.sentMessages().length > 0, "the blocking ask to wake the supervisor");
+		const wake = m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
+		const askId = (wake.match(/askId: "([^"]+)"/) ?? [])[1] as string;
+		assert.ok(askId, `the ask names the id to reply to; wake was:\n${wake}`);
+
+		const call = { toolCallId: "reply-call-1", toolName: "intercom", input: { action: "reply", askId, message: "hold" } };
+		m.fire("tool_call", call, ctx);
+		const intercom = m.tool("intercom") as { execute: AnyFn };
+		const replied = await intercom.execute(call.toolCallId, call.input, undefined, undefined, ctx);
+		assert.equal(replied.details?.ok, true, "the child's pending ask was actually answered");
+		assert.equal(await decision, "hold");
+		m.fire("tool_result", { ...call, content: [], isError: false, details: replied.details }, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const events = readTelemetryEvents(cwd);
+		assert.ok(events.some((event) => event.type === "message.received" && event.payload.id === askId), "the ask itself is on the bus");
+		const replies = events.filter((event) => event.type === "message.replied");
+		assert.ok(replies.length > 0, "the reply is on the bus");
+		for (const reply of replies) {
+			assert.notEqual(reply.payload.id, askId, "a reply must not collide with (and replace) the ask it answers");
+			assert.equal(reply.payload.replyTo, askId, "…while still pointing back at it");
+			assert.equal(reply.payload.to, "orion-recon", "the reply is addressed to the child that asked, not to a literal");
+		}
+	} finally {
+		client?.close();
+		if (prevBroker === undefined) delete process.env.PI_PERSONA_BROKER;
+		else process.env.PI_PERSONA_BROKER = prevBroker;
+		if (prevEngine === undefined) delete process.env.PI_PERSONA_ENGINE;
+		else process.env.PI_PERSONA_ENGINE = prevEngine;
+	}
+});
+
+test("an over-budget context reading is clamped at the producer, not dropped at the consumer", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const cwd = tempDir("pi-persona-telemetry-context-");
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = {
+		...base,
+		sessionManager: { getSessionId: () => "telemetry-context-session" },
+		getContextUsage: () => ({ percent: 104 }),
+	};
+	await m.fire("session_start", undefined, ctx);
+	m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+
+	const events = readTelemetryEvents(cwd);
+	const updates = events.filter((event) => event.type === "instance.updated");
+	assert.ok(updates.length > 0, "the turn boundary republishes the instance");
+	for (const update of updates) {
+		assert.equal(update.payload.contextPercent, 100, "a percent over 100 is clamped, not passed through");
+		assert.ok(parseTelemetryEvent(update), "…so no consumer discards the whole event over one field");
+	}
+});
+
+test("a tool argument that merely contains \"waiting\" never reports a running leg as waiting", async () => {
+	// `detail` is tool activity — `toolActivity(name, args)` splices up to 40 chars of the argument —
+	// so a grep for the word "waiting" is the only way this substring ever appears.
+	const stub: StrategyEngine = {
+		run: async (spec, onProgress) => {
+			onProgress?.({ output: "", activity: "grep waiting" });
+			return { agent: spec.agent, output: "found", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const cwd = tempDir("pi-persona-telemetry-waiting-");
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-waiting-session" } };
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	await delegate.execute("greptool", { agent: "scout", task: "search", sync: true }, undefined, undefined, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+
+	const events = readTelemetryEvents(cwd);
+	const statuses = events
+		.filter((event) => event.type === "agent.added" || event.type === "agent.updated")
+		.map((event) => agentEventStatus(event));
+	assert.ok(statuses.includes("running"), "the leg was reported at all");
+	assert.ok(!statuses.includes("waiting"), `a leg running grep {pattern:"waiting"} is running, not waiting: ${JSON.stringify(statuses)}`);
+});
+
+test("supervisor tool calls Pi resolves as \"immediate\" are closed at the turn boundary", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const cwd = tempDir("pi-persona-telemetry-orphan-");
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-orphan-session" } };
+	await m.fire("session_start", undefined, ctx);
+	for (const id of ["esc-1", "esc-2", "esc-3"]) m.fire("tool_call", { toolCallId: id, toolName: "read", input: {} }, ctx);
+	// Only the first call reached afterToolCall: the user pressed Esc while it ran, so Pi resolved
+	// the other two as {kind:"immediate"} and our tool_result hook never fires for them.
+	m.fire("tool_result", { toolCallId: "esc-1", toolName: "read", input: {}, content: [], isError: false }, ctx);
+	await m.fire("agent_settled", undefined, ctx);
+	// A late result for an already-drained call must not close it a second time.
+	m.fire("tool_result", { toolCallId: "esc-2", toolName: "read", input: {}, content: [], isError: false }, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+
+	const events = readTelemetryEvents(cwd);
+	const finished = events.filter((event) => event.type === "tool.finished");
+	assert.deepEqual(
+		finished.map((event) => event.payload.callId).sort(),
+		["esc-1", "esc-2", "esc-3"],
+		`every started supervisor call is closed exactly once: ${JSON.stringify(finished.map((event) => event.payload))}`,
+	);
+	assert.equal(finished.find((event) => event.payload.callId === "esc-1")?.payload.status, "done");
+	for (const id of ["esc-2", "esc-3"]) {
+		assert.equal(finished.find((event) => event.payload.callId === id)?.payload.status, "failed", `${id} never completed`);
+	}
 });
 
 test("idle notifiers stay closed while mandatory orchestration owns the input hook", () => {
@@ -2024,6 +2235,44 @@ test("an `mcp: true` leg routes through the pinned-cwd child engine, and that en
 	}
 });
 
+test("child engines read Pi settings from the same agent dir as the in-process engine", async () => {
+	const expectedAgentDir = process.env.PI_AGENT_DIR!;
+	const previousCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const previousEngine = process.env.PI_PERSONA_ENGINE;
+	process.env.PI_CODING_AGENT_DIR = tempDir("pi-persona-wrong-child-agentdir-");
+	try {
+		for (const scenario of [
+			{ label: "plain child", forceChild: true, mcp: false },
+			{ label: "mcp child", forceChild: false, mcp: true },
+		] as const) {
+			if (scenario.forceChild) process.env.PI_PERSONA_ENGINE = "child";
+			else delete process.env.PI_PERSONA_ENGINE;
+			const cap = captureEngineDeps();
+			const m = makeMockPi();
+			piPersona(m.pi, { engineFactories: cap.factories });
+			const { ctx } = makeCtx(os.tmpdir());
+			await m.fire("session_start", undefined, ctx);
+			await (m.tool("delegate") as { execute: AnyFn }).execute(
+				`retry-settings-${scenario.label}`,
+				{ tasks: [{ agent: "scout", task: "probe", ...(scenario.mcp ? { mcp: true } : {}) }] },
+				undefined,
+				undefined,
+				ctx,
+			);
+			assert.equal(
+				cap.child[0]?.childOptions?.env?.PI_CODING_AGENT_DIR,
+				expectedAgentDir,
+				`${scenario.label} must inherit the same global settings/auth directory as inproc`,
+			);
+		}
+	} finally {
+		if (previousCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousCodingAgentDir;
+		if (previousEngine === undefined) delete process.env.PI_PERSONA_ENGINE;
+		else process.env.PI_PERSONA_ENGINE = previousEngine;
+	}
+});
+
 test("a persona's `spine: false` suppresses the layer for the legs it spawns, not just its own turns", async () => {
 	// Otherwise the documented judge/verify/audit opt-out is hollow: the persona saves the layer on
 	// its own turn and pays for it again on every sub-agent it fans out to.
@@ -2927,10 +3176,11 @@ test("two concurrent runs of ONE strategy hold separate subtrees — the first t
 
 	const peak = sizes.lastIndexOf(8);
 	assert.ok(peak >= 0, `both runs must be live at once as 2 roots × (root + 3 cores); frame sizes were [${sizes}]`);
+	const distinctSizes = sizes.slice(peak).filter((size, index, all) => index === 0 || size !== all[index - 1]);
 	assert.deepEqual(
-		sizes.slice(peak),
+		distinctSizes,
 		[8, 4, 0],
-		"the first run to settle removes only its OWN subtree — the second's stays on screen until it finishes",
+		"terminal-status repaint aside, the first run removes only its OWN subtree — the second's stays on screen until it finishes",
 	);
 });
 
@@ -2962,10 +3212,11 @@ test("two concurrent runs of ONE flow hold separate subtrees too", async () => {
 		peak >= 0,
 		`both flow runs must be live at once and saturate the bounded 8-row widget; frame sizes were [${sizes}]`,
 	);
+	const distinctSizes = sizes.slice(peak).filter((size, index, all) => index === 0 || size !== all[index - 1]);
 	assert.deepEqual(
-		sizes.slice(peak),
+		distinctSizes,
 		[8, 6, 0],
-		"after the capped concurrent view, the first flow removes only its subtree and leaves the other six rows visible",
+		"terminal-status repaint aside, the first flow removes only its subtree and leaves the other six rows visible",
 	);
 });
 
@@ -3437,6 +3688,49 @@ test("a model picker that dies partway keeps — and persists — the picks the 
 	}
 });
 
+test("the model picker names the core's verticalization, so the choice is made for a ROLE", async () => {
+	// Choosing a model "for the Conservatore" is a different judgement than choosing one for a bare
+	// "balthasar" — the picker title is the other place, besides the tree, where a human meets a core.
+	const fresh = tempDir("pi-persona-pickertitle-");
+	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
+	const prev = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx } = makeCtx(os.tmpdir());
+		const titles: string[] = [];
+		const pickCtx = {
+			...ctx,
+			hasUI: true,
+			mode: "rpc",
+			modelRegistry: { getAll: () => [{ provider: "alpha", id: "one" }, { provider: "beta", id: "two" }] },
+			ui: {
+				...ctx.ui,
+				select: async (title: string, options: string[]) => {
+					titles.push(title);
+					return options[0];
+				},
+			},
+		};
+		await m.fire("session_start", undefined, pickCtx);
+		await m.cmd("persona", "magi", pickCtx);
+		const council = m.tool("council") as { execute: AnyFn };
+		await council.execute("titles", { question: "decide", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, pickCtx);
+
+		assert.ok(titles.length > 0, "the picker was never opened");
+		for (const [core, purpose] of [["melchior", "Propulsore"], ["balthasar", "Conservatore"], ["casper", "Catalizzatore"]] as const) {
+			const asked = titles.find((t) => t.includes(`"${core}"`));
+			assert.ok(asked, `no picker for ${core}: ${JSON.stringify(titles)}`);
+			assert.ok(asked.includes(`(${purpose})`), `${core}'s picker must name its lens, got "${asked}"`);
+		}
+	} finally {
+		if (prev) process.env.PI_AGENT_DIR = prev;
+		else delete process.env.PI_AGENT_DIR;
+		fs.rmSync(fresh, { recursive: true, force: true });
+	}
+});
+
 // ── the run's abort signal must reach the STRATEGY, not only the engine ──────────────────
 
 test("an aborted run reaches the strategy's own cooperative check — no member is ever convened", async () => {
@@ -3462,8 +3756,8 @@ test("an aborted run reaches the strategy's own cooperative check — no member 
 	assert.match(String(result.content?.[0]?.text ?? ""), /cancelled after 0 round\(s\)/);
 	// Cooperative abort means the strategy returns BEFORE dispatching the roster: every seeded core
 	// stays queued, so no node ever flips to a settled glyph.
-	const settled = frames.filter((lines) => lines.some((line) => /[✓✗■]/.test(line)));
-	assert.deepEqual(settled, [], "no roster member was dispatched by an already-aborted run");
+	const settledMembers = frames.flatMap((lines) => lines.slice(1)).filter((line) => /[✓✗■]/.test(line));
+	assert.deepEqual(settledMembers, [], "no roster member was dispatched by an already-aborted run");
 });
 
 // ── exocom (T9): the plane runs on a real socket/named pipe over a per-test workspace ────
@@ -4175,6 +4469,134 @@ test("a shutdown landing mid-start leaves no ghost plane either (teardown is on 
 	}
 });
 
+test("a broadcast whose failure list was truncated never reports an unmatched peer as delivered", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "xbroadcast-session");
+	// The session-pinned token `exocom_send` reports each failure against (exocom/plane.ts).
+	const targetOf = (sessionId: string, name: string) => `${name}@${createHash("sha256").update(sessionId).digest("hex").slice(0, 24)}`;
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		const peers = Array.from({ length: MAX_BROADCAST_DETAIL_ITEMS + 1 }, (_, i) => ({ session_id: `xbroadcast-peer-${i}`, name: `peer${i}` }));
+		for (const peer of peers) {
+			writeEntry(agentDir, hash, registryEntryFixture({
+				session_id: peer.session_id,
+				name: peer.name,
+				pid: process.pid,
+				endpoint: endpointFor(agentDir, hash, peer.session_id, process.platform),
+				cwd,
+				heartbeat_at: new Date().toISOString(),
+			}));
+		}
+		const call = { toolCallId: "broadcast-1", toolName: "exocom_send", input: { target: "*", message: "hi" } };
+		m.fire("tool_call", call, ctx);
+		// Every peer failed, but `exocom_send` samples only MAX_BROADCAST_DETAIL_ITEMS failures and
+		// reports the rest through `omittedFailures` — so the sample alone cannot clear a recipient.
+		const sampled = peers.slice(0, MAX_BROADCAST_DETAIL_ITEMS);
+		const unsampled = peers[MAX_BROADCAST_DETAIL_ITEMS]!;
+		m.fire("tool_result", {
+			...call,
+			content: [],
+			isError: false,
+			details: {
+				target: "*",
+				peerCount: peers.length,
+				queuedCount: 0,
+				failedCount: peers.length,
+				msg_ids: [],
+				failed: sampled.map((peer) => ({ target: targetOf(peer.session_id, peer.name), error: "peer unreachable" })),
+				omittedMsgIds: 0,
+				omittedFailures: peers.length - MAX_BROADCAST_DETAIL_ITEMS,
+			},
+		}, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const events = readTelemetryEvents(cwd);
+		const terminalFor = (sessionId: string) =>
+			events.filter((event) => event.type === "message.sent" && event.payload.to === sessionId).at(-1)?.payload.status;
+		assert.equal(terminalFor(sampled[0]!.session_id), "failed", "a sampled failure is reported as one");
+		assert.notEqual(
+			terminalFor(unsampled.session_id),
+			"delivered",
+			"a recipient the truncated sample cannot speak for must never be claimed as delivered",
+		);
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("an exocom send Pi resolves as \"immediate\" is closed at the turn boundary", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "xorphan-session");
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: "xorphan-peer",
+			name: "peer0",
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, "xorphan-peer", process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+		const call = { toolCallId: "exo-esc-1", toolName: "exocom_send", input: { target: "*", message: "hi" } };
+		m.fire("tool_call", call, ctx);
+		// Esc was already pressed, so Pi resolved the send as {kind:"immediate"} and our tool_result
+		// hook never fires — exactly the orphan path the supervisor tool drain already covers.
+		await m.fire("agent_settled", undefined, ctx);
+		// A late result for an already-drained send must not report the recipient a second time.
+		m.fire("tool_result", { ...call, content: [], isError: false }, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const sends = readTelemetryEvents(cwd).filter((event) => event.type === "message.sent" && event.payload.to === "xorphan-peer");
+		assert.equal(sends.length, 2, `the send is opened once and closed once: ${JSON.stringify(sends.map((event) => event.payload))}`);
+		assert.equal(sends[0]?.payload.status, "queued");
+		assert.equal(sends[1]?.payload.status, "failed", "a send that never completed is not delivered");
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("an intercom send Pi resolves as \"immediate\" is closed at the turn boundary", async () => {
+	const cwd = tempDir("pi-persona-intercom-orphan-");
+	const m = makeMockPi();
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "intercom-orphan-session" } };
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		const call = { toolCallId: "int-esc-1", toolName: "intercom", input: { action: "send", to: "scout", message: "hi" } };
+		m.fire("tool_call", call, ctx);
+		// Same orphan path as the exocom send above: Pi resolved this one as {kind:"immediate"}, so our
+		// tool_result hook never fires and only the turn boundary can close it.
+		await m.fire("agent_settled", undefined, ctx);
+		// A late result for an already-drained send must not report it a second time.
+		m.fire("tool_result", { ...call, content: [], isError: false }, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const sends = readTelemetryEvents(cwd).filter((event) => event.type === "message.sent" && event.payload.channel === "intercom");
+		assert.equal(sends.length, 2, `the send is opened once and closed once: ${JSON.stringify(sends.map((event) => event.payload))}`);
+		assert.equal(sends[0]?.payload.status, "queued");
+		assert.equal(sends[1]?.payload.status, "failed", "a send that never completed is not delivered");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // ---------------------------------------------------------------------------------------------
 // Session time anchor — the model has no clock, so "how long have I been on this problem" has no
 // answer from inside a turn. The anchor lives in the SYSTEM prompt (re-sent every turn, never
@@ -4255,4 +4677,63 @@ test("an explicitly collected async result reports how long the leg took", async
 	// Whatever this stub leg actually took, the header states it — the assertion pins the FIELD,
 	// never a wall-clock value, so nothing here waits on real time.
 	assert.match(String(result?.content?.[0]?.text ?? ""), /^run-\d+ \(scout\) · done · (?:<1s|\d+(?:s|m|h|d)\b)/);
+});
+
+test("a MAGI core is watched and chosen by its verticalization, not just its name", async () => {
+	// A roster of three names says nothing about which lens argued what. The seeded tree node
+	// carries the core's declared purpose, so a watcher reads roles; the same field titles the
+	// model picker, where "a model for the Conservatore" is a different judgement than "for
+	// balthasar". Both surfaces are asserted here because they are the two places a human meets
+	// a core, and they derive from the same declaration.
+	const cwd = tempDir("pi-persona-magi-purpose-");
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "magi-purpose-session" } };
+	await m.fire("session_start", undefined, ctx);
+	const council = m.tool("council") as { execute: AnyFn };
+	// The cores cannot really run here (no model is configured), but the roster is SEEDED into the
+	// tree before any of them starts — which is exactly the label under test.
+	await council.execute("magi-1", { question: "decide", strategy: "magi", roster: "magi" }, undefined, undefined, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+
+	const labels = readTelemetryEvents(cwd)
+		.filter((event) => event.type === "agent.added")
+		.map((event) => String(event.payload.label ?? ""));
+	for (const [core, purpose] of [["melchior", "Propulsore"], ["balthasar", "Conservatore"], ["casper", "Catalizzatore"]] as const) {
+		const seeded = labels.find((label) => label.startsWith(core));
+		assert.ok(seeded, `no tree node was seeded for ${core}: ${JSON.stringify(labels)}`);
+		assert.ok(seeded.includes(purpose), `${core}'s node must name its lens, got "${seeded}"`);
+	}
+});
+
+test("a core listed twice keeps its lens; a roster-ROLE member does not repeat one", async () => {
+	// `coreLabel` composes three key shapes and only the plain one is exercised above. An occurrence
+	// suffix (`melchior#2`) is the SAME core twice and must keep its lens; a role-specialised member
+	// already carries a lens in its key and must not show two. Both are asserted from the real
+	// seeded telemetry labels, not from `rosterNodeKeys` — that function is not what this changed.
+	const cwd = tempDir("pi-persona-magi-keys-");
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "teams.yaml"),
+		["twice: [melchior, balthasar, melchior]", "lensed:", '  - { agent: melchior, role: "Focus ONLY on the SECURITY lens" }', "  - balthasar", ""].join(String.fromCharCode(10)),
+	);
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "magi-keys-session" } };
+	await m.fire("session_start", undefined, ctx);
+	const council = m.tool("council") as { execute: AnyFn };
+	await council.execute("k1", { question: "q", strategy: "magi", roster: "twice" }, undefined, undefined, ctx);
+	await council.execute("k2", { question: "q", strategy: "magi", roster: "lensed" }, undefined, undefined, ctx);
+	await m.fire("session_shutdown", {}, ctx);
+
+	const labels = readTelemetryEvents(cwd).filter((e) => e.type === "agent.added").map((e) => String(e.payload.label ?? ""));
+	const repeat = labels.find((l) => l.startsWith("melchior#2"));
+	assert.ok(repeat, `no node for the repeated core: ${JSON.stringify(labels)}`);
+	assert.ok(repeat.includes("Propulsore"), `a repeated core keeps its lens, got "${repeat}"`);
+
+	const lensed = labels.find((l) => l.startsWith("melchior · SECURITY"));
+	assert.ok(lensed, `no node for the role-specialised core: ${JSON.stringify(labels)}`);
+	assert.ok(!lensed.includes("Propulsore"), `a role member must not show two lenses, got "${lensed}"`);
 });

@@ -7,7 +7,7 @@
  * gating happens upstream in the `tool_call` hook.
  */
 
-import { type ChildUsage, emptyUsage } from "../engine/stream.ts";
+import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { mapWithConcurrency } from "../orchestration/parallel.ts";
 import { posix, win32 } from "node:path";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
@@ -464,6 +464,8 @@ export async function runDelegate(
 	 *  without it a cancelled leg whose engine rejects is filed as an agent failure and the user's
 	 *  own stop renders as FAILED. Mirrors `SDKDeps.signal`, which classifies the same way. */
 	signal?: AbortSignal,
+	/** Authoritative per-leg tool lifecycle; arguments and output are intentionally absent. */
+	onLegToolEvent?: (index: number, event: ToolEvent) => void,
 ): Promise<DelegateOutcome> {
 	if (params.tasks && params.tasks.length > 0) {
 		// Enforce the hard ceilings: cap the fan-out and clamp the concurrency the
@@ -499,6 +501,7 @@ export async function runDelegate(
 					specOf(t),
 					(p) => {
 						// Stream the leg's rolling output + current tool activity.
+						if (p.toolEvent) onLegToolEvent?.(i, p.toolEvent);
 						const cur = views[i] as DelegateView;
 						views[i] = { ...cur, output: p.output || cur.output, activity: p.activity ?? "" };
 						onProgress?.(views.map((v) => ({ ...v })));
@@ -550,6 +553,7 @@ export async function runDelegate(
 		const r = await engine.run(
 			specOf(single),
 			(p) => {
+				if (p.toolEvent) onLegToolEvent?.(0, p.toolEvent);
 				if (p.output) view.output = p.output;
 				view.activity = p.activity ?? "";
 				onProgress?.([{ ...view }]);

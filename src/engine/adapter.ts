@@ -15,7 +15,7 @@ import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
-import { emptyUsage } from "./stream.ts";
+import { emptyUsage, type ToolEvent } from "./stream.ts";
 
 /** The engine-side face of the cross-process broker (spec B3/B4/B7) — a child-engine
  *  spawn's connection to the supervisor-hosted relay. The concrete implementation
@@ -94,7 +94,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	return {
 		async run(
 			spec: AgentRunSpec,
-			onProgress?: (p: { output: string; tokens?: number; activity?: string }) => void,
+			onProgress?: (p: { output: string; tokens?: number; activity?: string; toolEvent?: ToolEvent }) => void,
 			callSignal?: AbortSignal,
 			/** Called once with a steer handle when the broker is on (in-process parity). */
 			onSteerable?: (steer: (text: string) => void) => void,
@@ -152,7 +152,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (isPositiveFiniteMs(spec.timeoutMs)) childOptions.timeoutMs = spec.timeoutMs;
 			if (onProgress) {
 				childOptions.onProgress = (snap) =>
-					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}) });
+					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
 			}
 			// The run aborts if EITHER the whole-run signal or this agent's own (UI stop) fires.
 			const signal = combineSignals(deps.signal, callSignal);
