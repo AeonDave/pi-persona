@@ -48,6 +48,8 @@ export const LEDGER_LIMITS = {
 	maxResults: 256,
 	maxAskIds: 4_096,
 	maxSeen: 4_096,
+	/** Pending asks from one session to another — stops a peer from hostage-taking a constrained turn. */
+	maxAsksFromTo: 3,
 	lockAttempts: 24,
 	lockBackoffMs: 20,
 	lockBackoffMaxMs: 80,
@@ -112,6 +114,8 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 			if (state.asks.length >= LEDGER_LIMITS.maxAsks) return { ok: false, error: "ledger ask limit reached" };
 			if (!event.to_session || event.to_session === "*") return { ok: false, error: "ask to_session is missing" };
 			if (event.to_session === event.from_session) return { ok: false, error: "ask to_session cannot be self" };
+			const fromTo = state.asks.filter((ask) => ask.from_session === event.from_session && ask.to_session === event.to_session).length;
+			if (fromTo >= LEDGER_LIMITS.maxAsksFromTo) return { ok: false, error: `ask limit from "${event.from_session}" to "${event.to_session}" reached` };
 			if (state.asks.some((ask) => ask.work_key === event.work_key && ask.to_session === event.to_session)) return { ok: false, error: `ask already pending for (${event.work_key}, ${event.to_session})` };
 			return { ok: true, state: remember({ ...state, asks: [...state.asks, askOf(event)], askIds: [...state.askIds, event.ask_id] }, event.msg_id) };
 		}

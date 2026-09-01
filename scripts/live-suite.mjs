@@ -43,12 +43,20 @@ const tests = [
 
 console.log(`LIVE SUITE — model=${M} — ${tests.length} tests\n`);
 const t0 = Date.now();
+let failed = 0;
 for (const [label, persona, prompt] of tests) {
 	console.log(`\n${"=".repeat(78)}\n### ${label}\n${"=".repeat(78)}`);
 	const r = spawnSync(process.execPath, ["--import", "tsx", "scripts/drive.ts", "--persona", persona, "--model", M, prompt], {
 		stdio: "inherit",
 		timeout: TIMEOUT,
 	});
-	if (r.error) console.log(`  [runner] ${r.error.code === "ETIMEDOUT" ? "TIMED OUT" : r.error.message}`);
+	if (r.error) {
+		console.log(`  [runner] ${r.error.code === "ETIMEDOUT" ? "TIMED OUT" : r.error.message}`);
+		failed += 1;
+	} else if (r.status !== 0) {
+		console.log(`  [runner] drive exited ${r.status}`);
+		failed += 1;
+	}
 }
-console.log(`\n${"=".repeat(78)}\nLIVE SUITE done in ${((Date.now() - t0) / 1000 / 60).toFixed(1)} min`);
+console.log(`\n${"=".repeat(78)}\nLIVE SUITE done in ${((Date.now() - t0) / 1000 / 60).toFixed(1)} min${failed ? ` — ${failed} failed` : ""}`);
+process.exit(failed > 0 ? 1 : 0);

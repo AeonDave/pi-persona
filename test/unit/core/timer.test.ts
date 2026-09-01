@@ -118,6 +118,30 @@ test("ids are unique and monotonic", () => {
 	assert.notEqual(a, b);
 });
 
+test("the armed-timer count is bounded — a looping supervisor cannot pin unbounded OS timers", () => {
+	const h = harness();
+	for (let i = 0; i < 32; i++) {
+		const r = h.scheduler.arm({ message: `wake ${i}`, delayMs: 60_000 });
+		assert.ok(r.ok, `timer ${i} armed`);
+	}
+	const over = h.scheduler.arm({ message: "one too many", delayMs: 60_000 });
+	assert.equal(over.ok, false);
+	assert.match(over.error ?? "", /maximum 32/);
+	// A fired timer frees its slot.
+	h.advance(60_000);
+	assert.equal(h.fired.length, 32);
+	const again = h.scheduler.arm({ message: "after the batch fired", delayMs: 60_000 });
+	assert.ok(again.ok, "slots free up after firing");
+});
+
+test("the follow-up message is length-bounded — it is re-injected into context at fire time", () => {
+	const h = harness();
+	const r = h.scheduler.arm({ message: "x".repeat(4_001), delayMs: 60_000 });
+	assert.equal(r.ok, false);
+	assert.match(r.error ?? "", /maximum 4000/);
+	assert.ok(h.scheduler.arm({ message: "x".repeat(4_000), delayMs: 60_000 }).ok, "at the cap is fine");
+});
+
 test("renderTimerFire batches multiple fires into one wake message", () => {
 	const entries: TimerEntry[] = [
 		{ id: "timer-1", label: "release", fireAtEpochMs: 0, armedAtEpochMs: 0, message: "spawn Paperwork" },

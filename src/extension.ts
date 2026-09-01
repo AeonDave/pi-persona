@@ -85,9 +85,10 @@ import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
-import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
+import { type FlowSpec, flowHash, parseFlow, verifyFlowRefs } from "./orchestration/flow.ts";
 import { journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
+import type { FlowOutcome } from "./orchestration/flow-run.ts";
 import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
 import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
@@ -588,12 +589,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const fn = steerRegistry.get(nodeId);
 		if (!fn || !text.trim()) return false;
 		try {
-			fn(text);
+			const delivered = fn(text);
+			return delivered !== false;
 		} catch {
 			// the handle may point at a just-finished/disposed session — treat as "not steerable"
 			return false;
 		}
-		return true;
 	}
 
 	// The live count of agents in flight (leaf cores/legs), published as a status so a
@@ -640,6 +641,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let contractDefs: Record<string, ContractDef> = {};
 	let shadowed: Array<{ name: string; scope: string; path: string }> = [];
 	let definitionCollisions: LoadResult["collisions"] = [];
+	let definitionWarnings: string[] = [];
 	let seedSourceCollisions: string[] = [];
 
 	// Remembered selection lives in the persona data folder; only user gestures write it.
@@ -694,7 +696,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		shadowed = result.shadowed.map((f) => ({ name: f.name, scope: f.scope, path: f.path }));
 		definitionCollisions = result.collisions;
 		teams = loadTeams(teamFiles(cwd));
-		contractDefs = loadContracts(contractDirs(cwd));
+		const contractsLoad = loadContracts(contractDirs(cwd));
+		contractDefs = contractsLoad.contracts;
+		definitionWarnings = [...result.warnings, ...contractsLoad.warnings];
 	}
 
 	// Install the bundled defaults into the user's agent dir — this is the ONLY way personas/agents
@@ -716,11 +720,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	function reportDefinitionCollisions(ctx: ExtensionContext): void {
-		if (definitionCollisions.length === 0) return;
-		const names = definitionCollisions.map((collision) => collision.name).join(", ");
-		const message = `pi-persona: ${definitionCollisions.length} persona/agent definition collision(s) were omitted: ${names}. Run /doctor for source paths.`;
-		if (ctx.hasUI) ctx.ui.notify(message, "warning");
-		else process.stderr.write(`${message}\n`);
+		if (definitionCollisions.length > 0) {
+			const names = definitionCollisions.map((collision) => collision.name).join(", ");
+			const message = `pi-persona: ${definitionCollisions.length} persona/agent definition collision(s) were omitted: ${names}. Run /doctor for source paths.`;
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+			else process.stderr.write(`${message}\n`);
+		}
+		if (definitionWarnings.length > 0) {
+			const shown = definitionWarnings.slice(0, 5).join("; ");
+			const more = definitionWarnings.length > 5 ? ` (+${definitionWarnings.length - 5} more)` : "";
+			const message = `pi-persona: ${definitionWarnings.length} definition problem(s): ${shown}${more}. Run /doctor for details.`;
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+			else process.stderr.write(`${message}\n`);
+		}
 	}
 
 	function reportSeedSourceCollisions(ctx: ExtensionContext, result: SeedResult): void {
@@ -794,6 +806,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				/* cosmetic */
 			}
 		},
+		warn: (message) => {
+			try {
+				if (lastCtx?.hasUI) lastCtx.ui.notify(message, "warning");
+				else process.stderr.write(`${message}\n`);
+			} catch {
+				/* cosmetic */
+			}
+		},
 	};
 
 	const controller = new PersonaController(host, config.delegateDefaultAllow);
@@ -810,7 +830,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// (core/fence.ts) in a tagged data block with a standing do-not-obey clause.
 	/** Drain child→supervisor messages into a compact block for a sync tool result (push). */
 	const drainBusBlock = (): string => {
-		const msgs = bus.take(SUPERVISOR);
+		const msgs = bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply);
 		return msgs.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(msgs))}` : "";
 	};
 
@@ -1019,6 +1039,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// capped-backoff connect tolerates the brief startup race; `endpoint` is a pure function of
 	// the session id, so it's known and handed to the child immediately, without waiting on the
 	// listen to complete). Idempotent; a failed bind clears the promise so a later build retries.
+	const expectedBrokerHandles = new Set<string>();
+	const preHostSteers = new Map<string, string[]>();
+
 	function ensureBrokerHost(endpoint: string): void {
 		if (brokerHostPromise) return;
 		if (process.platform !== "win32") {
@@ -1040,6 +1063,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		brokerHostPromise.then(
 			(h) => {
 				brokerHost = h;
+				for (const handle of expectedBrokerHandles) h.expect(handle);
+				for (const [handle, texts] of preHostSteers) {
+					for (const text of texts) h.steer(handle, text);
+				}
+				preHostSteers.clear();
 			},
 			(err) => {
 				brokerHostPromise = undefined; // never started — a later build gets another chance
@@ -1055,6 +1083,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// peer map; a remote child is otherwise indistinguishable from an in-process one, by
 	// construction). `steerFrame` degrades to a silent no-op before the host has finished
 	// starting or after the target has disconnected — "sends report undelivered", never a throw.
+	// construction). `steerFrame` returns false when the handle was never expected (unknown /
+	// already forgotten). An expected handle that has not connected yet buffers the steer
+	// (host.expect + pending flush on register), so spawn→connect is reported as delivered.
 	function makeBrokerDeps(ctx: ExtensionContext): EngineAdapterBroker {
 		const endpoint = brokerEndpoint(ctx.sessionManager.getSessionId());
 		ensureBrokerHost(endpoint);
@@ -1062,14 +1093,24 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			endpoint,
 			register: (info) => {
 				bus.register(info.handle);
+				expectedBrokerHandles.add(info.handle);
 				if (info.peers) brokerPeers.set(info.handle, { label: info.label ?? info.handle, group: info.group ?? "" });
+				brokerHost?.expect(info.handle);
 			},
 			unregister: (handle) => {
+				expectedBrokerHandles.delete(handle);
+				preHostSteers.delete(handle);
 				brokerPeers.delete(handle);
 				bus.unregister(handle);
+				brokerHost?.forget(handle);
 			},
 			steerFrame: (handle, text) => {
-				brokerHost?.steer(handle, text);
+				if (brokerHost) return brokerHost.steer(handle, text);
+				if (!expectedBrokerHandles.has(handle) || !text.trim()) return false;
+				const queued = preHostSteers.get(handle) ?? [];
+				queued.push(text);
+				preHostSteers.set(handle, queued);
+				return true;
 			},
 		};
 	}
@@ -1233,6 +1274,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		};
 	}
 
+	function strategySpawnGate(): { canSpawn?: (agent: string) => boolean } {
+		const caps = controller.capabilities;
+		return caps ? { canSpawn: (agent) => canDelegateTo(caps, agent) } : {};
+	}
+
 	// Run a persona strategy with the unified tree wired in: assign models on first run,
 	// seed the roster (cores show by name at once), flip ⏳ → ✓/✗ live, clear when done.
 	async function runStrategyVisible(
@@ -1259,7 +1305,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
 			// cooperatively between rounds, so an aborted run stops convening instead of running every
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
-			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId) });
+			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId), ...strategySpawnGate() });
 			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
 			return result ?? undefined;
 		} catch (error) {
@@ -1299,13 +1345,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				/* not here */
 			}
 		}
-		return found === undefined ? undefined : parseFlow(found);
+		if (found === undefined) return undefined;
+		return parseFlow(found);
 	}
 
 	// Run a flow's DAG with the unified tree (phases as nodes, cores beneath) + journaled
 	// resume: a prior run's journal (keyed by flow@hash) skips already-done phases; the
 	// journal is cleared on a fully-successful run.
-	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, signal?: AbortSignal) {
+	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, signal?: AbortSignal): Promise<FlowOutcome> {
 		const hash = flowHash(spec);
 		const journalDir = join(personaDataDir(), "flows");
 		try {
@@ -1328,6 +1375,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			agentTree.add(node);
 		}
 		try {
+			// Yield so a concurrent flow can seed its own tree before we fail-closed on refs —
+			// the check still runs BEFORE any phase/engine work.
+			await Promise.resolve();
+			const refs = verifyFlowRefs(spec, {
+				strategies: strategyNames(),
+				teams: new Set(Object.keys(teams)),
+			});
+			if (!refs.ok) {
+				agentTree.update(flowRoot, { status: "failed", detail: refs.error });
+				const failed: FlowOutcome = {
+					ok: false,
+					results: {},
+					output: refs.error,
+					error: refs.error,
+					failureKind: "contract",
+				};
+				if (spec.phases[0]?.id) failed.failedPhase = spec.phases[0].id;
+				return failed;
+			}
 			const outcome = await runFlow(spec, baseTask, {
 				hash,
 				resume,
@@ -1359,6 +1425,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						...sessionModelDep(ctx),
 						...(signal ? { signal } : {}), // cooperative per-round abort inside the phase's strategy, not just the engine
 						...strategyTreeDeps(ctx, pid),
+						...strategySpawnGate(),
 					});
 					return r ?? { agent: phase.id, output: `unknown strategy: ${phase.strategy}`, usage: emptyUsage(), ok: false, error: "unknown strategy" };
 				},
@@ -1484,6 +1551,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			for (const collision of definitionCollisions) {
 				lines.push(`  - ${collision.name}: persona=${collision.persona.path}; agent=${collision.agent.path}`);
 			}
+		}
+		if (definitionWarnings.length > 0) {
+			lines.push(`definition warnings (${definitionWarnings.length}):`);
+			for (const w of definitionWarnings) lines.push(`  - ${w}`);
 		}
 		if (seedSourceCollisions.length > 0) {
 			lines.push(`bundled seed collisions (${seedSourceCollisions.length}): ${seedSourceCollisions.join(", ")}`);

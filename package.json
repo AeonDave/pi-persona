@@ -1,6 +1,6 @@
 {
   "name": "pi-persona",
-  "version": "1.12.0",
+  "version": "1.12.1",
   "private": false,
   "type": "module",
   "description": "Unified Pi extension: switchable supervisor personas with a clear orchestration grammar (opportunistic delegation or mandatory multi-agent strategies), file-based strategies on a core SDK, cross-OS. Replaces pi-subagents + pi-subagents-comtac + pi-subagents-persona.",
@@ -56,8 +56,11 @@
       "optional": true
     }
   },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
-    "typebox": "*"
+    "typebox": "1.3.7"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.84.2",

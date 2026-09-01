@@ -177,6 +177,7 @@ function makeSpyBroker(endpoint = "fake-broker-endpoint") {
 		steerFrame: (handle: string, text: string) => {
 			calls.push("steerFrame");
 			steered.push({ handle, text });
+			return true;
 		},
 	};
 }

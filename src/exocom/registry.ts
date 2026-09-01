@@ -1,6 +1,6 @@
 /** exocom workspace registry — one JSON file per live instance. */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { agentsDir, registryPath } from "./paths.ts";
 
 export interface RegistryEntry {
@@ -23,6 +23,9 @@ export type RegistryOwnership = Pick<RegistryEntry, "session_id" | "endpoint"> &
 
 const CONTROL_OR_MARKUP = /[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]/g;
 const HAS_CONTROL_OR_MARKUP = /[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]/;
+/** Skip a registry file that is not a regular file or is larger than this — a hostile peer
+ *  could otherwise force this process to parse an unbounded JSON blob on every heartbeat. */
+export const MAX_REGISTRY_FILE_BYTES = 64 * 1024;
 
 export function normalizeMetadataText(value: unknown, max: number, fallback = ""): string {
 	if (typeof value !== "string") return fallback;
@@ -194,7 +197,10 @@ export function readAll(agentDir: string, hash: string): RegistryEntry[] {
 	for (const f of readdirSync(dir)) {
 		if (!f.endsWith(".json")) continue;
 		try {
-			const e = normalizeRegistryEntry(JSON.parse(readFileSync(registryPath(agentDir, hash, f.slice(0, -5)), "utf8")));
+			const path = registryPath(agentDir, hash, f.slice(0, -5));
+			const st = lstatSync(path);
+			if (!st.isFile() || st.size > MAX_REGISTRY_FILE_BYTES) continue;
+			const e = normalizeRegistryEntry(JSON.parse(readFileSync(path, "utf8")));
 			if (e && f.slice(0, -5) === sessionKey(e.session_id)) out.push(e);
 		} catch { /* skip malformed */ }
 	}

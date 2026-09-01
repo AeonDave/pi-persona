@@ -20,11 +20,37 @@ export interface JudgePrep {
 
 const LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
+/**
+ * The judge's vote reduced to a ballot label. Models routinely answer "Candidate B" or "B."
+ * where the ballot asked for "B", so a bare single-letter token is read as the pick.
+ *
+ * The candidate letters are filtered against the labels ACTUALLY on this ballot, and an
+ * ambiguous vote (two different labels named, e.g. "A or B?") resolves to nothing. Guessing
+ * here is worse than failing: the no-pick path already returns the panel (or, for compete,
+ * every valid diff) — a refusal loses nothing, while a wrong guess applies the wrong work.
+ */
+export function ballotLabel(vote: string, onBallot: number): string {
+	const bare = vote.trim().toUpperCase();
+	if (bare.length <= 1) return bare;
+	const labels = new Set(LABELS.slice(0, Math.min(onBallot, LABELS.length)));
+	const named = [...new Set(bare.split(/[^A-Z]+/).filter((t) => t.length === 1 && labels.has(t)))];
+	return named.length === 1 ? named[0]! : bare;
+}
+
+function isPermutation(order: number[], n: number): boolean {
+	if (order.length !== n) return false;
+	const seen = new Set(order);
+	if (seen.size !== n) return false;
+	return order.every((i) => Number.isInteger(i) && i >= 0 && i < n);
+}
+
 /** Anonymise + label (+ optionally reorder) candidates for an impartial LLM judge. `order`
  *  is a permutation of candidate indices (ballot position → candidate); production passes a
- *  shuffle, tests pass a fixed permutation. Defaults to candidate order. */
+ *  shuffle, tests pass a fixed permutation. Defaults to candidate order. A malformed `order`
+ *  (wrong length / not a permutation) is ignored rather than silently becoming identity —
+ *  identity would drop the reorder half of the bias guard. */
 export function prepareJudge(candidates: AgentResult[], order?: number[]): JudgePrep {
-	const perm = order && order.length === candidates.length ? order : candidates.map((_, i) => i);
+	const perm = order && isPermutation(order, candidates.length) ? order : candidates.map((_, i) => i);
 	const byLabel = new Map<string, AgentResult>();
 	const sections: string[] = [];
 	perm.forEach((candIdx, pos) => {
@@ -36,7 +62,7 @@ export function prepareJudge(candidates: AgentResult[], order?: number[]): Judge
 	});
 	return {
 		ballot: sections.join("\n\n"),
-		pick: (label) => byLabel.get(label.trim().toUpperCase()),
+		pick: (label) => byLabel.get(ballotLabel(label, byLabel.size)),
 	};
 }
 

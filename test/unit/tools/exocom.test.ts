@@ -113,6 +113,17 @@ test("exocom_send broadcast uses singular grammar for one peer", async () => {
 	assert.doesNotMatch(r.content[0].text, /queued 1\/1 peers/);
 });
 
+test("exocom_send rejects a broadcast that also carries in_reply_to", async () => {
+	const m = mockPi();
+	let sent = 0;
+	registerExocomTools(m.pi, () => stubPlane({ send: async () => { sent++; return { msg_id: "x" }; } }) as never);
+	await assert.rejects(
+		() => m.tools.get("exocom_send").execute("c", { target: "*", message: "hi", in_reply_to: "msg-1" }, undefined, undefined, {}),
+		/cannot carry in_reply_to/,
+	);
+	assert.equal(sent, 0);
+});
+
 test("exocom_send renderer keeps an all-failed broadcast actionable when collapsed", async () => {
 	const m = mockPi();
 	registerExocomTools(m.pi, () => stubPlane({

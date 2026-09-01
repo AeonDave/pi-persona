@@ -145,6 +145,36 @@ test("the single-dump nudge names the burn in tokens and points at delegate", ()
 	assert.match(nudge ?? "", /burns context or budget/i);
 });
 
+test("the dump trigger de-escalates like the sweep: repeated fat one-shots don't nudge every time", () => {
+	// A legit review loop reads several 40k+ results in a row. The FIRST dump nudge is the
+	// reminder; repeating the identical text on every fat result is noise — the same
+	// widening the sweep gets must apply to the dump path.
+	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
+	assert.match(n.observe("bash", 120) ?? "", /pi-persona/, "first dump nudges");
+	assert.equal(n.observe("bash", 120), undefined, "immediate repeat suppressed");
+	assert.equal(n.observe("bash", 120), undefined, "still inside the widened window");
+	assert.equal(n.observe("bash", 120), undefined);
+	assert.match(n.observe("bash", 120) ?? "", /pi-persona/, "fires again after a full base window");
+});
+
+test("intercom/timer results are orchestration glue: they neither advance nor reset the run", () => {
+	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
+	// Collecting delegated results is the DOCUMENTED way to gather hand-offs — it must not
+	// be punished as hands-on grinding, and must not masquerade as a hand-off either.
+	n.observe("intercom", 50_000);
+	n.observe("intercom", 50_000);
+	n.observe("intercom", 50_000);
+	n.observe("intercom", 50_000);
+	n.observe("intercom", 50_000);
+	n.observe("timer", 50_000);
+	assert.equal(n.observe("intercom", 50_000), undefined, "six fat intercom/timer results never nudge");
+	// And they didn't advance the run either: a sweep still needs 4 REAL steps.
+	assert.equal(n.observe("read", 300), undefined);
+	assert.equal(n.observe("read", 300), undefined);
+	assert.equal(n.observe("read", 300), undefined);
+	assert.match(n.observe("read", 300) ?? "", /pi-persona/, "the 4th real step trips the sweep");
+});
+
 test("reset() clears the run (new session / persona switch)", () => {
 	const n = mk();
 	n.observe("bash", 50);

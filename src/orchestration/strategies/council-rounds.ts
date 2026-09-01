@@ -10,6 +10,7 @@
  */
 
 import { fenceUntrusted } from "../../core/fence.ts";
+import { clampBestOf, positiveInteger } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
@@ -61,11 +62,6 @@ function render(
 
 const DEFAULT_ROUNDS = 3;
 
-function positiveInteger(value: unknown, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
-	return Math.max(1, Math.floor(value));
-}
-
 /** A deliberation the run cancelled — distinct from one that finished without a ruling, so a
  *  journal or supervisor records it as cancelled rather than as a completed failure. */
 function cancelled(rounds: number, usages: AgentResult["usage"][]): AgentResult {
@@ -91,7 +87,7 @@ export const councilRounds: Strategy = {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("council-rounds: a roster is required");
 		const maxRounds = positiveInteger(input.params.rounds, DEFAULT_ROUNDS);
-		const bestOf = positiveInteger(input.params.bestOf, Math.floor(team.length / 2) + 1);
+		const { bestOf } = clampBestOf(input.params.bestOf, team.length);
 		const aggregate = input.params.aggregate === "unanimity" ? "unanimity" : "majority";
 
 		const usages: AgentResult["usage"][] = [];

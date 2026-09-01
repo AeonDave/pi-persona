@@ -64,6 +64,28 @@ test("claim allows disjoint write sets", () => {
 	assert.equal(second.ok, true);
 });
 
+test("ask NACKs more than maxAsksFromTo pending asks from the same sender to the same target", () => {
+	let state = emptyLedger();
+	for (let i = 1; i <= LEDGER_LIMITS.maxAsksFromTo; i++) {
+		const opened = applyLedgerEvent(state, ask({
+			ask_id: `ask-${i}`,
+			work_key: `wk-${i}`,
+			msg_id: `msg-ask-${i}`,
+		}));
+		assert.equal(opened.ok, true, `ask ${i}`);
+		if (!opened.ok) return;
+		state = opened.state;
+	}
+	const overflow = applyLedgerEvent(state, ask({
+		ask_id: "ask-overflow",
+		work_key: "wk-overflow",
+		msg_id: "msg-ask-overflow",
+	}));
+	assert.equal(overflow.ok, false);
+	if (overflow.ok) return;
+	assert.match(overflow.error, /ask limit from "sess-a" to "sess-b"/);
+});
+
 test("ask NACKs missing/self to_session and one pending ask per (work_key, to)", () => {
 	const opened = applyLedgerEvent(emptyLedger(), ask());
 	assert.equal(opened.ok, true);

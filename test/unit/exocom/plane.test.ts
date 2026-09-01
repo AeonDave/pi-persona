@@ -526,6 +526,9 @@ test("an artifact claim is honoured only when the payload on disk is this worksp
 		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(got.length, 1, "an honest spill still lands");
 		assert.equal(got[0]?.msg_id, honest);
+		const delivered = JSON.parse(got[0]?.text ?? "{}") as { path?: string };
+		assert.match(delivered.path ?? "", /received[/\\]/, "the model is pointed at a snapshot, not the sender-mutable spill");
+		assert.equal(readFileSync(delivered.path!, "utf8").length, 20_000);
 	} finally { await sender.stop(); await reader.stop(); }
 });
 

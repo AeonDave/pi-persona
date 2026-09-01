@@ -362,6 +362,42 @@ test("steer on an unconnected handle is a harmless no-op (returns false)", async
 	}
 });
 
+test("steer to an expect()ed handle buffers until register, then flushes", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		host.expect("child#1");
+		assert.equal(host.steer("child#1", "focus on tests"), true, "spawn→connect is delivered, not lost");
+		const { send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "steer"));
+		const steer = frames.find((f) => f.t === "steer");
+		assert.ok(steer && steer.t === "steer");
+		assert.equal(steer.text, "focus on tests");
+	} finally {
+		await host.close();
+	}
+});
+
+test("forget() drops a buffered steer so a failed spawn is not reported as delivered later", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		host.expect("child#1");
+		assert.equal(host.steer("child#1", "stale"), true);
+		host.forget("child#1");
+		assert.equal(host.steer("child#1", "again"), false);
+		const { send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+		assert.equal(frames.some((f) => f.t === "steer"), false);
+	} finally {
+		await host.close();
+	}
+});
+
 test("close() is idempotent and unregisters all still-connected handles", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

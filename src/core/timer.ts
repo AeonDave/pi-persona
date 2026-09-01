@@ -65,10 +65,18 @@ export interface TimerSchedulerDeps {
 	minDelayMs?: number;
 	/** Maximum accepted delay (ms). Default 24h — guards against a runaway/typo alarm. */
 	maxDelayMs?: number;
+	/** Maximum simultaneously armed timers. Default 32 — the tool is model-callable, so a
+	 *  looping supervisor must not pin thousands of live OS timers. */
+	maxArmed?: number;
+	/** Maximum follow-up message length (chars). Default 4000 — the stored message is
+	 *  re-injected into context at fire time, so it is a budget, not a document. */
+	maxMessageChars?: number;
 }
 
 const DEFAULT_MIN_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 24 * 60 * 60 * 1_000;
+const DEFAULT_MAX_ARMED = 32;
+const DEFAULT_MAX_MESSAGE_CHARS = 4_000;
 
 interface Scheduled {
 	entry: TimerEntry;
@@ -79,6 +87,8 @@ export class TimerScheduler {
 	private readonly deps: TimerSchedulerDeps;
 	private readonly minDelayMs: number;
 	private readonly maxDelayMs: number;
+	private readonly maxArmed: number;
+	private readonly maxMessageChars: number;
 	private readonly timers = new Map<string, Scheduled>();
 	private seq = 0;
 
@@ -86,12 +96,20 @@ export class TimerScheduler {
 		this.deps = deps;
 		this.minDelayMs = deps.minDelayMs ?? DEFAULT_MIN_DELAY_MS;
 		this.maxDelayMs = deps.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+		this.maxArmed = deps.maxArmed ?? DEFAULT_MAX_ARMED;
+		this.maxMessageChars = deps.maxMessageChars ?? DEFAULT_MAX_MESSAGE_CHARS;
 	}
 
 	/** Arm a new alarm. Returns the entry on success, or a reason on rejection. */
 	arm(req: TimerArmRequest): TimerArmResult {
 		const message = (req.message ?? "").trim();
 		if (!message) return { ok: false, error: "timer needs a non-empty message (the follow-up injected when it fires)." };
+		if (message.length > this.maxMessageChars) {
+			return { ok: false, error: `timer message is too long (${message.length} chars; maximum ${this.maxMessageChars}). The follow-up is re-injected into context at fire time — keep it a pointer, not a document.` };
+		}
+		if (this.timers.size >= this.maxArmed) {
+			return { ok: false, error: `too many armed timers (${this.timers.size}; maximum ${this.maxArmed}). Cancel or let some fire before arming more.` };
+		}
 
 		const hasDelay = req.delayMs !== undefined;
 		const hasAt = req.atEpochMs !== undefined;

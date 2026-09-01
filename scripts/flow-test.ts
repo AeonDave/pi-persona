@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../src/agents/agent.ts";
-import { makeInProcessEngine } from "../src/engine/inproc.ts";
+import { makeInProcessEngine, type InProcessDeps } from "../src/engine/inproc.ts";
 import { flowHash, parseFlow } from "../src/orchestration/flow.ts";
 import { journalWriter } from "../src/orchestration/flow-journal.ts";
 import { runFlow } from "../src/orchestration/flow-run.ts";
@@ -31,9 +31,9 @@ const operator: AgentConfig = {
 };
 const engine = makeInProcessEngine({
 	resolveAgent: (n) => (n === "operator" ? operator : undefined),
-	modelRegistry: probe.modelRegistry,
+	modelRegistry: (probe as unknown as { modelRegistry: InProcessDeps["modelRegistry"] }).modelRegistry,
 	cwd: process.cwd(),
-	agentDir: join(homedir(), ".pi", "agent"),
+	agentDir: process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent"),
 	defaultModel: MODEL,
 });
 

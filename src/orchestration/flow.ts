@@ -106,3 +106,20 @@ export function parseFlow(content: string): FlowParse {
 	if (typeof raw.description === "string") flow.description = raw.description;
 	return { ok: true, flow };
 }
+
+/** Bind a parsed flow to the live strategy registry + team names. `parseFlow` is
+ *  structural (JSON + DAG); this is the discovery check so a typo cannot start a run. */
+export function verifyFlowRefs(
+	flow: FlowSpec,
+	known: { strategies: readonly string[]; teams: ReadonlySet<string> },
+): FlowParse {
+	for (const phase of flow.phases) {
+		if (!known.strategies.includes(phase.strategy)) {
+			return { ok: false, error: `unknown strategy "${phase.strategy}"` };
+		}
+		if (phase.roster && !known.teams.has(phase.roster)) {
+			return { ok: false, error: `unknown roster "${phase.roster}"` };
+		}
+	}
+	return { ok: true, flow };
+}

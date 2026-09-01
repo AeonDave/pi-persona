@@ -83,6 +83,16 @@ function run(task) {
 			},
 		});
 		process.exit(0);
+	} else if (task.includes("[provider-fail]")) {
+		// A pre-stream provider death: the request is rejected and pi exits non-zero BEFORE
+		// emitting a single assistant event — the evidence lives only in stderr.
+		process.stderr.write("Error: 429 rate limit exceeded (provider)\n");
+		process.exit(1);
+	} else if (task.includes("[flood-line]")) {
+		// One unterminated line over the engine's 1 MiB guard — stream noise. The engine
+		// must kill the child and fail LOUDLY, never drop the line and "succeed".
+		process.stdout.write("x".repeat(2 * 1024 * 1024));
+		process.exit(0);
 	} else if (task.includes("[fail]")) {
 		emit({
 			type: "message_end",

@@ -27,6 +27,21 @@ function cancelled(results: AgentResult[], upstream: string): AgentResult {
 	};
 }
 
+function failed(results: AgentResult[], upstream: string, step: AgentResult): AgentResult {
+	const cause = step.error ?? step.output ?? "failed";
+	const failedStep = `--- failed step (${step.agent}): ${cause} ---`;
+	const result: AgentResult = {
+		agent: "pipeline",
+		output: upstream ? `${upstream}\n\n${failedStep}` : (step.output || failedStep),
+		usage: results.length > 0 ? sumUsage(results.map((r) => r.usage)) : emptyUsage(),
+		ok: false,
+	};
+	if (step.error) result.error = step.error;
+	if (step.failureKind) result.failureKind = step.failureKind;
+	if (step.structured) result.structured = step.structured;
+	return result;
+}
+
 export const pipeline: Strategy = {
 	name: "pipeline",
 	async run(input, sdk) {
@@ -52,7 +67,7 @@ export const pipeline: Strategy = {
 				// only consulted BETWEEN steps. Report it as a cancelled chain that keeps the
 				// upstream work, not as a failed step whose empty output replaces it.
 				if (r.failureKind === "abort") return cancelled(results, upstream);
-				break; // a failed step stops the chain — its dependents can't build on nothing
+				return failed(results, upstream, r);
 			}
 			if (r.output) upstream = r.output;
 		}

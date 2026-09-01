@@ -3207,16 +3207,16 @@ test("two concurrent runs of ONE flow hold separate subtrees too", async () => {
 		flow.execute("flow-b", { name: "rootid", task: "review" }, undefined, undefined, ctx),
 	]);
 
-	const peak = sizes.lastIndexOf(8);
+	const peak = sizes.lastIndexOf(6);
 	assert.ok(
 		peak >= 0,
-		`both flow runs must be live at once and saturate the bounded 8-row widget; frame sizes were [${sizes}]`,
+		`both flow runs must be live at once (2 × flow-root + 2 phases); frame sizes were [${sizes}]`,
 	);
 	const distinctSizes = sizes.slice(peak).filter((size, index, all) => index === 0 || size !== all[index - 1]);
 	assert.deepEqual(
 		distinctSizes,
-		[8, 6, 0],
-		"terminal-status repaint aside, the first flow removes only its subtree and leaves the other six rows visible",
+		[6, 3, 0],
+		"an unknown strategy fails after the phase tree is seeded, before cores spawn — the first flow removes only its subtree",
 	);
 });
 

@@ -150,6 +150,64 @@ test(
 	},
 );
 
+test("runChildAgent fails LOUDLY on an unterminated >1 MiB line instead of silently dropping it", async () => {
+	const r = await runChildAgent({ task: "noise [flood-line]" }, undefined, { resolveInvocation: resolveFake, killGraceMs: 200 });
+	assert.equal(r.ok, false, "a flooded leg never 'succeeds' on truncated output");
+	assert.match(r.errorMessage ?? "", /unterminated line/, "the cause is named");
+});
+
+test("runChildAgent scrubs stale broker wiring from the inherited env", async () => {
+	// A supervisor whose OWN env carries PI_PERSONA_BUS (left over from a broker session)
+	// must not boot a plain child's bridge against a dead endpoint. The adapter re-adds
+	// the wiring via opts.env when a broker is actually live.
+	process.env.PI_PERSONA_BUS = "stale-endpoint";
+	process.env.PI_PERSONA_HANDLE = "stale-handle";
+	try {
+		const r = await runChildAgent({ task: "check [env]" }, undefined, { resolveInvocation: resolveFake });
+		assert.equal(r.ok, true);
+		assert.match(r.output, /PI_PERSONA_BUS=unset/, "inherited PI_PERSONA_BUS is scrubbed");
+		assert.match(r.output, /PI_PERSONA_HANDLE=unset/, "inherited PI_PERSONA_HANDLE is scrubbed");
+		// …but a deliberate opts.env wiring (the live-broker path) still reaches the child.
+		const r2 = await runChildAgent({ task: "check [env]" }, undefined, {
+			resolveInvocation: resolveFake,
+			env: { PI_PERSONA_BUS: "live-endpoint", PI_PERSONA_HANDLE: "h-1" },
+		});
+		assert.match(r2.output, /PI_PERSONA_BUS=live-endpoint/, "opts.env wiring wins deliberately");
+		assert.match(r2.output, /PI_PERSONA_HANDLE=h-1/);
+	} finally {
+		delete process.env.PI_PERSONA_BUS;
+		delete process.env.PI_PERSONA_HANDLE;
+	}
+});
+
+test("runChildAgent settles even when the tree-kill fails and 'close' never arrives", async () => {
+	// A wedged kill (taskkill failure, a process handle that never closes) used to hang the
+	// run promise FOREVER — the strategy above it never settled. The last-resort timer
+	// settles it as a failure instead. The stubbed tree-kill does nothing, so the stray
+	// child is really killed afterwards to keep the test process exitable.
+	let strayPid: number | undefined;
+	const r = await runChildAgent({ task: "stubborn [ignore-term]" }, undefined, {
+		resolveInvocation: resolveFake,
+		timeoutMs: 120,
+		killGraceMs: 100,
+		killProcessTree: (pid) => {
+			strayPid = pid;
+		},
+	});
+	try {
+		assert.equal(r.ok, false);
+		assert.equal(r.timedOut, true, "the idle timeout initiated the kill");
+	} finally {
+		if (strayPid !== undefined) {
+			try {
+				process.kill(strayPid, "SIGKILL"); // cleanup only — SIGKILL can't be caught
+			} catch {
+				/* already gone (POSIX group SIGKILL got it) */
+			}
+		}
+	}
+});
+
 test("runChildAgent startup-deadline kills a child that makes NO progress within startupTimeoutMs", async () => {
 	// [sleep] emits nothing (a stalled init: e.g. a headless mcp:true leg whose MCP adapter hangs).
 	// The idle window is long here, so ONLY the startup deadline can settle it.

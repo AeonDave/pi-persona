@@ -89,6 +89,42 @@ test("extractJsonCandidate: balanced scan handles nested/escaped braces in JSON 
 	assert.deepEqual(JSON.parse(extractJsonCandidate(bareMixed)), { result: "pass" });
 });
 
+test("extractJsonCandidate: a trailing bracketed token must not shadow the real answer object", () => {
+	// A correct answer followed by prose that itself parses as JSON ("[2]") used to be
+	// returned as THE candidate: the real object was never tried and the leg failed
+	// "expected a JSON object".
+	const bracketed = '{"result":"ship it","vote":"x"}\n\nI picked option [2] because of the above.';
+	assert.deepEqual(JSON.parse(extractJsonCandidate(bracketed)), { result: "ship it", vote: "x" });
+});
+
+test("parseAndValidate walks candidates until one VALIDATES, not just parses", () => {
+	// Trailing prose with a bracketed token: "[2]" parses but is not a contract object;
+	// the real object behind it is.
+	const bracketed = '{"result":"ship it","vote":"x"}\n\nI picked option [2] because of the above.';
+	const r = parseAndValidate(bracketed, DEFAULT_CONTRACT);
+	assert.equal(r.ok, true);
+	assert.equal(r.value?.result, "ship it");
+
+	// Trailing prose with braces: the balanced slice from the last "}" spans into the
+	// prose and fails; the earlier balanced object is the answer.
+	const braced = '{"result":"ship it"}\n\nDone {thanks}.';
+	const r2 = parseAndValidate(braced, DEFAULT_CONTRACT);
+	assert.equal(r2.ok, true);
+	assert.equal(r2.value?.result, "ship it");
+
+	// A genuinely invalid output still fails, reporting validation errors of the best
+	// parseable candidate rather than a later garbage one.
+	const wrongShape = '### 1. finding\n\n[{"a":1}]';
+	const r3 = parseAndValidate(wrongShape, DEFAULT_CONTRACT);
+	assert.equal(r3.ok, false);
+	assert.match(r3.error ?? "", /contract default failed/);
+
+	// No parseable JSON at all keeps the classic error.
+	const r4 = parseAndValidate("no json here", DEFAULT_CONTRACT);
+	assert.equal(r4.ok, false);
+	assert.match(r4.error ?? "", /not valid JSON/);
+});
+
 test("DEFAULT_CONTRACT requires result and declares the voting/judging fields", () => {
 	assert.equal(DEFAULT_CONTRACT.name, "default");
 	assert.equal(DEFAULT_CONTRACT.fields.result?.required, true);

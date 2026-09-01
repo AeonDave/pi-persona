@@ -260,6 +260,9 @@ export function registerExocomTools(
 		): Promise<{ content: [{ type: "text"; text: string }]; details: ExocomSendDetails }> {
 			const plane = getPlane();
 			if (!plane) throw new Error("exocom is not active for this persona");
+			if (params.target === "*" && params.in_reply_to) {
+				throw new Error('exocom_send: target "*" cannot carry in_reply_to — a broadcast cannot be a reply (N−1 peers would reject it).');
+			}
 			if (params.target === "*") {
 				const peers = plane.listPeers();
 				const sent: Array<{ target: string; msg_id: string }> = [];

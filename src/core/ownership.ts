@@ -13,7 +13,11 @@ interface NormalizedWritePath {
 
 export function normalizeWritePath(raw: string): NormalizedWritePath {
 	const trimmed = raw.trim();
-	const windows = process.platform === "win32" || trimmed.includes("\\") || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\");
+	// Case-folding is decided PER PATH by its syntax, never by the host platform: a plan is
+	// authored on one OS and may execute on another, so the overlap answer must not change
+	// with the machine. Backslashes, a drive letter, or a UNC prefix mark a Windows path
+	// (case-insensitive); plain slash-separated ownership names stay case-sensitive.
+	const windows = trimmed.includes("\\") || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\");
 	const normalized = (windows ? win32.normalize(trimmed) : posix.normalize(trimmed)).replaceAll("\\", "/");
 	const value = normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
 	return { value: windows ? value.toLowerCase() : value, windows };

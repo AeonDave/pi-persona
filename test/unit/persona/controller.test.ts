@@ -48,6 +48,7 @@ class MockHost implements PersonaHost {
 	setStatus(text: string | undefined): void {
 		this.status = text;
 	}
+	warn?: (message: string) => void;
 }
 
 test("activate restricts tools and sets status; deactivate restores the full registry", async () => {
@@ -103,6 +104,18 @@ test("a declared-but-unavailable model keeps the current model (no override, no 
 	await c.activate(p("name: m\npersona: true\nmodel: ghost/none"));
 	assert.equal(host.model?.id, "b");
 	await c.deactivate();
+	assert.equal(host.model?.id, "b");
+});
+
+test("a declared-but-unavailable model warns through the host when warn is provided", async () => {
+	const warnings: string[] = [];
+	const host = new MockHost();
+	host.warn = (message) => {
+		warnings.push(message);
+	};
+	const c = new PersonaController(host, true);
+	await c.activate(p("name: m\npersona: true\nmodel: ghost/none"));
+	assert.match(warnings.join("\n"), /ghost\/none/);
 	assert.equal(host.model?.id, "b");
 });
 
