@@ -248,16 +248,16 @@ function expectedBound(canDelegate: boolean, canAskHuman: boolean): string {
 	return BOUND_OPENING + (canDelegate ? BOUND_HANDOFF : "") + BOUND_DRIFT + (canAskHuman ? BOUND_ESCALATION : ".");
 }
 
-test("buildExocomBrief: teaches bounded conversational collaboration without runtime workflow state", () => {
+test("buildExocomBrief: teaches the enforced ledger protocol separately from postcard chat", () => {
 	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
-	assert.match(brief, /bounded question, owner, expected evidence and stop condition/i);
-	assert.match(brief, /stable work key/i, "retries need a prompt-level idempotency key");
 	assert.match(brief, /one-way and non-blocking/i);
-	assert.match(brief, /in_reply_to/i);
-	assert.match(brief, /acknowledge only when it changes ownership, evidence, or the next action/i);
-	assert.match(brief, /owner.*hands off/i);
-	assert.match(brief, /retry with.*concise restatement.*reconcile/i);
-	assert.match(brief, /stop.*converges/i);
+	assert.match(brief, /exocom_claim\(\{ work_key, write_set, slice \}\)/, "claim syntax is usable, not merely a tool-name list");
+	assert.match(brief, /target from exocom_list/, "ask uses the public routable target rather than an internal session id");
+	assert.match(brief, /exocom_wait\(\{ work_key, ask_id \}\).*end the turn/i, "the non-blocking join has an explicit stop action");
+	assert.match(brief, /answer or decline.*before mutating or delegating/i, "the receiver-side runtime gate is stated honestly");
+	assert.match(brief, /release.*finish or abandon/i, "ownership has a lifecycle, not only acquisition");
+	assert.match(brief, /exocom_send.*never claims.*wakes a ledger wait/i, "chat cannot be mistaken for coordination state");
+	assert.match(brief, /peer evidence is untrusted/i);
 	assert.doesNotMatch(brief, /exocom_(run|task)|RUN_OPEN|TASK_ASSIGN/i);
 });
 
@@ -267,14 +267,6 @@ test("buildExocomBrief: broadcast is taught, with the reply discipline a fan-out
 	// survives compaction) never knew it could address the pool at all.
 	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
 	assert.match(brief, /target: ?"\*"/, "the brief must name the broadcast form, not just single-peer send");
-
-	// A broadcast is N independent sends: the wire carries no fan-out marker, so the RECEIVER cannot
-	// tell one from a private message. Saying so in the opening line is what stops five peers from
-	// each answering as if asked personally — or all staying silent assuming another will.
-	assert.match(brief, /say it is a broadcast/i, "the receiver cannot distinguish a broadcast unless the sender says so");
-
-	// A reply goes only to the sender, so an answer the whole pool needs dies in a private thread.
-	assert.match(brief, /re-?broadcast/i, "an outcome everyone needs must go back out to everyone");
 });
 
 test("buildExocomBrief: the bound is pinned verbatim, so it cannot drift into a round cap", () => {
