@@ -16,7 +16,7 @@ import type net from "node:net";
 import { dirname, join, resolve } from "node:path";
 
 import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
-import { frameSigningPayload, isExocomFrame, nextHops, parseExocomArtifactDescriptor, truncateForInject, type AgentCard, type ExocomAck, type ExocomArtifactDescriptor, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack } from "./envelope.ts";
+import { frameSigningPayload, isExocomFrame, isSemanticFrame, nextHops, parseExocomArtifactDescriptor, truncateForInject, type AgentCard, type ExocomAck, type ExocomArtifactDescriptor, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack, type ExocomSemanticFrame } from "./envelope.ts";
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
 import { isAlive, normalizePeerName, prune, readAll, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
@@ -36,6 +36,8 @@ export interface ExocomPlaneDeps {
 	identity: ExocomIdentity;
 	getCard: () => AgentCard;
 	onInbound: (m: ExocomMessage, fromEntry: RegistryEntry | undefined) => ExocomInboundResult;
+	/** Semantic collaboration frames (claim/ask/answer/progress/release). Unset ⇒ ACK bytes only. */
+	onSemantic?: (frame: ExocomSemanticFrame, fromEntry: RegistryEntry) => ExocomInboundResult;
 	/** Fired when the live pool changes without our own action — a peer's `bye` (clean shutdown)
 	 *  removes it from the registry, so the widget should refresh at once rather than wait for the
 	 *  next heartbeat tick. Optional; unset ⇒ no-op. */
@@ -203,7 +205,7 @@ async function bindServer(netImpl: typeof import("node:net"), endpoint: string, 
 /** Connect, write one frame, and resolve with the peer's ack (or reject on a signed nack).
  *  Bounded by an unref'd `ackTimeoutMs` (R4): a peer that accepts the connection and then
  *  never replies (frozen, wedged) must not hang the caller's turn forever. */
-function sendFrame(netImpl: typeof import("node:net"), endpoint: string, frame: ExocomMessage, ackTimeoutMs: number, expected: RegistryEntry): Promise<ExocomAck> {
+function sendFrame(netImpl: typeof import("node:net"), endpoint: string, frame: ExocomFrame & { msg_id: string }, ackTimeoutMs: number, expected: RegistryEntry): Promise<ExocomAck> {
 	return new Promise((resolve, reject) => {
 		const socket = netImpl.connect(endpoint);
 		let settled = false;
@@ -484,6 +486,25 @@ export class ExocomPlane {
 		return dedupeDisplayNames(live).filter((e) => e.session_id !== identity.session_id);
 	}
 
+	/** Resolve the same public target emitted by `exocom_list` to its authenticated registry
+	 * identity. Work-ledger frames persist raw session ids, so callers must canonicalize through
+	 * this seam before committing an addressed event. */
+	resolvePeer(target: string): DisplayPeer {
+		const peers = this.listPeers();
+		if (isRoutingToken(target)) {
+			const qualified = peers.find((entry) => entry.target === target);
+			if (qualified) return qualified;
+			const namesake = peers.find((peer) => peer.displayName === target);
+			throw new Error([
+				`exocom: unknown qualified target "${target}"`,
+				namesake ? ` — a live peer holds that string as its display name; address it as "${namesake.target}"` : "",
+			].join(""));
+		}
+		const entry = peers.find((peer) => peer.displayName === target);
+		if (!entry) throw new Error(`exocom: unknown peer "${target}"`);
+		return entry;
+	}
+
 	/** Read-only live pool used for human labels. Unlike listPeers(), this never prunes: an
 	 * authenticated inbound sender may be just past its heartbeat window while its socket is
 	 * still serving the message. The same liveness predicate keeps numbering aligned with the
@@ -675,6 +696,31 @@ export class ExocomPlane {
 					}
 					return;
 				}
+				case "claim":
+				case "ask":
+				case "answer":
+				case "progress":
+				case "release": {
+					if (!isSemanticFrame(raw)) return;
+					const entry = this.lookupPeer(raw.from_session);
+					if (!entry || !verifyFrameOrigin(raw, entry)) {
+						write(this.nack(raw.msg_id, "authentication failed"));
+						return;
+					}
+					let disposition: ExocomInboundResult | undefined;
+					try {
+						disposition = this.deps.onSemantic ? this.deps.onSemantic(raw, entry) : { accepted: true };
+					} catch {
+						write(this.nack(raw.msg_id, "receiver rejected frame"));
+						return;
+					}
+					if (disposition?.accepted === false) {
+						write(this.nack(raw.msg_id, disposition.reason.slice(0, 256) || "receiver rejected frame"));
+						return;
+					}
+					write(this.ack(raw.msg_id));
+					return;
+				}
 				default:
 					return; // ack/nack land on a SENDER's own connection, never here
 			}
@@ -815,7 +861,41 @@ export class ExocomPlane {
 		return { msg_id };
 	}
 
+	/** Point-to-point send of a semantic frame. Transport ACK still means bytes received (and ledger-accepted if the peer applied it). */
+	async sendSemantic(target: string, unsigned: ExocomSemanticFrame): Promise<{ msg_id: string }> {
+		const { agentDir, hash } = this.deps;
+		const entry = this.resolvePeer(target);
+		const frame = this.signFrame(unsigned);
+		try {
+			await sendFrame(this.netImpl, entry.endpoint, frame, this.ackTimeoutMs, entry);
+		} catch (err) {
+			if (err instanceof PeerNackError) throw new ExocomPeerRejection(target, err.message);
+			if (err instanceof AckTimeoutError) throw new Error(`exocom: ack timeout from "${target}"`);
+			if (err instanceof PeerAuthenticationError || err instanceof PeerProtocolError) {
+				removeEntryIfMatches(agentDir, hash, entry);
+				throw new Error(`${err.message} from "${target}"`);
+			}
+			if (!isRestartingError(err)) {
+				removeEntryIfMatches(agentDir, hash, entry);
+				throw new Error(`exocom: peer "${target}" unreachable`);
+			}
+			await delay(RECONNECT_DELAY_MS);
+			try {
+				await sendFrame(this.netImpl, entry.endpoint, frame, this.ackTimeoutMs, entry);
+			} catch (err2) {
+				if (err2 instanceof PeerNackError) throw new ExocomPeerRejection(target, err2.message);
+				if (err2 instanceof AckTimeoutError) throw new Error(`exocom: ack timeout from "${target}"`);
+				removeEntryIfMatches(agentDir, hash, entry);
+				if (err2 instanceof PeerAuthenticationError || err2 instanceof PeerProtocolError) throw new Error(`${err2.message} from "${target}"`);
+				throw new Error(`exocom: peer "${target}" unreachable`);
+			}
+		}
+		this.sentTo.set(entry.session_id, (this.sentTo.get(entry.session_id) ?? 0) + 1);
+		return { msg_id: frame.msg_id };
+	}
+
 	async stop(): Promise<void> {
+
 		const { agentDir, hash, identity } = this.deps;
 		const bye: ExocomBye = this.signFrame({ kind: "bye", from_session: identity.session_id, from_endpoint: identity.endpoint });
 		try {

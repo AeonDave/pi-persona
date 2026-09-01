@@ -130,8 +130,7 @@ These are the guardrails a contributor must not violate. They are enforced in co
 
 Downward-only, acyclic dependencies: `core ← all`; `engine`/`bus → core`; `orchestration →
 engine + bus + core`; `persona → orchestration + core`; `exocom → core + bus` (it reuses the
-fence and the broker's wire framing); `tools`/`ui → lower layers`;
-`extension.ts` wires everything to `pi.*`.
+fence and the broker's wire framing); `tools`/`ui → lower layers`; `src/extension/*` is extracted factory internals (must not import `extension.ts`); `extension.ts` remains the only composition root (`package.json` `pi.extensions` → `./src/extension.ts`).
 
 - **`src/agents/`** — the agent definition (`agent.ts`: `AgentConfig`/`parseAgent`, the
   `persona: false` sibling of the persona parser; both share one frontmatter engine).
@@ -162,7 +161,9 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
   bind/join/teardown + reconnect), `registry.ts` (workspace-scoped presence + stale pruning),
   `paths.ts` (pure path layout), `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
   delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
-  `guards.ts` (`SenderBudget`/`SeenMessages`).
+  `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (workspace JSONL work ledger),
+  `wait.ts`/`gate.ts` (non-blocking join + inbound constrained-turn allowlist),
+  `install.ts` (session-scoped plane + ledger + wait wiring; not an ExtensionFactory).
 - **`src/telemetry/`** — a generic, versioned observer/export contract for future plugins: projected
   lifecycle metadata only, never an agent-message router or control surface.
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
@@ -170,15 +171,19 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`;
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
   `persona.ts` for supervisor turns and in the engines for delegated legs).
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
-  tools). **`src/ui/`** — agent tree/overlay, model picker, `presentation.ts` (the shared
+  tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `presentation.ts` (the shared
   card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
   (token/usage formatting).
 - **`src/loader.ts`** — the discovery loader (`loadDefinitions`/`loadContracts`/`loadPresets`/
   `loadTeams`), the concrete read-side of the discovery precedence table.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
   `PI_PERSONA_BUS` is set (a broker child).
-- **`src/extension.ts`** — the single `ExtensionFactory`: wires tools/commands/hooks/engines,
-  `/doctor`, seeding.
+- **`src/extension.ts`** — the single `ExtensionFactory` (default export `piPersona`): still the
+  only file `package.json` `pi.extensions` names. Tools/commands stay registered here; Pi lifecycle,
+  prompt composition, the pending-ask tool gate, and engine construction were extracted to
+  `src/extension/hooks.ts`, `src/extension/engine.ts`, and leaf helpers in `src/extension/shared.ts`.
+  Those modules must not import the factory. Broker host state is declared before `installHooks` so
+  shutdown cannot TDZ on `brokerHostPromise`.
 
 ## The two engines
 
@@ -411,10 +416,16 @@ independent, top-level pi instances sharing a workspace — no parent/child rela
 other and message peer-to-peer. (The names encode the split: intercom = internal comm; exocom =
 external comm.)
 
-Exocom supplies fenced, one-way transport and presence; its collaboration grammar lives in the
-per-turn `buildExocomBrief` prompt guidance (identify the bounded question/owner/evidence/stop,
-use `in_reply_to` for a continued thread, retry and reconcile conversationally). It deliberately has
-no task/run workflow runtime.
+Exocom still supplies fenced one-way postcards and presence; chat `message` never mutates shared
+work state. On top of that, a workspace work ledger (`ledger.ts`, tools in `tools/exocom-work.ts`)
+records claims/asks/answers/releases. `exocom_ask` canonicalizes the public `exocom_list` target
+through `plane.resolvePeer` (raw session ids on the ledger, never the display name). A pending ask
+to this session constrains the turn (`gate.ts`: answer/decline plus read-only tools) and both the
+prompt and the gate render `pendingAskPrompt` — registry display name keyed by `from_session`, never
+envelope `from_name`. `exocom_wait` is non-blocking and wakes on a separate idle notifier from
+postcard `exocom_received` delivery. Clean shutdown releases this session's claims; a vanished
+registry owner is pruned on the next ledger transaction (live registry sessions are the lease).
+This is not a delegate/council replacement and not a task/run workflow runtime.
 
 - **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or `--exocom` (a `pi.registerFlag`
   convenience); additionally gated by the active persona's `canUseBus`, re-evaluated on every persona
