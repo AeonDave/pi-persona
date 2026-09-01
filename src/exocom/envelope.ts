@@ -15,13 +15,72 @@ export interface ExocomArtifactDescriptor {
 export interface ExocomBye { kind: "bye"; from_session: string; from_endpoint?: string; signature?: string; }
 export interface ExocomAck { kind: "ack"; msg_id: string; from_session?: string; signature?: string; }
 export interface ExocomNack { kind: "nack"; msg_id: string; error: string; from_session?: string; signature?: string; }
-export type ExocomFrame = ExocomMessage | ExocomBye | ExocomAck | ExocomNack;
+
+/** Semantic collaboration frames — ack/nack stay TRANSPORT. */
+export interface ExocomClaim {
+	kind: "claim"; work_key: string; from_session: string; from_name: string;
+	write_set: string[]; slice: string; msg_id: string; ts: string; signature?: string;
+}
+export interface ExocomAsk {
+	kind: "ask"; ask_id: string; work_key: string; from_session: string; from_name: string;
+	to_session: string; question: string; msg_id: string; ts: string; signature?: string;
+}
+export interface ExocomAnswer {
+	kind: "answer"; ask_id: string; work_key: string; from_session: string; from_name: string;
+	ok: boolean; evidence: string; msg_id: string; ts: string; signature?: string;
+}
+export interface ExocomProgress {
+	kind: "progress"; work_key: string; from_session: string; from_name: string;
+	note: string; msg_id: string; ts: string; signature?: string;
+}
+export interface ExocomRelease {
+	kind: "release"; work_key: string; from_session: string; from_name: string;
+	msg_id: string; ts: string; signature?: string;
+}
+export type ExocomSemanticFrame = ExocomClaim | ExocomAsk | ExocomAnswer | ExocomProgress | ExocomRelease;
+export type ExocomFrame = ExocomMessage | ExocomBye | ExocomAck | ExocomNack | ExocomSemanticFrame;
 
 const str = (v: unknown): v is string => typeof v === "string";
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const bounded = (v: unknown, max: number): v is string => str(v) && v.length > 0 && v.length <= max;
 const token = (v: unknown): v is string => bounded(v, 128) && /^[A-Za-z0-9._:-]+$/.test(v);
 const optionalBounded = (v: unknown, max: number): boolean => v === undefined || bounded(v, max);
+const metadata = (v: unknown, max: number): v is string =>
+	bounded(v, max) && !/[\p{Cc}\p{Zl}\p{Zp}<>]/u.test(v);
+const timestamp = (v: unknown): v is string =>
+	bounded(v, 128)
+	&& /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(v)
+	&& Number.isFinite(Date.parse(v));
+const writeSet = (v: unknown): v is string[] =>
+	Array.isArray(v) && v.length <= 64 && v.every((p) => str(p) && p.length > 0 && p.length <= 256);
+
+export function isSemanticFrame(v: unknown): v is ExocomSemanticFrame {
+	if (!v || typeof v !== "object") return false;
+	const o = v as Record<string, unknown>;
+	switch (o.kind) {
+		case "claim":
+			return token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
+				&& writeSet(o.write_set) && bounded(o.slice, 256) && token(o.msg_id) && timestamp(o.ts)
+				&& optionalBounded(o.signature, 512);
+		case "ask":
+			return token(o.ask_id) && token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
+				&& token(o.to_session) && o.to_session !== "*" && bounded(o.question, 4_096)
+				&& token(o.msg_id) && timestamp(o.ts) && optionalBounded(o.signature, 512);
+		case "answer":
+			return token(o.ask_id) && token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
+				&& typeof o.ok === "boolean" && bounded(o.evidence, 8_192)
+				&& token(o.msg_id) && timestamp(o.ts) && optionalBounded(o.signature, 512);
+		case "progress":
+			return token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
+				&& bounded(o.note, 4_096) && token(o.msg_id) && timestamp(o.ts)
+				&& optionalBounded(o.signature, 512);
+		case "release":
+			return token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
+				&& token(o.msg_id) && timestamp(o.ts) && optionalBounded(o.signature, 512);
+		default:
+			return false;
+	}
+}
 
 /** Fail-closed structural validation of an inbound frame (R5). */
 export function isExocomFrame(v: unknown): v is ExocomFrame {
@@ -38,6 +97,12 @@ export function isExocomFrame(v: unknown): v is ExocomFrame {
 			return token(o.msg_id) && optionalBounded(o.from_session, 128) && optionalBounded(o.signature, 512);
 		case "nack":
 			return token(o.msg_id) && bounded(o.error, 512) && optionalBounded(o.from_session, 128) && optionalBounded(o.signature, 512);
+		case "claim":
+		case "ask":
+		case "answer":
+		case "progress":
+		case "release":
+			return isSemanticFrame(v);
 		default: return false;
 	}
 }
@@ -51,6 +116,20 @@ export function frameSigningPayload(frame: ExocomFrame): string {
 		case "bye": return JSON.stringify([frame.kind, frame.from_session, frame.from_endpoint ?? null]);
 		case "ack": return JSON.stringify([frame.kind, frame.msg_id, frame.from_session ?? null]);
 		case "nack": return JSON.stringify([frame.kind, frame.msg_id, frame.error, frame.from_session ?? null]);
+		case "claim":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.from_session, frame.from_name,
+				frame.write_set, frame.slice, frame.ts]);
+		case "ask":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.ask_id, frame.work_key, frame.from_session, frame.from_name,
+				frame.to_session, frame.question, frame.ts]);
+		case "answer":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.ask_id, frame.work_key, frame.from_session, frame.from_name,
+				frame.ok, frame.evidence, frame.ts]);
+		case "progress":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.from_session, frame.from_name,
+				frame.note, frame.ts]);
+		case "release":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.from_session, frame.from_name, frame.ts]);
 	}
 }
 

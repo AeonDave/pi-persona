@@ -4011,6 +4011,175 @@ test("an inbound peer message tells the supervisor to reply to the stable qualif
 	}
 });
 
+test("the ledger protocol canonicalizes ask targets, gates the receiver, and survives answer-before-wait", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "ledger-session-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "ledger-session-b");
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("list-a", {}, undefined, undefined, ctxA);
+		const peer = (roster.details as { peers: Array<{ name: string; target: string }> }).peers.find((candidate) => candidate.name === "ledger-session-b" || candidate.target);
+		assert.ok(peer?.target, "the asker uses the only public session-pinned address exocom_list exposes");
+
+		const asked = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("ask-a", {
+			target: peer.target,
+			work_key: "ledger-e2e",
+			question: "Is src/auth.ts in your current write slice?",
+		}, undefined, undefined, ctxA);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+		await new Promise((resolve) => setTimeout(resolve, 150));
+
+		const blocked = b.fire("tool_call", { toolCallId: "blocked-edit", toolName: "delegate", input: {} }, ctxB);
+		assert.equal(blocked?.block, true, "a canonical pending ask activates the receiver-side tool gate");
+		assert.match(blocked?.reason ?? "", new RegExp(askId));
+		const askDelivery = b.sentMessages().find((sent) => (sent.message as { customType?: string }).customType === "exocom_received");
+		assert.ok(askDelivery, "wire delivery wakes the addressed peer even though the event is already durable in the shared ledger");
+
+		await (b.tool("exocom_answer") as { execute: AnyFn }).execute("answer-b", {
+			ask_id: askId,
+			work_key: "ledger-e2e",
+			ok: true,
+			evidence: "src/auth.ts is outside my claimed slice",
+		}, undefined, undefined, ctxB);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+
+		const waited = await (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-a", {
+			work_key: "ledger-e2e",
+			ask_id: askId,
+			timeoutMs: 5_000,
+		}, undefined, undefined, ctxA);
+		const waitText = String(waited.content?.[0]?.text ?? "");
+		assert.match(waitText, /already answered.*ok=true/i, "a fast answer is read from durable state instead of being lost before waiter registration");
+		assert.match(waitText, /> src\/auth\.ts is outside my claimed slice/, "answer evidence is delivered inside the peer-data fence");
+		assert.doesNotMatch(waitText, /End this turn|waiting on/i);
+
+		const unblocked = b.fire("tool_call", { toolCallId: "unblocked-edit", toolName: "delegate", input: {} }, ctxB);
+		assert.equal(unblocked?.block, undefined, "answering closes the constrained turn");
+
+		const askedLive = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("ask-live", {
+			target: peer.target,
+			work_key: "ledger-live-wake",
+			question: "Can I proceed with the parser slice?",
+		}, undefined, undefined, ctxA);
+		const liveAskId = (askedLive.details as { ask_id: string }).ask_id;
+		const armed = await (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-live", {
+			work_key: "ledger-live-wake",
+			ask_id: liveAskId,
+			timeoutMs: 5_000,
+		}, undefined, undefined, ctxA);
+		assert.match(String(armed.content?.[0]?.text ?? ""), /waiting on.*End this turn/i);
+		await (b.tool("exocom_answer") as { execute: AnyFn }).execute("answer-live", {
+			ask_id: liveAskId,
+			work_key: "ledger-live-wake",
+			ok: true,
+			evidence: "LIVE-WAKE-EVIDENCE",
+		}, undefined, undefined, ctxB);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		const liveWake = a.sentMessages()
+			.map((sent) => String((sent.message as { content?: string }).content ?? ""))
+			.find((content) => content.includes("LIVE-WAKE-EVIDENCE"));
+		assert.match(liveWake ?? "", /ask_id=.*ok=true/);
+		assert.match(liveWake ?? "", /> LIVE-WAKE-EVIDENCE/, "an armed wait is woken exactly through the fenced answer path");
+	} finally {
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("clean exocom shutdown releases write ownership for another live session", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "ledger-owner-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "ledger-owner-b");
+	let aStopped = false;
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+		await (a.tool("exocom_claim") as { execute: AnyFn }).execute("claim-a", {
+			work_key: "shutdown-release",
+			write_set: ["src/owned.ts"],
+			slice: "owner A",
+		}, undefined, undefined, ctxA);
+		await assert.rejects(
+			() => (b.tool("exocom_claim") as { execute: AnyFn }).execute("claim-b-blocked", {
+				work_key: "shutdown-release-b",
+				write_set: ["src"],
+				slice: "owner B",
+			}, undefined, undefined, ctxB),
+			/overlap/i,
+		);
+
+		await a.fire("session_shutdown", undefined, ctxA);
+		aStopped = true;
+		const reclaimed = await (b.tool("exocom_claim") as { execute: AnyFn }).execute("claim-b-after", {
+			work_key: "shutdown-release-b",
+			write_set: ["src"],
+			slice: "owner B",
+		}, undefined, undefined, ctxB);
+		assert.match(String(reclaimed.content?.[0]?.text ?? ""), /claimed shutdown-release-b/);
+	} finally {
+		if (!aStopped) await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a claim whose owner vanished from the live registry is pruned before the next claim transaction", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "ledger-crash-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "ledger-crash-b");
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+		await (a.tool("exocom_claim") as { execute: AnyFn }).execute("claim-crash-a", {
+			work_key: "crash-recovery",
+			write_set: ["src/recover.ts"],
+			slice: "owner that disappears",
+		}, undefined, undefined, ctxA);
+
+		const vanished = entryFileFor(cwd, "ledger-crash-a");
+		fs.rmSync(vanished, { force: true });
+		// A live heartbeat must not resurrect the vanished owner before the next claim commits.
+		fs.mkdirSync(vanished);
+		const recovered = await (b.tool("exocom_claim") as { execute: AnyFn }).execute("claim-after-crash", {
+			work_key: "crash-recovery-b",
+			write_set: ["src"],
+			slice: "live replacement",
+		}, undefined, undefined, ctxB);
+		assert.match(String(recovered.content?.[0]?.text ?? ""), /claimed crash-recovery-b/);
+	} finally {
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // buildExocomBrief's two conditional clauses are only as true as the facts the CALL SITE feeds it,
 // and that wiring is one line in before_agent_start: `canDelegate` must be read from the live
 // persona (holding the bus says nothing about `delegate` — `canUseBus` keys off `intercom` alone)

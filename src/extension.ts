@@ -11,20 +11,17 @@
  * isolation; see docs/ARCHITECTURE.md).
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, keyHint } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { type Static, Type } from "typebox";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
 import { resolveConfig } from "./core/config.ts";
-import { resolveModelRef } from "./core/models.ts";
-import { isThinkingLevel } from "./core/types.ts";
-import { type ContractDef, DEFAULT_CONTRACT } from "./core/contract.ts";
+import { type ContractDef } from "./core/contract.ts";
 import {
 	inspectLegacySeededSpines,
 	migratePristineSeededDefaults,
@@ -36,44 +33,72 @@ import {
 	type SpineLegacyResult,
 	type SpineLegacySelection,
 } from "./core/seed.ts";
-import { buildDelegationBrief, buildExocomBrief } from "./core/brief.ts";
-import { buildSessionAnchor } from "./core/time.ts";
-import { canDelegateTo, canFanOut, EXOCOM_TOOL_NAMES, type RunLimits } from "./core/capabilities.ts";
+import { buildDelegationBrief } from "./core/brief.ts";
+import { canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
-import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "./engine/adapter.ts";
-import { withModelFallback } from "./engine/fallback.ts";
-import { captureWorktreeArtifact, defaultGitExec, withWorktree, worktreePreflight } from "./engine/worktree.ts";
-import { type InProcessDeps, makeInProcessEngine } from "./engine/inproc.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, buildWaitTimeoutNote, compactTokens, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS, PeekWatcher, renderCompletion, runDurationLabel } from "./engine/async.ts";
-import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "./engine/stream.ts";
+import { type EngineAdapterBroker } from "./engine/adapter.ts";
+import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type EngineFactories } from "./extension/engine.ts";
+import { installHooks, type HookHost } from "./extension/hooks.ts";
+import {
+	canDeliverPersonaNotification,
+	expandDetailHint,
+	sanitizePeerField,
+	sendPersonaFollowUp,
+	type PendingAsk,
+} from "./extension/shared.ts";
+export {
+	agentNodeStatusForDelegate,
+	boundExocomInboundBatch,
+	canDeliverPersonaNotification,
+	canonicalExocomTelemetryTargets,
+	coachingDisabledHint,
+	exocomInboundBatchSize,
+	EXOCOM_INBOX_MAX,
+	exocomInboundDisposition,
+	expandDetailHint,
+	failureDetails,
+	fenceIntercomOutcome,
+	formatCouncilCallLabel,
+	formatExocomQueuedBatchToast,
+	formatExocomQueuedToast,
+	piPersonaToolErrorPatch,
+	reconcileAnsweredAsk,
+	sanitizeLabel,
+	sanitizePeerField,
+	sendPersonaFollowUp,
+	shouldReportHeartbeatFailure,
+	type ExocomQueuedToast,
+	type PendingAsk,
+} from "./extension/shared.ts";
+import { installExocom } from "./exocom/install.ts";
+import { registerDelegateTool } from "./tools/delegate-tool.ts";
+import { registerIntercomTool } from "./tools/intercom-tool.ts";
+import { registerTimerTool } from "./tools/timer.ts";
+import { registerCouncilTool } from "./tools/council.ts";
+import { registerFlowTool } from "./tools/flow.ts";
+import { registerModelsTool } from "./tools/models.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, compactTokens, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
-import { buildInboundDelivery, type InboundDecision } from "./exocom/inbound.ts";
-import { SeenMessages, SenderBudget } from "./exocom/guards.ts";
-import { EXOCOM } from "./exocom/limits.ts";
-import { endpoint as exocomEndpointFor, workspaceHash } from "./exocom/paths.ts";
-import { ExocomPlane, type DisplayPeer, type ExocomInboundResult } from "./exocom/plane.ts";
-import { prune as pruneExocom, type RegistryEntry } from "./exocom/registry.ts";
-import { registerExocomTools } from "./tools/exocom.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
 import { type FlowSpec, flowHash, parseFlow } from "./orchestration/flow.ts";
 import { journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
-import { Semaphore } from "./orchestration/parallel.ts";
 import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
-import type { AgentProgress, AgentRunSpec, AgentStatus, SteerFn, StrategyEngine } from "./orchestration/sdk.ts";
+import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
-import { compactMemberResult, formatCouncilResult, humanizeAggregateResult } from "./orchestration/render.ts";
+import { compactMemberResult } from "./orchestration/render.ts";
 import type { AgentResult, FailureKind } from "./orchestration/types.ts";
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, runPersonaStrategy } from "./persona/orchestrate.ts";
-import { expandCouncilPreset, resolveCouncilInvocation, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
+import { expandCouncilPreset, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
 import { bundledSpinePath, bundledWorkerSpinePath, readSpineFile, resolveSpine, type SpineSources } from "./persona/spine.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
-import { TELEMETRY_EVENT_NAME, type AgentKind as TelemetryAgentKind, type AgentStatus as TelemetryAgentStatus, type InstanceDescriptor, type PeerDescriptor, type TelemetryEvent } from "./telemetry/contract.ts";
+import { type AgentKind as TelemetryAgentKind, type AgentStatus as TelemetryAgentStatus } from "./telemetry/contract.ts";
 import { TelemetryProducer, type TelemetryAgentInput } from "./telemetry/producer.ts";
 import {
 	type PersonaConfigStore,
@@ -82,27 +107,13 @@ import {
 	withPersonaModels,
 	writePersonaConfigs,
 } from "./persona/config-store.ts";
-import {
-	CODENAMES,
-	DelegationLedger,
-	type DelegateView,
-	nameFor,
-	normalizeDelegateConcurrency,
-	runDelegate,
-	shortModel,
-	shouldRecordDelegationOutcome,
-	specOf,
-	unknownAgentError,
-	validateDelegationBrief,
-	validateParallelWriteSets,
-	wantsAsyncRun,
-} from "./tools/delegate.ts";
-import { formatInbox, type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS, runIntercom } from "./tools/intercom.ts";
-import { formatRemaining, renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
+import { shortModel } from "./tools/delegate.ts";
+import { formatInbox } from "./tools/intercom.ts";
+import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
-import { boundDisplayRows, compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
+import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
 import { formatUsage } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
@@ -125,31 +136,6 @@ const STALL_FLAG_MS = 90_000;
 
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = "persona";
-
-/**
- * Pi 0.84.x deliberately ignores an `isError` property returned by a tool's `execute()`.
- * Recoverable pi-persona failures still need their rich `details` for the compact renderers, so
- * throwing would discard useful operator context. Mark the result in details and repair the
- * host-visible error bit from the `tool_result` hook, where Pi explicitly supports it.
- */
-const PI_PERSONA_TOOL_ERROR = "__piPersonaToolError";
-
-function failureDetails<T extends object>(details: T): T & { __piPersonaToolError: true } {
-	return { ...details, [PI_PERSONA_TOOL_ERROR]: true };
-}
-
-export function piPersonaToolErrorPatch(details: unknown): { isError: true; details: Record<string, unknown> } | undefined {
-	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
-	const record = details as Record<string, unknown>;
-	if (record[PI_PERSONA_TOOL_ERROR] !== true) return undefined;
-	const clean = { ...record };
-	delete clean[PI_PERSONA_TOOL_ERROR];
-	return { isError: true, details: clean };
-}
-
-export function canDeliverPersonaNotification(orchestrating: boolean, processingDeferred: boolean, hostIdle: boolean): boolean {
-	return !orchestrating && !processingDeferred && hostIdle;
-}
 
 /** The Pi global agent dir, overridable via PI_AGENT_DIR (handy for tests/sandboxes). */
 function userAgentDir(): string {
@@ -184,66 +170,6 @@ export function listPeersForGroup(brokerPeers: ReadonlyMap<string, { label: stri
 		.map(([handle, p]) => ({ handle, label: p.label }));
 }
 
-/** exocom attribution-label sanitizer (I2): the resolved label is PEER-CONTROLLED registry data
- *  (`fromEntry.name`/`persona` — a peer writes its own registry entry) and is rendered OUTSIDE
- *  the quoted body. A CR/LF-laden name could otherwise inject pseudo-instructions into the
- *  supervisor's context. Reduce it to a bounded identifier before it reaches the canonical
- *  inbound builder. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
-function sanitizePeerField(value: string, max: number): string {
-	return value
-		.normalize("NFKC")
-		.replace(/[^A-Za-z0-9._/@:+#-]+/g, "-")
-		.replace(/-{2,}/g, "-")
-		.replace(/^[-._/@:+#]+|[-._/@:+#]+$/g, "")
-		.slice(0, max);
-}
-
-export function sanitizeLabel(s: string): string {
-	return sanitizePeerField(s, 80) || "peer";
-}
-
-/** The tail every routing token carries — the shape `ExocomPlane`'s own `isRoutingToken` tests
- * (exocom/plane.ts, private to that module). Deliberately un-anchored, exactly as there: a
- * call-sign may itself contain `@`, and the token built from it keeps the same protection. */
-const EXOCOM_ROUTING_TOKEN = /@[a-f0-9]{24}$/i;
-
-/** Resolve an exocom tool target into the stable session ids used by the telemetry graph.
- * Routing tokens contain only a hash of that id, so the dashboard must never guess by slicing
- * the token. Unknown/stale targets intentionally produce no edge; tool lifecycle still records
- * the failed call. */
-export function canonicalExocomTelemetryTargets(
-	peers: ReadonlyArray<Pick<DisplayPeer, "session_id" | "displayName" | "target">>,
-	target: string,
-): string[] {
-	if (target === "*") return peers.map((peer) => peer.session_id);
-	const exact = peers.find((peer) => peer.target === target);
-	if (exact) return [exact.session_id];
-	// `ExocomPlane.send`'s precedence, not a looser one: a routing token names ONE session and
-	// never degrades to a display name, because call-signs are unreserved (`normalizePeerName`
-	// keeps `@`) — a peer can register another's published token as its own label and would
-	// otherwise collect that peer's edge, message size included, for a message it never received.
-	if (EXOCOM_ROUTING_TOKEN.test(target)) return [];
-	const display = peers.find((peer) => peer.displayName === target);
-	return display ? [display.session_id] : [];
-}
-
-/** Translate the local guard decision into the transport ACK contract. An ACK means queued (or an
- * idempotent duplicate), never rendered or consumed by the receiving model. */
-export function exocomInboundDisposition(decision: InboundDecision): ExocomInboundResult {
-	if ("deliver" in decision) return { accepted: true };
-	if ("duplicate" in decision) return { accepted: true, duplicate: true };
-	return { accepted: false, reason: decision.drop };
-}
-
-export function formatExocomQueuedToast(label: string, inReplyTo: string | undefined): string {
-	return `exocom: ${inReplyTo === undefined ? "message" : "reply"} from ${label} queued`;
-}
-
-export interface ExocomQueuedToast {
-	label: string;
-	inReplyTo: string | undefined;
-}
-
 interface CommandResultEntry {
 	label: string;
 	content: string;
@@ -251,61 +177,6 @@ interface CommandResultEntry {
 	failureKind?: FailureKind;
 	error?: string;
 }
-
-/** One human toast for a burst; the semantic messages themselves remain in the idle-gated card. */
-export function formatExocomQueuedBatchToast(items: readonly ExocomQueuedToast[]): string {
-	if (items.length === 0) return "";
-	const first = items[0]!;
-	if (items.length === 1) return formatExocomQueuedToast(first.label, first.inReplyTo);
-	const counts = new Map<string, number>();
-	for (const item of items) counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
-	const senders = [...counts.entries()];
-	const visible = senders.slice(0, 3).map(([label, count]) => count > 1 ? `${label} ×${count}` : label);
-	const omitted = senders.length - visible.length;
-	return `exocom: ${items.length} messages/replies queued from ${visible.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`;
-}
-
-/** Bound the model-facing external-inbound burst while retaining the already-built attribution
- * and peer fence on every complete line that survives the head/tail sample. */
-export function boundExocomInboundBatch(items: readonly string[]): string {
-	return boundCompletionSurface(
-		items.join("\n\n"),
-		"exocom inbound batch truncated; remaining peer messages stay queued for later delivery",
-	);
-}
-
-/**
- * How many leading queued peer messages one inbound wake may carry. exocom has no receiver-side
- * inbox or result retrieval, so a message truncated INSIDE a delivery is lost outright — the batch
- * is therefore sized to what {@link boundExocomInboundBatch} renders whole, and the rest stays
- * queued in FIFO order for the next wake. Sizing by content rather than by a fixed item count is
- * what lets the drain keep pace with ordinary chatter: the wake gates (R6: 10s apart, 6/min) cap
- * the number of DELIVERIES, while each sender may send EXOCOM.SENDER_MAX_MSGS per minute, so a
- * one-message-per-wake drain falls permanently behind a handful of peers talking normally. A single
- * item over the whole budget still goes out alone (it is already head-truncated to
- * EXOCOM.INJECT_MAX_BYTES on arrival), so the queue can never wedge.
- */
-export function exocomInboundBatchSize(items: readonly string[]): number {
-	let chars = 0;
-	let count = 0;
-	for (const item of items) {
-		const withItem = chars + (count > 0 ? 2 : 0) + item.length; // 2 = the "\n\n" join
-		if (count > 0 && withItem > MAX_COMPLETION_REPORT_CHARS) break;
-		chars = withItem;
-		count += 1;
-	}
-	return Math.max(1, count);
-}
-
-/**
- * How many undelivered peer messages the inbox holds before further inbound messages are REFUSED
- * at the ACK (a signed nack the sender surfaces, not a silent drop). Sustained large messages drain
- * one per wake, which is slower than a single sender's permitted rate, so without a ceiling the
- * queue grows monotonically: memory climbs, every fresh message waits behind the whole backlog, and
- * a persona downgrade or shutdown discards all of it at once. This depth still absorbs a full
- * minute of bursting from three peers at their maximum permitted rate.
- */
-export const EXOCOM_INBOX_MAX = 3 * EXOCOM.SENDER_MAX_MSGS;
 
 /**
  * Keep the immediate operator-facing settlement toast and the semantic completion delivery on one
@@ -323,42 +194,6 @@ export function announceAsyncRunSettlement(
 	if (run.status === "stopped") notify?.(`async run ${id} (${agent}) stopped`, "info");
 	else if (run.status === "failed") notify?.(`async run ${id} (${agent}) failed: ${compactInlineText(run.error ?? "(no detail)", { maxChars: 240 })}`, "error");
 	enqueue(run);
-}
-
-/** Project a delegate leg without conflating an explicit abort with an execution failure. */
-export function agentNodeStatusForDelegate(view: Pick<DelegateView, "running" | "ok" | "failureKind">): AgentNodeStatus {
-	if (view.running) return "running";
-	if (view.failureKind === "abort") return "stopped";
-	return view.ok ? "done" : "failed";
-}
-
-/** One race-safe path for every extension-originated wake. */
-export function sendPersonaFollowUp(
-	pi: Pick<ExtensionAPI, "sendMessage">,
-	content: string,
-	customType = "pi-persona",
-): void {
-	const body = customType === "pi-persona" ? content.replace(/^\[pi-persona\]\s*/, "") : content;
-	pi.sendMessage(
-		{ customType, content: body, display: true },
-		{ deliverAs: "followUp", triggerTurn: true },
-	);
-}
-
-function expandDetailHint(): string {
-	try {
-		return keyHint("app.tools.expand", "to expand");
-	} catch {
-		// Renderers are also exercised by headless/test hosts where Pi's interactive theme and
-		// keybinding registry do not exist. The production TUI takes the branch above.
-		return "expand to see full detail";
-	}
-}
-
-export function formatCouncilCallLabel(strategy: string, roster: string): string {
-	const safeStrategy = compactInlineText(strategy, { maxChars: 80 }) || "?";
-	const safeRoster = compactInlineText(roster, { maxChars: 80 }) || "?";
-	return `council ${safeStrategy}${strategy === roster ? "" : ` · ${safeRoster}`}`;
 }
 
 /** Agents actually IN FLIGHT: a RUNNING node with no children of its own. "Has a parent" is not the
@@ -383,14 +218,6 @@ export function makeRootIdAllocator(): (prefix: string) => string {
 	};
 }
 
-/** One buffered blocking ask — carried with its `askId` so an answered ask can be reconciled out
- *  of the notifier (see {@link reconcileAnsweredAsk}) instead of waking the supervisor for a
- *  decision it has already made. */
-export interface PendingAsk {
-	askId: string;
-	text: string;
-}
-
 /** Bound a burst of blocking child questions before it becomes an automatic supervisor turn. Each
  * item is already individually fenced; the line-safe completion bound preserves those quote lines. */
 export function renderPendingAskBatch(asks: readonly PendingAsk[]): string {
@@ -400,55 +227,11 @@ export function renderPendingAskBatch(asks: readonly PendingAsk[]): string {
 	);
 }
 
-/** A child's blocking ask lands on TWO surfaces — the idle-gated notifier wake and the supervisor's
- *  bus inbox — and answering one leaves the other stale (a re-wake for an answered ask, or an
- *  envelope that re-surfaces in the next `inbox` with its "reply with id" tag). Answering IS the
- *  reconciliation point: drop the ask from both. Mirrors `completionNotifier.discard` on
- *  `intercom wait`. */
-export function reconcileAnsweredAsk(
-	askId: string,
-	notifier: { discard: (pred: (item: PendingAsk) => boolean) => void },
-	inbox: { takeWhere: (handle: string, pred: (env: { id: string }) => boolean) => unknown },
-	handle: string,
-): void {
-	notifier.discard((item) => item.askId === askId);
-	inbox.takeWhere(handle, (env) => env.id === askId);
-}
-
-/** Whether an exocom heartbeat failure is worth telling the user about. The tick runs on a timer,
- *  so reporting every one would spam a session that is otherwise fine; reporting none would hide a
- *  plane that has silently dropped out of every peer's pool (its entry goes stale after
- *  EXOCOM.STALE_AFTER_MS and never comes back). So: the first failure at once, then one reminder
- *  per ~10 ticks for as long as it keeps failing. A single successful tick resets the count. */
-export function shouldReportHeartbeatFailure(consecutiveFailures: number): boolean {
-	return consecutiveFailures === 1 || consecutiveFailures % 10 === 0;
-}
-
-/** The `intercom` bus actions echo text of two different provenances: `inbox` carries CHILD-authored
- *  message bodies (untrusted — the same text `drainBusBlock`/`peek` fence), while `list`/`reply`/
- *  `send` (and the empty-inbox placeholder) are supervisor-side. Fence only the former. */
-export function fenceIntercomOutcome(out: { text: string; details: { action: string; messages?: unknown[] } }, fence: (t: string) => string): string {
-	const untrusted = out.details.action === "inbox" && (out.details.messages?.length ?? 0) > 0;
-	return untrusted ? fence(out.text) : out.text;
-}
-
-export function coachingDisabledHint(personaName: string | undefined): string {
-	const who = sanitizeDisplayLabel(personaName ?? "default", "default");
-	return `(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
-}
-
 /** The engine constructors `buildEngine` builds through. Indirected via one object so the deps
  *  each backend is actually handed are observable: the child engine can be watched through a fake
  *  `pi` binary, but the in-process one — the DEFAULT backend — creates a real session that needs a
  *  live model and provider, so its wiring would otherwise have no witness at all. */
-export interface EngineFactories {
-	makeEngine: typeof makeEngine;
-	makeInProcessEngine: typeof makeInProcessEngine;
-}
-
-/** Frozen, so the production table is a constant rather than something a later import can swap
- *  out from under a running session. */
-const DEFAULT_ENGINE_FACTORIES: EngineFactories = Object.freeze({ makeEngine, makeInProcessEngine });
+export type { EngineFactories } from "./extension/engine.ts";
 
 /** Activation-scoped overrides. Pi's `ExtensionFactory` is `(pi) => void`, so it never passes a
  *  second argument and this is absent in production; a caller that does supply it substitutes
@@ -1291,744 +1074,37 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		};
 	}
 
-	// ── exocom (opt-in, T9): the EXTERNAL peer-to-peer plane ─────────────────────
-	// Independent top-level pi instances in this workspace discover + message each other
-	// directly (flat) — distinct from the broker/intercom plane above, which is strictly
-	// hierarchical (a supervisor and its OWN spawned children). Off by default (config.exocom /
-	// --exocom), additionally gated by the active persona's canUseBus capability; no active
-	// persona ⇒ unrestricted (mirrors delegationBrief's own reading of an absent capability set,
-	// rather than silently refusing to join for an unpersona'd session — see startExocom below).
-	let exocomPlane: ExocomPlane | undefined;
-	let exocomName = "";
-	let exocomBudget: SenderBudget | undefined;
-	let exocomSeen: SeenMessages | undefined;
-	let exocomNotifier: IdleCoalescingNotifier<string> | undefined;
-	/** Latched while the inbox is at EXOCOM_INBOX_MAX, so a peer hammering a full inbox produces one
-	 *  operator warning rather than one per refused message. */
-	let exocomInboxFull = false;
-	let exocomToastNotifier: IdleCoalescingNotifier<ExocomQueuedToast> | undefined;
-	let exocomHeartbeat: ReturnType<typeof setInterval> | undefined;
-	let exocomHeartbeatFailures = 0; // consecutive failed ticks — drives the report cadence, reset by any success
-	let exocomResetTimer: ReturnType<typeof setInterval> | undefined;
+	const exocom = installExocom(pi, {
+		pi,
+		get config() { return config; },
+		get controller() { return controller; },
+		get lastCtx() { return lastCtx; },
+		get disposed() { return disposed; },
+		get orchestrating() { return orchestrating; },
+		get processingDeferredOrchestration() { return processingDeferredOrchestration; },
+		get telemetry() { return telemetry; },
+		get delegationNudge() { return delegationNudge; },
+		userAgentDir,
+	});
 
-	// A tiny, stable name→color hash for the pool widget's swatch — exocom peers carry no
-	// persona "label colour" of their own to read, so this derives one deterministically
-	// instead of hardcoding one default for every peer.
-	const EXOCOM_PALETTE = ["#36F9F6", "#FF6B6B", "#FFD93D", "#6BCB77", "#4D96FF", "#C780FA", "#FF9F1C", "#00C2A8"];
-	function exocomColorFor(name: string): string {
-		let h = 0;
-		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-		return EXOCOM_PALETTE[h % EXOCOM_PALETTE.length]!;
-	}
-	// A distinctive per-instance call-sign (orion/vega/…) drawn from the delegate CODENAMES pool,
-	// derived by hashing the session_id so it's stable for the session (never re-randomises on a
-	// plane restart) yet spreads across the pool. Independent of the active persona — the persona
-	// is displayed alongside it, not baked into the name.
-	function exocomCodename(sessionId: string, taken: Set<string>): string {
-		// A deterministic starting point from the session, then the first call-sign NOT already held
-		// by a live peer — so N concurrent instances get N DISTINCT names (`hash % 16` alone collides
-		// ~18% of the time at just 3 instances). Only a >16-live run, or a rare simultaneous-start
-		// race (both read the registry before either registered), falls back to the hashed one and
-		// the display dedup ("orion#2").
-		let h = 0;
-		for (let i = 0; i < sessionId.length; i++) h = (h * 31 + sessionId.charCodeAt(i)) >>> 0;
-		const start = h % CODENAMES.length;
-		for (let i = 0; i < CODENAMES.length; i++) {
-			const name = CODENAMES[(start + i) % CODENAMES.length]!;
-			if (!taken.has(name)) return name;
-		}
-		return CODENAMES[start]!;
-	}
+	const buildEngine = createBuildEngine(() => ({
+		agents,
+		contractDefs,
+		controller,
+		host,
+		config,
+		personaConfigs,
+		lastCtx,
+		workerSpineText,
+		engineFactories,
+		makeBrokerDeps,
+		userAgentDir,
+		childPiSettingsEnv,
+		runLimits: RUN_LIMITS,
+		bus,
+		supervisorHandle: SUPERVISOR,
+	}));
 
-	function telemetrySessionId(ctx: ExtensionContext): string {
-		return (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? `legacy-${process.pid}`;
-	}
-
-	function currentTelemetryInstance(ctx: ExtensionContext): InstanceDescriptor {
-		const runtimeCtx = ctx as ExtensionContext & {
-			sessionManager?: { getSessionId?: () => string };
-			isIdle?: () => boolean;
-			getContextUsage?: () => { percent?: number } | undefined;
-		};
-		const sessionId = telemetrySessionId(ctx);
-		const displayName = exocomName || exocomCodename(sessionId, new Set());
-		return {
-			displayName,
-			persona: controller.activePersona?.name ?? "",
-			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
-			status: runtimeCtx.isIdle?.() === true ? "idle" : "active",
-			pid: process.pid,
-			// Clamped HERE, not merely in the producer's `sanitizeInstance`: that one runs only for
-			// `instance.started`, so an out-of-range reading would ride `instance.updated` and
-			// `instance.heartbeat` out to consumers, where the contract rejects the WHOLE event over
-			// the one bad field.
-			contextPercent: Math.max(0, Math.min(100, Math.round(runtimeCtx.getContextUsage?.()?.percent ?? 0))),
-			exocomEnabled: exocomPlane !== undefined,
-			color: exocomColorFor(displayName),
-		};
-	}
-
-	function publishTelemetryPeers(peers?: DisplayPeer[]): void {
-		const producer = telemetry;
-		if (!producer) return;
-		let pool = peers;
-		if (!pool) {
-			try { pool = exocomPlane?.listPeers() ?? []; } catch { pool = []; }
-		}
-		const now = Date.now();
-		const payload: PeerDescriptor[] = pool.map((peer) => ({
-			sessionId: peer.session_id,
-			displayName: peer.displayName,
-			persona: peer.persona,
-			model: peer.model,
-			contextPercent: peer.context_pct,
-			status: now - Date.parse(peer.heartbeat_at) > EXOCOM.QUIET_AFTER_MS ? "idle" : "online",
-			...(peer.color ? { color: peer.color } : {}),
-			sent: exocomPlane?.sentToPeer(peer.session_id) ?? 0,
-			received: exocomPlane?.receivedFromPeer(peer.session_id) ?? 0,
-		}));
-		producer.publish("peers.snapshot", { peers: payload });
-	}
-
-	// One row per live peer (the registry read itself IS the pool — each peer refreshes its
-	// own entry on its own heartbeat, so no ping fan-out is needed here). Best-effort/cosmetic,
-	// mirrors renderAgentWidget above.
-	function renderExocomWidget(): void {
-		if (!lastCtx || !exocomPlane) return;
-		// The pool read is disk I/O (readdir + a read per entry) and can fail like any other, so it
-		// is guarded too — otherwise "best-effort" would be false of the very first statement, and
-		// a registry hiccup would escape into whatever tick asked for a repaint. There is nothing
-		// to draw without it; the next heartbeat repaints.
-		let peers: DisplayPeer[];
-		try {
-			peers = exocomPlane.listPeers();
-		} catch {
-			return;
-		}
-		publishTelemetryPeers(peers);
-		try {
-			const now = Date.now();
-			const selfPersona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
-			const selfModel = sanitizePeerField(lastCtx.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "", 96);
-			const selfContextPct = Math.max(0, Math.min(100, Math.round(lastCtx.getContextUsage()?.percent ?? 0)));
-			const local = `📡 ${exocomName} (you)${selfPersona ? ` · ${selfPersona}` : ""} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
-			const peerRows = peers.map((p) => {
-							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
-							const name = sanitizePeerField(p.displayName, 48) || "peer";
-							const persona = sanitizePeerField(p.persona, 48);
-							const model = sanitizePeerField(p.model, 96);
-							const contextPct = Number.isFinite(p.context_pct) ? Math.max(0, Math.min(100, Math.round(p.context_pct))) : 0;
-							// Viewer-centric: THIS row's in/out is what WE exchanged with THIS peer, not
-							// the peer's own global self-report (which reads inverted from our side).
-							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${shortModel(model) || "?"} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}`;
-						});
-			const lines = boundDisplayRows(local, peerRows, 7, "exocom_list for the full pool");
-			lastCtx.ui.setWidget("persona-exocom", lines, { placement: "aboveEditor" });
-		} catch {
-			/* cosmetic — the widget is best-effort */
-		}
-		try {
-			lastCtx.ui.setStatus(
-				"persona-exocom",
-				`📡 ${exocomName} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
-			);
-		} catch {
-			/* cosmetic */
-		}
-	}
-
-	// Re-register with the CURRENT persona/model/context% (so a `/persona` switch or a model change
-	// is reflected, not a stale snapshot from session_start) and prune dead peers — one unref'd tick
-	// covers both heartbeat AND pool refresh. Routed through `plane.heartbeat` rather than a bare
-	// `writeEntry`: the plane re-attaches its ed25519 public key on every re-registration, including
-	// one that RE-CREATES an entry a peer deleted underneath us (plane.ts) — the key lives nowhere
-	// but this process, and an entry without it makes every frame we sign unverifiable.
-	function exocomHeartbeatTick(agentDir: string, hash: string, sessionId: string, ep: string, cwd: string): void {
-		const plane = exocomPlane;
-		if (!plane) return;
-		const persona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
-		const model = sanitizePeerField(lastCtx?.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "", 96);
-		const entry: RegistryEntry = {
-			session_id: sessionId,
-			name: exocomName,
-			persona,
-			purpose: controller.activePersona?.description ?? "",
-			color: exocomColorFor(exocomName),
-			model,
-			pid: process.pid,
-			endpoint: ep,
-			cwd,
-			context_pct: Math.round(lastCtx?.getContextUsage()?.percent ?? 0),
-			inbox: exocomNotifier?.peekPending().length ?? 0,
-			heartbeat_at: new Date().toISOString(),
-		};
-		plane.heartbeat(entry);
-		// Everything past the re-registration is local upkeep: sweeping OTHER instances' dead entries
-		// and repainting our own widget. Letting a failure there out would be counted as a heartbeat
-		// failure and tell the user "peers drop this instance from the pool" — which would be false,
-		// since the write above is exactly what keeps us in it. Only the registration decides that.
-		try {
-			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-			renderExocomWidget();
-		} catch (err) {
-			if (process.env.PI_PERSONA_DEBUG) {
-				process.stderr.write(`[pi-persona] exocom: pool upkeep failed after a good heartbeat: ${err instanceof Error ? err.message : String(err)}\n`);
-			}
-		}
-	}
-
-	// Join the plane for this session — called from session_start ONCE the persona is applied,
-	// so identity + the canUseBus gate reflect the persona actually active. Never throws: a
-	// bind/registry failure degrades to "exocom inactive", it must never block a normal session
-	// from starting (mirrors the broker host's own fire-and-forget-on-failure discipline).
-	async function startExocom(ctx: ExtensionContext): Promise<void> {
-		if (!(config.exocom || pi.getFlag("exocom") === true)) return;
-		if (!(controller.capabilities?.canUseBus ?? true)) return;
-		try {
-			const hash = workspaceHash(ctx.cwd);
-			const sessionId = ctx.sessionManager.getSessionId();
-			const agentDir = userAgentDir();
-			// Default instance name: a distinctive CALL-SIGN (orion/vega/…, the same pool a delegated
-			// sub-agent draws from), INDEPENDENT of the persona (shown separately) — picked collision-
-			// free against the LIVE peers so N instances get N distinct names. It is only a DEFAULT:
-			// the model can rebrand itself creatively via the `exocom_name` tool. The registry FILE is
-			// keyed by session_id, not by name, so the name is purely a display label.
-			const liveAtStart = pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-			const desired = exocomCodename(sessionId, new Set(liveAtStart.map((e) => e.name)));
-			exocomName = desired;
-			const ep = exocomEndpointFor(agentDir, hash, sessionId, process.platform);
-			const persona = sanitizePeerField(controller.activePersona?.name ?? "", 48);
-			const model = sanitizePeerField(ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", 96);
-			exocomBudget = new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES });
-			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
-			// Fenced, attributed follow-up delivery — idle-gated + rate-limited (R6), the same
-			// discipline completionNotifier/intercomNotifier/timerNotifier apply above, but through
-			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
-			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
-			exocomNotifier = new IdleCoalescingNotifier<string>({
-				isIdle: () => canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true),
-				deliver: (message) => sendPersonaFollowUp(pi, message, "exocom_received"),
-				// A burst of independent peers must not turn one idle wake into an unbounded model
-				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;
-				// boundCompletionSurface keeps complete lines (including quote prefixes) intact while
-				// retaining a bounded head/tail sample and an actionable drill-down marker.
-				render: boundExocomInboundBatch,
-				// Deliver whole peer messages — as many as one wake renders untruncated — and retain the
-				// rest in FIFO order; truncating a coalesced burst would silently lose communication that
-				// has no other retrieval path. Sized by content, so the drain keeps pace with ordinary
-				// traffic instead of being pinned to one message per wake (see exocomInboundBatchSize).
-				maxBatchItems: exocomInboundBatchSize,
-				setTimer: (fn, ms) => {
-					const h = setTimeout(fn, ms);
-					h.unref?.();
-					return h;
-				},
-				clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-				minIntervalMs: EXOCOM.DELIVER_MIN_INTERVAL_MS,
-				maxDeliveries: EXOCOM.DELIVER_MAX_PER_MIN,
-			});
-			exocomToastNotifier = new IdleCoalescingNotifier<ExocomQueuedToast>({
-				// This channel is human-only and deliberately independent from model idleness: it folds a
-				// burst of arrivals into one small receipt instead of emitting one toast per peer message.
-				isIdle: () => true,
-				deliver: (message) => {
-					try {
-						lastCtx?.ui.notify(message, "info");
-					} catch {
-						/* cosmetic */
-					}
-				},
-				render: formatExocomQueuedBatchToast,
-				setTimer: (fn, ms) => {
-					const h = setTimeout(fn, ms);
-					h.unref?.();
-					return h;
-				},
-				clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-				debounceMs: 200,
-			});
-			exocomPlane = new ExocomPlane({
-				agentDir,
-				hash,
-				identity: {
-					session_id: sessionId,
-					name: exocomName,
-					persona,
-					purpose: controller.activePersona?.description ?? "",
-					color: exocomColorFor(exocomName),
-					model,
-					endpoint: ep,
-					cwd: ctx.cwd,
-				},
-				getCard: () => ({
-					name: exocomName,
-					persona: sanitizePeerField(controller.activePersona?.name ?? "", 48),
-					model: sanitizePeerField(lastCtx?.model ? `${lastCtx.model.provider}/${lastCtx.model.id}` : "", 96),
-					context_pct: Math.round(lastCtx?.getContextUsage()?.percent ?? 0),
-					inbox: exocomNotifier?.peekPending().length ?? 0,
-				}),
-				onInbound: (msg, fromEntry) => {
-					const queued = exocomNotifier?.peekPending().length ?? 0;
-					if (queued >= EXOCOM_INBOX_MAX) {
-						if (!exocomInboxFull) {
-							exocomInboxFull = true;
-							try {
-								lastCtx?.ui.notify(`exocom: inbox full (${queued} undelivered peer messages) — refusing further messages until it drains.`, "warning");
-							} catch {
-								/* cosmetic */
-							}
-						}
-						return { accepted: false, reason: `receiver inbox full (${queued} queued) — retry once it drains` };
-					}
-					exocomInboxFull = false;
-					// Attribution from the REGISTRY entry keyed by the connecting session — never from
-					// msg.from_name (the envelope's own self-report, not to be trusted; see inbound.ts).
-					// Sanitized (I2): fromEntry.name/persona are PEER-WRITTEN registry fields, and
-					// The inbound builder places this label OUTSIDE the quote — a CR/LF-laden name must
-					// not be able to inject pseudo-instructions there.
-					const peerName = sanitizePeerField(
-						fromEntry ? (exocomPlane?.humanDisplayLabelFor(fromEntry) ?? fromEntry.name) : msg.from_session,
-						48,
-					) || "peer";
-					const peerPersona = sanitizePeerField(fromEntry?.persona ?? "", 48);
-					const label = peerPersona ? `${peerName} (${peerPersona})` : peerName;
-					// The reply hint is a stable qualified token from the authenticated registry entry,
-					// not the human display name. Raw names are shared by live twins and can become stale
-					// between delivery and the model's reply; the plane caches this token with the sender's
-					// endpoint/key so it remains routable even after registry pruning. Attribution remains
-					// the separate sanitized human label above.
-					const replyTarget = fromEntry ? exocomPlane?.replyTargetFor(fromEntry) : undefined;
-					const decision = buildInboundDelivery(msg, label, {
-						budget: exocomBudget!,
-						seen: exocomSeen!,
-						injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
-						...(replyTarget ? { replyTarget } : {}),
-					});
-					const disposition = exocomInboundDisposition(decision);
-					telemetry?.publish("message.received", {
-						id: msg.msg_id,
-						channel: "exocom",
-						from: fromEntry?.session_id ?? msg.from_session,
-						to: sessionId,
-						kind: "message",
-						status: disposition.accepted ? "delivered" : "rejected",
-						expectsReply: false,
-						size: Buffer.byteLength(msg.text, "utf8"),
-						...(msg.in_reply_to ? { replyTo: msg.in_reply_to } : {}),
-					});
-					if ("deliver" in decision) {
-						exocomNotifier?.notify(decision.deliver);
-						// Never inject peer text into a live model turn. A compact human-only toast makes
-						// receipt visible while a long tool loop keeps the follow-up idle-gated.
-						if (lastCtx?.isIdle?.() !== true) {
-							exocomToastNotifier?.notify({ label, inReplyTo: msg.in_reply_to });
-						}
-					}
-					// Plane accounting happens after this callback returns. Defer the render one
-					// microtask so the inbound counter shown in the widget is the post-ACK value.
-					queueMicrotask(() => {
-						if (disposed) return;
-						try {
-							renderExocomWidget();
-						} catch {
-							/* cosmetic */
-						}
-					});
-					return disposition;
-				},
-				onPoolChange: () => renderExocomWidget(),
-			});
-			await exocomPlane.start();
-			renderExocomWidget();
-			// A throw from a bare timer callback is an uncaughtException — it would take the whole host
-			// session down over a transient registry write error (a full volume, an AV-held destination,
-			// a prune racing our rename). exocom failures must never block a normal session, so the tick
-			// is contained here; a failure that PERSISTS is still surfaced (see the report policy) rather
-			// than leaving the user with a plane no peer can see.
-			exocomHeartbeat = setInterval(() => {
-				try {
-					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
-					exocomHeartbeatFailures = 0;
-				} catch (err) {
-					exocomHeartbeatFailures += 1;
-					const message = err instanceof Error ? err.message : String(err);
-					if (process.env.PI_PERSONA_DEBUG) {
-						process.stderr.write(`[pi-persona] exocom: heartbeat failed (${exocomHeartbeatFailures}×): ${message}\n`);
-					}
-					if (shouldReportHeartbeatFailure(exocomHeartbeatFailures)) {
-						try {
-							lastCtx?.ui.notify(
-								`exocom: heartbeat failed ${exocomHeartbeatFailures}× in a row (${message}) — peers drop this instance from the pool until it recovers.`,
-								"warning",
-							);
-						} catch {
-							/* cosmetic */
-						}
-					}
-				}
-			}, EXOCOM.HEARTBEAT_MS);
-			exocomHeartbeat.unref?.();
-			// Makes maxDeliveries a per-MINUTE ceiling (R6) instead of a one-shot lifetime cap.
-			exocomResetTimer = setInterval(() => exocomNotifier?.resetDeliveries(), 60_000);
-			exocomResetTimer.unref?.();
-			// I3: a LIVE accessor, not the plane object itself — `stopExocom` nulls `exocomPlane` on a
-			// `canUseBus` downgrade, and the tool bodies re-read it on every call, failing closed
-			// once it's gone (pi has no `unregisterTool`, so this is how revocation is made real).
-			registerExocomTools(pi, () => exocomPlane, (raw) => {
-				// The model's free-choice call-sign. Sanitized (a display label — strip control chars
-				// via sanitizeLabel, clamp to 32) so a crafted name can't break the widget/attribution;
-				// empty after sanitizing ⇒ keep the current one. Rewrite the entry at once so peers see it.
-				const chosen = sanitizePeerField(raw, 32);
-				if (chosen) {
-					exocomName = chosen;
-					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
-				}
-				return exocomName;
-			});
-		} catch (err) {
-			// `plane.start()` may have bound its server before a later registry write failed.
-			// Teardown while the reference is still owned; this also cancels notifier/timers.
-			await stopExocom();
-			const message = err instanceof Error ? err.message : String(err);
-			try {
-				ctx.ui.notify(`exocom failed to start: ${message}`, "error");
-			} catch {
-				/* the session may already be tearing down */
-			}
-			if (process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] exocom: failed to start: ${message}\n`);
-		}
-	}
-
-	function syncExocomActiveTools(): void {
-		try {
-			const available = new Set(pi.getAllTools().map((tool) => tool.name));
-			const active = new Set(pi.getActiveTools());
-			const enabled = exocomPlane !== undefined && (controller.capabilities?.canUseBus ?? true);
-			let changed = false;
-			for (const name of EXOCOM_TOOL_NAMES) {
-				if (!available.has(name)) continue;
-				if (enabled && !active.has(name)) {
-					active.add(name);
-					changed = true;
-				} else if (!enabled && active.delete(name)) {
-					changed = true;
-				}
-			}
-			if (changed) pi.setActiveTools([...active]);
-		} catch {
-			/* a stale runtime is already shutting down; live tool getters still fail closed */
-		}
-	}
-
-	// Idempotent: recompute the gate and start/stop the plane to match. `startExocom` only ever
-	// runs at `session_start`, so a mid-session persona change (a/persona switch, the f8 cycle)
-	// would otherwise leave a stale decision in place until the next heartbeat (up to
-	// HEARTBEAT_MS later) — or, worse, never revoke a plane that should now be denied
-	// (containment leak: the persona changed to one whose canUseBus is false, but the plane, its
-	// tools, and inbound delivery all keep running under the OLD identity). Every other canUseBus
-	// consumer (engine/adapter.ts, engine/inproc.ts, the buildEngine call sites) reads
-	// `controller.capabilities` FRESH at bind time — this does the same for exocom. Already
-	// running and still gated on ⇒ a no-op (the heartbeat already relabels under the new persona).
-	async function applyExocomGate(ctx: ExtensionContext): Promise<void> {
-		const shouldRun = (config.exocom || pi.getFlag("exocom") === true) && (controller.capabilities?.canUseBus ?? true);
-		if (shouldRun && !exocomPlane) await startExocom(ctx);
-		else if (!shouldRun && exocomPlane) await stopExocom();
-		syncExocomActiveTools();
-	}
-	// Lifecycle transitions run ONE AT A TIME. `startExocom` publishes `exocomPlane` synchronously
-	// but then suspends inside `plane.start()`'s bind, so an overlapping transition (rapid f8
-	// cycling into a canUseBus:false persona; a Ctrl+C during startup) would otherwise tear down a
-	// plane that has not finished starting: `plane.stop()` closes nothing (no server assigned yet),
-	// then `start()` resumes and keeps a bound socket plus a fresh registry entry for a plane the
-	// extension has already discarded. EVERY start/stop goes through this queue — the shutdown
-	// teardown included, since it is the transition most likely to race a still-pending start.
-	let exocomReconcile: Promise<void> = Promise.resolve();
-	function queueExocom(op: () => Promise<void>): Promise<void> {
-		const next = exocomReconcile.then(op);
-		// A rejected transition must not wedge every later one behind it (startExocom already
-		// degrades on its own; this only keeps the queue's tail alive).
-		exocomReconcile = next.catch(() => {});
-		return next;
-	}
-	function reconcileExocom(ctx: ExtensionContext): Promise<void> {
-		return queueExocom(() => applyExocomGate(ctx));
-	}
-
-	// Every mid-session persona change funnels through here. Besides re-gating exocom, the incoming
-	// persona starts with a clean by-hand run: the nudge's streak, cumulative burn, and backoff
-	// belong to the persona that accumulated them (nudge.ts's reset contract), so leaving them in
-	// place would bill persona A's sweep to B's first command — and let A's fired nudges suppress
-	// B's legitimate early ones.
-	async function onPersonaChanged(ctx: ExtensionContext): Promise<void> {
-		delegationNudge.reset();
-		await reconcileExocom(ctx);
-	}
-
-	// Clean shutdown: stop timers, best-effort `bye` + registry cleanup (plane.stop()). Pi's own
-	// session_shutdown already fires on Ctrl+C/SIGHUP/SIGTERM (not just a normal exit), so wiring
-	// teardown only here — like the broker teardown above — covers every exit path without a
-	// redundant raw process.on(SIGINT/SIGTERM) handler.
-	async function stopExocom(): Promise<void> {
-		if (exocomHeartbeat) {
-			clearInterval(exocomHeartbeat);
-			exocomHeartbeat = undefined;
-		}
-		exocomHeartbeatFailures = 0; // a later re-start reports its own first failure, not this plane's tail
-		if (exocomResetTimer) {
-			clearInterval(exocomResetTimer);
-			exocomResetTimer = undefined;
-		}
-		exocomNotifier?.cancel();
-		exocomNotifier = undefined;
-		exocomInboxFull = false; // a later plane reports its own first full inbox, not this one's tail
-		exocomToastNotifier?.cancel();
-		exocomToastNotifier = undefined;
-		exocomBudget = undefined;
-		exocomSeen = undefined;
-		if (exocomPlane) {
-			const plane = exocomPlane;
-			exocomPlane = undefined;
-			try {
-				await plane.stop();
-			} catch {
-				/* never block shutdown on a teardown error */
-			}
-		}
-		try {
-			lastCtx?.ui.setWidget("persona-exocom", undefined, { placement: "aboveEditor" });
-		} catch {
-			/* cosmetic */
-		}
-		try {
-			lastCtx?.ui.setStatus("persona-exocom", undefined);
-		} catch {
-			/* cosmetic */
-		}
-	}
-
-	function buildEngine(signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, engOpts?: { async?: boolean }): StrategyEngine {
-		const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
-		// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
-		const contracts = (n: string): ContractDef | undefined => contractDefs[n] ?? (n === "default" ? DEFAULT_CONTRACT : undefined);
-		const modelFor = (agent: string): string | undefined => {
-			const persona = controller.activePersona?.name;
-			return persona ? personaModels(personaConfigs, persona)[agent] : undefined;
-		};
-		// The main model thinks adaptively (it picks effort by difficulty); a spawned child
-		// can't inherit "adaptive" if its model doesn't support it, so give children an
-		// explicit level — the supervisor's (if concrete) or a sane default, overridable.
-		const supLevel = host.getThinkingLevel();
-		const childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
-
-		// A persona that opted out of the layer (`spine: false`) opts its legs out too — otherwise
-		// a short verdict persona (judge/verify/audit) would still pay for the baseline on every
-		// sub-agent it spawns. The per-AGENT opt-out applies on top, inside each engine.
-		const legSpine = controller.activePersona?.spine === false ? "" : workerSpineText;
-
-		// Cross-process broker (spec B1-B7): lazily built on the FIRST actual child-engine
-		// construction below (worktree leg OR `PI_PERSONA_ENGINE=child`) — NOT on every
-		// `buildEngine` call, most of which build the (default) in-process engine and never
-		// touch a child at all; starting a host for those would be neither lazy nor needed.
-		// Memoized so both call sites below share ONE broker object (and its `peerGroup`
-		// registration) per `buildEngine` invocation. `config.broker` off (default) or no live
-		// `ctx` yet ⇒ stays undefined forever, so `deps.broker` is never set (the default-OFF pin).
-		let brokerDepsMemo: EngineAdapterBroker | undefined;
-		let brokerDepsBuilt = false;
-		const getBrokerDeps = (): EngineAdapterBroker | undefined => {
-			if (!brokerDepsBuilt) {
-				brokerDepsBuilt = true;
-				if (config.broker && lastCtx) brokerDepsMemo = makeBrokerDeps(lastCtx);
-			}
-			return brokerDepsMemo;
-		};
-
-		// A child-process engine pinned to a specific cwd — the seam worktree isolation runs
-		// through (a worktree needs its own working dir, i.e. a separate process).
-		const childEngineAt = (cwd: string): StrategyEngine => {
-			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
-			deps.listAgents = () => agents.map((a) => a.name);
-			if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
-			if (signal) deps.signal = signal;
-			deps.childOptions = {
-				timeoutMs: RUN_LIMITS.timeoutMs,
-				hardTimeoutMs: config.agentHardTimeoutMs,
-				startupTimeoutMs: config.agentStartupTimeoutMs,
-				env: childPiSettingsEnv(),
-			};
-			// Feed progress here too (mirrors the plain-child branch): without it a worktree/mcp async leg
-			// never advances its tracker snapshot, so lastAdvanceAt freezes at launch and the leg is falsely
-			// flagged stalled while a genuine later wedge goes undetected.
-			if (onProgress) deps.childOptions.onProgress = onProgress;
-			const brokerDeps = getBrokerDeps();
-			if (brokerDeps) deps.broker = brokerDeps;
-			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
-			// only for async runs — same guards as the inproc engine below (spec B7 / §4.9).
-			const caps = controller.capabilities;
-			if (caps) deps.canUseBus = caps.canUseBus;
-			if (engOpts?.async) deps.allowBlocking = true;
-			return engineFactories.makeEngine(deps);
-		};
-
-		// v0.4: run sub-agents in-process (createAgentSession) instead of spawning `pi -p`.
-		let base: StrategyEngine;
-		if (config.engine === "inproc" && lastCtx) {
-			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
-			const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
-			ideps.listAgents = () => agents.map((a) => a.name);
-			if (legSpine) ideps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
-			ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
-			ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
-			ideps.startupTimeoutMs = config.agentStartupTimeoutMs; // first-progress deadline — fast-fail a child that never started
-			if (signal) ideps.signal = signal;
-			if (onProgress) ideps.onProgress = onProgress;
-			if (lastCtx.model) ideps.defaultModel = `${lastCtx.model.provider}/${lastCtx.model.id}`;
-			// Comm plane: a `coaching: on` persona gives its children `contact_supervisor`.
-			// Blocking asks are honoured only for async runs (a sync run holds the turn → it
-			// can't answer, so blocking there would deadlock; the tool downgrades to one-way).
-			ideps.bus = bus;
-			ideps.supervisorHandle = SUPERVISOR;
-			if (controller.activePersona?.coaching) ideps.coaching = true;
-			// Peer messaging obeys the persona's bus capability (canUseBus; Task: sibling peer comm).
-			const caps = controller.capabilities;
-			if (caps) ideps.canUseBus = caps.canUseBus;
-			if (engOpts?.async) ideps.allowBlocking = true;
-			base = engineFactories.makeInProcessEngine(ideps);
-		} else {
-			if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=child\n");
-			const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
-			deps.listAgents = () => agents.map((a) => a.name);
-			if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
-			if (signal) deps.signal = signal;
-			if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
-			deps.childOptions = {
-				timeoutMs: RUN_LIMITS.timeoutMs,
-				hardTimeoutMs: config.agentHardTimeoutMs,
-				startupTimeoutMs: config.agentStartupTimeoutMs,
-				env: childPiSettingsEnv(),
-			}; // idle watchdog + hard cap + startup deadline on every child; same Pi settings dir as inproc
-			if (onProgress) deps.childOptions.onProgress = onProgress;
-			const brokerDeps = getBrokerDeps();
-			if (brokerDeps) deps.broker = brokerDeps;
-			// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
-			// only for async runs — same guards as the inproc engine above (spec B7 / §4.9).
-			const caps = controller.capabilities;
-			if (caps) deps.canUseBus = caps.canUseBus;
-			if (engOpts?.async) deps.allowBlocking = true;
-			base = engineFactories.makeEngine(deps);
-		}
-
-		// Worktree isolation: an agent/leg marked `isolation: worktree` runs in a throwaway git
-		// worktree via the child engine (its edits never touch the main tree), regardless of the
-		// default backend. This branch is deliberately fail-closed: a missing/dirty repository or
-		// failed worktree creation is a contract failure, never permission to run in the real cwd.
-		// Provider fallback (outermost): a run whose model PROVIDER fails at call time (auth,
-		// outage, 5xx, model-not-supported) is retried on the same model id under another
-		// authenticated provider — "priority to the supervisor's provider, but try others and
-		// switch on error". No ctx (no registry) ⇒ pass through. Each attempt still runs through
-		// worktree isolation + steering below.
-		const wrapFallback = (eng: StrategyEngine): StrategyEngine => {
-			if (!lastCtx) return eng;
-			const prefer = lastCtx.model?.provider;
-			return withModelFallback(eng, { models: configuredModels(lastCtx), ...(prefer ? { preferProvider: prefer } : {}) });
-		};
-		const root = lastCtx?.cwd;
-		return wrapFallback({
-			async run(spec, perProgress, perSignal, perSteer) {
-				const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
-				if (iso === "worktree") {
-					if (!root) {
-						return isolatedWorktreeFailure(spec, "worktree isolation requires a real Git cwd; remove isolation: \"worktree\" or run inside a Git checkout");
-					}
-					const preflight = worktreePreflight(root, defaultGitExec);
-					if (!preflight.ok) return isolatedWorktreeFailure(spec, preflight.error);
-					try {
-						return await withWorktree(root, defaultGitExec, async (dir) => {
-							const result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
-							const artifact = captureWorktreeArtifact(dir, defaultGitExec);
-							const hasOutputArtifact = hasUnifiedDiff(result.output);
-							if (!result.ok) {
-								return artifact.ok && artifact.diff.trim().length > 0
-									? appendWorktreeArtifact(result, artifact.diff)
-									: result;
-							}
-							if (!artifact.ok) {
-								if (hasOutputArtifact) return result;
-								return isolatedWorktreeFailure(spec, `${artifact.error}; the isolated leg returned success without an exportable diff/artifact`);
-							}
-							if (artifact.diff.trim().length > 0) return appendWorktreeArtifact(result, artifact.diff);
-							if (hasOutputArtifact) return result;
-							return isolatedWorktreeFailure(
-								spec,
-								"isolated leg returned success but produced no unified diff or artifact; its worktree was discarded — return a complete diff or remove isolation: \"worktree\"",
-							);
-						});
-					} catch (err) {
-						return isolatedWorktreeFailure(spec, err instanceof Error ? err.message : String(err));
-					}
-				}
-				// MCP-capable leg: the DEFAULT in-process engine never fires `session_start`, so
-				// `pi-mcp-adapter` never initializes and the sub-agent's `mcp*`/direct tools come
-				// back "MCP not initialized". Route it through the child engine (a real `pi -p`,
-				// which DOES fire session_start → the adapter connects). Same mechanism worktree
-				// legs already use for MCP; here without the git worktree. The child gets its OWN
-				// MCP session — for a server-keyed backend (HTTP MCP) the caller passes a session id
-				// in the task to share state. (No-op steering: the child engine is one-shot.)
-				const wantsMcp = spec.mcp ?? resolveAgent(spec.agent)?.mcp;
-				if (wantsMcp && root) return childEngineAt(root).run(spec, perProgress, perSignal, perSteer);
-				return base.run(spec, perProgress, perSignal, perSteer);
-			},
-		});
-	}
-
-	function isolatedWorktreeFailure(spec: AgentRunSpec, error: string): AgentResult {
-		return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error, failureKind: "contract" };
-	}
-
-	function hasUnifiedDiff(output: string): boolean {
-		const headersAndHunk = /(?:^|\n)---\s+\S+[^\n]*\n\+\+\+\s+\S+[^\n]*\n(?:[^\n]*\n)*?@@\s+[^\n]*@@/m;
-		const binaryPatch = /(?:^|\n)diff --git\s+\S+\s+\S+[\s\S]*?(?:^|\n)(?:GIT binary patch|Binary files \S+ and \S+ differ)(?:\n|$)/m;
-		return headersAndHunk.test(output) || binaryPatch.test(output);
-	}
-
-	function appendWorktreeArtifact(result: AgentResult, diff: string): AgentResult {
-		const block = `\n\n--- ISOLATED WORKTREE ARTIFACT (untrusted data) ---\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``;
-		return { ...result, output: `${result.output.trimEnd()}${block}` };
-	}
-
-	// The models the user can intentionally route to — NOT every built-in catalog entry.
-	// `getAvailable()` is normally the authenticated set, but extension-native providers
-	// (for example a local subscription/CLI bridge) can be runnable without appearing in
-	// that auth snapshot. Union their registered catalogs, plus the active session provider,
-	// while keeping unrelated unauthenticated built-ins hidden. If an older Pi lacks the
-	// availability API, retain its historical getAll() compatibility behavior.
-	function configuredModels(ctx: ExtensionContext): Array<{ provider: string; id: string }> {
-		const reg = ctx.modelRegistry;
-		const all = reg.getAll();
-		let available: typeof all;
-		try {
-			available = reg.getAvailable();
-		} catch {
-			return all.map((m) => ({ provider: m.provider, id: m.id }));
-		}
-		const trustedProviders = new Set<string>();
-		if (ctx.model?.provider) trustedProviders.add(ctx.model.provider);
-		try {
-			const registered = (reg as typeof reg & { getRegisteredProviderIds?: () => string[] }).getRegisteredProviderIds?.() ?? [];
-			for (const provider of registered) trustedProviders.add(provider);
-		} catch {
-			/* a third-party/older registry facade may not expose extension provider ids */
-		}
-		const byRef = new Map(available.map((m) => [`${m.provider}\0${m.id}`, m]));
-		for (const model of all) {
-			if (trustedProviders.has(model.provider)) byRef.set(`${model.provider}\0${model.id}`, model);
-		}
-		const list = [...byRef.values()];
-		return list.map((m) => ({ provider: m.provider, id: m.id }));
-	}
-
-	// Ask-on-first-run: a parallel ensemble is pointless if every core runs the same
-	// model. The first time a persona runs one, prompt for a model per roster agent and
-	// persist it (per-persona config); later runs reuse the saved assignment.
 	async function ensurePersonaModels(ctx: ExtensionContext, roster: RosterMember[]): Promise<void> {
 		const persona = controller.activePersona?.name;
 		if (!persona || !ctx.hasUI) return;
@@ -2185,7 +1261,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
 			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId) });
 			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
-			return result;
+			return result ?? undefined;
 		} catch (error) {
 			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : "failed" });
 			throw error;
@@ -2447,1117 +1523,100 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return lines.join("\n");
 	}
 
-	// ── lifecycle ─────────────────────────────────────────────────────────────
-	pi.on("session_start", async (_event, ctx) => {
-		lastCtx = ctx;
-		delegationNudge.reset(); // a fresh session starts with a clean by-hand run
-		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
-		// a fresh install shows no personas until `/persona seed` or `/persona restore`.
-		if (config.seed && !existsSync(seedMarker())) {
-			try {
-				const r = runSeed(false);
-				reportSeedSourceCollisions(ctx, r);
-				// Resolution happened before session_start, when a fresh install had no user copy. Refresh
-				// now so this very process uses what auto-seed just created and reports only post-seed state.
-				refreshSpineAfterSeed();
-				if (ctx.hasUI && r.copied.length > 0) {
-					ctx.ui.notify(`pi-persona: seeded ${r.copied.length} default(s) to ${personaDataDir()} — edit them freely; /persona restore brings back the originals.`, "info");
-				}
-			} catch {
-				// Seeding is multi-file: an error can arrive after the prompt itself was copied. Re-resolve
-				// and retry only enabled legacy roles so partial progress is visible in this same process.
-				inspectEnabledLegacySpines();
-			}
-		}
-		reportSeedMigration(ctx, seedMigration);
-		reportSpineWarning(ctx);
-		reload(ctx.cwd);
-		reportDefinitionCollisions(ctx);
-		personaConfigs = readConfigStore();
-		// Restore order: --persona flag > env pin (PI_PERSONA_DEFAULT) > remembered-on-disk. Read-only.
-		const flagPersona = ((pi.getFlag("persona") as string) || "").trim();
-		const remembered = flagPersona || config.defaultPersona || readRememberedPersona();
-		const target = remembered ? personas.find((p) => p.name === remembered) : undefined;
-		if (target) await controller.activate(target);
-		else {
-			// A name that doesn't resolve leaves the session with NO persona at all, whichever source it
-			// came from — and silence there reads as "it's active" while nothing is (downstream tooling
-			// keyed on the remembered name, e.g. per-persona memory, then serves a persona that was never
-			// activated). An EXPLICIT `--persona` is a direct instruction, so it stays an error; an env
-			// pin or a stale remembered name is a warning. The marker itself is deliberately NOT cleared:
-			// personas are discovered per-cwd, so a name that is missing here may be present in the
-			// project the user came from. The model (`--model`) and effort (`--thinking`) are pi's own
-			// flags — pi validates those.
-			if (remembered) {
-				const names = personas.map((p) => p.name).sort().join(", ") || "(none installed — run /persona seed)";
-				const source = flagPersona ? "--persona" : config.defaultPersona ? "PI_PERSONA_DEFAULT" : "remembered persona";
-				const msg = `pi-persona: ${source} "${remembered}" is not an installed persona. Available: ${names}`;
-				if (ctx.hasUI) ctx.ui.notify(msg, flagPersona ? "error" : "warning");
-				else process.stderr.write(`${msg}\n`);
-			}
-			host.setStatus(controller.activePersona?.label);
-		}
-		await reconcileExocom(ctx); // after persona activation, so plane + active tools share one gate
-		await telemetry?.stop("session-replaced");
-		telemetry = undefined;
-		const sessionManager = (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager;
-		const sessionId = sessionManager?.getSessionId?.();
-		if (sessionId) {
-			const eventBus = (pi as unknown as { events?: { emit?: (name: string, event: TelemetryEvent) => void } }).events;
-			telemetry = new TelemetryProducer({
-				agentDir: userAgentDir(),
-				cwd: ctx.cwd,
-				sessionId,
-				emit: (event) => eventBus?.emit?.(TELEMETRY_EVENT_NAME, event),
-				heartbeat: () => currentTelemetryInstance(lastCtx ?? ctx),
-				...(process.env.PI_PERSONA_DEBUG
-					? { onError: (error: unknown) => { process.stderr.write(`[pi-persona] telemetry: ${error instanceof Error ? error.message : String(error)}\n`); } }
-					: {}),
-			});
-			telemetry.start(currentTelemetryInstance(ctx));
-			// Re-seeded with the replay, so the dedupe below always mirrors what THIS producer last
-			// published — a session start that follows no teardown carries no stale projection.
-			lastAgentProjection.clear();
-			for (const node of agentTree.snapshot()) {
-				lastAgentProjection.set(node.id, JSON.stringify(telemetryAgent(node)));
-				telemetry.publishAgentAdded(telemetryAgent(node));
-			}
-			publishTelemetryPeers();
-		}
+	const hookHost: HookHost = {
+		get config() { return config; },
+		get controller() { return controller; },
+		get personaHost() { return host; },
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		get disposed() { return disposed; },
+		set disposed(value) { disposed = value; },
+		get orchestrating() { return orchestrating; },
+		set orchestrating(value) { orchestrating = value; },
+		get processingDeferredOrchestration() { return processingDeferredOrchestration; },
+		set processingDeferredOrchestration(value) { processingDeferredOrchestration = value; },
+		get pendingOrchestration() { return pendingOrchestration; },
+		set pendingOrchestration(value) { pendingOrchestration = value; },
+		MAX_DEFERRED_ORCHESTRATIONS,
+		deferredOrchestrations,
+		get telemetry() { return telemetry; },
+		set telemetry(value) { telemetry = value; },
+		telemetryToolStartedAt,
+		telemetryExocomPending,
+		telemetryIntercomPending,
+		lastAgentProjection,
+		telemetryAskSenders,
+		agentTree,
+		telemetryAgent,
+		delegationNudge,
+		persistenceNudge,
+		completionNotifier,
+		intercomNotifier,
+		timerNotifier,
+		timerScheduler,
+		peekWatcher,
+		stopPeek,
+		stopRegistry,
+		stopRequested,
+		steerRegistry,
+		get brokerHost() { return brokerHost; },
+		set brokerHost(value) { brokerHost = value as typeof brokerHost; },
+		get brokerHostPromise() { return brokerHostPromise; },
+		set brokerHostPromise(value) { brokerHostPromise = value as typeof brokerHostPromise; },
+		brokerPeers,
+		get spineText() { return spineText; },
+		delegationBrief,
+		get agents() { return agents; },
+		get personas() { return personas; },
+		reload,
+		readConfigStore,
+		get personaConfigs() { return personaConfigs; },
+		set personaConfigs(value) { personaConfigs = value; },
+		readRememberedPersona,
+		runSeed,
+		seedMarker,
+		personaDataDir,
+		reportSeedSourceCollisions,
+		refreshSpineAfterSeed,
+		inspectEnabledLegacySpines,
+		reportSeedMigration,
+		get seedMigration() { return seedMigration; },
+		reportSpineWarning,
+		reportDefinitionCollisions,
+		userAgentDir,
+		loadFlow,
+		runFlowVisible,
+		runStrategyVisible,
+		personaGrammarError,
+		intercomRecipient,
+		idleDelivery,
+		drainBusBlock,
+	};
+	installHooks(pi, hookHost, exocom);
+
+	registerDelegateTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		controller,
+		get agents() { return agents; },
+		buildEngine,
+		agentTree,
+		nextRootId,
+		tracker,
+		config: { ledgerV2: config.ledgerV2 },
+		RUN_LIMITS,
+		publishAgentTool,
+		stopRegistry,
+		steerRegistry,
+		stopRequested,
+		ensurePersonaModels,
+		clearStops,
+		clearSteers,
+		drainBusBlock,
+		startPeek,
 	});
 
-	pi.on("session_shutdown", async (event, ctx) => {
-		lastCtx = ctx;
-		disposed = true; // gate any late async-run onComplete from touching the next session's instance
-		deferredOrchestrations.length = 0;
-		pendingOrchestration = undefined;
-		stopPeek(); // reload-hygiene: never leak the idle-peek timer across sessions
-		peekWatcher.reset(); // …nor a stale "already surfaced this leg as stuck" set into the next session
-		completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
-		intercomNotifier.cancel();
-		exocomNotifier?.cancel(); // …nor a late exocom follow-up (M1) — cancelled BEFORE stopExocom tears down the plane below
-		timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
-		timerNotifier.cancel();
-		// This instance is being torn down (a reload/new/resume rebinds a fresh one); abort in-flight
-		// sub-agents and reset control state so nothing is left orphaned or rendered stale.
-		for (const abort of [...stopRegistry.values()]) {
-			try {
-				abort();
-			} catch {
-				/* ignore */
-			}
-		}
-		stopRegistry.clear();
-		stopRequested.clear();
-		steerRegistry.clear();
-		agentTree.clear();
-		host.setStatus(undefined);
-		// Queued, not called bare: a shutdown that lands while session_start's own start is still
-		// pending would otherwise see `exocomPlane` unset, no-op, and let that start bind a socket
-		// and register an entry for a session that no longer exists. Idempotent either way — off
-		// (or never started) ⇒ a no-op.
-		await queueExocom(() => stopExocom());
-		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
-		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
-		if (brokerHostPromise) {
-			try {
-				const h = await brokerHostPromise;
-				await h.close();
-			} catch {
-				/* best-effort — never block shutdown on a broker teardown error */
-			}
-			brokerHost = undefined;
-			brokerHostPromise = undefined;
-			brokerPeers.clear();
-		}
-		await telemetry?.stop(event?.reason);
-		telemetry = undefined;
-		telemetryToolStartedAt.clear();
-		telemetryExocomPending.clear();
-		telemetryIntercomPending.clear();
-		telemetryAskSenders.clear(); // …and no ask attribution leaks into the next session
-		lastAgentProjection.clear();
-	});
-
-	// Pi marks the session idle before emitting agent_settled. A deferred mandatory input owns this
-	// idle window first; its replay starts the next run and the remaining FIFO entries follow one per
-	// settlement. With no deferred input, flush ordinary wakes immediately.
-	pi.on("agent_settled", async () => {
-		if (lastCtx) telemetry?.publish("instance.updated", { ...currentTelemetryInstance(lastCtx), status: "idle" });
-		// Pi's `prepareToolCall` returns {kind:"immediate"} when the abort signal is already set
-		// after beforeToolCall — skipping afterToolCall, and so our tool_result hook. Those calls
-		// would otherwise stay "running" until session_shutdown (press Esc mid-fan-out and every
-		// call that had not yet started is orphaned). The turn boundary is where they end.
-		for (const [callId, open] of telemetryToolStartedAt) {
-			telemetry?.publish("tool.finished", {
-				callId,
-				agentId: "supervisor",
-				name: open.name,
-				status: "failed",
-				durationMs: Math.max(0, Date.now() - open.startedAt),
-			});
-		}
-		telemetryToolStartedAt.clear(); // a late result for a drained call must not close it twice
-		// An exocom send orphaned on that same path left its recipients at "queued" forever. They are
-		// reported failed, never delivered: the call never reached a result, so nothing observed a send.
-		for (const pending of telemetryExocomPending.values()) {
-			for (const message of pending) telemetry?.publish("message.sent", {
-				id: message.id,
-				channel: "exocom",
-				// A session id, like every other exocom publish site — never an agentId literal in this slot.
-				from: lastCtx ? telemetrySessionId(lastCtx) : `legacy-${process.pid}`,
-				to: message.sessionId,
-				kind: "message",
-				status: "failed",
-				expectsReply: false,
-				size: message.size,
-			});
-		}
-		telemetryExocomPending.clear();
-		for (const [callId, message] of telemetryIntercomPending) {
-			telemetry?.publish(message.kind === "reply" ? "message.replied" : "message.sent", {
-				id: callId,
-				channel: "intercom",
-				from: "supervisor",
-				to: message.to,
-				kind: message.kind,
-				status: "failed",
-				expectsReply: false,
-				size: message.size,
-				...(message.replyTo ? { replyTo: message.replyTo } : {}),
-			});
-		}
-		telemetryIntercomPending.clear();
-		if (await processNextDeferredOrchestration()) return;
-		completionNotifier.kick();
-		intercomNotifier.kick();
-		timerNotifier.kick();
-		exocomNotifier?.kick();
-	});
-
-	pi.on("before_agent_start", (event, ctx) => {
-		lastCtx = ctx;
-		telemetry?.publish("instance.updated", { ...currentTelemetryInstance(ctx), status: "active" });
-		// The spine lifts persona-less turns too: with nothing active the composition is Pi's base
-		// prompt + the layer. Off ⇒ `spineText` is empty and this is `event.systemPrompt` itself.
-		const noPersona = spineText ? `${event.systemPrompt}\n\n${spineText}` : event.systemPrompt;
-		let prompt = controller.composePrompt(event.systemPrompt, spineText) ?? noPersona;
-		// The session time anchor (core/time.ts). Unconditional, unlike both briefs below: a supervisor
-		// that has been working for hours needs to know it whether or not agents or peers exist. It goes
-		// in the SYSTEM prompt because the prompt is re-composed and re-sent every turn rather than
-		// summarized, so an anchor placed here cannot be compacted away — the same fact in the
-		// conversation tail would be. Its start comes from the session HEADER, the first entry of the
-		// append-only session file, so after /resume it is still the ORIGINAL start: that is what makes it
-		// answer "how long have I been on this problem" across restarts and not merely across turns.
-		// Placed BEFORE the briefs so the standing hand-off default keeps the last word at the tail; the
-		// elapsed reading is bucketed so this block stays byte-identical across an hour of turns.
-		const anchor = buildSessionAnchor(ctx.sessionManager?.getHeader?.() ?? null, Date.now());
-		if (anchor) prompt = `${prompt}\n\n${anchor}`;
-		const brief = delegationBrief(ctx);
-		if (brief) prompt = `${prompt}\n\n${brief}`;
-		// Per-turn exocom peer AWARENESS (mirrors the delegation brief above): regenerated from the
-		// live registry every turn so it cannot desync, and gated implicitly — exocomPlane is only
-		// set when exocom is on AND canUseBus, so this is a no-op (undefined ⇒ no prompt change)
-		// whenever exocom is off, matching every other opt-in surface in this file.
-		if (exocomPlane) {
-			const peers = exocomPlane.listPeers();
-			const xcaps = controller.capabilities;
-			// Holding the bus says nothing about `delegate` (canUseBus keys off `intercom` alone), so
-			// read the persona the way delegationBrief does — absent capabilities ⇒ unrestricted — but
-			// gate on a REACHABLE target, which is stricter than delegationBrief: that one still renders
-			// (with `installedCount`, to say "your allowlist filtered everything away") when fan-out is
-			// allowed and no target survives, whereas urging a peer-vs-sub-agent split with nothing to
-			// delegate to would point the model at a call the gate refuses.
-			// `canFanOut(xcaps)` is defence in depth, not a live branch: `resolveCapabilities` empties
-			// `delegateTargets` whenever the delegate tool is absent (core/capabilities.ts), so the
-			// second conjunct already implies the first and no test can kill the first alone. Kept
-			// because it states the structural rule the second conjunct only happens to encode.
-			const canDelegate = xcaps ? canFanOut(xcaps) && agents.some((a) => canDelegateTo(xcaps, a.name)) : agents.length > 0;
-			const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })), {
-				canDelegate,
-				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
-				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
-				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
-				canAskHuman: ctx.hasUI === true,
-			});
-			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
-		}
-		if (pendingOrchestration) {
-			// The result is sub-agent text entering the SYSTEM prompt — fence it (I-guardrail:
-			// untrusted output must never reach the supervisor unfenced, least of all here).
-			if (pendingOrchestration.ok) {
-				// Keep the established success hand-off byte-for-byte: successful mandatory runs are
-				// still rulings the supervisor should present without spending the same council twice.
-				prompt = `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration was run on the user's request and produced the result below. Present and build on it as your answer — do not re-run it:\n\n${fenceUntrusted(pendingOrchestration.output)}`;
-			} else {
-				const evidence = pendingOrchestration.error && pendingOrchestration.error !== pendingOrchestration.output
-					? `${pendingOrchestration.output}\n\n--- RUNTIME ERROR ---\n${pendingOrchestration.error}`
-					: pendingOrchestration.output;
-				prompt = pendingOrchestration.failureKind === "abort"
-					? `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration was CANCELLED. Report the cancellation; do not present its partial output as approved, and do not resume or re-run it unless the user explicitly asks:\n\n${fenceUntrusted(evidence)}`
-					: `${prompt}\n\n[orchestration: ${pendingOrchestration.label}] The mandated multi-agent orchestration FAILED or remained unresolved. Do not present its output as approved or claim completion. Report the blocker, then repair and verify before declaring success:\n\n${fenceUntrusted(evidence)}`;
-				reportMandatoryFailure(ctx, pendingOrchestration);
-			}
-			pendingOrchestration = undefined;
-		}
-		return prompt === event.systemPrompt ? undefined : { systemPrompt: prompt };
-	});
-
-	pi.on("tool_call", (event, ctx) => {
-		lastCtx = ctx;
-		const startedAt = Date.now();
-		telemetryToolStartedAt.set(event.toolCallId, { startedAt, name: event.toolName });
-		telemetry?.publish("tool.started", {
-			callId: event.toolCallId,
-			agentId: "supervisor",
-			name: event.toolName,
-			status: "running",
-		});
-		const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
-		const gate = controller.gate(event.toolName, event.input);
-		if (gate) {
-			telemetryToolStartedAt.delete(event.toolCallId);
-			telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
-			return gate;
-		}
-		if (event.toolName === "intercom") {
-			const action = typeof input.action === "string" ? input.action : "message";
-			if (action === "send" || action === "reply") {
-				const text = typeof input.message === "string" ? input.message : "";
-				const askId = typeof input.askId === "string" ? input.askId : undefined;
-				telemetryIntercomPending.set(event.toolCallId, {
-					kind: action,
-					to: intercomRecipient(input, askId),
-					size: Buffer.byteLength(text, "utf8"),
-					...(askId ? { replyTo: askId } : {}),
-				});
-				telemetry?.publish(action === "reply" ? "message.replied" : "message.sent", {
-					id: event.toolCallId,
-					channel: "intercom",
-					from: "supervisor",
-					to: intercomRecipient(input, askId),
-					kind: action,
-					status: "queued",
-					expectsReply: false,
-					size: Buffer.byteLength(text, "utf8"),
-					...(askId ? { replyTo: askId } : {}),
-				});
-			}
-		}
-		if (event.toolName === "exocom_send") {
-			const text = typeof input.message === "string" ? input.message : "";
-			const target = typeof input.target === "string" ? input.target : "";
-			let peers: DisplayPeer[] = [];
-			try { peers = exocomPlane?.listPeers() ?? []; } catch { /* telemetry cannot break the tool */ }
-			const sessions = canonicalExocomTelemetryTargets(peers, target);
-			const size = Buffer.byteLength(text, "utf8");
-			const pending = sessions.map((sessionId) => ({
-				id: sessions.length === 1 ? event.toolCallId : `${event.toolCallId}:${sessionId}`,
-				sessionId,
-				target: target === "*" ? (peers.find((peer) => peer.session_id === sessionId)?.target ?? sessionId) : target,
-				size,
-			}));
-			if (pending.length > 0) telemetryExocomPending.set(event.toolCallId, pending);
-			for (const message of pending) telemetry?.publish("message.sent", {
-				id: message.id,
-				channel: "exocom",
-				from: telemetrySessionId(ctx),
-				to: message.sessionId,
-				kind: "message",
-				status: "queued",
-				expectsReply: false,
-				size: message.size,
-			});
-		}
-		return undefined;
-	});
-
-	// Delegation nudge (config.nudge; delegating personas only): when the supervisor grinds a RUN of
-	// hands-on commands by hand — a by-hand sweep with no hand-off — append a reminder to the
-	// offending tool's result. It lands in RECENT context, on the very command that tripped it, where
-	// a top-of-prompt persona directive has already lost its pull. Sub-agents run in their own
-	// sessions, so this hook only ever sees the SUPERVISOR's own tools. A `delegate`/`council` result
-	// resets the run.
-	pi.on("tool_result", (event, ctx) => {
-		lastCtx = ctx;
-		const open = telemetryToolStartedAt.get(event.toolCallId);
-		telemetryToolStartedAt.delete(event.toolCallId);
-		if (open !== undefined) {
-			telemetry?.publish("tool.finished", {
-				callId: event.toolCallId,
-				agentId: "supervisor",
-				name: event.toolName,
-				status: event.isError ? "failed" : "done",
-				durationMs: Math.max(0, Date.now() - open.startedAt),
-			});
-		}
-		const telemetryInput = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
-		if (event.toolName === "exocom_send") {
-			const pending = telemetryExocomPending.get(event.toolCallId) ?? [];
-			telemetryExocomPending.delete(event.toolCallId);
-			const details = event.details && typeof event.details === "object" && !Array.isArray(event.details)
-				? event.details as { failed?: Array<{ target?: unknown }>; failedCount?: unknown; omittedFailures?: unknown }
-				: undefined;
-			const sampledFailures = details?.failed ?? [];
-			const failedTargets = new Set(sampledFailures.flatMap((failure) => typeof failure.target === "string" ? [failure.target] : []));
-			// A broadcast samples its failures (`MAX_BROADCAST_DETAIL_ITEMS` in tools/exocom.ts) and
-			// reports the rest as a count, so the sample alone CLEARS nobody: with more failures than
-			// the sample holds, a recipient we cannot find in it is unknown, never delivered.
-			const declaredFailures = typeof details?.failedCount === "number" ? details.failedCount : sampledFailures.length;
-			const omittedFailures = Math.max(
-				typeof details?.omittedFailures === "number" ? details.omittedFailures : 0,
-				declaredFailures - sampledFailures.length,
-			);
-			for (const message of pending) telemetry?.publish("message.sent", {
-				id: message.id,
-				channel: "exocom",
-				from: telemetrySessionId(ctx),
-				to: message.sessionId,
-				kind: "message",
-				status: event.isError || failedTargets.has(message.target) ? "failed" : omittedFailures > 0 ? "unknown" : "delivered",
-				expectsReply: false,
-				size: message.size,
-			});
-		}
-		if (event.toolName === "intercom") {
-			const action = typeof telemetryInput.action === "string" ? telemetryInput.action : "";
-			// The open entry is the right to publish a terminal: once the turn-boundary drain has closed
-			// this call, a late result must not report it a second time.
-			const open = telemetryIntercomPending.delete(event.toolCallId);
-			if (open && (action === "send" || action === "reply")) {
-				const text = typeof telemetryInput.message === "string" ? telemetryInput.message : "";
-				const askId = typeof telemetryInput.askId === "string" ? telemetryInput.askId : undefined;
-				telemetry?.publish(action === "reply" ? "message.replied" : "message.sent", {
-					id: event.toolCallId,
-					channel: "intercom",
-					from: "supervisor",
-					to: intercomRecipient(telemetryInput, askId),
-					kind: action,
-					status: event.isError ? "failed" : action === "reply" ? "replied" : "delivered",
-					expectsReply: false,
-					size: Buffer.byteLength(text, "utf8"),
-					...(askId ? { replyTo: askId } : {}),
-				});
-			}
-		}
-		const errorPatch = piPersonaToolErrorPatch(event.details);
-		if (!config.nudge) return errorPatch;
-		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
-		if (!controller.capabilities?.tools.has("delegate")) return errorPatch;
-		const notes: string[] = [];
-		// Grinding-by-hand reminder: a RUN of substantive hands-on commands on the supervisor's own
-		// tools (delegate/council reset the run). `size` classifies substantive vs glue + fat dump.
-		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
-		const size = text.length;
-		const sweepNote = delegationNudge.observe(event.toolName, size, !errorPatch && event.isError !== true, text);
-		if (sweepNote) notes.push(sweepNote);
-		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
-		// results only; because delegate/council reset the run the two never fire on one event).
-		const surrender = persistenceNudge.observe(event.toolName, text);
-		if (surrender) notes.push(surrender);
-		if (notes.length === 0) return errorPatch;
-		return { ...errorPatch, content: [...event.content, { type: "text", text: notes.join("\n\n") }] };
-	});
-
-	// Mandatory orchestration: when the active persona declares a strategy/parallel/
-	// pipeline mode (or a flow), run it on the user's turn (the LLM cannot skip it) and
-	// fold the result into the prompt. Opportunistic personas (no orchestration) take the
-	// normal turn.
-	function mandatoryFailure(label: string, output: string, error: string, failureKind: FailureKind): MandatoryOutcome {
-		return { label, output, ok: false, error, failureKind };
-	}
-
-	/** Make a mandatory failure visible outside the hidden system prompt too. The cause may contain
-	 * provider/model text, so compact it to one bounded operator-facing line. */
-	function reportMandatoryFailure(ctx: ExtensionContext, outcome: MandatoryOutcome): void {
-		const label = outcome.label.replace(/\s+/g, " ").trim().slice(0, 120);
-		const cause = (outcome.error ?? "unresolved result").replace(/\s+/g, " ").trim().slice(0, 500);
-		const kind = outcome.failureKind ? ` [${outcome.failureKind}]` : "";
-		const message = `pi-persona: mandatory orchestration ${label} failed${kind}: ${cause}`;
-		try {
-			if (ctx.hasUI) ctx.ui.notify(message, "error");
-			else process.stderr.write(`${message}\n`);
-		} catch {
-			// Diagnostics are best-effort; the fail-closed system-prompt hand-off remains authoritative.
-		}
-	}
-
-	async function executeMandatoryOrchestration(
-		ctx: ExtensionContext,
-		orch: OrchestrationGrammar,
-		task: string,
-	): Promise<MandatoryOutcome> {
-		const flowName = orch.mode === "flow" ? orch.flow : undefined;
-		const label = flowName ? `flow ${flowName}` : (resolveStrategyName(orch) ?? "strategy");
-		try {
-			if (flowName) {
-				const parsed = loadFlow(ctx.cwd, flowName);
-				if (!parsed) {
-					const error = `no flow named "${flowName}"`;
-					return mandatoryFailure(label, error, error, "contract");
-				}
-				if (!parsed.ok) {
-					const error = `flow "${flowName}" is invalid: ${parsed.error}`;
-					return mandatoryFailure(label, error, error, "contract");
-				}
-				const outcome = await runFlowVisible(ctx, parsed.flow, task);
-				const output = outcome.output || "(the flow returned no output)";
-				if (outcome.ok) return { label, output, ok: true };
-				const error = outcome.cancelled
-					? "the mandatory flow was aborted"
-					: (outcome.error ?? "the mandatory flow did not complete successfully");
-				const failureKind = outcome.cancelled ? "abort" : (outcome.failureKind ?? "agent");
-				return mandatoryFailure(label, output, error, failureKind);
-			}
-
-			const result = await runStrategyVisible(ctx, orch, task, "strategy");
-			if (!result) {
-				const error = "the mandatory orchestration returned no result";
-				return mandatoryFailure(label, `(${error})`, error, "contract");
-			}
-			if (!result.ok) {
-				return mandatoryFailure(
-					label,
-					result.output || "(the orchestration returned no output)",
-					result.error ?? "the mandatory orchestration did not complete successfully",
-					result.failureKind ?? "agent",
-				);
-			}
-			return { label, output: result.output, ok: true };
-		} catch (err) {
-			const error = `orchestration failed: ${err instanceof Error ? err.message : String(err)}`;
-			return mandatoryFailure(label, error, error, "agent");
-		}
-	}
-
-	function enqueueDeferredOrchestration(
-		task: string,
-		orchestration: OrchestrationGrammar,
-		ctx: ExtensionContext,
-	): { action: "handled" } {
-		if (deferredOrchestrations.length >= MAX_DEFERRED_ORCHESTRATIONS) {
-			ctx.ui.notify(
-				`persona orchestration queue full (${MAX_DEFERRED_ORCHESTRATIONS}); input was not accepted — retry after the current run settles.`,
-				"error",
-			);
-			return { action: "handled" };
-		}
-		deferredOrchestrations.push({ task, orchestration });
-		ctx.ui.notify(`persona orchestration queued (${deferredOrchestrations.length}) — it will run after the current turn settles.`, "info");
-		return { action: "handled" };
-	}
-
-	async function processNextDeferredOrchestration(): Promise<boolean> {
-		if (disposed || processingDeferredOrchestration || deferredOrchestrations.length === 0 || !lastCtx) return false;
-		const item = deferredOrchestrations.shift()!;
-		processingDeferredOrchestration = true;
-		orchestrating = true;
-		try {
-			const result = await executeMandatoryOrchestration(lastCtx, item.orchestration, item.task);
-			if (disposed) return false;
-			pendingOrchestration = result;
-			// Source is "extension", so the input hook will not orchestrate this replay again.
-			sendPersonaFollowUp(pi, item.task, "pi-persona-deferred-input");
-			return true;
-		} catch (err) {
-			pendingOrchestration = undefined;
-			if (!disposed) {
-				deferredOrchestrations.unshift(item);
-				lastCtx.ui.notify(`could not replay deferred persona input: ${err instanceof Error ? err.message : String(err)}`, "error");
-			}
-			return false;
-		} finally {
-			orchestrating = false;
-			processingDeferredOrchestration = false;
-		}
-	}
-
-	pi.on("input", async (event, ctx) => {
-		lastCtx = ctx;
-		if (event.source === "extension") return undefined;
-		const orch = controller.activePersona?.orchestration;
-		const task = event.text?.trim();
-		if (!orch || !task) return undefined;
-		const flowName = orch.mode === "flow" ? orch.flow : undefined;
-		let strategyName: string | undefined;
-		try {
-			strategyName = resolveStrategyName(orch);
-		} catch (err) {
-			// Only the persona FILE can fix this; take the turn normally rather than tearing the
-			// input hook down on every keystroke, but say so loudly — the mandatory orchestration
-			// the user configured is silently not happening.
-			ctx.ui.notify(personaGrammarError(err), "error");
-			return undefined;
-		}
-		if (!flowName && !strategyName) return undefined;
-		const mainBusy = ctx.isIdle() !== true;
-		// Steering belongs to the turn already in progress. Never start a competing mandatory
-		// orchestration for it; Pi remains responsible for applying the steering message.
-		if (mainBusy && event.streamingBehavior !== "followUp") return { action: "continue" };
-		// Follow-up input must retain mandatory semantics without racing the live run. An input that
-		// arrives while another orchestration is executing joins the same FIFO even if Pi is idle.
-		if (mainBusy || orchestrating) return enqueueDeferredOrchestration(task, orch, ctx);
-		orchestrating = true;
-		try {
-			pendingOrchestration = await executeMandatoryOrchestration(ctx, orch, task);
-		} finally {
-			orchestrating = false;
-		}
-		// Let the user's original prompt proceed; the ruling is injected (hidden) into the
-		// turn's system prompt via before_agent_start — no internal plumbing in the chat.
-		return undefined;
-	});
-
-	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
-	const SkillsSchema = Type.Array(Type.String(), {
-		description: "Skills the sub-agent loads first — spawns a dynamic specialist (skills are inherited from the host)",
-	});
-	const RoleSchema = Type.String({
-		description:
-			"On-the-fly specialist persona: extra system-prompt text appended to the agent's own (e.g. 'You are a Rust unsafe-code auditor…') — combine with `skills` to shape a dynamic sub-agent without authoring a file",
-	});
-	const BriefListSchema = Type.Union([Type.String(), Type.Array(Type.String())]);
-	const DelegationBriefSchema = Type.Object({
-		objective: Type.String({ description: "Verifiable objective and success signal" }),
-		scopeRoe: Type.String({ description: "In-scope targets plus hard scope/authorization boundaries" }),
-		position: Type.String({ description: "Minimum starting state, foothold, credentials, or assumptions the worker may rely on" }),
-		constraints: BriefListSchema,
-		requiredArtifacts: BriefListSchema,
-		stopConditions: BriefListSchema,
-	});
-	const WriteSetSchema = Type.Array(Type.String(), {
-		description: "Repository-relative files/directories this leg alone may modify; parallel overlaps are rejected",
-	});
-	const DelegateTaskItem = Type.Object({
-		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
-		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
-		brief: Type.Optional(DelegationBriefSchema),
-		name: Type.Optional(
-			Type.String({ description: "Short codename for this sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug', 'atlas-fuzz'. Pick a DIFFERENT call-sign for EVERY leg so two of the same kind stay apart (orion-recon vs vega-recon). A UI label only — not a task description." }),
-		),
-		skills: Type.Optional(SkillsSchema),
-		role: Type.Optional(RoleSchema),
-		model: Type.Optional(
-			Type.String({ description: "Model override (exact provider/id — call the `models` tool to find one)" }),
-		),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" })),
-		isolation: Type.Optional(
-			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run in an isolated git worktree (edits never touch the main tree)" }),
-		),
-		mcp: Type.Optional(
-			Type.Boolean({ description: "true = give this sub-agent working MCP tools (runs it on the child engine so pi-mcp-adapter initializes; the default engine leaves MCP tools 'not initialized'). Pass any server session id in the task to share a server-keyed backend's state." }),
-		),
-		timeoutMs: Type.Optional(
-			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default for this task only" }),
-		),
-		writeSet: Type.Optional(WriteSetSchema),
-		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for this leg" })),
-	});
-	const DelegateParams = Type.Object({
-		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
-		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
-		brief: Type.Optional(DelegationBriefSchema),
-		name: Type.Optional(Type.String({ description: "Short codename for the sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug'. A UI label, not a task description (single mode)." })),
-		skills: Type.Optional(SkillsSchema),
-		role: Type.Optional(RoleSchema),
-		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" })),
-		isolation: Type.Optional(
-			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
-		),
-		mcp: Type.Optional(
-			Type.Boolean({ description: "true = give the single sub-agent working MCP tools (runs it on the child engine; the default engine leaves MCP tools 'not initialized')" }),
-		),
-		timeoutMs: Type.Optional(
-			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default (single mode)" }),
-		),
-		writeSet: Type.Optional(WriteSetSchema),
-		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for the single leg" })),
-		tasks: Type.Optional(
-			Type.Array(DelegateTaskItem, { description: "Independent tasks to run in parallel — give each a disjoint scope" }),
-		),
-		concurrency: Type.Optional(
-			Type.Integer({ minimum: 1, description: `Max children to run at once (default ${RUN_LIMITS.maxConcurrency}; larger requests are clamped)` }),
-		),
-		async: Type.Optional(
-			Type.Boolean({
-				description:
-					"Explicitly run in the background (already the DEFAULT in interactive sessions) — returns run ids at once; each result comes back to you automatically as a follow-up. Set false to force blocking.",
-			}),
-		),
-		sync: Type.Optional(
-			Type.Boolean({
-				description:
-					"Block this turn until the sub-agent(s) finish and return their results inline — only when you need them before your very next step. (Headless sessions already default to sync.)",
-			}),
-		),
-	});
-
-	// Canonicalise a delegate's requested model names to provider/id; return a clear
-	// error (no spawn) when one is ambiguous/unknown so the supervisor retries with a
-	// valid id instead of wasting a child on an unauthenticated provider.
-	function resolveDelegateModels(params: Static<typeof DelegateParams>, ctx: ExtensionContext): string | undefined {
-		const models = configuredModels(ctx);
-		if (models.length === 0) return undefined;
-		const preferProvider = ctx.model?.provider; // the loader/session provider (the authenticated one)
-		const slots: Array<{ ref: string; set: (v: string) => void; who: string }> = [];
-		if (params.model) slots.push({ ref: params.model, set: (v) => { params.model = v; }, who: "the sub-agent" });
-		params.tasks?.forEach((t, i) => {
-			if (t.model) slots.push({ ref: t.model, set: (v) => { t.model = v; }, who: `task ${i + 1} (${t.agent})` });
-		});
-		for (const s of slots) {
-			const r = resolveModelRef(s.ref, models, preferProvider);
-			if (r.ok) {
-				s.set(r.ref);
-				continue;
-			}
-			const list = r.candidates.slice(0, 10).join(", ");
-			return `delegate: model "${s.ref}" for ${s.who} is ${r.reason} — use an exact model id. Candidates: ${list}${r.candidates.length > 10 ? ", …" : ""}.`;
-		}
-		return undefined;
-	}
-
-	// The async launch pool: every background run passes through here, so a 20-task async
-	// fan-out respects the same concurrency ceiling a sync delegate does, instead of opening
-	// 20 model sessions at once. Queued runs show as "running" with no progress yet; stopping
-	// a queued run works (the engine settles a pre-aborted signal without a model call).
-	const asyncSlots = new Semaphore(RUN_LIMITS.maxConcurrency);
-	let asyncNameSequence = 0;
-
-	// Runtime anti-loop guard: an identical (agent, model, task) delegation that failed
-	// twice is vetoed BEFORE it spawns — the completion report's "don't re-issue" guidance
-	// is advice; this is the enforcement (capabilities are never prompt-only).
-	const ledger = new DelegationLedger({ ledgerV2: config.ledgerV2 });
-
-	// Only the built-in inspection tools are known read-only. Shells and unknown/custom tools are
-	// potential writers; treating them as readers would let a persona's ownership policy fail open
-	// merely by moving an edit into a script. ONE classifier for the in-batch gates and the
-	// cross-call one below, so a leg can never count as a writer in one and a reader in the other.
-	// `skills`/`role` are deliberately NOT part of this: both are prompt text (a skills preamble and an
-	// appended system prompt), while `tools` is an enforced session allowlist in both engines — a leg
-	// granted only read/grep/find/ls cannot write however it is instructed. Classifying on them would
-	// invent writers that provably cannot write, and under requireDisjointWrites that is a hard refusal.
-	const readOnlyTools = new Set(["read", "grep", "find", "ls"]);
-	function mayMutateWorkspace(spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): boolean {
-		const configured = agents.find((agent) => agent.name === spec.agent);
-		const effectiveTools = spec.tools !== undefined ? spec.tools : configured?.tools;
-		const effectiveMcp = spec.mcp ?? configured?.mcp;
-		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !readOnlyTools.has(tool));
-	}
-
-	// Launch one agent in the background (tracked) and add its live async node to the tree.
-	// `label` is the bare codename (nameFor) — the model is folded in here (and stored on the
-	// tracker entry) so the tree node and every intercom digest show the SAME composed name.
-	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, batchSlots?: Semaphore): string {
-		const model = shortModel(runSpec.model);
-		// The writer classification travels WITH the run (tracker metadata), not in a side Set keyed by
-		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
-		// registration after launch() returns would re-insert an already-dead run and leak it.
-		const id = tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec) }, (onProgress, runId) => {
-			const nodeId = `async:${runId}`;
-			// A real, HARD stop for the async run (a steer is only a soft request the child may
-			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
-			const ac = new AbortController();
-			stopRegistry.set(nodeId, () => ac.abort());
-			const execute = () =>
-				asyncSlots.with(() =>
-					buildEngine(
-						undefined,
-						(snap) => {
-							onProgress(snap);
-							if (snap.toolEvent) publishAgentTool(nodeId, snap.toolEvent);
-							const patch: { output?: string; detail?: string } = {};
-							if (snap.output) patch.output = snap.output;
-							// Mirrors the main subscription's onAgentProgress fallback: activity (e.g. the
-							// "✉ from …" transparency tick) wins over a bare token count.
-							if (snap.activity) patch.detail = snap.activity;
-							else if (snap.tokens) patch.detail = `${compactTokens(snap.tokens)} tok`;
-							if (patch.output !== undefined || patch.detail !== undefined) agentTree.update(nodeId, patch);
-						},
-						{ async: true },
-						// STOP via `ac.signal` (hard abort) and STEER via the run-id key (soft redirect) —
-						// both work for the supervisor (intercom `stop`/`steer`) and the f9 overlay (`x`/`s`),
-						// for ANY persona (these are supervisor→child controls, not child tools).
-					).run(runSpec, undefined, ac.signal, (steer) => {
-						steerRegistry.set(nodeId, steer);
-						agentTree.update(nodeId, { detail: "" }); // live now — clear the "queued" marker
-					}),
-					ac.signal,
-				);
-			// A per-call semaphore composes with the process-wide ceiling. Acquire it first so a
-			// queued member of a serial batch never occupies a global slot while waiting for its
-			// predecessor. This makes `concurrency: 1` mean the same thing in sync and async mode.
-			return (batchSlots ? batchSlots.with(execute, ac.signal) : execute())
-				.catch((error: unknown): AgentResult => {
-					if (!ac.signal.aborted) throw error;
-					return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
-				})
-				.then((r) => {
-					if (shouldRecordDelegationOutcome(r)) {
-						ledger.record(
-							{
-								agent,
-								...(runSpec.model ? { model: runSpec.model } : {}),
-								task,
-								...(runSpec.role ? { role: runSpec.role } : {}),
-								...(runSpec.tools !== undefined ? { tools: runSpec.tools } : {}),
-								...(runSpec.isolation ? { isolation: runSpec.isolation } : {}),
-							},
-							r.ok,
-						);
-					}
-					return r;
-				});
-		});
-		const nodeId = `async:${id}`;
-		// "queued" until the semaphore grants a slot and the engine reports it steerable. Every
-		// `async:*` node IS async by construction, so no "(async)" tag is needed — fold in the
-		// model instead, matching the canonical `<codename> · <model>` name shown elsewhere.
-		agentTree.add({
-			id: nodeId,
-			label: model ? `${label} · ${model}` : label,
-			status: "running",
-			kind: "subagent",
-			agent,
-			...(runSpec.model ? { model: runSpec.model } : {}),
-			detail: "queued",
-		});
-		startPeek(); // arm the timed supervisor wakeup while this run is in flight (no-op if PI_PERSONA_PEEK_MS=0)
-		return id;
-	}
-
-	pi.registerTool({
-		name: "delegate",
-		label: "Delegate",
-		description: [
-			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
-			'Minimum call: { agent: "operator", task: "<self-contained brief: objective, scope, success signal>" } — everything else is optional.',
-			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes), then synthesize the returns yourself. A persona may declaratively require a six-field `brief`, a structured output contract, or disjoint `writeSet` ownership; those calls fail before spawn when incomplete.",
-			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once, stay free,",
-			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
-			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
-			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
-			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
-			"candidates (or call `models`). Advanced knobs: name, tools, brief, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
-		].join(" "),
-		parameters: DelegateParams,
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			lastCtx = ctx;
-			const policy = controller.activePersona?.delegation;
-			const defaultOutputContract = policy?.outputContract;
-			if (defaultOutputContract) {
-				params = params.tasks && params.tasks.length > 0
-					? {
-							...params,
-							tasks: params.tasks.map((task) => task.outputContract?.trim() ? task : { ...task, outputContract: defaultOutputContract }),
-						}
-					: params.agent && params.task && !params.outputContract?.trim()
-						? { ...params, outputContract: defaultOutputContract }
-						: params;
-			}
-			if (policy?.requireBrief) {
-				const briefError = validateDelegationBrief(params);
-				if (briefError) return { content: [{ type: "text", text: briefError }], details: failureDetails({}), isError: true };
-			}
-			if (params.tasks && params.tasks.length > 0) {
-				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, RUN_LIMITS.maxConcurrency);
-				const classified = params.tasks.map((task, index) => ({ task, index, mayWrite: mayMutateWorkspace(task) }));
-				const writing = classified.filter((entry) => entry.mayWrite);
-				if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
-					const verifierNames = new Set(policy.verificationAgents);
-					const droppedVerifiers = params.tasks
-						.slice(RUN_LIMITS.maxChildren)
-						.filter((task) => verifierNames.has(task.agent));
-					if (droppedVerifiers.length > 0) {
-						const names = [...new Set(droppedVerifiers.map((task) => `"${task.agent}"`))].join(", ");
-						const message =
-							`delegate: the max-children limit (${RUN_LIMITS.maxChildren}) would truncate declared fresh verifier ${names}. ` +
-							"Split the mutations into smaller batches and run every verifier after the final material mutation; no partial batch was started.";
-						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
-					}
-					const verifiers = classified.filter(({ task }) => verifierNames.has(task.agent));
-					// A declared verifier may itself have `bash` for running tests; that makes it a
-					// potential filesystem writer for ownership purposes, but not the material mutation
-					// it is meant to approve. Compare it only with the other mutating roles here.
-					const mutations = writing.filter(({ task }) => !verifierNames.has(task.agent));
-					const lastMutation = mutations.reduce((last, entry) => Math.max(last, entry.index), -1);
-					const staleOrder = effectiveConcurrency === 1 && verifiers.some(({ index }) => index <= lastMutation);
-					if (mutations.length > 0 && verifiers.length > 0 && (effectiveConcurrency > 1 || staleOrder)) {
-						const names = verifiers.map(({ index, task }) => `tasks[${index}] ("${task.agent}")`).join(", ");
-						const reason = effectiveConcurrency > 1
-							? "would overlap a material mutation"
-							: "is ordered before a material mutation";
-						const message = `delegate: fresh verification must run after every material mutation; ${names} ${reason}. Serialize the batch with every writer first and every declared verifier last, or start the verifier in a later call once every writer has SETTLED (its completion follow-up, or intercom { action:"wait", to:"<run-id>" }) — a later call while a writer is still running is rejected the same way.`;
-						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
-					}
-				}
-				if (effectiveConcurrency > 1) {
-					if (policy?.requireDisjointWrites) {
-						if (writing.length > 1) {
-							const missing = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim())).map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
-							if (missing.length > 0) {
-								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths, split the scopes, or serialize the writers.`;
-								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
-							}
-						}
-					}
-					const writeSetError = validateParallelWriteSets(params.tasks);
-					if (writeSetError) return { content: [{ type: "text", text: writeSetError }], details: failureDetails({}), isError: true };
-				}
-			}
-			// The gate above sees ONE call. Interactive delegate is background by default, so the
-			// remedy it prescribes — run the verifier in a later call — lands WHILE the mutation is
-			// still running unless the same rule holds across calls; the policy would otherwise be
-			// defeated by following its own instructions. Guidance is never the enforcement here
-			// (capabilities are runtime-checked), so a verifier waits for the writers to settle.
-			if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
-				const verifierNames = new Set(policy.verificationAgents);
-				const requestedAgents = params.tasks && params.tasks.length > 0 ? params.tasks.map((t) => t.agent) : params.agent ? [params.agent] : [];
-				if (requestedAgents.some((agent) => verifierNames.has(agent))) {
-					// A declared verifier's own background legs are not the mutation it must approve
-					// (same carve-out the in-batch gate makes for a test-running verifier).
-					const liveMutations = tracker.writers().filter((run) => !verifierNames.has(run.agent));
-					if (liveMutations.length > 0) {
-						const verifierList = [...new Set(requestedAgents.filter((agent) => verifierNames.has(agent)))].map((agent) => `"${agent}"`).join(", ");
-						const visibleMutations = liveMutations.slice(0, 8);
-						const omittedMutations = liveMutations.length - visibleMutations.length;
-						const inFlight = `${visibleMutations.map((run) => `${run.id} (${sanitizeLabel(run.agent)})`).join(", ")}${omittedMutations > 0 ? `, … +${omittedMutations} more` : ""}`;
-						const message =
-							`delegate: fresh verification must run after every material mutation; ${verifierList} cannot start while ${inFlight} ${liveMutations.length === 1 ? "is" : "are"} still mutating. ` +
-							`Wait for the completion follow-up (or intercom { action:"wait", to:"${liveMutations[0]?.id}" }), then start the verifier against the resulting state.`;
-						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
-					}
-				}
-			}
-			const modelErr = resolveDelegateModels(params, ctx);
-			if (modelErr) return { content: [{ type: "text", text: modelErr }], details: failureDetails({}), isError: true };
-			// Pre-spawn agent validation (mirrors the model path): a wrong name returns the
-			// installed list instead of spawning into a bare engine failure, and a typo never
-			// counts toward the ledger's 2-strike veto.
-			const agentErr = unknownAgentError(
-				params.tasks && params.tasks.length > 0 ? params.tasks.map((t) => t.agent) : params.agent ? [params.agent] : [],
-				agents.map((a) => a.name),
-			);
-			if (agentErr) return { content: [{ type: "text", text: agentErr }], details: failureDetails({}), isError: true };
-			// Anti-loop veto (after model canonicalisation, so keys match retries): an
-			// identical delegation that already failed twice does not spawn again.
-			const requested =
-				params.tasks && params.tasks.length > 0
-					? params.tasks.map((t) => ({
-							agent: t.agent,
-							...(t.model ? { model: t.model } : {}),
-							task: t.task,
-							...(t.role ? { role: t.role } : {}),
-							...(t.tools !== undefined ? { tools: t.tools } : {}),
-							...(t.isolation ? { isolation: t.isolation } : {}),
-						}))
-					: params.agent && params.task
-						? [
-								{
-									agent: params.agent,
-									...(params.model ? { model: params.model } : {}),
-									task: params.task,
-									...(params.role ? { role: params.role } : {}),
-									...(params.tools !== undefined ? { tools: params.tools } : {}),
-									...(params.isolation ? { isolation: params.isolation } : {}),
-								},
-							]
-						: [];
-			const veto = ledger.vet(requested);
-			if (veto) return { content: [{ type: "text", text: veto }], details: failureDetails({}), isError: true };
-			// Background by default in interactive sessions: the supervisor stays free and results
-			// return as follow-ups (the idle-gated push path). Headless (`pi -p`) defaults to sync —
-			// the single turn must carry the result, and nothing drains a follow-up after the
-			// process exits. An explicit `async` always wins; `sync: true` opts one call out.
-			const wantsAsync = wantsAsyncRun(params, ctx.hasUI === true);
-			// Async (single OR parallel): run in the background so YOU stay free to keep
-			// working / answer the user — results arrive later as follow-ups; /peek to watch.
-			if (wantsAsync && params.tasks && params.tasks.length > 0) {
-				const tasks = params.tasks.slice(0, RUN_LIMITS.maxChildren);
-				const dropped = params.tasks.length - tasks.length;
-				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, RUN_LIMITS.maxConcurrency);
-				// Avoid an extra scheduling hop when the requested limit cannot bind (also keeps a
-				// one-leg background launch observably immediate, as it was before per-call limits).
-				const batchSlots = effectiveConcurrency < tasks.length ? new Semaphore(effectiveConcurrency) : undefined;
-				const nameOffset = asyncNameSequence;
-				asyncNameSequence += tasks.length;
-				const ids = tasks.map((t, i) => {
-					// Routed through specOf() (not a hand-rolled field list) so this, the interactive
-					// DEFAULT delegate path, never drifts from the sync path's mapping — NP2's per-leg
-					// `timeoutMs` (and any future knob) lands here for free instead of needing a second copy.
-					const spec = specOf(t);
-					return launchAsyncRun(t.agent, t.task, spec, nameFor(t, nameOffset + i), batchSlots);
-				});
-				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${RUN_LIMITS.maxChildren}) were dropped.` : "";
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Launched ${ids.length} async runs in the background (${ids.join(", ")}) — keep working; each notifies on completion. /peek to watch.${droppedNote}`,
-						},
-					],
-					details: { runIds: ids },
-					isError: false,
-				};
-			}
-			if (wantsAsync && params.agent && params.task) {
-				const agent = params.agent;
-				const task = params.task;
-				// Use the canonical mapper here too: explicit `none`/`false` and future fields must
-				// survive exactly as they do in fan-out and sync mode.
-				const single = { ...params, agent, task };
-				const runSpec = specOf(single);
-				const id = launchAsyncRun(agent, task, runSpec, nameFor(single, asyncNameSequence++));
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Launched async run ${id} (${agent}) — runs in the background; you'll be notified on completion. /peek ${id} to watch.`,
-						},
-					],
-					details: { runId: id },
-					isError: false,
-				};
-			}
-			const delRoot = `delegate:${_toolCallId}`;
-			agentTree.add({ id: delRoot, label: "delegate", status: "running", kind: "delegate" });
-			try {
-				const delegateLimits = { maxConcurrency: RUN_LIMITS.maxConcurrency, maxChildren: RUN_LIMITS.maxChildren };
-				const outcome = await runDelegate(
-					params,
-					buildEngine(signal),
-					delegateLimits,
-					(views) => {
-						views.forEach((v, i) => {
-							const id = `${delRoot}/${i}`;
-							if (!v.running) {
-								stopRegistry.delete(id);
-								stopRequested.delete(id);
-								steerRegistry.delete(id);
-							}
-							const status = agentNodeStatusForDelegate(v);
-							const spec = requested[i];
-							const node: AddNodeInput = {
-								id,
-								label: v.label,
-								parentId: delRoot,
-								status,
-								kind: "subagent",
-								...(spec?.agent ? { agent: spec.agent } : {}),
-								...(spec?.model ? { model: spec.model } : {}),
-							};
-							node.detail = v.running ? v.activity : formatUsage(v.usage);
-							if (v.output) node.output = v.output;
-							agentTree.add(node);
-						});
-						const done = views.filter((v) => !v.running).length;
-						onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
-					},
-					(i, abort) => stopRegistry.set(`${delRoot}/${i}`, abort),
-					(i, steer) => steerRegistry.set(`${delRoot}/${i}`, steer),
-					// The same run signal the engine was built with: a leg whose engine REJECTS under a
-					// whole-run stop must file as "abort", not as an agent failure the user never caused.
-					signal,
-					(i, event) => publishAgentTool(`${delRoot}/${i}`, event),
-				);
-				// Feed the anti-loop ledger (results align with the requested tasks by index).
-				outcome.results.forEach((r, i) => {
-					const t = requested[i];
-					if (t && shouldRecordDelegationOutcome(r)) ledger.record(t, r.ok);
-				});
-				agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : outcome.ok ? "done" : "failed" });
-				return {
-					// Sub-agent text is untrusted even as a tool result (guardrails §: fence
-					// before it reaches the supervisor) — the async path already fences via
-					// buildCompletionReport; the sync path must match.
-					content: [{ type: "text", text: `${fenceUntrusted(outcome.text)}${drainBusBlock()}` }],
-					details: outcome.ok ? { views: outcome.views } : failureDetails({ views: outcome.views }),
-					isError: !outcome.ok,
-				};
-			} catch (error) {
-				agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : "failed" });
-				throw error;
-			} finally {
-				clearStops(delRoot);
-				clearSteers(delRoot);
-				agentTree.remove(delRoot);
-			}
-		},
-
-		renderCall(args, theme) {
-			const title = theme.fg("toolTitle", theme.bold("delegate "));
-			if (args.tasks && args.tasks.length > 0) {
-				// Names live in the tree / final card — keep the call line itself minimal.
-				return new Text(`${title}${theme.fg("accent", `parallel (${args.tasks.length})`)}`, 0, 0);
-			}
-			const agent = compactInlineText(args.agent ?? "?", { maxChars: 80 }) || "?";
-			const preview = compactInlineText(args.task ?? "", { maxChars: 60 });
-			// renderCall only fires in an interactive UI, where delegate runs in the BACKGROUND by
-			// default — pass hasUI:true to the same wantsAsyncRun the execute path uses, so the common
-			// (defaulted) background run still shows the tag; `sync: true` drops it.
-			const asyncTag = wantsAsyncRun(args, true) ? theme.fg("warning", " async") : "";
-			return new Text(`${title}${theme.fg("accent", agent)}${asyncTag}${theme.fg("dim", ` ${preview}`)}`, 0, 0);
-		},
-
-		renderResult(result, { expanded }, theme) {
-			// Safe: the delegate `execute` above always stores `{ views: DelegateView[] }` (sync,
-			// single/parallel) or `{ runId | runIds }` (async) in `details`; the double cast just narrows
-			// Pi's opaque `details` type to that known shape for rendering.
-			const details = result.details as unknown as { views?: DelegateView[]; runId?: string; runIds?: string[] } | undefined;
-			const views = details?.views ?? [];
-			if (views.length === 0) {
-				const first = result.content[0];
-				const fallback = details?.runIds?.length
-					? `async runs ${details.runIds.join(", ")}`
-					: details?.runId
-						? `async run ${details.runId}`
-						: "(no output)";
-				const text = first?.type === "text" ? first.text : fallback;
-				return new Text(sanitizeTerminalText(text), 0, 0);
-			}
-			const title = theme.fg("toolTitle", theme.bold("delegate "));
-			const running = views.filter((v) => v.running).length;
-			// While running, render nothing — the live per-agent view is the tree widget
-			// (and the f9 overlay). A sticky card here would just duplicate it. The full
-			// per-leg cards below appear once the run completes.
-			if (running > 0) return new Container();
-			const okCount = views.filter((v) => v.ok).length;
-			const container = new Container();
-			container.addChild(new Text(`${title}${theme.fg("accent", `${okCount}/${views.length} ok`)}`, 0, 0));
-			// A failure is actionable; never bury it below a page of successful legs. Collapsed cards
-			// show at most three semantic one-line previews. Expansion remains the lossless inspection
-			// surface, while F9 keeps the live navigable tree.
-			const ordered = expanded ? views : [...views].sort((a, b) => Number(a.ok) - Number(b.ok));
-			const visible = expanded ? ordered : ordered.slice(0, 3);
-			for (const v of visible) {
-				const icon = v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
-				const usageStr = formatUsage(v.usage);
-				const usage = usageStr ? theme.fg("dim", ` ${usageStr}`) : "";
-				const body = sanitizeTerminalText(v.output || "(no output)");
-				if (expanded) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 96 }) || "agent")}${usage}`, 0, 0));
-					container.addChild(new Text(theme.fg("toolOutput", body), 0, 0));
-					continue;
-				}
-				// Keep the collapsed semantic row below 100 columns even on a very wide terminal.
-				// Usage remains one keystroke away in expanded mode; the collapsed card prioritizes
-				// identity + outcome instead of wrapping one result into several pseudo-rows.
-				const preview = compactVisibleText(body, { maxLines: 1, maxLineChars: 60 });
-				container.addChild(
-					new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 28 }) || "agent")} · ${theme.fg("toolOutput", preview.text)}`, 0, 0),
-				);
-			}
-			if (!expanded) {
-				const omitted = views.length - visible.length;
-				const prefix = omitted > 0 ? `… +${omitted} more result${omitted === 1 ? "" : "s"} · ` : "";
-				container.addChild(new Text(theme.fg("dim", `${prefix}${expandDetailHint()}`), 0, 0));
-			}
-			return container;
-		},
-	});
-
-	// ── f8 cycle ────────────────────────────────────────────────────────────────
+// ── f8 cycle ────────────────────────────────────────────────────────────────
 	const cycleShortcut = {
 		description: "Cycle persona (pi-persona)",
 		handler: async (ctx: ExtensionContext) => {
@@ -3573,7 +1632,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				await controller.activate(personas[next]!);
 				persist(personas[next]!.name);
 			}
-			await onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
+			await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
 		},
 	};
 	type KeyId = Parameters<ExtensionAPI["registerShortcut"]>[0];
@@ -3589,525 +1648,50 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	}
 
-	// ── intercom tool (supervisor side of the comm plane: read/answer children) ───
-	const IntercomToolParams = Type.Object({
-		action: Type.Union(
-			[
-				Type.Literal("peek"),
-				Type.Literal("result"),
-				Type.Literal("wait"),
-				Type.Literal("steer"),
-				Type.Literal("stop"),
-				Type.Literal("list"),
-				Type.Literal("inbox"),
-				Type.Literal("reply"),
-				Type.Literal("send"),
-			],
-			{
-				description:
-					"peek = watch async sub-agents · result = retrieve one complete settled result by run id · wait = BLOCK until async run(s) settle and collect their bounded reports (a join) · steer = soft redirect into one by run id (it may ignore it) · stop = HARD-abort one by run id · list/inbox/reply/send = the coaching message bus (needs a coaching persona)",
-			},
-		),
-		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek/wait: the async run id (e.g. 'run-1'; wait without it = all running) · send: the child bus handle (from `list`)" })),
-		askId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "reply: the message id of the child's pending question" })),
-		message: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_MESSAGE_CHARS, description: "steer/reply/send: the text to deliver" })),
-		timeoutMs: Type.Optional(Type.Number({ description: "wait: max ms to hold your turn (default 600000, cap 600000) — on timeout you get what settled + what's still running" })),
-	});
-	pi.registerTool({
-		name: "intercom",
-		label: "Intercom",
-		description: [
-			"See, steer, message, and JOIN your running sub-agents.",
-			"`peek` watches what your async sub-agents are doing; `result` retrieves one complete settled",
-			"payload by run id; `wait` blocks until runs settle and returns a bounded join report;",
-			"`steer` injects a course-correction into one (by run id) mid-run — all for ANY persona on",
-			"in-process async runs.",
-			"`list`/`inbox`/`reply`/`send` are the message bus (a child reaching you via `contact_supervisor`)",
-			"and need a `coaching: on` persona.",
-		].join(" "),
-		parameters: IntercomToolParams,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			// `to` comes from model-authored tool arguments. Use the exact value for routing, but never
-			// interpolate it into trusted prose without reducing it to compact identifier metadata.
-			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
-			// peek + wait + steer + stop are supervisor→child controls over the async tracker /
-			// steer handles — available to EVERY persona (no dependency on the coaching bus).
-			if (params.action === "peek") {
-				// No `to` → running legs PLUS any settled-but-not-yet-delivered ones (the settle→deliver
-				// gap), so a peek right after a leg finishes shows its result instead of "No async runs".
-				const runs = params.to
-					? [tracker.peek(params.to)].filter((r): r is AsyncRun => !!r)
-					: dedupeRunsById([...tracker.running(), ...completionNotifier.peekPending()]);
-				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: STALL_FLAG_MS }) }], details: { action: "peek", ok: true }, isError: false };
-			}
-			if (params.action === "result") {
-				if (!params.to) {
-					return { content: [{ type: "text", text: "intercom result needs { to: <run id> }." }], details: failureDetails({ action: "result", ok: false }), isError: true };
-				}
-				const run = tracker.peek(params.to);
-				if (!run) {
-					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: failureDetails({ action: "result", ok: false }), isError: true };
-				}
-				if (run.status === "running") {
-					return {
-						content: [{ type: "text", text: `${displayTarget} is still running. Use intercom peek/wait, or request result after it settles.` }],
-						details: failureDetails({ action: "result", ok: false, status: run.status }),
-						isError: true,
-					};
-				}
-				// Explicit collection owns this delivery: remove a still-buffered passive completion so the
-				// same result cannot appear again as a follow-up a moment later. Telling the tracker too
-				// makes this retained copy the first thing retention evicts — the supervisor has read it,
-				// so it is the cheapest payload in the map to lose.
-				completionNotifier.discard((pending) => pending.id === run.id);
-				tracker.markCollected(run.id);
-				const full = getFullRunOutput(run);
-				const body = full === "(no output)" ? full : fenceUntrusted(full);
-				// The cause is engine/child-authored text too. Keep the run id/status as trusted compact
-				// metadata, but put the diagnostic inside the same untrusted fence as the payload.
-				const cause = run.error ? `\nFailure detail:\n${fenceUntrusted(run.error)}` : "";
-				const displayRun = sanitizeDisplayLabel(run.label ?? run.agent);
-				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
-				// the supervisor through, so it carries the same reading the passive/join reports do.
-				const took = runDurationLabel(run);
-				return {
-					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${cause}\n${body}` }],
-					details: { action: "result", ok: true, status: run.status, runId: run.id },
-					isError: false,
-				};
-			}
-			if (params.action === "wait") {
-				// No `to` → wait on running legs AND collect settled legs still queued for follow-up
-				// delivery, so a wait in the settle→deliver gap returns their results (not "nothing").
-				if (params.to && !tracker.peek(params.to)) {
-					return { content: [{ type: "text", text: missingRunMessage(params.to, displayTarget) }], details: failureDetails({ action: "wait", ok: false }), isError: true };
-				}
-				const ids = params.to
-					? [params.to]
-					: dedupeRunsById([...tracker.running(), ...completionNotifier.peekPending()]).map((r) => r.id);
-				if (ids.length === 0) {
-					return { content: [{ type: "text", text: "No async runs to wait for." }], details: { action: "wait", ok: true }, isError: false };
-				}
-				// Bounded join: never longer than a child's ask timeout (bus `ask` default 600s),
-				// so a coaching child blocking on OUR reply can't deadlock us past its own timeout.
-				// Default matches that ceiling — heavy sub-agents (30+ turns) routinely outlast a
-				// short window, and a premature "still running" forces a needless re-wait.
-				const timeoutMs = Math.min(Math.max(params.timeoutMs ?? 600_000, 1_000), 600_000);
-				const runs = await tracker.waitFor(ids, timeoutMs, _signal);
-				const settled = runs.filter((r) => r.status !== "running");
-				const still = runs.filter((r) => r.status === "running");
-				// These results are delivered HERE — drop them from the pending follow-up
-				// notifier so they aren't reported a second time. Render through the SAME
-				// renderCompletion the passive path uses, so a leg that came back BLOCKED still
-				// carries the premature-surrender note when it is collected via `wait`.
-				const settledIds = new Set(settled.map((r) => r.id));
-				completionNotifier.discard((run) => settledIds.has(run.id));
-				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => scanForSurrender(t)) : "";
-				const stillNote = still.length > 0 ? buildWaitTimeoutNote(still.map((r) => r.id), timeoutMs) : "";
-				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
-				const text = boundCompletionSurface(joined);
-				return {
-					content: [{ type: "text", text }],
-					details: { action: "wait", ok: true, settled: [...settledIds], running: still.map((r) => r.id) },
-					isError: false,
-				};
-			}
-			if (params.action === "steer") {
-				if (!params.to || params.message === undefined) {
-					return { content: [{ type: "text", text: "intercom steer needs { to: <run id>, message }." }], details: failureDetails({ action: "steer", ok: false }), isError: true };
-				}
-				const nodeId = `async:${params.to}`;
-				if (!steerRegistry.has(nodeId)) {
-					return {
-						content: [{ type: "text", text: `Cannot steer "${displayTarget}" — no live steer handle is available (the run may have finished or not started yet, or its engine/broker does not expose steering).` }],
-						details: failureDetails({ action: "steer", ok: false }),
-						isError: true,
-					};
-				}
-				// Routed through the guarded steerAgent so a just-finished/disposed handle can't throw.
-				const steered = steerAgent(nodeId, params.message);
-				return steered
-					? { content: [{ type: "text", text: `Steered ${displayTarget} (soft request; use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false }
-					: { content: [{ type: "text", text: `Could not steer "${displayTarget}" — it may have just finished, or the message was empty.` }], details: failureDetails({ action: "steer", ok: false }), isError: true };
-			}
-			if (params.action === "stop") {
-				if (!params.to) {
-					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: failureDetails({ action: "stop", ok: false }), isError: true };
-				}
-				// HARD stop: aborts the run's signal → the engine calls the sub-agent's agent.abort()
-				// (child.ts escalates SIGTERM → force tree-kill, so this DOES kill a child-engine process).
-				const nodeId = `async:${params.to}`;
-				const repeated = stopRequested.has(nodeId);
-				const stopped = stopAgent(nodeId);
-				if (stopped && !repeated) {
-					return { content: [{ type: "text", text: `Aborting ${displayTarget} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false };
-				}
-				// A repeated stop has just invoked the REAL cancel handle again. Only now force-clear
-				// tracker state if engine settlement is still lagging; the handle remains registered
-				// until onComplete so cancellation can never be replaced by UI-only bookkeeping.
-				if (stopped && repeated && tracker.forceSettle(params.to, "force-stopped by supervisor after repeated engine cancellation")) {
-					return {
-						content: [{ type: "text", text: `Force-cleared ${displayTarget} after repeating the engine cancellation; it will no longer be tracked as running.` }],
-						details: { action: "stop", ok: true },
-						isError: false,
-					};
-				}
-				return {
-					content: [{ type: "text", text: `Cannot stop "${displayTarget}" — no such running run (it already finished).` }],
-					details: failureDetails({ action: "stop", ok: false }),
-					isError: true,
-				};
-			}
-
-			// The message bus (coaching): list / inbox / reply / send.
-			const out = runIntercom(params as IntercomParams, bus, SUPERVISOR);
-			// An answered ask is settled on every surface it reached — never woken again, never
-			// re-listed (the ask envelope is NOT drained by the peek path, which skips expectsReply).
-			if (params.action === "reply" && out.details.ok && params.askId) {
-				reconcileAnsweredAsk(params.askId, intercomNotifier, bus, SUPERVISOR);
-			}
-			// Child-authored inbox bodies are untrusted, exactly like the drainBusBlock/peek copies.
-			let text = fenceIntercomOutcome(out, fenceUntrusted);
-			if ((params.action === "list" || params.action === "inbox") && !controller.activePersona?.coaching) {
-				text += `\n\n${coachingDisabledHint(controller.activePersona?.name)}`;
-			}
-			return { content: [{ type: "text", text }], details: out.details.ok ? out.details : failureDetails(out.details), isError: !out.details.ok };
-		},
-		renderCall(args, theme) {
-			const action = compactInlineText(args.action ?? "?", { maxChars: 24 }) || "?";
-			let target = "";
-			if (action === "wait" || action === "peek") target = compactInlineText(args.to ?? "all", { maxChars: 80 }) || "all";
-			else if (["result", "steer", "stop", "send"].includes(action)) target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
-			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
-			const timeout = action === "wait" && Number.isFinite(args.timeoutMs) && args.timeoutMs !== undefined
-				? ` · ${Math.max(0, Math.floor(args.timeoutMs))}ms`
-				: "";
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${target ? theme.fg("dim", ` ${target}${timeout}`) : ""}`,
-				0,
-				0,
-			);
-		},
-		renderResult(result, { expanded }, theme) {
-			const details = (result.details ?? {}) as { action?: string; ok?: boolean };
-			const first = result.content[0];
-			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
-			const failed = details.ok === false;
-			const prefix = failed ? `${theme.fg("error", theme.bold("failed"))}\n` : "";
-			if (expanded) return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
-			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-			return new Text(`${prefix}${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
-		},
+	registerIntercomTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		tracker,
+		completionNotifier,
+		intercomNotifier,
+		controller,
+		bus,
+		SUPERVISOR,
+		STALL_FLAG_MS,
+		missingRunMessage,
+		stopAgent,
+		steerAgent,
+		steerRegistry,
+		stopRequested,
+		drainBusBlock,
+		scanForSurrender,
+		get disposed() { return disposed; },
 	});
 
-	// ── timer tool (arm a wall-clock alarm that WAKES the session when it fires) ───
-	// Solves the "wait N minutes for a release / rate-limit window" problem WITHOUT a poll loop:
-	// arm an alarm, end your turn, and when it expires the extension injects a follow-up that
-	// resumes you (idle-gated so it starts a fresh turn instead of stranding). Arm as many as you
-	// want; cancel/list them. In-memory per session (a reload/new session clears armed alarms).
-	const TimerToolParams = Type.Object({
-		action: Type.Union([Type.Literal("arm"), Type.Literal("cancel"), Type.Literal("list")], {
-			description: "arm = schedule a wakeup · cancel = drop one by id · list = show armed alarms",
-		}),
-		message: Type.Optional(
-			Type.String({ description: "arm: the follow-up injected into the session when the timer fires (what to do on wake, e.g. 'spawn Paperwork and start nmap'). Required for arm." }),
-		),
-		delaySeconds: Type.Optional(Type.Number({ description: "arm: fire this many seconds from now. Give this OR atIso, not both." })),
-		atIso: Type.Optional(Type.String({ description: "arm: fire at this absolute time, ISO-8601 (e.g. '2026-07-11T19:00:00Z'). Give this OR delaySeconds, not both." })),
-		label: Type.Optional(Type.String({ description: "arm: a short human label for the alarm (e.g. 'Paperwork release')." })),
-		id: Type.Optional(Type.String({ description: "cancel: the timer id to cancel (e.g. 'timer-1')." })),
-	});
-	pi.registerTool({
-		name: "timer",
-		label: "Timer",
-		description: [
-			"Arm a wall-clock ALARM that wakes you when it fires — the token-cheap way to wait for a",
-			"fixed moment (a machine release, a rate-limit reset, a scheduled re-check) instead of a",
-			"poll loop. `arm` with { message, delaySeconds } or { message, atIso }; end your turn; when",
-			"it expires a follow-up carrying your message is injected and you resume. `cancel` by id,",
-			"`list` the armed ones. Arm as many as you need. Alarms are per-session (cleared on reload).",
-		].join(" "),
-		parameters: TimerToolParams,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			if (params.action === "list") {
-				const timers = timerScheduler.list();
-				const text =
-					timers.length === 0
-						? "(no armed timers)"
-						: `Armed timers:\n${timers
-								.map((t) => `• ${t.id} (${t.label}) — fires in ${formatRemaining(t.remainingMs)} [${new Date(t.fireAtEpochMs).toISOString()}]: ${t.message}`)
-								.join("\n")}`;
-				return { content: [{ type: "text", text }], details: { action: "list", count: timers.length, ok: true }, isError: false };
-			}
-			if (params.action === "cancel") {
-				if (!params.id) {
-					return { content: [{ type: "text", text: "timer cancel needs { id } (see `list`)." }], details: failureDetails({ action: "cancel", ok: false }), isError: true };
-				}
-				const cancelled = timerScheduler.cancel(params.id);
-				return cancelled
-					? { content: [{ type: "text", text: `Cancelled ${params.id}.` }], details: { action: "cancel", ok: true }, isError: false }
-					: { content: [{ type: "text", text: `No armed timer with id "${params.id}" (it may have already fired or been cancelled).` }], details: failureDetails({ action: "cancel", ok: false }), isError: true };
-			}
-			// action === "arm"
-			const arm: { message: string; label?: string; delayMs?: number; atEpochMs?: number } = { message: params.message ?? "" };
-			if (params.label !== undefined) arm.label = params.label;
-			if (params.atIso !== undefined) {
-				const at = Date.parse(params.atIso);
-				if (!Number.isFinite(at)) {
-					return { content: [{ type: "text", text: `timer atIso "${params.atIso}" is not a valid ISO-8601 time.` }], details: failureDetails({ action: "arm", ok: false }), isError: true };
-				}
-				arm.atEpochMs = at;
-			}
-			if (params.delaySeconds !== undefined) arm.delayMs = Math.round(params.delaySeconds * 1000);
-			const r = timerScheduler.arm(arm);
-			if (!r.ok || !r.entry) {
-				return { content: [{ type: "text", text: r.error ?? "timer arm failed." }], details: failureDetails({ action: "arm", ok: false }), isError: true };
-			}
-			const e = r.entry;
-			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(e.fireAtEpochMs - Date.now())} [${new Date(e.fireAtEpochMs).toISOString()}]. On fire I'll be woken with: "${e.message}". You can end this turn now.`;
-			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, ok: true }, isError: false };
-		},
+	registerTimerTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		timerScheduler,
 	});
 
-	// ── council tool (deliberate → vote → ruling; the executor then applies it) ───
-	const CouncilParams = Type.Object({
-		question: Type.String({ description: "The decision or problem to deliberate — specific and self-contained" }),
-		persona: Type.Optional(
-			Type.String({
-				description:
-					'Installed persona whose declared council profile to use (for example "magi"). This borrows only its council strategy/roster/params; the active caller remains in control.',
-			}),
-		),
-		strategy: Type.Optional(
-			Type.String({ description: "Per-call strategy override (default: the selected or active persona's council strategy)" }),
-		),
-		roster: Type.Optional(Type.String({ description: "Per-call roster override (default: the selected or active persona's council roster)" })),
-		params: Type.Optional(
-			Type.Record(Type.String(), Type.Unknown(), {
-				description:
-					'Strategy params, merged over the persona\'s (e.g. { "reflect": false } to skip magi\'s reflection round, { "aggregate": "unanimity" }, { "rounds": 3 }). Reach for it when the user asks for a variant of the persona\'s default council this one time.',
-			}),
-		),
-	});
-	pi.registerTool({
-		name: "council",
-		label: "Council",
-		description: [
-			"Convene a council of specialists with controlled, complementary biases to deliberate a",
-			"decision and vote — returns the ruling (winner, tally, each member's view, recorded dissent).",
-			"Use it before any significant choice; then EXECUTE the ruling yourself and re-convene when",
-			"execution surfaces a new decision. Patterns: adversarial vote (magi, council-rounds), best-of-N",
-			"with an impartial arbiter (judge, compete), batch map, merged synthesis (synthesize).",
-			'Use `persona: "magi"` to invoke an installed persona\'s declared council without switching away',
-			"from the active caller; its prompt, model, tools, and permissions are never inherited.",
-			`Strategies: ${strategyNames()
-				.map((n) => {
-					const p = knownParams(n);
-					const keys = p ? Object.keys(p) : [];
-					return keys.length > 0 ? `${n}(${keys.join(", ")})` : n;
-				})
-				.join(" · ")}.`,
-			'Pass `params` to vary the persona\'s default council for one call — e.g. { "reflect": false }.',
-		].join(" "),
-		parameters: CouncilParams,
-		async execute(_id, params, signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			const resolved = resolveCouncilInvocation(personas, controller.activePersona, {
-				persona: params.persona,
-				strategy: params.strategy,
-				roster: params.roster,
-				params: params.params as Record<string, unknown> | undefined,
-			});
-			if (!resolved.ok) {
-				return {
-					content: [{ type: "text", text: `council failed: ${resolved.error}` }],
-					details: failureDetails({ error: resolved.error, persona: params.persona }),
-					isError: true,
-				};
-			}
-			const { strategy, roster, params: mergedParams, persona } = resolved.value;
-			try {
-				// Fully persona-driven: a persona's `council:` block picks the strategy, roster,
-				// and params — a new ensemble (more members, supermajority, multi-round) needs no
-				// code, just a team + (optional) strategy file + a council block. Params override.
-				// Per-call params override the selected council profile (e.g. reflect:false this once).
-				// Lenient by design (I2: strategies are trusted project code) — an unknown param key
-				// only warns, it never blocks or alters the run. A correct call is untouched.
-				let paramNote = "";
-				const schema = knownParams(strategy);
-				if (schema) {
-					const unknown = Object.keys(mergedParams).filter((k) => !(k in schema));
-					if (unknown.length > 0) {
-						const note = `council: ignoring unknown param(s) [${unknown.join(", ")}] for "${strategy}" — known: ${Object.keys(schema).join(", ") || "(none)"}`;
-						if (process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] ${note}\n`);
-						ctx.ui.notify(note, "warning");
-						paramNote = `\n\n(${note})`;
-					}
-				}
-				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: mergedParams };
-				const result = await runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
-				const s = (result?.structured ?? {}) as { headline?: string; status?: string; tally?: Record<string, number>; usedFallback?: boolean; count?: number };
-				const ruling = result?.output ?? "(the council returned no ruling)";
-				const uiBody = result ? (humanizeAggregateResult(result) ?? result.output) : "";
-				const headline = s.headline ?? (typeof s.count === "number" ? `${s.count} member results` : s.status ?? "");
-				const ok = result?.ok ?? false;
-				const details = {
-					ok,
-					headline,
-					status: s.status,
-					tally: s.tally,
-					usedFallback: s.usedFallback,
-					body: uiBody,
-					strategy,
-					roster,
-					persona,
-					...(result?.error ? { error: result.error } : {}),
-					...(result?.failureKind ? { failureKind: result.failureKind } : {}),
-				};
-				return {
-					// The ruling is sub-agent (council member) text — fence it like every other
-					// path that hands sub-agent output to the supervisor.
-					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${paramNote}${drainBusBlock()}` }],
-					details: ok ? details : failureDetails(details),
-					isError: !ok,
-				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text", text: `council failed: ${message}` }], details: failureDetails({ error: message, strategy, roster }), isError: true };
-			}
-		},
-		renderCall(args, theme) {
-			const resolved = resolveCouncilInvocation(personas, controller.activePersona, {
-				persona: args.persona,
-				strategy: args.strategy,
-				roster: args.roster,
-				params: args.params as Record<string, unknown> | undefined,
-			});
-			const strategy = resolved.ok ? resolved.value.strategy : (args.strategy ?? "?");
-			const roster = resolved.ok ? resolved.value.roster : (args.roster ?? args.persona ?? "?");
-			return new Text(theme.fg("toolTitle", theme.bold(formatCouncilCallLabel(strategy, roster))), 0, 0);
-		},
-		renderResult(result, { expanded }, theme) {
-			const d = (result.details ?? {}) as {
-				ok?: boolean;
-				headline?: string;
-				status?: string;
-				tally?: Record<string, number>;
-				usedFallback?: boolean;
-				body?: string;
-				strategy?: string;
-				roster?: string;
-				error?: string;
-				failureKind?: FailureKind;
-			};
-			const first = result.content[0];
-			const body = sanitizeTerminalText(d.body || (first && first.type === "text" ? first.text : ""));
-			const failed = d.ok === false || !!d.error;
-			if (failed) {
-				const cause = compactInlineText([d.failureKind, d.error].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
-				const title = theme.fg("error", theme.bold(`council failed${cause ? ` · ${cause}` : ""}`));
-				if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", body || "(no ruling)")}`, 0, 0);
-				const preview = compactVisibleText(body || "(no ruling)", { maxLines: 3, maxLineChars: 100 });
-				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-				return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
-			}
-			const text = formatCouncilResult(
-				{ headline: d.headline, status: d.status, tally: d.tally, usedFallback: d.usedFallback, body },
-				expanded,
-				expandDetailHint(),
-			);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", text), 0, 0);
-		},
+	registerCouncilTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		controller,
+		get personas() { return personas; },
+		runStrategyVisible,
+		drainBusBlock,
 	});
 
-	// ── flow tool (run a *.flow.json DAG over strategies; the supervisor self-launches) ──
-	const FlowToolParams = Type.Object({
-		name: Type.String({ description: "The flow to run — a *.flow.json by name (installed flows are listed in your sub-agents brief; the user can run /flow to list them)" }),
-		task: Type.String({ description: "The objective to run the flow on" }),
-	});
-	pi.registerTool({
-		name: "flow",
-		label: "Flow",
-		description: [
-			"Run a named flow — a declarative DAG over strategies (`*.flow.json`): phases each run a",
-			"strategy over a roster, wired by `needs`, fanning out where independent and threading each",
-			"phase's output into its dependents. Journaled, so an interrupted flow resumes. Reach for it",
-			"when a task has a fixed multi-stage shape (e.g. gather → critique → decide) you want run",
-			"deterministically, end to end, rather than deciding each step yourself.",
-		].join(" "),
-		parameters: FlowToolParams,
-		async execute(_id, params, signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			const parsed = loadFlow(ctx.cwd, params.name);
-			if (!parsed) {
-				const installed = listFlows(ctx.cwd);
-				const hint = installed.length > 0 ? `Installed flows: ${installed.join(", ")}.` : "No flows are installed — add a *.flow.json under .pi/flows/.";
-				return {
-					content: [{ type: "text", text: `no flow named "${params.name}". ${hint}` }],
-					details: failureDetails({ ok: false, error: `no flow named "${params.name}"` }),
-					isError: true,
-				};
-			}
-			if (!parsed.ok) {
-				return {
-					content: [{ type: "text", text: `flow "${params.name}" is invalid: ${parsed.error}` }],
-					details: failureDetails({ ok: false, failureKind: "contract", error: parsed.error }),
-					isError: true,
-				};
-			}
-			try {
-				const outcome = await runFlowVisible(ctx, parsed.flow, params.task, signal);
-				const details = {
-					ok: outcome.ok,
-					failedPhase: outcome.failedPhase,
-					failureKind: outcome.failureKind,
-					error: outcome.error,
-				};
-				return {
-					content: [{ type: "text", text: fenceUntrusted(outcome.output || "(flow produced no output)") }],
-					details: outcome.ok ? details : failureDetails(details),
-					isError: !outcome.ok,
-				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text", text: `flow failed: ${message}` }], details: failureDetails({ ok: false, error: message }), isError: true };
-			}
-		},
-		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(args.name ?? "?", { maxChars: 96 }) || "?")}`, 0, 0);
-		},
-		renderResult(result, { expanded }, theme) {
-			const details = (result.details ?? {}) as {
-				ok?: boolean;
-				failedPhase?: string;
-				failureKind?: FailureKind;
-				error?: string;
-			};
-			const first = result.content[0];
-			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
-			const failed = details.ok === false;
-			const failureBits = failed
-				? compactInlineText(
-						[details.failedPhase ? `phase ${details.failedPhase}` : undefined, details.failureKind, details.error]
-							.filter((part): part is string => !!part)
-							.join(" · "),
-						{ maxChars: 160 },
-					)
-				: "";
-			const title = failed
-				? theme.fg("error", theme.bold(`flow failed${failureBits ? ` · ${failureBits}` : ""}`))
-				: theme.fg("success", theme.bold("flow complete"));
-			if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
-			const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-			return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
-		},
+	registerFlowTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		loadFlow,
+		listFlows,
+		runFlowVisible,
 	});
 
-	// ── f9: navigable agent overlay ──────────────────────────────────────────────
+// ── f9: navigable agent overlay ──────────────────────────────────────────────
 	pi.registerShortcut("f9" as Parameters<ExtensionAPI["registerShortcut"]>[0], {
 		description: "Open the navigable agent tree (pi-persona)",
 		handler: async (ctx) => {
@@ -4132,7 +1716,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (arg === "off" || arg === "none") {
 				await controller.deactivate();
 				persist(undefined);
-				await onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
+				await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
 				ctx.ui.notify("persona: cleared (default supervisor)", "info");
 				return;
 			}
@@ -4152,7 +1736,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					if (fresh) await controller.activate(fresh);
 					else await controller.deactivate();
 				}
-				await onPersonaChanged(ctx);
+				await exocom.onPersonaChanged(ctx);
 				ctx.ui.notify(`persona: reloaded ${personas.length} personas, ${agents.length} agents`, "info");
 				return;
 			}
@@ -4175,7 +1759,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const active = controller.activePersona?.name;
 				const fresh = active ? personas.find((p) => p.name === active) : undefined;
 				if (fresh) await controller.activate(fresh);
-				await onPersonaChanged(ctx); // a restored persona file may have changed canUseBus — re-gate; clear the by-hand run
+				await exocom.onPersonaChanged(ctx); // a restored persona file may have changed canUseBus — re-gate; clear the by-hand run
 				const kept = r.skipped.length > 0 ? `, kept ${r.skipped.length} existing` : "";
 				ctx.ui.notify(`persona: ${force ? "restored" : "seeded"} ${r.copied.length} default(s) to ${userAgentDir()}${kept}.`, "info");
 				return;
@@ -4207,7 +1791,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			await controller.activate(persona);
 			persist(persona.name);
-			await onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
+			await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
 			ctx.ui.notify(`persona: ${persona.label} active`, "info");
 		},
 	});
@@ -4226,15 +1810,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		description: "Show exocom peers in this workspace (refreshes the pool widget): /exocom",
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
-			if (!exocomPlane) {
+			if (!exocom.plane) {
 				ctx.ui.notify(
 					"exocom: not active — needs PI_PERSONA_EXOCOM=1 (or --exocom) and an active persona that allows the bus (canUseBus).",
 					"warning",
 				);
 				return;
 			}
-			renderExocomWidget();
-			const peers = exocomPlane.listPeers();
+			exocom.renderWidget();
+			const peers = exocom.plane.listPeers();
 			const lines = peers.map(
 				(p) => {
 					const name = sanitizePeerField(p.displayName, 48) || "peer";
@@ -4245,7 +1829,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				},
 			);
 			appendCommandResult(
-				`exocom ${exocomName}`,
+				`exocom ${exocom.name}`,
 				peers.length === 0
 					? "no other peers in this workspace right now"
 					: `${peers.length} peer${peers.length === 1 ? "" : "s"}:\n${lines.join("\n")}`,
@@ -4269,29 +1853,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		},
 	});
 
-	pi.registerTool({
-		name: "models",
-		label: "Models",
-		description: [
-			"List or search the available model ids (provider/id). The same name exists under several",
-			"providers — use an EXACT id from here as a delegate task's `model`. ★ marks your session",
-			"provider; prefer it (it's the authenticated one).",
-		].join(" "),
-		parameters: Type.Object({
-			query: Type.Optional(Type.String({ description: "Filter by substring (provider or id), e.g. 'sonnet'" })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			lastCtx = ctx;
-			const { lines, total, capped } = searchModels(ctx, params.query);
-			const text = lines.length
-				? `${total} model(s)${capped ? " (showing 40 — refine with a query)" : ""}; ★ = session provider:\n${lines.join("\n")}`
-				: `no models match "${params.query ?? ""}"`;
-			return { content: [{ type: "text", text }], details: { total }, isError: false };
-		},
-		renderCall(args, theme) {
-			const query = compactInlineText(args.query ?? "(all)", { maxChars: 96 }) || "(all)";
-			return new Text(`${theme.fg("toolTitle", theme.bold("models "))}${theme.fg("dim", query)}`, 0, 0);
-		},
+	registerModelsTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		searchModels,
 	});
 
 	// ── /peek (async run progress) ───────────────────────────────────────────────
