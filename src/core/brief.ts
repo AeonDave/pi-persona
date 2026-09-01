@@ -15,6 +15,8 @@
  * (capability gating, persona state); this module only renders.
  */
 
+import { inventedExocomNameHint, inventedLegNameHint } from "./naming.ts";
+
 export interface BriefAgent {
 	name: string;
 	description?: string;
@@ -154,7 +156,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}); convene \`council\` for deliberation or batch sweeps. Keep only trivial single-step work, decisions, and the final synthesis inline. ${minimum}`
+			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}); convene \`council\` for deliberation or batch sweeps. Keep only trivial single-step work, decisions, and the final synthesis inline. Name each leg yourself. ${inventedLegNameHint()} ${minimum}`
 			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).`,
 	);
 	return lines.join("\n");
@@ -180,6 +182,11 @@ export interface ExocomBriefInput {
 	 * question cannot be put at all, whoever is watching.
 	 */
 	canAskHuman: boolean;
+	/**
+	 * False until this instance has called `exocom_name`. A catalog-assigned default is gone;
+	 * the placeholder is not an identity, and the model should invent one.
+	 */
+	namedByModel?: boolean;
 }
 
 /** Registry metadata is peer-controlled. The roster lives in the system prompt, so only a
@@ -194,10 +201,16 @@ function peerIdentifier(value: string, max: number): string {
 }
 
 /** Per-turn awareness of live exocom peers (independent pi instances in this workspace), or
- *  undefined when none are reachable. Tells the supervisor WHO is available + their specialization
- *  so it can choose to collaborate — never an obligation. */
+ *  undefined when none are reachable (unless this instance still needs to invent a call-sign).
+ *  Tells the supervisor WHO is available + their specialization so it can choose to collaborate —
+ *  never an obligation. */
+export function exocomNameYourselfLine(): string {
+	return `You have no call-sign yet. ${inventedExocomNameHint()}`;
+}
+
 export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInput): string | undefined {
-	if (peers.length === 0) return undefined;
+	const invent = input.namedByModel === false ? exocomNameYourselfLine() : undefined;
+	if (peers.length === 0) return invent;
 	const lines: string[] = [
 		"[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this workspace right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:",
 	];
@@ -251,5 +264,6 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 	lines.push(
 		`Relevance bound: each message is a fresh prompt on the peer, so send only what changes what someone does — no acknowledgment, agreement or thanks; batch open points into the same message.${handoff} When a round no longer moves the work this turn is for — your human's request, or the peer message that started it — stop: ${settle}.`,
 	);
+	if (invent) lines.push(invent);
 	return lines.join("\n");
 }

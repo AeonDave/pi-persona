@@ -10,6 +10,7 @@ import { configuredModels } from "../extension/engine.ts";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { resolveModelRef } from "../core/models.ts";
+import { inventedLegNameHint } from "../core/naming.ts";
 import { formatUsage } from "../ui/usage.ts";
 import { expandDetailHint } from "../extension/shared.ts";
 import type { Static } from "typebox";
@@ -78,7 +79,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
 		brief: Type.Optional(DelegationBriefSchema),
 		name: Type.Optional(
-			Type.String({ description: "Short codename for this sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug', 'atlas-fuzz'. Pick a DIFFERENT call-sign for EVERY leg so two of the same kind stay apart (orion-recon vs vega-recon). A UI label only — not a task description." }),
+			Type.String({ description: inventedLegNameHint() }),
 		),
 		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
@@ -102,7 +103,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
 		brief: Type.Optional(DelegationBriefSchema),
-		name: Type.Optional(Type.String({ description: "Short codename for the sub-agent, `<call-sign>-<purpose>`: a distinctive call-sign you invent + what the leg does — e.g. 'orion-recon', 'hermes-debug'. A UI label, not a task description (single mode)." })),
+		name: Type.Optional(Type.String({ description: inventedLegNameHint() })),
 		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),

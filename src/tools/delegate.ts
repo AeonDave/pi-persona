@@ -172,7 +172,7 @@ export function validateParallelWriteSets(tasks: readonly Pick<DelegateTask, "ag
 /** A live per-sub-agent view for the UI (running → done/failed). */
 export interface DelegateView {
 	agent: string;
-	/** Display label: `name · model` (e.g. "orion-recon · sonnet-4-6"). */
+	/** Display label: `name · model` (e.g. "kiln-port · sonnet-4-6"). */
 	label: string;
 	running: boolean;
 	ok: boolean;
@@ -183,14 +183,6 @@ export interface DelegateView {
 	activity: string;
 	usage: ChildUsage;
 }
-
-// Fallback call-signs for an unnamed generic `operator`, so several legs are still tellable apart when
-// the supervisor doesn't name them itself. When it does — the `<call-sign>-<purpose>` convention, e.g.
-// "orion-recon" — that name wins over these.
-export const CODENAMES = [
-	"orion", "hermes", "atlas", "nova", "echo", "vega", "juno", "lyra",
-	"rune", "fenix", "zara", "oslo", "iris", "titan", "onyx", "cobra",
-];
 
 /** Short model name for display: drop provider + `claude-` + any `:thinking`. */
 export function shortModel(ref: string | undefined): string {
@@ -204,7 +196,10 @@ export function shortModel(ref: string | undefined): string {
  *  model itself (e.g. the async tree node, `AsyncRun.label`) doesn't have to strip it back out
  *  of {@link labelFor}'s composite string. */
 export function nameFor(t: { agent: string; name?: string }, index: number): string {
-	const fallback = t.agent === "operator" ? (CODENAMES[index % CODENAMES.length] as string) : t.agent;
+	// No catalog of call-signs: an unnamed generic operator stays the agent name, disambiguated
+	// by index. The model is supposed to invent `<call-sign>-<purpose>` itself; this is only the
+	// honest fallback when it doesn't.
+	const fallback = t.agent === "operator" && index > 0 ? `operator-${index + 1}` : t.agent;
 	return sanitizeDisplayLabel(t.name?.trim() || fallback, fallback);
 }
 

@@ -21,6 +21,7 @@ import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 import { fencePeer } from "../core/fence.ts";
+import { inventedExocomNameHint } from "../core/naming.ts";
 import { ExocomPeerRejection, type DisplayPeer, type ExocomPlane } from "../exocom/plane.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 import { compactInlineText } from "../ui/presentation.ts";
@@ -45,7 +46,7 @@ const ExocomSendParams = Type.Object({
 });
 
 const ExocomNameParams = Type.Object({
-	name: Type.String({ minLength: 1, maxLength: 96, description: "Your chosen exocom call-sign — a short, distinctive display handle. Free choice: invent one." }),
+	name: Type.String({ minLength: 1, maxLength: 96, description: inventedExocomNameHint() }),
 });
 
 /** Single-target send vs. `target: "*"` broadcast — two distinct result shapes, so `execute`'s
@@ -373,11 +374,7 @@ export function registerExocomTools(
 	pi.registerTool({
 		name: "exocom_name",
 		label: "Exocom Name",
-		description: [
-			"Pick your OWN call-sign on the exocom pool — any short, distinctive handle you like",
-			"(invent one freely: a codename, a fantasy name, whatever makes you recognizable to the",
-			"other instances). You start with an auto-assigned call-sign; use this to make it yours.",
-		].join(" "),
+		description: inventedExocomNameHint(),
 		parameters: ExocomNameParams,
 		async execute(_toolCallId, params: Static<typeof ExocomNameParams>) {
 			const plane = getPlane();

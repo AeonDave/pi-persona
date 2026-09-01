@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { buildDelegationBrief, buildExocomBrief } from "../../../src/core/brief.ts";
+import { CALL_SIGN_PROMPT } from "../../../src/core/naming.ts";
 
 const AGENTS = [
 	{ name: "operator", description: "Generic adaptive technical executor verticalized by skills." },
@@ -91,8 +92,10 @@ test("standing brief states the hand-off default and a minimum call using operat
 	assert.match(brief ?? "", /Hand off by default/i);
 	assert.match(brief ?? "", /delegate\(\{ agent: "operator"/);
 	assert.match(brief ?? "", /council/);
+	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT), "standing brief must reuse the shared call-sign invitation");
 	assert.match(brief ?? "", /Pi already renders tool calls/i);
 	assert.match(brief ?? "", /do not narrate|don't narrate/i);
+	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas/i);
 });
 
 test("a generic requireBrief policy advertises the complete cold-start packet", () => {
@@ -164,6 +167,15 @@ const PEERS = [{ name: "orion", persona: "dev" }];
 
 test("buildExocomBrief: no peers → no brief", () => {
 	assert.equal(buildExocomBrief([], XOPTS), undefined);
+});
+
+test("buildExocomBrief: an unnamed self still gets a name-yourself line with no peers", () => {
+	const brief = buildExocomBrief([], { ...XOPTS, namedByModel: false });
+	assert.ok(brief);
+	assert.match(brief ?? "", /no call-sign yet/i);
+	assert.match(brief ?? "", /exocom_name/);
+	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT));
+	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas|unnamed/i);
 });
 
 test("buildExocomBrief: lists identifier-only peer presence and excludes free-form metadata", () => {

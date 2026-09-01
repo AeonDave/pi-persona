@@ -23,7 +23,7 @@ no padding.
   briefing each with the deep-research `skills` to load (`deep-research-generic`, or
   `deep-research-offensive` for security topics), a clear `role` where useful (e.g. `evidence-auditor`,
   `contradiction-checker`), and the exact `.research/<slug>/` paths to write. Assign each leg a
-  `<call-sign>-<purpose>` `name` (`atlas-scan`, `hera-split`) so long-running sweeps remain
+  `<call-sign>-<purpose>` `name` so long-running sweeps remain
   distinguishable in the async tree. Use `scout` only for a quick local-codebase lookup.
   One sub-agent per sub-question; never serialise independent legs; never ask the user how. Legs
   run in the background and their reports return to you on their own — the chat stays free.
