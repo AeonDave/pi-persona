@@ -18,6 +18,9 @@ export function exocomRoot(agentDir: string, hash: string): string {
 export function agentsDir(agentDir: string, hash: string): string {
 	return join(exocomRoot(agentDir, hash), "agents");
 }
+export function ledgerPath(agentDir: string, hash: string): string {
+	return join(exocomRoot(agentDir, hash), "ledger.jsonl");
+}
 export function registryPath(agentDir: string, hash: string, key: string): string {
 	return join(agentsDir(agentDir, hash), `${key}.json`);
 }

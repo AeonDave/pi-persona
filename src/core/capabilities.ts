@@ -81,7 +81,7 @@ export function canFanOut(caps: EffectiveCapabilities, delegateTool = DEFAULT_DE
 	return caps.tools.has(delegateTool);
 }
 
-export const EXOCOM_TOOL_NAMES = ["exocom_list", "exocom_send", "exocom_name"] as const;
+export const EXOCOM_TOOL_NAMES = ["exocom_list", "exocom_send", "exocom_name", "exocom_claim", "exocom_ask", "exocom_answer", "exocom_decline", "exocom_wait", "exocom_release", "exocom_progress"] as const;
 const EXOCOM_TOOLS: ReadonlySet<string> = new Set(EXOCOM_TOOL_NAMES);
 
 export function canCallTool(caps: EffectiveCapabilities, toolName: string): boolean {

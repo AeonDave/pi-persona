@@ -122,6 +122,23 @@ test("a message from one plane lands as inbound on another; list shows the peer"
 	} finally { await a.stop(); await b.stop(); }
 });
 
+test("resolvePeer canonicalizes the public session-pinned target to the registry session id", async () => {
+	const a = planeFor("resolver-a", () => {});
+	const b = planeFor("resolver-b", () => {});
+	await a.start();
+	await b.start();
+	try {
+		const listed = a.listPeers().find((peer) => peer.name === "resolver-b");
+		assert.ok(listed, "the public roster exposes the peer");
+		assert.equal(a.resolvePeer(listed.target).session_id, listed.session_id);
+		assert.equal(a.resolvePeer(listed.displayName).session_id, listed.session_id, "display targets retain existing routing compatibility");
+		assert.throws(() => a.resolvePeer("missing@0123456789abcdef01234567"), /unknown qualified target/i);
+	} finally {
+		await a.stop();
+		await b.stop();
+	}
+});
+
 test("an oversize message spills to an artifact and sends {preview,path,size} inline (R3)", async () => {
 	const got: ExocomMessage[] = [];
 	const a = planeFor("elite", () => {});

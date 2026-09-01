@@ -12,6 +12,7 @@ export const EXOCOM = {
 	HEARTBEAT_MS: 30_000, // registry heartbeat + pool refresh
 	QUIET_AFTER_MS: 45_000, // a peer that missed a heartbeat looks "quiet" but isn't pruned yet
 	STALE_AFTER_MS: 120_000, // R7 evict an entry whose heartbeat is older than this
+	LEDGER_RESULT_TTL_MS: 3_600_000, // retain answer/decline evidence for reconnect/read-before-wait recovery
 	DELIVER_MIN_INTERVAL_MS: 10_000, // R6 floor between receiver-turn wakes from one plane
 	DELIVER_MAX_PER_MIN: 6, // R6 ceiling on wakes/min
 	ARTIFACT_TTL_MS: 3_600_000, // successful spill files survive long enough for the receiver to read them
