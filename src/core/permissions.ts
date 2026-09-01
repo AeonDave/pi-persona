@@ -14,6 +14,7 @@ export interface Permission {
 // Patterns are fixed (a persona's allow/deny lists), but `isAllowed` runs on every `tool_call`
 // and across the whole tool registry on each persona switch — so compile each glob once.
 const globCache = new Map<string, RegExp>();
+const GLOB_CACHE_MAX = 256;
 
 /** Compile a glob (`*`, `?`) into a full-string-anchored RegExp; all other
  *  characters are matched literally (regex metacharacters are escaped). Memoised. */
@@ -27,6 +28,7 @@ function globToRegExp(pattern: string): RegExp {
 		else body += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	}
 	const re = new RegExp(`^${body}$`);
+	if (globCache.size >= GLOB_CACHE_MAX) globCache.clear();
 	globCache.set(pattern, re);
 	return re;
 }

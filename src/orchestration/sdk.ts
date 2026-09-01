@@ -65,8 +65,10 @@ export interface AgentProgress {
 	toolEvent?: ToolEvent;
 }
 
-/** Inject a steering message into a running agent (in-process engine only). */
-export type SteerFn = (text: string) => void;
+/** Inject a steering message into a running agent (in-process engine only).
+ *  Returning `false` means the message was not delivered (disposed session, unknown broker
+ *  handle). `void` is treated as success so in-process steers that fire-and-forget stay honest. */
+export type SteerFn = (text: string) => boolean | void;
 
 /** The engine seam the SDK runs agents through (real child engine or a stub). */
 export interface StrategyEngine {
@@ -150,6 +152,9 @@ export interface SDKDeps {
 	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
 	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
+	/** Capability gate for every `sdk.agent()` spawn (council/flow/judge arbiter included).
+	 *  Denied BEFORE the child-slot is consumed and without calling the engine. Absent ⇒ no gate. */
+	canSpawn?: (agent: string) => boolean;
 }
 
 /**
@@ -208,6 +213,16 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 
 	return {
 		agent: async (spec) => {
+			if (deps.canSpawn && !deps.canSpawn(spec.agent)) {
+				return {
+					agent: spec.agent,
+					output: "",
+					usage: emptyUsage(),
+					ok: false,
+					error: `persona may not spawn "${spec.agent}"`,
+					failureKind: "contract",
+				};
+			}
 			if (childrenSpawned >= deps.limits.maxChildren) {
 				throw new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`);
 			}

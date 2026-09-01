@@ -140,6 +140,28 @@ test("a maxChildren breach still rejects the fan-out instead of degrading into a
 	assert.equal(runs, 2, "the breach stops the run — it must not keep spawning");
 });
 
+test("canSpawn denies a member before the engine runs and does not consume a child slot", async () => {
+	let runs = 0;
+	const sdk = makeSDK({
+		engine: {
+			run: async (spec) => {
+				runs++;
+				return ok(spec.agent);
+			},
+		},
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 1 },
+		canSpawn: (agent) => agent !== "ghost",
+	});
+	const denied = await sdk.agent({ agent: "ghost", task: "t" });
+	assert.equal(denied.ok, false);
+	assert.match(denied.error ?? "", /may not spawn "ghost"/);
+	assert.equal(runs, 0, "a denied spawn never reaches the engine");
+	const allowed = await sdk.agent({ agent: "scout", task: "t" });
+	assert.equal(allowed.ok, true);
+	assert.equal(runs, 1, "the denied attempt did not consume maxChildren");
+});
+
 test("a token-budget breach still rejects the fan-out instead of degrading into a failed member", async () => {
 	const engine: StrategyEngine = {
 		run: async (spec) => ({ agent: spec.agent, output: "o", usage: { ...usage(), input: 200 }, ok: true }),

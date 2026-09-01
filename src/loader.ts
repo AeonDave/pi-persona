@@ -24,6 +24,11 @@ export interface LoadResult {
 	shadowed: DiscoveredFile[];
 	/** Ambiguous names found in the shared persona/agent namespace. These entries are omitted. */
 	collisions: Array<{ name: string; persona: DiscoveredFile; agent: DiscoveredFile }>;
+	/** Per-file problems that previously dropped a definition silently: unreadable file,
+	 *  missing frontmatter `name`, filename≠`name` mismatch. Surfaced via /doctor and the
+	 *  startup diagnostics notification — a typo'd frontmatter must not vanish an agent
+	 *  from the roster without a trace. */
+	warnings: string[];
 }
 
 /** List `*.md` files in a directory (name without extension + full path). */
@@ -52,11 +57,17 @@ function readSafe(path: string): string | undefined {
  * runtime namespace: a name collision is returned as a diagnostic and omitted from both effective
  * registries, so activation cannot silently choose a different definition for delegate vs persona.
  * Each kind is still merged by precedence independently before the collision check.
+ *
+ * Identity is the frontmatter `name`, never the filename: the merge, shadowing, and the
+ * collision guard all key on the parsed name, so a persona `foo.md` declaring `name: dev`
+ * collides with an agent `dev.md` declaring `name: dev` exactly like a same-filename pair.
+ * A name≠basename mismatch is warned about (confusing to debug), not rejected.
  */
 export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 	const personaLayers: DiscoveredFile[][] = [];
 	const agentLayers: DiscoveredFile[][] = [];
 	const content = new Map<string, string>();
+	const warnings: string[] = [];
 	// Classification already parses each file as a persona — cache the result so the
 	// winners are not parsed a second time below.
 	const parsedPersonas = new Map<string, Persona | null>();
@@ -66,12 +77,24 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 		const agentFiles: DiscoveredFile[] = [];
 		for (const f of listMarkdown(d.path)) {
 			const text = readSafe(f.path);
-			if (text === undefined) continue;
+			if (text === undefined) {
+				warnings.push(`${f.path}: unreadable — skipped`);
+				continue;
+			}
 			content.set(f.path, text);
-			const entry: DiscoveredFile = { name: f.name, path: f.path, scope: d.scope };
 			const persona = parsePersona(text, f.path);
 			parsedPersonas.set(f.path, persona);
-			if (persona?.isPersona) personaFiles.push(entry);
+			if (!persona) {
+				// parseAgent fails on the same condition (missing frontmatter `name`),
+				// so this file can be NEITHER — say so instead of silently dropping it.
+				warnings.push(`${f.path}: no frontmatter "name" — skipped`);
+				continue;
+			}
+			if (persona.name !== f.name) {
+				warnings.push(`${f.path}: frontmatter name "${persona.name}" differs from the filename — the frontmatter name wins`);
+			}
+			const entry: DiscoveredFile = { name: persona.name, path: f.path, scope: d.scope };
+			if (persona.isPersona) personaFiles.push(entry);
 			else agentFiles.push(entry);
 		}
 		personaLayers.push(personaFiles);
@@ -101,13 +124,22 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 		if (agent) agents.push(agent);
 	}
 
-	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed], collisions };
+	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed], collisions, warnings };
+}
+
+export interface ContractsLoad {
+	contracts: Record<string, ContractDef>;
+	warnings: string[];
 }
 
 /** Discover `*.contract.json` files across dirs into a name→ContractDef map (later dirs win,
- *  so project overrides user overrides builtin). Malformed files are skipped (never crash). */
-export function loadContracts(dirs: ScopedDir[]): Record<string, ContractDef> {
+ *  so project overrides user overrides builtin). The registry key is the FILENAME
+ *  (`<name>.contract.json`) — deterministic, unlike two same-dir files declaring the same
+ *  embedded `name`, which would resolve by readdir order. A filename≠`name` mismatch and a
+ *  malformed file are warned about, never silently skipped. */
+export function loadContracts(dirs: ScopedDir[]): ContractsLoad {
 	const merged: Record<string, ContractDef> = {};
+	const warnings: string[] = [];
 	for (const d of dirs) {
 		let entries: string[];
 		try {
@@ -116,13 +148,25 @@ export function loadContracts(dirs: ScopedDir[]): Record<string, ContractDef> {
 			continue;
 		}
 		for (const f of entries.filter((e) => e.toLowerCase().endsWith(".contract.json"))) {
-			const text = readSafe(path.join(d.path, f));
-			if (text === undefined) continue;
+			const full = path.join(d.path, f);
+			const text = readSafe(full);
+			if (text === undefined) {
+				warnings.push(`${full}: unreadable — skipped`);
+				continue;
+			}
 			const parsed = parseContract(text);
-			if (parsed.ok) merged[parsed.def.name] = parsed.def;
+			if (!parsed.ok) {
+				warnings.push(`${full}: ${parsed.error} — skipped`);
+				continue;
+			}
+			const key = f.slice(0, -".contract.json".length);
+			if (parsed.def.name !== key) {
+				warnings.push(`${full}: embedded name "${parsed.def.name}" differs from the filename — registered as "${key}"`);
+			}
+			merged[key] = parsed.def;
 		}
 	}
-	return merged;
+	return { contracts: merged, warnings };
 }
 
 /** Discover `*.preset.json` files (council presets) across dirs into a name→partial-spec map

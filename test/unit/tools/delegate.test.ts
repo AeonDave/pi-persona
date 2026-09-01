@@ -160,7 +160,9 @@ test("runDelegate threads a per-leg steer handle (onLegSteerable) from the engin
 	const steered: string[] = [];
 	const engine: StrategyEngine = {
 		run: async (s, _onProgress, _signal, onSteerable) => {
-			onSteerable?.((text) => steered.push(`${s.agent}:${text}`));
+			onSteerable?.((text) => {
+				steered.push(`${s.agent}:${text}`);
+			});
 			return { agent: s.agent, output: "ok", usage: usage(), ok: true };
 		},
 	};

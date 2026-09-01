@@ -43,8 +43,15 @@ export interface BrokerHost {
 	 *  live voice, NOT a bus envelope (it bypasses `bus.send`/the outbound drain entirely, so
 	 *  it can't be mistaken for a peer/child message on the wire). Returns false (a harmless
 	 *  no-op, mirrors `InProcessBus.reply`'s unknown-id return) when the handle is not
-	 *  currently connected — e.g. the child hasn't dialed in yet, or already disconnected. */
+	 *  currently connected AND was never `expect()`ed — e.g. a typo, or already forgotten.
+	 *  A handle `expect()`ed during spawn-before-connect buffers the steer and still returns
+	 *  true; the buffer flushes when the child registers. */
 	steer(handle: string, text: string): boolean;
+	/** Mark `handle` as a child that is about to connect (adapter pre-register). A steer
+	 *  to an expected-but-not-yet-connected handle is buffered rather than reported as lost. */
+	expect(handle: string): void;
+	/** Drop expectation + any buffered steers (adapter unregister / spawn failure). */
+	forget(handle: string): void;
 }
 
 type PeerEntry = { handle: string; label: string };
@@ -148,6 +155,16 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 	const connections = new Map<string, { write: (frame: Frame) => void }>();
 	const peerRegistry = new Map<string, { handle: string; label: string; group: string }>();
 	const sockets = new Set<net.Socket>();
+	const expected = new Set<string>();
+	const pendingSteer = new Map<string, string[]>();
+
+	function flushPendingSteer(handle: string): void {
+		const conn = connections.get(handle);
+		const queued = pendingSteer.get(handle);
+		if (!conn || !queued) return;
+		pendingSteer.delete(handle);
+		for (const text of queued) conn.write({ t: "steer", text });
+	}
 
 	function unregisterConnection(handle: string): void {
 		if (!connections.delete(handle)) return;
@@ -236,6 +253,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					if (frame.peers) peerRegistry.set(handle, { handle, label: frame.label ?? handle, group: frame.group ?? "" });
 					write({ t: "registered", handle });
 					drain(handle);
+					flushPendingSteer(handle);
 					return;
 				}
 				case "send": {
@@ -314,14 +332,29 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		connectedHandles: () => [...connections.keys()],
 		steer(handle: string, text: string): boolean {
 			const conn = connections.get(handle);
-			if (!conn) return false;
-			conn.write({ t: "steer", text });
+			if (conn) {
+				conn.write({ t: "steer", text });
+				return true;
+			}
+			if (!expected.has(handle) || !text.trim()) return false;
+			const queued = pendingSteer.get(handle) ?? [];
+			queued.push(text);
+			pendingSteer.set(handle, queued);
 			return true;
+		},
+		expect(handle: string): void {
+			expected.add(handle);
+		},
+		forget(handle: string): void {
+			expected.delete(handle);
+			pendingSteer.delete(handle);
 		},
 		async close(): Promise<void> {
 			if (closed) return;
 			closed = true;
 			unsubBus();
+			expected.clear();
+			pendingSteer.clear();
 			for (const h of [...connections.keys()]) unregisterConnection(h);
 			for (const s of [...sockets]) {
 				try {
@@ -338,6 +371,13 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					resolve();
 				}
 			});
+			if (process.platform !== "win32") {
+				try {
+					unlinkSync(deps.endpoint);
+				} catch {
+					/* already gone, or this was a fake/in-memory endpoint */
+				}
+			}
 		},
 	};
 }

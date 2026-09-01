@@ -86,6 +86,9 @@ export interface SeedResult {
 	skipped: string[];
 	/** Basenames present in both bundled persona and agent sources; the persona wins seeding. */
 	collisions?: string[];
+	/** Per-file failures (a destination locked by an editor/AV on Windows, EACCES…). One bad
+	 *  file must not abort the whole seed: the rest still lands and each failure is named. */
+	warnings?: string[];
 }
 
 /** Exact bytes from earlier releases whose seeded copies are known to be stale. A user file is
@@ -606,7 +609,17 @@ export function seedDefaults(bundledDir: string, userDir: string, force: boolean
 	const copied: string[] = [];
 	const skipped: string[] = [];
 	const collisions: string[] = [];
+	const warnings: string[] = [];
 	const place = (src: string, dst: string): void => {
+		// Per-file fault isolation, same posture as the migration path below: a locked or
+		// unreadable destination is a warning, never an abort of the remaining defaults.
+		try {
+			placeFile(src, dst);
+		} catch (error) {
+			warnings.push(`${dst}: ${errorText(error)}`);
+		}
+	};
+	const placeFile = (src: string, dst: string): void => {
 		mkdirSync(dirname(dst), { recursive: true });
 		if (!force) {
 			// `existsSync` follows symlinks and leaves a TOCTOU window. Inspect the directory entry,
@@ -681,5 +694,5 @@ export function seedDefaults(bundledDir: string, userDir: string, force: boolean
 	const teamsSrc = join(bundledDir, "teams.yaml");
 	if (existsSync(teamsSrc)) place(teamsSrc, join(userDir, "teams.yaml"));
 
-	return { copied, skipped, ...(collisions.length > 0 ? { collisions } : {}) };
+	return { copied, skipped, ...(collisions.length > 0 ? { collisions } : {}), ...(warnings.length > 0 ? { warnings } : {}) };
 }

@@ -27,6 +27,11 @@
 
 /** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
 const HANDOFF_TOOLS = new Set(["delegate", "council"]);
+/** Supervision glue: collecting a delegated result (`intercom wait`/`result`) or arming a
+ *  `timer` is neither hands-on work nor a hand-off. Their payloads are large by nature, so
+ *  counting them would punish the exact behavior the nudge exists to encourage. They neither
+ *  advance nor reset the run, and never nudge. */
+const GLUE_TOOLS = new Set(["intercom", "timer"]);
 /** Mutation tools often return only a terse acknowledgement. Their output size is not a useful
  * proxy for the amount of direct coding work, so every call counts as substantive. */
 const MUTATING_TOOLS = new Set(["edit", "write", "apply_patch"]);
@@ -123,6 +128,7 @@ export class DelegationNudge {
 	 * that result, or undefined to leave the result untouched.
 	 */
 	observe(toolName: string, size: number, handoffSucceeded = true, failureText?: string): string | undefined {
+		if (GLUE_TOOLS.has(toolName)) return undefined;
 		if (HANDOFF_TOOLS.has(toolName)) {
 			if (!handoffSucceeded) {
 				const normalizedSize = Math.max(0, Math.floor(size));
@@ -152,11 +158,14 @@ export class DelegationNudge {
 		// Only a substantive step advances the run; a trivial call is orchestration glue, not a sweep
 		// step (it neither advances nor resets the run — a stray echo mid-sweep doesn't break it).
 		if (MUTATING_TOOLS.has(toolName) || step >= this.t.minStepChars) this.run += 1;
-		const single = size >= this.t.singleHeavyChars;
 		// Backoff: each un-actioned nudge widens the next run window, so a long non-delegable
 		// session-bound loop is reminded ONCE then left alone; a real runaway grind still trips the
-		// widened window; a hand-off resets it.
+		// widened window; a hand-off resets it. The dump trigger gets the same de-escalation —
+		// repeated fat one-shots (a legit review loop) must not re-fire the identical reminder on
+		// every result: after the first dump nudge, a full base window of further work must pass.
 		const window = this.t.runLength * (this.nudges + 1);
+		const dumpReady = this.nudges === 0 || this.run - this.lastNudgeRun >= this.t.runLength * this.nudges;
+		const single = size >= this.t.singleHeavyChars && dumpReady;
 		const burnFloor = this.t.minSweepBurnChars ?? DEFAULT_NUDGE_THRESHOLDS.minSweepBurnChars ?? 0;
 		const sweep = this.run - this.lastNudgeRun >= window && this.burn >= burnFloor;
 		if (!single && !sweep) return undefined;

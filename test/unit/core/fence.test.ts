@@ -50,6 +50,11 @@ test("newlines, tag-shaped text, controls and ANSI never create unquoted payload
 	}
 });
 
+test("tab characters survive fencing — tab-indented code is not mangled", () => {
+	const fenced = fenceUntrusted("if (x) {\n\treturn 1;\n}");
+	assert.ok(fenced.includes("> \treturn 1;"), "the tab-indented line keeps its tab");
+});
+
 test("an unterminated OSC payload is bounded on the synchronous fencing path", () => {
 	// This is deliberately many OSC introducers without BEL/ST. The old `[^BEL]*` branch
 	// rescanned the suffix from every introducer (quadratic), which let a child stall the

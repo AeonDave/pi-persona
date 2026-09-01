@@ -9,6 +9,7 @@
  * params: { bestOf?: number (default = majority of the roster), aggregate? }
  */
 
+import { clampBestOf } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
@@ -91,7 +92,7 @@ export const debate: Strategy = {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length < 2) throw new Error("debate: a roster of at least 2 members is required");
 		if (sdk.signal?.aborted) return cancelled([]);
-		const bestOf = typeof input.params.bestOf === "number" ? input.params.bestOf : Math.floor(team.length / 2) + 1;
+		const { bestOf } = clampBestOf(input.params.bestOf, team.length);
 		const aggregate = input.params.aggregate === "unanimity" ? "unanimity" : "majority";
 		sdk.log(`debate: ${team.length} members, live peer exchange, best of ${bestOf}`);
 		if (team.length > sdk.limits.maxConcurrency) {

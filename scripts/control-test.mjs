@@ -21,7 +21,7 @@ const engine = makeInProcessEngine({
 	resolveAgent: (n) => (n === "operator" ? op : undefined),
 	modelRegistry: probe.modelRegistry,
 	cwd: process.cwd(),
-	agentDir: join(homedir(), ".pi", "agent"),
+	agentDir: process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent"),
 	defaultModel: MODEL,
 });
 const READ8 = "Read these files ONE PER TURN (never batch) and summarise each in one line: package.json, README.md, AGENTS.md, tsconfig.json, src/extension.ts, src/engine/inproc.ts, src/orchestration/sdk.ts, src/persona/persona.ts.";
@@ -36,6 +36,7 @@ const sR = await engine.run(
 	(steer) => setTimeout(() => { console.log("  >>> STEER: 'stop, reply only STEERED-OK'"); steer("STOP. Ignore the remaining files. Reply with ONLY: STEERED-OK"); steered = true; }, 4000),
 );
 console.log(`  injected:${steered} · TOOK EFFECT: ${sR.output.includes("STEERED-OK") ? "YES ✅" : "NO ❌"}  (out: ${sR.output.replace(/\s+/g, " ").slice(0, 50)})`);
+const steerOk = sR.output.includes("STEERED-OK");
 
 // ── 2. STOP / terminate ─────────────────────────────────────────────────────
 console.log(`\n${"=".repeat(70)}\n### STOP — abort a running sub-agent mid-run\n${"=".repeat(70)}`);
@@ -43,6 +44,7 @@ const ac = new AbortController();
 setTimeout(() => { console.log("  >>> ABORT"); ac.abort(); }, 5000);
 const stR = await engine.run({ agent: "operator", task: READ8 }, (p) => { if (p.activity) process.stdout.write(`  · ${p.activity}\n`); }, ac.signal);
 console.log(`  ok:${stR.ok} (expect false) · error:'${stR.error}' · STOPPED: ${!stR.ok && /abort/i.test(stR.error ?? "") ? "YES ✅" : "NO ❌"}`);
+const stopOk = !stR.ok && /abort/i.test(stR.error ?? "");
 
 // ── 3. RESUME — a flow skips journaled phases ───────────────────────────────
 console.log(`\n${"=".repeat(70)}\n### RESUME — re-run a flow; the done phase is skipped\n${"=".repeat(70)}`);
@@ -68,6 +70,7 @@ await runFlow(flow.flow, "run the harness", {
 	runPhase: ({ phase, task }) => { ran2.push(phase.id); return engine.run({ agent: "operator", task }); },
 });
 console.log(`  resumed run executed phases: [${ran2.join(", ")}]  ·  RESUME (a skipped, b ran): ${ran2.length === 1 && ran2[0] === "b" ? "YES ✅" : "NO ❌"}`);
+const resumeOk = ran2.length === 1 && ran2[0] === "b";
 
 probe.dispose();
-process.exit(0);
+process.exit(steerOk && stopOk && resumeOk ? 0 : 1);

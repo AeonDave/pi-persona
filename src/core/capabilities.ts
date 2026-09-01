@@ -88,7 +88,7 @@ export function canCallTool(caps: EffectiveCapabilities, toolName: string): bool
 	// Bus revocation must win even after these dynamically registered tools have entered
 	// `caps.tools` on a later persona activation. Checking the ordinary set first would make
 	// an allow -> deny switch keep the external bus callable.
-	if (EXOCOM_TOOLS.has(toolName)) return caps.canUseBus;
+	if (EXOCOM_TOOLS.has(toolName)) return caps.canUseBus && !explicitlyDenied(toolName, caps.toolsPerm);
 	// Evaluate the persona's ACTUAL allow/deny against the NAME — not only the activation-time
 	// `caps.tools` snapshot. The snapshot is built from the tools registered AT activation, so it
 	// fails closed on any tool that registers later: an MCP server connects asynchronously and

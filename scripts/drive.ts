@@ -36,12 +36,22 @@ function parseArgs(argv: string[]): DriveOptions {
 	const rest: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] as string;
-		if (a === "--persona") out.persona = argv[++i];
-		else if (a === "--engine") out.engine = argv[++i];
-		else if (a === "--model") out.model = argv[++i];
-		else if (a === "--thinking") out.thinking = argv[++i];
-		else if (a === "--tools") out.tools = argv[++i];
-		else rest.push(a);
+		if (a === "--persona") {
+			const v = argv[++i];
+			if (v !== undefined) out.persona = v;
+		} else if (a === "--engine") {
+			const v = argv[++i];
+			if (v !== undefined) out.engine = v;
+		} else if (a === "--model") {
+			const v = argv[++i];
+			if (v !== undefined) out.model = v;
+		} else if (a === "--thinking") {
+			const v = argv[++i];
+			if (v !== undefined) out.thinking = v;
+		} else if (a === "--tools") {
+			const v = argv[++i];
+			if (v !== undefined) out.tools = v;
+		} else rest.push(a);
 	}
 	out.prompt = rest.join(" ");
 	return out;

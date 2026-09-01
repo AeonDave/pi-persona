@@ -32,7 +32,7 @@ test("the child engine and the inproc engine mint bus handles from ONE sequence 
 			endpoint: "pipe:test",
 			register: (info) => minted.push(info.handle),
 			unregister: () => {},
-			steerFrame: () => {},
+			steerFrame: () => true,
 		},
 	});
 	await childEngine.run({ agent: "a", task: "t" });

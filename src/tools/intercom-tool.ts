@@ -153,6 +153,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// carries the premature-surrender note when it is collected via `wait`.
 				const settledIds = new Set(settled.map((r) => r.id));
 				d.completionNotifier.discard((run) => settledIds.has(run.id));
+				for (const id of settledIds) d.tracker.markCollected(id);
 				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => d.scanForSurrender(t)) : "";
 				const stillNote = still.length > 0 ? buildWaitTimeoutNote(still.map((r) => r.id), timeoutMs) : "";
 				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";

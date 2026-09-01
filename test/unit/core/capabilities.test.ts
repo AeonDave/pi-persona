@@ -47,6 +47,15 @@ test("exocom tools follow canUseBus, not the general allowlist (like delegate)",
 	for (const tool of EXOCOM_TOOL_NAMES) assert.equal(canCallTool(caps, tool), true, `${tool} is granted via canUseBus`);
 });
 
+test("an explicit per-tool deny beats the exocom canUseBus fast-path (deny-wins, I4)", () => {
+	// Denying ONE exocom tool (not the whole bus) must stick: the fast-path grants via
+	// canUseBus, but deny-wins is the I4 rule and a targeted denial is more specific.
+	const caps = resolveCapabilities(base({ permissions: { tools: { deny: ["exocom_send"] } } }));
+	assert.equal(caps.canUseBus, true, "the bus itself is not denied");
+	assert.equal(canCallTool(caps, "exocom_send"), false, "explicitly denied");
+	assert.equal(canCallTool(caps, "exocom_list"), true, "siblings still follow canUseBus");
+});
+
 test("denying the bus (intercom) also denies the exocom tools", () => {
 	const caps = resolveCapabilities(base({ permissions: { tools: { deny: ["intercom"] } } }));
 	assert.equal(caps.canUseBus, false);

@@ -10,7 +10,7 @@
  */
 
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import nodeNet from "node:net";
 import type net from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -641,6 +641,32 @@ export class ExocomPlane {
 		return undefined;
 	}
 
+	/**
+	 * Copy a verified spill into `artifacts/received/<msg_id>.txt` and rewrite the descriptor
+	 * path so the model reads a snapshot, not a file the sender can still mutate (TOCTOU).
+	 * Returns an error when the message carries a descriptor but the copy failed.
+	 */
+	private snapshotArtifact(msg: ExocomMessage): { ok: true; msg: ExocomMessage } | { ok: false; error: string } {
+		const descriptor = parseExocomArtifactDescriptor(msg.text);
+		if (!descriptor) return { ok: true, msg };
+		const src = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", `${msg.msg_id}.txt`);
+		const destDir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", "received");
+		const dest = join(destDir, `${msg.msg_id}.txt`);
+		try {
+			mkdirSync(destDir, { recursive: true });
+			copyFileSync(src, dest);
+		} catch {
+			return { ok: false, error: "artifact snapshot failed" };
+		}
+		const quarantined: ExocomArtifactDescriptor = {
+			kind: "exocom_artifact",
+			preview: descriptor.preview,
+			path: dest,
+			size: descriptor.size,
+		};
+		return { ok: true, msg: { ...msg, text: JSON.stringify(quarantined) } };
+	}
+
 	private handleConnection(socket: net.Socket): void {
 		socket.unref?.(); // M5: an accepted connection must never keep the process alive on its own (mirrors the server's own unref())
 		this.sockets.add(socket);
@@ -661,9 +687,14 @@ export class ExocomPlane {
 						write(this.nack(raw.msg_id, artifactError));
 						return;
 					}
+					const snapshot = this.snapshotArtifact(raw);
+					if (!snapshot.ok) {
+						write(this.nack(raw.msg_id, snapshot.error));
+						return;
+					}
 					let disposition: ExocomInboundResult | undefined;
 					try {
-						disposition = this.deps.onInbound(raw, entry);
+						disposition = this.deps.onInbound(snapshot.msg, entry);
 					} catch {
 						write(this.nack(raw.msg_id, "receiver rejected message"));
 						return;

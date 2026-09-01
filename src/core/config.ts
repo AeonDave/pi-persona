@@ -141,7 +141,14 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		extraDirs: splitDirs(env.PI_PERSONA_DIRS),
 		keybinding: env.PI_PERSONA_KEY?.trim() || "f8",
 		persist: env.PI_PERSONA_PERSIST?.trim().toLowerCase() !== "off",
-		delegateDefaultAllow: env.PI_PERSONA_DELEGATE_DEFAULT?.trim().toLowerCase() !== "deny",
+		// "deny" locks the delegate roster down; the shared OFF_WORDS are accepted as the same
+		// request (additive — "off" previously meant default-ALLOW, a security default a user
+		// could believe they had tightened while changing nothing).
+		delegateDefaultAllow: (() => {
+			const v = env.PI_PERSONA_DELEGATE_DEFAULT?.trim().toLowerCase();
+			if (v === undefined || v === "") return true; // unset stays default-allow
+			return v !== "deny" && !OFF_WORDS.has(v);
+		})(),
 		// Opt-in: auto-install the bundled defaults on first run ONLY when explicitly enabled with
 		// `PI_PERSONA_SEED=on`. Default off — personas are installed via `/persona seed|restore`.
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",

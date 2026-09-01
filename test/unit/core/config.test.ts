@@ -75,6 +75,14 @@ test("PI_PERSONA_DIRS splits on ';' and ',' and trims", () => {
 	assert.deepEqual(resolveConfig({ PI_PERSONA_DIRS: "/a;/b, /c " }).extraDirs, ["/a", "/b", "/c"]);
 });
 
+test("PI_PERSONA_DELEGATE_DEFAULT: off-words lock the roster down like 'deny' (additive)", () => {
+	for (const word of ["deny", "off", "false", "0", "no"]) {
+		const c = resolveConfig({ PI_PERSONA_DELEGATE_DEFAULT: word });
+		assert.equal(c.delegateDefaultAllow, false, `"${word}" must not silently mean default-allow`);
+	}
+	assert.equal(resolveConfig({}).delegateDefaultAllow, true, "unset stays default-allow");
+});
+
 test("env flips keybinding, persist, delegate-default, seed, and default persona", () => {
 	const c = resolveConfig({
 		PI_PERSONA_KEY: "alt+p",

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { prepareJudge } from "../../../src/orchestration/judge.ts";
+import { ballotLabel, prepareJudge } from "../../../src/orchestration/judge.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
@@ -29,6 +29,20 @@ test("prepareJudge ignores invalid candidates failing the contract excluded upst
 	const rep = prepareJudge([cand("only", "the one")]);
 	assert.match(rep.ballot, /\[A\][\s\S]*the one/);
 	assert.equal(rep.pick("A")?.agent, "only");
+});
+
+test("ballotLabel reduces prose-wrapped votes to the unique on-ballot letter", () => {
+	assert.equal(ballotLabel("B", 3), "B");
+	assert.equal(ballotLabel("Candidate B", 3), "B");
+	assert.equal(ballotLabel("B.", 3), "B");
+	assert.equal(ballotLabel("I would pick B", 2), "B", "a stray letter that is not on a 2-candidate ballot is ignored");
+	assert.equal(ballotLabel("A or B?", 3), "A OR B?", "ambiguous votes stay unresolved");
+});
+
+test("prepareJudge.pick resolves a prose-wrapped verdict the same way compete does", () => {
+	const rep = prepareJudge([cand("one", "first"), cand("two", "second")]);
+	assert.equal(rep.pick("Candidate B")?.agent, "two");
+	assert.equal(rep.pick("A or B?"), undefined);
 });
 
 test("prepareJudge fences instruction-shaped candidate output as untrusted data", () => {

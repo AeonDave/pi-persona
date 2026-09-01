@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { closeSync, openSync, readdirSync, renameSync } from "node:fs";
+import { closeSync, openSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { tempDir } from "../../setup/temp-dir.ts";
 import { agentsDir, registryPath } from "../../../src/exocom/paths.ts";
-import { prune, readAll, registryEntryFixture, removeEntry, removeEntryIfMatches, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
+import { MAX_REGISTRY_FILE_BYTES, prune, readAll, registryEntryFixture, removeEntry, removeEntryIfMatches, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
 
 let dir: string;
 before(async () => { dir = await mkdtemp(join(tmpdir(), "exo-reg-")); });
@@ -172,4 +172,12 @@ test("heartbeat rewrite preserves the existing public_key for the same session_i
 	const stored = readAll(dir, H).find((e) => e.session_id === "heartbeat-session");
 	assert.equal(stored?.name, "after", "heartbeat metadata is refreshed");
 	assert.equal(stored?.public_key, publicKey, "heartbeat cannot erase the plane-owned authentication key");
+});
+
+test("readAll skips a registry file larger than the size cap", () => {
+	const key = sessionKey("huge-session");
+	const path = registryPath(dir, H, key);
+	writeEntry(dir, H, entry({ session_id: "huge-session", name: "huge" }));
+	writeFileSync(path, `${"x".repeat(MAX_REGISTRY_FILE_BYTES + 8)}`);
+	assert.equal(readAll(dir, H).some((e) => e.session_id === "huge-session"), false);
 });

@@ -27,6 +27,20 @@ test("writeSetPathError rejects ownership outside the repository", () => {
 	assert.equal(writeSetPathError("."), undefined);
 });
 
+test("case-folding is per-path syntax, not host platform: POSIX-style names stay case-sensitive", () => {
+	// On a Windows host the old code folded EVERY path, so these two distinct ownership
+	// names were falsely reported as overlapping. The answer must be host-independent.
+	assert.deepEqual(findWriteSetOverlaps([
+		{ agent: "a", writeSet: ["SRC/app.ts"] },
+		{ agent: "b", writeSet: ["src/app.ts"] },
+	]), []);
+	// Windows syntax (backslash) still folds, on any host.
+	assert.equal(findWriteSetOverlaps([
+		{ agent: "a", writeSet: ["SRC\\app.ts"] },
+		{ agent: "b", writeSet: ["src\\app.ts"] },
+	]).length, 1);
+});
+
 test("write-set normalization treats repository root markers as ancestors", () => {
 	assert.equal(findWriteSetOverlaps([{ agent: "a", writeSet: ["."] }, { agent: "b", writeSet: ["src/file.ts"] }]).length, 1);
 });

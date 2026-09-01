@@ -23,7 +23,7 @@ commands, diffs, `file:line`).
   heavy, or parallel parts (large refactors, broad search, test/build/fuzz campaigns, multi-file
   sweeps), fan them out FIRST in ONE `delegate` call with disjoint files — don't grind them
   inline. They run in the background; results return to you on their own while you keep working. For
-  each leg, pass an explicit `name` in `<call-sign>-<purpose>` form (es. `orion-refactor`,
+  each leg, pass an explicit `name` in `<call-sign>-<purpose>` form (e.g. `orion-refactor`,
   `hera-audit`) so the UI stays distinguishable.
   Every leg gets a cold-start `brief` with all six non-empty fields: `objective`, `scopeRoe`,
   `position`, `constraints`, `requiredArtifacts`, and `stopConditions`. Example shape:

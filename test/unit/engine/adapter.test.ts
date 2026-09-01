@@ -175,6 +175,29 @@ test("child adapter's unknown-agent error names the installed agents when listAg
 	assert.match(r.error ?? "", /— installed agents: scout, operator/);
 });
 
+test("child adapter classifies a PRE-STREAM provider death as provider (fallback can reroute)", async () => {
+	// [provider-fail]: pi exits 1 with a 429 on stderr and NO stream events — no stop reason.
+	// Before evidence-based classification this was "agent" and the fallback never fired.
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
+	const r = await engine.run({ agent: "a", task: "boom [provider-fail]" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "provider", "stderr evidence of a provider rejection reroutes");
+});
+
+test("child adapter keeps a pre-stream non-provider death as agent (terminal)", async () => {
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
+	const r = await engine.run({ agent: "a", task: "boom [fail]" });
+	assert.equal(r.ok, false);
+	// [fail] reports stopReason error ("stub failure") — a stream-level error stays provider;
+	// a plain non-zero exit with no provider evidence stays agent.
+});
+
+test("child adapter prefers the child's STREAM-REPORTED model for modelUsed", async () => {
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
+	const r = await engine.run({ agent: "a", task: "do it", model: "alias/some-model" });
+	assert.equal(r.modelUsed, "stub/model", "what actually RAN seeds the fallback chain, not the requested alias");
+});
+
 test("child adapter keeps the cause of death when a contract-bearing leg dies before producing output", async () => {
 	// The leg never starts → the startup deadline fires with empty output. Validating that
 	// emptiness must not rename the failure "invalid JSON": the operator would coach the

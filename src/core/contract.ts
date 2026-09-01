@@ -127,14 +127,12 @@ function fencedBlocks(s: string): string[] {
 }
 
 /**
- * Scan backwards for a BALANCED object/array: walk from the last closer to its matching
- * opener, tracking string state so a brace inside a string value never miscounts. This is
- * what survives prose that itself contains braces (a report quoting code or a `${…}`),
- * where a naive first-`{` scan slices from the prose and yields garbage.
+ * Scan backwards from one closer for a BALANCED object/array: walk from `close` to its
+ * matching opener, tracking string state so a brace inside a string value never miscounts.
+ * This is what survives prose that itself contains braces (a report quoting code or a
+ * `${…}`), where a naive first-`{` scan slices from the prose and yields garbage.
  */
-function balancedFromEnd(s: string): string | undefined {
-	const close = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
-	if (close < 0) return undefined;
+function balancedFrom(s: string, close: number): string | undefined {
 	const open = s[close] === "}" ? "{" : "[";
 	const shut = s[close];
 	let depth = 0;
@@ -161,6 +159,60 @@ function balancedFromEnd(s: string): string | undefined {
 	return undefined;
 }
 
+/** Candidates are cheap; the cap only bounds pathological prose dense with closers. */
+const MAX_JSON_CANDIDATES = 64;
+
+/**
+ * Every balanced object/array in the text, walking closers RIGHT-TO-LEFT (the contract
+ * asks for the answer at the end). One candidate per closer is not enough: trailing prose
+ * like "option [2]" or "Done {thanks}." yields a slice that parses (or mis-slices into
+ * prose) and must not shadow the real answer object sitting behind it.
+ */
+function* balancedFromEnd(s: string): Generator<string> {
+	const seen = new Set<string>();
+	let yielded = 0;
+	for (let close = s.length - 1; close >= 0 && yielded < MAX_JSON_CANDIDATES; close--) {
+		const ch = s[close];
+		if (ch !== "}" && ch !== "]") continue;
+		const slice = balancedFrom(s, close);
+		if (slice !== undefined && !seen.has(slice)) {
+			seen.add(slice);
+			yielded++;
+			yield slice;
+		}
+	}
+}
+
+/**
+ * All JSON candidates of a reply, most-specific first, deduped: the whole text, each
+ * fenced block last-first (plus the balanced objects inside a fence that holds prose
+ * around the JSON), then every balanced object/array of the whole text right-to-left,
+ * and finally the legacy outermost slice (error shaping only — it may not parse).
+ */
+function* jsonCandidates(text: string): Generator<string> {
+	const seen = new Set<string>();
+	const emit = function* (c: string | undefined): Generator<string> {
+		if (c !== undefined && c.length > 0 && !seen.has(c)) {
+			seen.add(c);
+			yield c;
+		}
+	};
+	const s = text.trim();
+	yield* emit(s);
+	for (const block of fencedBlocks(s)) {
+		yield* emit(block);
+		yield* balancedFromEnd(block);
+	}
+	yield* balancedFromEnd(s);
+	// Legacy fallback: outermost slice. If nothing parsed, this only shapes the error.
+	const starts = [s.indexOf("{"), s.indexOf("[")].filter((i) => i >= 0);
+	if (starts.length > 0) {
+		const start = Math.min(...starts);
+		const end = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
+		if (end > start) yield* emit(s.slice(start, end + 1));
+	}
+}
+
 /**
  * Pull a JSON candidate out of an LLM reply before parsing. Models very often wrap
  * structured output in a ```json fence or surround it with prose ("Here you go: {…}"),
@@ -168,38 +220,35 @@ function balancedFromEnd(s: string): string | undefined {
  * bug: every member's vote excluded as "invalid output").
  *
  * Candidates are tried most-specific first and the FIRST ONE THAT ACTUALLY PARSES wins,
- * so a heuristic can never win by producing confident garbage:
+ * so a heuristic can never win by producing confident garbage — with one refinement:
+ * contracts always want a JSON OBJECT, so among parseable candidates an object beats an
+ * array/scalar (trailing prose like "option [2]" parses as JSON but can never be the
+ * answer; the real object behind it is).
  *   1. the whole text (already-clean JSON);
  *   2. each fenced block, last fence first (the contract puts the answer last, so an
  *      earlier fence is quoted evidence);
- *   3. a balanced object/array scanned backwards from the last closer, string-aware.
+ *   3. every balanced object/array scanned backwards, string-aware, right-to-left.
  * Falls back to the legacy outermost-slice so genuinely-malformed output still fails
  * parsing naturally with the same shape of error as before.
  *
- * Regression this closes: a report whose PROSE contains a brace (quoted code, a `${…}`)
- * followed by the fenced answer. The old path only unwrapped a fence spanning the ENTIRE
- * output, then sliced from the FIRST brace — landing inside the prose and failing a leg
- * whose work was correct ("contract <name> failed: output was not valid JSON").
+ * Regressions this closes: a report whose PROSE contains a brace (quoted code, a `${…}`)
+ * followed by the fenced answer; and a correct answer followed by prose carrying its own
+ * bracketed token ("I picked option [2]"), which used to shadow the real object and fail
+ * a leg whose work was correct ("contract <name> failed: output was not valid JSON").
  */
 export function extractJsonCandidate(text: string): string {
-	const s = text.trim();
-	if (parses(s)) return s;
-	for (const block of fencedBlocks(s)) {
-		if (parses(block)) return block;
-		// A fence may itself hold prose around the object ("Result:\n{…}").
-		const inner = balancedFromEnd(block);
-		if (inner !== undefined && parses(inner)) return inner;
+	let firstParseable: string | undefined;
+	for (const candidate of jsonCandidates(text)) {
+		if (!parses(candidate)) continue;
+		if (candidate.startsWith("{")) return candidate;
+		firstParseable ??= candidate;
 	}
-	const balanced = balancedFromEnd(s);
-	if (balanced !== undefined && parses(balanced)) return balanced;
-	// Legacy fallback: outermost slice. Nothing parsed, so this only shapes the error.
-	const starts = [s.indexOf("{"), s.indexOf("[")].filter((i) => i >= 0);
-	if (starts.length > 0) {
-		const start = Math.min(...starts);
-		const end = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
-		if (end > start) return s.slice(start, end + 1);
-	}
-	return s;
+	if (firstParseable !== undefined) return firstParseable;
+	// Nothing parsed: return the last (legacy outermost-slice) candidate if it exists,
+	// else the trimmed text — both only shape the downstream parse error.
+	let last: string | undefined;
+	for (const candidate of jsonCandidates(text)) last = candidate;
+	return last ?? text.trim();
 }
 
 /** One human-readable ballot line for a field: `- vote (string, required, one of: a | b)`. */
@@ -247,18 +296,25 @@ export interface ParseResult {
 }
 
 /** Unwrap (fences/prose), JSON-parse, and validate an agent's raw output against a
- *  contract in one step — the shared path for every engine backend. */
+ *  contract in one step — the shared path for every engine backend. Every candidate is
+ *  tried until one BOTH parses and validates: a candidate that parses but is not the
+ *  answer object (trailing "option [2]", quoted code) must not quarantine a correct,
+ *  already-billed leg as an invalid output. */
 export function parseAndValidate(output: string, def: ContractDef): ParseResult {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(extractJsonCandidate(output));
-	} catch {
-		parsed = undefined;
+	let firstErrors: string[] | undefined;
+	for (const candidate of jsonCandidates(output)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(candidate);
+		} catch {
+			continue;
+		}
+		const v = validateAgainst(def, parsed);
+		if (v.ok && v.value) return { ok: true, value: v.value };
+		firstErrors ??= v.errors;
 	}
-	const v: ValidationResult =
-		parsed === undefined ? { ok: false, errors: ["output was not valid JSON"] } : validateAgainst(def, parsed);
-	if (v.ok && v.value) return { ok: true, value: v.value };
-	return { ok: false, error: `contract ${def.name} failed: ${v.errors.join("; ")}` };
+	const errors = firstErrors ?? ["output was not valid JSON"];
+	return { ok: false, error: `contract ${def.name} failed: ${errors.join("; ")}` };
 }
 
 /** Deterministic, key-order-independent serialisation for hashing. */

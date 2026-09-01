@@ -15,7 +15,7 @@
  *          ballotDiffChars?: number (default 6000 — ballot-only clip; the winner is full) }
  */
 
-import { shuffleOrder } from "../judge.ts";
+import { ballotLabel, shuffleOrder } from "../judge.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
@@ -51,27 +51,6 @@ function extractDiff(output: string): { summary: string; diff: string } | undefi
 	if (i < 0) return undefined;
 	const body = output.slice(i).match(TAIL_DIFF_FENCE)?.[1]?.trim();
 	return body ? { summary: output.slice(0, i).trim(), diff: body } : undefined;
-}
-
-/** The ballot labels `judge.ts` hands out, in order (position → label). */
-const BALLOT_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-/**
- * The judge's vote reduced to a ballot label. Models routinely answer "Candidate B" or "B."
- * where the ballot asked for "B", so a bare single-letter token is read as the pick.
- *
- * The candidate letters are filtered against the labels ACTUALLY on this ballot, and an
- * ambiguous vote (two different labels named, e.g. "A or B?") resolves to nothing. Guessing
- * here is worse than failing: the caller hands the picked competitor's diff back as THE winner
- * for the supervisor to apply, and the no-pick path already returns every valid diff — so a
- * refusal loses nothing, while a wrong guess applies the wrong competitor's work.
- */
-function ballotLabel(vote: string, onBallot: number): string {
-	const bare = vote.trim().toUpperCase();
-	if (bare.length <= 1) return bare;
-	const labels = new Set(BALLOT_LABELS.slice(0, Math.min(onBallot, BALLOT_LABELS.length)));
-	const named = [...new Set(bare.split(/[^A-Z]+/).filter((t) => t.length === 1 && labels.has(t)))];
-	return named.length === 1 ? named[0]! : bare;
 }
 
 /** Clip a diff for the ballot only — the winner's diff is always returned in full. */
@@ -131,6 +110,20 @@ export const compete: Strategy = {
 			...result,
 			output: `${summary}\n\n${clip(diff, ballotChars)}`,
 		}));
+		if (sdk.signal?.aborted) {
+			const entries = valid.map(({ result, diff, summary }) =>
+				[`--- ${result.agent} ---`, summary, "```diff", diff, "```"].join("\n"),
+			);
+			return {
+				agent: "compete",
+				output: [`compete cancelled before the arbiter ran — the ${valid.length} valid entries follow, unjudged.`, ...entries].join("\n\n"),
+				structured: { entered: team.length, valid: valid.length, cancelled: true },
+				usage: sumUsage(candidates.map((c) => c.usage)),
+				ok: false,
+				error: "the run was aborted",
+				failureKind: "abort",
+			};
+		}
 		const prep = sdk.reduce.judge(display, shuffleOrder(display.length));
 		const verdict = await sdk.agent({
 			agent: arbiter,

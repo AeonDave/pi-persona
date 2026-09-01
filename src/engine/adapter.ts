@@ -13,6 +13,7 @@ import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
+import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { emptyUsage, type ToolEvent } from "./stream.ts";
@@ -29,8 +30,9 @@ export interface EngineAdapterBroker {
 	register(info: { handle: string; label?: string; group?: string; peers?: boolean }): void;
 	/** Unregisters the handle once the run has settled (success, failure, or abort). */
 	unregister(handle: string): void;
-	/** Pushes a `steer` frame to the connected (or not-yet-connected) child. */
-	steerFrame(handle: string, text: string): void;
+	/** Pushes a `steer` frame to the connected (or not-yet-connected) child.
+	 *  Returns false when the handle is unknown (not pre-registered / already forgotten). */
+	steerFrame(handle: string, text: string): boolean;
 }
 
 export interface EngineAdapterDeps {
@@ -190,8 +192,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
 			// The provider/id the child ran on (drop any `:thinking` suffix) — for the UI and
-			// as the seed of the provider-fallback chain on a provider failure.
-			const modelUsed = (childSpec.model ?? spec.model ?? cfg.model)?.split(":")[0];
+			// as the seed of the provider-fallback chain on a provider failure. The child's
+			// STREAM-REPORTED model wins over the requested spec: a resolved alias or a
+			// provider-side redirect must seed the fallback chain with what actually ran.
+			const modelUsed = (child.model ?? childSpec.model ?? spec.model ?? cfg.model)?.split(":")[0];
 			if (modelUsed) result.modelUsed = modelUsed;
 			// Diagnostic tag: agent · model ref · dynamic overrides. Same shape as inproc engine,
 			// so failed follow-ups always say WHICH agent+model died and WHY.
@@ -219,8 +223,18 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			}
 
 			// Classify the failure so the fallback decorator reroutes ONLY provider errors
-			// (a stream `error`), never an abort/timeout/spawn-miss/agent failure.
-			if (!child.ok) result.failureKind = child.timedOut ? "timeout" : child.aborted ? "abort" : child.stopReason === "error" ? "provider" : "agent";
+			// (a stream `error`), never an abort/timeout/spawn-miss/agent failure. A child that
+			// dies BEFORE the stream starts (the provider rejected the request and `pi` exited
+			// non-zero) has no stop reason at all — the evidence sits in stderr/error text, so
+			// classify it by content or the fallback silently never reroutes pre-stream deaths.
+			if (!child.ok)
+				result.failureKind = child.timedOut
+					? "timeout"
+					: child.aborted
+						? "abort"
+						: child.stopReason === "error" || looksLikeProviderError(`${child.errorMessage ?? ""}\n${child.stderr}`)
+							? "provider"
+							: "agent";
 
 			if (contractDef) {
 				// Shared parse+validate (unwraps ```json fences / prose first) — a member's

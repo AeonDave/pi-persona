@@ -155,7 +155,7 @@ export async function runChildAgent(
 	const killGraceMs = opts.killGraceMs ?? 5000;
 	const forceKillTree = opts.killProcessTree ?? killProcessTree;
 	const maxStderrBytes = opts.maxStderrBytes ?? 256 * 1024;
-	const maxLineBytes = 1024 * 1024; // drop a single unterminated >1 MiB line (noise / memory guard)
+	const maxLineBytes = 1024 * 1024; // a single unterminated >1 MiB line is stream noise — loud failure, never a silent drop
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (spec.model) args.push("--model", spec.model);
@@ -185,10 +185,21 @@ export async function runChildAgent(
 	let killSignal: NodeJS.Signals | undefined; // the signal that ended the child, if any (POSIX)
 	let progressed = false; // set once the child produces its FIRST real progress (turn/tokens/output)
 	let spawnError: Error | undefined;
+	let oversizedLine = false; // a >maxLineBytes unterminated line — loud failure, never a silent drop
+	let diedWithoutStatus = false; // 'close' with null code AND null signal — never a clean exit
 
 	try {
 		const exitCode = await new Promise<number>((resolveP) => {
 			const inv = resolveInvocation(args);
+			// A stale broker wiring in the SUPERVISOR's own environment must not leak into a
+			// plain child: PI_PERSONA_BUS would boot the child's bridge against a dead (or
+			// foreign) endpoint. The adapter re-adds these deliberately via opts.env when a
+			// broker is actually live for THIS run.
+			const inherited = { ...process.env };
+			delete inherited.PI_PERSONA_BUS;
+			delete inherited.PI_PERSONA_HANDLE;
+			delete inherited.PI_PERSONA_PEERS;
+			delete inherited.PI_PERSONA_ALLOW_BLOCKING;
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
@@ -203,7 +214,7 @@ export async function runChildAgent(
 				// PI_PERSONA_CHILD marks the child process; PI_PERSONA_LEG is the dedicated
 				// "delegated worker leg" marker a companion extension reads to tell a real leg from
 				// a user-set PI_PERSONA_DISABLE kill switch (see inproc.ts pushDisableGuard).
-				env: { ...process.env, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1", PI_PERSONA_LEG: "1", ...opts.env },
+				env: { ...inherited, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1", PI_PERSONA_LEG: "1", ...opts.env },
 			});
 
 			let settled = false;
@@ -214,6 +225,7 @@ export async function runChildAgent(
 			let hardTimer: ReturnType<typeof setTimeout> | undefined;
 			let startupTimer: ReturnType<typeof setTimeout> | undefined;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
+			let lastResortTimer: ReturnType<typeof setTimeout> | undefined;
 
 			// Calls whose start crossed the progress seam but whose end has not. The tool NAME is kept
 			// beside the id because a synthetic close in finish() has to carry it.
@@ -245,6 +257,25 @@ export async function runChildAgent(
 				if (hardTimer) clearTimeout(hardTimer);
 				if (startupTimer) clearTimeout(startupTimer);
 				const pid = proc.pid;
+				// POSIX: the child is a process-GROUP leader (detached above), so signal the
+				// whole group — its own tool subprocesses (grandchildren) must die with it,
+				// not survive as orphans holding the workspace.
+				const signalGroup = (sig: NodeJS.Signals): boolean => {
+					if (process.platform === "win32" || pid === undefined) return false;
+					try {
+						process.kill(-pid, sig);
+						return true;
+					} catch {
+						return false; // the group is already gone
+					}
+				};
+				// Last resort: if NEITHER 'close' nor 'error' ever arrives after a kill (a
+				// wedged process handle, a failed tree-kill), settle the run anyway — an
+				// unsettled promise here hangs the whole strategy.
+				lastResortTimer = setTimeout(() => {
+					if (!settled) finish(1);
+				}, killGraceMs + 5000);
+				lastResortTimer.unref?.();
 				// On Windows, proc.kill("SIGTERM") maps to TerminateProcess: it kills ONLY the root
 				// and fires `close` synchronously, which clears the grace timer before it can run —
 				// so the tree-kill never fires and the child's own tool subprocesses are orphaned.
@@ -253,13 +284,18 @@ export async function runChildAgent(
 					if (pid !== undefined) forceKillTree(pid);
 					return;
 				}
-				try {
-					proc.kill("SIGTERM");
-				} catch {
-					/* ignore */
+				if (!signalGroup("SIGTERM")) {
+					try {
+						proc.kill("SIGTERM");
+					} catch {
+						/* ignore */
+					}
 				}
 				graceTimer = setTimeout(() => {
-					if (!exited && pid !== undefined) forceKillTree(pid);
+					if (!exited && pid !== undefined) {
+						forceKillTree(pid);
+						signalGroup("SIGKILL"); // belt-and-braces for grandchildren the tree-kill missed
+					}
 				}, killGraceMs);
 				graceTimer.unref?.();
 			};
@@ -279,6 +315,7 @@ export async function runChildAgent(
 				if (hardTimer) clearTimeout(hardTimer);
 				if (startupTimer) clearTimeout(startupTimer);
 				if (graceTimer) clearTimeout(graceTimer);
+				if (lastResortTimer) clearTimeout(lastResortTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
 				if (buffer.trim()) onLine(buffer);
 				// A killed child (UI stop, idle/hard/startup deadline) never emits the
@@ -346,9 +383,18 @@ export async function runChildAgent(
 
 			proc.stdout?.setEncoding("utf8");
 			proc.stdout?.on("data", (d: string) => {
+				if (oversizedLine) return; // already failing loudly — stop processing the flood
 				const { lines, rest } = feedLines(buffer, d);
-				// Guard against an unbounded unterminated line (binary/noise flood).
-				buffer = rest.length > maxLineBytes ? "" : rest;
+				// An unterminated line over maxLineBytes is stream noise (or a stuck flood),
+				// never a leg's real output. Dropping it silently would let a flooded leg
+				// "succeed" on truncated output — kill the child and fail LOUDLY instead.
+				if (rest.length > maxLineBytes) {
+					oversizedLine = true;
+					buffer = "";
+					kill();
+					return;
+				}
+				buffer = rest;
 				for (const l of lines) onLine(l);
 				noteProgress(); // first real progress cancels the startup deadline
 				opts.onProgress?.(snapshot(state));
@@ -380,8 +426,10 @@ export async function runChildAgent(
 				// child killed by something OUTSIDE this engine (OOM killer, `kill -9`, shutdown)
 				// as a clean success carrying its truncated mid-run output — none of the
 				// abort/timeout flags are set for those, so nothing else would catch it.
+				// A null code WITHOUT a signal is just as abnormal (a wedged spawn): never 0.
 				if (sig) killSignal = sig;
-				finish(code ?? (sig ? 1 : 0));
+				if (code === null && !sig) diedWithoutStatus = true;
+				finish(code ?? 1);
 			});
 			// A spawn failure (e.g. ENOENT: `pi` not on PATH) must not be silently
 			// folded into a bare exit code — capture it so it surfaces in errorMessage.
@@ -404,6 +452,8 @@ export async function runChildAgent(
 			!timedOut &&
 			!hardTimedOut &&
 			!startupTimedOut &&
+			!oversizedLine &&
+			!diedWithoutStatus &&
 			exitCode === 0 &&
 			state.stopReason !== "error" &&
 			state.stopReason !== "aborted";
@@ -435,6 +485,10 @@ export async function runChildAgent(
 			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (aborted) {
 			result.errorMessage = `agent aborted${streamErr ? ` (last error: ${streamErr})` : ""}`;
+		} else if (oversizedLine) {
+			result.errorMessage = `agent emitted an unterminated line over ${maxLineBytes} bytes — killed as stream noise (a flooded leg fails loudly; it never "succeeds" on truncated output)`;
+		} else if (diedWithoutStatus) {
+			result.errorMessage = `agent process closed without an exit code or signal${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (spawnError) {
 			result.errorMessage = `failed to spawn pi: ${spawnError.message}`;
 		} else if (killSignal) {

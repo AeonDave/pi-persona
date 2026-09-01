@@ -49,6 +49,8 @@ export interface RunStrategyDeps {
 	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
 	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
+	/** See `SDKDeps.canSpawn` — every strategy spawn, not only `delegate`. */
+	canSpawn?: (agent: string) => boolean;
 }
 
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */
@@ -72,6 +74,7 @@ export async function runPersonaStrategy(
 	if (deps.onAgentProgress) sdkDeps.onAgentProgress = deps.onAgentProgress;
 	if (deps.onAgentStart) sdkDeps.onAgentStart = deps.onAgentStart;
 	if (deps.onAgentSteerable) sdkDeps.onAgentSteerable = deps.onAgentSteerable;
+	if (deps.canSpawn) sdkDeps.canSpawn = deps.canSpawn;
 
 	const input: StrategyInput = { task, params: orch.params ?? {} };
 	if (orch.roster) input.roster = orch.roster;

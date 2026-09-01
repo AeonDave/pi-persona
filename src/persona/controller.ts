@@ -32,6 +32,8 @@ export interface PersonaHost {
 	findModel(ref: string): ModelHandle | undefined;
 	setModel(model: ModelHandle): void | Promise<void>;
 	setStatus(text: string | undefined): void;
+	/** Optional: a declared-but-unavailable model/thinking would otherwise fail silently. */
+	warn?(message: string): void;
 }
 
 export class PersonaController {
@@ -111,8 +113,11 @@ export class PersonaController {
 					this.modelOverridden = true;
 				}
 				await this.host.setModel(model);
+			} else {
+				this.host.warn?.(
+					`persona "${persona.name}" declared model "${persona.model}" which is not configured; keeping the current model`,
+				);
 			}
-			// declared-but-unavailable → keep current (no override, no restore)
 		} else {
 			await this.restoreModel();
 		}

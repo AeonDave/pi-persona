@@ -97,7 +97,9 @@ export function stripTerminalControls(text: string): string {
 			i += 1;
 			continue;
 		}
-		if ((code <= 0x09) || (code >= 0x0b && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
+		// TAB (0x09) is not a cursor-moving control: stripping it silently mangles tab-indented
+		// code inside fenced sub-agent output. It passes through like LF (0x0a) already does.
+		if ((code <= 0x08) || (code >= 0x0b && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
 			i += 1;
 			continue;
 		}

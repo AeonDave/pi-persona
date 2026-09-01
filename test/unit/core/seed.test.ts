@@ -55,6 +55,22 @@ test("seedDefaults copies personas + agents into <user>/agents, and teams/flows/
 	assert.equal(read(path.join(u, "teams.yaml")), "magi: [a, b, c]");
 });
 
+test("one failing file never aborts the seed — the rest lands and the failure is a named warning", () => {
+	// Windows: a destination held open by an editor/AV makes renameSync fail with EPERM.
+	// Simulate by pointing the bundled source at a missing file for ONE entry: the copy
+	// throws, the remaining defaults must still be placed.
+	const b = bundled();
+	const u = userDir();
+	fs.rmSync(path.join(b, "agents", "scout.md"));
+	fs.mkdirSync(path.join(b, "agents"), { recursive: true });
+	// A directory where a file is expected makes copyFileSync fail deterministically on every OS.
+	fs.mkdirSync(path.join(b, "agents", "scout.md"));
+	const r = seedDefaults(b, u, false);
+	assert.equal(read(path.join(u, "agents", "sample.md")), "PERSONA sample", "later files still seeded");
+	assert.ok(fs.existsSync(path.join(u, "teams.yaml")), "the tail of the seed still ran");
+	assert.ok(r.warnings?.some((w) => w.includes("scout.md")), "the failure is named, not thrown");
+});
+
 test("the spine pair is seeded FLAT into <user>, which is where `on` resolution looks for the user's own copy", () => {
 	// Without this, the documented "your own copy shadows the bundled one" precedence has no
 	// gesture that creates that copy — a user would have to know the filenames and write them by

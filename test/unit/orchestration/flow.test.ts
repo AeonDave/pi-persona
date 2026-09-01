@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { tempDir } from "../../setup/temp-dir.ts";
-import { flowHash, parseFlow, topoOrder } from "../../../src/orchestration/flow.ts";
+import { flowHash, parseFlow, topoOrder, verifyFlowRefs } from "../../../src/orchestration/flow.ts";
 import { journalFileName, parseJournal } from "../../../src/orchestration/flow-journal.ts";
 import { runFlow } from "../../../src/orchestration/flow-run.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
@@ -27,6 +27,34 @@ test("parseFlow accepts a valid JSON DAG over strategies", () => {
 		assert.deepEqual(r.flow.phases[1]?.needs, ["gather"]);
 		assert.equal(r.flow.phases[0]?.roster, "review");
 	}
+});
+
+test("verifyFlowRefs rejects unknown strategy and roster names before any phase runs", () => {
+	const parsed = parseFlow(
+		flow([
+			{ id: "gather", strategy: "fanout", roster: "review" },
+			{ id: "decide", strategy: "mgai", needs: ["gather"] },
+		]),
+	);
+	assert.ok(parsed.ok);
+	if (!parsed.ok) return;
+	const badStrategy = verifyFlowRefs(parsed.flow, { strategies: ["fanout", "magi"], teams: new Set(["review"]) });
+	assert.equal(badStrategy.ok, false);
+	if (!badStrategy.ok) assert.match(badStrategy.error, /unknown strategy "mgai"/);
+
+	const parsedRoster = parseFlow(flow([{ id: "gather", strategy: "fanout", roster: "ghosts" }]));
+	assert.ok(parsedRoster.ok);
+	if (!parsedRoster.ok) return;
+	const badRoster = verifyFlowRefs(parsedRoster.flow, { strategies: ["fanout"], teams: new Set(["review"]) });
+	assert.equal(badRoster.ok, false);
+	if (!badRoster.ok) assert.match(badRoster.error, /unknown roster "ghosts"/);
+
+	const ok = verifyFlowRefs(parsed.ok ? parsed.flow : parsedRoster.flow, {
+		strategies: ["fanout", "mgai"],
+		teams: new Set(["review"]),
+	});
+	// The first flow's typo is a real strategy name in THIS known set — that's the caller's table.
+	assert.equal(ok.ok, true);
 });
 
 test("parseFlow rejects malformed JSON, empty/duplicate/dangling phases", () => {

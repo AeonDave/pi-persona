@@ -30,6 +30,7 @@ import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
+import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
@@ -529,6 +530,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let unsub: (() => void) | undefined;
 			let unsubBridge: (() => void) | undefined;
 			let aborted = false;
+			let steerable = true;
 			// Calls whose start crossed the progress seam but whose end has not. The tool NAME rides
 			// beside the id because the synthetic close below has to carry it, and stream.ts tracks
 			// only the ids. Mirrors the child engine's `openToolCalls`.
@@ -566,8 +568,15 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				// Steering: the in-process engine can inject a user message into the running
 				// agent — the v0.4 payoff the one-shot child engine can't do.
 				onSteerable?.((text) => {
+					if (!steerable) return false;
 					const trimmed = text.trim();
-					if (trimmed) session.agent.steer({ role: "user", content: [{ type: "text", text: trimmed }] });
+					if (!trimmed) return false;
+					try {
+						session.agent.steer({ role: "user", content: [{ type: "text", text: trimmed }] });
+						return true;
+					} catch {
+						return false;
+					}
 				});
 
 				// Delivery bridge: bus messages addressed to this child are steered into its live
@@ -628,6 +637,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				unsubBridge?.();
 				unsub?.();
 				releaseHandle();
+				steerable = false;
 				session.dispose();
 				throw e;
 			}
@@ -659,6 +669,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				unsubBridge?.();
 				releaseHandle();
 				unsub?.();
+				steerable = false;
 				session.dispose();
 			}
 
@@ -700,11 +711,19 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
-			// Classify the failure so the fallback decorator can reroute ONLY provider errors
-			// (a thrown API rejection or a stream `error`), never an abort/timeout/hard-cap/agent miss.
+			// Classify the failure so the fallback decorator can reroute ONLY provider errors,
+			// never an abort/timeout/hard-cap/agent miss. A stream `error` stop reason is pi's
+			// own report of an API failure → provider. A THROWN error is not automatically a
+			// provider fault (bugs and tool failures throw too) — classify by its text.
 			if (!ok)
 				result.failureKind =
-					timedOut || hardTimedOut || startupTimedOut ? "timeout" : aborted ? "abort" : thrownError || state.stopReason === "error" ? "provider" : "agent";
+					timedOut || hardTimedOut || startupTimedOut
+						? "timeout"
+						: aborted
+							? "abort"
+							: state.stopReason === "error" || (thrownError !== undefined && looksLikeProviderError(thrownError))
+								? "provider"
+								: "agent";
 
 			if (contractDef) {
 				const v = parseAndValidate(state.output, contractDef);

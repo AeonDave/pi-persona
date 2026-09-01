@@ -53,3 +53,26 @@ test("runPersonaStrategy throws a clear error for a named-but-unknown strategy (
 		/unknown strategy "nope".*fanout|judge|magi|pipeline/s,
 	);
 });
+
+test("runPersonaStrategy canSpawn denies a roster member without calling the engine", async () => {
+	let runs = 0;
+	const engine: StrategyEngine = {
+		run: async (s) => {
+			runs++;
+			return { agent: s.agent, output: "o", usage: usage(), ok: true };
+		},
+	};
+	const r = await runPersonaStrategy(
+		{ mode: "strategy", strategy: "fanout", roster: "t" },
+		"task",
+		{
+			engine,
+			teams: { t: ["scout", "ghost"] },
+			limits: LIMITS,
+			canSpawn: (agent) => agent !== "ghost",
+		},
+	);
+	assert.ok(r);
+	assert.equal(runs, 1, "the denied member never reaches the engine");
+	assert.match(r.output, /may not spawn "ghost"/);
+});
