@@ -294,8 +294,8 @@ For collaboration between independent Pi processes, open the same workspace in t
 ```js
 exocom_list({})
 exocom_list({ offset: 24, limit: 24 }) // next page when the first result reports nextOffset: 24
-exocom_send({ target: "orion", message: "Review the API boundary and send back concrete risks." })
-exocom_name({ name: "atlas" }) // rebrand your own call-sign; routing still keys on the session
+exocom_send({ target: "night-owl", message: "Review the API boundary and send back concrete risks." })
+exocom_name({ name: "kiln" }) // invent your call-sign; routing still keys on the session
 ```
 
 | | Intercom | Exocom |

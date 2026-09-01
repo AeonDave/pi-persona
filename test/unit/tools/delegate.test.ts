@@ -447,9 +447,10 @@ test("normalizeDelegateConcurrency floors fractions, clamps bounds, and serializ
 test("shortModel + labelFor produce a friendly 'name · model' label", () => {
 	assert.equal(shortModel("anthropic/claude-sonnet-4-6"), "sonnet-4-6");
 	assert.equal(shortModel("openrouter/openrouter/owl-alpha:high"), "owl-alpha");
-	assert.equal(labelFor({ agent: "operator", model: "anthropic/claude-sonnet-4-6" }, 0), "orion · sonnet-4-6");
+	assert.equal(labelFor({ agent: "operator", model: "anthropic/claude-sonnet-4-6" }, 0), "operator · sonnet-4-6");
 	assert.equal(labelFor({ agent: "scout", model: "x/y" }, 0), "scout · y", "a fixed agent keeps its own name");
 	assert.equal(labelFor({ agent: "operator", name: "auditor", model: "p/claude-haiku" }, 3), "auditor · haiku");
+	assert.equal(nameFor({ agent: "operator" }, 1), "operator-2", "unnamed extra operators are numbered, not catalog-named");
 });
 
 test("nameFor turns an untrusted codename into a bounded single-line identifier", () => {
@@ -462,7 +463,7 @@ test("nameFor turns an untrusted codename into a bounded single-line identifier"
 test("runDelegate carries the display label in each view", async () => {
 	const engine = engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }));
 	const r = await runDelegate({ tasks: [{ agent: "operator", task: "t", model: "anthropic/claude-sonnet-4-6" }] }, engine);
-	assert.equal(r.views[0]?.label, "orion · sonnet-4-6");
+	assert.equal(r.views[0]?.label, "operator · sonnet-4-6");
 });
 
 test("runDelegate exposes a per-leg abort via onLegStart", async () => {

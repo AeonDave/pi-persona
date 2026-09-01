@@ -450,12 +450,13 @@ This is not a delegate/council replacement and not a task/run workflow runtime.
   if it changes what someone does, otherwise send nothing". A delivery is a fresh prompt on the
   receiver, and a bare `Reply:` would make answering the default and silence the exception — which
   is how a settled point keeps running on agreement and thanks.
-- **Identity is session-stable, persona is presence metadata.** Each instance starts with a
-  collision-aware call-sign (`orion`, `vega`, …) derived from its session id and independent of
-  persona; `exocom_name` replaces that display label only — the registry entry stays keyed by the
-  session, so a rename cannot take over another peer's slot or its inbound replies. Persona,
-  model, and context usage are refreshed on heartbeat; changing persona never changes the registry
-  key or grants authority over another peer.
+- **Identity is session-stable, persona is presence metadata.** Each instance joins with no chosen
+  call-sign (a blank registry placeholder); the model invents its display handle via `exocom_name`
+  from whatever the moment suggests — a mood, a joke, a snack, weather, a place, anything that
+  fits — not from a catalog. `exocom_name` replaces that display label only — the registry entry
+  stays keyed by the session, so a rename cannot take over another peer's slot or its inbound
+  replies. Persona, model, and context usage are refreshed on heartbeat; changing persona never
+  changes the registry key or grants authority over another peer.
 - **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
   message is head-truncated, then delivered under a header the RECEIVER writes (`[label] —
   message|reply`) above a body quoted by `fencePeer` — the peer flavor of the same `core/fence.ts`

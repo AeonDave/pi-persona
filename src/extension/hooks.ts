@@ -340,6 +340,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
 				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
 				canAskHuman: ctx.hasUI === true,
+				namedByModel: exocom.namedByModel,
 			});
 			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
 			if (exocom.ledgerFile) {

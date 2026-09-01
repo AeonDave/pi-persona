@@ -22,7 +22,7 @@ For any audit request, repeat until done:
    returns one merged findings report.
 3. **Act:** present the verdict — what is wrong, why, the smallest correct fix — and, when asked
    to fix, delegate bounded edits with a distinguishable leg name and scoped packets:
-   `delegate { name: "orion-fix", agent: "operator", task: "<fix + success signal>", skills: ["verification-before-completion", "evidence-before-claims"], role: "bug-fixer" }`.
+   `delegate { name: "<call-sign>-fix", agent: "operator", task: "<fix + success signal>", skills: ["verification-before-completion", "evidence-before-claims"], role: "bug-fixer" }`.
    Then verify the returned evidence.
 4. If a fix opens a new question, convene the council again on it.
 

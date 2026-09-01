@@ -7,10 +7,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { IdleCoalescingNotifier } from "../engine/async.ts";
 import { attributePeer } from "../core/fence.ts";
+import { exocomSelfStatusLabel, exocomSelfWidgetLabel } from "../core/naming.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { EXOCOM_TOOL_NAMES } from "../core/capabilities.ts";
 import type { DelegationNudge } from "../core/nudge.ts";
-import { CODENAMES, shortModel } from "../tools/delegate.ts";
+import { shortModel } from "../tools/delegate.ts";
 import { boundDisplayRows } from "../ui/presentation.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { type InstanceDescriptor, type PeerDescriptor } from "../telemetry/contract.ts";
@@ -73,6 +74,7 @@ export interface ExocomInstall {
 	publishTelemetryPeers(peers?: DisplayPeer[]): void;
 	get plane(): ExocomPlane | undefined;
 	get name(): string;
+	get namedByModel(): boolean;
 	renderWidget(): void;
 	get ledgerFile(): string;
 	pendingAsks(ctx: ExtensionContext): LedgerAsk[];
@@ -94,6 +96,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomLedgerFile = "";
 	let exocomSessionId = "";
 	let exocomName = "";
+	let exocomNamedByModel = false;
 	interface ExocomWaiter { id: string; work_key: string; ask_id: string; handle: ReturnType<typeof setTimeout>; }
 	const exocomWaiters: ExocomWaiter[] = [];
 	let exocomWaitSeq = 0;
@@ -165,25 +168,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
 		return EXOCOM_PALETTE[h % EXOCOM_PALETTE.length]!;
 	}
-	// A distinctive per-instance call-sign (orion/vega/…) drawn from the delegate CODENAMES pool,
-	// derived by hashing the session_id so it's stable for the session (never re-randomises on a
-	// plane restart) yet spreads across the pool. Independent of the active persona — the persona
-	// is displayed alongside it, not baked into the name.
-	function exocomCodename(sessionId: string, taken: Set<string>): string {
-		// A deterministic starting point from the session, then the first call-sign NOT already held
-		// by a live peer — so N concurrent instances get N DISTINCT names (`hash % 16` alone collides
-		// ~18% of the time at just 3 instances). Only a >16-live run, or a rare simultaneous-start
-		// race (both read the registry before either registered), falls back to the hashed one and
-		// the display dedup ("orion#2").
-		let h = 0;
-		for (let i = 0; i < sessionId.length; i++) h = (h * 31 + sessionId.charCodeAt(i)) >>> 0;
-		const start = h % CODENAMES.length;
-		for (let i = 0; i < CODENAMES.length; i++) {
-			const name = CODENAMES[(start + i) % CODENAMES.length]!;
-			if (!taken.has(name)) return name;
-		}
-		return CODENAMES[start]!;
-	}
+	// Placeholder until the model invents a call-sign via `exocom_name`. Not a catalog pick —
+	// display-dedup turns concurrent blanks into unnamed / unnamed#2 until someone names themselves.
+	const EXOCOM_PLACEHOLDER_NAME = "unnamed";
 
 	function telemetrySessionId(ctx: ExtensionContext): string {
 		return (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? `legacy-${process.pid}`;
@@ -195,8 +182,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			isIdle?: () => boolean;
 			getContextUsage?: () => { percent?: number } | undefined;
 		};
-		const sessionId = telemetrySessionId(ctx);
-		const displayName = exocomName || exocomCodename(sessionId, new Set());
+		const displayName = exocomSelfStatusLabel(exocomNamedByModel, exocomName);
 		return {
 			displayName,
 			persona: host.controller.activePersona?.name ?? "",
@@ -256,7 +242,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const selfModel = sanitizePeerField(host.lastCtx.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
-			const local = `📡 ${exocomName} (you)${selfPersona ? ` · ${selfPersona}` : ""} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
+			const local = `📡 ${exocomSelfWidgetLabel(exocomNamedByModel, exocomName)}${selfPersona ? ` · ${selfPersona}` : ""} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
 			const peerRows = peers.map((p) => {
 							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
 							const name = sanitizePeerField(p.displayName, 48) || "peer";
@@ -275,7 +261,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try {
 			host.lastCtx.ui.setStatus(
 				"persona-exocom",
-				`📡 ${exocomName} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
+				`📡 ${exocomSelfStatusLabel(exocomNamedByModel, exocomName)} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
 			);
 		} catch {
 			/* cosmetic */
@@ -334,14 +320,11 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const sessionId = ctx.sessionManager.getSessionId();
 			exocomSessionId = sessionId;
 			const agentDir = host.userAgentDir();
-			// Default instance name: a distinctive CALL-SIGN (orion/vega/…, the same pool a delegated
-			// sub-agent draws from), INDEPENDENT of the persona (shown separately) — picked collision-
-			// free against the LIVE peers so N instances get N distinct names. It is only a DEFAULT:
-			// the model can rebrand itself creatively via the `exocom_name` tool. The registry FILE is
-			// keyed by session_id, not by name, so the name is purely a display label.
-			const liveAtStart = pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-			const desired = exocomCodename(sessionId, new Set(liveAtStart.map((e) => e.name)));
-			exocomName = desired;
+			// Placeholder only. The model invents the real call-sign via `exocom_name` from the
+			// feel of the session — no catalog is assigned here. Registry key is session_id.
+			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
+			exocomName = EXOCOM_PLACEHOLDER_NAME;
+			exocomNamedByModel = false;
 			const ep = exocomEndpointFor(agentDir, hash, sessionId, process.platform);
 			const persona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const model = sanitizePeerField(ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", 96);
@@ -665,6 +648,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				const chosen = sanitizePeerField(raw, 32);
 				if (chosen) {
 					exocomName = chosen;
+					exocomNamedByModel = true;
 					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
 				}
 				return exocomName;
@@ -816,6 +800,11 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const plane = exocomPlane;
 			exocomPlane = undefined;
 			try {
+				publishTelemetryPeers([]);
+			} catch {
+				/* the dying instance's last roster must not linger as live presence */
+			}
+			try {
 				await plane.stop();
 			} catch {
 				/* never block shutdown on a teardown error */
@@ -831,6 +820,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		} catch {
 			/* cosmetic */
 		}
+		exocomName = "";
+		exocomNamedByModel = false;
 	}
 	return {
 		reconcile: reconcileExocom,
@@ -843,6 +834,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		publishTelemetryPeers,
 		get plane() { return exocomPlane; },
 		get name() { return exocomName; },
+		get namedByModel() { return exocomNamedByModel; },
 		renderWidget: renderExocomWidget,
 		get ledgerFile() { return exocomLedgerFile; },
 		pendingAsks: pendingAsksFor,
