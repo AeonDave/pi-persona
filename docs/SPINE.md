@@ -120,7 +120,7 @@ without anything entering this repository.
 
 ## Default is off, on purpose
 
-Following the same convention as the broker and exocom, the spine ships opt-in. A prompt layer
+Following the same convention as exocom, the spine ships opt-in. A prompt layer
 changes behavior on every turn and every delegated leg; flipping it on by default is a claim that it
 helps, and that claim needs measurement, not conviction.
 

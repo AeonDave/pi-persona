@@ -11,7 +11,8 @@ import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
-import { formatUsage } from "../ui/usage.ts";
+import { formatUsage, toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
+import { sumUsage } from "../orchestration/reducers.ts";
 import { expandDetailHint } from "../extension/shared.ts";
 import type { Static } from "typebox";
 import {
@@ -51,6 +52,8 @@ export interface DelegateToolDeps {
 	clearSteers(prefix: string): void;
 	drainBusBlock(): string;
 	startPeek(): void;
+	childUsage: ChildUsageLedger;
+	publishPersonaCost(): void;
 }
 
 export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): void {
@@ -512,6 +515,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					if (t && shouldRecordDelegationOutcome(r)) ledger.record(t, r.ok);
 				});
 				d.agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : outcome.ok ? "done" : "failed" });
+				const usage = sumUsage(outcome.results.map((r) => r.usage));
+				d.childUsage.account(usage);
+				d.publishPersonaCost();
 				return {
 					// Sub-agent text is untrusted even as a tool result (guardrails §: fence
 					// before it reaches the supervisor) — the async path already fences via
@@ -519,6 +525,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					content: [{ type: "text", text: `${fenceUntrusted(outcome.text)}${d.drainBusBlock()}` }],
 					details: outcome.ok ? { views: outcome.views } : failureDetails({ views: outcome.views }),
 					isError: !outcome.ok,
+					...toolUsageField(usage),
 				};
 			} catch (error) {
 				d.agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : "failed" });

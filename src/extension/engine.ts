@@ -72,18 +72,19 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			const legSpine = controller.activePersona?.spine === false ? "" : workerSpineText;
 
 			// Cross-process broker (spec B1-B7): lazily built on the FIRST actual child-engine
-			// construction below (worktree leg OR `PI_PERSONA_ENGINE=child`) — NOT on every
+			// construction below (worktree leg, MCP leg, or `PI_PERSONA_ENGINE=child`) — NOT on every
 			// `buildEngine` call, most of which build the (default) in-process engine and never
 			// touch a child at all; starting a host for those would be neither lazy nor needed.
 			// Memoized so both call sites below share ONE broker object (and its `peerGroup`
-			// registration) per `buildEngine` invocation. `config.broker` off (default) or no live
-			// `ctx` yet ⇒ stays undefined forever, so `deps.broker` is never set (the default-OFF pin).
+			// registration) per `buildEngine` invocation. `config.broker` off or no live
+			// `ctx` yet ⇒ stays undefined forever, so `deps.broker` is never set.
 			let brokerDepsMemo: EngineAdapterBroker | undefined;
 			let brokerDepsBuilt = false;
 			const getBrokerDeps = (): EngineAdapterBroker | undefined => {
 				if (!brokerDepsBuilt) {
 					brokerDepsBuilt = true;
-					if (config.broker && lastCtx) brokerDepsMemo = makeBrokerDeps(lastCtx);
+					const sessionId = (lastCtx as { sessionManager?: { getSessionId?: () => string } } | undefined)?.sessionManager?.getSessionId?.();
+					if (config.broker && lastCtx && sessionId) brokerDepsMemo = makeBrokerDeps(lastCtx);
 				}
 				return brokerDepsMemo;
 			};
@@ -218,7 +219,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 					// which DOES fire session_start → the adapter connects). Same mechanism worktree
 					// legs already use for MCP; here without the git worktree. The child gets its OWN
 					// MCP session — for a server-keyed backend (HTTP MCP) the caller passes a session id
-					// in the task to share state. (No-op steering: the child engine is one-shot.)
+					// in the task to share state. Steer rides the broker (same as worktree / child engine).
 					const wantsMcp = spec.mcp ?? resolveAgent(spec.agent)?.mcp;
 					if (wantsMcp && root) return childEngineAt(root).run(spec, perProgress, perSignal, perSteer);
 					return base.run(spec, perProgress, perSignal, perSteer);

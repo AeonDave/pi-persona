@@ -13,6 +13,8 @@ import type { PersonaController } from "../persona/controller.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
+import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
+import { emptyUsage } from "../engine/stream.ts";
 
 
 export interface CouncilToolDeps {
@@ -28,6 +30,8 @@ export interface CouncilToolDeps {
 		signal?: AbortSignal,
 	): Promise<AgentResult | undefined>;
 	drainBusBlock(): string;
+	childUsage: ChildUsageLedger;
+	publishPersonaCost(): void;
 }
 
 export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void {
@@ -126,12 +130,16 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					...(result?.error ? { error: result.error } : {}),
 					...(result?.failureKind ? { failureKind: result.failureKind } : {}),
 				};
+				const usage = result?.usage ?? emptyUsage();
+				d.childUsage.account(usage);
+				d.publishPersonaCost();
 				return {
 					// The ruling is sub-agent (council member) text — fence it like every other
 					// path that hands sub-agent output to the supervisor.
 					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${paramNote}${d.drainBusBlock()}` }],
 					details: ok ? details : failureDetails(details),
 					isError: !ok,
+					...toolUsageField(usage),
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

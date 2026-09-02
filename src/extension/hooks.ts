@@ -103,6 +103,8 @@ export interface HookHost {
 	intercomRecipient(input: Record<string, unknown>, askId: string | undefined): string;
 	idleDelivery: unknown;
 	drainBusBlock: () => string;
+	childUsage: { reset(): void };
+	publishPersonaCost: () => void;
 }
 
 export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstall): void {
@@ -110,6 +112,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	pi.on("session_start", async (_event, ctx) => {
 		h.lastCtx = ctx;
 		h.delegationNudge.reset(); // a fresh session starts with a clean by-hand run
+		h.childUsage.reset();
+		h.publishPersonaCost();
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no h.personas until `/persona seed` or `/persona restore`.
 		if (h.config.seed && !existsSync(h.seedMarker())) {

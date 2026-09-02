@@ -155,8 +155,8 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`; `src/extens
   `knownParams`), `strategies/*.ts`, `voting.ts`, `judge.ts` (anonymise-for-judge), `reducers.ts`,
   `roster.ts` (teams + `rosterSpec`), `flow*.ts` (DAG + JSONL journal + gates), `render.ts`.
 - **`src/bus/`** — coordination: `inproc.ts` (handle-based mailbox: send/ask/reply/onMessage),
-  `contact.ts` (child `contact_supervisor`), `peers.ts` (child `contact_peer`), `broker/` (opt-in
-  cross-process relay: `paths`/`framing`/`messages` pure, `host`/`client` over `node:net`).
+  `contact.ts` (child `contact_supervisor`), `peers.ts` (child `contact_peer`), `broker/` (cross-process
+  relay, on by default: `paths`/`framing`/`messages` pure, `host`/`client` over `node:net`).
 - **`src/exocom/`** — the external peer plane (the exocom section below): `plane.ts` (lifecycle —
   bind/join/teardown + reconnect), `registry.ts` (workspace-scoped presence + stale pruning),
   `paths.ts` (pure path layout), `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
@@ -173,7 +173,9 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`; `src/extens
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
   tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `presentation.ts` (the shared
   card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
-  (token/usage formatting).
+  (token/usage formatting, `ChildUsageLedger` / `toToolUsage` — sub-agent spend is
+  attached as Pi `toolResult.usage` so the footer and pi-theme-1337's frame count it;
+  leftover background-leg cost is published on the `persona-cost` status key).
 - **`src/loader.ts`** — the discovery loader (`loadDefinitions`/`loadContracts`/`loadPresets`/
   `loadTeams`), the concrete read-side of the discovery precedence table.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
@@ -369,12 +371,13 @@ events and cannot route, reply, steer, or otherwise control agents.
   `intercom send`. `debate`/`pair` always use peers; `map`/`synthesize` opt in via `params.peers`;
   `magi`/`judge`/`fanout`/`compete`/`council-rounds` stay peer-less by design (independence is a bias
   guard — see [STRATEGIES.md](STRATEGIES.md#bias-guard-invariants-do-not-fix-these)).
-- **Cross-process broker** (opt-in, `PI_PERSONA_BROKER=1`; `bus/broker/`) — gives child-process runs
-  and every `isolation: worktree` leg the SAME comm plane and **steer** the in-process ones have. It is
-  a session-scoped (POSIX socket / Windows named pipe under the session id), supervisor-hosted **relay
-  into the local `InProcessBus`**: a connected child is indistinguishable from an in-process one, so the
-  supervisor side (intercom, idle notifier, f9, peek) is unchanged BY CONSTRUCTION. Off by default ⇒
-  the host never starts and the child spawns byte-identical to pre-broker pi-persona.
+- **Cross-process broker** (on by default; `PI_PERSONA_BROKER=off` to restore pre-broker spawn;
+  `bus/broker/`) — gives child-process runs, every `isolation: worktree` leg, and every `mcp: true`
+  leg the SAME comm plane and **steer** the in-process ones have. It is a session-scoped (POSIX
+  socket / Windows named pipe under the session id), supervisor-hosted **relay into the local
+  `InProcessBus`**: a connected child is indistinguishable from an in-process one, so the supervisor
+  side (intercom, idle notifier, f9, peek) is unchanged BY CONSTRUCTION. Off ⇒ the host never starts
+  and the child spawns byte-identical to pre-broker pi-persona.
 
 ### Presentation is a projection, not another comm plane
 

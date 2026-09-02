@@ -19,14 +19,15 @@ export function inventedExocomNameHint(): string {
 	return `${CALL_SIGN_PROMPT} Set it with exocom_name before you speak.`;
 }
 
-/** Local widget: never present the registry placeholder as if it were a chosen identity. */
-export function exocomSelfWidgetLabel(namedByModel: boolean, name: string): string {
-	const trimmed = name.trim();
-	return namedByModel && trimmed ? `${trimmed} (you)` : "you";
+/** Local widget: mark this instance without using "you" as the identity. */
+export function exocomSelfWidgetLabel(namedByModel: boolean, name: string, persona = ""): string {
+	return `${exocomSelfStatusLabel(namedByModel, name, persona)} (you)`;
 }
 
-/** Status / telemetry displayName until the model names this instance. */
-export function exocomSelfStatusLabel(namedByModel: boolean, name: string): string {
-	const trimmed = name.trim();
-	return namedByModel && trimmed ? trimmed : "you";
+/** Status / telemetry displayName: invented call-sign, else the persona, else the registry placeholder. */
+export function exocomSelfStatusLabel(namedByModel: boolean, name: string, persona = ""): string {
+	const invented = name.trim();
+	if (namedByModel && invented) return invented;
+	const role = persona.trim();
+	return role || "unnamed";
 }

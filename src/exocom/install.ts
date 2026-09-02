@@ -182,7 +182,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			isIdle?: () => boolean;
 			getContextUsage?: () => { percent?: number } | undefined;
 		};
-		const displayName = exocomSelfStatusLabel(exocomNamedByModel, exocomName);
+		const personaName = host.controller.activePersona?.name ?? "";
+		const displayName = exocomSelfStatusLabel(exocomNamedByModel, exocomName, personaName);
 		return {
 			displayName,
 			persona: host.controller.activePersona?.name ?? "",
@@ -242,7 +243,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const selfModel = sanitizePeerField(host.lastCtx.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
-			const local = `📡 ${exocomSelfWidgetLabel(exocomNamedByModel, exocomName)}${selfPersona ? ` · ${selfPersona}` : ""} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
+			const ident = exocomSelfWidgetLabel(exocomNamedByModel, exocomName, selfPersona);
+			const roleBit = exocomNamedByModel && selfPersona ? ` · ${selfPersona}` : "";
+			const local = `📡 ${ident}${roleBit} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
 			const peerRows = peers.map((p) => {
 							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
 							const name = sanitizePeerField(p.displayName, 48) || "peer";
@@ -261,7 +264,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try {
 			host.lastCtx.ui.setStatus(
 				"persona-exocom",
-				`📡 ${exocomSelfStatusLabel(exocomNamedByModel, exocomName)} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
+				`📡 ${exocomSelfStatusLabel(exocomNamedByModel, exocomName, host.controller.activePersona?.name ?? "")} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
 			);
 		} catch {
 			/* cosmetic */

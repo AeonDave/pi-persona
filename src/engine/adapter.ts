@@ -55,10 +55,9 @@ export interface EngineAdapterDeps {
 	/** Forwarded to the child engine (e.g. a test invocation resolver). */
 	childOptions?: ChildEngineOptions;
 	cwd?: string;
-	/** Cross-process comm plane (spec B1-B7). Absent ⇒ the child spawns exactly as
-	 *  today: no `PI_PERSONA_BUS`/`PI_PERSONA_HANDLE` env, no host, no steer frames
-	 *  (the default-OFF pin). Present ⇒ every spawn is registered with the host and
-	 *  gets a live handle for `onSteerable`. */
+	/** Cross-process comm plane (spec B1-B7). Absent ⇒ the child spawns with no
+	 *  `PI_PERSONA_BUS`/`PI_PERSONA_HANDLE` env, no host, no steer frames. Present ⇒ every
+	 *  spawn is registered with the host and gets a live handle for `onSteerable`. */
 	broker?: EngineAdapterBroker;
 	/** Persona-level bus capability (`EffectiveCapabilities.canUseBus`). Default true.
 	 *  When false, a spec's `peers` request is dropped (no peer registration, no
@@ -160,8 +159,8 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const signal = combineSignals(deps.signal, callSignal);
 
 			// Cross-process comm plane (spec B1-B7): absent broker ⇒ none of this runs, so
-			// the spawn env + behaviour stay byte-identical to pre-broker pi-persona (the
-			// default-OFF pin). Present ⇒ mint a handle, register it with the host BEFORE
+			// the spawn env + behaviour stay byte-identical to pre-broker pi-persona.
+			// Present ⇒ mint a handle, register it with the host BEFORE
 			// spawn, wire the child's env, and give the caller a steer function.
 			let handle: string | undefined;
 			if (deps.broker) {

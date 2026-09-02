@@ -115,7 +115,7 @@ import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
-import { formatUsage } from "./ui/usage.ts";
+import { ChildUsageLedger, formatPersonaCostStatus, formatUsage, PERSONA_COST_STATUS_KEY } from "./ui/usage.ts";
 
 const RUN_LIMITS: RunLimits = {
 	// A generous anti-runaway backstop, not a council-size cap: a declared ensemble
@@ -1021,9 +1021,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		peekTimer.unref?.();
 	}
 
-	// Cross-process broker (v0.5, spec B1-B7): opt-in (PI_PERSONA_BROKER), off by default — see
-	// `config.broker`. Off ⇒ none of the state below is ever touched, so `deps.broker` stays
-	// undefined and the child engine spawns byte-identical to pre-broker pi-persona.
+	// Cross-process broker (v0.5, spec B1-B7): on by default so MCP/worktree/child-engine
+	// legs expose steer. Off (`PI_PERSONA_BROKER=off`) ⇒ none of the state below is ever
+	// touched, so `deps.broker` stays undefined and the child engine spawns byte-identical
+	// to pre-broker pi-persona.
 	let brokerHost: BrokerHost | undefined;
 	let brokerHostPromise: Promise<BrokerHost> | undefined;
 	// Pre-spawn peer registrations (handle → {label, group}): the child's env carries no group
@@ -1087,7 +1088,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// already forgotten). An expected handle that has not connected yet buffers the steer
 	// (host.expect + pending flush on register), so spawn→connect is reported as delivered.
 	function makeBrokerDeps(ctx: ExtensionContext): EngineAdapterBroker {
-		const endpoint = brokerEndpoint(ctx.sessionManager.getSessionId());
+		const sessionId = (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? "";
+		const endpoint = brokerEndpoint(sessionId);
 		ensureBrokerHost(endpoint);
 		return {
 			endpoint,
@@ -1128,7 +1130,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		userAgentDir,
 	});
 
-	const buildEngine = createBuildEngine(() => ({
+	const innerBuildEngine = createBuildEngine(() => ({
 		agents,
 		contractDefs,
 		controller,
@@ -1145,6 +1147,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		bus,
 		supervisorHandle: SUPERVISOR,
 	}));
+	const childUsage = new ChildUsageLedger();
+	const publishPersonaCost = (): void => {
+		try {
+			lastCtx?.ui.setStatus(PERSONA_COST_STATUS_KEY, formatPersonaCostStatus(childUsage.pending()));
+		} catch {
+			/* cosmetic — the status is best-effort */
+		}
+	};
+	const buildEngine: typeof innerBuildEngine = (signal, onProgress, engOpts) => {
+		const engine = innerBuildEngine(signal, onProgress, engOpts);
+		return {
+			run: async (spec, progress, sig, steer) => {
+				const result = await engine.run(spec, progress, sig, steer);
+				childUsage.add(result.usage);
+				publishPersonaCost();
+				return result;
+			},
+		};
+	};
 
 	async function ensurePersonaModels(ctx: ExtensionContext, roster: RosterMember[]): Promise<void> {
 		const persona = controller.activePersona?.name;
@@ -1662,6 +1683,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		intercomRecipient,
 		idleDelivery,
 		drainBusBlock,
+		childUsage,
+		publishPersonaCost,
 	};
 	installHooks(pi, hookHost, exocom);
 
@@ -1685,6 +1708,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		clearSteers,
 		drainBusBlock,
 		startPeek,
+		childUsage,
+		publishPersonaCost,
 	});
 
 // ── f8 cycle ────────────────────────────────────────────────────────────────
@@ -1737,6 +1762,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		drainBusBlock,
 		scanForSurrender,
 		get disposed() { return disposed; },
+		childUsage,
+		publishPersonaCost,
 	});
 
 	registerTimerTool(pi, {
@@ -1752,6 +1779,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		get personas() { return personas; },
 		runStrategyVisible,
 		drainBusBlock,
+		childUsage,
+		publishPersonaCost,
 	});
 
 	registerFlowTool(pi, {
@@ -1760,6 +1789,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		loadFlow,
 		listFlows,
 		runFlowVisible,
+		childUsage,
+		publishPersonaCost,
 	});
 
 // ── f9: navigable agent overlay ──────────────────────────────────────────────

@@ -65,9 +65,11 @@ test("PI_PERSONA_DISABLE (any non-empty value) disables the extension", () => {
 	assert.equal(resolveConfig({ PI_PERSONA_DISABLE: "" }).disabled, false);
 });
 
-test("PI_PERSONA_BROKER (any non-empty value) opts into the cross-process broker; unset ⇒ off", () => {
-	assert.equal(resolveConfig({}).broker, false, "off by default (default-OFF pin)");
+test("PI_PERSONA_BROKER is on by default so MCP/worktree/child-engine legs are steerable; off-words opt out", () => {
+	assert.equal(resolveConfig({}).broker, true, "on by default — a live async MCP leg must expose steer");
 	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "1" }).broker, true);
+	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "off" }).broker, false);
+	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "0" }).broker, false);
 	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "" }).broker, false);
 });
 
@@ -147,7 +149,7 @@ test("PI_PERSONA_ASYNC_RETAIN sets the async tracker's retention bound (default 
 });
 
 test("PI_PERSONA_SPINE selects the shared behavioral layer (default OFF; `on` or a path)", () => {
-	assert.equal(resolveConfig({}).spine, "", "off by default (opt-in, like the broker and exocom)");
+	assert.equal(resolveConfig({}).spine, "", "off by default (opt-in, like exocom)");
 	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "" }).spine, "", "empty ⇒ off");
 	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "off" }).spine, "", "explicit off");
 	assert.equal(resolveConfig({ PI_PERSONA_SPINE: "OFF" }).spine, "", "case-insensitive");

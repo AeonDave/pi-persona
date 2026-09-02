@@ -17,6 +17,8 @@ import { type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS
 import { fenceIntercomOutcome, type PendingAsk } from "../extension/shared.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
 import type { PersonaController } from "../persona/controller.ts";
+import { emptyUsage } from "../engine/stream.ts";
+import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
 
 export interface IntercomToolDeps {
 	get lastCtx(): ExtensionContext | undefined;
@@ -36,6 +38,8 @@ export interface IntercomToolDeps {
 	drainBusBlock(): string;
 	scanForSurrender(text: string): string | undefined;
 	get disposed(): boolean;
+	childUsage: ChildUsageLedger;
+	publishPersonaCost(): void;
 }
 
 export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): void {
@@ -70,8 +74,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			"See, steer, message, and JOIN your running sub-agents.",
 			"`peek` watches what your async sub-agents are doing; `result` retrieves one complete settled",
 			"payload by run id; `wait` blocks until runs settle and returns a bounded join report;",
-			"`steer` injects a course-correction into one (by run id) mid-run — all for ANY persona on",
-			"in-process async runs.",
+			"`steer` injects a course-correction into one (by run id) mid-run — in-process async",
+			"runs, and child-engine (MCP/worktree) async runs via the session broker.",
 			"`list`/`inbox`/`reply`/`send` are the message d.bus (a child reaching you via `contact_supervisor`)",
 			"and need a `coaching: on` persona.",
 		].join(" "),
@@ -121,10 +125,13 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
 				// the supervisor through, so it carries the same reading the passive/join reports do.
 				const took = runDurationLabel(run);
+				const billed = d.childUsage.accountMany([{ key: run.id, usage: run.result?.usage ?? emptyUsage() }]);
+				d.publishPersonaCost();
 				return {
 					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${cause}\n${body}` }],
 					details: { action: "result", ok: true, status: run.status, runId: run.id },
 					isError: false,
+					...toolUsageField(billed),
 				};
 			}
 			if (params.action === "wait") {
@@ -158,10 +165,15 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const stillNote = still.length > 0 ? buildWaitTimeoutNote(still.map((r) => r.id), timeoutMs) : "";
 				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
 				const text = boundCompletionSurface(joined);
+				const billed = d.childUsage.accountMany(
+					settled.map((r) => ({ key: r.id, usage: r.result?.usage ?? emptyUsage() })),
+				);
+				d.publishPersonaCost();
 				return {
 					content: [{ type: "text", text }],
 					details: { action: "wait", ok: true, settled: [...settledIds], running: still.map((r) => r.id) },
 					isError: false,
+					...toolUsageField(billed),
 				};
 			}
 			if (params.action === "steer") {
