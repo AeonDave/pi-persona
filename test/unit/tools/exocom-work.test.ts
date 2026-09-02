@@ -54,7 +54,12 @@ test("exocom_ask refuses a target that sanitizes to something other than the typ
 			work_key: "review-auth",
 			question: "Does this overlap your current slice?",
 		}),
-		/invalid characters or whitespace/,
+		(err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(err.message, /invalid characters or whitespace/);
+			assert.equal(err.message.includes("\u0007"), false, "unsafe input must not be interpolated into the thrown error");
+			return true;
+		},
 	);
 	assert.equal(h.dispatched.length, 0);
 	assert.deepEqual(h.resolvedTargets, [], "a dirty target must not be canonicalized into a session id");

@@ -629,3 +629,7 @@ test("the MAGI cores carry a legacy digest, so an existing install gains their v
 		assert.ok(LEGACY_SEEDED_DEFAULTS[core], `${core} has no legacy digest — its update would ship inert`);
 	}
 });
+
+test("swarm carries a legacy digest, so an existing install gains the live-peer section", () => {
+	assert.ok(LEGACY_SEEDED_DEFAULTS["personas/swarm.md"], "personas/swarm.md has no legacy digest — its 1.12.2 live-peer section would ship inert");
+});

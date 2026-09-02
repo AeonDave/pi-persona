@@ -182,6 +182,13 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
 		},
 	],
+	// Live-peer collaboration landed in v1.12.2. Without these, a seeded copy from 1.7–1.12.1
+	// (and the two earlier untouched hashes) keeps the pre-collaboration prompt forever.
+	"personas/swarm.md": [
+		{ size: 1857, sha256: "77de7f590fdede6ede4848be11b39fb16bfb4733687ac1b1244cc59e626874c6" }, // v1.1.0–v1.4.0
+		{ size: 1955, sha256: "b7a7caa38c4d31c8cc27b85eb7facbf2339a024ad8d4cd2ba681a2a885de7646" }, // v1.5.1–v1.6.3
+		{ size: 2285, sha256: "985a1c5455b2c81537a55b31daed216d7f67a897b3b2d5bde35d64f3779d6fe4" }, // v1.7.0–v1.12.1
+	],
 };
 
 export interface SeedMigrationResult {

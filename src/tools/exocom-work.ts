@@ -126,7 +126,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			}
 			const safeTarget = normalizeMetadataText(params.target, 80, "peer");
 			if (!safeTarget || safeTarget !== params.target.trim()) {
-				throw new Error(`exocom_ask: target "${params.target}" contains invalid characters or whitespace; use the exact name from exocom_list.`);
+				throw new Error(`exocom_ask: target "${safeTarget}" contains invalid characters or whitespace; use the exact name from exocom_list.`);
 			}
 			const to_session = deps.resolveTarget(safeTarget);
 			if (to_session === from_session) throw new Error("exocom_ask: target cannot be this session");

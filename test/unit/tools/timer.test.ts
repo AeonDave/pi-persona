@@ -28,6 +28,13 @@ test("timer arm refuses a missing message instead of storing an empty follow-up"
 	assert.match(result.content[0]?.text ?? "", /timer arm needs \{ message \}/);
 });
 
+test("timer arm refuses a whitespace-only message instead of storing an empty follow-up", async () => {
+	const { tools } = harness();
+	const result = await tools.get("timer").execute("call-1", { action: "arm", message: "   ", delaySeconds: 60 });
+	assert.equal(result.isError, true);
+	assert.match(result.content[0]?.text ?? "", /timer arm needs \{ message \}/);
+});
+
 test("timer arm refuses neither delaySeconds nor atIso", async () => {
 	const { tools } = harness();
 	const result = await tools.get("timer").execute("call-1", { action: "arm", message: "wake me" });
