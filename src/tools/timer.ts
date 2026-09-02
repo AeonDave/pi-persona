@@ -61,7 +61,8 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 					: { content: [{ type: "text", text: `No armed timer with id "${params.id}" (it may have already fired or been cancelled).` }], details: failureDetails({ action: "cancel", ok: false }), isError: true };
 			}
 			// action === "arm"
-			if (!params.message) {
+			const message = params.message?.trim() ?? "";
+			if (!message) {
 				return { content: [{ type: "text", text: "timer arm needs { message } — the follow-up text injected on wake." }], details: failureDetails({ action: "arm", ok: false }), isError: true };
 			}
 			if (params.delaySeconds === undefined && params.atIso === undefined) {
@@ -70,7 +71,7 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			if (params.delaySeconds !== undefined && params.atIso !== undefined) {
 				return { content: [{ type: "text", text: "timer arm needs { delaySeconds } or { atIso }, not both." }], details: failureDetails({ action: "arm", ok: false }), isError: true };
 			}
-			const arm: { message: string; label?: string; delayMs?: number; atEpochMs?: number } = { message: params.message };
+			const arm: { message: string; label?: string; delayMs?: number; atEpochMs?: number } = { message };
 			if (params.label !== undefined) arm.label = params.label;
 			if (params.atIso !== undefined) {
 				const at = Date.parse(params.atIso);
