@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { DelegationLedger, type DelegateView, labelFor, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, runDelegate, shortModel, shouldRecordDelegationOutcome, unknownAgentError, wantsAsyncRun, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
+import { coerceDelegateParams, DelegationLedger, type DelegateView, labelFor, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, runDelegate, shortModel, shouldRecordDelegationOutcome, unknownAgentError, wantsAsyncRun, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -628,6 +628,51 @@ test("a leg the RUN signal cancelled is classified as an abort, not an agent fai
 
 	assert.equal(r.results[0]?.failureKind, "abort", "a cancelled run must not masquerade as an agent failure");
 	assert.equal(r.views[0]?.failureKind, "abort", "the UI projects the leg as stopped, not failed");
+});
+
+test("coerceDelegateParams unwraps a stringified tasks array and JSON-string items", () => {
+	const legs = [
+		{ agent: "operator", task: "digest spectre", brief: completeBrief(), writeSet: ["notes/a.md"], skills: ["reading-budget-discipline"] },
+		{ agent: "operator", task: "digest wraith", brief: completeBrief(), writeSet: ["notes/b.md"] },
+	];
+	const asString = coerceDelegateParams({ tasks: JSON.stringify(legs), sync: true });
+	assert.equal(asString.ok, true);
+	if (!asString.ok) return;
+	assert.equal(asString.params.tasks?.length, 2);
+	assert.equal(asString.params.tasks?.[0]?.agent, "operator");
+	assert.equal(asString.params.tasks?.[1]?.writeSet?.[0], "notes/b.md");
+	assert.equal(asString.params.sync, true);
+
+	const asItems = coerceDelegateParams({ tasks: [JSON.stringify(legs[0]), JSON.stringify(legs[1])] });
+	assert.equal(asItems.ok, true);
+	if (!asItems.ok) return;
+	assert.equal(asItems.params.tasks?.[0]?.task, "digest spectre");
+	assert.deepEqual(asItems.params.tasks?.[0]?.skills, ["reading-budget-discipline"]);
+});
+
+test("coerceDelegateParams unwraps nested JSON-encoded brief/writeSet/skills and a single writeSet path", () => {
+	const coerced = coerceDelegateParams({
+		agent: "operator",
+		task: "port",
+		brief: JSON.stringify(completeBrief()),
+		writeSet: "src/db",
+		skills: JSON.stringify(["typescript-patterns"]),
+		tools: '["read","bash"]',
+	});
+	assert.equal(coerced.ok, true);
+	if (!coerced.ok) return;
+	assert.equal(coerced.params.brief?.objective, "Find the root cause");
+	assert.deepEqual(coerced.params.writeSet, ["src/db"]);
+	assert.deepEqual(coerced.params.skills, ["typescript-patterns"]);
+	assert.deepEqual(coerced.params.tools, ["read", "bash"]);
+});
+
+test("coerceDelegateParams reports malformed JSON instead of leaving a character array", () => {
+	const malformed = coerceDelegateParams({ tasks: "[{oops" });
+	assert.equal(malformed.ok, false);
+	if (malformed.ok) return;
+	assert.match(malformed.error, /tasks/);
+	assert.match(malformed.error, /JSON|parse/i);
 });
 
 test("the max-children ceiling still drops surplus tasks rather than running them", async () => {

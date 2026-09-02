@@ -2,7 +2,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../agents/agent.ts";
 import { Type } from "typebox";
-import { failureDetails } from "../extension/shared.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Container, Spacer } from "@earendil-works/pi-tui";
@@ -13,12 +12,11 @@ import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
 import { formatUsage, toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
 import { sumUsage } from "../orchestration/reducers.ts";
-import { expandDetailHint } from "../extension/shared.ts";
-import type { Static } from "typebox";
+import { expandDetailHint, failureDetails } from "../extension/shared.ts";
 import {
-	DelegationLedger, type DelegateView, nameFor, normalizeDelegateConcurrency,
+	DelegationLedger, type DelegateView, type DelegateParams as DelegateCall, nameFor, normalizeDelegateConcurrency,
 	runDelegate, shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError,
-	validateDelegationBrief, validateParallelWriteSets, wantsAsyncRun,
+	validateDelegationBrief, validateParallelWriteSets, wantsAsyncRun, coerceDelegateParams,
 } from "./delegate.ts";
 import { Semaphore } from "../orchestration/parallel.ts";
 import type { AgentRunSpec, SteerFn, StrategyEngine } from "../orchestration/sdk.ts";
@@ -58,6 +56,9 @@ export interface DelegateToolDeps {
 
 export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): void {
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
+	const JsonString = Type.String({
+		description: "JSON text of the same value — accepted when a client stringifies nested args",
+	});
 	const SkillsSchema = Type.Array(Type.String(), {
 		description: "Skills the sub-agent loads first — spawns a dynamic specialist (skills are inherited from the host)",
 	});
@@ -80,16 +81,16 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
-		brief: Type.Optional(DelegationBriefSchema),
+		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString])),
 		name: Type.Optional(
 			Type.String({ description: inventedLegNameHint() }),
 		),
-		skills: Type.Optional(SkillsSchema),
+		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(
 			Type.String({ description: "Model override (exact provider/id — call the `models` tool to find one)" }),
 		),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" })),
+		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run in an isolated git worktree (edits never touch the main tree)" }),
 		),
@@ -99,18 +100,18 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		timeoutMs: Type.Optional(
 			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default for this task only" }),
 		),
-		writeSet: Type.Optional(WriteSetSchema),
+		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
 		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for this leg" })),
 	});
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
-		brief: Type.Optional(DelegationBriefSchema),
+		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString])),
 		name: Type.Optional(Type.String({ description: inventedLegNameHint() })),
-		skills: Type.Optional(SkillsSchema),
+		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
-		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" })),
+		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
 		),
@@ -120,10 +121,13 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		timeoutMs: Type.Optional(
 			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default (single mode)" }),
 		),
-		writeSet: Type.Optional(WriteSetSchema),
+		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
 		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for the single leg" })),
 		tasks: Type.Optional(
-			Type.Array(DelegateTaskItem, { description: "Independent tasks to run in parallel — give each a disjoint scope" }),
+			Type.Union([
+				Type.Array(Type.Union([DelegateTaskItem, JsonString])),
+				JsonString,
+			], { description: "Independent tasks as an array of objects (not a stringified JSON array). Give each a disjoint scope; parallel writers need writeSet." }),
 		),
 		concurrency: Type.Optional(
 			Type.Integer({ minimum: 1, description: `Max children to run at once (default ${d.RUN_LIMITS.maxConcurrency}; larger requests are clamped)` }),
@@ -145,7 +149,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// Canonicalise a delegate's requested model names to provider/id; return a clear
 	// error (no spawn) when one is ambiguous/unknown so the supervisor retries with a
 	// valid id instead of wasting a child on an unauthenticated provider.
-	function resolveDelegateModels(params: Static<typeof DelegateParams>, ctx: ExtensionContext): string | undefined {
+	function resolveDelegateModels(params: DelegateCall, ctx: ExtensionContext): string | undefined {
 		const models = configuredModels(ctx);
 		if (models.length === 0) return undefined;
 		const preferProvider = ctx.model?.provider; // the loader/session provider (the authenticated one)
@@ -281,7 +285,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		description: [
 			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
 			'Minimum call: { agent: "operator", task: "<self-contained brief: objective, scope, success signal>" } — everything else is optional.',
-			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes), then synthesize the returns yourself. A persona may declaratively require a six-field `brief`, a structured output contract, or disjoint `writeSet` ownership; those calls fail before spawn when incomplete.",
+			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes — a JSON array of objects, never a string). A persona may declaratively require a six-field `brief`, a structured output contract, or disjoint `writeSet` ownership; those calls fail before spawn when incomplete.",
 			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once, stay free,",
 			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
 			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
@@ -290,8 +294,11 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"candidates (or call `models`). Advanced knobs: name, tools, brief, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			d.lastCtx = ctx;
+			const coerced = coerceDelegateParams(rawParams);
+			if (!coerced.ok) return { content: [{ type: "text", text: coerced.error }], details: failureDetails({}), isError: true };
+			let params = coerced.params;
 			const policy = d.controller.activePersona?.delegation;
 			const defaultOutputContract = policy?.outputContract;
 			if (defaultOutputContract) {
@@ -345,7 +352,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						if (writing.length > 1) {
 							const missing = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim())).map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
 							if (missing.length > 0) {
-								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths, split the scopes, or serialize the writers.`;
+								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths each of those legs alone may edit, restrict tools to read/grep/find/ls (or pick scout), or serialize with concurrency: 1.`;
 								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 							}
 						}
@@ -539,16 +546,21 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 
 		renderCall(args, theme) {
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
-			if (args.tasks && args.tasks.length > 0) {
+			const coerced = coerceDelegateParams(args);
+			const view = coerced.ok ? coerced.params : undefined;
+			if (view?.tasks && view.tasks.length > 0) {
 				// Names live in the tree / final card — keep the call line itself minimal.
-				return new Text(`${title}${theme.fg("accent", `parallel (${args.tasks.length})`)}`, 0, 0);
+				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})`)}`, 0, 0);
 			}
-			const agent = compactInlineText(args.agent ?? "?", { maxChars: 80 }) || "?";
-			const preview = compactInlineText(args.task ?? "", { maxChars: 60 });
+			if (typeof args.tasks === "string" && args.tasks.trim()) {
+				return new Text(`${title}${theme.fg("accent", "parallel")}`, 0, 0);
+			}
+			const agent = compactInlineText(view?.agent ?? args.agent ?? "?", { maxChars: 80 }) || "?";
+			const preview = compactInlineText(view?.task ?? args.task ?? "", { maxChars: 60 });
 			// renderCall only fires in an interactive UI, where delegate runs in the BACKGROUND by
 			// default — pass hasUI:true to the same wantsAsyncRun the execute path uses, so the common
 			// (defaulted) background run still shows the tag; `sync: true` drops it.
-			const asyncTag = wantsAsyncRun(args, true) ? theme.fg("warning", " async") : "";
+			const asyncTag = wantsAsyncRun(view ?? args, true) ? theme.fg("warning", " async") : "";
 			return new Text(`${title}${theme.fg("accent", agent)}${asyncTag}${theme.fg("dim", ` ${preview}`)}`, 0, 0);
 		},
 

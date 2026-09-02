@@ -151,6 +151,37 @@ function renderComponent(component: { render(width: number): string[] }, width =
 	return component.render(width).join("\n");
 }
 
+/** Walk TypeBox/JSON-schema unions so discoverability pins survive `anyOf` (jsonish string branches). */
+function jsonSchemaProperties(schema: unknown): Record<string, unknown> | undefined {
+	if (!schema || typeof schema !== "object") return undefined;
+	const node = schema as { properties?: Record<string, unknown>; anyOf?: unknown[]; oneOf?: unknown[]; items?: unknown };
+	if (node.properties) return node.properties;
+	for (const branch of [...(node.anyOf ?? []), ...(node.oneOf ?? [])]) {
+		const properties = jsonSchemaProperties(branch);
+		if (properties) return properties;
+	}
+	if (node.items) return jsonSchemaProperties(node.items);
+	return undefined;
+}
+
+function jsonSchemaArrayItems(schema: unknown): unknown {
+	if (!schema || typeof schema !== "object") return undefined;
+	const node = schema as { items?: unknown; anyOf?: unknown[]; oneOf?: unknown[] };
+	if (node.items) return node.items;
+	for (const branch of [...(node.anyOf ?? []), ...(node.oneOf ?? [])]) {
+		const items = jsonSchemaArrayItems(branch);
+		if (items !== undefined) return items;
+	}
+	return undefined;
+}
+
+function jsonSchemaAcceptsString(schema: unknown): boolean {
+	if (!schema || typeof schema !== "object") return false;
+	const node = schema as { type?: string | string[]; anyOf?: unknown[]; oneOf?: unknown[] };
+	if (node.type === "string" || (Array.isArray(node.type) && node.type.includes("string"))) return true;
+	return [...(node.anyOf ?? []), ...(node.oneOf ?? [])].some((branch) => jsonSchemaAcceptsString(branch));
+}
+
 function makeCtx(cwd: string) {
 	const notes: string[] = [];
 	const ctx = {
@@ -236,15 +267,32 @@ test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable pe
 	// identify schema drift, mapping drift, or lifecycle drift precisely.
 	const m = makeMockPi();
 	piPersona(m.pi);
-	const delegate = m.tool("delegate") as {
-		parameters: { properties: { tasks: { items: { properties: Record<string, unknown> } }; timeoutMs: unknown; brief: unknown; writeSet: unknown; outputContract: unknown } };
-	};
-	assert.ok(delegate.parameters.properties.tasks.items.properties.timeoutMs, "tasks[].timeoutMs is declared in the tool schema");
-	assert.ok(delegate.parameters.properties.timeoutMs, "top-level timeoutMs (single mode) is declared in the tool schema too");
+	const delegate = m.tool("delegate") as { parameters: { properties: Record<string, unknown> } };
+	const properties = jsonSchemaProperties(delegate.parameters) ?? {};
+	const taskItems = jsonSchemaArrayItems(properties.tasks);
+	const taskProperties = jsonSchemaProperties(taskItems) ?? {};
+	assert.ok(taskProperties.timeoutMs, "tasks[].timeoutMs is declared in the tool schema");
+	assert.ok(properties.timeoutMs, "top-level timeoutMs (single mode) is declared in the tool schema too");
 	for (const field of ["brief", "writeSet", "outputContract"]) {
-		assert.ok(delegate.parameters.properties.tasks.items.properties[field], `tasks[].${field} is declared in the tool schema`);
-		assert.ok(delegate.parameters.properties[field as "brief"], `top-level ${field} is declared in the tool schema`);
+		assert.ok(taskProperties[field], `tasks[].${field} is declared in the tool schema`);
+		assert.ok(properties[field], `top-level ${field} is declared in the tool schema`);
 	}
+	assert.equal(jsonSchemaAcceptsString(properties.tasks), true, "a stringified tasks payload must not hard-fail schema validation");
+});
+
+test("delegate renderCall counts stringified tasks as legs, not characters", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const delegate = m.tool("delegate") as { renderCall: AnyFn };
+	const payload = JSON.stringify([
+		{ agent: "operator", task: "digest spectre" },
+		{ agent: "operator", task: "digest wraith" },
+		{ agent: "operator", task: "digest core" },
+	]);
+	assert.ok(payload.length > 80, "the payload is large enough that a character count would look like a fan-out");
+	const line = renderComponent(delegate.renderCall({ tasks: payload }, traceTheme));
+	assert.match(line, /parallel \(3\)/);
+	assert.doesNotMatch(line, new RegExp(`parallel \\(${payload.length}\\)`));
 });
 
 test("intercom schema bounds routing identifiers and delivered messages", () => {
@@ -1166,6 +1214,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	);
 	assert.equal(missing.isError, true);
 	assert.match(String(missing.content?.[0]?.text ?? ""), /writeSet/i);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /read\/grep\/find\/ls/);
 	assert.equal(spawned, 0);
 
 	const emptyToolOverrides = await delegate.execute(
@@ -1279,6 +1328,27 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	);
 	assert.equal(readOnly.isError, false, "read-only agents do not need fictional write ownership");
 	assert.equal(spawned, 6);
+
+	const stringifiedScouts = await delegate.execute(
+		"custom-write-stringified-scouts",
+		{ tasks: JSON.stringify([{ agent: "scout", task: "inspect A" }, { agent: "scout", task: "inspect B" }]), sync: true },
+		undefined,
+		undefined,
+		ctx,
+	);
+	assert.equal(stringifiedScouts.isError, false, "a JSON-stringified tasks array is unwrapped, not rejected as tasks.0 must be object");
+	assert.equal(spawned, 8);
+
+	const stringifiedWriters = await delegate.execute(
+		"custom-write-stringified-writers",
+		{ tasks: JSON.stringify([{ agent: "operator", task: "change A" }, { agent: "operator", task: "change B" }]), sync: true },
+		undefined,
+		undefined,
+		ctx,
+	);
+	assert.equal(stringifiedWriters.isError, true, "unwrapping JSON does not skip the ownership gate");
+	assert.match(String(stringifiedWriters.content?.[0]?.text ?? ""), /writeSet/i);
+	assert.equal(spawned, 8);
 });
 
 test("a declared verifier cannot start in a later call while the mutation it must check is still running", async () => {
