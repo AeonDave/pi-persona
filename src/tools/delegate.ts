@@ -158,7 +158,7 @@ export function validateParallelWriteSets(tasks: readonly Pick<DelegateTask, "ag
 			return `delegate: task[${index}] ("${task.agent}") writeSet path "${path}" is ${err}.`;
 		}
 	}
-		const overlap = findWriteSetOverlaps(tasks)[0];
+	const overlap = findWriteSetOverlaps(tasks)[0];
 	if (!overlap) return undefined;
 	const first = tasks[overlap.firstIndex];
 	const second = tasks[overlap.secondIndex];
