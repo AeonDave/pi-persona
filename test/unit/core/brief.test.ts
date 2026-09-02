@@ -126,6 +126,7 @@ test("generic write ownership and fresh-verification policies are advertised wit
 	});
 	assert.match(brief ?? "", /writeSet/);
 	assert.match(brief ?? "", /disjoint/i);
+	assert.match(brief ?? "", /read\/grep\/find\/ls/);
 	assert.match(brief ?? "", /fresh verifier/i);
 });
 

@@ -151,7 +151,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	if (input.requireDisjointWrites) callFields.push('writeSet: ["<repository-relative paths this leg alone may edit>"]');
 	if (input.outputContract?.trim()) callFields.push(`outputContract: ${JSON.stringify(input.outputContract.trim())}`);
 	const discipline: string[] = [];
-	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts.");
+	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. Read-only scout (or tools limited to read/grep/find/ls) may fan out without writeSet.");
 	if (input.requireFreshVerification) discipline.push("After a material mutation, start a fresh verifier sequentially against the resulting state; a verifier launched before or during the mutation cannot approve completion.");
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(

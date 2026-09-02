@@ -72,6 +72,8 @@ export interface DelegateParams {
 	outputContract?: string;
 	tasks?: DelegateTask[];
 	concurrency?: number;
+	async?: boolean;
+	sync?: boolean;
 }
 
 /** Structured cold-start context that any persona policy may require. */
@@ -167,6 +169,123 @@ export function validateParallelWriteSets(tasks: readonly Pick<DelegateTask, "ag
 		`path "${overlap.firstPath}" and task[${overlap.secondIndex}] ("${second?.agent ?? "?"}") ` +
 		`path "${overlap.secondPath}". Split the paths, serialize these tasks, or remove the overlap before spawning.`
 	);
+}
+
+function unwrapJsonish(value: unknown, label: string): { ok: true; value: unknown } | { ok: false; error: string } {
+	let current = value;
+	for (let depth = 0; depth < 2; depth++) {
+		if (typeof current !== "string") return { ok: true, value: current };
+		const trimmed = current.trim();
+		if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return { ok: true, value: current };
+		try {
+			current = JSON.parse(trimmed);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			return { ok: false, error: `delegate: ${label} looks like JSON but did not parse (${detail}). Pass a real array/object, not a string.` };
+		}
+	}
+	return { ok: true, value: current };
+}
+
+function coerceStringList(value: unknown, label: string): { ok: true; value?: string[] } | { ok: false; error: string } {
+	if (value === undefined) return { ok: true };
+	const parsed = unwrapJsonish(value, label);
+	if (!parsed.ok) return parsed;
+	if (parsed.value === undefined) return { ok: true };
+	if (typeof parsed.value === "string") {
+		const trimmed = parsed.value.trim();
+		return { ok: true, value: trimmed ? [trimmed] : [] };
+	}
+	if (!Array.isArray(parsed.value)) return { ok: false, error: `delegate: ${label} must be an array of strings.` };
+	const out: string[] = [];
+	for (let i = 0; i < parsed.value.length; i++) {
+		const item = parsed.value[i];
+		if (typeof item !== "string") return { ok: false, error: `delegate: ${label}[${i}] must be a string.` };
+		out.push(item);
+	}
+	return { ok: true, value: out };
+}
+
+function coerceBriefField(value: unknown, label: string): { ok: true; value?: Partial<DelegationBrief> } | { ok: false; error: string } {
+	if (value === undefined) return { ok: true };
+	const parsed = unwrapJsonish(value, label);
+	if (!parsed.ok) return parsed;
+	if (parsed.value === undefined) return { ok: true };
+	if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+		return { ok: false, error: `delegate: ${label} must be an object.` };
+	}
+	const brief = { ...(parsed.value as Record<string, unknown>) };
+	for (const field of ["constraints", "requiredArtifacts", "stopConditions"] as const) {
+		const list = coerceStringList(brief[field], `${label}.${field}`);
+		if (!list.ok) return list;
+		if (list.value !== undefined) brief[field] = list.value;
+	}
+	return { ok: true, value: brief as Partial<DelegationBrief> };
+}
+
+function coerceOneTask(raw: unknown, index: number): { ok: true; task: DelegateTask } | { ok: false; error: string } {
+	const parsed = unwrapJsonish(raw, `tasks[${index}]`);
+	if (!parsed.ok) return parsed;
+	if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+		return { ok: false, error: `delegate: tasks[${index}] must be an object.` };
+	}
+	const bag = { ...(parsed.value as Record<string, unknown>) };
+	const brief = coerceBriefField(bag.brief, `tasks[${index}].brief`);
+	if (!brief.ok) return brief;
+	if (brief.value !== undefined) bag.brief = brief.value;
+	const writeSet = coerceStringList(bag.writeSet, `tasks[${index}].writeSet`);
+	if (!writeSet.ok) return writeSet;
+	if (writeSet.value !== undefined) bag.writeSet = writeSet.value;
+	const skills = coerceStringList(bag.skills, `tasks[${index}].skills`);
+	if (!skills.ok) return skills;
+	if (skills.value !== undefined) bag.skills = skills.value;
+	const tools = coerceStringList(bag.tools, `tasks[${index}].tools`);
+	if (!tools.ok) return tools;
+	if (tools.value !== undefined) bag.tools = tools.value;
+	return { ok: true, task: bag as unknown as DelegateTask };
+}
+
+function coerceTaskList(value: unknown): { ok: true; value?: DelegateTask[] } | { ok: false; error: string } {
+	if (value === undefined) return { ok: true };
+	const parsed = unwrapJsonish(value, "tasks");
+	if (!parsed.ok) return parsed;
+	let list: unknown = parsed.value;
+	if (list !== null && typeof list === "object" && !Array.isArray(list)) list = [list];
+	if (!Array.isArray(list)) return { ok: false, error: "delegate: tasks must be an array of objects, not a string." };
+	const tasks: DelegateTask[] = [];
+	for (let i = 0; i < list.length; i++) {
+		const task = coerceOneTask(list[i], i);
+		if (!task.ok) return task;
+		tasks.push(task.task);
+	}
+	return { ok: true, value: tasks };
+}
+
+/**
+ * Models often stringify nested `tasks`/`brief`/`writeSet`. Unwrap JSON text so a 9k-character
+ * string is not validated as `tasks.0` (first character) or rendered as `parallel (9445)`.
+ */
+export function coerceDelegateParams(raw: unknown): { ok: true; params: DelegateParams } | { ok: false; error: string } {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+		return { ok: false, error: "delegate: arguments must be an object." };
+	}
+	const bag = { ...(raw as Record<string, unknown>) };
+	const tasks = coerceTaskList(bag.tasks);
+	if (!tasks.ok) return tasks;
+	if (tasks.value !== undefined) bag.tasks = tasks.value;
+	const brief = coerceBriefField(bag.brief, "brief");
+	if (!brief.ok) return brief;
+	if (brief.value !== undefined) bag.brief = brief.value;
+	const writeSet = coerceStringList(bag.writeSet, "writeSet");
+	if (!writeSet.ok) return writeSet;
+	if (writeSet.value !== undefined) bag.writeSet = writeSet.value;
+	const skills = coerceStringList(bag.skills, "skills");
+	if (!skills.ok) return skills;
+	if (skills.value !== undefined) bag.skills = skills.value;
+	const tools = coerceStringList(bag.tools, "tools");
+	if (!tools.ok) return tools;
+	if (tools.value !== undefined) bag.tools = tools.value;
+	return { ok: true, params: bag as DelegateParams };
 }
 
 /** A live per-sub-agent view for the UI (running → done/failed). */
