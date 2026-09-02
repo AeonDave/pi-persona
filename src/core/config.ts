@@ -57,11 +57,10 @@ export interface PiPersonaConfig {
 	 *  by-hand sweep) without a hand-off, append a reminder to the offending tool's result. On by
 	 *  default; PI_PERSONA_NUDGE=off opts out. */
 	nudge: boolean;
-	/** Opt-in cross-process broker (spec B1-B7): off (default) ⇒ the child engine spawns
-	 *  exactly as today — no host, no extra env vars, zero behavior change. On ⇒ the
-	 *  extension lazily starts a session-scoped host on the first child-engine build,
-	 *  giving `PI_PERSONA_ENGINE=child` runs (and every worktree-isolated leg) the comm
-	 *  plane + steer that in-process runs already have. */
+	/** Cross-process broker (spec B1-B7): on by default so child-engine legs (MCP, worktree,
+	 *  `PI_PERSONA_ENGINE=child`) expose the same steer/contact_supervisor plane in-process
+	 *  runs already have. The host still starts lazily on the first child-engine build.
+	 *  PI_PERSONA_BROKER=off restores pre-broker spawn env (no host, no extra env vars). */
 	broker: boolean;
 	/** External agent-to-agent plane (exocom): independent top-level instances in one workspace
 	 *  discover + message each other. Opt-in, OFF by default (PI_PERSONA_EXOCOM=1 / --exocom),
@@ -109,9 +108,10 @@ export const OFF_WORDS: ReadonlySet<string> = new Set(["", "off", "0", "false", 
 export const ON_WORDS: ReadonlySet<string> = new Set(["on", "1", "true", "yes"]);
 
 /** One definition of "off", shared by the switches whose value is a plain flag or a path. The
- *  older boolean switches (`persist`, `nudge`, `seed`, `broker`, `disabled`, `delegateDefaultAllow`)
+ *  older boolean switches (`persist`, `nudge`, `seed`, `disabled`, `delegateDefaultAllow`)
  *  predate it and keep their own published conventions — changing those would alter what an
- *  existing user's environment means. Unset counts as off. */
+ *  existing user's environment means. Unset counts as off. `broker` uses this helper with a
+ *  default-on pin (`PI_PERSONA_BROKER ?? "on"`). */
 function isOff(value: string | undefined): boolean {
 	return OFF_WORDS.has((value ?? "").trim().toLowerCase());
 }
@@ -161,9 +161,9 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		agentStartupTimeoutMs: 300_000,
 		// On unless explicitly turned off (mirrors PI_PERSONA_PERSIST's `!== "off"` convention).
 		nudge: env.PI_PERSONA_NUDGE?.trim().toLowerCase() !== "off",
-		// Any non-empty value opts in (mirrors PI_PERSONA_DISABLE's own convention) — the
-		// live-drive doc/examples use PI_PERSONA_BROKER=1.
-		broker: !!env.PI_PERSONA_BROKER && env.PI_PERSONA_BROKER.trim().length > 0,
+		// On unless explicitly turned off, so an MCP/worktree/child-engine async leg is
+		// steerable without a hidden env pin. Off-words restore pre-broker spawn env.
+		broker: !isOff(env.PI_PERSONA_BROKER ?? "on"),
 		exocom: false,
 		asyncRetain: 25,
 		ledgerV2: false,

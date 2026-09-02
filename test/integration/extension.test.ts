@@ -2458,14 +2458,31 @@ test("persistence: /persona writes the selection and a fresh session restores it
 
 // ── cross-process broker (v0.5): flag wiring, lazy host, teardown ────────────────────
 
-test("PI_PERSONA_BROKER unset (default-OFF pin): /doctor shows no broker line, teardown is a no-op", async () => {
+test("PI_PERSONA_BROKER unset (default-on): /doctor reports the flag as on but the host stays unstarted until a child-engine build", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
 	const { ctx, notes } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("doctor", "", ctx);
-	assert.doesNotMatch(notes.join("\n"), /broker:/, "no broker line when the flag is off");
-	await m.fire("session_shutdown", undefined, ctx); // must not throw / hang — nothing was ever started
+	assert.match(notes.join("\n"), /broker: on — endpoint \(not started/);
+	await m.fire("session_shutdown", undefined, ctx); // idempotent no-op teardown (nothing to close)
+});
+
+test("PI_PERSONA_BROKER=off: /doctor shows no broker line, teardown is a no-op", async () => {
+	const prev = process.env.PI_PERSONA_BROKER;
+	process.env.PI_PERSONA_BROKER = "off";
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx, notes } = makeCtx(os.tmpdir());
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("doctor", "", ctx);
+		assert.doesNotMatch(notes.join("\n"), /broker:/, "no broker line when the flag is off");
+		await m.fire("session_shutdown", undefined, ctx);
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_BROKER;
+		else process.env.PI_PERSONA_BROKER = prev;
+	}
 });
 
 // ── param schema (Task 4): lenient council warn + /doctor discovery ──────────────

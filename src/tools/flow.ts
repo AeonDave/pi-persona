@@ -7,6 +7,9 @@ import type { FlowOutcome } from "../orchestration/flow-run.ts";
 import type { FlowSpec } from "../orchestration/flow.ts";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
+import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
+import { sumUsage } from "../orchestration/reducers.ts";
+import { emptyUsage } from "../engine/stream.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { expandDetailHint } from "../extension/shared.ts";
 import type { FailureKind } from "../orchestration/types.ts";
@@ -17,6 +20,8 @@ export interface FlowToolDeps {
 	loadFlow(cwd: string, name: string): { ok: true; flow: FlowSpec } | { ok: false; error: string } | undefined;
 	listFlows(cwd: string): string[];
 	runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, task: string, signal?: AbortSignal): Promise<FlowOutcome>;
+	childUsage: ChildUsageLedger;
+	publishPersonaCost(): void;
 }
 
 export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
@@ -63,10 +68,16 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 					failureKind: outcome.failureKind,
 					error: outcome.error,
 				};
+				const usage = Object.values(outcome.results).length > 0
+					? sumUsage(Object.values(outcome.results).map((r) => r.usage))
+					: emptyUsage();
+				d.childUsage.account(usage);
+				d.publishPersonaCost();
 				return {
 					content: [{ type: "text", text: fenceUntrusted(outcome.output || "(flow produced no output)") }],
 					details: outcome.ok ? details : failureDetails(details),
 					isError: !outcome.ok,
+					...toolUsageField(usage),
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

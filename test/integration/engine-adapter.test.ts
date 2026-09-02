@@ -153,7 +153,7 @@ test("makeEngine marks a contract failure when output is not valid JSON", async 
 	assert.match(r.error ?? "", /contract/);
 });
 
-// --- broker wiring (Task 6): default-OFF pin + broker-on env/handle/steer-frame plumbing ---
+// --- broker wiring: absent deps keep spawn env clean; present deps wire env/handle/steer ---
 
 function makeSpyBroker(endpoint = "fake-broker-endpoint") {
 	const calls: string[] = [];
@@ -182,7 +182,7 @@ function makeSpyBroker(endpoint = "fake-broker-endpoint") {
 	};
 }
 
-test("makeEngine (broker absent): child env carries NO PI_PERSONA_BUS/PI_PERSONA_HANDLE (default-OFF pin)", async () => {
+test("makeEngine (broker absent): child env carries NO PI_PERSONA_BUS/PI_PERSONA_HANDLE", async () => {
 	const r = await engine().run({ agent: "scout", task: "check [env]" });
 	assert.equal(r.ok, true);
 	assert.match(r.output, /PI_PERSONA_BUS=unset/);

@@ -48,16 +48,17 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
   share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async
   fan-out can't open more concurrent sessions than a sync one.
-- **Cross-process broker** (`src/bus/broker/{paths,framing,messages,host,client}.ts`, opt-in via
-  `PI_PERSONA_BROKER=1`, spec B1-B7): session-scoped (POSIX socket / Windows named pipe under the
-  session id), supervisor-hosted, lazily started on the FIRST actual child-engine build (a
-  `PI_PERSONA_ENGINE=child` run, or any `isolation: worktree` leg — worktree ALWAYS uses the child
-  engine). It is a RELAY into the local `InProcessBus`: a connected child is indistinguishable from
-  an in-process one, so the supervisor side (intercom, idle notifier, f9, peek) is unchanged BY
-  CONSTRUCTION. It gives child-process runs `contact_supervisor`/`contact_peer` AND **steer**
-  (closing the child-engine steer gap — `intercom steer`/f9 `s` now work on both engines; a child's
-  steer is follow-up-queued, not mid-turn injection). Off (default) ⇒ `deps.broker` is never built,
-  the host never starts, and the child spawns byte-identical to pre-broker pi-persona — see
+- **Cross-process broker** (`src/bus/broker/{paths,framing,messages,host,client}.ts`, on by default,
+  spec B1-B7; `PI_PERSONA_BROKER=off` restores pre-broker spawn): session-scoped (POSIX socket /
+  Windows named pipe under the session id), supervisor-hosted, lazily started on the FIRST actual
+  child-engine build (a `PI_PERSONA_ENGINE=child` run, any `isolation: worktree` leg, or an
+  `mcp: true` leg — those ALWAYS use the child engine). It is a RELAY into the local `InProcessBus`:
+  a connected child is indistinguishable from an in-process one, so the supervisor side (intercom,
+  idle notifier, f9, peek) is unchanged BY CONSTRUCTION. It gives child-process runs
+  `contact_supervisor`/`contact_peer` AND **steer** (closing the child-engine steer gap —
+  `intercom steer`/f9 `s` work on both engines; a child's steer is follow-up-queued, not mid-turn
+  injection). Off ⇒ `deps.broker` is never built, the host never starts, and the child spawns
+  byte-identical to pre-broker pi-persona — see
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 - **Provider fallback**: `buildEngine` wraps the engine in `withModelFallback` (`engine/fallback.ts`).
   A provider-qualified `spec.model` is an explicit provider/billing pin and is strict by default:
@@ -149,7 +150,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
-- `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (opt-in cross-process relay: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
+- `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (cross-process relay, on by default: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`; `PI_PERSONA_BROKER=off` restores pre-broker spawn). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
 - `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`. `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona` < project `.pi/`):

@@ -24,9 +24,11 @@ test("intercom and exocom reuse the same invitation", () => {
 });
 
 test("local UI never presents the placeholder as a chosen identity", () => {
-	assert.equal(exocomSelfWidgetLabel(false, "unnamed"), "you");
-	assert.equal(exocomSelfStatusLabel(false, "unnamed"), "you");
-	assert.equal(exocomSelfWidgetLabel(false, ""), "you");
+	assert.equal(exocomSelfStatusLabel(false, "unnamed"), "unnamed");
+	assert.equal(exocomSelfStatusLabel(false, "unnamed", "elite"), "elite");
+	assert.equal(exocomSelfStatusLabel(false, ""), "unnamed");
+	assert.equal(exocomSelfWidgetLabel(false, "unnamed"), "unnamed (you)");
+	assert.equal(exocomSelfWidgetLabel(false, "unnamed", "elite"), "elite (you)");
 	assert.equal(exocomSelfWidgetLabel(true, "kiln"), "kiln (you)");
-	assert.equal(exocomSelfStatusLabel(true, "kiln"), "kiln");
+	assert.equal(exocomSelfStatusLabel(true, "kiln", "elite"), "kiln");
 });
