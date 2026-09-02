@@ -124,7 +124,11 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			if (params.target === "*") {
 				throw new Error("exocom_ask: target must name one other session, never *");
 			}
-			const to_session = deps.resolveTarget(params.target);
+			const safeTarget = normalizeMetadataText(params.target, 80, "peer");
+			if (!safeTarget || safeTarget !== params.target.trim()) {
+				throw new Error(`exocom_ask: target "${params.target}" contains invalid characters or whitespace; use the exact name from exocom_list.`);
+			}
+			const to_session = deps.resolveTarget(safeTarget);
 			if (to_session === from_session) throw new Error("exocom_ask: target cannot be this session");
 			const frame: ExocomSemanticFrame = {
 				kind: "ask", ask_id: tokenOrUuid(params.ask_id), work_key: params.work_key,
@@ -132,7 +136,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				msg_id: randomUUID(), ts,
 			};
 			const { msg_id } = await deps.dispatch(frame);
-			return result(`exocom: asked ${params.target} · ask_id=${frame.ask_id} · msg_id=${msg_id}`, { ask_id: frame.ask_id, msg_id, work_key: params.work_key, target: params.target });
+			return result(`exocom: asked ${safeTarget} · ask_id=${frame.ask_id} · msg_id=${msg_id}`, { ask_id: frame.ask_id, msg_id, work_key: params.work_key, target: safeTarget });
 		},
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
