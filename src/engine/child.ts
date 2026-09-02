@@ -317,7 +317,13 @@ export async function runChildAgent(
 				if (graceTimer) clearTimeout(graceTimer);
 				if (lastResortTimer) clearTimeout(lastResortTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
-				if (buffer.trim()) onLine(buffer);
+				// Close can beat the last `data` tick's oversized check (a child that
+				// dumps one huge unterminated write and exits). Treat that remainder
+				// as stream noise too — never parse it as a trailing line and "succeed".
+				if (buffer.length > maxLineBytes) {
+					oversizedLine = true;
+					buffer = "";
+				} else if (buffer.trim()) onLine(buffer);
 				// A killed child (UI stop, idle/hard/startup deadline) never emits the
 				// tool_execution_end for whatever it was running, so close each abandoned call here —
 				// exactly once, mirroring what applyEvent would have produced. Without it the consumer

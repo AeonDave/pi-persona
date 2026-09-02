@@ -6,6 +6,15 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { after, before, test } from "node:test";
+
+// Keep the event loop ref'd for the whole file. The plane unrefs its server and
+// accepted sockets (production: stdin/TUI keep pi alive; the listener must not).
+// Without a ref'd handle the loop drains mid-await → node:test aborts with
+// "Promise resolution is still pending but the event loop has already resolved"
+// and cascades `cancelledByParent` to every later test. A ref'd keeper, cleared
+// after all tests, holds the loop open so ack/grace timers fire.
+const _loopKeeper = setInterval(() => {}, 60_000);
+after(() => clearInterval(_loopKeeper));
 import { endpoint, exocomRoot, registryPath } from "../../../src/exocom/paths.ts";
 import { ARTIFACT_MAX_BYTES, ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
 import { readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
