@@ -91,8 +91,12 @@ function run(task) {
 	} else if (task.includes("[flood-line]")) {
 		// One unterminated line over the engine's 1 MiB guard — stream noise. The engine
 		// must kill the child and fail LOUDLY, never drop the line and "succeed".
-		process.stdout.write("x".repeat(2 * 1024 * 1024));
-		process.exit(0);
+		// Drain BEFORE exit: process.exit() after a huge stdout.write drops the kernel
+		// buffer on Linux (pipe ~64 KiB), so the parent never sees a >1 MiB remainder
+		// and the flood "succeeds" on truncated output — the exact bug this fixture exists to catch.
+		process.stdout.write("x".repeat(2 * 1024 * 1024), () => {
+			process.exit(0);
+		});
 	} else if (task.includes("[fail]")) {
 		emit({
 			type: "message_end",

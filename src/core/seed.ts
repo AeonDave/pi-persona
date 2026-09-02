@@ -107,7 +107,13 @@ export type SeededDefaultEntry = SeededDefaultSpec | readonly SeededDefaultSpec[
 const ELITE_REQUIRED_ADDITIONS = ["agents/evidence-verifier.md"] as const;
 
 export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>> = {
-	"personas/dev.md": { size: 3985, sha256: "fb02263d97c53d6c10b6089c9c65ae7fad27a77c28434b5c892dbb87dd285e5b" },
+	"personas/dev.md": [
+		{ size: 3985, sha256: "fb02263d97c53d6c10b6089c9c65ae7fad27a77c28434b5c892dbb87dd285e5b" },
+		// v1.10.5–v1.12.0
+		{ size: 5194, sha256: "0899ee3b10971c2b324e9e9c868fcab833ea80a80b83d94a1f0a95147475e9b5" },
+		// v1.12.1
+		{ size: 5195, sha256: "54da40a44a777f8a3b36b6c038248116e19be5a6515707747d070dc3f32ead56" },
+	],
 	// The MAGI cores gained `purpose:` (their verticalization) in v1.10.6. Agents are seeded COPIES,
 	// not a live layer read from the package, so without these an existing install keeps three cores
 	// that render as bare names — the label feature would ship inert for everyone who already has them.
@@ -167,6 +173,12 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 			// v1.9.0–v1.10.5: migrate only untouched copies to the current hardened prompt.
 			size: 16521,
 			sha256: "e0ab767934b62e25e712ec31ebbc97dc780dff93d2e3855181f8bbe0086a4940",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
+			// v1.11.0–v1.12.1
+			size: 18267,
+			sha256: "dbe4a4da34338e4210b5abf9a902b4c56bba31eced1f00eb775e30b25ee37b90",
 			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
 		},
 	],

@@ -1,4 +1,13 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
+
+// Keep the event loop ref'd for the whole file. Abort-grace uses an UNREF'd timer
+// (`within()` in flow-run.ts) so a pending grace cannot keep pi alive. Without a
+// ref'd handle the loop drains mid-await → node:test aborts with "Promise
+// resolution is still pending but the event loop has already resolved" and
+// cascades `cancelledByParent` to every later test. A ref'd keeper, cleared after
+// all tests, holds the loop open so those grace timers fire.
+const _loopKeeper = setInterval(() => {}, 60_000);
+after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

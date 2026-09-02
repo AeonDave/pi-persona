@@ -46,6 +46,20 @@ test("exocom_ask consumes the public target emitted by exocom_list", async () =>
 	assert.match(result.content[0].text, new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("exocom_ask refuses a target that sanitizes to something other than the typed name", async () => {
+	const h = harness();
+	await assert.rejects(
+		() => h.tools.get("exocom_ask").execute("call-dirty", {
+			target: "vega\u0007@0123456789abcdef01234567",
+			work_key: "review-auth",
+			question: "Does this overlap your current slice?",
+		}),
+		/invalid characters or whitespace/,
+	);
+	assert.equal(h.dispatched.length, 0);
+	assert.deepEqual(h.resolvedTargets, [], "a dirty target must not be canonicalized into a session id");
+});
+
 test("exocom_ask refuses a broadcast target instead of resolving *", async () => {
 	const h = harness();
 	await assert.rejects(
