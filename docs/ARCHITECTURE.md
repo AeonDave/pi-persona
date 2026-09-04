@@ -163,10 +163,12 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `contact.ts` (child `contact_supervisor`), `peers.ts` (child `contact_peer`), `broker/` (cross-process
   relay, on by default: `paths`/`framing`/`messages` pure, `host`/`client` over `node:net`).
 - **`src/exocom/`** — the external peer plane (the exocom section below): `plane.ts` (lifecycle —
-  bind/join/teardown + reconnect), `registry.ts` (scope-selected presence + stale pruning),
-  `paths.ts` (pure path layout), `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
+  bind/join/teardown + reconnect), `activation.ts` (the exact optional-value CLI shim), `codes.ts`
+  (persistent four-character alias allocation), `scope.ts` (home identity versus selected scope),
+  `registry.ts` (scope-selected presence + stale pruning), `paths.ts` (pure path layout),
+  `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
   delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
-  `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (workspace JSONL work ledger),
+  `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (scope JSONL work ledger),
   `wait.ts`/`gate.ts` (non-blocking join + inbound constrained-turn allowlist),
   `install.ts` (the feature's composition adapter: session-scoped plane + ledger + wait/tool/hook
   wiring; not an ExtensionFactory and not constrained to the transport layer's dependencies).

@@ -40,6 +40,10 @@ An active persona can also borrow another installed persona's declared council f
 - **Live supervision** — peek progress, steer a run mid-flight, hard-stop it; a `coaching` persona
   adds a two-way bus where a child asks you a blocking `decision` and you reply. All under hard
   limits (timeout, token budget, concurrency, max children) with cooperative abort.
+- **Exocom across workspaces** — independent top-level Pi instances share presence, fenced
+  postcards, and a durable claim/ask ledger. `--exocom` joins the current workspace;
+  `--exocom=Ab0T` attaches a full Pi whose own workspace contains different files; that foreign
+  member can answer asks but cannot claim paths in the scope workspace.
 - **Composable strategies** — orchestration is small files over a Strategy SDK: fan-out, pipeline,
   map, critic-loop, vote (`magi`), multi-round council, judge, synthesize, debate, pair, compete.
   Adding one is a new file, not a core change.
