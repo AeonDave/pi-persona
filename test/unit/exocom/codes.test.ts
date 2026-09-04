@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync, lstatSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import {
@@ -66,6 +66,10 @@ test("allocation persists under agentDir and resolves back to the full scope id"
 	assert.equal(lstatSync(path).isFile(), true);
 	assert.doesNotMatch(path, new RegExp(code), "mixed-case code is not used as a filename");
 	assert.match(path, /[0-9a-f]{8}\.json$/);
+	// Durable aliases are the one part of the exocom tree nothing can reconstruct, so pin the
+	// directory they live in: `<agentDir>/persona/exocom/codes`, alongside the registry scopes.
+	assert.equal(dirname(path), join(root, "persona", "exocom", "codes"));
+	assert.equal(dirname(joinCodeReservationPath(root, code)), join(root, "persona", "exocom", "codes", ".used"));
 });
 
 test("a deterministic candidate collision probes the next candidate without recycling aliases", async () => {

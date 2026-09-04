@@ -22,6 +22,7 @@ import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
 import { resolveConfig } from "./core/config.ts";
 import { type ContractDef } from "./core/contract.ts";
+import { type DataRootMigrationResult, migrateLegacyDataRoot } from "./core/data-root.ts";
 import {
 	inspectLegacySeededSpines,
 	migratePristineSeededDefaults,
@@ -323,6 +324,31 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		supervisor: config.spine === "on",
 		worker: config.spineLegs === "on",
 	});
+	// The plugin's storage root shed its package-name prefix (see core/data-root.ts). Fold an
+	// existing `<agentDir>/pi-persona` into the persona data dir HERE, before anything opens the
+	// exocom rendezvous or the broker socket, so this Pi and its peers agree on one path for the
+	// whole session. Idempotent, so every later activation costs one missing-directory lstat.
+	const dataRootMigration: DataRootMigrationResult = ((): DataRootMigrationResult => {
+		try {
+			return migrateLegacyDataRoot(userAgentDir());
+		} catch (error) {
+			// The module reports per-entry failures rather than throwing; this is the backstop that
+			// keeps an unforeseen one out of activation, where it would cost the user the session.
+			const message = error instanceof Error ? error.message : String(error);
+			return { moved: [], kept: [], warnings: [`data root migration failed: ${message}`] };
+		}
+	})();
+	const reportDataRootMigration = (ctx: ExtensionContext): void => {
+		if (dataRootMigration.moved.length > 0) {
+			const message = `pi-persona: moved ${dataRootMigration.moved.length} file(s) from the legacy pi-persona storage root into ${personaDataDir()}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "info");
+			else process.stderr.write(`${message}\n`);
+		}
+		for (const warning of dataRootMigration.warnings) {
+			if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+			else process.stderr.write(`${warning}\n`);
+		}
+	};
 	const migrateSeededDefaults = (): SeedMigrationResult => {
 		try {
 			return migratePristineSeededDefaults(BUNDLED_DIR, personaDataDir(), options.seedMigration);
@@ -1570,6 +1596,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		for (const warning of seedMigration.warnings) {
 			lines.push(warning.startsWith("seed migration") ? warning : `seed migration warning: ${warning}`);
 		}
+		if (dataRootMigration.moved.length > 0 || dataRootMigration.kept.length > 0) {
+			lines.push(`data root migration: moved ${dataRootMigration.moved.length}, kept ${dataRootMigration.kept.length} (legacy pi-persona root folded into ${personaDataDir()})`);
+		}
+		for (const warning of dataRootMigration.warnings) lines.push(warning);
 		lines.push(`personas (${personas.length}): ${personas.map((p) => p.name).join(", ") || "—"}`);
 		lines.push(`agents (${agents.length}): ${agents.map((a) => a.name).join(", ") || "—"}`);
 		if (definitionCollisions.length > 0) {
@@ -1678,6 +1708,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		inspectEnabledLegacySpines,
 		reportSeedMigration,
 		get seedMigration() { return seedMigration; },
+		reportDataRootMigration,
 		reportSpineWarning,
 		reportDefinitionCollisions,
 		userAgentDir,

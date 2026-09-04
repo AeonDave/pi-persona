@@ -49,7 +49,7 @@ import { EXOCOM_TOOL_NAMES } from "../../src/core/capabilities.ts";
 import { endpoint as endpointFor, ledgerPath, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
 import { ExocomPlane } from "../../src/exocom/plane.ts";
 import { readAll, registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
-import { allocateJoinCode } from "../../src/exocom/codes.ts";
+import { allocateJoinCode, resolveJoinCode } from "../../src/exocom/codes.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults, type SpineLegacyIO } from "../../src/core/seed.ts";
 import { tempDir } from "../setup/temp-dir.ts";
@@ -1014,6 +1014,38 @@ test("activation upgrades an exact known-pristine seeded persona before discover
 		notes.length = 0;
 		await m.cmd("doctor", "", ctx);
 		assert.match(notes.join("\n"), /seed migration: upgraded .*dev\.md/i);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+	}
+});
+
+// The exocom rendezvous and the POSIX broker socket used to live under a SECOND, package-named
+// root next to the persona data dir. Moving the writers is trivial; an existing install converging
+// on its own is the part worth pinning — nothing reconstructs `exocom/codes/`, and a user with a
+// live join code must keep resolving it after the upgrade without running a single command.
+test("activation folds a legacy pi-persona storage root into the persona data dir", async () => {
+	const fresh = tempDir("pi-persona-data-root-migration-");
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	const scope = "0123456789abcdef01234567";
+	const legacyCodes = path.join(fresh, "pi-persona", "exocom", "codes");
+	fs.mkdirSync(legacyCodes, { recursive: true });
+	fs.writeFileSync(path.join(legacyCodes, "30615a39.json"), JSON.stringify({ version: 1, code: "0aZ9", scope_id: scope }));
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx: base, notes } = makeCtx(os.tmpdir());
+		const ctx = { ...base, hasUI: true };
+		await m.fire("session_start", undefined, ctx);
+
+		assert.equal(resolveJoinCode(fresh, "0aZ9"), scope, "the durable alias resolves where the code now looks for it");
+		assert.equal(fs.existsSync(path.join(fresh, "pi-persona")), false, "the agent dir is left with one root per plugin");
+		assert.match(notes.join("\n"), /pi-persona: moved 1 file\(s\)/i);
+
+		notes.length = 0;
+		await m.cmd("doctor", "", ctx);
+		assert.match(notes.join("\n"), /data root migration: moved 1/i);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
 		else process.env.PI_AGENT_DIR = previousAgentDir;

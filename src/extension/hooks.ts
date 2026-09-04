@@ -93,6 +93,7 @@ export interface HookHost {
 	inspectEnabledLegacySpines(): void;
 	reportSeedMigration(ctx: ExtensionContext, result: unknown): void;
 	seedMigration: unknown;
+	reportDataRootMigration(ctx: ExtensionContext): void;
 	reportSpineWarning(ctx: ExtensionContext): void;
 	reportDefinitionCollisions(ctx: ExtensionContext): void;
 	userAgentDir(): string;
@@ -133,6 +134,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			}
 		}
 		h.reportSeedMigration(ctx, h.seedMigration);
+		h.reportDataRootMigration(ctx); // the one-time storage-root move ran at activation; this is its voice
 		h.reportSpineWarning(ctx);
 		h.reload(ctx.cwd);
 		h.reportDefinitionCollisions(ctx);

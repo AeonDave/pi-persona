@@ -462,11 +462,14 @@ workflow runtime.
   atomic, collision-aware, bounded, and never assigns a reserved code to another workspace; the short
   code is presentation/routing convenience, not the storage identity. Each instance binds its own
   socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
-  `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<session-key>.json` (`sessionKey` — a hash of
+  `<agentDir>/persona/exocom/<workspace-hash>/agents/<session-key>.json` (`sessionKey` — a hash of
   the session id, so the name is path-safe; a read drops any entry whose filename is not the hash of
   its own `session_id`), and heartbeats it; discovery is
-  just reading that directory. Dead-pid and stale-heartbeat entries are pruned on read — no host
-  election, no failover, genuinely peer-to-peer.
+  just reading that directory. `persona` is the plugin's ONE storage root under the agent dir (the
+  npm package name is not a path); an install written by an earlier release has its legacy
+  `pi-persona` root folded into it once, at activation — `src/core/data-root.ts`. Dead-pid and
+  stale-heartbeat entries are pruned on read — no host election, no failover, genuinely
+  peer-to-peer.
 - **Workspace identity remains the Pi's actual cwd.** The chosen scope controls registry, endpoint,
   ledger, and artifact paths. It never overwrites the member's home workspace identity. Every new
   registry entry publishes an all-or-none safe tuple (`workspace_id`, four-character

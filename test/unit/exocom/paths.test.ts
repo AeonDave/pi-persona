@@ -14,7 +14,9 @@ test("workspaceHash is a stable 24-hex of the resolved project root", () => {
 
 test("registry layout stays workspace-scoped while AF_UNIX endpoints stay short and hashed", () => {
 	const h = "abc123";
-	assert.ok(exocomRoot("/agent", h).endsWith(join("pi-persona", "exocom", h)));
+	// The storage root is the plugin's data dir `persona`, NOT the npm package name: this is the
+	// rendezvous every live pi in the workspace opens, so the segment is part of the contract.
+	assert.equal(exocomRoot("/agent", h), join("/agent", "persona", "exocom", h));
 	assert.ok(agentsDir("/agent", h).endsWith(join("exocom", h, "agents")));
 	assert.ok(registryPath("/agent", h, "elite").endsWith(join("agents", "elite.json")));
 	const longSession = `session-${"x".repeat(200)}`;
