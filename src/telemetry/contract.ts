@@ -4,7 +4,7 @@ export const TELEMETRY_EVENT_NAME = "pi:telemetry" as const;
 export const LEGACY_TELEMETRY_EVENT_NAME = "pi-persona:telemetry" as const;
 export const LEGACY_TELEMETRY_VERSION = 1 as const;
 export const TELEMETRY_PRODUCER_ID = "pi-persona" as const;
-export const TELEMETRY_PRODUCER_VERSION = "1.13.0" as const;
+export const TELEMETRY_PRODUCER_VERSION = "1.13.1" as const;
 
 export type InstanceStatus = "active" | "idle" | "stopped" | "stale" | (string & {});
 export type AgentKind = "subagent" | "delegate" | "council" | "flow" | "phase" | (string & {});
