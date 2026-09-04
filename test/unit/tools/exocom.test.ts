@@ -23,6 +23,8 @@ test("registers exocom_list + exocom_send", () => {
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	assert.ok(m.tools.has("exocom_list"));
 	assert.ok(m.tools.has("exocom_send"));
+	const schema = m.tools.get("exocom_send").parameters as { properties: { target: { description?: string } } };
+	assert.match(schema.properties.target.description ?? "", /session suffix.*rename/i);
 });
 
 test("exocom_send returns the msg_id from the plane", async () => {
@@ -39,7 +41,7 @@ test("exocom_list renders the peers", async () => {
 	const m = mockPi();
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	const r = await m.tools.get("exocom_list").execute("c", {}, undefined, undefined, {});
-	assert.equal(r.content[0].text, "Exocom presence only (1 peer; not a message inbox)\n- dev · dev · m · ctx 10% · target: dev@0123456789abcdef01234567\nUse each peer's target exactly as shown; display names can be reassigned as peers come and go.");
+	assert.equal(r.content[0].text, "Exocom presence only (1 peer; not a message inbox)\n- dev · dev · m · ctx 10% · target: dev@0123456789abcdef01234567\nUse each peer's qualified target as shown. Its session suffix stays routable if the peer later renames; display names alone can be reassigned.");
 	assert.doesNotMatch(r.content[0].text, /purpose|peer-message/, "default roster omits prose metadata and fences");
 });
 

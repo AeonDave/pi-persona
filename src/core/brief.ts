@@ -187,6 +187,8 @@ export interface ExocomBriefInput {
 	 * the placeholder is not an identity, and the model should invent one.
 	 */
 	namedByModel?: boolean;
+	/** False while a pending ask (or unreadable ledger) gives protocol settlement priority. */
+	canNameNow?: boolean;
 }
 
 /** Registry metadata is peer-controlled. The roster lives in the system prompt, so only a
@@ -205,11 +207,15 @@ function peerIdentifier(value: string, max: number): string {
  *  Tells the supervisor WHO is available + their specialization so it can choose to collaborate —
  *  never an obligation. */
 export function exocomNameYourselfLine(): string {
-	return `You have no call-sign yet. ${inventedExocomNameHint()}`;
+	return (
+		`You have no call-sign yet. ${inventedExocomNameHint()} ` +
+		"Your FIRST action on the first unconstrained turn must be exocom_name({ name: \"<your invented call-sign>\" }), " +
+		"before any prose or other tool call."
+	);
 }
 
 export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInput): string | undefined {
-	const invent = input.namedByModel === false ? exocomNameYourselfLine() : undefined;
+	const invent = input.namedByModel === false && input.canNameNow !== false ? exocomNameYourselfLine() : undefined;
 	if (peers.length === 0) return invent;
 	const lines: string[] = [
 		"[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this workspace right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:",

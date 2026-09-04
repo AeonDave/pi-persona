@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { canCallTool, canDelegateTo, canFanOut, EXOCOM_TOOL_NAMES, resolveCapabilities } from "../../../src/core/capabilities.ts";
+import {
+	canCallTool,
+	canDelegateTo,
+	canFanOut,
+	canParticipateInExocom,
+	EXOCOM_TOOL_NAMES,
+	resolveCapabilities,
+} from "../../../src/core/capabilities.ts";
 
 const TOOLS = ["read", "grep", "bash", "write", "delegate", "web_search"];
 const AGENTS = ["scout", "researcher", "planner"];
@@ -54,6 +61,30 @@ test("an explicit per-tool deny beats the exocom canUseBus fast-path (deny-wins,
 	assert.equal(caps.canUseBus, true, "the bus itself is not denied");
 	assert.equal(canCallTool(caps, "exocom_send"), false, "explicitly denied");
 	assert.equal(canCallTool(caps, "exocom_list"), true, "siblings still follow canUseBus");
+});
+
+test("Exocom admission requires the bus and at least one way to settle an inbound ask", () => {
+	assert.equal(canParticipateInExocom(undefined), true, "no persona means unrestricted participation");
+	assert.equal(
+		canParticipateInExocom(resolveCapabilities(base({ permissions: { tools: { deny: ["exocom_answer"] } } }))),
+		true,
+		"decline alone can settle the obligation",
+	);
+	assert.equal(
+		canParticipateInExocom(resolveCapabilities(base({ permissions: { tools: { deny: ["exocom_decline"] } } }))),
+		true,
+		"answer alone can settle the obligation",
+	);
+	assert.equal(
+		canParticipateInExocom(resolveCapabilities(base({ permissions: { tools: { deny: ["exocom_answer", "exocom_decline"] } } }))),
+		false,
+		"an answerless participant must not advertise itself as an ask target",
+	);
+	assert.equal(
+		canParticipateInExocom(resolveCapabilities(base({ permissions: { tools: { deny: ["intercom"] } } }))),
+		false,
+		"the existing bus revocation still wins",
+	);
 });
 
 test("denying the bus (intercom) also denies the exocom tools", () => {

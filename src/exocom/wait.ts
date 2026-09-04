@@ -19,3 +19,17 @@ export function waitMatches(waiter: WaitMatch, event: WaitMatch): boolean {
 	if (waiter.ask_id === undefined || waiter.ask_id === "") return true;
 	return event.ask_id === waiter.ask_id;
 }
+
+/** Match cleanup notices only through extension-owned metadata. A substring search confuses `a`
+ * with `a1` and, worse, lets untrusted postcard prose containing `ask_id=...` discard an unrelated
+ * queued delivery. Notifier items are still strings, so recognize only their trusted header lines. */
+export function waitNoticeMatchesAskId(notice: string, askId: string): boolean {
+	if (!askId) return false;
+	const [first = "", second = ""] = notice.split(/\r?\n/, 2);
+	const metadata = first === "[exocom-pending-ask]"
+		? second
+		: first.startsWith("[pi-persona] exocom answer ·") || first.startsWith("[pi-persona] exocom wait ")
+			? first
+			: "";
+	return metadata.split(/[\t ·]+/u).includes(`ask_id=${askId}`);
+}

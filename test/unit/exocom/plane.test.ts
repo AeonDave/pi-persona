@@ -164,6 +164,38 @@ test("resolvePeer canonicalizes the public session-pinned target to the registry
 	}
 });
 
+test("a qualified target keeps routing to its session after the peer changes call-sign", async () => {
+	const inbox: ExocomMessage[] = [];
+	const sender = planeFor("rename-sender", () => {});
+	const peer = planeFor("first-call-sign", (message) => inbox.push(message));
+	await sender.start();
+	await peer.start();
+	try {
+		const beforeRename = sender.listPeers().find((entry) => entry.name === "first-call-sign");
+		assert.ok(beforeRename, "the roster exposes the original call-sign");
+
+		peer.heartbeat(registryEntryFixture({
+			session_id: beforeRename.session_id,
+			name: "second-call-sign",
+			pid: process.pid,
+			endpoint: beforeRename.endpoint,
+			heartbeat_at: new Date().toISOString(),
+		}));
+
+		const renamed = sender.listPeers().find((entry) => entry.name === "second-call-sign");
+		assert.ok(renamed, "the roster shows the current human-readable call-sign");
+		assert.notEqual(renamed.target, beforeRename.target, "the display token reflects the renamed label");
+		assert.equal(sender.resolvePeer(beforeRename.target).session_id, beforeRename.session_id);
+		await sender.send(beforeRename.target, "still reaches the original session");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.equal(inbox.length, 1);
+		assert.equal(inbox[0]?.text, "still reaches the original session");
+	} finally {
+		await sender.stop();
+		await peer.stop();
+	}
+});
+
 test("an oversize message spills to an artifact and sends {preview,path,size} inline (R3)", async () => {
 	const got: ExocomMessage[] = [];
 	const a = planeFor("elite", () => {});

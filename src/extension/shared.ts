@@ -45,16 +45,22 @@ export function sanitizeLabel(s: string): string {
 	return sanitizePeerField(s, 80) || "peer";
 }
 
-const EXOCOM_ROUTING_TOKEN = /@[a-f0-9]{24}$/i;
+const EXOCOM_ROUTING_TOKEN = /@([a-f0-9]{24})$/i;
 
+/** Mirror transport routing for observability: a qualified target's readable prefix may be stale
+ * after rename, while its session-hash suffix remains authoritative. Ambiguity emits no speculative
+ * edge; the transport will fail the same collision closed. */
 export function canonicalExocomTelemetryTargets(
 	peers: ReadonlyArray<Pick<DisplayPeer, "session_id" | "displayName" | "target">>,
 	target: string,
 ): string[] {
 	if (target === "*") return peers.map((peer) => peer.session_id);
-	const exact = peers.find((peer) => peer.target === target);
-	if (exact) return [exact.session_id];
-	if (EXOCOM_ROUTING_TOKEN.test(target)) return [];
+	const routing = EXOCOM_ROUTING_TOKEN.exec(target);
+	if (routing) {
+		const suffix = routing[1]!.toLowerCase();
+		const matches = peers.filter((peer) => EXOCOM_ROUTING_TOKEN.exec(peer.target)?.[1]?.toLowerCase() === suffix);
+		return matches.length === 1 ? [matches[0]!.session_id] : [];
+	}
 	const display = peers.find((peer) => peer.displayName === target);
 	return display ? [display.session_id] : [];
 }

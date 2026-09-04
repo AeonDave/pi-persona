@@ -175,8 +175,22 @@ test("buildExocomBrief: an unnamed self still gets a name-yourself line with no 
 	assert.ok(brief);
 	assert.match(brief ?? "", /no call-sign yet/i);
 	assert.match(brief ?? "", /exocom_name/);
-	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT));
+	assert.match(brief ?? "", /current task that triggered this turn/i, "the first real task supplies the creative seed");
+	assert.match(brief ?? "", /first action.*exocom_name/is, "naming happens at the start of the first task, not later in the session");
+	assert.match(brief ?? "", /before any prose or other tool call/i, "the ordering is operationally unambiguous");
+	assert.match(brief ?? "", /no built-in list or catalog/i, "the model invents rather than selecting a bundled identity");
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas|unnamed/i);
+});
+
+test("buildExocomBrief: a pending protocol obligation defers naming until the next unconstrained turn", () => {
+	assert.equal(
+		buildExocomBrief([], { ...XOPTS, namedByModel: false, canNameNow: false }),
+		undefined,
+		"without peers, suppressing the bootstrap leaves no synthetic brief",
+	);
+	const withPeer = buildExocomBrief(PEERS, { ...XOPTS, namedByModel: false, canNameNow: false }) ?? "";
+	assert.doesNotMatch(withPeer, /FIRST action.*exocom_name/is);
+	assert.match(withPeer, /exocom peers/i, "only the conflicting bootstrap is suppressed");
 });
 
 test("buildExocomBrief: lists identifier-only peer presence and excludes free-form metadata", () => {

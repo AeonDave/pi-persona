@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { buildExocomBrief } from "../core/brief.ts";
-import { canDelegateTo, canFanOut } from "../core/capabilities.ts";
+import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import type { DelegationNudge, PersistenceNudge } from "../core/nudge.ts";
@@ -326,11 +326,20 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// whenever exocom is off, matching every other opt-in surface in this file.
 		if (exocom.plane) {
 			let peers: DisplayPeer[] | undefined;
+			let pendingBlock: string | undefined;
+			let ledgerFailure: string | undefined;
 			try {
 				peers = exocom.plane.listPeers();
 			} catch {
 				// Peer awareness is opportunistic. A transient registry I/O failure must not abort
 				// Pi's turn or prevent the rest of the system prompt from reaching the model.
+			}
+			if (exocom.ledgerFile) {
+				try {
+					pendingBlock = exocom.pendingAskPrompt(ctx);
+				} catch (error) {
+					ledgerFailure = `[pi-persona] Exocom ledger unavailable. Treat work ownership and pending asks as unresolved; do not mutate or delegate until storage recovers. (${error instanceof Error ? error.message : String(error)})`;
+				}
 			}
 			const xcaps = h.controller.capabilities;
 			// Holding the bus says nothing about `delegate` (canUseBus keys off `intercom` alone), so
@@ -343,26 +352,25 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			// `delegateTargets` whenever the delegate tool is absent (core/capabilities.ts), so the
 			// second conjunct already implies the first and no test can kill the first alone. Kept
 			// because it states the structural rule the second conjunct only happens to encode.
-			if (peers) {
-				const canDelegate = xcaps ? canFanOut(xcaps) && h.agents.some((a) => canDelegateTo(xcaps, a.name)) : h.agents.length > 0;
-				const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })), {
-					canDelegate,
-					// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
-					// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
-					// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
-					canAskHuman: ctx.hasUI === true,
-					namedByModel: exocom.namedByModel,
-				});
-				if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
-			}
-			if (exocom.ledgerFile) {
-				try {
-					const block = exocom.pendingAskPrompt(ctx);
-					if (block) prompt = `${prompt}\n\n${block}`;
-				} catch (error) {
-					prompt = `${prompt}\n\n[pi-persona] Exocom ledger unavailable. Treat work ownership and pending asks as unresolved; do not mutate or delegate until storage recovers. (${error instanceof Error ? error.message : String(error)})`;
-				}
-			}
+			const canDelegate = xcaps ? canFanOut(xcaps) && h.agents.some((a) => canDelegateTo(xcaps, a.name)) : h.agents.length > 0;
+			const xbrief = buildExocomBrief((peers ?? []).map((p) => ({ name: p.displayName, persona: p.persona })), {
+				canDelegate,
+				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
+				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
+				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
+				canAskHuman: ctx.hasUI === true,
+				namedByModel: exocom.namedByModel,
+				// An ask already addressed to this session owns the turn. `exocom_name` is not a
+				// constrained-turn tool, so suppress the bootstrap until settlement rather than
+				// ordering a call the runtime will correctly refuse. Ledger uncertainty gets the
+				// same treatment because the fail-closed gate cannot prove naming is safe either.
+				canNameNow: pendingBlock === undefined
+					&& ledgerFailure === undefined
+					&& (!xcaps || canCallTool(xcaps, "exocom_name")),
+			});
+			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
+			if (pendingBlock) prompt = `${prompt}\n\n${pendingBlock}`;
+			else if (ledgerFailure) prompt = `${prompt}\n\n${ledgerFailure}`;
 		}
 		if (h.pendingOrchestration) {
 			// The result is sub-agent text entering the SYSTEM prompt — fence it (I-guardrail:

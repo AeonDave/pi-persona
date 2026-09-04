@@ -101,6 +101,15 @@ export function canCallTool(caps: EffectiveCapabilities, toolName: string): bool
 	return caps.tools.has(toolName);
 }
 
+/** A published Exocom peer may receive a durable ask from any other live participant. Joining is
+ * therefore valid only when the active persona can settle that obligation through at least one of
+ * the two protocol closers. This is stricter than the generic bus grant without weakening targeted
+ * deny-wins: a persona may deny either closer, but denying both makes the external plane unavailable. */
+export function canParticipateInExocom(caps: EffectiveCapabilities | undefined): boolean {
+	if (!caps) return true;
+	return caps.canUseBus && (canCallTool(caps, "exocom_answer") || canCallTool(caps, "exocom_decline"));
+}
+
 export function canDelegateTo(caps: EffectiveCapabilities, agent: string): boolean {
 	return caps.delegateTargets.has(agent);
 }

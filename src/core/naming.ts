@@ -1,10 +1,9 @@
 /**
- * Shared invitation for invented call-signs. Both planes use it:
- *   - intercom / `delegate`: a fresh label per leg (`<call-sign>-<purpose>`)
- *   - exocom / `exocom_name`: this instance's display handle
+ * Naming hints for two independent identity scopes:
+ *   - intercom / `delegate`: the supervisor invents a fresh label per leg
+ *   - exocom / `exocom_name`: the top-level instance derives its own handle from its task
  *
- * Lists *kinds* of invention, never example handles — models copy examples.
- * Pure module (no Pi imports).
+ * Neither path carries a catalog of example handles. Pure module (no Pi imports).
  */
 export const CALL_SIGN_PROMPT =
 	"Invent a short distinctive call-sign from whatever this moment suggests — a mood, a joke, a snack, the weather, a place, a song fragment, a half-remembered character, a tool on the bench. Anything that fits. One or two words, or a compact compound. Fresh every time; never reuse a handle.";
@@ -16,7 +15,10 @@ export function inventedLegNameHint(): string {
 
 /** Tool-schema / per-turn hint for this instance's exocom handle. */
 export function inventedExocomNameHint(): string {
-	return `${CALL_SIGN_PROMPT} Set it with exocom_name before you speak.`;
+	return (
+		"Invent a short distinctive call-sign inspired by the current task that triggered this turn; " +
+		"use one or two words or a compact compound, with no built-in list or catalog."
+	);
 }
 
 /** Local widget: mark this instance without using "you" as the identity. */

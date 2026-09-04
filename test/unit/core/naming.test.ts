@@ -16,11 +16,12 @@ test("CALL_SIGN_PROMPT invites a free invention and never seeds catalog handles"
 	assert.doesNotMatch(CALL_SIGN_PROMPT, /orion|hermes|vega|atlas|unnamed/i);
 });
 
-test("intercom and exocom reuse the same invitation", () => {
+test("the supervisor invents leg labels while a top-level Exocom identity is task-derived", () => {
 	assert.ok(inventedLegNameHint().includes(CALL_SIGN_PROMPT));
-	assert.ok(inventedExocomNameHint().includes(CALL_SIGN_PROMPT));
 	assert.match(inventedLegNameHint(), /purpose/);
-	assert.match(inventedExocomNameHint(), /exocom_name/);
+	assert.match(inventedExocomNameHint(), /current task/i);
+	assert.match(inventedExocomNameHint(), /no built-in list or catalog/i);
+	assert.doesNotMatch(inventedExocomNameHint(), /mood|joke|snack|weather|place|song/i);
 });
 
 test("local UI never presents the placeholder as a chosen identity", () => {

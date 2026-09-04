@@ -10,6 +10,11 @@ const peers = [
 
 test("exocom telemetry resolves routing tokens to canonical peer session ids", () => {
 	assert.deepEqual(canonicalExocomTelemetryTargets(peers, peers[1]!.target), ["peer-session-b"]);
+	assert.deepEqual(
+		canonicalExocomTelemetryTargets(peers, "retained-old-name@89abcdef0123456789abcdef"),
+		["peer-session-b"],
+		"the telemetry edge follows the same stable session suffix as transport after a rename",
+	);
 	assert.deepEqual(canonicalExocomTelemetryTargets(peers, "twin#2"), ["peer-session-b"]);
 	assert.deepEqual(canonicalExocomTelemetryTargets(peers, "*"), ["peer-session-a", "peer-session-b"]);
 	assert.deepEqual(canonicalExocomTelemetryTargets(peers, "missing"), []);
@@ -26,4 +31,12 @@ test("a routing token never degrades into a display-name match", () => {
 	];
 	assert.deepEqual(canonicalExocomTelemetryTargets(impostor, lapsedToken), [], "a token nobody answers to resolves to nothing");
 	assert.deepEqual(canonicalExocomTelemetryTargets(impostor, impostor[0]!.target), ["peer-session-b"], "…while its own token still resolves");
+});
+
+test("an ambiguous telemetry routing suffix fails closed instead of inventing message edges", () => {
+	const collision = [
+		...peers,
+		{ session_id: "peer-session-c", name: "third", displayName: "third", target: "third@89abcdef0123456789abcdef" },
+	];
+	assert.deepEqual(canonicalExocomTelemetryTargets(collision, "old@89abcdef0123456789abcdef"), []);
 });

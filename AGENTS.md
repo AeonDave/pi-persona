@@ -124,8 +124,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a clean git repo; missing
   repo/dirty checkout/worktree failure fails closed and never falls back to the real tree) and returns
   the winning diff for the SUPERVISOR to apply.
-- **exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`, gated
-  by `canUseBus`): a plane apart from everything above — those are all INTERNAL to one supervisor's
+- **exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`,
+  capability-gated): a plane apart from everything above — those are all INTERNAL to one supervisor's
   own run (hierarchical, session-keyed children); exocom is FLAT and EXTERNAL, between independent
   top-level pi instances sharing a workspace, discovered via a workspace-scoped file registry, no
   parent/child relationship. Postcards remain one-way and non-blocking: `exocom_list`/`exocom_send`
@@ -134,7 +134,14 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   open write sets NACK atomically, and a pending targeted ask gates that participant to answer/decline
   plus read-only tools. Semantic frames are signed immediate-wake signals; the ledger is authoritative
   if delivery is deferred. This is cooperative runtime coordination, not OS authorization. All ten
-  tools are gated together by `EXOCOM_TOOL_NAMES`/`canUseBus`. Reuses the broker's wire framing
+  tools remain in `EXOCOM_TOOL_NAMES`, targeted denies win independently, and joining requires
+  `canUseBus` plus at least one callable closer (`answer` or `decline`) so a published peer cannot be
+  wedged by an obligation it has no way to settle. If `exocom_name` is permitted, an unnamed top-level
+  Pi is prompted to invent a task-derived call-sign as its first action on the first unconstrained
+  turn (no catalog or extra model call; pending ask settlement wins); a targeted deny suppresses that
+  prompt. The session-hash suffix of a qualified target survives renames and telemetry resolves the
+  same canonical session.
+  Reuses the broker's wire framing
   (`bus/broker/framing.ts`) and the
   core fence (`fenceUntrusted`/`attributeInbound`) — no new trust-sensitive code path; inbound
   attribution is resolved from the registry, never the envelope's self-reported `from_name`.
