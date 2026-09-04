@@ -124,13 +124,17 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a clean git repo; missing
   repo/dirty checkout/worktree failure fails closed and never falls back to the real tree) and returns
   the winning diff for the SUPERVISOR to apply.
-- **exocom** (`src/exocom/*`, `src/tools/exocom.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`, gated
+- **exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`, gated
   by `canUseBus`): a plane apart from everything above — those are all INTERNAL to one supervisor's
   own run (hierarchical, session-keyed children); exocom is FLAT and EXTERNAL, between independent
   top-level pi instances sharing a workspace, discovered via a workspace-scoped file registry, no
-  parent/child relationship. `exocom_list`/`exocom_send` are one-way and non-blocking (a reply is a
-  send with `in_reply_to` set); `exocom_name` renames only this instance's display call-sign — all
-  three are gated together by `EXOCOM_TOOL_NAMES`/`canUseBus`. Reuses the broker's wire framing
+  parent/child relationship. Postcards remain one-way and non-blocking: `exocom_list`/`exocom_send`
+  plus `exocom_name` (a reply is a send with `in_reply_to` set). The separate shared JSONL work
+  ledger adds `claim`/`ask`/`answer`/`decline`/non-blocking `wait`/`progress`/`release`: overlapping
+  open write sets NACK atomically, and a pending targeted ask gates that participant to answer/decline
+  plus read-only tools. Semantic frames are signed immediate-wake signals; the ledger is authoritative
+  if delivery is deferred. This is cooperative runtime coordination, not OS authorization. All ten
+  tools are gated together by `EXOCOM_TOOL_NAMES`/`canUseBus`. Reuses the broker's wire framing
   (`bus/broker/framing.ts`) and the
   core fence (`fenceUntrusted`/`attributeInbound`) — no new trust-sensitive code path; inbound
   attribution is resolved from the registry, never the envelope's self-reported `from_name`.

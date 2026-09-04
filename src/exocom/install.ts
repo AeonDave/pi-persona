@@ -400,7 +400,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				return fired;
 			};
 			const armExocomWait = (work_key: string, ask_id: string, timeoutMs: number) => {
-				const existing = answerFor(currentLedgerState(), ask_id, sessionId);
+				// One snapshot supplies both branches. If an answer commits after this read, the
+				// post-registration read below observes it. Taking a second pre-registration
+				// snapshot for the pending ask would instead create a gap where the answer removes
+				// the ask and we falsely report "no pending outbound ask".
+				const initial = currentLedgerState();
+				const existing = answerFor(initial, ask_id, sessionId);
 				if (existing) {
 					if (existing.work_key !== work_key) throw new Error("exocom_wait: work_key does not match the retained answer");
 					const hint = `ask_id=${ask_id}`;
@@ -408,7 +413,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					exocomNotifier?.discard((item) => item.includes(hint));
 					return { status: "answered" as const, answer: existing };
 				}
-				const pending = currentLedgerState().asks.find((ask) => ask.ask_id === ask_id && ask.from_session === sessionId);
+				const pending = initial.asks.find((ask) => ask.ask_id === ask_id && ask.from_session === sessionId);
 				if (!pending) throw new Error(`exocom_wait: no pending outbound ask "${ask_id}"`);
 				if (pending.work_key !== work_key) throw new Error("exocom_wait: work_key does not match the pending ask");
 				const id = `exocom-wait-${++exocomWaitSeq}`;
@@ -427,12 +432,23 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				handle.unref?.();
 				const waiter: ExocomWaiter = { id, work_key, ask_id, handle };
 				exocomWaiters.push(waiter);
-				// Close the small cross-process window between the first read and waiter registration.
-				const raced = answerFor(currentLedgerState(), ask_id, sessionId);
-				if (raced) {
+				const disarm = (): void => {
 					clearTimeout(handle);
 					const idx = exocomWaiters.indexOf(waiter);
 					if (idx >= 0) exocomWaiters.splice(idx, 1);
+				};
+				// Close the small cross-process window between the first read and waiter registration.
+				let raced: LedgerAnswer | undefined;
+				try {
+					raced = answerFor(currentLedgerState(), ask_id, sessionId);
+				} catch (error) {
+					// The tool call is failing, so it must not leave a hidden waiter that later starts
+					// an unrelated Pi turn with a timeout/read-error follow-up.
+					disarm();
+					throw error;
+				}
+				if (raced) {
+					disarm();
 					const hint = `ask_id=${ask_id}`;
 					exocomWaitNotifier?.discard((item) => item.includes(hint));
 					exocomNotifier?.discard((item) => item.includes(hint));
@@ -440,7 +456,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				}
 				return { status: "waiting" as const, id };
 			};
-			const dispatchSemantic = async (frame: ExocomSemanticFrame): Promise<{ msg_id: string }> => {
+			const dispatchSemantic = async (frame: ExocomSemanticFrame): Promise<{ msg_id: string; peerWakeDeferred?: true }> => {
 				const plane = exocomPlane;
 				if (!plane) throw new Error("exocom is not active for this persona");
 				if (!exocomLedgerFile) throw new Error("exocom ledger is not available");
@@ -451,7 +467,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				} else if (frame.kind === "answer") {
 					const ask = currentLedgerState().asks.find((candidate) => candidate.ask_id === frame.ask_id);
 					if (!ask) throw new Error(`exocom: answer for unknown ask_id "${frame.ask_id}"`);
-					target = plane.listPeers().find((peer) => peer.session_id === ask.from_session);
+					try {
+						target = plane.listPeers().find((peer) => peer.session_id === ask.from_session);
+					} catch {
+						// The answer is a ledger transition first. Registry uncertainty may defer the
+						// immediate wake, but must not keep the receiver trapped behind the ask gate.
+					}
 				}
 				const prune = currentLedgerPruneOptions();
 				const applied = commitLedgerEvent(exocomLedgerFile, frame, prune ? { prune } : {});
@@ -460,16 +481,23 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				// Claims/progress/releases are authoritative in the shared ledger and need no postcard.
 				// Ask/answer use the wire only as a signed immediate-wake signal; durable state remains
 				// recoverable if that signal fails.
+				if (frame.kind === "answer" && !target) {
+					try {
+						host.lastCtx?.ui.notify("exocom: ledger updated, but answer wake was deferred.", "warning");
+					} catch { /* the durable result is still recoverable from the ledger */ }
+					return { msg_id: frame.msg_id, peerWakeDeferred: true };
+				}
 				if (target && (frame.kind === "ask" || frame.kind === "answer")) {
 					try {
 						await plane.sendSemantic(target.target, frame);
-					} catch (error) {
+					} catch {
 						try {
 							host.lastCtx?.ui.notify(
-								`exocom: ledger updated, but ${frame.kind} wake to ${target.displayName} was deferred (${error instanceof Error ? error.message : String(error)}).`,
+								`exocom: ledger updated, but ${frame.kind} wake to ${target.displayName} was deferred.`,
 								"warning",
 							);
 						} catch { /* the durable result is still recoverable from the ledger */ }
+						return { msg_id: frame.msg_id, peerWakeDeferred: true };
 					}
 				}
 				return { msg_id: frame.msg_id };
@@ -768,8 +796,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		exocomWaitNotifier = undefined;
 		for (const waiter of exocomWaiters) clearTimeout(waiter.handle);
 		exocomWaiters.length = 0;
-		// A clean shutdown relinquishes every slice/question owned by this exact session. Crash
-		// recovery is the registry-liveness prune; this closes the normal lifecycle immediately.
+		// A clean shutdown best-effort relinquishes every slice/question owned by this exact session.
+		// Crash or write-failure recovery is the registry-liveness prune.
 		if (exocomLedgerFile && exocomSessionId) {
 			try {
 				const state = currentLedgerState();
@@ -825,6 +853,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		}
 		exocomName = "";
 		exocomNamedByModel = false;
+		syncExocomActiveTools();
 	}
 	return {
 		reconcile: reconcileExocom,

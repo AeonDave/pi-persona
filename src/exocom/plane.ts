@@ -10,7 +10,21 @@
  */
 
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
+import {
+	chmodSync,
+	closeSync,
+	constants as fsConstants,
+	existsSync,
+	fstatSync,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	readdirSync,
+	unlinkSync,
+	writeFileSync,
+	type Stats,
+} from "node:fs";
 import nodeNet from "node:net";
 import type net from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -53,6 +67,10 @@ export interface ExocomPlaneDeps {
 	ackTimeoutMs?: number;
 	/** Endpoint cleanup seam; production unlinks only POSIX socket paths. */
 	unlinkEndpoint?: () => void;
+	/** Test seam: runs after source validation and immediately before snapshot I/O. */
+	beforeArtifactRead?: (sourcePath: string) => void;
+	/** Test seam: production receiver snapshot names come from `randomUUID()`. */
+	artifactSnapshotId?: () => string;
 }
 
 const STALE_PROBE_TIMEOUT_MS = 1000;
@@ -288,11 +306,39 @@ function isRoutingToken(target: string): boolean {
 /** The same file, spelled two ways. Peers share one registry by construction (that `agentDir`+`hash`
  *  pair IS the registry both sides read), but each reaches it through its own `PI_AGENT_DIR`, which
  *  may differ in case on Windows or carry relative segments — comparing the peer's path string
- *  byte-for-byte would NACK every large message between two such peers. A symlinked root is
- *  deliberately NOT resolved here; the `lstat` in `artifactClaimError` is what refuses links. */
+ *  byte-for-byte would NACK every large message between two such peers. Directory safety is checked
+ *  separately with `lstat`; do not `realpath` here and collapse the accepted spelling contract. */
 function samePath(a: string, b: string): boolean {
 	const canonical = (path: string): string => (process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path));
 	return canonical(a) === canonical(b);
+}
+
+/** Compare the kernel identity behind a pathname/descriptor. `dev` + `ino` are populated by
+ * Node on supported Windows filesystems as well as POSIX. If a filesystem reports neither, the
+ * identity cannot be proved: fail closed rather than treating forgeable timestamps as identity. */
+function sameFileIdentity(a: Stats, b: Stats): boolean {
+	if (a.dev !== 0 || a.ino !== 0 || b.dev !== 0 || b.ino !== 0) return a.dev === b.dev && a.ino === b.ino;
+	return false;
+}
+
+function unchangedOpenFile(before: Stats, after: Stats): boolean {
+	return sameFileIdentity(before, after)
+		&& before.size === after.size
+		&& before.nlink === after.nlink
+		&& before.mtimeMs === after.mtimeMs
+		&& before.ctimeMs === after.ctimeMs;
+}
+
+/** `lstat` the artifacts directory itself: checking only a final spill file does not reveal that
+ * a parent component is a symlink/junction. Callers compare returned identities across their own
+ * operation where useful; an absent, linked, or non-directory path always fails closed. */
+function safeArtifactDirectory(path: string): Stats | undefined {
+	try {
+		const stat = lstatSync(path);
+		return stat.isDirectory() && !stat.isSymbolicLink() ? stat : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 interface InboundContext {
@@ -619,7 +665,9 @@ export class ExocomPlane {
 	private artifactClaimError(msg: ExocomMessage): string | undefined {
 		const descriptor = parseExocomArtifactDescriptor(msg.text);
 		if (!descriptor) return undefined;
-		const expected = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", `${msg.msg_id}.txt`);
+		const artifactsDir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
+		if (!safeArtifactDirectory(artifactsDir)) return "artifact directory is unsafe";
+		const expected = join(artifactsDir, `${msg.msg_id}.txt`);
 		if (!samePath(descriptor.path, expected)) return "artifact path is not this workspace's spill for that message";
 		let stat: Stats;
 		try {
@@ -642,22 +690,90 @@ export class ExocomPlane {
 	}
 
 	/**
-	 * Copy a verified spill into `artifacts/received/<msg_id>.txt` and rewrite the descriptor
-	 * path so the model reads a snapshot, not a file the sender can still mutate (TOCTOU).
+	 * Copy a verified spill into an exclusive, receiver-chosen `artifacts/received/<uuid>.txt`
+	 * and rewrite the descriptor path so the model reads a snapshot, not a file the sender can
+	 * still mutate (TOCTOU).
 	 * Returns an error when the message carries a descriptor but the copy failed.
 	 */
 	private snapshotArtifact(msg: ExocomMessage): { ok: true; msg: ExocomMessage } | { ok: false; error: string } {
 		const descriptor = parseExocomArtifactDescriptor(msg.text);
 		if (!descriptor) return { ok: true, msg };
-		const src = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", `${msg.msg_id}.txt`);
-		const destDir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts", "received");
-		const dest = join(destDir, `${msg.msg_id}.txt`);
+		const artifactsDir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
+		const src = join(artifactsDir, `${msg.msg_id}.txt`);
+		const destDir = join(artifactsDir, "received");
+		let sourceFd: number | undefined;
+		let payload: Buffer;
+		let artifactsIdentity: Stats;
 		try {
-			mkdirSync(destDir, { recursive: true });
-			copyFileSync(src, dest);
+			// The pathname check above is only a preflight. Open the file without following a final
+			// symlink where the OS supports it, then bind every validation and the read to that held
+			// descriptor. The before/after pathname checks detect POSIX rename-and-replace while the
+			// descriptor stays pinned to the original inode; the repeated fd checks also reject an
+			// in-place truncate/write during the read.
+			const safeDir = safeArtifactDirectory(artifactsDir);
+			if (!safeDir) throw new Error("unsafe artifact directory");
+			artifactsIdentity = safeDir;
+			const pathBefore = lstatSync(src);
+			const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+			sourceFd = openSync(src, fsConstants.O_RDONLY | noFollow);
+			const fdBefore = fstatSync(sourceFd);
+			if (!pathBefore.isFile() || !fdBefore.isFile() || !sameFileIdentity(pathBefore, fdBefore)) throw new Error("unsafe source identity");
+			if (pathBefore.nlink > 1 || fdBefore.nlink > 1) throw new Error("linked source");
+			if (fdBefore.size !== descriptor.size || fdBefore.size <= EXOCOM.INLINE_MAX_BYTES || fdBefore.size > ARTIFACT_MAX_BYTES) throw new Error("invalid source size");
+			this.deps.beforeArtifactRead?.(src);
+			payload = readFileSync(sourceFd);
+			const fdAfter = fstatSync(sourceFd);
+			const pathAfter = lstatSync(src);
+			const artifactsAfterRead = safeArtifactDirectory(artifactsDir);
+			if (!fdAfter.isFile() || !pathAfter.isFile() || fdAfter.nlink > 1 || pathAfter.nlink > 1) throw new Error("unsafe source after read");
+			if (!artifactsAfterRead || !sameFileIdentity(artifactsIdentity, artifactsAfterRead)) throw new Error("artifact directory changed during snapshot");
+			if (!unchangedOpenFile(fdBefore, fdAfter) || !sameFileIdentity(fdAfter, pathAfter)) throw new Error("source changed during snapshot");
+			if (fdAfter.size !== descriptor.size || payload.byteLength !== descriptor.size) throw new Error("source size changed during snapshot");
 		} catch {
 			return { ok: false, error: "artifact snapshot failed" };
+		} finally {
+			if (sourceFd !== undefined) {
+				try { closeSync(sourceFd); } catch { /* best-effort close after a failed read */ }
+			}
 		}
+
+		let destFd: number | undefined;
+		let dest: string | undefined;
+		let destCreated = false;
+		try {
+			const artifactsBeforeWrite = safeArtifactDirectory(artifactsDir);
+			if (!artifactsBeforeWrite || !sameFileIdentity(artifactsIdentity, artifactsBeforeWrite)) throw new Error("unsafe artifact directory");
+			mkdirSync(destDir, { recursive: true, mode: 0o700 });
+			const artifactsAfterMkdir = safeArtifactDirectory(artifactsDir);
+			if (!artifactsAfterMkdir || !sameFileIdentity(artifactsIdentity, artifactsAfterMkdir)) throw new Error("artifact directory changed during snapshot");
+			const destDirStat = lstatSync(destDir);
+			if (!destDirStat.isDirectory() || destDirStat.isSymbolicLink()) throw new Error("unsafe received directory");
+			this.cleanupArtifacts();
+			const snapshotId = this.deps.artifactSnapshotId?.() ?? randomUUID();
+			if (!/^[0-9a-f-]{36}$/i.test(snapshotId)) throw new Error("invalid snapshot id");
+			dest = join(destDir, `${snapshotId}.txt`);
+			// `wx` is O_CREAT|O_EXCL: even if somebody guessed the random name and planted a
+			// regular file or symlink, this fails instead of following or overwriting it.
+			destFd = openSync(dest, "wx", 0o600);
+			destCreated = true;
+			writeFileSync(destFd, payload);
+			const destStat = fstatSync(destFd);
+			if (!destStat.isFile() || destStat.nlink > 1 || destStat.size !== payload.byteLength) throw new Error("unsafe snapshot destination");
+		} catch {
+			if (destFd !== undefined) {
+				try { closeSync(destFd); } catch { /* best-effort close before removing our partial file */ }
+				destFd = undefined;
+			}
+			if (destCreated && dest !== undefined) {
+				try { unlinkSync(dest); } catch { /* best-effort removal of our partial snapshot */ }
+			}
+			return { ok: false, error: "artifact snapshot failed" };
+		} finally {
+			if (destFd !== undefined) {
+				try { closeSync(destFd); } catch { /* best-effort close after a failed write */ }
+			}
+		}
+		if (dest === undefined) return { ok: false, error: "artifact snapshot failed" };
 		const quarantined: ExocomArtifactDescriptor = {
 			kind: "exocom_artifact",
 			preview: descriptor.preview,
@@ -765,16 +881,27 @@ export class ExocomPlane {
 		const dir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
 		if (!existsSync(dir)) return;
 		try {
+			const rootStat = lstatSync(dir);
+			if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return;
 			const now = Date.now();
 			const live: Array<{ path: string; mtime: number }> = [];
-			for (const file of readdirSync(dir)) {
-				if (!/^[0-9a-f-]{36}\.txt$/i.test(file)) continue;
-				const path = join(dir, file);
-				const stat = statSync(path);
-				if (!stat.isFile()) continue;
-				if (now - stat.mtimeMs > EXOCOM.ARTIFACT_TTL_MS) { try { unlinkSync(path); } catch { /* best-effort */ } }
-				else live.push({ path, mtime: stat.mtimeMs });
-			}
+			const collect = (candidateDir: string): void => {
+				let dirStat: Stats;
+				try { dirStat = lstatSync(candidateDir); } catch { return; }
+				// Never recurse through a planted `received` link (or any non-directory object).
+				if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return;
+				for (const file of readdirSync(candidateDir)) {
+					if (!/^[0-9a-f-]{36}\.txt$/i.test(file)) continue;
+					const path = join(candidateDir, file);
+					let stat: Stats;
+					try { stat = lstatSync(path); } catch { continue; }
+					if (!stat.isFile() || stat.isSymbolicLink()) continue;
+					if (now - stat.mtimeMs > EXOCOM.ARTIFACT_TTL_MS) { try { unlinkSync(path); } catch { /* best-effort */ } }
+					else live.push({ path, mtime: stat.mtimeMs });
+				}
+			};
+			collect(dir);
+			collect(join(dir, "received"));
 			live.sort((a, b) => a.mtime - b.mtime);
 			// The artifacts directory is shared by every peer in the workspace and this sweep runs on
 			// any of them starting, stopping or spilling. A spill is written, sent and verified by its
@@ -805,9 +932,15 @@ export class ExocomPlane {
 		if (Buffer.byteLength(text, "utf8") <= EXOCOM.INLINE_MAX_BYTES) return text;
 		const dir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
 		mkdirSync(dir, { recursive: true });
+		const dirBefore = safeArtifactDirectory(dir);
+		if (!dirBefore) throw new Error("exocom: unsafe artifact directory");
 		this.cleanupArtifacts();
+		const dirAfterCleanup = safeArtifactDirectory(dir);
+		if (!dirAfterCleanup || !sameFileIdentity(dirBefore, dirAfterCleanup)) throw new Error("exocom: unsafe artifact directory");
 		const path = join(dir, `${msgId}.txt`);
 		writeFileSync(path, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
+		const dirAfterWrite = safeArtifactDirectory(dir);
+		if (!dirAfterWrite || !sameFileIdentity(dirBefore, dirAfterWrite)) throw new Error("exocom: unsafe artifact directory");
 		this.artifacts.set(msgId, path);
 		const descriptor: ExocomArtifactDescriptor = {
 			kind: "exocom_artifact",

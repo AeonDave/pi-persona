@@ -297,19 +297,32 @@ exocom_list({})
 exocom_list({ offset: 24, limit: 24 }) // next page when the first result reports nextOffset: 24
 exocom_send({ target: "night-owl", message: "Review the API boundary and send back concrete risks." })
 exocom_name({ name: "kiln" }) // invent your call-sign; routing still keys on the session
+
+exocom_claim({ work_key: "api-review", write_set: ["src/api"], slice: "Review and fix the API boundary" })
+exocom_ask({ target: "night-owl", work_key: "api-review", question: "Is the transport contract safe to change?" })
+exocom_wait({ work_key: "api-review", ask_id: "<ask_id returned above>" }) // non-blocking; wakes on answer/timeout
+exocom_answer({ work_key: "api-review", ask_id: "<received ask_id>", ok: true, evidence: "Tests and file references" }) // peer side
+exocom_release({ work_key: "api-review" })
 ```
 
 | | Intercom | Exocom |
 |---|---|---|
 | Shape | Hierarchical: supervisor → its spawned sub-agents | Flat: independent Pi ↔ Pi peers |
-| Control | `peek`, `result`, `wait`, `steer`, `stop`; optional coaching messages | Presence plus one-way `exocom_list` / `exocom_send` (+ `exocom_name` to rebrand yourself); a reply is another send with `in_reply_to` |
+| Control | `peek`, `result`, `wait`, `steer`, `stop`; optional coaching messages | Presence/postcards (`list`, `send`, `name`) plus the work ledger (`claim`, `ask`, `answer`/`decline`, non-blocking `wait`, `progress`, `release`) |
 | Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` or `PI_PERSONA_EXOCOM=1` |
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 
-Both planes are asynchronous and keep inbound text fenced. Exocom collaboration is prompt-level grammar
-over this one-way transport, not a task/run workflow runtime. A bounded exchange names a stable work
-key, question, owner, expected evidence, and stop condition; `in_reply_to` continues its thread, and
-a missed message is resent under the same key before peers reconcile the current facts. On exocom,
+Both planes are asynchronous and keep inbound text fenced. Exocom's chat lane remains a prompt-level
+grammar over one-way postcards, but work coordination is now durable runtime state: overlapping open
+write-set claims are rejected, an `ask` remains an obligation until `answer`/`decline` or requester
+release/liveness cleanup, and a pending
+inbound ask limits that participating Pi instance to the response tools plus read-only work. `wait`
+arms a bounded wake without blocking a tool call. This is cooperative coordination between local
+processes sharing the workspace, not OS-level authorization and not a task/run workflow runtime.
+
+A bounded postcard exchange names a stable work key, question, owner, expected evidence, and stop
+condition; `in_reply_to` continues its thread, and a missed message is resent under the same key before
+peers reconcile the current facts. On exocom,
 **replying is the exception, not the default**: an inbound peer message lands with a hint that says to
 reply only if it changes what someone does, and otherwise to send nothing. The per-turn peer brief
 bounds an exchange the same way — on **relevance**: stop once a round no longer moves the work the

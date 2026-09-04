@@ -1,5 +1,5 @@
 /**
- * Collaboration tools over the work ledger: claim / ask / answer / decline / wait / release.
+ * Collaboration tools over the work ledger: claim / ask / answer / decline / wait / progress / release.
  * Wait is non-blocking (MCP cap) — it arms a wake like `timer`.
  */
 import { randomUUID } from "node:crypto";
@@ -19,7 +19,7 @@ const TOKEN = { minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$" } as
 
 const ClaimParams = Type.Object({
 	work_key: Type.String({ ...TOKEN, description: "Stable work key for this slice of collaboration." }),
-	write_set: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 64, description: "Repository-relative paths this session claims." }),
+	write_set: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 64, description: "Repository-relative paths this session claims." }),
 	slice: Type.String({ minLength: 1, maxLength: 256, description: "Short description of the claimed slice." }),
 });
 
@@ -66,7 +66,7 @@ export interface ExocomWorkDeps {
 	/** Canonicalize the public exocom_list target to the authenticated raw session id. */
 	resolveTarget: (target: string) => string;
 	/** Local ledger apply, then wire send routed by kind. */
-	dispatch: (frame: ExocomSemanticFrame) => Promise<{ msg_id: string }>;
+	dispatch: (frame: ExocomSemanticFrame) => Promise<{ msg_id: string; peerWakeDeferred?: true }>;
 	/** Read-before-arm closes the answer-before-wait race. */
 	armWait: (work_key: string, ask_id: string, timeoutMs: number) => ExocomWaitArmResult;
 }
@@ -81,6 +81,11 @@ function tokenOrUuid(value: string | undefined): string {
 
 function result(text: string, details: Record<string, unknown>) {
 	return { content: [{ type: "text" as const, text }], details };
+}
+
+function workToolFailed(renderedResult: unknown): boolean {
+	return !!renderedResult && typeof renderedResult === "object"
+		&& (renderedResult as { isError?: unknown }).isError === true;
 }
 
 export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps): void {
@@ -110,6 +115,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom claim failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
@@ -135,8 +141,12 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				from_session, from_name, to_session, question: params.question,
 				msg_id: randomUUID(), ts,
 			};
-			const { msg_id } = await deps.dispatch(frame);
-			return result(`exocom: asked ${safeTarget} · ask_id=${frame.ask_id} · msg_id=${msg_id}`, { ask_id: frame.ask_id, msg_id, work_key: params.work_key, target: safeTarget });
+			const dispatched = await deps.dispatch(frame);
+			const deferred = dispatched.peerWakeDeferred === true;
+			return result(
+				`exocom: asked ${safeTarget} · ask_id=${frame.ask_id} · msg_id=${dispatched.msg_id}${deferred ? " · ledger committed; peer wake deferred" : ""}`,
+				{ ask_id: frame.ask_id, msg_id: dispatched.msg_id, work_key: params.work_key, target: safeTarget, ...(deferred ? { peerWakeDeferred: true } : {}) },
+			);
 		},
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
@@ -144,6 +154,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom ask failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
@@ -160,8 +171,12 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				from_session, from_name, ok: params.ok, evidence: params.evidence,
 				msg_id: randomUUID(), ts,
 			};
-			const { msg_id } = await deps.dispatch(frame);
-			return result(`exocom: answered ${params.ask_id} · ok=${params.ok} · msg_id=${msg_id}`, { ask_id: params.ask_id, msg_id, ok: params.ok });
+			const dispatched = await deps.dispatch(frame);
+			const deferred = dispatched.peerWakeDeferred === true;
+			return result(
+				`exocom: answered ${params.ask_id} · ok=${params.ok} · msg_id=${dispatched.msg_id}${deferred ? " · ledger committed; peer wake deferred" : ""}`,
+				{ ask_id: params.ask_id, msg_id: dispatched.msg_id, ok: params.ok, ...(deferred ? { peerWakeDeferred: true } : {}) },
+			);
 		},
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Answer "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
@@ -169,6 +184,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom answer failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
@@ -185,8 +201,12 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				from_session, from_name, ok: false, evidence: params.reason ?? "declined",
 				msg_id: randomUUID(), ts,
 			};
-			const { msg_id } = await deps.dispatch(frame);
-			return result(`exocom: declined ${params.ask_id} · msg_id=${msg_id}`, { ask_id: params.ask_id, msg_id, ok: false });
+			const dispatched = await deps.dispatch(frame);
+			const deferred = dispatched.peerWakeDeferred === true;
+			return result(
+				`exocom: declined ${params.ask_id} · msg_id=${dispatched.msg_id}${deferred ? " · ledger committed; peer wake deferred" : ""}`,
+				{ ask_id: params.ask_id, msg_id: dispatched.msg_id, ok: false, ...(deferred ? { peerWakeDeferred: true } : {}) },
+			);
 		},
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Decline "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
@@ -194,6 +214,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom decline failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
@@ -222,6 +243,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom wait failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
@@ -245,6 +267,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom release failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});
@@ -268,6 +291,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom progress failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},
 	});

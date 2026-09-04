@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -33,13 +33,28 @@ let seq = 0;
 // Cross-platform endpoint (POSIX socket file / Windows named pipe via `paths.endpoint`) —
 // this box is win32, so building it via `endpoint()` (rather than hardcoding a `.sock` path
 // and skipping) exercises the real transport here instead of skipping it.
-function planeFor(name: string, inbox: (m: ExocomMessage) => void, decide?: (m: ExocomMessage) => ExocomInboundResult) {
+function planeFor(
+	name: string,
+	inbox: (m: ExocomMessage) => void,
+	decide?: (m: ExocomMessage) => ExocomInboundResult,
+	testSeams: { beforeArtifactRead?: (sourcePath: string) => void; artifactSnapshotId?: () => string } = {},
+) {
+	return planeForHash("h", name, inbox, decide, testSeams);
+}
+
+function planeForHash(
+	hash: string,
+	name: string,
+	inbox: (m: ExocomMessage) => void,
+	decide?: (m: ExocomMessage) => ExocomInboundResult,
+	testSeams: { beforeArtifactRead?: (sourcePath: string) => void; artifactSnapshotId?: () => string } = {},
+) {
 	const session_id = `sid-${name}-${process.pid}-${seq++}`;
 	return new ExocomPlane({
-		agentDir: dir, hash: "h",
+		agentDir: dir, hash,
 		identity: {
 			session_id, name, persona: name, purpose: "", color: "#36F9F6", model: "m",
-			endpoint: endpoint(dir, "h", session_id, process.platform), cwd: "/",
+			endpoint: endpoint(dir, hash, session_id, process.platform), cwd: "/",
 		},
 		getCard: () => ({ name, persona: name, model: "m", context_pct: 0, inbox: 0 }),
 		onInbound: (m) => {
@@ -47,6 +62,7 @@ function planeFor(name: string, inbox: (m: ExocomMessage) => void, decide?: (m: 
 			if (disposition.accepted && disposition.duplicate !== true) inbox(m);
 			return disposition;
 		},
+		...testSeams,
 	});
 }
 
@@ -649,6 +665,182 @@ test("a spill claim is refused when the file at the expected path is a link or e
 		await injectForReply(readerEntry.endpoint, claim(honest, 20_000));
 		assert.equal(got.length, 1, "an ordinary spill still lands");
 		assert.equal(got[0]?.msg_id, honest);
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
+test("artifact snapshotting rejects a source pathname replaced after validation", async () => {
+	const got: ExocomMessage[] = [];
+	const sender = planeFor("replace-claimer", () => {});
+	let replaced = false;
+	const reader = planeFor("replace-reader", (m) => got.push(m), undefined, {
+		beforeArtifactRead: (sourcePath) => {
+			const moved = `${sourcePath}.validated`;
+			renameSync(sourcePath, moved);
+			writeFileSync(sourcePath, "R".repeat(20_000));
+			replaced = true;
+		},
+	});
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, "h").find((p) => p.name === "replace-claimer")!;
+		const readerEntry = readAll(dir, "h").find((p) => p.name === "replace-reader")!;
+		const msgId = randomUUID();
+		const sourcePath = join(exocomRoot(dir, "h"), "artifacts", `${msgId}.txt`);
+		mkdirSync(join(exocomRoot(dir, "h"), "artifacts"), { recursive: true });
+		writeFileSync(sourcePath, "V".repeat(20_000));
+		const claim = signedPlaneMessage(sender, {
+			kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+			from_name: "replace-claimer", hops: 0, ts: new Date().toISOString(),
+			text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: sourcePath, size: 20_000 }),
+		});
+
+		const reply = await injectForReply(readerEntry.endpoint, claim);
+		assert.equal(replaced, true, "the deterministic seam replaced the validated pathname");
+		assert.equal(got.length, 0, "neither the validated bytes nor replacement bytes are delivered after pathname churn");
+		assert.match(reply, /"kind":"nack"/, "the sender sees a failed snapshot rather than a false ACK");
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
+test("receiver snapshots never overwrite an existing exclusive destination", async () => {
+	const got: ExocomMessage[] = [];
+	const fixedSnapshotId = randomUUID();
+	const sender = planeFor("exclusive-claimer", () => {});
+	const reader = planeFor("exclusive-reader", (m) => got.push(m), undefined, {
+		artifactSnapshotId: () => fixedSnapshotId,
+	});
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, "h").find((p) => p.name === "exclusive-claimer")!;
+		const readerEntry = readAll(dir, "h").find((p) => p.name === "exclusive-reader")!;
+		const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+		const receivedDir = join(artifactsDir, "received");
+		mkdirSync(receivedDir, { recursive: true });
+		const occupied = join(receivedDir, `${fixedSnapshotId}.txt`);
+		writeFileSync(occupied, "DO-NOT-OVERWRITE");
+		const msgId = randomUUID();
+		const sourcePath = join(artifactsDir, `${msgId}.txt`);
+		writeFileSync(sourcePath, "S".repeat(20_000));
+		const claim = signedPlaneMessage(sender, {
+			kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+			from_name: "exclusive-claimer", hops: 0, ts: new Date().toISOString(),
+			text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: sourcePath, size: 20_000 }),
+		});
+
+		const reply = await injectForReply(readerEntry.endpoint, claim);
+		assert.equal(readFileSync(occupied, "utf8"), "DO-NOT-OVERWRITE");
+		assert.equal(got.length, 0, "an occupied receiver destination fails closed");
+		assert.match(reply, /"kind":"nack"/);
+	} finally { await sender.stop(); await reader.stop(); }
+});
+
+test("received artifact snapshots are reclaimed by the existing TTL and file cap", async () => {
+	const hash = `received-cleanup-${seq++}`;
+	const receivedDir = join(exocomRoot(dir, hash), "artifacts", "received");
+	mkdirSync(receivedDir, { recursive: true });
+	const expired = join(receivedDir, `${randomUUID()}.txt`);
+	writeFileSync(expired, "expired");
+	const expiredAt = (Date.now() - EXOCOM.ARTIFACT_TTL_MS - 60_000) / 1000;
+	utimesSync(expired, expiredAt, expiredAt);
+	const capped = Array.from({ length: EXOCOM.ARTIFACT_MAX_FILES + 5 }, () => join(receivedDir, `${randomUUID()}.txt`));
+	const capAge = (Date.now() - EXOCOM.ACK_TIMEOUT_MS - 60_000) / 1000;
+	for (const path of capped) {
+		writeFileSync(path, "snapshot");
+		utimesSync(path, capAge, capAge);
+	}
+	const sessionId = `sid-received-sweeper-${process.pid}-${seq++}`;
+	const sweeper = new ExocomPlane({
+		agentDir: dir, hash,
+		identity: {
+			session_id: sessionId, name: "received-sweeper", persona: "received-sweeper", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, hash, sessionId, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "received-sweeper", persona: "received-sweeper", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true }),
+	});
+	try {
+		await sweeper.start();
+		assert.equal(existsSync(expired), false, "expired receiver snapshots are reclaimed");
+		assert.ok(
+			readdirSync(receivedDir).filter((file) => /^[0-9a-f-]{36}\.txt$/i.test(file)).length <= EXOCOM.ARTIFACT_MAX_FILES - 1,
+			"receiver snapshots obey the same soft capacity sweep as sender spills",
+		);
+	} finally { await sweeper.stop(); }
+});
+
+test("received cleanup never follows a planted directory link", async (t) => {
+	const hash = `received-link-${seq++}`;
+	const artifactsDir = join(exocomRoot(dir, hash), "artifacts");
+	const outsideDir = join(dir, `outside-received-${seq++}`);
+	mkdirSync(artifactsDir, { recursive: true });
+	mkdirSync(outsideDir, { recursive: true });
+	const outsideFile = join(outsideDir, `${randomUUID()}.txt`);
+	writeFileSync(outsideFile, "must survive");
+	const expiredAt = (Date.now() - EXOCOM.ARTIFACT_TTL_MS - 60_000) / 1000;
+	utimesSync(outsideFile, expiredAt, expiredAt);
+	try {
+		symlinkSync(outsideDir, join(artifactsDir, "received"), process.platform === "win32" ? "junction" : "dir");
+	} catch {
+		t.skip("this host does not permit directory links");
+		return;
+	}
+	const sessionId = `sid-received-link-sweeper-${process.pid}-${seq++}`;
+	const sweeper = new ExocomPlane({
+		agentDir: dir, hash,
+		identity: {
+			session_id: sessionId, name: "received-link-sweeper", persona: "received-link-sweeper", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, hash, sessionId, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "received-link-sweeper", persona: "received-link-sweeper", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true }),
+	});
+	try {
+		await sweeper.start();
+		assert.equal(existsSync(outsideFile), true, "cleanup did not cross the received-directory trust boundary");
+	} finally { await sweeper.stop(); }
+});
+
+test("a planted artifacts directory link cannot redirect spill reads or writes outside Exocom", async (t) => {
+	const hash = `artifact-root-link-${seq++}`;
+	const root = exocomRoot(dir, hash);
+	const artifactsDir = join(root, "artifacts");
+	const outsideDir = join(dir, `outside-artifact-root-${seq++}`);
+	mkdirSync(root, { recursive: true });
+	mkdirSync(outsideDir, { recursive: true });
+	try {
+		symlinkSync(outsideDir, artifactsDir, process.platform === "win32" ? "junction" : "dir");
+	} catch {
+		t.skip("this host does not permit directory links");
+		return;
+	}
+
+	const got: ExocomMessage[] = [];
+	const sender = planeForHash(hash, "root-link-sender", () => {});
+	const reader = planeForHash(hash, "root-link-reader", (m) => got.push(m));
+	await sender.start();
+	await reader.start();
+	try {
+		const senderEntry = readAll(dir, hash).find((p) => p.name === "root-link-sender")!;
+		const readerEntry = readAll(dir, hash).find((p) => p.name === "root-link-reader")!;
+		const msgId = randomUUID();
+		const claimedPath = join(artifactsDir, `${msgId}.txt`);
+		writeFileSync(join(outsideDir, `${msgId}.txt`), "X".repeat(20_000));
+		const claim = signedPlaneMessage(sender, {
+			kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+			from_name: "root-link-sender", hops: 0, ts: new Date().toISOString(),
+			text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: claimedPath, size: 20_000 }),
+		});
+
+		const reply = await injectForReply(readerEntry.endpoint, claim);
+		assert.equal(got.length, 0, "the receiver does not ingest a file reached through a linked artifacts root");
+		assert.match(reply, /"kind":"nack".*artifact directory/i);
+		assert.equal(existsSync(join(outsideDir, "received")), false, "snapshot creation never crosses the linked root");
+		await assert.rejects(
+			() => sender.send("root-link-reader", "S".repeat(20_000)),
+			/unsafe artifact directory/i,
+			"the sender does not spill into a linked external directory",
+		);
 	} finally { await sender.stop(); await reader.stop(); }
 });
 

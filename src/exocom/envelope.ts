@@ -52,7 +52,7 @@ const timestamp = (v: unknown): v is string =>
 	&& /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(v)
 	&& Number.isFinite(Date.parse(v));
 const writeSet = (v: unknown): v is string[] =>
-	Array.isArray(v) && v.length <= 64 && v.every((p) => str(p) && p.length > 0 && p.length <= 256);
+	Array.isArray(v) && v.length > 0 && v.length <= 64 && v.every((p) => str(p) && p.length > 0 && p.length <= 256);
 
 export function isSemanticFrame(v: unknown): v is ExocomSemanticFrame {
 	if (!v || typeof v !== "object") return false;

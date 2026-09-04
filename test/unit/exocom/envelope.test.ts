@@ -57,6 +57,7 @@ test("artifact descriptors require the exact marker and validated fields", () =>
 test("isExocomFrame accepts semantic collaboration kinds and rejects ask to_session *", () => {
 	const base = { from_session: "s1", from_name: "orion", msg_id: "m9", ts: "2026-09-01T00:00:00Z" };
 	assert.equal(isExocomFrame({ kind: "claim", work_key: "wk1", write_set: ["src/a.ts"], slice: "a", ...base }), true);
+	assert.equal(isExocomFrame({ kind: "claim", work_key: "wk1", write_set: [], slice: "a", ...base }), false, "a claim must name at least one owned path");
 	assert.equal(isExocomFrame({ kind: "ask", ask_id: "a1", work_key: "wk1", to_session: "s2", question: "ok?", ...base }), true);
 	assert.equal(isExocomFrame({ kind: "ask", ask_id: "a1", work_key: "wk1", to_session: "*", question: "ok?", ...base }), false);
 	assert.equal(isExocomFrame({ kind: "answer", ask_id: "a1", work_key: "wk1", ok: true, evidence: "yes", ...base }), true);

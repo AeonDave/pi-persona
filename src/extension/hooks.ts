@@ -325,7 +325,13 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// set when exocom is on AND canUseBus, so this is a no-op (undefined ⇒ no prompt change)
 		// whenever exocom is off, matching every other opt-in surface in this file.
 		if (exocom.plane) {
-			const peers = exocom.plane.listPeers();
+			let peers: DisplayPeer[] | undefined;
+			try {
+				peers = exocom.plane.listPeers();
+			} catch {
+				// Peer awareness is opportunistic. A transient registry I/O failure must not abort
+				// Pi's turn or prevent the rest of the system prompt from reaching the model.
+			}
 			const xcaps = h.controller.capabilities;
 			// Holding the bus says nothing about `delegate` (canUseBus keys off `intercom` alone), so
 			// read the persona the way h.delegationBrief does — absent capabilities ⇒ unrestricted — but
@@ -337,16 +343,18 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			// `delegateTargets` whenever the delegate tool is absent (core/capabilities.ts), so the
 			// second conjunct already implies the first and no test can kill the first alone. Kept
 			// because it states the structural rule the second conjunct only happens to encode.
-			const canDelegate = xcaps ? canFanOut(xcaps) && h.agents.some((a) => canDelegateTo(xcaps, a.name)) : h.agents.length > 0;
-			const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })), {
-				canDelegate,
-				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
-				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
-				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
-				canAskHuman: ctx.hasUI === true,
-				namedByModel: exocom.namedByModel,
-			});
-			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
+			if (peers) {
+				const canDelegate = xcaps ? canFanOut(xcaps) && h.agents.some((a) => canDelegateTo(xcaps, a.name)) : h.agents.length > 0;
+				const xbrief = buildExocomBrief(peers.map((p) => ({ name: p.displayName, persona: p.persona })), {
+					canDelegate,
+					// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
+					// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
+					// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
+					canAskHuman: ctx.hasUI === true,
+					namedByModel: exocom.namedByModel,
+				});
+				if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
+			}
 			if (exocom.ledgerFile) {
 				try {
 					const block = exocom.pendingAskPrompt(ctx);
@@ -409,10 +417,10 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			if (pending.length > 0 && !constrainedTurnAllows(event.toolName)) {
 				h.telemetryToolStartedAt.delete(event.toolCallId);
 				h.telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
-				const block = exocom.pendingAskPrompt(ctx);
+				const omitted = pending.length > 1 ? `; ${pending.length - 1} more pending` : "";
 				return {
 					block: true,
-					reason: `exocom: pending ask(s) to this session — only exocom_answer, exocom_decline, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id})${block ? `\n${block}` : ""}`,
+					reason: `exocom: pending ask(s) to this session — only exocom_answer, exocom_decline, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id}${omitted})`,
 				};
 			}
 		}
