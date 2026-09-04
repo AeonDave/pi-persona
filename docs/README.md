@@ -10,12 +10,20 @@ This folder contains the long-form documentation that defines how the project is
   - Strategy SDK and built-in orchestration behavior.
 - [`SPINE.md`](./SPINE.md)
   - Shared behavioral spine prompt layer and rollout controls.
+- [`TELEMETRY.md`](./TELEMETRY.md)
+  - Vendor-neutral observer contract, privacy boundary, persistence, and consumer conformance.
+
+## Supporting evidence
+
+- [`REVIEW-2026-09-04.md`](./REVIEW-2026-09-04.md)
+  - Quality review and real multi-Pi validation for the v1.13.0 release.
 
 ## Quick map
 
 - **For users / operators:** start from [README](../README.md) and follow links into these design docs as needed.
 - **For contributors:** begin at `ARCHITECTURE.md`, then `STRATEGIES.md` for implementation details.
 - **For behavior-layer changes:** consult `SPINE.md` and `src/core` / `src/persona/spine.ts` together.
+- **For telemetry producers or consumers:** start with `TELEMETRY.md` and its conformance corpus.
 
 ## Documentation maintenance notes
 
