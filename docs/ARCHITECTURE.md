@@ -128,9 +128,14 @@ These are the guardrails a contributor must not violate. They are enforced in co
 
 ## Module layout
 
-Downward-only, acyclic dependencies: `core ← all`; `engine`/`bus → core`; `orchestration →
-engine + bus + core`; `persona → orchestration + core`; `exocom → core + bus` (it reuses the
-fence and the broker's wire framing); `tools`/`ui → lower layers`; `src/extension/*` is extracted factory internals (must not import `extension.ts`); `extension.ts` remains the only composition root (`package.json` `pi.extensions` → `./src/extension.ts`).
+Domain dependencies remain downward-only and acyclic: `core ← all`; `engine`/`bus → core`;
+`orchestration → engine + bus + core`; `persona → orchestration + core`; the Exocom transport and
+ledger → `core + bus`; `tools`/`ui → lower layers`. `src/exocom/install.ts` is deliberately the
+composition adapter for that feature, colocated with Exocom but allowed to wire extension, persona,
+engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain layer.
+`src/extension/*` contains extracted factory internals (which must not import `extension.ts`), while
+`extension.ts` remains the package entry and composition root (`package.json` `pi.extensions` →
+`./src/extension.ts`).
 
 - **`src/agents/`** — the agent definition (`agent.ts`: `AgentConfig`/`parseAgent`, the
   `persona: false` sibling of the persona parser; both share one frontmatter engine).
@@ -163,7 +168,8 @@ fence and the broker's wire framing); `tools`/`ui → lower layers`; `src/extens
   delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
   `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (workspace JSONL work ledger),
   `wait.ts`/`gate.ts` (non-blocking join + inbound constrained-turn allowlist),
-  `install.ts` (session-scoped plane + ledger + wait wiring; not an ExtensionFactory).
+  `install.ts` (the feature's composition adapter: session-scoped plane + ledger + wait/tool/hook
+  wiring; not an ExtensionFactory and not constrained to the transport layer's dependencies).
 - **`src/telemetry/`** — a generic, versioned observer/export contract for future plugins: projected
   lifecycle metadata only, never an agent-message router or control surface.
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
@@ -421,14 +427,18 @@ external comm.)
 
 Exocom still supplies fenced one-way postcards and presence; chat `message` never mutates shared
 work state. On top of that, a workspace work ledger (`ledger.ts`, tools in `tools/exocom-work.ts`)
-records claims/asks/answers/releases. `exocom_ask` canonicalizes the public `exocom_list` target
+records claims/asks/answers/progress/releases. `exocom_ask` canonicalizes the public `exocom_list` target
 through `plane.resolvePeer` (raw session ids on the ledger, never the display name). A pending ask
 to this session constrains the turn (`gate.ts`: answer/decline plus read-only tools) and both the
-prompt and the gate render `pendingAskPrompt` — registry display name keyed by `from_session`, never
-envelope `from_name`. `exocom_wait` is non-blocking and wakes on a separate idle notifier from
-postcard `exocom_received` delivery. Clean shutdown releases this session's claims; a vanished
-registry owner is pruned on the next ledger transaction (live registry sessions are the lease).
-This is not a delegate/council replacement and not a task/run workflow runtime.
+prompt renders a bounded `pendingAskPrompt` — one complete, fenced next question plus an omitted
+count; the tool gate repeats only its `ask_id`, not the peer text. Registry display name is keyed by
+`from_session`, never envelope `from_name`. `exocom_wait` is non-blocking and wakes on a separate
+idle notifier from postcard `exocom_received` delivery. Clean shutdown attempts to release this
+session's claims and outbound asks; if that best-effort write cannot complete, the vanished registry
+owner is pruned on the next ledger transaction (live registry sessions are the lease). This gate is
+cooperative coordination for participating local Pi processes, not filesystem authorization or
+isolation from another same-user process. It is not a delegate/council replacement and not a task/run
+workflow runtime.
 
 - **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or `--exocom` (a `pi.registerFlag`
   convenience); additionally gated by the active persona's `canUseBus`, re-evaluated on every persona
@@ -441,10 +451,13 @@ This is not a delegate/council replacement and not a task/run workflow runtime.
   its own `session_id`), and heartbeats it; discovery is
   just reading that directory. Dead-pid and stale-heartbeat entries are pruned on read — no host
   election, no failover, genuinely peer-to-peer.
-- **Interaction model — one-way + async reply, never blocking.** `exocom_send` returns a `msg_id`
-  immediately; a reply is just another `exocom_send` with `in_reply_to` set, delivered back as a
-  correlated follow-up — no blocking await, no mutual-wait deadlock class. `target: "*"` broadcasts to
-  every live peer (best-effort; one unreachable peer doesn't fail the rest).
+- **Interaction model — postcards plus a durable, non-blocking join.** `exocom_send` returns a
+  `msg_id` immediately; a chat reply is just another `exocom_send` with `in_reply_to` set, delivered
+  back as a correlated follow-up. `target: "*"` broadcasts postcards to every live peer
+  (best-effort; one unreachable peer doesn't fail the rest). Work coordination is separate:
+  `exocom_ask` commits an obligation to the ledger, `answer`/`decline` settles it, and `exocom_wait`
+  arms a bounded idle wake rather than blocking the tool call. The signed semantic frame is a wake
+  signal; the shared ledger remains the source of truth if delivery is deferred.
 - **Reply routing is session-stable.** `exocom_list` keeps human display names (`name`/`name#2`),
   while inbound reply hints use `name@<96-bit session hash>`. The authenticated registry entry
   (endpoint and signing key) is cached with the bounded inbound context, so a stale/pruned sender
@@ -474,9 +487,13 @@ This is not a delegate/council replacement and not a task/run workflow runtime.
   never claims that an artifact exists. A descriptor is verified at the RECEIVER's transport boundary
   before anything reaches its model: the path must be this workspace's own `artifacts/<msg_id>.txt`,
   the file must be a regular unlinked file whose size equals the declared one, and that size must sit
-  between the inline cap and `ARTIFACT_MAX_BYTES`; anything else is NACKed to the sender rather than
-  advertised as readable. The per-sender byte window charges only what crossed the wire, not a spill's
-  declared size, so a legitimate large spill is delivered instead of being refused as "budget".
+  between the inline cap and `ARTIFACT_MAX_BYTES`. The receiver then reads through one held,
+  identity-checked descriptor, rechecks that the source did not change, and writes an unpredictable
+  receiver-owned snapshot with exclusive creation; only that snapshot path is advertised to the
+  model. Anything else is NACKed rather than exposed as readable. Received snapshots join sender
+  spills under the same TTL/file-cap cleanup. The per-sender byte window charges only what crossed
+  the wire, not a spill's declared size, so a legitimate large spill is delivered instead of being
+  refused as "budget".
   Transport guardrails — enforced at the boundary, and not the whole discipline: a hop cap, a
   per-sender rate+byte budget, and a (sender, msg_id)
   dedup set so an at-least-once resend can't double-trigger a turn. Reply-hop history is keyed by
@@ -500,13 +517,17 @@ This is not a delegate/council replacement and not a task/run workflow runtime.
   self-chosen, so the fallback was an interception route), and a peer whose call-sign happens to take
   that shape is reachable through the qualified address the refusal names — and
   `exocom_name({ name })` rebrands this instance's display call-sign (the registry key stays the
-  session id, so a rename moves no state and grants nothing). Pi has no dynamic
+  session id, so a rename moves no state and grants nothing). The ledger tools are
+  `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`,
+  `exocom_progress`, and `exocom_release`; they are capability-gated with the postcard tools. Pi has
+  no dynamic
   unregister API, so definitions registered by a prior join may remain in the registry; the live
   accessor, capability gate, and active-tool set all deny them whenever the plane is stopped.
 - **Inbound delivery is bounded without loss.** Each external message is injected under the same
-  byte cap whether it is plain text or an artifact descriptor. Bursts remain FIFO-queued and drain
-  one message per rate-limited wake; collapsed cards show only a short preview, while expanding the
-  card reveals that delivered message. A presentation cap never discards the rest of the queue.
+  byte cap whether it is plain text or an artifact descriptor. Bursts remain FIFO-queued; each
+  rate-limited wake drains as many whole messages as fit the bounded batch surface, leaving the rest
+  queued in order. Collapsed cards show only a short preview, while expanding the card reveals the
+  delivered batch. A presentation cap never discards the rest of the queue.
 
 exocom never touches the delegate/council/broker path. A single instance can be **both** a supervisor
 (delegating its own spawned children via intercom/broker) **and** an exocom peer (collaborating with

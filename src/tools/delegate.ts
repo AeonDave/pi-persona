@@ -215,12 +215,38 @@ function coerceBriefField(value: unknown, label: string): { ok: true; value?: Pa
 		return { ok: false, error: `delegate: ${label} must be an object.` };
 	}
 	const brief = { ...(parsed.value as Record<string, unknown>) };
+	for (const field of ["objective", "scopeRoe", "position"] as const) {
+		if (typeof brief[field] !== "string") {
+			return { ok: false, error: `delegate: ${label}.${field} must be a string.` };
+		}
+	}
 	for (const field of ["constraints", "requiredArtifacts", "stopConditions"] as const) {
 		const list = coerceStringList(brief[field], `${label}.${field}`);
 		if (!list.ok) return list;
-		if (list.value !== undefined) brief[field] = list.value;
+		if (list.value === undefined) return { ok: false, error: `delegate: ${label}.${field} is required.` };
+		brief[field] = list.value;
 	}
 	return { ok: true, value: brief as Partial<DelegationBrief> };
+}
+
+function decodedTaskFieldError(bag: Record<string, unknown>, index: number): string | undefined {
+	const label = `tasks[${index}]`;
+	for (const field of ["agent", "task"] as const) {
+		if (typeof bag[field] !== "string") return `delegate: ${label}.${field} must be a string.`;
+	}
+	for (const field of ["name", "role", "model", "outputContract"] as const) {
+		if (bag[field] !== undefined && typeof bag[field] !== "string") {
+			return `delegate: ${label}.${field} must be a string.`;
+		}
+	}
+	if (bag.isolation !== undefined && bag.isolation !== "none" && bag.isolation !== "worktree") {
+		return `delegate: ${label}.isolation must be "none" or "worktree".`;
+	}
+	if (bag.mcp !== undefined && typeof bag.mcp !== "boolean") return `delegate: ${label}.mcp must be a boolean.`;
+	if (bag.timeoutMs !== undefined && (typeof bag.timeoutMs !== "number" || !Number.isFinite(bag.timeoutMs))) {
+		return `delegate: ${label}.timeoutMs must be a finite number.`;
+	}
+	return undefined;
 }
 
 function coerceOneTask(raw: unknown, index: number): { ok: true; task: DelegateTask } | { ok: false; error: string } {
@@ -230,6 +256,8 @@ function coerceOneTask(raw: unknown, index: number): { ok: true; task: DelegateT
 		return { ok: false, error: `delegate: tasks[${index}] must be an object.` };
 	}
 	const bag = { ...(parsed.value as Record<string, unknown>) };
+	const fieldError = decodedTaskFieldError(bag, index);
+	if (fieldError) return { ok: false, error: fieldError };
 	const brief = coerceBriefField(bag.brief, `tasks[${index}].brief`);
 	if (!brief.ok) return brief;
 	if (brief.value !== undefined) bag.brief = brief.value;

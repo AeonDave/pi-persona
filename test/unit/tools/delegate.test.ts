@@ -675,6 +675,22 @@ test("coerceDelegateParams reports malformed JSON instead of leaving a character
 	assert.match(malformed.error, /JSON|parse/i);
 });
 
+test("coerceDelegateParams validates decoded task fields instead of trusting the JSON string", () => {
+	const invalid = [
+		{ value: { task: "inspect" }, field: /agent/ },
+		{ value: { agent: "operator", task: 7 }, field: /task/ },
+		{ value: { agent: "operator", task: "inspect", role: 7 }, field: /role/ },
+		{ value: { agent: "operator", task: "inspect", mcp: "yes" }, field: /mcp/ },
+		{ value: { agent: "operator", task: "inspect", isolation: "shared" }, field: /isolation/ },
+		{ value: { agent: "operator", task: "inspect", brief: { ...completeBrief(), objective: 7 } }, field: /brief\.objective/ },
+	];
+	for (const sample of invalid) {
+		const coerced = coerceDelegateParams({ tasks: JSON.stringify([sample.value]) });
+		assert.equal(coerced.ok, false, `decoded ${String(sample.field)} must be rejected`);
+		if (!coerced.ok) assert.match(coerced.error, sample.field);
+	}
+});
+
 test("the max-children ceiling still drops surplus tasks rather than running them", async () => {
 	let runs = 0;
 	const engine = engineThat((s) => {

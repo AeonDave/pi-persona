@@ -64,6 +64,16 @@ test("claim allows disjoint write sets", () => {
 	assert.equal(second.ok, true);
 });
 
+test("ledger reducer rejects a claim with an empty write_set", () => {
+	const applied = applyLedgerEvent(emptyLedger(), claim({ write_set: [] }));
+	assert.equal(applied.ok, false);
+	if (!applied.ok) assert.match(applied.error, /write_set is empty/i);
+	const malformed = applyLedgerEvent(emptyLedger(), { kind: "claim" } as never);
+	assert.equal(malformed.ok, false, "a malformed direct caller is NACKed rather than throwing before validation");
+	const nullEvent = applyLedgerEvent(emptyLedger(), null as never);
+	assert.equal(nullEvent.ok, false, "a null direct caller is NACKed rather than throwing before validation");
+});
+
 test("ask NACKs more than maxAsksFromTo pending asks from the same sender to the same target", () => {
 	let state = emptyLedger();
 	for (let i = 1; i <= LEDGER_LIMITS.maxAsksFromTo; i++) {
@@ -228,6 +238,20 @@ test("pending ask rendering sanitizes attribution and fences the peer question",
 	assert.doesNotMatch(block ?? "", /from_name=/);
 });
 
+test("pending ask rendering exposes one complete bounded next ask and an omitted count", () => {
+	const fullQuestion = `${"Q".repeat(4_090)}TAIL`;
+	const asks = ["ask-1", "ask-2", "ask-3"].map((ask_id) => ({
+		ask_id, work_key: "wk1", from_session: "peer-1", from_name: "eve",
+		to_session: "sess-b", question: fullQuestion, msg_id: `msg-${ask_id}`, ts,
+	}));
+	const block = pendingAskBlock(asks, () => "registry-peer") ?? "";
+	assert.match(block, /ask_id=ask-1/);
+	assert.match(block, /TAIL/, "the one ask shown is complete; the receiver has no separate detail-fetch tool");
+	assert.match(block, /omitted=2/);
+	assert.doesNotMatch(block, /ask_id=ask-2|ask_id=ask-3/);
+	assert.ok(Buffer.byteLength(block, "utf8") <= 14 * 1_024, "one maximum-size question keeps the model-facing aggregate bounded");
+});
+
 test("ledger IO rejects a hard-linked ledger instead of reading or appending through it", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-link-"));
 	const target = join(dir, "target.jsonl");
@@ -346,6 +370,21 @@ test("commit compacts an oversized historical journal instead of bricking future
 	}
 });
 
+test("tail recovery never reads or repairs a journal beyond the hard byte ceiling", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-hard-ceiling-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		const oversized = " ".repeat(LEDGER_LIMITS.maxBytes + 1);
+		writeFileSync(ledger, oversized, "utf8");
+		const committed = commitLedgerEvent(ledger, claim());
+		assert.equal(committed.ok, false);
+		if (!committed.ok) assert.match(committed.error, /exceeds bounded size/i);
+		assert.equal(readFileSync(ledger, "utf8"), oversized, "fail-closed recovery leaves an oversized journal untouched");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("transactionally prunes non-live state under the same lock before applying the new event", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-prune-commit-"));
 	const ledger = join(dir, "ledger.jsonl");
@@ -443,6 +482,72 @@ test("compaction handles short writes and never falls back to an in-place replac
 		});
 		assert.equal(shortWrite.ok, true);
 		assert.equal(loadLedger(ledger).claims.length, 1);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a failed partial append rolls back under the lock so the next commit remains durable", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-append-rollback-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		const failed = commitLedgerEvent(ledger, claim(), {
+			io: { write: (fd, data, offset, length) => {
+				writeSync(fd, data, offset, Math.min(1, length));
+				return 0;
+			} },
+		});
+		assert.equal(failed.ok, false);
+		assert.equal(readFileSync(ledger, "utf8"), "", "a failed append must not leave a partial record behind");
+		const committed = commitLedgerEvent(ledger, claim({ msg_id: "claim-after-rollback" }));
+		assert.equal(committed.ok, true);
+		assert.equal(loadLedger(ledger).claims[0]?.msg_id, "claim-after-rollback");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a successful commit recovers a pre-existing incomplete trailing record under the lock", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-trailing-record-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		writeFileSync(ledger, JSON.stringify(claim()).slice(0, -8), "utf8");
+		const committed = commitLedgerEvent(ledger, claim({
+			work_key: "wk2", from_session: "sess-b", from_name: "vega", write_set: ["src/b.ts"], msg_id: "claim-after-recovery",
+		}));
+		assert.equal(committed.ok, true);
+		const reloaded = loadLedger(ledger);
+		assert.deepEqual(reloaded.claims.map((entry) => entry.msg_id), ["claim-after-recovery"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("recovery preserves a complete final record that only lost its newline", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-final-newline-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		writeFileSync(ledger, JSON.stringify(claim()), "utf8");
+		const committed = commitLedgerEvent(ledger, claim({
+			work_key: "wk2", from_session: "sess-b", from_name: "vega", write_set: ["src/b.ts"], msg_id: "claim-after-newline-repair",
+		}));
+		assert.equal(committed.ok, true);
+		assert.deepEqual(loadLedger(ledger).claims.map((entry) => entry.msg_id), ["msg-claim-a", "claim-after-newline-repair"]);
+		assert.match(readFileSync(ledger, "utf8"), /\n$/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("an unknown unterminated tail fails closed instead of swallowing a successful commit", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-unknown-tail-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		writeFileSync(ledger, "not-a-ledger-record", "utf8");
+		const committed = commitLedgerEvent(ledger, claim());
+		assert.equal(committed.ok, false);
+		if (!committed.ok) assert.match(committed.error, /unterminated|tail/i);
+		assert.equal(readFileSync(ledger, "utf8"), "not-a-ledger-record");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

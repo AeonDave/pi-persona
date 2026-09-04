@@ -45,7 +45,7 @@ import { makeBrokerClient } from "../../src/bus/broker/client.ts";
 import { brokerEndpoint } from "../../src/bus/broker/paths.ts";
 import { IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS } from "../../src/engine/async.ts";
 import { attributePeer, fenceUntrusted } from "../../src/core/fence.ts";
-import { endpoint as endpointFor, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
+import { endpoint as endpointFor, ledgerPath, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
 import { ExocomPlane } from "../../src/exocom/plane.ts";
 import { registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
@@ -109,7 +109,8 @@ function makeMockPi() {
 		sendMessage: (message: unknown, options: unknown) => {
 			sentMessages.push({ message, options });
 		},
-		getAllTools: () => activeTools.map((n) => ({ name: n })),
+		getAllTools: () => [...new Set([...activeTools, ...Object.keys(tools)])].map((n) => ({ name: n })),
+		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
 			activeTools = names;
 		},
@@ -120,6 +121,7 @@ function makeMockPi() {
 	return {
 		pi: pi as unknown as ExtensionAPI,
 		toolNames: () => Object.keys(tools),
+		activeToolNames: () => [...activeTools],
 		tool: (name: string) => tools[name],
 		messageRenderer: (customType: string) => messageRenderers[customType],
 		entryRenderer: (customType: string) => entryRenderers[customType],
@@ -3874,6 +3876,288 @@ function entryFileFor(cwd: string, sessionId: string): string {
 	return registryPath(process.env.PI_AGENT_DIR as string, workspaceHash(cwd), sessionKey(sessionId));
 }
 
+test("a durable exocom ask reports a deferred peer wake without exposing the peer's NACK text", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const { ctx, notes } = makeExocomCtx(cwd, "dispatch-nack-session");
+	const originalSendSemantic = ExocomPlane.prototype.sendSemantic;
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: "dispatch-nack-peer",
+			name: "orion",
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, "dispatch-nack-peer", process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+		ExocomPlane.prototype.sendSemantic = async () => {
+			throw new Error("peer supplied an untrusted NACK reason");
+		};
+
+		const ask = m.tool("exocom_ask") as { execute: AnyFn };
+		const result = await ask.execute("dispatch-nack", {
+			work_key: "wake-deferred",
+			target: "orion",
+			question: "Can you inspect this?",
+		}, undefined, undefined, ctx);
+		const text = String(result.content?.[0]?.text ?? "");
+		assert.match(text, /ledger committed/i);
+		assert.match(text, /peer wake deferred/i);
+		assert.doesNotMatch(text, /untrusted NACK reason/);
+		assert.doesNotMatch(notes.join("\n"), /untrusted NACK reason/);
+	} finally {
+		ExocomPlane.prototype.sendSemantic = originalSendSemantic;
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("answering a durable ask succeeds when registry lookup fails after the ledger read", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "answer-registry-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "answer-registry-b");
+	const originalListPeers = ExocomPlane.prototype.listPeers;
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("list-answer-registry", {}, undefined, undefined, ctxA);
+		const target = (roster.details as { peers: Array<{ target: string }> }).peers[0]?.target;
+		assert.ok(target);
+		const asked = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("ask-answer-registry", {
+			target,
+			work_key: "answer-registry",
+			question: "Can this be answered from the durable ledger?",
+		}, undefined, undefined, ctxA);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+
+		let reads = 0;
+		ExocomPlane.prototype.listPeers = function () {
+			reads += 1;
+			if (reads === 1) return originalListPeers.call(this);
+			throw new Error("registry unavailable after ledger read");
+		};
+		const answered = await (b.tool("exocom_answer") as { execute: AnyFn }).execute("answer-without-wake-target", {
+			ask_id: askId,
+			work_key: "answer-registry",
+			ok: true,
+			evidence: "durable answer",
+		}, undefined, undefined, ctxB);
+		assert.match(String(answered.content?.[0]?.text ?? ""), /ledger committed.*peer wake deferred/i);
+		assert.equal((answered.details as { peerWakeDeferred?: boolean }).peerWakeDeferred, true);
+		ExocomPlane.prototype.listPeers = originalListPeers;
+
+		const waited = await (a.tool("exocom_wait") as { execute: AnyFn }).execute("read-durable-answer", {
+			work_key: "answer-registry",
+			ask_id: askId,
+		}, undefined, undefined, ctxA);
+		assert.match(String(waited.content?.[0]?.text ?? ""), /already answered.*durable answer/is);
+	} finally {
+		ExocomPlane.prototype.listPeers = originalListPeers;
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("exocom_wait catches an answer committed between its initial ledger read and waiter registration", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "wait-race-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "wait-race-b");
+	const originalListPeers = ExocomPlane.prototype.listPeers;
+	const originalSendSemantic = ExocomPlane.prototype.sendSemantic;
+	let answerPromise: Promise<unknown> | undefined;
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("list-wait-race", {}, undefined, undefined, ctxA);
+		const target = (roster.details as { peers: Array<{ target: string }> }).peers[0]?.target;
+		assert.ok(target);
+		const asked = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("ask-wait-race", {
+			target,
+			work_key: "wait-race",
+			question: "Can the wait arm race with this answer?",
+		}, undefined, undefined, ctxA);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+
+		let injectAnswer = true;
+		ExocomPlane.prototype.sendSemantic = async () => { throw new Error("wake intentionally deferred"); };
+		ExocomPlane.prototype.listPeers = function () {
+			if (injectAnswer) {
+				injectAnswer = false;
+				answerPromise = (b.tool("exocom_answer") as { execute: AnyFn }).execute("answer-inside-wait-read", {
+					ask_id: askId,
+					work_key: "wait-race",
+					ok: true,
+					evidence: "committed during the read",
+				}, undefined, undefined, ctxB) as Promise<unknown>;
+			}
+			return originalListPeers.call(this);
+		};
+
+		const waited = await (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-race", {
+			work_key: "wait-race",
+			ask_id: askId,
+		}, undefined, undefined, ctxA);
+		await answerPromise;
+		assert.match(String(waited.content?.[0]?.text ?? ""), /already answered.*committed during the read/is);
+		assert.equal((waited.details as { status?: string }).status, "answered");
+	} finally {
+		ExocomPlane.prototype.listPeers = originalListPeers;
+		ExocomPlane.prototype.sendSemantic = originalSendSemantic;
+		await answerPromise?.catch(() => {});
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("exocom_wait removes its timer when the post-registration ledger read fails", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const ledger = ledgerPath(agentDir, hash);
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "wait-read-failure-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "wait-read-failure-b");
+	const originalListPeers = ExocomPlane.prototype.listPeers;
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("list-wait-read-failure", {}, undefined, undefined, ctxA);
+		const target = (roster.details as { peers: Array<{ target: string }> }).peers[0]?.target;
+		assert.ok(target);
+		const asked = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("ask-wait-read-failure", {
+			target,
+			work_key: "wait-read-failure",
+			question: "Will a failed confirmation read leak a waiter?",
+		}, undefined, undefined, ctxA);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+		const messagesBeforeWait = a.sentMessages().length;
+
+		let corruptAfterInitialRead = true;
+		ExocomPlane.prototype.listPeers = function () {
+			if (corruptAfterInitialRead) {
+				corruptAfterInitialRead = false;
+				fs.rmSync(ledger, { force: true });
+				fs.mkdirSync(ledger);
+			}
+			return originalListPeers.call(this);
+		};
+		await assert.rejects(
+			() => (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-read-failure", {
+				work_key: "wait-read-failure",
+				ask_id: askId,
+				timeoutMs: 1,
+			}, undefined, undefined, ctxA),
+			/ledger unsafe file/i,
+		);
+		ExocomPlane.prototype.listPeers = originalListPeers;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		assert.equal(a.sentMessages().length, messagesBeforeWait, "a failed arm must not wake Pi later from a leaked timer");
+	} finally {
+		ExocomPlane.prototype.listPeers = originalListPeers;
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("an exocom registry read failure does not abort before_agent_start", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "brief-registry-failure-session");
+	const originalListPeers = ExocomPlane.prototype.listPeers;
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		ExocomPlane.prototype.listPeers = () => {
+			throw new Error("registry read failed");
+		};
+		const turn = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		assert.ok(turn, "the hook still returns a prompt update");
+		assert.match(turn.systemPrompt, /^BASE/, "Pi's base prompt still reaches the model");
+		assert.doesNotMatch(turn.systemPrompt, /exocom peers/, "a registry failure skips only peer awareness");
+	} finally {
+		ExocomPlane.prototype.listPeers = originalListPeers;
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("active exocom tools follow session lifecycle and canUseBus denial", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "nobus-tools.md"),
+		"---\nname: nobus-tools\nlabel: NoBus Tools\npersona: true\ntools:\n  deny: [intercom]\n---\nNo external bus.",
+	);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "tool-lifecycle-session");
+	const exocomTools = ["exocom_list", "exocom_send", "exocom_name", "exocom_claim", "exocom_ask", "exocom_answer", "exocom_decline", "exocom_wait", "exocom_release", "exocom_progress"];
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		for (const name of exocomTools) {
+			assert.ok(m.activeToolNames().includes(name), `${name} is active while exocom is joined`);
+		}
+		await m.fire("session_shutdown", undefined, ctx);
+		for (const name of exocomTools) {
+			assert.ok(!m.activeToolNames().includes(name), `${name} is removed after session shutdown`);
+		}
+
+		const m2 = makeMockPi();
+		const { ctx: ctx2 } = makeExocomCtx(cwd, "tool-denial-session");
+		piPersona(m2.pi);
+		await m2.fire("session_start", undefined, ctx2);
+		for (const name of exocomTools) assert.ok(m2.activeToolNames().includes(name), `${name} is active before canUseBus denial`);
+		await m2.cmd("persona", "nobus-tools", ctx2);
+		for (const name of exocomTools) assert.ok(!m2.activeToolNames().includes(name), `${name} is removed after canUseBus denial`);
+		await m2.fire("session_shutdown", undefined, ctx2);
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("a heartbeat that cannot write the registry degrades exocom instead of killing the session", async () => {
 	const prev = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";
@@ -4127,6 +4411,7 @@ test("the ledger protocol canonicalizes ask targets, gates the receiver, and sur
 		const blocked = b.fire("tool_call", { toolCallId: "blocked-edit", toolName: "delegate", input: {} }, ctxB);
 		assert.equal(blocked?.block, true, "a canonical pending ask activates the receiver-side tool gate");
 		assert.match(blocked?.reason ?? "", new RegExp(askId));
+		assert.doesNotMatch(blocked?.reason ?? "", /Is src\/auth\.ts/, "the gate points to the ask id without repeating peer text already present in the system prompt");
 		const askDelivery = b.sentMessages().find((sent) => (sent.message as { customType?: string }).customType === "exocom_received");
 		assert.ok(askDelivery, "wire delivery wakes the addressed peer even though the event is already durable in the shared ledger");
 

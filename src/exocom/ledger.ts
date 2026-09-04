@@ -3,12 +3,12 @@
  * Chat `message` never mutates it.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { attributePeer } from "../core/fence.ts";
 import { findWriteSetOverlaps, writeSetPathError } from "../core/ownership.ts";
-import { isSemanticFrame, type ExocomAsk, type ExocomClaim, type ExocomSemanticFrame } from "./envelope.ts";
+import { isSemanticFrame, truncateForInject, type ExocomAsk, type ExocomClaim, type ExocomSemanticFrame } from "./envelope.ts";
 
 export type LedgerEvent = ExocomSemanticFrame;
 
@@ -91,7 +91,15 @@ function answerOf(event: Extract<LedgerEvent, { kind: "answer" }>, ask: LedgerAs
 
 /** Apply one signed-or-local semantic event. Fail-closed; idempotent on msg_id. */
 export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyResult {
-	if (!isSemanticFrame(event)) return { ok: false, error: "malformed ledger event" };
+	if (!isSemanticFrame(event)) {
+		const raw = event && typeof event === "object"
+			? event as Partial<Extract<LedgerEvent, { kind: "claim" }>>
+			: undefined;
+		if (raw?.kind === "claim" && Array.isArray(raw.write_set) && raw.write_set.length === 0) {
+			return { ok: false, error: "claim write_set is empty" };
+		}
+		return { ok: false, error: "malformed ledger event" };
+	}
 	if (state.seen.includes(event.msg_id)) return { ok: true, state, duplicate: true };
 	switch (event.kind) {
 		case "claim": {
@@ -272,19 +280,21 @@ export function pruneLedger(state: LedgerState, options: LedgerPruneOptions): Le
 	return { ...state, claims, asks, answers, askIds };
 }
 
-/** Short machine-readable pending-ask block. Peer content is attributed and fenced. */
+// `question` is capped at 4,096 UTF-16 code units on the wire. Three UTF-8 bytes per
+// code unit covers its worst valid encoding, so the one ask we expose remains complete.
+const PENDING_ASK_QUESTION_MAX_BYTES = 12_288;
+
+/** Short machine-readable pending-ask block. Shows one resolvable ask at a time so a peer cannot consume a turn. */
 export function pendingAskBlock(
 	asks: readonly LedgerAsk[],
 	resolvePeerName: (sessionId: string) => string | undefined = (sessionId) => sessionId,
 ): string | undefined {
 	if (asks.length === 0) return undefined;
-	const shown = asks.slice(0, 8);
+	const ask = asks[0]!;
 	const lines = ["[exocom-pending-ask]"];
-	for (const ask of shown) {
-		lines.push(`ask_id=${ask.ask_id} work_key=${ask.work_key} from_session=${ask.from_session}`);
-		lines.push(attributePeer(resolvePeerName(ask.from_session) ?? ask.from_session, ask.question));
-	}
-	if (asks.length > shown.length) lines.push(`omitted=${asks.length - shown.length}`);
+	lines.push(`ask_id=${ask.ask_id} work_key=${ask.work_key} from_session=${ask.from_session}`);
+	lines.push(attributePeer(resolvePeerName(ask.from_session) ?? ask.from_session, truncateForInject(ask.question, PENDING_ASK_QUESTION_MAX_BYTES).text));
+	if (asks.length > 1) lines.push(`omitted=${asks.length - 1}`);
 	lines.push("[/exocom-pending-ask]");
 	return lines.join("\n");
 }
@@ -430,10 +440,73 @@ function appendLocked(path: string, event: LedgerEvent, io?: LedgerFileIO): void
 	const payload = Buffer.from(`${JSON.stringify(event)}\n`, "utf8");
 	const fd = openLedger(path, true);
 	if (fd === undefined) throw new Error("ledger unavailable");
+	let originalSize: number | undefined;
+	let originalIdentity: { dev: number; ino: number } | undefined;
 	try {
-		if (fstatSync(fd).size + payload.length > LEDGER_LIMITS.maxBytes) throw new Error("ledger bounded size reached");
+		const original = fstatSync(fd);
+		originalSize = original.size;
+		originalIdentity = { dev: original.dev, ino: original.ino };
+		if (originalSize + payload.length > LEDGER_LIMITS.maxBytes) throw new Error("ledger bounded size reached");
 		writeAllSync(fd, payload, io?.write);
 		fsyncSync(fd);
+	} catch (error) {
+		try {
+			if (originalSize !== undefined && originalIdentity !== undefined) {
+				// Windows cannot reliably truncate the O_APPEND descriptor. Reopen with the normal
+				// safety checks, then additionally prove it is still the exact file we appended to.
+				const rollbackFd = openLedger(path, false);
+				if (rollbackFd === undefined) throw new Error("ledger disappeared during append rollback");
+				try {
+					const current = fstatSync(rollbackFd);
+					if (current.dev !== originalIdentity.dev || current.ino !== originalIdentity.ino) {
+						throw new Error("ledger changed during append rollback");
+					}
+					ftruncateSync(rollbackFd, originalSize);
+					fsyncSync(rollbackFd);
+				} finally { closeSync(rollbackFd); }
+			}
+		} catch { /* retained below after the original append failure */ }
+		throw error;
+	} finally { closeSync(fd); }
+}
+
+/** A writer may have died after writing only part of its newline-terminated record.
+ * With the transaction lock held, repair that tail before the next commit. Returns the size
+ * observed before repair so a transaction still compacts history it had to trim. */
+function recoverIncompleteTrailingRecordLocked(path: string): number {
+	const fd = openLedger(path, false);
+	if (fd === undefined) return 0;
+	try {
+		const size = fstatSync(fd).size;
+		if (size === 0) return 0;
+		if (size > LEDGER_LIMITS.maxBytes) throw new Error("ledger exceeds bounded size");
+		const content = readFileSync(fd);
+		if (content[content.length - 1] === 0x0a) return size;
+		const lastNewline = content.lastIndexOf(0x0a);
+		const tail = content.subarray(lastNewline + 1);
+		if (tail.toString("utf8").trim().length === 0) {
+			ftruncateSync(fd, lastNewline + 1);
+			fsyncSync(fd);
+			return size;
+		}
+		try {
+			JSON.parse(tail.toString("utf8"));
+			// The record itself is complete and only its terminator was lost. Preserve it and
+			// restore the delimiter before any O_APPEND writer can concatenate the next record.
+			// At the hard size ceiling, leave it byte-identical: commitLedgerEvent uses the
+			// returned pre-repair size to compact it before another append.
+			if (size < LEDGER_LIMITS.maxBytes) {
+				writeSync(fd, Buffer.from("\n"), 0, 1, size);
+				fsyncSync(fd);
+			}
+			return size;
+		} catch { /* handled below */ }
+		// Every record this writer emits starts with `{`. Unknown garbage must fail closed:
+		// appending to it could return success while making the new event unreplayable.
+		if (tail[0] !== 0x7b) throw new Error("ledger has an unknown unterminated tail");
+		ftruncateSync(fd, lastNewline + 1);
+		fsyncSync(fd);
+		return size;
 	} finally { closeSync(fd); }
 }
 
@@ -478,7 +551,10 @@ function replaceWithSnapshotLocked(path: string, state: LedgerState, io?: Ledger
 export function appendLedgerEvent(path: string, event: LedgerEvent): void {
 	if (!isSemanticFrame(event)) throw new Error("malformed ledger event");
 	const release = acquireLedgerLock(path);
-	try { appendLocked(path, event); } finally { release(); }
+	try {
+		recoverIncompleteTrailingRecordLocked(path);
+		appendLocked(path, event);
+	} finally { release(); }
 }
 /** Atomic cross-process read/apply/append transaction. I/O failures become an explicit NACK. */
 export interface LedgerCommitOptions {
@@ -504,6 +580,7 @@ export function commitLedgerEvent(path: string, event: LedgerEvent, options: Led
 	let release: (() => void) | undefined;
 	try {
 		release = acquireLedgerLock(path);
+		const sizeBeforeRecovery = recoverIncompleteTrailingRecordLocked(path);
 		const loaded = loadLedger(path);
 		const pruned = options.prune ? pruneLedger(loaded, options.prune) : loaded;
 		const result = applyLedgerEvent(pruned, event);
@@ -511,7 +588,7 @@ export function commitLedgerEvent(path: string, event: LedgerEvent, options: Led
 			? Math.max(1, Math.floor(options.compactAtBytes)) : Math.floor(LEDGER_LIMITS.maxBytes / 2);
 		const eventBytes = Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8");
 		const mustCompact = pruningChanged(loaded, pruned)
-			|| (result.ok && result.duplicate !== true && fileSizeLocked(path) + eventBytes >= compactAt);
+			|| (result.ok && result.duplicate !== true && Math.max(sizeBeforeRecovery, fileSizeLocked(path)) + eventBytes >= compactAt);
 		if (mustCompact) replaceWithSnapshotLocked(path, result.ok ? result.state : pruned, options.io);
 		else if (result.ok && result.duplicate !== true) appendLocked(path, event, options.io);
 		return result;
