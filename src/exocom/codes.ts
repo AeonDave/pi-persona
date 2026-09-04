@@ -54,7 +54,7 @@ function normalizeScopeId(value: unknown): string {
 }
 
 function codesDirectory(agentDir: string): string {
-	return join(agentDir, "pi-persona", "exocom", CODES_DIRECTORY);
+	return join(agentDir, "persona", "exocom", CODES_DIRECTORY);
 }
 
 function usedDirectory(agentDir: string): string {

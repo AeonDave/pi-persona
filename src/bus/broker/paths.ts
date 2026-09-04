@@ -19,7 +19,7 @@ export function sanitizeSegment(s: string): string {
 export function brokerEndpoint(sessionId: string, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
 	const sid = sanitizeSegment(sessionId) || "default";
 	if (platform === "win32") return `\\\\.\\pipe\\pi-persona-${sanitizeSegment(home)}-${sid}`;
-	const dir = join(home, ".pi", "agent", "pi-persona");
+	const dir = join(home, ".pi", "agent", "persona");
 	const endpoint = join(dir, `broker-${sid}.sock`);
 	if (Buffer.byteLength(endpoint) <= MAX_SUN_PATH) return endpoint;
 	// Session ids are uuidv7 (36 chars), so an ordinary-but-longish $HOME already pushes the

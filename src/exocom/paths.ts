@@ -13,7 +13,7 @@ export function workspaceHash(projectRoot: string): string {
 	return createHash("sha256").update(canonical).digest("hex").slice(0, 24);
 }
 export function exocomRoot(agentDir: string, hash: string): string {
-	return join(agentDir, "pi-persona", "exocom", hash);
+	return join(agentDir, "persona", "exocom", hash);
 }
 export function agentsDir(agentDir: string, hash: string): string {
 	return join(exocomRoot(agentDir, hash), "agents");
