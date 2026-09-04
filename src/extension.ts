@@ -73,6 +73,7 @@ export {
 	type PendingAsk,
 } from "./extension/shared.ts";
 import { installExocom } from "./exocom/install.ts";
+import { parseExocomArgv } from "./exocom/activation.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
 import { registerIntercomTool } from "./tools/intercom-tool.ts";
 import { registerTimerTool } from "./tools/timer.ts";
@@ -244,6 +245,8 @@ export interface PiPersonaOptions {
 	spineLegacyIO?: SpineLegacyIO;
 	/** Activation-local test seam for exact seeded-default migrations. */
 	seedMigration?: SeedMigrationOptions;
+	/** Activation-local argv seam for Pi's boolean `--exocom=<code>` compatibility parser. */
+	exocomArgv?: readonly string[];
 }
 
 export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = {}): void {
@@ -261,6 +264,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	const config = resolveConfig(process.env);
 	if (config.disabled) return;
+	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
 	const registerFollowUpRenderer = (customType: "pi-persona" | "exocom_received", label: string): void => {
 		pi.registerMessageRenderer(customType, (message, { expanded, outputPad }, theme) => {
 			const raw = typeof message.content === "string"
@@ -426,7 +430,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// exocom (opt-in, T9): `--exocom` is a per-invocation convenience alongside PI_PERSONA_EXOCOM
 	// (config.exocom) — the flag declaration is inert unless either is on (see startExocom below).
 	pi.registerFlag("exocom", {
-		description: "Join the exocom peer-to-peer plane for this run (external agent-to-agent collaboration between independent pi instances in this workspace)",
+		description: "Join Exocom for this workspace; use --exocom=Ab0T to join that workspace scope from another workspace (4-char case-sensitive Base62 code)",
 		type: "boolean",
 		default: false,
 	});
@@ -1127,6 +1131,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		get processingDeferredOrchestration() { return processingDeferredOrchestration; },
 		get telemetry() { return telemetry; },
 		get delegationNudge() { return delegationNudge; },
+		exocomArgs,
 		userAgentDir,
 	});
 
@@ -1909,32 +1914,45 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	// ── /exocom (T9): the external peer-to-peer plane's live pool ─────────────────
 	pi.registerCommand("exocom", {
-		description: "Show exocom peers in this workspace (refreshes the pool widget): /exocom",
+		description: "Show the active Exocom scope, workspace code, and peers: /exocom",
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			if (!exocom.plane) {
 				ctx.ui.notify(
-					"exocom: not active — needs PI_PERSONA_EXOCOM=1 (or --exocom) and an active persona that allows the bus (canUseBus).",
+					"exocom: not active — use --exocom for this workspace or --exocom=Ab0T to join another workspace, with a persona that allows the bus (canUseBus).",
 					"warning",
 				);
 				return;
 			}
 			exocom.renderWidget();
 			const peers = exocom.plane.listPeers();
+			const scope = exocom.scope;
 			const lines = peers.map(
 				(p) => {
 					const name = sanitizePeerField(p.displayName, 48) || "peer";
 					const persona = sanitizePeerField(p.persona, 48) || "—";
 					const model = sanitizePeerField(p.model, 96) || "?";
 					const contextPct = Number.isFinite(p.context_pct) ? Math.max(0, Math.min(100, Math.round(p.context_pct))) : 0;
-					return `• ${name} (${persona} · ${model}, ctx ${contextPct}%)`;
+					const workspaceId = p.workspace_id ?? scope?.scopeWorkspaceId;
+					const workspaceCode = p.workspace_code ?? (scope && workspaceId === scope.scopeWorkspaceId ? scope.scopeCode : "?");
+					const workspaceLabel = sanitizePeerField(
+						p.workspace_label ?? (scope && workspaceId === scope.homeWorkspaceId ? scope.homeWorkspaceLabel : "workspace"),
+						80,
+					) || "workspace";
+					const locality = workspaceId === scope?.homeWorkspaceId ? "same workspace" : "external workspace";
+					return `• ${name} (${persona} · ${model}, ctx ${contextPct}%) · ${workspaceLabel} [${workspaceCode}] · ${locality}`;
 				},
 			);
+			const scopeLine = scope
+				? scope.joined
+					? `joined scope [${scope.scopeCode}] · home ${scope.homeWorkspaceLabel} [${scope.homeWorkspaceCode}] · advisory for writes`
+					: `workspace ${scope.homeWorkspaceLabel} [${scope.scopeCode}]`
+				: "scope unavailable";
 			appendCommandResult(
 				`exocom ${exocom.name}`,
 				peers.length === 0
-					? "no other peers in this workspace right now"
-					: `${peers.length} peer${peers.length === 1 ? "" : "s"}:\n${lines.join("\n")}`,
+					? `${scopeLine}\nno other peers in this scope right now`
+					: `${scopeLine}\n${peers.length} peer${peers.length === 1 ? "" : "s"}:\n${lines.join("\n")}`,
 				true,
 			);
 		},

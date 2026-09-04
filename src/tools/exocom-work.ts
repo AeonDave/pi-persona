@@ -63,6 +63,8 @@ export interface ExocomWorkDeps {
 	sessionId: () => string;
 	name: () => string;
 	now: () => number;
+	/** False for a Pi that joined from another workspace: ledger paths belong to the scope workspace. */
+	canClaim?: () => boolean;
 	/** Canonicalize the public exocom_list target to the authenticated raw session id. */
 	resolveTarget: (target: string) => string;
 	/** Local ledger apply, then wire send routed by kind. */
@@ -101,6 +103,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		description: "Claim a write-set slice on the workspace work ledger. Overlap with an open claim is refused.",
 		parameters: ClaimParams,
 		async execute(_id, params: Static<typeof ClaimParams>) {
+			if (deps.canClaim?.() === false) {
+				throw new Error("exocom_claim: this Pi is in an external workspace and cannot claim repository-relative paths in the joined workspace ledger");
+			}
 			const { from_session, from_name, ts } = identity();
 			const frame: ExocomSemanticFrame = {
 				kind: "claim", work_key: params.work_key, from_session, from_name,

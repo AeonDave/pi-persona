@@ -16,5 +16,5 @@ export const EXOCOM = {
 	DELIVER_MIN_INTERVAL_MS: 10_000, // R6 floor between receiver-turn wakes from one plane
 	DELIVER_MAX_PER_MIN: 6, // R6 ceiling on wakes/min
 	ARTIFACT_TTL_MS: 3_600_000, // successful spill files survive long enough for the receiver to read them
-	ARTIFACT_MAX_FILES: 256, // workspace-wide bound; oldest spill files are reaped before a new one is written
+	ARTIFACT_MAX_FILES: 256, // scope-wide bound; oldest spill files are reaped before a new one is written
 } as const;

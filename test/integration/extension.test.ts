@@ -48,7 +48,8 @@ import { attributePeer, fenceUntrusted } from "../../src/core/fence.ts";
 import { EXOCOM_TOOL_NAMES } from "../../src/core/capabilities.ts";
 import { endpoint as endpointFor, ledgerPath, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
 import { ExocomPlane } from "../../src/exocom/plane.ts";
-import { registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
+import { readAll, registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
+import { allocateJoinCode } from "../../src/exocom/codes.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults, type SpineLegacyIO } from "../../src/core/seed.ts";
 import { tempDir } from "../setup/temp-dir.ts";
@@ -3877,6 +3878,201 @@ function entryFileFor(cwd: string, sessionId: string): string {
 	return registryPath(process.env.PI_AGENT_DIR as string, workspaceHash(cwd), sessionKey(sessionId));
 }
 
+test("--exocom=<code> joins another workspace while advertising the Pi's real workspace", async () => {
+	const prevExocom = process.env.PI_PERSONA_EXOCOM;
+	const prevAgentDir = process.env.PI_AGENT_DIR as string;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const agentDir = tempDir("pi-persona-exo-cross-agent-");
+	process.env.PI_AGENT_DIR = agentDir;
+	const teamCwd = exocomWorkspace();
+	const corpusCwd = exocomWorkspace();
+	const teamHash = workspaceHash(teamCwd);
+	const corpusHash = workspaceHash(corpusCwd);
+	const teamCode = allocateJoinCode(agentDir, teamHash);
+	const team = makeMockPi();
+	const corpus = makeMockPi();
+	let rogue: ExocomPlane | undefined;
+	const { ctx: teamCtx } = makeExocomCtx(teamCwd, "cross-team-session");
+	const { ctx: corpusCtx } = makeExocomCtx(corpusCwd, "cross-corpus-session");
+	try {
+		piPersona(team.pi, { exocomArgv: ["node", "pi", "--exocom"] });
+		piPersona(corpus.pi, { exocomArgv: ["node", "pi", `--exocom=${teamCode}`] });
+		await team.fire("session_start", undefined, teamCtx);
+		await corpus.fire("session_start", undefined, corpusCtx);
+
+		const entries = readAll(agentDir, teamHash);
+		const native = entries.find((entry) => entry.session_id === "cross-team-session");
+		const external = entries.find((entry) => entry.session_id === "cross-corpus-session");
+		assert.equal(native?.workspace_id, teamHash);
+		assert.equal(native?.workspace_code, teamCode);
+		assert.equal(external?.workspace_id, corpusHash, "the joined scope never replaces actual workspace identity");
+		assert.notEqual(external?.workspace_code, teamCode);
+		assert.equal(readAll(agentDir, corpusHash).some((entry) => entry.session_id === "cross-corpus-session"), false, "the external Pi registers only in the selected scope");
+
+		const listed = await (team.tool("exocom_list") as { execute: AnyFn }).execute("cross-list", {}, undefined, undefined, teamCtx);
+		assert.match(String(listed.content?.[0]?.text ?? ""), new RegExp(`workspace .* \\[${teamCode}\\]`, "i"));
+		assert.match(String(listed.content?.[0]?.text ?? ""), /external workspace/i);
+		assert.equal((listed.details as any).peers[0].sameWorkspace, false);
+		const externalTarget = (listed.details as any).peers[0].target as string;
+		await team.cmd("exocom", "", teamCtx);
+		const commandOutput = String((team.entries().at(-1)?.data as { content?: string } | undefined)?.content ?? "");
+		assert.match(commandOutput, new RegExp(`workspace .* \\[${teamCode}\\]`, "i"));
+		assert.match(commandOutput, /external workspace/i);
+		assert.doesNotMatch(commandOutput, /[A-Z]:[\\/]/i, "operator output uses safe workspace labels, never absolute paths");
+
+		assert.ok(!corpus.activeToolNames().includes("exocom_claim"), "a foreign Pi is not offered repository-relative ownership");
+		await assert.rejects(
+			() => (corpus.tool("exocom_claim") as { execute: AnyFn }).execute("cross-claim", {
+				work_key: "foreign-files",
+				write_set: ["src"],
+				slice: "wrong namespace",
+			}, undefined, undefined, corpusCtx),
+			/external workspace.*cannot claim/i,
+		);
+		const brief = corpus.fire("before_agent_start", { systemPrompt: "BASE" }, corpusCtx).systemPrompt as string;
+		assert.match(brief, /joined workspace/i);
+		assert.match(brief, /different files.*inspect files in your own workspace/i);
+		assert.match(brief, /cannot use exocom_claim/i);
+
+		await (team.tool("exocom_send") as { execute: AnyFn }).execute("cross-send", {
+			target: externalTarget,
+			message: "inspect the corpus-only files",
+		}, undefined, undefined, teamCtx);
+		await waitUntil(
+			() => corpus.sentMessages().some((sent) => String((sent.message as { content?: string }).content ?? "").includes("corpus-only files")),
+			"the cross-workspace postcard",
+		);
+
+		const asked = await (team.tool("exocom_ask") as { execute: AnyFn }).execute("cross-ask", {
+			target: externalTarget,
+			work_key: "cross-workspace-evidence",
+			question: "Can your workspace verify the document index?",
+		}, undefined, undefined, teamCtx);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+		await waitUntil(
+			() => corpus.fire("tool_call", { toolCallId: "cross-blocked", toolName: "write", input: {} }, corpusCtx)?.block === true,
+			"the foreign peer's durable ask gate",
+		);
+		await (corpus.tool("exocom_answer") as { execute: AnyFn }).execute("cross-answer", {
+			ask_id: askId,
+			work_key: "cross-workspace-evidence",
+			ok: true,
+			evidence: "the external document index is present",
+		}, undefined, undefined, corpusCtx);
+		const waited = await (team.tool("exocom_wait") as { execute: AnyFn }).execute("cross-wait", {
+			work_key: "cross-workspace-evidence",
+			ask_id: askId,
+		}, undefined, undefined, teamCtx);
+		assert.match(String(waited.content?.[0]?.text ?? ""), /already answered.*ok=true/i);
+
+		const rogueSession = "cross-rogue-session";
+		rogue = new ExocomPlane({
+			agentDir,
+			hash: teamHash,
+			identity: {
+				session_id: rogueSession,
+				name: "rogue",
+				persona: "external",
+				purpose: "",
+				color: "#36F9F6",
+				model: "m",
+				endpoint: endpointFor(agentDir, teamHash, rogueSession, process.platform),
+				cwd: corpusCwd,
+				workspace: { id: corpusHash, code: external!.workspace_code!, label: "external" },
+			},
+			getCard: () => ({ name: "rogue", persona: "external", model: "m", context_pct: 0, inbox: 0 }),
+			onInbound: () => ({ accepted: true }),
+		});
+		await rogue.start();
+		const teamTarget = rogue.listPeers().find((peer) => peer.session_id === "cross-team-session")?.target;
+		assert.ok(teamTarget);
+		await assert.rejects(
+			() => rogue!.sendSemantic(teamTarget, {
+				kind: "claim",
+				work_key: "forged-foreign-claim",
+				write_set: ["src"],
+				slice: "wrong workspace",
+				from_session: rogueSession,
+				from_name: "rogue",
+				msg_id: randomUUID(),
+				ts: new Date().toISOString(),
+			}),
+			/external-workspace peers cannot claim/i,
+		);
+	} finally {
+		await rogue?.stop();
+		await team.fire("session_shutdown", undefined, teamCtx);
+		await corpus.fire("session_shutdown", undefined, corpusCtx);
+		if (prevExocom === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prevExocom;
+		process.env.PI_AGENT_DIR = prevAgentDir;
+		fs.rmSync(teamCwd, { recursive: true, force: true });
+		fs.rmSync(corpusCwd, { recursive: true, force: true });
+		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("an unknown --exocom=<code> fails closed without joining the current workspace", async () => {
+	const prevExocom = process.env.PI_PERSONA_EXOCOM;
+	const prevAgentDir = process.env.PI_AGENT_DIR as string;
+	delete process.env.PI_PERSONA_EXOCOM;
+	const agentDir = tempDir("pi-persona-exo-unknown-agent-");
+	process.env.PI_AGENT_DIR = agentDir;
+	const cwd = exocomWorkspace();
+	const m = makeMockPi();
+	const { ctx: base, notes } = makeExocomCtx(cwd, "unknown-code-session");
+	const ctx = { ...base, hasUI: true };
+	try {
+		piPersona(m.pi, { exocomArgv: ["node", "pi", "--exocom=Ab0T"] });
+		await m.fire("session_start", undefined, ctx);
+		assert.match(notes.join("\n"), /unknown Exocom join code "Ab0T"/);
+		assert.equal(readAll(agentDir, workspaceHash(cwd)).length, 0);
+		assert.ok(!m.activeToolNames().includes("exocom_list"));
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prevExocom === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prevExocom;
+		process.env.PI_AGENT_DIR = prevAgentDir;
+		fs.rmSync(cwd, { recursive: true, force: true });
+		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("a headless invalid join code is reported on stderr instead of disappearing with UI notifications", async () => {
+	const prevExocom = process.env.PI_PERSONA_EXOCOM;
+	const prevAgentDir = process.env.PI_AGENT_DIR as string;
+	delete process.env.PI_PERSONA_EXOCOM;
+	const agentDir = tempDir("pi-persona-exo-invalid-headless-agent-");
+	process.env.PI_AGENT_DIR = agentDir;
+	const cwd = exocomWorkspace();
+	const m = makeMockPi();
+	const { ctx: base, notes } = makeExocomCtx(cwd, "invalid-code-headless-session");
+	const ctx = { ...base, hasUI: false };
+	const written: string[] = [];
+	const realWrite = process.stderr.write.bind(process.stderr);
+	// biome-ignore lint: narrow stderr spy for one hook
+	(process.stderr as any).write = (chunk: unknown, ...rest: unknown[]) => {
+		written.push(String(chunk));
+		// biome-ignore lint: pass-through
+		return (realWrite as any)(chunk, ...rest);
+	};
+	try {
+		piPersona(m.pi, { exocomArgv: ["node", "pi", "--exocom=bad"] });
+		await m.fire("session_start", undefined, ctx);
+		assert.match(written.join("\n"), /exocom.*join code must be exactly 4 Base62/i);
+		assert.deepEqual(notes.filter((note) => /exocom failed to start/i.test(note)), []);
+		assert.equal(readAll(agentDir, workspaceHash(cwd)).length, 0);
+	} finally {
+		process.stderr.write = realWrite;
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prevExocom === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prevExocom;
+		process.env.PI_AGENT_DIR = prevAgentDir;
+		fs.rmSync(cwd, { recursive: true, force: true });
+		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
 test("a durable exocom ask reports a deferred peer wake without exposing the peer's NACK text", async () => {
 	const prev = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";
@@ -4857,11 +5053,11 @@ test("the peer roster carries display-deduped call-signs and each peer's special
 		}
 
 		const brief = m.fire("before_agent_start", { systemPrompt: "BASE" }, uiCtx).systemPrompt;
-		assert.match(brief, /^- orion \(dev\)$/m, "the first of the twins keeps the bare call-sign");
-		assert.match(brief, /^- orion#2 \(reviewer\)$/m, "the twin is addressable — the raw `.name` would render two identical rows");
-		assert.match(brief, /^- vega \(writer\)$/m, "an uncontested peer is listed with its specialization");
+		assert.match(brief, /^- orion \(dev\)(?: ·|$)/m, "the first of the twins keeps the bare call-sign");
+		assert.match(brief, /^- orion#2 \(reviewer\)(?: ·|$)/m, "the twin is addressable — the raw `.name` would render two identical rows");
+		assert.match(brief, /^- vega \(writer\)(?: ·|$)/m, "an uncontested peer is listed with its specialization");
 		assert.equal(
-			(brief.match(/^- orion \(dev\)$/gm) ?? []).length,
+			(brief.match(/^- orion \(dev\)(?: ·|$)/gm) ?? []).length,
 			1,
 			"passing the stored `.name` instead of `displayName` would collapse the twins into one label",
 		);

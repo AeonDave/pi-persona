@@ -163,7 +163,7 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `contact.ts` (child `contact_supervisor`), `peers.ts` (child `contact_peer`), `broker/` (cross-process
   relay, on by default: `paths`/`framing`/`messages` pure, `host`/`client` over `node:net`).
 - **`src/exocom/`** — the external peer plane (the exocom section below): `plane.ts` (lifecycle —
-  bind/join/teardown + reconnect), `registry.ts` (workspace-scoped presence + stale pruning),
+  bind/join/teardown + reconnect), `registry.ts` (scope-selected presence + stale pruning),
   `paths.ts` (pure path layout), `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
   delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
   `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (workspace JSONL work ledger),
@@ -421,8 +421,9 @@ underlying result or changing a strategy's contract.
 A separate plane (`src/exocom/`) from everything above, with a different shape entirely: every plane
 in "the comm plane in practice" is **internal** to one supervisor's own run — hierarchical, keyed by
 that supervisor's session id, talking to children *it* spawned. **exocom is flat and external**:
-independent, top-level pi instances sharing a workspace — no parent/child relationship — discover each
-other and message peer-to-peer. (The names encode the split: intercom = internal comm; exocom =
+independent, top-level pi instances sharing one explicit Exocom scope — normally the same workspace,
+or a Pi in another workspace that joined by code — discover each other and message peer-to-peer. There
+is no parent/child relationship. (The names encode the split: intercom = internal comm; exocom =
 external comm.)
 
 Exocom still supplies fenced one-way postcards and presence; chat `message` never mutates shared
@@ -440,20 +441,37 @@ cooperative coordination for participating local Pi processes, not filesystem au
 isolation from another same-user process. It is not a delegate/council replacement and not a task/run
 workflow runtime.
 
-- **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or `--exocom` (a `pi.registerFlag`
-  convenience); additionally gated by the active persona's `canUseBus` and ability to call at least
+- **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or bare `--exocom` joins the current
+  workspace. `--exocom=Ab0T` joins the existing workspace scope identified by that exact,
+  case-sensitive four-character Base62 alias from any other cwd. Pi's extension flag API cannot
+  express a boolean flag with an optional string value, so the extension keeps the registered flag
+  boolean for backward compatibility and recovers only the exact equals form from raw argv. Unknown,
+  malformed, or conflicting codes fail closed without falling back to the caller's workspace. The
+  selection is frozen for the session. Participation is additionally gated by the active persona's
+  `canUseBus` and ability to call at least
   one obligation closer (`exocom_answer` or `exocom_decline`), re-evaluated on every persona switch
   (`reconcileExocom`). A bus-restricted or answerless persona leaves the registry rather than
   advertising a participant that can be permanently wedged by an inbound ask; switching back to an
   admissible persona rejoins. Individual targeted tool denies still win. OFF ⇒ no bind, no registry
   entry, no tools registered.
-- **Discovery — a workspace-scoped file registry, not an elected hub.** Each instance binds its own
+- **Discovery — a scope-selected file registry, not an elected hub.** Bare Exocom preserves the
+  existing workspace-hash paths byte-for-byte. A persistent alias map under the effective agent
+  directory resolves each four-character code to that full 24-hex workspace identity. Allocation is
+  atomic, collision-aware, bounded, and never assigns a reserved code to another workspace; the short
+  code is presentation/routing convenience, not the storage identity. Each instance binds its own
   socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
   `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<session-key>.json` (`sessionKey` — a hash of
   the session id, so the name is path-safe; a read drops any entry whose filename is not the hash of
   its own `session_id`), and heartbeats it; discovery is
   just reading that directory. Dead-pid and stale-heartbeat entries are pruned on read — no host
   election, no failover, genuinely peer-to-peer.
+- **Workspace identity remains the Pi's actual cwd.** The chosen scope controls registry, endpoint,
+  ledger, and artifact paths. It never overwrites the member's home workspace identity. Every new
+  registry entry publishes an all-or-none safe tuple (`workspace_id`, four-character
+  `workspace_code`, bounded `workspace_label`); peer lists, the standing brief, widget, and `/exocom`
+  label a peer as same-workspace or external without putting its absolute `cwd` in model output.
+  External peers are full Pi instances that can inspect the files in their own workspace; paths are
+  not implicitly shared.
 - **Interaction model — postcards plus a durable, non-blocking join.** `exocom_send` returns a
   `msg_id` immediately; a chat reply is just another `exocom_send` with `in_reply_to` set, delivered
   back as a correlated follow-up. `target: "*"` broadcasts postcards to every live peer
@@ -461,6 +479,13 @@ workflow runtime.
   `exocom_ask` commits an obligation to the ledger, `answer`/`decline` settles it, and `exocom_wait`
   arms a bounded idle wake rather than blocking the tool call. The signed semantic frame is a wake
   signal; the shared ledger remains the source of truth if delivery is deferred.
+- **Cross-workspace writes are advisory-only in v1.** Repository-relative claim paths have meaning
+  only in the workspace that owns the selected scope. A member whose home workspace differs from the
+  scope therefore does not receive `exocom_claim`, and the tool and signed-frame receiver both reject
+  a foreign claim. It may still send postcards, inspect its own files, ask, answer/decline, wait,
+  journal progress, and release its outbound asks. General multi-repository write coordination would
+  require a versioned resource namespace; path strings from unrelated repositories are never compared
+  as if they named the same files.
 - **Reply routing is session-stable.** `exocom_list` keeps human display names (`name`/`name#2`),
   while sends and inbound reply hints use `name@<96-bit session hash>`. The name prefix is
   presentation only; routing uses the session hash, so a retained qualified target remains valid
@@ -490,11 +515,11 @@ workflow runtime.
   sits OUTSIDE the fence, so a payload can't spoof its sender by closing the block, and `label` comes
   from the registry entry keyed by the connecting session, never the envelope's self-reported
   `from_name`, so a peer cannot spoof its identity. A message over the inline budget spills to a
-  workspace-scoped artifact file (a small preview stays inline) rather than landing whole in the
+  scope-selected artifact file (a small preview stays inline) rather than landing whole in the
   receiver's context. The spill is an exact, validated descriptor (`preview`, `path`, `size`) rendered
   as readable fenced metadata; arbitrary JSON is ordinary peer text, and an inline-only truncation
   never claims that an artifact exists. A descriptor is verified at the RECEIVER's transport boundary
-  before anything reaches its model: the path must be this workspace's own `artifacts/<msg_id>.txt`,
+  before anything reaches its model: the path must be the selected scope's own `artifacts/<msg_id>.txt`,
   the file must be a regular unlinked file whose size equals the declared one, and that size must sit
   between the inline cap and `ARTIFACT_MAX_BYTES`. The receiver then reads through one held,
   identity-checked descriptor, rechecks that the source did not change, and writes an unpredictable
@@ -547,6 +572,9 @@ independent sibling instances) at once — the planes are independent and indepe
 The process that initiates a collaboration is merely the coordinator de facto: the plane remains
 flat, and no peer gains stop/steer authority over another. Those controls exist only on the
 hierarchical intercom plane.
+The join code is not authentication. Exocom remains cooperative same-user, same-host coordination
+between processes that use the same effective Pi agent directory; it is not a remote/network plane,
+and a local process able to modify that directory is inside the existing trust boundary.
 
 ## Supervision & the waiting model
 
@@ -665,4 +693,5 @@ The stable contracts other layers build on:
 - Blocking peer asks and hard param validation are out of scope by design — see the reasons in
   [STRATEGIES.md](STRATEGIES.md) and the comm-plane section above. Inter-session comm (the broker
   endpoint stays per-session by design) is no longer a gap: **exocom** (above) is the flat, opt-in
-  plane for independently-launched instances sharing a workspace.
+  plane for independently-launched instances sharing a selected scope, including explicitly joined
+  peers whose actual files live in another workspace.

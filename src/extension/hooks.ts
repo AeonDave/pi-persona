@@ -353,8 +353,24 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			// second conjunct already implies the first and no test can kill the first alone. Kept
 			// because it states the structural rule the second conjunct only happens to encode.
 			const canDelegate = xcaps ? canFanOut(xcaps) && h.agents.some((a) => canDelegateTo(xcaps, a.name)) : h.agents.length > 0;
-			const xbrief = buildExocomBrief((peers ?? []).map((p) => ({ name: p.displayName, persona: p.persona })), {
+			const scope = exocom.scope;
+			const xbrief = buildExocomBrief((peers ?? []).map((p) => {
+				const workspaceId = p.workspace_id ?? scope?.scopeWorkspaceId;
+				const workspaceCode = p.workspace_code ?? (scope && workspaceId === scope.scopeWorkspaceId ? scope.scopeCode : undefined);
+				const workspaceLabel = p.workspace_label
+					?? (scope && workspaceId === scope.homeWorkspaceId ? scope.homeWorkspaceLabel : undefined);
+				return {
+					name: p.displayName,
+					persona: p.persona,
+					...(workspaceCode && workspaceLabel ? {
+						workspaceCode,
+						workspaceLabel,
+						sameWorkspace: workspaceId === scope?.homeWorkspaceId,
+					} : {}),
+				};
+			}), {
 				canDelegate,
+				canClaim: scope?.joined !== true && (!xcaps || canCallTool(xcaps, "exocom_claim")),
 				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
 				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
 				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
@@ -367,6 +383,12 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				canNameNow: pendingBlock === undefined
 					&& ledgerFailure === undefined
 					&& (!xcaps || canCallTool(xcaps, "exocom_name")),
+				...(scope ? {
+					joined: scope.joined,
+					scopeCode: scope.scopeCode,
+					homeWorkspaceLabel: scope.homeWorkspaceLabel,
+					homeWorkspaceCode: scope.homeWorkspaceCode,
+				} : {}),
 			});
 			if (xbrief) prompt = `${prompt}\n\n${xbrief}`;
 			if (pendingBlock) prompt = `${prompt}\n\n${pendingBlock}`;

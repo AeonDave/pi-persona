@@ -305,6 +305,26 @@ exocom_answer({ work_key: "api-review", ask_id: "<received ask_id>", ok: true, e
 exocom_release({ work_key: "api-review" })
 ```
 
+`/exocom` and `exocom_list` show the workspace's persistent four-character code. To attach a full Pi
+running in another workspace—for example, one whose checkout contains a separate document corpus—use
+the exact equals form (the code is case-sensitive):
+
+```text
+D:\project> pi --exocom
+# /exocom shows: workspace project [Ab0T]
+
+D:\document-corpus> pi --exocom=Ab0T
+```
+
+Both instances then share the first workspace's Exocom registry, transport, asks, and postcards while
+each advertises the safe label/code of the workspace it can actually inspect. Peer rows say `same
+workspace` or `external workspace`; paths are not implicitly shared. A foreign member can read its own
+files and participate in `send`, `ask`, `answer`/`decline`, `wait`, `progress`, and release, but cannot
+place repository-relative `exocom_claim`s in the joined workspace ledger. The four-character Base62
+value is a persistent alias for the full workspace identity: allocation detects collisions and probes
+another code. It is a join reference, not a secret or authorization token, and works only between
+same-host processes using the same effective Pi agent directory.
+
 When the active persona permits `exocom_name`, an unnamed top-level Pi is prompted to invent a
 task-derived call-sign as its first action on the first unconstrained turn. There is no bundled name
 list and no extra model call. Settling an inbound ledger ask takes priority; naming resumes on the
@@ -316,7 +336,7 @@ independent of Exocom identity.
 |---|---|---|
 | Shape | Hierarchical: supervisor → its spawned sub-agents | Flat: independent Pi ↔ Pi peers |
 | Control | `peek`, `result`, `wait`, `steer`, `stop`; optional coaching messages | Presence/postcards (`list`, `send`, `name`) plus the work ledger (`claim`, `ask`, `answer`/`decline`, non-blocking `wait`, `progress`, `release`) |
-| Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` or `PI_PERSONA_EXOCOM=1` |
+| Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` / `PI_PERSONA_EXOCOM=1`; `--exocom=Ab0T` joins that workspace scope from another cwd |
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 
 Both planes are asynchronous and keep inbound text fenced. Exocom's chat lane remains a prompt-level
@@ -327,7 +347,8 @@ inbound ask limits that participating Pi instance to the response tools plus rea
 persona can join Exocom only when it can settle an inbound ask through at least one of `answer` or
 `decline`. `wait`
 arms a bounded wake without blocking a tool call. This is cooperative coordination between local
-processes sharing the workspace, not OS-level authorization and not a task/run workflow runtime.
+same-user processes sharing one Exocom scope; peers may have different workspaces and files. It is not
+OS-level authorization, a remote/network protocol, or a task/run workflow runtime.
 
 A bounded postcard exchange names a stable work key, question, owner, expected evidence, and stop
 condition; `in_reply_to` continues its thread, and a missed message is resent under the same key before
@@ -536,8 +557,8 @@ register it, and name it in any persona's `council:` block. Everything else abov
 
 - `f8` cycle persona · `f9` / `/agents` agent overlay (↑↓ navigate · ⏎ open · `x` stop · `s` steer · esc)
 - `/persona [name\|off\|list\|reload\|seed\|restore]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`
-- CLI flags (per run): `--persona <name>` (start with this persona active — e.g. `pi --persona elite`; overrides `PI_PERSONA_DEFAULT` and the remembered persona, and errors if the name isn't installed) · `--exocom` (join the exocom peer-to-peer plane for this run; same as `PI_PERSONA_EXOCOM=1`). Model + reasoning effort are pi's own native flags: `--model <provider/id>` (e.g. `--model claude-pro-max-native/claude-opus-4-8` or `--model openai-codex/gpt-5.6-luna`; `--list-models` to search) and `--thinking <off|minimal|low|medium|high|xhigh|max>`.
-- env (the knobs worth reaching for; `src/core/config.ts` declares the full set): `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=off` (disable the cross-process comm plane + steer for child/worktree/MCP sub-agents; on by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — kills a child that produces no progress of its own, e.g. a headless `mcp: true` leg stalled on init; the window must cover the whole cold start including the first provider response, so the default is generous: 300000, `0` disables) · `PI_PERSONA_NUDGE=off` (silence both nudges — the hand-off reminder and the "don't bank it yet" one — on every delivery path: the `tool_result` hook, background completions, and `intercom wait`. On by default) · `PI_PERSONA_EXOCOM=1` (or `--exocom`; join the exocom peer-to-peer plane — external collaboration between independent pi instances in the same workspace; off by default, additionally gated by the active persona's `canUseBus`) · `PI_PERSONA_SPINE=on|<path>` (the spine — a shared behavioral layer injected between pi's base prompt and the persona body, with a worker variant ahead of every sub-agent prompt; `on` uses your own `spine.md`/`spine.worker.md` if you have them, else the bundled `prompts/spine.md` + `prompts/spine.worker.md`, and a path selects one file of your own for both roles; off by default, and `spine: false` in a persona/agent's frontmatter opts that definition out — a persona's opt-out covers the legs it spawns — see docs/SPINE.md) · `PI_PERSONA_SPINE_LEGS=on|off|<path>` (the same selector for delegated legs alone; follows `PI_PERSONA_SPINE` unless set, so the pair expresses the four measurement arms — off, supervisor-only, legs-only, both)
+- CLI flags (per run): `--persona <name>` (start with this persona active — e.g. `pi --persona elite`; overrides `PI_PERSONA_DEFAULT` and the remembered persona, and errors if the name isn't installed) · `--exocom` (join this workspace's Exocom plane; same as `PI_PERSONA_EXOCOM=1`) · `--exocom=Ab0T` (join that existing workspace scope from another cwd; exact equals form, four case-sensitive Base62 characters). Model + reasoning effort are pi's own native flags: `--model <provider/id>` (e.g. `--model claude-pro-max-native/claude-opus-4-8` or `--model openai-codex/gpt-5.6-luna`; `--list-models` to search) and `--thinking <off|minimal|low|medium|high|xhigh|max>`.
+- env (the knobs worth reaching for; `src/core/config.ts` declares the full set): `PI_PERSONA_ENGINE=child` (spawn instead of in-process) · `PI_PERSONA_CHILD_THINKING=<level>` · `PI_PERSONA_SEED=on` (first-run auto-install; off by default) · `PI_PERSONA_BROKER=off` (disable the cross-process comm plane + steer for child/worktree/MCP sub-agents; on by default) · `PI_PERSONA_PEEK_MS=<ms>` (peek watchdog tick — the fast stall/message wakeup while async children run; default 30000, `0` disables) · `PI_PERSONA_CHECKIN_MS=<ms>` (routine direction check-in digest while async children run; default 300000, `0` disables) · `PI_PERSONA_AGENT_MAX_MS=<ms>` (per-agent hard wall-clock cap; OFF by default = unlimited so a healthy child runs to completion, set `<ms>` to arm it) · `PI_PERSONA_AGENT_STARTUP_MS=<ms>` (per-agent startup deadline — kills a child that produces no progress of its own, e.g. a headless `mcp: true` leg stalled on init; the window must cover the whole cold start including the first provider response, so the default is generous: 300000, `0` disables) · `PI_PERSONA_NUDGE=off` (silence both nudges — the hand-off reminder and the "don't bank it yet" one — on every delivery path: the `tool_result` hook, background completions, and `intercom wait`. On by default) · `PI_PERSONA_EXOCOM=1` (same as bare `--exocom`; joins the current workspace scope, off by default and capability-gated; cross-workspace selection is CLI-only via `--exocom=Ab0T`) · `PI_PERSONA_SPINE=on|<path>` (the spine — a shared behavioral layer injected between pi's base prompt and the persona body, with a worker variant ahead of every sub-agent prompt; `on` uses your own `spine.md`/`spine.worker.md` if you have them, else the bundled `prompts/spine.md` + `prompts/spine.worker.md`, and a path selects one file of your own for both roles; off by default, and `spine: false` in a persona/agent's frontmatter opts that definition out — a persona's opt-out covers the legs it spawns — see docs/SPINE.md) · `PI_PERSONA_SPINE_LEGS=on|off|<path>` (the same selector for delegated legs alone; follows `PI_PERSONA_SPINE` unless set, so the pair expresses the four measurement arms — off, supervisor-only, legs-only, both)
 
 ## Develop
 

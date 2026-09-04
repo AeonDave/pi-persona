@@ -216,6 +216,30 @@ test("buildExocomBrief: lists identifier-only peer presence and excludes free-fo
 	assert.match(brief ?? "", /exocom_send\(\{ target: "<name>", message: "<request>" \}\)/);
 });
 
+test("buildExocomBrief: cross-workspace peers are explicit file-bearing Pi instances and foreign claims are not offered", () => {
+	const brief = buildExocomBrief([{
+		name: "indexer",
+		persona: "research",
+		workspaceLabel: "document-corpus",
+		workspaceCode: "Ab0T",
+		sameWorkspace: false,
+	}], {
+		...XOPTS,
+		canClaim: false,
+		joined: true,
+		scopeCode: "Q7zM",
+		homeWorkspaceLabel: "document-corpus",
+		homeWorkspaceCode: "Ab0T",
+	}) ?? "";
+
+	assert.match(brief, /workspace document-corpus \[Ab0T\].*external/i);
+	assert.match(brief, /different files.*inspect.*own workspace/i);
+	assert.match(brief, /joined.*\[Q7zM\]/i);
+	assert.match(brief, /cannot use exocom_claim/i);
+	assert.doesNotMatch(brief, /claim repository-relative ownership first with exocom_claim/);
+	assert.doesNotMatch(brief, /live in this workspace right now/i);
+});
+
 // The two hand-off lines have to PARTITION the work, or they route the same task twice: a peer is
 // for what you cannot specify, a sub-agent for what you can. Each half is asserted on its own, so
 // dropping either — and leaving a brief that offers both routes for the same task — fails here.

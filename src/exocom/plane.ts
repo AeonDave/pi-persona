@@ -38,6 +38,7 @@ import { isAlive, normalizePeerName, prune, readAll, removeEntryIfMatches, write
 export interface ExocomIdentity {
 	session_id: string; name: string; persona: string; purpose: string; color: string;
 	model: string; endpoint: string; cwd: string;
+	workspace?: { id: string; code: string; label: string };
 }
 
 export type ExocomInboundResult =
@@ -518,6 +519,11 @@ export class ExocomPlane {
 			cwd: identity.cwd, context_pct: card.context_pct, inbox: card.inbox,
 			heartbeat_at: new Date(this.now()).toISOString(),
 			public_key: this.publicKey,
+			...(identity.workspace ? {
+				workspace_id: identity.workspace.id,
+				workspace_code: identity.workspace.code,
+				workspace_label: identity.workspace.label,
+			} : {}),
 		};
 	}
 
@@ -675,8 +681,8 @@ export class ExocomPlane {
 	 *  <path>` for its own model plus a byte charge against the sender's window (exocom/inbound.ts).
 	 *  The peer authors both fields, so verify them against local ground truth here — the only
 	 *  layer that has it — before the claim can become an instruction to read something. What is
-	 *  established: the path names THIS workspace's artifacts directory (however it is spelled), the
-	 *  file there is a regular file this workspace itself wrote rather than a link to some other
+	 *  established: the path names THIS Exocom scope's artifacts directory (however it is spelled), the
+	 *  file there is a regular file this Exocom scope itself wrote rather than a link to some other
 	 *  file, and its size on disk both matches the declared number and sits inside the artifact
 	 *  band. What is NOT established is the CONTENT: a peer that can write the file can put anything
 	 *  in it, and the delivery is fenced as untrusted peer data for exactly that reason. Returns a
@@ -687,13 +693,13 @@ export class ExocomPlane {
 		const artifactsDir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
 		if (!safeArtifactDirectory(artifactsDir)) return "artifact directory is unsafe";
 		const expected = join(artifactsDir, `${msg.msg_id}.txt`);
-		if (!samePath(descriptor.path, expected)) return "artifact path is not this workspace's spill for that message";
+		if (!samePath(descriptor.path, expected)) return "artifact path is not this Exocom scope's spill for that message";
 		let stat: Stats;
 		try {
 			// lstat, never stat: the check above constrains a NAME, and a name is not a file. A link
 			// left at that name would otherwise hand the receiver's model any file this user can read
 			// — a symlink fails `isFile()`, and a hard link is a second name for a file this
-			// workspace never spilled, which is what `nlink` reports.
+			// scope never spilled, which is what `nlink` reports.
 			stat = lstatSync(expected);
 		} catch {
 			return "artifact payload is missing";
@@ -922,7 +928,7 @@ export class ExocomPlane {
 			collect(dir);
 			collect(join(dir, "received"));
 			live.sort((a, b) => a.mtime - b.mtime);
-			// The artifacts directory is shared by every peer in the workspace and this sweep runs on
+			// The artifacts directory is shared by every peer in the scope and this sweep runs on
 			// any of them starting, stopping or spilling. A spill is written, sent and verified by its
 			// receiver inside the sender's ack budget, so anything younger than that may be IN FLIGHT:
 			// reaping it turns a capacity sweep into a hard, lossy send failure ("artifact payload is
@@ -945,7 +951,7 @@ export class ExocomPlane {
 		this.artifacts.delete(msgId);
 	}
 
-	/** Spill to a workspace-scoped artifact once the payload exceeds the inline budget (R3);
+	/** Spill to a scope-selected artifact once the payload exceeds the inline budget (R3);
 	 *  the receiver reads `path` on its own turn instead of the full text landing inline. */
 	private payloadFor(msgId: string, text: string): string {
 		if (Buffer.byteLength(text, "utf8") <= EXOCOM.INLINE_MAX_BYTES) return text;
@@ -1108,7 +1114,7 @@ export class ExocomPlane {
 		for (const msgId of [...this.artifacts.keys()]) this.removeArtifact(msgId); // only spills whose send never landed are still tracked here
 		// A DELIVERED spill is deliberately left for its receiver's later turn, so its reclamation
 		// falls to the TTL/max-files sweep — which otherwise runs only on a plane start or the next
-		// spill. In a workspace where exocom is never enabled again, that is never: sweeping on the
+		// spill. In a scope where Exocom is never enabled again, that is never: sweeping on the
 		// way out bounds the retention without touching anything still inside its TTL.
 		this.cleanupArtifacts();
 	}
