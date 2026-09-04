@@ -40,7 +40,7 @@ const ExocomListParams = Type.Object({
 });
 
 const ExocomSendParams = Type.Object({
-	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s `target` token exactly as `exocom_list` shows it (a display name still works, but it can be reassigned as peers come and go), or "*" to broadcast to every reachable peer.' }),
+	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s qualified `target` from `exocom_list`; its session suffix stays routable if that peer later renames. A display name alone still works but can be reassigned. Use "*" to broadcast to every reachable peer.' }),
 	message: Type.String({ minLength: 1, maxLength: 1_000_000, description: "The message body." }),
 	in_reply_to: Type.Optional(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$", description: "The msg_id you're replying to, if this is a reply." })),
 });
@@ -113,7 +113,7 @@ function formatPeers(peers: DisplayPeer[], offset = 0, limit = MAX_MODEL_PEER_RO
 		const next = offset + shown.length < peers.length ? `call exocom_list with offset: ${offset + shown.length} to continue` : "call exocom_list with offset: 0 to return to the first page";
 		lines.push(`…and ${omitted} peers omitted from this bounded page; ${next}.`);
 	}
-	lines.push("Use each peer's target exactly as shown; display names can be reassigned as peers come and go.");
+	lines.push("Use each peer's qualified target as shown. Its session suffix stays routable if the peer later renames; display names alone can be reassigned.");
 	return lines.join("\n");
 }
 

@@ -9,7 +9,7 @@ import { IdleCoalescingNotifier } from "../engine/async.ts";
 import { attributePeer } from "../core/fence.ts";
 import { exocomSelfStatusLabel, exocomSelfWidgetLabel } from "../core/naming.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
-import { EXOCOM_TOOL_NAMES } from "../core/capabilities.ts";
+import { canCallTool, canParticipateInExocom, EXOCOM_TOOL_NAMES } from "../core/capabilities.ts";
 import type { DelegationNudge } from "../core/nudge.ts";
 import { shortModel } from "../tools/delegate.ts";
 import { boundDisplayRows } from "../ui/presentation.ts";
@@ -45,6 +45,7 @@ import {
 	type LedgerState,
 } from "./ledger.ts";
 import { buildInboundDelivery } from "./inbound.ts";
+import { waitNoticeMatchesAskId } from "./wait.ts";
 import type { ExocomSemanticFrame } from "./envelope.ts";
 import { prune as pruneExocom, type RegistryEntry } from "./registry.ts";
 import { registerExocomTools } from "../tools/exocom.ts";
@@ -317,14 +318,15 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// from starting (mirrors the broker host's own fire-and-forget-on-failure discipline).
 	async function startExocom(ctx: ExtensionContext): Promise<void> {
 		if (!(host.config.exocom || pi.getFlag("exocom") === true)) return;
-		if (!(host.controller.capabilities?.canUseBus ?? true)) return;
+		if (!canParticipateInExocom(host.controller.capabilities)) return;
 		try {
 			const hash = workspaceHash(ctx.cwd);
 			const sessionId = ctx.sessionManager.getSessionId();
 			exocomSessionId = sessionId;
 			const agentDir = host.userAgentDir();
-			// Placeholder only. The model invents the real call-sign via `exocom_name` from the
-			// feel of the session — no catalog is assigned here. Registry key is session_id.
+			// Placeholder only. On the first unconstrained task turn, the prompt asks the model to
+			// invent the real call-sign via `exocom_name`; no catalog is assigned here. Registry key
+			// is session_id.
 			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
 			exocomName = EXOCOM_PLACEHOLDER_NAME;
 			exocomNamedByModel = false;
@@ -408,9 +410,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				const existing = answerFor(initial, ask_id, sessionId);
 				if (existing) {
 					if (existing.work_key !== work_key) throw new Error("exocom_wait: work_key does not match the retained answer");
-					const hint = `ask_id=${ask_id}`;
-					exocomWaitNotifier?.discard((item) => item.includes(hint));
-					exocomNotifier?.discard((item) => item.includes(hint));
+					exocomWaitNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
+					exocomNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
 					return { status: "answered" as const, answer: existing };
 				}
 				const pending = initial.asks.find((ask) => ask.ask_id === ask_id && ask.from_session === sessionId);
@@ -449,9 +450,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				}
 				if (raced) {
 					disarm();
-					const hint = `ask_id=${ask_id}`;
-					exocomWaitNotifier?.discard((item) => item.includes(hint));
-					exocomNotifier?.discard((item) => item.includes(hint));
+					exocomWaitNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
+					exocomNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
 					return { status: "answered" as const, answer: raced };
 				}
 				return { status: "waiting" as const, id };
@@ -715,14 +715,16 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try {
 			const available = new Set(pi.getAllTools().map((tool) => tool.name));
 			const active = new Set(pi.getActiveTools());
-			const enabled = exocomPlane !== undefined && (host.controller.capabilities?.canUseBus ?? true);
+			const caps = host.controller.capabilities;
+			const enabled = exocomPlane !== undefined && canParticipateInExocom(caps);
 			let changed = false;
 			for (const name of EXOCOM_TOOL_NAMES) {
 				if (!available.has(name)) continue;
-				if (enabled && !active.has(name)) {
+				const allowed = enabled && (!caps || canCallTool(caps, name));
+				if (allowed && !active.has(name)) {
 					active.add(name);
 					changed = true;
-				} else if (!enabled && active.delete(name)) {
+				} else if (!allowed && active.delete(name)) {
 					changed = true;
 				}
 			}
@@ -742,7 +744,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// `host.controller.capabilities` FRESH at bind time — this does the same for exocom. Already
 	// running and still gated on ⇒ a no-op (the heartbeat already relabels under the new persona).
 	async function applyExocomGate(ctx: ExtensionContext): Promise<void> {
-		const shouldRun = (host.config.exocom || pi.getFlag("exocom") === true) && (host.controller.capabilities?.canUseBus ?? true);
+		const shouldRun = (host.config.exocom || pi.getFlag("exocom") === true) && canParticipateInExocom(host.controller.capabilities);
 		if (shouldRun && !exocomPlane) await startExocom(ctx);
 		else if (!shouldRun && exocomPlane) await stopExocom();
 		syncExocomActiveTools();

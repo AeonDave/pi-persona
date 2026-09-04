@@ -441,9 +441,12 @@ isolation from another same-user process. It is not a delegate/council replaceme
 workflow runtime.
 
 - **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or `--exocom` (a `pi.registerFlag`
-  convenience); additionally gated by the active persona's `canUseBus`, re-evaluated on every persona
-  switch (`reconcileExocom`) — switching to a bus-restricted persona tears the plane down, switching
-  back to one that allows it rejoins. OFF ⇒ no bind, no registry entry, no tools registered.
+  convenience); additionally gated by the active persona's `canUseBus` and ability to call at least
+  one obligation closer (`exocom_answer` or `exocom_decline`), re-evaluated on every persona switch
+  (`reconcileExocom`). A bus-restricted or answerless persona leaves the registry rather than
+  advertising a participant that can be permanently wedged by an inbound ask; switching back to an
+  admissible persona rejoins. Individual targeted tool denies still win. OFF ⇒ no bind, no registry
+  entry, no tools registered.
 - **Discovery — a workspace-scoped file registry, not an elected hub.** Each instance binds its own
   socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
   `<agentDir>/pi-persona/exocom/<workspace-hash>/agents/<session-key>.json` (`sessionKey` — a hash of
@@ -459,7 +462,11 @@ workflow runtime.
   arms a bounded idle wake rather than blocking the tool call. The signed semantic frame is a wake
   signal; the shared ledger remains the source of truth if delivery is deferred.
 - **Reply routing is session-stable.** `exocom_list` keeps human display names (`name`/`name#2`),
-  while inbound reply hints use `name@<96-bit session hash>`. The authenticated registry entry
+  while sends and inbound reply hints use `name@<96-bit session hash>`. The name prefix is
+  presentation only; routing uses the session hash, so a retained qualified target remains valid
+  after that peer renames. Multiple matches for the same suffix fail closed as ambiguous rather than
+  guessing; the telemetry projection mirrors this rule so a successful retained-target send does not
+  lose its `message.sent` edge. The authenticated registry entry
   (endpoint and signing key) is cached with the bounded inbound context, so a stale/pruned sender
   cannot be retargeted to a same-name twin and its live socket can still receive the reply. The hint
   is CONDITIONAL, not an invitation: it carries the target and the correlation id under "reply only
@@ -467,9 +474,11 @@ workflow runtime.
   receiver, and a bare `Reply:` would make answering the default and silence the exception — which
   is how a settled point keeps running on agreement and thanks.
 - **Identity is session-stable, persona is presence metadata.** Each instance joins with no chosen
-  call-sign (a blank registry placeholder); the model invents its display handle via `exocom_name`
-  from whatever the moment suggests — a mood, a joke, a snack, weather, a place, anything that
-  fits — not from a catalog. `exocom_name` replaces that display label only — the registry entry
+  call-sign (a blank registry placeholder). If the active persona permits `exocom_name`, then on its
+  first unconstrained task turn the existing model is instructed to make that tool its first action
+  and invent a short handle from the task — no catalog and no extra naming model call. A pending
+  ledger ask owns the turn, so settlement precedes naming and the bootstrap returns on the next free
+  turn. A targeted deny suppresses the prompt as well as the tool. `exocom_name` replaces that display label only — the registry entry
   stays keyed by the session, so a rename cannot take over another peer's slot or its inbound
   replies. Persona, model, and context usage are refreshed on heartbeat; changing persona never
   changes the registry key or grants authority over another peer.
@@ -517,12 +526,15 @@ workflow runtime.
   self-chosen, so the fallback was an interception route), and a peer whose call-sign happens to take
   that shape is reachable through the qualified address the refusal names — and
   `exocom_name({ name })` rebrands this instance's display call-sign (the registry key stays the
-  session id, so a rename moves no state and grants nothing). The ledger tools are
+  session id, so a rename moves no state, invalidates no retained qualified target, and grants
+  nothing). The ledger tools are
   `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`,
   `exocom_progress`, and `exocom_release`; they are capability-gated with the postcard tools. Pi has
   no dynamic
   unregister API, so definitions registered by a prior join may remain in the registry; the live
-  accessor, capability gate, and active-tool set all deny them whenever the plane is stopped.
+  accessor, capability gate, and active-tool set all deny them whenever the plane is stopped. Plane
+  admission requires at least one of `exocom_answer`/`exocom_decline`, because every published peer
+  may receive a durable ask and must retain a runtime path to settle it.
 - **Inbound delivery is bounded without loss.** Each external message is injected under the same
   byte cap whether it is plain text or an artifact descriptor. Bursts remain FIFO-queued; each
   rate-limited wake drains as many whole messages as fit the bounded batch surface, leaving the rest

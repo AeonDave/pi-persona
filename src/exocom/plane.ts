@@ -281,16 +281,20 @@ function sendNoReply(netImpl: typeof import("node:net"), endpoint: string, frame
 }
 
 /** `displayName` is the human label (may be renumbered as peers come and go); `target` is the
- *  session-pinned token every caller should ROUTE with. Both are derived, never stored. */
+ *  human-readable routing token every caller should ROUTE with. Both are derived, never stored. */
 export type DisplayPeer = RegistryEntry & { displayName: string; target: string };
 
 /** A display name is intentionally human-sized, may be shared, and is renumbered from the live
  * set on every read. This qualified token uses a 96-bit session hash, stays within the tool's
  * 80-character budget even for maximum-length names, and is kept separate from human roster
- * labels so a send always addresses the authenticated session it was aimed at. */
+ * labels so a send always addresses the authenticated session it was aimed at. Its label is
+ * deliberately current (for people); its hash alone is the stable routing identity. */
+function sessionRoutingHash(sessionId: string): string {
+	return createHash("sha256").update(sessionId).digest("hex").slice(0, 24);
+}
+
 function qualifiedTarget(entry: RegistryEntry): string {
-	const sessionSuffix = createHash("sha256").update(entry.session_id).digest("hex").slice(0, 24);
-	return `${entry.name}@${sessionSuffix}`;
+	return `${entry.name}@${sessionRoutingHash(entry.session_id)}`;
 }
 
 /** The tail `qualifiedTarget` emits, whatever the call-sign in front of it. A string of this shape
@@ -301,6 +305,13 @@ function qualifiedTarget(entry: RegistryEntry): string {
  *  token is the cost of that rule; `namesakeTarget` is what keeps such a peer reachable. */
 function isRoutingToken(target: string): boolean {
 	return /@[a-f0-9]{24}$/i.test(target);
+}
+
+/** The stable, session-derived part of a public target. The prefix is presentation only: a
+ * peer may choose a new call-sign after another instance has retained the old target. */
+function routingSessionHash(target: string): string | undefined {
+	const match = /@([a-f0-9]{24})$/i.exec(target);
+	return match?.[1]?.toLowerCase();
 }
 
 /** The same file, spelled two ways. Peers share one registry by construction (that `agentDir`+`hash`
@@ -538,8 +549,9 @@ export class ExocomPlane {
 	resolvePeer(target: string): DisplayPeer {
 		const peers = this.listPeers();
 		if (isRoutingToken(target)) {
-			const qualified = peers.find((entry) => entry.target === target);
-			if (qualified) return qualified;
+			const qualified = this.qualifiedPeers(target, peers);
+			if (qualified.length === 1) return qualified[0]!;
+			if (qualified.length > 1) throw new Error(`exocom: ambiguous qualified target "${target}"`);
 			const namesake = peers.find((peer) => peer.displayName === target);
 			throw new Error([
 				`exocom: unknown qualified target "${target}"`,
@@ -569,18 +581,25 @@ export class ExocomPlane {
 		return this.deps.readPool ? this.deps.readPool(agentDir, hash) : readAll(agentDir, hash);
 	}
 
-	/** Resolve a session-qualified token. A REPLY may still reach a sender whose registry entry
+	/** Resolve a session-qualified token. The readable name before its hash may be stale after a
+	 *  rename; the stable hash is the routing identity. A REPLY may still reach a sender whose registry entry
 	 * has already been pruned (the whole pool is searched before `listPeers()` would evict it) —
 	 * direct stale targeting stays limited to replies, so an ordinary send resolves only against
 	 * the live roster `exocom_list` publishes. */
-	private qualifiedPeer(target: string, inReplyTo: string | undefined): RegistryEntry | undefined {
-		if (!isRoutingToken(target)) return undefined;
+	private qualifiedPeers<T extends RegistryEntry>(target: string, peers: T[]): T[] {
+		const suffix = routingSessionHash(target);
+		if (!suffix) return [];
+		return peers.filter((entry) => sessionRoutingHash(entry.session_id) === suffix);
+	}
+
+	private qualifiedPeer(target: string, inReplyTo: string | undefined): RegistryEntry[] {
+		if (!isRoutingToken(target)) return [];
 		try {
-			if (inReplyTo === undefined) return this.listPeers().find((entry) => qualifiedTarget(entry) === target);
+			if (inReplyTo === undefined) return this.qualifiedPeers(target, this.listPeers());
 			const own = this.deps.identity.session_id;
-			return this.pool().find((entry) => entry.session_id !== own && qualifiedTarget(entry) === target);
+			return this.qualifiedPeers(target, this.pool().filter((entry) => entry.session_id !== own));
 		} catch {
-			return undefined;
+			return [];
 		}
 	}
 
@@ -964,7 +983,10 @@ export class ExocomPlane {
 			throw new Error(`exocom: reply target "${target}" does not match the authenticated sender for "${inReplyTo}"`);
 		}
 		const qualified = this.qualifiedPeer(target, inReplyTo);
-		if (isRoutingToken(target) && !cachedReply && !qualified) {
+		if (qualified.length > 1 && !cachedReply) {
+			throw new Error(`exocom: ambiguous qualified target "${target}"`);
+		}
+		if (isRoutingToken(target) && !cachedReply && qualified.length === 0) {
 			const namesake = this.namesakeTarget(target);
 			throw new Error([
 				inReplyTo === undefined
@@ -974,7 +996,7 @@ export class ExocomPlane {
 			].join(""));
 		}
 		const entry = cachedReply
-			?? qualified
+			?? qualified[0]
 			?? this.listPeers().find((e) => e.displayName === target);
 		if (!entry) throw new Error(`exocom: unknown peer "${target}"`);
 

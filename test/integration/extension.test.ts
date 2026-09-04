@@ -45,6 +45,7 @@ import { makeBrokerClient } from "../../src/bus/broker/client.ts";
 import { brokerEndpoint } from "../../src/bus/broker/paths.ts";
 import { IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS } from "../../src/engine/async.ts";
 import { attributePeer, fenceUntrusted } from "../../src/core/fence.ts";
+import { EXOCOM_TOOL_NAMES } from "../../src/core/capabilities.ts";
 import { endpoint as endpointFor, ledgerPath, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
 import { ExocomPlane } from "../../src/exocom/plane.ts";
 import { registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
@@ -4158,6 +4159,57 @@ test("active exocom tools follow session lifecycle and canUseBus denial", async 
 	}
 });
 
+test("a persona that cannot answer or decline leaves Exocom instead of advertising a deadlocking ask target", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "answerless.md"),
+		"---\nname: answerless\nlabel: Answerless\npersona: true\ntools:\n  deny: [exocom_answer, exocom_decline]\n---\nCannot settle peer asks.",
+	);
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "bus-ready.md"),
+		"---\nname: bus-ready\nlabel: Bus Ready\npersona: true\n---\nCan settle peer asks.",
+	);
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "nameless.md"),
+		"---\nname: nameless\nlabel: Nameless\npersona: true\ntools:\n  deny: [exocom_name]\n---\nCan collaborate but may not rename itself.",
+	);
+	const m = makeMockPi();
+	const { ctx } = makeExocomCtx(cwd, "answerless-session");
+	const entry = entryFileFor(cwd, "answerless-session");
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		assert.ok(fs.existsSync(entry), "the unrestricted session initially joins the registry");
+
+		await m.cmd("persona", "answerless", ctx);
+		assert.equal(fs.existsSync(entry), false, "an answerless persona is not published as an ask target");
+		for (const name of EXOCOM_TOOL_NAMES) {
+			assert.ok(!m.activeToolNames().includes(name), `${name} is inactive while protocol admission fails`);
+		}
+
+		await m.cmd("persona", "bus-ready", ctx);
+		assert.ok(fs.existsSync(entry), "switching to a participant with a closer rejoins the same session");
+		for (const name of EXOCOM_TOOL_NAMES) {
+			assert.ok(m.activeToolNames().includes(name), `${name} is restored after admission recovers`);
+		}
+
+		await m.cmd("persona", "nameless", ctx);
+		assert.ok(fs.existsSync(entry), "denying only naming does not remove a peer that can settle asks");
+		assert.ok(!m.activeToolNames().includes("exocom_name"), "the targeted naming deny remains active");
+		assert.ok(m.activeToolNames().includes("exocom_answer"), "a protocol closer remains callable");
+		const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
+		assert.doesNotMatch(prompt, /FIRST action.*exocom_name/is, "the system prompt never orders a denied tool");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("a heartbeat that cannot write the registry degrades exocom instead of killing the session", async () => {
 	const prev = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";
@@ -4460,6 +4512,55 @@ test("the ledger protocol canonicalizes ask targets, gates the receiver, and sur
 			.find((content) => content.includes("LIVE-WAKE-EVIDENCE"));
 		assert.match(liveWake ?? "", /ask_id=.*ok=true/);
 		assert.match(liveWake ?? "", /> LIVE-WAKE-EVIDENCE/, "an armed wait is woken exactly through the fenced answer path");
+	} finally {
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a pending ask defers first-turn naming, which resumes once the protocol obligation is settled", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "name-priority-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "name-priority-b");
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("name-list", {}, undefined, undefined, ctxA);
+		const target = (roster.details as { peers: Array<{ target: string }> }).peers[0]?.target;
+		assert.ok(target);
+		const asked = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("name-ask", {
+			target,
+			work_key: "name-priority",
+			question: "Settle this before choosing a call-sign.",
+		}, undefined, undefined, ctxA);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+
+		const constrained = b.fire("before_agent_start", { systemPrompt: "BASE" }, ctxB).systemPrompt as string;
+		assert.match(constrained, new RegExp(`ask_id=${askId}`), "the durable ask is the current obligation");
+		assert.doesNotMatch(constrained, /FIRST action.*exocom_name/is, "the prompt must not order a tool the pending gate forbids");
+
+		await (b.tool("exocom_answer") as { execute: AnyFn }).execute("name-answer", {
+			ask_id: askId,
+			work_key: "name-priority",
+			ok: true,
+			evidence: "settled",
+		}, undefined, undefined, ctxB);
+		const ready = b.fire("before_agent_start", { systemPrompt: "BASE" }, ctxB).systemPrompt as string;
+		assert.match(ready, /FIRST action.*exocom_name/is, "naming resumes on the first unconstrained turn");
+
+		await (b.tool("exocom_name") as { execute: AnyFn }).execute("name-self", { name: "Task-Firefly" }, undefined, undefined, ctxB);
+		const named = b.fire("before_agent_start", { systemPrompt: "BASE" }, ctxB).systemPrompt as string;
+		assert.doesNotMatch(named, /FIRST action.*exocom_name/is, "a chosen name ends the one-time bootstrap");
 	} finally {
 		await a.fire("session_shutdown", undefined, ctxA);
 		await b.fire("session_shutdown", undefined, ctxB);

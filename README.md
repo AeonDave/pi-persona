@@ -293,17 +293,24 @@ For collaboration between independent Pi processes, open the same workspace in t
 `pi --exocom` (optionally add `--persona <name>`), then use:
 
 ```js
+exocom_name({ name: "<invented from the current task>" }) // Pi does this first on its first unconstrained turn
 exocom_list({})
 exocom_list({ offset: 24, limit: 24 }) // next page when the first result reports nextOffset: 24
-exocom_send({ target: "night-owl", message: "Review the API boundary and send back concrete risks." })
-exocom_name({ name: "kiln" }) // invent your call-sign; routing still keys on the session
+exocom_send({ target: "<qualified target from exocom_list>", message: "Review the API boundary and send back concrete risks." })
 
 exocom_claim({ work_key: "api-review", write_set: ["src/api"], slice: "Review and fix the API boundary" })
-exocom_ask({ target: "night-owl", work_key: "api-review", question: "Is the transport contract safe to change?" })
+exocom_ask({ target: "<qualified target from exocom_list>", work_key: "api-review", question: "Is the transport contract safe to change?" })
 exocom_wait({ work_key: "api-review", ask_id: "<ask_id returned above>" }) // non-blocking; wakes on answer/timeout
 exocom_answer({ work_key: "api-review", ask_id: "<received ask_id>", ok: true, evidence: "Tests and file references" }) // peer side
 exocom_release({ work_key: "api-review" })
 ```
+
+When the active persona permits `exocom_name`, an unnamed top-level Pi is prompted to invent a
+task-derived call-sign as its first action on the first unconstrained turn. There is no bundled name
+list and no extra model call. Settling an inbound ledger ask takes priority; naming resumes on the
+next free turn. A qualified target's readable prefix may become stale after a rename, but its session
+suffix remains routable. Sub-agent labels stay under the supervisor's delegation protocol and are
+independent of Exocom identity.
 
 | | Intercom | Exocom |
 |---|---|---|
@@ -316,7 +323,9 @@ Both planes are asynchronous and keep inbound text fenced. Exocom's chat lane re
 grammar over one-way postcards, but work coordination is now durable runtime state: overlapping open
 write-set claims are rejected, an `ask` remains an obligation until `answer`/`decline` or requester
 release/liveness cleanup, and a pending
-inbound ask limits that participating Pi instance to the response tools plus read-only work. `wait`
+inbound ask limits that participating Pi instance to the response tools plus read-only work. A
+persona can join Exocom only when it can settle an inbound ask through at least one of `answer` or
+`decline`. `wait`
 arms a bounded wake without blocking a tool call. This is cooperative coordination between local
 processes sharing the workspace, not OS-level authorization and not a task/run workflow runtime.
 
