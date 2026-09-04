@@ -1,6 +1,6 @@
 /**
  * `exocom_list` + `exocom_send` — the supervisor-facing tools over the exocom plane
- * (Task 7's {@link ExocomPlane}): independent top-level pi instances in one workspace
+ * (Task 7's {@link ExocomPlane}): independent top-level Pi instances in one selected scope
  * messaging each other peer-to-peer, one-way and non-blocking.
  *
  *   - `exocom_list` — who else is reachable right now (live, pruned peers).
@@ -24,6 +24,7 @@ import { fencePeer } from "../core/fence.ts";
 import { inventedExocomNameHint } from "../core/naming.ts";
 import { ExocomPeerRejection, type DisplayPeer, type ExocomPlane } from "../exocom/plane.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
+import type { ExocomScope } from "../exocom/scope.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 
 const COLLAPSED_PEER_LIMIT = 8;
@@ -67,7 +68,12 @@ type ExocomSendDetails =
 		omittedFailures: number;
 	};
 
-type ExocomPeerSummary = Pick<DisplayPeer, "displayName" | "persona" | "model" | "context_pct" | "target">;
+type ExocomPeerSummary = Pick<DisplayPeer, "displayName" | "persona" | "model" | "context_pct" | "target"> & {
+	workspace_id?: string;
+	workspace_code?: string;
+	workspace_label?: string;
+	sameWorkspace?: boolean;
+};
 
 function peerWord(count: number): string {
 	return `${count} peer${count === 1 ? "" : "s"}`;
@@ -77,35 +83,75 @@ function peerWord(count: number): string {
  * model so it can retain useful detail without turning one peer into a 300-column wall. */
 function peerRows(peer: ExocomPeerSummary, expanded: boolean): string[] {
 	const context = `${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}%`;
+	const workspace = peer.workspace_code && peer.workspace_label
+		? `  workspace: ${compactInlineText(peer.workspace_label, { maxChars: expanded ? 64 : 40 }) || "workspace"} [${peer.workspace_code}] · ${peer.sameWorkspace === false ? "external" : "same"}`
+		: undefined;
 	if (expanded) {
 		const name = compactInlineText(peer.displayName, { maxChars: 48 }) || "peer";
 		const persona = compactInlineText(peer.persona, { maxChars: 32 }) || "unknown";
 		const model = compactInlineText(peer.model, { maxChars: 88 }) || "unknown";
-		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${model}`];
+		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${model}`, ...(workspace ? [workspace] : [])];
 	}
 	const name = compactInlineText(peer.displayName, { maxChars: 24 }) || "peer";
 	const persona = compactInlineText(peer.persona, { maxChars: 18 }) || "unknown";
 	const model = compactInlineText(peer.model, { maxChars: 36 }) || "unknown";
-	return [`- ${name} · ${persona} · ${model} · ctx ${context}`];
+	return [`- ${name} · ${persona} · ${model} · ctx ${context}`, ...(workspace ? [workspace] : [])];
 }
 
 /** The model-facing row carries the ROUTE as well as the human label: a display name is
  *  recomputed from the live set on every call, so the label a roster showed can belong to a
  *  different session by the time the model sends. The TUI row above stays human-sized. */
 function modelPeerRow(peer: ExocomPeerSummary): string {
-	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}% · target: ${normalizeMetadataText(peer.target, 80, "peer")}`;
+	const workspace = peer.workspace_code && peer.workspace_label
+		? ` · workspace: ${normalizeMetadataText(peer.workspace_label, 80, "workspace")} [${peer.workspace_code}] · ${peer.sameWorkspace === false ? "external workspace" : "same workspace"}`
+		: "";
+	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}% · target: ${normalizeMetadataText(peer.target, 80, "peer")}${workspace}`;
+}
+
+function summarizePeer(peer: DisplayPeer, scope: ExocomScope | undefined): ExocomPeerSummary {
+	if (!scope) {
+		return {
+			displayName: normalizeMetadataText(peer.displayName, 80, "peer"),
+			target: normalizeMetadataText(peer.target, 80, "peer"),
+			persona: normalizeMetadataText(peer.persona, 64, "unknown"),
+			model: normalizeMetadataText(peer.model, 160, "unknown"),
+			context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
+		};
+	}
+	// Legacy peers predate workspace metadata. Their registry location still proves they belong
+	// to the selected scope; infer that identity, but never invent an absolute path or label.
+	const workspaceId = peer.workspace_id ?? scope.scopeWorkspaceId;
+	const workspaceCode = peer.workspace_code ?? (workspaceId === scope.scopeWorkspaceId ? scope.scopeCode : undefined);
+	const workspaceLabel = peer.workspace_label
+		?? (workspaceId === scope.homeWorkspaceId ? scope.homeWorkspaceLabel : "workspace");
+	return {
+		displayName: normalizeMetadataText(peer.displayName, 80, "peer"),
+		target: normalizeMetadataText(peer.target, 80, "peer"),
+		persona: normalizeMetadataText(peer.persona, 64, "unknown"),
+		model: normalizeMetadataText(peer.model, 160, "unknown"),
+		context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
+		workspace_id: workspaceId,
+		...(workspaceCode ? { workspace_code: workspaceCode } : {}),
+		workspace_label: normalizeMetadataText(workspaceLabel, 80, "workspace"),
+		sameWorkspace: workspaceId === scope.homeWorkspaceId,
+	};
 }
 
 /** One readable line per live peer: `displayName` (not the possibly-shared `.name`) disambiguates
  *  two peers registered under the same persona name — see plane.ts's `dedupeDisplayNames` — and
  *  `target` is what the model must actually address with. */
-function formatPeers(peers: DisplayPeer[], offset = 0, limit = MAX_MODEL_PEER_ROWS): string {
-	const head = `Exocom presence only (${peerWord(peers.length)}; ${peers.length === 0 ? "no reachable peers" : "not a message inbox"})`;
+function formatPeers(peers: DisplayPeer[], offset = 0, limit = MAX_MODEL_PEER_ROWS, scope?: ExocomScope): string {
+	const scopeHead = scope
+		? scope.joined
+			? `Exocom joined scope [${scope.scopeCode}] from workspace ${scope.homeWorkspaceLabel} [${scope.homeWorkspaceCode}]`
+			: `Exocom workspace ${scope.homeWorkspaceLabel} [${scope.scopeCode}]`
+		: "Exocom";
+	const head = `${scopeHead} presence only (${peerWord(peers.length)}; ${peers.length === 0 ? "no reachable peers" : "not a message inbox"})`;
 	if (peers.length === 0) return head;
-	const shown = peers.slice(offset, offset + limit);
+	const shown = peers.slice(offset, offset + limit).map((peer) => summarizePeer(peer, scope));
 	const paged = offset > 0 || peers.length > limit;
 	const pageHead = paged
-		? `Exocom presence only (${peerWord(peers.length)}; showing ${shown.length === 0 ? "none" : `${offset + 1}–${offset + shown.length}`} of ${peers.length}; not a message inbox)`
+		? `${scopeHead} presence only (${peerWord(peers.length)}; showing ${shown.length === 0 ? "none" : `${offset + 1}–${offset + shown.length}`} of ${peers.length}; not a message inbox)`
 		: head;
 	const omitted = peers.length - shown.length;
 	const lines = [pageHead, shown.map(modelPeerRow).join("\n")];
@@ -123,15 +169,21 @@ function renderListResult(
 	total = peers.length,
 	offset = 0,
 	nextOffset?: number,
+	scope?: { scopeCode: string; homeWorkspace: { label: string; code: string; sameAsScope: boolean } },
 ): string {
-	if (total === 0) return "Exocom · 0 peers · no reachable peers";
+	const scopeLabel = scope
+		? scope.homeWorkspace.sameAsScope
+			? ` · workspace ${compactInlineText(scope.homeWorkspace.label, { maxChars: 48 })} [${scope.scopeCode}]`
+			: ` · joined [${scope.scopeCode}] · home ${compactInlineText(scope.homeWorkspace.label, { maxChars: 48 })} [${scope.homeWorkspace.code}]`
+		: "";
+	if (total === 0) return `Exocom${scopeLabel} · 0 peers · no reachable peers`;
 	const shown = expanded ? peers : peers.slice(0, COLLAPSED_PEER_LIMIT);
 	const pageEnd = Math.min(total, offset + shown.length);
 	const paged = offset > 0 || pageEnd < total;
 	const page = paged
 		? shown.length === 0 ? `; showing none of ${total}` : `; showing ${offset + 1}–${pageEnd} of ${total}`
 		: "";
-	const lines = [`Exocom · ${peerWord(total)} (presence only${page})`];
+	const lines = [`Exocom${scopeLabel} · ${peerWord(total)} (presence only${page})`];
 	for (const peer of shown) lines.push(...peerRows(peer, expanded));
 	if (offset > 0) lines.push(`…and ${offset} peers before this page`);
 	if (pageEnd < total) lines.push(`…and ${total - pageEnd} more peers after this page`);
@@ -192,6 +244,7 @@ export function registerExocomTools(
 	pi: ExtensionAPI,
 	getPlane: () => ExocomPlane | undefined,
 	onRename?: (name: string) => string,
+	getScope?: () => ExocomScope | undefined,
 ): void {
 	pi.registerTool({
 		name: "exocom_list",
@@ -202,23 +255,26 @@ export function registerExocomTools(
 			const plane = getPlane();
 			if (!plane) throw new Error("exocom is not active for this persona");
 			const peers = plane.listPeers();
+			const scope = getScope?.();
 			const offset = Math.min(peers.length, Math.max(0, Math.floor(params?.offset ?? 0)));
 			const limit = Math.max(1, Math.min(MAX_MODEL_PEER_ROWS, Math.floor(params?.limit ?? MAX_MODEL_PEER_ROWS)));
-			const shown: ExocomPeerSummary[] = peers.slice(offset, offset + limit).map((peer) => ({
-				displayName: normalizeMetadataText(peer.displayName, 80, "peer"),
-				target: normalizeMetadataText(peer.target, 80, "peer"),
-				persona: normalizeMetadataText(peer.persona, 64, "unknown"),
-				model: normalizeMetadataText(peer.model, 160, "unknown"),
-				context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
-			}));
+			const shown = peers.slice(offset, offset + limit).map((peer) => summarizePeer(peer, scope));
 			return {
-				content: [{ type: "text", text: formatPeers(peers, offset, limit) }],
+				content: [{ type: "text", text: formatPeers(peers, offset, limit, scope) }],
 				details: {
 					peers: shown,
 					total: peers.length,
 					offset,
 					limit,
 					omitted: peers.length - shown.length,
+					...(scope ? {
+						scopeCode: scope.scopeCode,
+						homeWorkspace: {
+							label: scope.homeWorkspaceLabel,
+							code: scope.homeWorkspaceCode,
+							sameAsScope: !scope.joined,
+						},
+					} : {}),
 					...(offset + shown.length < peers.length ? { nextOffset: offset + shown.length } : {}),
 				},
 			};
@@ -232,6 +288,8 @@ export function registerExocomTools(
 				total?: number;
 				offset?: number;
 				nextOffset?: number;
+				scopeCode?: string;
+				homeWorkspace?: { label?: string; code?: string; sameAsScope?: boolean };
 			} | undefined;
 			if (!details || !Array.isArray(details.peers)) {
 				const first = result.content.find((item) => item.type === "text");
@@ -241,7 +299,20 @@ export function registerExocomTools(
 			const total = typeof details.total === "number" ? details.total : peers.length;
 			const offset = typeof details.offset === "number" ? Math.max(0, details.offset) : 0;
 			const nextOffset = typeof details.nextOffset === "number" ? details.nextOffset : undefined;
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset)), 0, 0);
+			const scope = typeof details.scopeCode === "string"
+				&& typeof details.homeWorkspace?.label === "string"
+				&& typeof details.homeWorkspace.code === "string"
+				&& typeof details.homeWorkspace.sameAsScope === "boolean"
+				? {
+					scopeCode: details.scopeCode,
+					homeWorkspace: {
+						label: details.homeWorkspace.label,
+						code: details.homeWorkspace.code,
+						sameAsScope: details.homeWorkspace.sameAsScope,
+					},
+				}
+				: undefined;
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset, scope)), 0, 0);
 		},
 	});
 
@@ -249,7 +320,7 @@ export function registerExocomTools(
 		name: "exocom_send",
 		label: "Exocom Send",
 		description: [
-			"Send a ONE-WAY, non-blocking message to another top-level pi instance in this workspace",
+			"Send a ONE-WAY, non-blocking message to another top-level pi instance in this Exocom scope",
 			"(see `exocom_list`) — it returns a `msg_id` immediately and does not wait for the peer to",
 			"act on it. If you're replying to something a peer sent you, set `in_reply_to` to its",
 			'`msg_id`. `target: "*"` broadcasts the message to every reachable peer.',

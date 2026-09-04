@@ -79,8 +79,8 @@ function formatArtifactSize(bytes: number): string {
 
 /** Renders the spill as the readable form the model sees. `path` is peer-authored and this line
  *  is an invitation to READ it, so it may only be rendered for a descriptor the transport already
- *  verified against this workspace's own artifacts directory and the bytes on disk — that the file
- *  is this workspace's own unlinked spill, and that its size matches and is bounded (see
+ *  verified against this Exocom scope's own artifacts directory and the bytes on disk — that the file
+ *  is this scope's own unlinked spill, and that its size matches and is bounded (see
  *  `ExocomPlane.artifactClaimError`). Nothing here can check a path or a file. */
 function artifactBody(descriptor: ReturnType<typeof parseExocomArtifactDescriptor>): string {
 	if (!descriptor) return "";

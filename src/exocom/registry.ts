@@ -1,4 +1,4 @@
-/** exocom workspace registry — one JSON file per live instance. */
+/** Exocom scope registry — one JSON file per live instance. */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { agentsDir, registryPath } from "./paths.ts";
@@ -12,6 +12,10 @@ export interface RegistryEntry {
 	pid: number; endpoint: string; cwd: string; context_pct: number; inbox: number;
 	heartbeat_at: string;
 	public_key?: string;
+	/** New peers publish a safe workspace identity as one all-or-none tuple. Legacy entries omit it. */
+	workspace_id?: string;
+	workspace_code?: string;
+	workspace_label?: string;
 }
 
 /** The fields that prove which process owns a registry slot.  `session_id` is the
@@ -53,6 +57,18 @@ export function normalizeRegistryEntry(value: unknown): RegistryEntry | undefine
 	const contextPct = typeof e.context_pct === "number" && Number.isFinite(e.context_pct) ? Math.max(0, Math.min(100, e.context_pct)) : 0;
 	const inbox = typeof e.inbox === "number" && Number.isFinite(e.inbox) ? Math.max(0, Math.min(1_000_000, Math.floor(e.inbox))) : 0;
 	const publicKey = opaqueString(e.public_key, 256);
+	const hasWorkspaceMetadata = e.workspace_id !== undefined || e.workspace_code !== undefined || e.workspace_label !== undefined;
+	let workspace: Pick<RegistryEntry, "workspace_id" | "workspace_code" | "workspace_label"> = {};
+	if (hasWorkspaceMetadata) {
+		if (typeof e.workspace_id !== "string" || !/^[0-9a-f]{24}$/.test(e.workspace_id)
+			|| typeof e.workspace_code !== "string" || !/^[0-9A-Za-z]{4}$/.test(e.workspace_code)
+			|| typeof e.workspace_label !== "string") return undefined;
+		workspace = {
+			workspace_id: e.workspace_id,
+			workspace_code: e.workspace_code,
+			workspace_label: normalizeMetadataText(e.workspace_label, 80, "workspace"),
+		};
+	}
 	return {
 		session_id: sessionId,
 		name: normalizePeerName(e.name),
@@ -67,6 +83,7 @@ export function normalizeRegistryEntry(value: unknown): RegistryEntry | undefine
 		inbox,
 		heartbeat_at: new Date(Date.parse(heartbeatAt)).toISOString(),
 		...(publicKey && /^[A-Za-z0-9+/]+={0,2}$/.test(publicKey) ? { public_key: publicKey } : {}),
+		...workspace,
 	};
 }
 

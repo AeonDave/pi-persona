@@ -127,14 +127,21 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - **exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`,
   capability-gated): a plane apart from everything above — those are all INTERNAL to one supervisor's
   own run (hierarchical, session-keyed children); exocom is FLAT and EXTERNAL, between independent
-  top-level pi instances sharing a workspace, discovered via a workspace-scoped file registry, no
-  parent/child relationship. Postcards remain one-way and non-blocking: `exocom_list`/`exocom_send`
+  top-level pi instances sharing one selected scope, no parent/child relationship. Bare `--exocom`
+  keeps the current workspace scope; exact `--exocom=Ab0T` joins that existing workspace's scope from
+  another cwd through a persistent, collision-aware, case-sensitive four-character Base62 alias.
+  The scope selects registry/transport/ledger/artifacts, while every peer advertises its actual home
+  workspace id/code/safe label so external file sets are explicit. A foreign peer is advisory for
+  writes: it can inspect its own files and use postcards/ask/answer/wait/progress/release, but
+  `exocom_claim` is inactive and rejected because the ledger's paths are repository-relative to the
+  scope workspace. The code is a same-host/same-agent-dir join reference, not authentication.
+  Postcards remain one-way and non-blocking: `exocom_list`/`exocom_send`
   plus `exocom_name` (a reply is a send with `in_reply_to` set). The separate shared JSONL work
   ledger adds `claim`/`ask`/`answer`/`decline`/non-blocking `wait`/`progress`/`release`: overlapping
   open write sets NACK atomically, and a pending targeted ask gates that participant to answer/decline
   plus read-only tools. Semantic frames are signed immediate-wake signals; the ledger is authoritative
   if delivery is deferred. This is cooperative runtime coordination, not OS authorization. All ten
-  tools remain in `EXOCOM_TOOL_NAMES`, targeted denies win independently, and joining requires
+  tools remain in `EXOCOM_TOOL_NAMES` (with `claim` withheld for a foreign member), targeted denies win independently, and joining requires
   `canUseBus` plus at least one callable closer (`answer` or `decline`) so a published peer cannot be
   wedged by an obligation it has no way to settle. If `exocom_name` is permitted, an unnamed top-level
   Pi is prompted to invent a task-derived call-sign as its first action on the first unconstrained

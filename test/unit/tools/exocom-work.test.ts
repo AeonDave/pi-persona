@@ -9,6 +9,7 @@ import { registerExocomWorkTools, type ExocomWaitArmResult } from "../../../src/
 function harness(over: {
 	armWait?: (workKey: string, askId: string, timeoutMs: number) => ExocomWaitArmResult;
 	dispatch?: (frame: ExocomSemanticFrame) => Promise<{ msg_id: string; peerWakeDeferred?: true }>;
+	canClaim?: () => boolean;
 } = {}) {
 	const tools = new Map<string, any>();
 	const dispatched: ExocomSemanticFrame[] = [];
@@ -19,6 +20,7 @@ function harness(over: {
 		sessionId: () => "session-a",
 		name: () => "orion",
 		now: () => Date.parse("2026-09-01T00:00:00Z"),
+		...(over.canClaim ? { canClaim: over.canClaim } : {}),
 		resolveTarget: (target) => {
 			resolvedTargets.push(target);
 			return "session-b";
@@ -36,6 +38,19 @@ test("exocom_claim TypeBox schema requires a non-empty write_set", () => {
 	const h = harness();
 	const schema = h.tools.get("exocom_claim").parameters as { properties: { write_set: { minItems?: number } } };
 	assert.equal(schema.properties.write_set.minItems, 1);
+});
+
+test("an external-workspace member cannot place repository-relative claims in the joined workspace ledger", async () => {
+	const h = harness({ canClaim: () => false });
+	await assert.rejects(
+		() => h.tools.get("exocom_claim").execute("claim-external", {
+			work_key: "external-review",
+			write_set: ["src"],
+			slice: "inspect the external corpus",
+		}),
+		/external workspace.*cannot claim/i,
+	);
+	assert.deepEqual(h.dispatched, [], "a refused foreign claim never reaches the shared ledger");
 });
 
 test("exocom_ask consumes the public target emitted by exocom_list", async () => {

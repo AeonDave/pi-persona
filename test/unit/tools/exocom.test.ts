@@ -45,6 +45,42 @@ test("exocom_list renders the peers", async () => {
 	assert.doesNotMatch(r.content[0].text, /purpose|peer-message/, "default roster omits prose metadata and fences");
 });
 
+test("exocom_list exposes scope and each peer's safe workspace identity without leaking paths", async () => {
+	const m = mockPi();
+	const peer = {
+		name: "indexer", persona: "research", model: "m", context_pct: 10, purpose: "",
+		displayName: "indexer", target: "indexer@0123456789abcdef01234567",
+		workspace_id: "89abcdef0123456789abcdef",
+		workspace_code: "Ab0T",
+		workspace_label: "document-corpus",
+		cwd: "D:/private/document-corpus",
+	};
+	registerExocomTools(
+		m.pi,
+		() => stubPlane({ listPeers: () => [peer] }) as never,
+		undefined,
+		() => ({
+			scopeWorkspaceId: "0123456789abcdef01234567",
+			scopeCode: "Q7zM",
+			homeWorkspaceId: "0123456789abcdef01234567",
+			homeWorkspaceCode: "Q7zM",
+			homeWorkspaceLabel: "pi-persona",
+			joined: false,
+		}),
+	);
+	const result = await m.tools.get("exocom_list").execute("c", {}, undefined, undefined, {});
+	const details = result.details as any;
+	assert.match(result.content[0].text, /workspace pi-persona \[Q7zM\]/i);
+	assert.match(result.content[0].text, /workspace: document-corpus \[Ab0T\].*external/i);
+	assert.doesNotMatch(result.content[0].text, /D:\/private|cwd/i);
+	assert.equal(details.peers[0].sameWorkspace, false);
+	assert.equal(details.peers[0].workspace_code, "Ab0T");
+	assert.equal(details.scopeCode, "Q7zM");
+	const rendered = m.tools.get("exocom_list").renderResult(result, { expanded: true }, plainTheme).render(200).join("\n");
+	assert.match(rendered, /workspace pi-persona \[Q7zM\]/i, "the operator-facing card exposes the copyable code too");
+	assert.match(rendered, /document-corpus \[Ab0T\].*external/i);
+});
+
 test("exocom_list keeps full model content but caps collapsed TUI rendering", async () => {
 	const m = mockPi();
 	const peers = Array.from({ length: 10 }, (_, i) => ({ name: `peer-${i}`, persona: "dev", model: "m", context_pct: i, purpose: "", displayName: `peer-${i}` }));

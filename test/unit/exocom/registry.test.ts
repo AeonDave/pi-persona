@@ -22,6 +22,31 @@ test("write then read round-trips an entry", () => {
 	assert.equal(all[0]?.name, "elite");
 });
 
+test("workspace identity round-trips as a safe label plus stable id/code", () => {
+	writeEntry(dir, H, entry({
+		session_id: "workspace-metadata",
+		workspace_id: "0123456789abcdef01234567",
+		workspace_code: "Ab0T",
+		workspace_label: "docs <archive>",
+	}));
+	const stored = readAll(dir, H).find((candidate) => candidate.session_id === "workspace-metadata");
+	assert.equal(stored?.workspace_id, "0123456789abcdef01234567");
+	assert.equal(stored?.workspace_code, "Ab0T");
+	assert.equal(stored?.workspace_label, "docs archive");
+});
+
+test("workspace identity is all-or-none and malformed metadata fails closed", () => {
+	for (const [session_id, malformed] of [
+		["missing-code", { workspace_id: "0123456789abcdef01234567", workspace_label: "docs" }],
+		["bad-id", { workspace_id: "../outside", workspace_code: "Ab0T", workspace_label: "docs" }],
+		["bad-code", { workspace_id: "0123456789abcdef01234567", workspace_code: "abc/", workspace_label: "docs" }],
+	] as const) {
+		assert.throws(() => writeEntry(dir, H, entry({ session_id, ...malformed })), /invalid entry/);
+	}
+	writeEntry(dir, H, entry({ session_id: "legacy-no-workspace-metadata" }));
+	assert.ok(readAll(dir, H).some((candidate) => candidate.session_id === "legacy-no-workspace-metadata"));
+});
+
 test("prune drops a dead pid AND a stale heartbeat, keeps the live one", () => {
 	writeEntry(dir, H, entry({ session_id: "live", name: "live", pid: process.pid, heartbeat_at: new Date(1_000_000).toISOString() }));
 	writeEntry(dir, H, entry({ session_id: "dead", name: "dead", pid: 999_999, heartbeat_at: new Date(1_000_000).toISOString() }));

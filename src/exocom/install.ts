@@ -30,8 +30,10 @@ import {
 } from "../extension/shared.ts";
 import { SeenMessages, SenderBudget } from "./guards.ts";
 import { EXOCOM } from "./limits.ts";
-import { endpoint as exocomEndpointFor, ledgerPath, workspaceHash } from "./paths.ts";
+import { endpoint as exocomEndpointFor, ledgerPath } from "./paths.ts";
 import { ExocomPlane, type DisplayPeer } from "./plane.ts";
+import type { ExocomArgSelection } from "./activation.ts";
+import { selectExocomScope, type ExocomScope } from "./scope.ts";
 import {
 	answerFor,
 	commitLedgerEvent,
@@ -61,6 +63,7 @@ export interface ExocomHost {
 	get processingDeferredOrchestration(): boolean;
 	get telemetry(): TelemetryProducer | undefined;
 	readonly delegationNudge: DelegationNudge;
+	readonly exocomArgs: ExocomArgSelection;
 	userAgentDir(): string;
 }
 
@@ -76,6 +79,7 @@ export interface ExocomInstall {
 	get plane(): ExocomPlane | undefined;
 	get name(): string;
 	get namedByModel(): boolean;
+	get scope(): ExocomScope | undefined;
 	renderWidget(): void;
 	get ledgerFile(): string;
 	pendingAsks(ctx: ExtensionContext): LedgerAsk[];
@@ -87,7 +91,7 @@ export interface ExocomInstall {
 
 export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall {
 	// ── exocom (opt-in, T9): the EXTERNAL peer-to-peer plane ─────────────────────
-	// Independent top-level pi instances in this workspace discover + message each other
+	// Independent top-level pi instances in this selected scope discover + message each other
 	// directly (flat) — distinct from the broker/intercom plane above, which is strictly
 	// hierarchical (a supervisor and its OWN spawned children). Off by default (host.config.exocom /
 	// --exocom), additionally gated by the active persona's canUseBus capability; no active
@@ -98,6 +102,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomSessionId = "";
 	let exocomName = "";
 	let exocomNamedByModel = false;
+	let exocomScope: ExocomScope | undefined;
 	interface ExocomWaiter { id: string; work_key: string; ask_id: string; handle: ReturnType<typeof setTimeout>; }
 	const exocomWaiters: ExocomWaiter[] = [];
 	let exocomWaitSeq = 0;
@@ -112,6 +117,26 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomHeartbeat: ReturnType<typeof setInterval> | undefined;
 	let exocomHeartbeatFailures = 0; // consecutive failed ticks — drives the report cadence, reset by any success
 	let exocomResetTimer: ReturnType<typeof setInterval> | undefined;
+
+	function exocomRequested(): boolean {
+		return host.config.exocom
+			|| pi.getFlag("exocom") === true
+			|| host.exocomArgs.joinCode !== undefined
+			|| host.exocomArgs.error !== undefined;
+	}
+
+	function peerWorkspace(peer: DisplayPeer): { label: string; code: string; same: boolean } | undefined {
+		const scope = exocomScope;
+		if (!scope) return undefined;
+		const id = peer.workspace_id ?? scope.scopeWorkspaceId;
+		const code = peer.workspace_code ?? (id === scope.scopeWorkspaceId ? scope.scopeCode : "");
+		if (!code) return undefined;
+		return {
+			label: peer.workspace_label ?? (id === scope.homeWorkspaceId ? scope.homeWorkspaceLabel : "workspace"),
+			code,
+			same: id === scope.homeWorkspaceId,
+		};
+	}
 
 	function currentLedgerPruneOptions(): LedgerPruneOptions | undefined {
 		const plane = exocomPlane;
@@ -246,7 +271,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
 			const ident = exocomSelfWidgetLabel(exocomNamedByModel, exocomName, selfPersona);
 			const roleBit = exocomNamedByModel && selfPersona ? ` · ${selfPersona}` : "";
-			const local = `📡 ${ident}${roleBit} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%`;
+			const scopeBit = exocomScope
+				? exocomScope.joined
+					? ` · home ${exocomScope.homeWorkspaceLabel} [${exocomScope.homeWorkspaceCode}] → scope [${exocomScope.scopeCode}]`
+					: ` · workspace ${exocomScope.homeWorkspaceLabel} [${exocomScope.scopeCode}]`
+				: "";
+			const local = `📡 ${ident}${roleBit} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%${scopeBit}`;
 			const peerRows = peers.map((p) => {
 							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
 							const name = sanitizePeerField(p.displayName, 48) || "peer";
@@ -255,7 +285,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 							const contextPct = Number.isFinite(p.context_pct) ? Math.max(0, Math.min(100, Math.round(p.context_pct))) : 0;
 							// Viewer-centric: THIS row's in/out is what WE exchanged with THIS peer, not
 							// the peer's own global self-report (which reads inverted from our side).
-							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${shortModel(model) || "?"} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}`;
+							const workspace = peerWorkspace(p);
+							const workspaceBit = workspace ? ` · ${workspace.same ? "ws" : "external"} ${workspace.label} [${workspace.code}]` : "";
+							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${shortModel(model) || "?"} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}${workspaceBit}`;
 						});
 			const lines = boundDisplayRows(local, peerRows, 7, "exocom_list for the full pool");
 			host.lastCtx.ui.setWidget("persona-exocom", lines, { placement: "aboveEditor" });
@@ -265,7 +297,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try {
 			host.lastCtx.ui.setStatus(
 				"persona-exocom",
-				`📡 ${exocomSelfStatusLabel(exocomNamedByModel, exocomName, host.controller.activePersona?.name ?? "")} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
+				`📡 ${exocomSelfStatusLabel(exocomNamedByModel, exocomName, host.controller.activePersona?.name ?? "")} · ${exocomScope?.joined ? `scope ${exocomScope.scopeCode} · home ${exocomScope.homeWorkspaceCode}` : `workspace ${exocomScope?.scopeCode ?? "?"}`} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
 			);
 		} catch {
 			/* cosmetic */
@@ -280,7 +312,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// but this process, and an entry without it makes every frame we sign unverifiable.
 	function exocomHeartbeatTick(agentDir: string, hash: string, sessionId: string, ep: string, cwd: string): void {
 		const plane = exocomPlane;
-		if (!plane) return;
+		const scope = exocomScope;
+		if (!plane || !scope) return;
 		const persona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 		const model = sanitizePeerField(host.lastCtx?.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 		const entry: RegistryEntry = {
@@ -296,6 +329,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			context_pct: Math.round(host.lastCtx?.getContextUsage()?.percent ?? 0),
 			inbox: exocomNotifier?.peekPending().length ?? 0,
 			heartbeat_at: new Date().toISOString(),
+			workspace_id: scope.homeWorkspaceId,
+			workspace_code: scope.homeWorkspaceCode,
+			workspace_label: scope.homeWorkspaceLabel,
 		};
 		plane.heartbeat(entry);
 		// Everything past the re-registration is local upkeep: sweeping OTHER instances' dead entries
@@ -317,13 +353,16 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// bind/registry failure degrades to "exocom inactive", it must never block a normal session
 	// from starting (mirrors the broker host's own fire-and-forget-on-failure discipline).
 	async function startExocom(ctx: ExtensionContext): Promise<void> {
-		if (!(host.config.exocom || pi.getFlag("exocom") === true)) return;
+		if (!exocomRequested()) return;
 		if (!canParticipateInExocom(host.controller.capabilities)) return;
 		try {
-			const hash = workspaceHash(ctx.cwd);
+			if (host.exocomArgs.error) throw new Error(host.exocomArgs.error);
 			const sessionId = ctx.sessionManager.getSessionId();
 			exocomSessionId = sessionId;
 			const agentDir = host.userAgentDir();
+			const scope = exocomScope ?? selectExocomScope(agentDir, ctx.cwd, host.exocomArgs.joinCode);
+			exocomScope = scope;
+			const hash = scope.scopeWorkspaceId;
 			// Placeholder only. On the first unconstrained task turn, the prompt asks the model to
 			// invent the real call-sign via `exocom_name`; no catalog is assigned here. Registry key
 			// is session_id.
@@ -516,6 +555,11 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					model,
 					endpoint: ep,
 					cwd: ctx.cwd,
+					workspace: {
+						id: scope.homeWorkspaceId,
+						code: scope.homeWorkspaceCode,
+						label: scope.homeWorkspaceLabel,
+					},
 				},
 				getCard: () => ({
 					name: exocomName,
@@ -595,6 +639,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				},
 				onSemantic: (frame, fromEntry) => {
 					if (!exocomLedgerFile) return { accepted: false, reason: "ledger unavailable" };
+					if (frame.kind === "claim" && fromEntry.workspace_id !== undefined && fromEntry.workspace_id !== scope.scopeWorkspaceId) {
+						return { accepted: false, reason: "external-workspace peers cannot claim paths in the selected scope's workspace ledger" };
+					}
 					if (exocomSeen?.seenBefore(frame.from_session, frame.msg_id)) return { accepted: true, duplicate: true };
 					const bytes = Buffer.byteLength(JSON.stringify(frame), "utf8");
 					if (!exocomBudget?.allow(frame.from_session, bytes)) {
@@ -683,12 +730,13 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
 				}
 				return exocomName;
-			});
+			}, () => exocomScope);
 			registerExocomWorkTools(pi, {
 				getPlane: () => exocomPlane,
 				sessionId: () => sessionId,
 				name: () => exocomName,
 				now: () => Date.now(),
+				canClaim: () => exocomScope?.joined !== true,
 				resolveTarget: (target) => {
 					const plane = exocomPlane;
 					if (!plane) throw new Error("exocom is not active for this persona");
@@ -702,12 +750,18 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// Teardown while the reference is still owned; this also cancels notifier/timers.
 			await stopExocom();
 			const message = err instanceof Error ? err.message : String(err);
-			try {
-				ctx.ui.notify(`exocom failed to start: ${message}`, "error");
-			} catch {
-				/* the session may already be tearing down */
+			let surfacedInUi = false;
+			if (ctx.hasUI) {
+				try {
+					ctx.ui.notify(`exocom failed to start: ${message}`, "error");
+					surfacedInUi = true;
+				} catch {
+					/* the session may already be tearing down; stderr remains available */
+				}
 			}
-			if (process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] exocom: failed to start: ${message}\n`);
+			if (!surfacedInUi || process.env.PI_PERSONA_DEBUG) {
+				process.stderr.write(`[pi-persona] exocom: failed to start: ${message}\n`);
+			}
 		}
 	}
 
@@ -720,7 +774,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			let changed = false;
 			for (const name of EXOCOM_TOOL_NAMES) {
 				if (!available.has(name)) continue;
-				const allowed = enabled && (!caps || canCallTool(caps, name));
+				const scopeAllows = name !== "exocom_claim" || exocomScope?.joined !== true;
+				const allowed = enabled && scopeAllows && (!caps || canCallTool(caps, name));
 				if (allowed && !active.has(name)) {
 					active.add(name);
 					changed = true;
@@ -744,7 +799,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// `host.controller.capabilities` FRESH at bind time — this does the same for exocom. Already
 	// running and still gated on ⇒ a no-op (the heartbeat already relabels under the new persona).
 	async function applyExocomGate(ctx: ExtensionContext): Promise<void> {
-		const shouldRun = (host.config.exocom || pi.getFlag("exocom") === true) && canParticipateInExocom(host.controller.capabilities);
+		const shouldRun = exocomRequested() && canParticipateInExocom(host.controller.capabilities);
 		if (shouldRun && !exocomPlane) await startExocom(ctx);
 		else if (!shouldRun && exocomPlane) await stopExocom();
 		syncExocomActiveTools();
@@ -869,6 +924,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		get plane() { return exocomPlane; },
 		get name() { return exocomName; },
 		get namedByModel() { return exocomNamedByModel; },
+		get scope() { return exocomScope; },
 		renderWidget: renderExocomWidget,
 		get ledgerFile() { return exocomLedgerFile; },
 		pendingAsks: pendingAsksFor,
