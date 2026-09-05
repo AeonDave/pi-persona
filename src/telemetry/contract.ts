@@ -4,7 +4,7 @@ export const TELEMETRY_EVENT_NAME = "pi:telemetry" as const;
 export const LEGACY_TELEMETRY_EVENT_NAME = "pi-persona:telemetry" as const;
 export const LEGACY_TELEMETRY_VERSION = 1 as const;
 export const TELEMETRY_PRODUCER_ID = "pi-persona" as const;
-export const TELEMETRY_PRODUCER_VERSION = "1.13.3" as const;
+export const TELEMETRY_PRODUCER_VERSION = "1.13.4" as const;
 
 export type InstanceStatus = "active" | "idle" | "stopped" | "stale" | (string & {});
 export type AgentKind = "subagent" | "delegate" | "council" | "flow" | "phase" | (string & {});
@@ -182,6 +182,9 @@ function numberField(payload: Record<string, unknown>, key: string, opts: { inte
 	if (opts.integer && !Number.isSafeInteger(payload[key])) return false;
 	return (opts.min === undefined || payload[key] >= opts.min) && (opts.max === undefined || payload[key] <= opts.max);
 }
+/** A start event may name its in-flight state with the producer's own word — `terminalTool` in the
+ *  consumer classifies by denylist and the descriptor type is open — but it may not claim to be over. */
+const TERMINAL_TOOL_STATUS = ["done", "failed"];
 function validKnownPayload(type: string, payload: Record<string, unknown>): boolean {
 	if (type === "instance.updated" || type === "instance.heartbeat") return Object.keys(payload).every((key) => ["displayName", "persona", "model", "status", "exocomEnabled", "color", "pid", "contextPercent"].includes(key)) && ["displayName", "status"].every((key) => payload[key] === undefined || stringField(payload, key)) && ["persona", "model", "color"].every((key) => payload[key] === undefined || stringField(payload, key, false)) && (payload.exocomEnabled === undefined || typeof payload.exocomEnabled === "boolean") && numberField(payload, "pid", { integer: true, min: 0 }) && numberField(payload, "contextPercent", { min: 0, max: 100 });
 	if (type === "agent.cleared") return true;
@@ -193,7 +196,7 @@ function validKnownPayload(type: string, payload: Record<string, unknown>): bool
 		return stringField(payload, "id") && patch !== undefined && Object.entries(patch).every(([key, value]) => ["label", "kind", "status", "parentId", "agent", "persona", "model"].includes(key) ? typeof value === "string" : false);
 	}
 	if (type === "agent.removed") return stringField(payload, "id") && (payload.status === undefined || ["done", "failed", "stopped"].includes(payload.status as string));
-	if (type === "tool.started") return stringField(payload, "callId") && stringField(payload, "agentId") && stringField(payload, "name") && payload.status === "running";
+	if (type === "tool.started") return stringField(payload, "callId") && stringField(payload, "agentId") && stringField(payload, "name") && stringField(payload, "status") && !TERMINAL_TOOL_STATUS.includes(payload.status as string);
 	if (type === "tool.finished") return stringField(payload, "callId") && stringField(payload, "agentId") && stringField(payload, "name") && ["done", "failed"].includes(payload.status as string) && numberField(payload, "durationMs", { min: 0 });
 	if (type === "message.sent" || type === "message.received" || type === "message.replied") return stringField(payload, "id") && stringField(payload, "channel") && stringField(payload, "from") && stringField(payload, "to") && stringField(payload, "kind") && stringField(payload, "status") && typeof payload.expectsReply === "boolean" && numberField(payload, "size", { integer: true, min: 0 }) && (payload.replyTo === undefined || stringField(payload, "replyTo"));
 	if (type === "peers.snapshot") return Array.isArray(payload.peers) && payload.peers.every((peer) => { const p = objectPayload(peer); return p !== undefined && stringField(p, "sessionId") && stringField(p, "displayName") && stringField(p, "persona", false) && stringField(p, "model", false) && numberField(p, "contextPercent", { min: 0, max: 100 }) && typeof p.status === "string" && numberField(p, "sent", { integer: true, min: 0 }) && numberField(p, "received", { integer: true, min: 0 }); });
