@@ -138,3 +138,189 @@ test("a destination that cannot hold the tree degrades to a warning and keeps th
 	assert.equal(fs.existsSync(legacy.code), true, "nothing is removed when nothing was moved");
 	assert.deepEqual(result.moved, []);
 });
+
+/** A directory link the way the rest of this suite plants one (junctions need no privilege on
+ *  Windows; a plain `dir` symlink does). Returns false on a host that refuses either. */
+function linkDirectory(target: string, link: string): boolean {
+	try {
+		fs.mkdirSync(path.dirname(link), { recursive: true });
+		fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+test("a linked destination directory never relocates data out of the agent dir", (t) => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const outside = path.join(dir, "outside");
+	fs.mkdirSync(outside, { recursive: true });
+	if (!linkDirectory(outside, path.join(dir, "persona", "exocom", "codes"))) {
+		t.skip("this host does not permit directory links");
+		return;
+	}
+	const result = migrateLegacyDataRoot(dir);
+	assert.equal(fs.existsSync(path.join(outside, "30615a39.json")), false, "the durable join code stayed inside the agent dir");
+	assert.equal(fs.existsSync(legacy.code), true, "a source we did not place is never removed");
+	assert.equal(result.warnings.length > 0, true, "a linked destination is reported");
+	assert.deepEqual(result.moved.filter((p) => p.includes("codes")), []);
+});
+
+test("a linked destination at the exocom level leaves registry and ledger state where they are", (t) => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const outside = path.join(dir, "outside");
+	fs.mkdirSync(outside, { recursive: true });
+	if (!linkDirectory(outside, path.join(dir, "persona", "exocom"))) {
+		t.skip("this host does not permit directory links");
+		return;
+	}
+	const result = migrateLegacyDataRoot(dir);
+	assert.deepEqual(fs.readdirSync(outside), [], "nothing was written through the link");
+	assert.equal(fs.existsSync(legacy.ledger), true);
+	assert.equal(fs.existsSync(legacy.registry), true);
+	assert.equal(result.warnings.length > 0, true);
+	assert.deepEqual(result.moved, []);
+});
+
+test("a relocated persona root is followed, because that is where the plugin already reads and writes", (t) => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const elsewhere = path.join(dir, "elsewhere");
+	fs.mkdirSync(elsewhere, { recursive: true });
+	if (!linkDirectory(elsewhere, path.join(dir, "persona"))) {
+		t.skip("this host does not permit directory links");
+		return;
+	}
+	const result = migrateLegacyDataRoot(dir);
+	assert.deepEqual(result.warnings, []);
+	assert.equal(fs.readFileSync(path.join(elsewhere, "exocom", "codes", "30615a39.json"), "utf8").includes("0aZ9"), true);
+	assert.equal(fs.existsSync(legacy.code), false);
+	assert.equal(fs.existsSync(path.join(dir, "pi-persona")), false);
+});
+
+test("a peer that finished a move is not reported as a collision", () => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const result = migrateLegacyDataRoot(dir, {
+		io: {
+			// Exactly what a peer migrator leaves behind between our readdir and our link: the bytes
+			// at the destination, the legacy name gone, and EEXIST for us.
+			link: (from, to) => {
+				fs.mkdirSync(path.dirname(to), { recursive: true });
+				fs.copyFileSync(from, to);
+				fs.unlinkSync(from);
+				throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+			},
+		},
+	});
+	assert.deepEqual(result.kept, [], "nothing is kept: every source is gone");
+	assert.deepEqual(result.warnings, []);
+	assert.equal(fs.existsSync(relocated(dir, legacy.code)), true);
+});
+
+test("losing the race to remove a migrated source is not a warning", () => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const result = migrateLegacyDataRoot(dir, {
+		io: {
+			// NTFS hands the loser of two concurrent removals EPERM, not ENOENT — with the name
+			// already gone in every measured case.
+			unlink: (target) => {
+				fs.unlinkSync(target);
+				throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+			},
+		},
+	});
+	assert.deepEqual(result.warnings, [], "a source that is provably gone was migrated, not stranded");
+	assert.equal(result.moved.includes(relocated(dir, legacy.code)), true);
+	assert.equal(fs.existsSync(path.join(dir, "pi-persona")), false);
+});
+
+test("a source that cannot be removed leaves no hard-linked destination behind", () => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const result = migrateLegacyDataRoot(dir, {
+		io: {
+			// One locked legacy file (a foreign handle), everything else removable.
+			unlink: (target) => {
+				if (target === legacy.ledger) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+				fs.unlinkSync(target);
+			},
+		},
+	});
+	const target = relocated(dir, legacy.ledger);
+	assert.equal(fs.existsSync(legacy.ledger), true, "the pre-run state is intact");
+	assert.equal(fs.existsSync(target), false, "exocom refuses a ledger with a second link, so ours is undone");
+	assert.equal(result.moved.includes(target), false);
+	assert.deepEqual(result.kept, [legacy.ledger]);
+	assert.equal(result.warnings.length, 1, result.warnings.join("; "));
+	assert.equal(fs.existsSync(relocated(dir, legacy.code)), true, "its siblings still move");
+});
+
+test("a destination link that cannot be undone is reported as unusable", () => {
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const result = migrateLegacyDataRoot(dir, {
+		io: {
+			unlink: (target) => {
+				if (target.includes("ledger.jsonl")) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+				fs.unlinkSync(target);
+			},
+		},
+	});
+	assert.equal(fs.existsSync(legacy.ledger), true);
+	assert.equal(fs.existsSync(relocated(dir, legacy.ledger)), true, "neither name could be removed");
+	assert.equal(result.warnings.length, 1, result.warnings.join("; "));
+	assert.match(result.warnings[0] as string, /unusable/);
+});
+
+test("resuming an interrupted move never unwinds the placement an earlier run completed", () => {
+	// An interrupted run leaves the bytes under BOTH names, so the next run finds its own inode at the
+	// destination and only has to finish the unlink. If THAT unlink is blocked too, undoing the link
+	// would delete a placement this run never made and leave the destination empty — the one outcome
+	// worse than a lingering second name.
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const target = relocated(dir, legacy.ledger);
+	fs.mkdirSync(path.dirname(target), { recursive: true });
+	fs.linkSync(legacy.ledger, target); // the previous run linked, then died before unlinking
+
+	const result = migrateLegacyDataRoot(dir, {
+		io: {
+			// A foreign handle still holds the legacy name open, exactly as it did last time.
+			unlink: (victim) => {
+				if (victim === legacy.ledger) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+				fs.unlinkSync(victim);
+			},
+		},
+	});
+
+	assert.equal(fs.existsSync(target), true, "the earlier run's placement must survive");
+	assert.equal(fs.existsSync(legacy.ledger), true, "and its legacy name is still there to retry");
+	assert.ok(
+		result.warnings.some((w) => w.includes("already holds it")),
+		`the blocked removal is reported without undoing the placement: ${JSON.stringify(result.warnings)}`,
+	);
+});
+
+test("a peer that finished the move is not a collision on the copy fallback either", () => {
+	// The link-less path must not report a completed peer move as a collision either. Note the source
+	// being gone is caught by copyFileSync's own ENOENT before EEXIST is ever reached, so this covers
+	// the PATH rather than the `existsSync` guard on the EEXIST branch, which that ENOENT shadows.
+	const dir = agentDir();
+	const legacy = seedLegacyRoot(dir);
+	const result = migrateLegacyDataRoot(dir, {
+		io: {
+			link: (from, to) => {
+				fs.mkdirSync(path.dirname(to), { recursive: true });
+				fs.copyFileSync(from, to);
+				fs.unlinkSync(from);
+				throw Object.assign(new Error("EPERM"), { code: "EPERM" }); // forces copyAcross
+			},
+		},
+	});
+	assert.deepEqual(result.kept, [], "a completed peer move leaves nothing to keep");
+	assert.equal(fs.existsSync(relocated(dir, legacy.code)), true);
+});
