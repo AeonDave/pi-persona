@@ -26,3 +26,7 @@ Return ONLY a JSON object (no prose around it):
   "output": "<the failure modes / costs and the safer path>",
   "evidence": "<what grounds the risk — precedent, constraints, dependencies>"
 }
+
+`confidence` is your own 0.0–1.0 certainty in this vote — the `0.0` above is a placeholder, not a
+default. The council tallies votes first and only falls back to confidence, so a flat 0.0 forfeits
+your weight in a tie.

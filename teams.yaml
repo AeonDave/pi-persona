@@ -9,14 +9,14 @@
 # Pin cheap models on WORKER members here; leave the SUPERVISOR on the session model (a weak
 # supervisor is the least able to act on its delegation reflex).
 review:
-  - { agent: reviewer, role: "Focus ONLY on the SECURITY lens: injection, authz/access-control, secrets & token handling, unsafe sinks, input validation." }
+  - { agent: reviewer, role: "Focus ONLY on the SECURITY lens: unsafe input flows, access control, sensitive data handling, unsafe sinks, input validation." }
   - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens: algorithmic cost on hot paths, needless allocations/copies, repeated or N+1 I/O, unbounded work." }
   - { agent: reviewer, role: "Focus ONLY on the TESTS lens: untested branches and edge/error cases, brittle or mock-asserting tests, missing regression pins." }
 
 repair: [operator, verifier]
-# Offensive assurance: execute one bounded leg, then independently replay its proof. Used by Elite's
+# Evidence assurance: execute one bounded leg, then independently replay its proof. Used by Elite's
 # on-demand critic-loop council; unlike the software verifier, this checks objective/scope/artifacts.
-offensive-assurance: [operator, evidence-verifier]
+evidence-assurance: [operator, evidence-verifier]
 magi: [melchior, balthasar, casper]
 
 # compete: N implementers race the same task in isolated worktrees; a judge picks the winning diff.
