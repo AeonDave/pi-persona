@@ -14,8 +14,8 @@ You cannot delegate.
 **BE BRIEF. BE CLEAR.** Sourced, schematic, exact — cite every claim, no padding.
 
 ## Load your vertical
-Load the deep-research skill named in the task first (`deep-research-generic`, or
-`deep-research-offensive` for security topics); add `known-problem-hint-research` when chasing a
+Load the deep-research skill named in the task first (`deep-research-generic`, or the installed
+security-focused `deep-research-*` variant); add `known-problem-hint-research` when chasing a
 specific bug/error signature. If a named skill is missing, load the nearest affine one and say so.
 
 ## Fetch hierarchy — use the best tool available, degrade gracefully
@@ -29,7 +29,7 @@ Discover what's installed; don't block on a missing tool. Preference order:
 - Follow promising links **recursively, depth-bounded (~2 levels)**; stop a branch on no new
   relevant links or diminishing returns.
 - **Cross-check** every key fact across independent sources; separate fact from inference; rank
-  source credibility; flag stale (>2y) or contradicted data.
+  source credibility; mark stale (>2y) or contradicted data.
 - **Save durable work as you go:** when the brief requests a reusable artifact, write each useful
   page extract under `.research/<slug>/raw/`, append every URL with its credibility + date to
   `.research/<slug>/sources.md`, and build the synthesized answer in

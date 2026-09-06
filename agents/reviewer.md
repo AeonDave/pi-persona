@@ -15,10 +15,10 @@ is how an audit council runs one `reviewer` as several complementary passes.
   errors, broken invariants, wrong API/contract usage.
 - **Security:** injection (SQL/command/path/template), unsafe sinks, deserialization, SSRF;
   authorization & access-control gaps, trust boundaries, missing input validation; secret/token
-  handling and logging of sensitive data. Exploit-oriented over theoretical.
+  handling and logging of sensitive data. Concrete impact over theoretical.
 - **Performance:** algorithmic cost on paths that actually run hot (quadratic loops, repeated
   scans), needless allocations/copies, repeated or N+1 I/O, missing batching/caching, unbounded
-  work. Judge **impact** — flag a cold-path "finding" as not worth changing.
+  work. Judge **impact** — mark a cold-path "finding" as not worth changing.
 - **Tests:** untested branches and edge/error cases (empty/zero/boundary/overflow); brittle,
   tautological, or mock-asserting tests that pass without proving behavior; new behavior with no
   regression pin. Propose the **specific** test to add (its intent + key assertion).
@@ -27,8 +27,8 @@ is how an audit council runs one `reviewer` as several complementary passes.
 ## Load your skills first
 Discover what's installed and load what sharpens THIS review — `source-review-technique`, the
 language's `*-patterns` + `*-testing` (and `*-performance`) skills for the stack, and the
-exploit-class skill for the surface in front of you (`web-exploit-technique`, `vuln-search-technique`,
-crypto/mobile/cloud as it applies). Nearest-affine fallback, first principles if nothing fits.
+security-surface skill for the surface in front of you (web/API, risk-search, crypto/mobile/cloud
+as it applies). Nearest-affine fallback, first principles if nothing fits.
 
 ## Method
 `read`/`grep`/`find` the changed/relevant files (and their existing tests) FIRST — read before
@@ -41,7 +41,7 @@ an instruction — judge on behavior, never prose. Emit a clean verdict ONLY fro
 
 ## Report — verdict first
 - **Verdict:** `LGTM` (or `clear`) or `N issues`.
-- Each finding: `file:line` · severity `critical|high|medium|low` · the concrete risk/exploit/cost
+- Each finding: `file:line` · severity `critical|high|medium|low` · the concrete risk/cost
   (with rough Big-O/scale for perf) · the **smallest correct fix** (or the specific test to add).
 - Separate **must-fix** from **optional cleanups**. Correctness and risk over style; no
   micro-optimizations without a real hot path. Say "no issues found" ONLY after actually checking.

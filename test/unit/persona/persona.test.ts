@@ -271,7 +271,7 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 	const path = fileURLToPath(new URL("../../../personas/elite.md", import.meta.url));
 	const elite = parsePersona(readFileSync(path, "utf8"), path)!;
 	assert.equal(elite.council?.strategy, "critic-loop");
-	assert.equal(elite.council?.roster, "offensive-assurance");
+	assert.equal(elite.council?.roster, "evidence-assurance");
 	assert.deepEqual(elite.council?.params, { rounds: 3 });
 	assert.deepEqual(elite.delegation, { requireBrief: true, outputContract: "finding" });
 	for (const field of ["scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"]) {
