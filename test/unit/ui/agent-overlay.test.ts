@@ -201,21 +201,24 @@ test("a stop typed at a drilled-in agent that finishes first does not fall throu
 });
 
 test("a drilled-in agent that streams a long report does not cost the render loop the whole buffer per tick", () => {
+	// Bound work charged to this process, not time spent descheduled while other test files
+	// compete for a shared CI runner. The CPU budget still catches whole-buffer rebuilds.
 	const tree = new AgentTree();
 	tree.add({ id: "a", label: "alpha" });
 	const overlay = openOverlay(tree);
 	overlay.handleInput("\n"); // drill in — the detail view sanitizes and wraps the output
 	const chunk = `${"lorem ipsum dolor sit amet ".repeat(38)}\n`;
 	let buffer = "";
-	const started = performance.now();
+	const started = process.cpuUsage();
 	for (let tick = 0; tick < 400; tick++) {
 		buffer += chunk;
 		tree.update("a", { output: buffer }); // a progress snapshot carries the whole buffer
 	}
-	const elapsed = performance.now() - started;
+	const cpu = process.cpuUsage(started);
+	const elapsed = (cpu.user + cpu.system) / 1000;
 	const rendered = overlay.render(80).join("\n");
 	assert.ok(rendered.includes("lorem ipsum"), "the streamed report is still displayed");
-	assert.ok(elapsed < 1000, `400 progress ticks over a ${buffer.length}-char report took ${Math.round(elapsed)}ms`);
+	assert.ok(elapsed < 1000, `400 progress ticks over a ${buffer.length}-char report used ${Math.round(elapsed)}ms CPU`);
 	overlay.dispose();
 });
 
@@ -229,16 +232,17 @@ test("a report that carries ANSI colour is still rendered incrementally", () => 
 	overlay.handleInput("\n");
 	const chunk = `[32m${"lorem ipsum dolor sit amet ".repeat(38)}[0m\n`;
 	let buffer = "";
-	const started = performance.now();
+	const started = process.cpuUsage();
 	for (let tick = 0; tick < 400; tick++) {
 		buffer += chunk;
 		tree.update("a", { output: buffer });
 	}
-	const elapsed = performance.now() - started;
+	const cpu = process.cpuUsage(started);
+	const elapsed = (cpu.user + cpu.system) / 1000;
 	const rendered = overlay.render(80).join("\n");
 	assert.ok(rendered.includes("lorem ipsum"), "the streamed report is still displayed");
 	assert.doesNotMatch(rendered, //, "and the colour codes are still stripped");
-	assert.ok(elapsed < 1000, `400 coloured progress ticks over a ${buffer.length}-char report took ${Math.round(elapsed)}ms`);
+	assert.ok(elapsed < 1000, `400 coloured progress ticks over a ${buffer.length}-char report used ${Math.round(elapsed)}ms CPU`);
 	overlay.dispose();
 });
 
@@ -346,15 +350,16 @@ test("an unterminated control sequence cannot stall the detail render either", (
 	overlay.handleInput("\n");
 	const chunk = `${"lorem ipsum dolor sit amet ".repeat(38)}\n`;
 	let buffer = "\u001b]0;never-terminated\n";
-	const started = performance.now();
+	const started = process.cpuUsage();
 	for (let tick = 0; tick < 400; tick++) {
 		buffer += chunk;
 		tree.update("a", { output: buffer });
 	}
-	const elapsed = performance.now() - started;
+	const cpu = process.cpuUsage(started);
+	const elapsed = (cpu.user + cpu.system) / 1000;
 	const rendered = overlay.render(80).join("\n");
 	assert.ok(rendered.includes("lorem ipsum"), "the report is still displayed");
 	assert.doesNotMatch(rendered, /\u001b/, "and the dangling introducer is still stripped");
-	assert.ok(elapsed < 1000, `400 ticks behind an unterminated OSC took ${Math.round(elapsed)}ms`);
+	assert.ok(elapsed < 1000, `400 ticks behind an unterminated OSC used ${Math.round(elapsed)}ms CPU`);
 	overlay.dispose();
 });
