@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessBus } from "../../../src/bus/inproc.ts";
-import { makeContactPeerTool } from "../../../src/bus/peers.ts";
+import { makeContactPeerTool, MAX_PEER_MESSAGE_CHARS } from "../../../src/bus/peers.ts";
 
 // Like contact.test.ts: ctx is unused by the tool, the bus is the real (pure) InProcessBus.
 const CTX = undefined as never;
@@ -74,4 +74,25 @@ test("contact_peer enforces the anti-ping-pong send budget", async () => {
 	assert.match(text(r), /budget exhausted/i);
 	assert.match(text(r), /finalize/i);
 	assert.equal(bus.take("b#2").length, 2, "the third note was not delivered");
+});
+
+test("contact_peer rejects oversized messages before delivery and without burning send budget", async () => {
+	const bus = new InProcessBus();
+	bus.register("a#1");
+	bus.register("b#2");
+	const tool = makeContactPeerTool(bus, "a#1", { listPeers: () => [{ handle: "b#2", label: "b#2" }], maxSends: 1 });
+
+	const oversized = await tool.execute(
+		"t10",
+		{ action: "send", to: "b#2", message: "x".repeat(MAX_PEER_MESSAGE_CHARS + 1) },
+		undefined,
+		undefined,
+		CTX,
+	);
+	assert.match(text(oversized), new RegExp(`exceeds the ${MAX_PEER_MESSAGE_CHARS}-character limit`));
+	assert.equal(bus.pending("b#2").length, 0, "the oversized note never enters the bus");
+
+	const accepted = await tool.execute("t11", { action: "send", to: "b#2", message: "small" }, undefined, undefined, CTX);
+	assert.match(text(accepted), /Sent to b#2/);
+	assert.equal(bus.pending("b#2").length, 1, "the invalid attempt did not consume the send budget");
 });

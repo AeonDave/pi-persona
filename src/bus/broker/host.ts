@@ -11,7 +11,8 @@
  * `bus.send`, or — when `expectsReply` — `bus.ask` run ON BEHALF of the remote sender (the
  * bus mints its own ask id; the host correlates it back to the client's `msgId` via the
  * settled promise, so an eventual `bus.reply`/local answer produces a `replied` frame);
- * `reply` answers a pending ask via `bus.reply`; `list` answers a `peers` frame scoped to
+ * `cancel` aborts only the ask owned by that same socket; `reply` answers a pending ask via
+ * `bus.reply`; `list` answers a `peers` frame scoped to
  * the caller's own registered group (B7); `bye`/socket close proxies `bus.unregister`.
  *
  * Outbound (bus → client): one `bus.onMessage` subscription drains (`bus.takeWhere`,
@@ -226,6 +227,10 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			// have claimed the freed handle, and unregistering blind would kill ITS live entry.
 			if (handle && connections.get(handle) === conn) unregisterConnection(handle);
 		};
+		const forgetAsk = (msgId: string, ac: AbortController): void => {
+			if (pendingAsks.get(msgId) === ac) pendingAsks.delete(msgId);
+		};
+		const errorReason = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 		const dispatch = (frame: Frame): void => {
 			switch (frame.t) {
@@ -265,19 +270,34 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					if (frame.expectsReply) {
 						const ac = new AbortController();
 						pendingAsks.set(frame.msgId, ac);
-						bus.ask(from, frame.to, frame.text, { kind: frame.kind, signal: ac.signal }).then(
-							(text) => {
-								pendingAsks.delete(frame.msgId);
-								write({ t: "replied", askId: frame.msgId, text });
-							},
-							(err: unknown) => {
-								pendingAsks.delete(frame.msgId);
-								write({ t: "error", reason: err instanceof Error ? err.message : String(err) });
-							},
-						);
+						try {
+							bus.ask(from, frame.to, frame.text, { kind: frame.kind, signal: ac.signal }).then(
+								(text) => {
+									forgetAsk(frame.msgId, ac);
+									write({ t: "replied", askId: frame.msgId, text });
+								},
+								(err: unknown) => {
+									forgetAsk(frame.msgId, ac);
+									write({ t: "error", reason: errorReason(err), msgId: frame.msgId });
+								},
+							);
+						} catch (error) {
+							forgetAsk(frame.msgId, ac);
+							write({ t: "error", reason: errorReason(error), msgId: frame.msgId });
+						}
 					} else if (!bus.send(from, frame.to, frame.text, frame.kind)) {
 						write({ t: "error", reason: `unknown peer: ${frame.to}` });
 					}
+					return;
+				}
+				case "cancel": {
+					if (!handle) {
+						write({ t: "error", reason: "cancel before register", msgId: frame.msgId });
+						return;
+					}
+					// The map is per socket/registered participant. A child can only cancel an
+					// ask that this same connection originated; an id from another peer is ignored.
+					pendingAsks.get(frame.msgId)?.abort();
 					return;
 				}
 				case "reply": {
@@ -309,7 +329,11 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			try {
 				dispatch(raw);
 			} catch (e) {
-				write({ t: "error", reason: e instanceof Error ? e.message : String(e) });
+				write({
+					t: "error",
+					reason: e instanceof Error ? e.message : String(e),
+					...(raw.t === "send" && raw.expectsReply ? { msgId: raw.msgId } : {}),
+				});
 			}
 		};
 

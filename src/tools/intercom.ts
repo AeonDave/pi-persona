@@ -15,9 +15,11 @@ import type { Envelope, InProcessBus } from "../bus/inproc.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 
 export interface IntercomParams {
-	action: "list" | "inbox" | "reply" | "send";
+	action: "list" | "inbox" | "message" | "reply" | "send";
 	/** `send` target child handle. */
 	to?: string;
+	/** `message` target — the id shown in an inbox message line. */
+	messageId?: string;
 	/** `reply` target — the message id of the child's pending ask. */
 	askId?: string;
 	/** `send`/`reply` body. */
@@ -28,6 +30,8 @@ export interface IntercomDetails {
 	action: string;
 	peers?: string[];
 	messages?: Envelope[];
+	message?: Envelope;
+	messageId?: string;
 	totalPeers?: number;
 	omittedPeers?: number;
 	ok: boolean;
@@ -38,7 +42,7 @@ export interface IntercomOutcome {
 	details: IntercomDetails;
 }
 
-/** Automatic intercom payload limits. Explicit `result` retrieval is the escape hatch for detail. */
+/** Automatic intercom payload limits. Explicit `message` retrieval is the escape hatch for detail. */
 export const MAX_INBOX_MESSAGE_CHARS = 2_000;
 export const MAX_INBOX_BATCH_CHARS = 16_000;
 export const MAX_INTERCOM_MESSAGE_CHARS = 8_000;
@@ -74,13 +78,13 @@ export function formatInbox(messages: Envelope[], opts?: InboxFormatOptions): st
 		const from = sanitizeDisplayLabel(m.from, "peer", 40);
 		const kind = sanitizeDisplayLabel(m.kind, "message", 24);
 		const id = sanitizeDisplayLabel(m.id, "message", 40);
-		const tag = m.expectsReply ? `${kind} · reply with id ${id}` : kind;
+		const tag = m.expectsReply ? `${kind} · reply with id ${id}` : `${kind} · message id ${id}`;
 		const prefix = `• [${from}] (${tag}): `;
 		const body = clipBody(m.text, Math.min(maxMessageChars, Math.max(0, slot - prefix.length)));
 		omittedChars += body.omitted;
 		return `${prefix}${body.text}`;
 	});
-	const footer = omittedChars > 0 ? `\n… ${omittedChars} message characters omitted from this inbox view; use the message id for full detail.` : "";
+	const footer = omittedChars > 0 ? `\n… ${omittedChars} message characters omitted from this inbox view; use intercom { action: "message", messageId: "<id>" } for full detail.` : "";
 	const rendered = `${lines.join("\n")}${footer}`;
 	if (rendered.length <= maxBatchChars) return rendered;
 	// This is only reachable with unusually long metadata; preserve the first and last lines while
@@ -113,6 +117,30 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 		case "inbox": {
 			const messages = bus.take(self);
 			return { text: formatInbox(messages), details: { action: "inbox", messages, ok: true } };
+		}
+		case "message": {
+			if (!params.messageId) {
+				return { text: "intercom message needs { messageId: <message id> }.", details: { action: "message", ok: false } };
+			}
+			if (params.messageId.length > MAX_INTERCOM_REF_CHARS) {
+				return { text: `intercom messageId exceeds the ${MAX_INTERCOM_REF_CHARS}-character limit.`, details: { action: "message", ok: false } };
+			}
+			const message = bus.retrieve(params.messageId, self);
+			const displayMessageId = sanitizeDisplayLabel(params.messageId, "message");
+			if (!message) {
+				return {
+					text: `No retained message with id "${displayMessageId}" — it may still be pending, expired, exceeded the retention limit, or never have been delivered (check "inbox").`,
+					details: { action: "message", ok: false },
+				};
+			}
+			const from = sanitizeDisplayLabel(message.from, "peer", 40);
+			const kind = sanitizeDisplayLabel(message.kind, "message", 24);
+			const id = sanitizeDisplayLabel(message.id, "message", 40);
+			const replyHint = message.expectsReply ? ` · reply with id ${id}` : "";
+			return {
+				text: `[${from}] (${kind}${replyHint}) message id ${id}:\n${message.text}`,
+				details: { action: "message", messageId: message.id, message, ok: true },
+			};
 		}
 		case "reply": {
 			if (!params.askId || params.message === undefined) {

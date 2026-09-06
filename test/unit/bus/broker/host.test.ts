@@ -193,6 +193,80 @@ test("a client send{expectsReply} resolves via bus.reply and the client gets a r
 	}
 });
 
+test("a synchronous bus.ask rejection is correlated to the originating client ask", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const { send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+
+		send({ t: "send", to: "nobody", kind: "decision", text: "?", msgId: "m-unknown", expectsReply: true });
+		await waitFor(() => frames.some((f) => f.t === "error" && f.msgId === "m-unknown"));
+		const error = frames.find((f) => f.t === "error" && f.msgId === "m-unknown");
+		assert.ok(error && error.t === "error");
+		assert.match(error.reason, /unknown peer/);
+	} finally {
+		await host.close();
+	}
+});
+
+test("a full supervisor inbox returns a correlated ask error instead of stranding the client", async () => {
+	const bus = new InProcessBus({ maxInbox: 1 });
+	bus.register("supervisor");
+	const blockerAbort = new AbortController();
+	const blocker = bus.ask("local", "supervisor", "already occupied", { signal: blockerAbort.signal });
+	const { host, server } = await startHost(bus);
+	try {
+		const { send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+		send({ t: "send", to: "supervisor", kind: "decision", text: "?", msgId: "m-full", expectsReply: true });
+		await waitFor(() => frames.some((f) => f.t === "error" && f.msgId === "m-full"));
+		const error = frames.find((f) => f.t === "error" && f.msgId === "m-full");
+		assert.ok(error && error.t === "error");
+		assert.match(error.reason, /inbox full/);
+	} finally {
+		blockerAbort.abort();
+		await assert.rejects(() => blocker, /abort/);
+		await host.close();
+	}
+});
+
+test("cancel aborts only the pending ask owned by that registered connection", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const first = connectClient(server);
+		first.send({ t: "register", handle: "child#1" });
+		await waitFor(() => first.frames.some((f) => f.t === "registered"));
+		const second = connectClient(server);
+		second.send({ t: "register", handle: "child#2" });
+		await waitFor(() => second.frames.some((f) => f.t === "registered"));
+
+		first.send({ t: "send", to: "supervisor", kind: "decision", text: "continue?", msgId: "m-owned", expectsReply: true });
+		await waitFor(() => bus.pending("supervisor").some((env) => env.expectsReply));
+		second.send({ t: "cancel", msgId: "m-owned" });
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(bus.pending("supervisor").some((env) => env.expectsReply), true, "a different connection cannot cancel the ask");
+		const ask = bus.pending("supervisor").find((env) => env.expectsReply);
+		assert.ok(ask);
+		assert.equal(bus.reply(ask.id, "yes"), true);
+		await waitFor(() => first.frames.some((f) => f.t === "replied" && f.askId === "m-owned"));
+		assert.equal(second.frames.some((f) => f.t === "error" && f.msgId === "m-owned"), false);
+
+		first.send({ t: "send", to: "supervisor", kind: "decision", text: "cancel me", msgId: "m-cancel", expectsReply: true });
+		await waitFor(() => bus.pending("supervisor").some((env) => env.expectsReply));
+		first.send({ t: "cancel", msgId: "m-cancel" });
+		await waitFor(() => first.frames.some((f) => f.t === "error" && f.msgId === "m-cancel"));
+		assert.equal(bus.pending("supervisor").some((env) => env.expectsReply), false, "the owning connection cancels its ask");
+	} finally {
+		await host.close();
+	}
+});
+
 test("list returns the peer registry via a peers frame, scoped to the caller's group", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

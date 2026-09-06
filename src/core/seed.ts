@@ -108,11 +108,37 @@ const ELITE_REQUIRED_ADDITIONS = ["agents/evidence-verifier.md"] as const;
 
 export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>> = {
 	"personas/dev.md": [
+		// v1.13.4 pristine seed (LF and CRLF checkout variants)
+		{ size: 5907, sha256: "1d7abbc482a26c452e2588e405bdcb60af536df1f81aa0b709dcff70554915d2" },
+		{ size: 5977, sha256: "a1b46938316636bc90f525d031490eef3ee46363abe3aa199b267449b8bff06a" },
+		// Current pre-Exocom-scope prompt (LF and CRLF checkout variants).
+		{ size: 3170, sha256: "caf493d2df543303c5c49731747be033ce7169749f2e5d2939aa0ae6432ff0b5" },
+		{ size: 3221, sha256: "40f6f682d0adbeee8e2221b7ab3525666b64816bf40af981fbdc88d6aef46671" },
 		{ size: 3985, sha256: "fb02263d97c53d6c10b6089c9c65ae7fad27a77c28434b5c892dbb87dd285e5b" },
 		// v1.10.5–v1.12.0
 		{ size: 5194, sha256: "0899ee3b10971c2b324e9e9c868fcab833ea80a80b83d94a1f0a95147475e9b5" },
 		// v1.12.1
 		{ size: 5195, sha256: "54da40a44a777f8a3b36b6c038248116e19be5a6515707747d070dc3f32ead56" },
+	],
+	"personas/planner.md": [
+		// v1.13.4 pristine seed (LF and CRLF checkout variants)
+		{ size: 3350, sha256: "78a1f1c88d4d779dca46414029a247e8c48db85b3b7266be9366c6dc23714d87" },
+		{ size: 3397, sha256: "8055b7440f2cf1e79378196eda675bdeb5d58b8941d450f8901672cf82a9e876" },
+	],
+	"personas/researcher.md": [
+		// v1.13.4 pristine seed (LF and CRLF checkout variants)
+		{ size: 4441, sha256: "a3819ea76afee2a2f14d50c99198a09d4a4bd858e22ea9e4ceb3d868dcbb78c8" },
+		{ size: 4498, sha256: "2bd9dcaf47bd4ef3d139be361d260fbf7c9caa523144548593cdfc7ea4a2246c" },
+	],
+	"personas/audit.md": [
+		// v1.13.4 pristine seed (LF and CRLF checkout variants)
+		{ size: 2110, sha256: "ea893333fc128a760455bb4eaac3ee2d384163f40950fca2c201b41860bd9d8a" },
+		{ size: 2145, sha256: "04f2167437081d69806a704238411275006df98e6ee902bc0a8cb6eb81b0ef14" },
+	],
+	"personas/verify.md": [
+		// v1.13.4 pristine seed (LF and CRLF checkout variants)
+		{ size: 1927, sha256: "4c670aba28ce15937d60074ec4ac7d50f6db3cccf137b60d9758627d69e82a0f" },
+		{ size: 1955, sha256: "9696278c243f83c9e8ee5f128faacebb8a89f85464b2c182f1bb77365a6d5643" },
 	],
 	// The MAGI cores gained `purpose:` (their verticalization) in v1.10.6. Agents are seeded COPIES,
 	// not a live layer read from the package, so without these an existing install keeps three cores
@@ -120,6 +146,11 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 	"agents/melchior.md": { size: 1503, sha256: "aa7a69296640f1023e00e2f2285b12cfdee158bb89f7b0b3d8c03a6317de9508" },
 	"agents/balthasar.md": { size: 1527, sha256: "27273ed49ea265f528efad4724e6abec6d051fa60d1f4fa678982e7383364981" },
 	"agents/casper.md": { size: 1508, sha256: "5074341b7e1ae7e9a44bc71de0405a17ccb404eacfaeb2fcf40f2ac4c23828ea" },
+	// Current pristine seed before the compact-digest/reusable-artifact prompt update (LF and CRLF).
+	"agents/research.md": [
+		{ size: 3771, sha256: "6d084d11c84a594ddac0986bcf81aea6e5768b9df18196fedc8715bfd3f1eb16" },
+		{ size: 3825, sha256: "768899c4c9a5f60a8ff18602d7ee5a696414fd35a8d53e6ae2cc9dfa41d7a88f" },
+	],
 	"personas/elite.md": [
 		{
 			// v1.0.0
@@ -185,6 +216,12 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 	// Live-peer collaboration landed in v1.12.2. Without these, a seeded copy from 1.7–1.12.1
 	// (and the two earlier untouched hashes) keeps the pre-collaboration prompt forever.
 	"personas/swarm.md": [
+		// v1.13.4 pristine seed (LF and CRLF checkout variants)
+		{ size: 2729, sha256: "3d5060277ecaec717e87beb8d95b0fe9f3dc70fe5f0192823aa79b55f9e49507" },
+		{ size: 2768, sha256: "b81910521e05d62e06abaf0f2a89bd18ad252ba968bb296cc85dea973028e7a5" },
+		// Current pre-Exocom-scope prompt (LF and CRLF checkout variants).
+		{ size: 2188, sha256: "bb7bfcc03f4b5239fb8dcd3552ee517ed3e0a8238edf05e21303085022f4018b" },
+		{ size: 2220, sha256: "5c0d332d389e2ff59a79f0ca0a28c05424da9b2194fe78a78c667606e9ff806d" },
 		{ size: 1857, sha256: "77de7f590fdede6ede4848be11b39fb16bfb4733687ac1b1244cc59e626874c6" }, // v1.1.0–v1.4.0
 		{ size: 1955, sha256: "b7a7caa38c4d31c8cc27b85eb7facbf2339a024ad8d4cd2ba681a2a885de7646" }, // v1.5.1–v1.6.3
 		{ size: 2285, sha256: "985a1c5455b2c81537a55b31daed216d7f67a897b3b2d5bde35d64f3779d6fe4" }, // v1.7.0–v1.12.1

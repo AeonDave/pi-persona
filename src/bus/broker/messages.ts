@@ -1,6 +1,6 @@
 /**
  * Slimmed wire-frame catalog + validators (spec B6) — comtac's protocol trimmed to the
- * frames pi-persona actually needs: register/send/reply/list/bye (client→host) and
+ * frames pi-persona actually needs: register/send/cancel/reply/list/bye (client→host) and
  * registered/deliver/steer/peers/replied/error (host→client). Mirrors comtac's
  * `messages.ts` validation STYLE (structural per-field checks, one explicit assert per
  * case) but drops presence/sessions/attachments/broadcasts entirely (YAGNI here).
@@ -14,6 +14,7 @@ export type Frame =
 	| { t: "register"; handle: string; label?: string; group?: string; peers?: boolean }
 	| { t: "registered"; handle: string }
 	| { t: "send"; to: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
+	| { t: "cancel"; msgId: string }
 	| { t: "deliver"; from: string; fromLabel?: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
 	| { t: "reply"; askId: string; text: string }
 	| { t: "replied"; askId: string; text: string }
@@ -21,7 +22,7 @@ export type Frame =
 	| { t: "list"; reqId: string }
 	| { t: "peers"; reqId: string; peers: Array<{ handle: string; label: string }> }
 	| { t: "bye" }
-	| { t: "error"; reason: string };
+	| { t: "error"; reason: string; msgId?: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -54,6 +55,8 @@ export function isFrame(value: unknown): value is Frame {
 				typeof value.msgId === "string" &&
 				typeof value.expectsReply === "boolean"
 			);
+		case "cancel":
+			return typeof value.msgId === "string";
 		case "deliver": {
 			if (typeof value.from !== "string") return false;
 			if (value.fromLabel !== undefined && typeof value.fromLabel !== "string") return false;
@@ -77,7 +80,7 @@ export function isFrame(value: unknown): value is Frame {
 		case "bye":
 			return true;
 		case "error":
-			return typeof value.reason === "string";
+			return typeof value.reason === "string" && (value.msgId === undefined || typeof value.msgId === "string");
 		default:
 			return false;
 	}

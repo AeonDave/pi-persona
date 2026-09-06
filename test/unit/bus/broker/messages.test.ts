@@ -48,6 +48,11 @@ test("isFrame accepts bye", () => {
 
 test("isFrame accepts error", () => {
 	assert.equal(isFrame({ t: "error", reason: "boom" }), true);
+	assert.equal(isFrame({ t: "error", reason: "ask failed", msgId: "m1" }), true);
+});
+
+test("isFrame accepts a per-connection ask cancellation", () => {
+	assert.equal(isFrame({ t: "cancel", msgId: "m1" }), true);
 });
 
 test("isFrame rejects an unknown t", () => {
@@ -67,4 +72,9 @@ test("isFrame rejects a non-object", () => {
 
 test("isFrame rejects a deliver with a numeric text", () => {
 	assert.equal(isFrame({ t: "deliver", from: "a1", kind: "progress", text: 123, msgId: "m1", expectsReply: true }), false);
+});
+
+test("isFrame rejects malformed ask error/cancel correlation", () => {
+	assert.equal(isFrame({ t: "error", reason: "boom", msgId: 1 }), false);
+	assert.equal(isFrame({ t: "cancel", msgId: 1 }), false);
 });

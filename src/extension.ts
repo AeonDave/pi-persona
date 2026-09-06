@@ -35,7 +35,7 @@ import {
 	type SpineLegacySelection,
 } from "./core/seed.ts";
 import { buildDelegationBrief } from "./core/brief.ts";
-import { canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
+import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
@@ -78,6 +78,8 @@ import { parseExocomArgv } from "./exocom/activation.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
 import { registerIntercomTool } from "./tools/intercom-tool.ts";
 import { registerTimerTool } from "./tools/timer.ts";
+import { registerMonitorTool } from "./tools/monitor.ts";
+import { createMonitorSession, type MonitorSession } from "./monitor/session.ts";
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
@@ -772,6 +774,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		else process.stderr.write(`${message}\n`);
 	}
 
+	let monitors: MonitorSession | undefined;
 	const host: PersonaHost = {
 		allToolNames: () => {
 			try {
@@ -787,6 +790,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			} catch {
 				/* ignore */
 			}
+			monitors?.reconcilePermissions();
 		},
 		getThinkingLevel: () => {
 			try {
@@ -903,6 +907,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		...idleDelivery,
 		render: renderPendingAskBatch,
 	});
+	// A buffered question is actionable only while its bus ask is live. This also covers
+	// timeout, cancellation and a departed child, without waiting for an intercom reply call.
+	bus.onAskSettled(({ id }) => {
+		intercomNotifier.discard((ask) => ask.askId === id);
+		telemetryAskSenders.delete(id);
+	});
 	// Supervisor-armable alarms: when a timer expires it WAKES the session by routing the fire
 	// through the same idle-delivery path (an idle delivery starts a fresh turn, so the supervisor
 	// resumes on its own — no token-burning poll loop). Coalesced so several timers firing close
@@ -920,6 +930,18 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		},
 		clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 		onFire: (entry) => timerNotifier.notify(entry),
+	});
+	const canRunMonitor = () => {
+		if (disposed) return false;
+		const caps = controller.capabilities;
+		const active = pi.getActiveTools();
+		return active.includes("monitor") && active.includes("bash")
+			&& (!caps || (canCallTool(caps, "monitor") && canCallTool(caps, "bash")));
+	};
+	monitors = createMonitorSession({
+		isIdle: idleDelivery.isIdle,
+		deliver: (text) => sendPersonaFollowUp(pi, text),
+		canRun: canRunMonitor,
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
 	// The premature-surrender counterweight rides the SAME kill switch as the by-hand nudge
@@ -1681,6 +1703,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		intercomNotifier,
 		timerNotifier,
 		timerScheduler,
+		monitors,
 		peekWatcher,
 		stopPeek,
 		stopRegistry,
@@ -1806,6 +1829,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		get lastCtx() { return lastCtx; },
 		set lastCtx(value) { lastCtx = value; },
 		timerScheduler,
+	});
+	registerMonitorTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		canRun: canRunMonitor,
+		monitors,
 	});
 
 	registerCouncilTool(pi, {

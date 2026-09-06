@@ -25,6 +25,7 @@ import type { InProcessBus } from "./inproc.ts";
 
 /** Anti ping-pong budget: after this many sends the tool tells the member to finalize. */
 export const MAX_PEER_SENDS = 20;
+export const MAX_PEER_MESSAGE_CHARS = 8_000;
 
 export interface PeerInfo {
 	handle: string;
@@ -44,7 +45,7 @@ const PeerParams = Type.Object({
 			"list = see which peers are still working · send = push a ONE-WAY note to one peer (you do NOT wait; a peer answers, if at all, with a send of its own).",
 	}),
 	to: Type.Optional(Type.String({ description: "send: the peer handle (from `list`, e.g. reviewer#2)." })),
-	message: Type.Optional(Type.String({ description: "send: what to tell the peer — specific and self-contained." })),
+	message: Type.Optional(Type.String({ maxLength: MAX_PEER_MESSAGE_CHARS, description: "send: what to tell the peer — specific and self-contained." })),
 });
 
 type PeerDetails = { action: string; delivered?: boolean; peers?: string[] };
@@ -82,6 +83,12 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 			}
 			if (!params.to || params.message === undefined) {
 				return result("contact_peer send needs { to, message } — use `list` for peer handles.", { action: "send", delivered: false });
+			}
+			if (params.message.length > MAX_PEER_MESSAGE_CHARS) {
+				return result(
+					`contact_peer message exceeds the ${MAX_PEER_MESSAGE_CHARS}-character limit; send a smaller note.`,
+					{ action: "send", delivered: false },
+				);
 			}
 			if (sent >= maxSends) {
 				return result(

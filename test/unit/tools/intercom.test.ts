@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { InProcessBus } from "../../../src/bus/inproc.ts";
+import { InProcessBus, MAX_RETAINED_MESSAGE_CHARS } from "../../../src/bus/inproc.ts";
 import { formatInbox, MAX_INTERCOM_LIST_PEERS, MAX_INTERCOM_MESSAGE_CHARS, runIntercom } from "../../../src/tools/intercom.ts";
+import { buildIntercomWaitStillNote, fenceIntercomToolOutcome } from "../../../src/tools/intercom-tool.ts";
 
 test("intercom list returns the registered peers (minus self)", () => {
 	const bus = new InProcessBus();
@@ -35,6 +36,46 @@ test("intercom inbox drains the supervisor's messages", () => {
 	assert.equal(r.details.messages?.[0]?.from, "scout#1");
 	assert.match(r.text, /found the bug/);
 	assert.equal(bus.hasPending("supervisor"), false, "inbox drained the queue");
+});
+
+test("intercom message retrieves the exact body after inbox truncation, including one-way messages", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const body = "HEAD-" + "x".repeat(4_000) + "-TAIL";
+	bus.send("scout#1", "supervisor", body);
+	const inbox = runIntercom({ action: "inbox" }, bus, "supervisor");
+	const messageId = inbox.details.messages?.[0]?.id;
+
+	assert.ok(messageId);
+	assert.match(inbox.text, new RegExp(`message id ${messageId}`));
+	const recovered = runIntercom({ action: "message", messageId }, bus, "supervisor");
+	assert.equal(recovered.details.ok, true);
+	assert.equal(recovered.details.message?.text, body);
+	assert.match(recovered.text, /HEAD-/);
+	assert.match(recovered.text, /-TAIL$/);
+});
+
+test("intercom message reports expired ids and never treats run ids as messages", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const missing = runIntercom({ action: "message", messageId: "run-1" }, bus, "supervisor");
+	assert.equal(missing.details.ok, false);
+	assert.match(missing.text, /no retained message|expired|never delivered/i);
+
+	const malformed = runIntercom({ action: "message" }, bus, "supervisor");
+	assert.equal(malformed.details.ok, false);
+	assert.match(malformed.text, /messageId/);
+});
+
+test("intercom message explains when a body exceeded the retention limit", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.send("scout#1", "supervisor", "x".repeat(MAX_RETAINED_MESSAGE_CHARS + 1));
+	const id = bus.take("supervisor")[0]!.id;
+	const result = runIntercom({ action: "message", messageId: id }, bus, "supervisor");
+
+	assert.equal(result.details.ok, false);
+	assert.match(result.text, /exceeded the retention limit/i);
 });
 
 test("intercom reply answers a child's blocking ask by id", async () => {
@@ -114,4 +155,41 @@ test("formatInbox renders decision messages with their id (so the supervisor can
 	assert.match(line, /scout#1/);
 	assert.match(line, /decision/);
 	assert.match(line, /reply/i, "tells the supervisor it can reply");
+});
+
+test("formatInbox renders an actionable id for a one-way message", () => {
+	const message = {
+		id: "m1",
+		from: "scout#1",
+		to: "supervisor",
+		kind: "progress" as const,
+		text: "x".repeat(4_000),
+		expectsReply: false,
+	};
+	const rendered = formatInbox([message]);
+	assert.match(rendered, /message id m1/);
+	assert.match(rendered, /characters omitted/);
+});
+
+test("intercom wait reports an interruption instead of claiming its timeout elapsed", () => {
+	const note = buildIntercomWaitStillNote(["run-1"], 60_000, true);
+	assert.match(note, /interrupted/i);
+	assert.doesNotMatch(note, /timed out|timeout elapsed/i);
+	assert.match(note, /run-1/);
+});
+
+test("intercom fences a recovered child payload but leaves missing-message diagnostics actionable", () => {
+	const fence = (text: string): string => `<fenced>${text}</fenced>`;
+	const success = fenceIntercomToolOutcome(
+		{ text: "child payload", details: { action: "message", ok: true } },
+		"message",
+		fence,
+	);
+	const failure = fenceIntercomToolOutcome(
+		{ text: "No retained message with id \"m1\".", details: { action: "message", ok: false } },
+		"message",
+		fence,
+	);
+	assert.equal(success, "<fenced>child payload</fenced>");
+	assert.equal(failure, "No retained message with id \"m1\".");
 });

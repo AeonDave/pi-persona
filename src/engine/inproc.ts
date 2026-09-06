@@ -46,6 +46,10 @@ export interface InProcSession {
 export interface CreateSessionOptions {
 	model: unknown;
 	modelRegistry: ModelRegistry;
+	/** Cooperative cancellation for resource/session initialization. Pi's loader does not
+	 * currently accept a signal itself, but injected factories can stop promptly and the
+	 * default factory checks it before/after each uncancellable Pi operation. */
+	signal?: AbortSignal;
 	/** The host's canonical runtime (Pi >=0.81); shared so auth/provider registrations survive. */
 	modelRuntime?: unknown;
 	cwd: string;
@@ -164,12 +168,14 @@ export function mergeSessionToolAllowlist(tools: readonly string[] | undefined, 
  *  that pi-persona self-disables under `PI_PERSONA_DISABLE` (set around creation), with
  *  the orchestration tools excluded as a second line of defense. */
 const createPiSession: CreateInProcSession = async (opts) => {
+	if (opts.signal?.aborted) throw new DOMException("Session initialization aborted", "AbortError");
 	const loader = new DefaultResourceLoader({
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
 		...(opts.systemPrompt ? { appendSystemPrompt: [opts.systemPrompt] } : {}),
 	});
 	await loader.reload();
+	if (opts.signal?.aborted) throw new DOMException("Session initialization aborted", "AbortError");
 	// If a `tools` allowlist is set, the injected custom tools must be allowed too,
 	// otherwise the allowlist would filter them out of the child's active set.
 	const customNames = (opts.customTools ?? []).map((t) => t.name);
@@ -203,6 +209,14 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	};
 	(sessionOptions as { modelRegistry?: unknown }).modelRegistry = opts.modelRegistry;
 	const { session } = await createAgentSession(sessionOptions);
+	if (opts.signal?.aborted) {
+		try {
+			session.dispose();
+		} catch {
+			// The initialization cancellation result still owns the lifecycle if disposal throws.
+		}
+		throw new DOMException("Session initialization aborted", "AbortError");
+	}
 	return {
 		subscribe: (l) => session.subscribe(l as Parameters<typeof session.subscribe>[0]),
 		prompt: async (input) => {
@@ -401,41 +415,56 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// in the run's own finally below. Anything that throws before we reach it must release
 			// it, or a phantom peer haunts `intercom list` (collecting dead letters nothing drains)
 			// for the rest of the supervisor's session.
+			let handleReleased = false;
 			const releaseHandle = (): void => {
-				if (!childHandle) return;
+				if (!childHandle || handleReleased) return;
+				handleReleased = true;
 				peerLabels.delete(childHandle);
 				deps.bus?.unregister(childHandle);
 			};
 
-			// Fork-bomb guard (ref-counted, concurrency-safe): disable pi-persona inside the
-			// sub-session while it's built; the guard survives concurrent parallel builds.
-			pushDisableGuard();
-			let session: InProcSession;
-			try {
-				session = await createSession(sessionOpts);
-			} catch (e) {
-				releaseHandle();
-				throw e;
-			} finally {
-				popDisableGuard();
-			}
-
 			// `agent.abort()` is a cancellation REQUEST, not a settlement guarantee: a provider/tool
 			// can leave both `prompt()` and `waitForIdle()` pending after accepting it. Keep a separate
 			// gate that every abort cause trips, so the engine always reaches its finally-cleanup instead
-			// of retaining the session (and its async semaphore slot) forever.
+			// of retaining the session (and its async semaphore slot) forever. The same gate also settles
+			// an initialization that cannot be interrupted by Pi's current resource-loader API.
 			let releaseAbortGate: () => void = () => {};
 			const abortGate = new Promise<void>((resolve) => {
 				releaseAbortGate = resolve;
 			});
+			let session!: InProcSession;
+			let initializedSession: InProcSession | undefined;
+			let aborted = false;
+			let timedOut = false;
+			let hardTimedOut = false;
+			let startupTimedOut = false;
+			let initializationTimedOut = false;
+			let cancellationRequested = false;
+			const initController = new AbortController();
 			const abortSession = (): void => {
+				const target = initializedSession;
 				try {
-					session.agent.abort();
+					target?.agent.abort();
 				} catch {
 					// Settlement and dispose must still run when the host abort hook itself throws.
 				} finally {
 					releaseAbortGate();
 				}
+			};
+			const requestCancellation = (kind: "abort" | "idle" | "timeout" | "startup" | "hard"): void => {
+				// Host abort hooks can synchronously emit more events or cancellation signals.
+				// Preserve the first cause and invoke the host abort hook only once.
+				if (cancellationRequested) return;
+				cancellationRequested = true;
+				if (kind === "abort") aborted = true;
+				else if (kind === "idle") timedOut = true;
+				else if (kind === "hard") hardTimedOut = true;
+				else {
+					if (kind === "timeout") initializationTimedOut = true;
+					startupTimedOut = true;
+				}
+				if (!initController.signal.aborted) initController.abort();
+				abortSession();
 			};
 
 			// Idle watchdog (mirrors the child engine's idle kill): a session that emits no
@@ -446,10 +475,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const blockingChild = deps.coaching && (deps.allowBlocking ?? false);
 			// NP2: a per-leg spec.timeoutMs override raises (or shortens) just THIS leg's idle
 			// ceiling without touching deps.timeoutMs — the shared default other legs still see.
-			// Junk (non-finite/≤0) is ignored and falls back to the engine-level default.
+			// Junk (non-finite/≤0) is ignored and falls back to deps.timeoutMs.
 			const specTimeoutMs = isPositiveFiniteMs(spec.timeoutMs) ? spec.timeoutMs : undefined;
-			const watchdogMs = blockingChild ? 0 : (specTimeoutMs ?? deps.timeoutMs ?? 0);
-			let timedOut = false;
+			const watchdogMs = specTimeoutMs ?? (isPositiveFiniteMs(deps.timeoutMs) ? deps.timeoutMs : 0);
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
 			const disarmIdle = (): void => {
 				if (idleTimer) {
@@ -458,29 +486,22 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 			const armIdle = (): void => {
-				if (watchdogMs <= 0) return;
 				disarmIdle();
+				if (watchdogMs <= 0 || cancellationRequested || (blockingChild && initializedSession)) return;
 				idleTimer = setTimeout(() => {
-					timedOut = true;
-					abortSession();
+					requestCancellation("idle");
 				}, watchdogMs);
 				idleTimer.unref?.();
 			};
 
 			// Hard wall-clock cap: armed ONCE, never reset by events — a definite lifetime ceiling
-			// that settles a busy-but-non-converging child (a loop that keeps emitting) the idle
-			// watchdog above never catches. Unlike the idle watchdog it is NOT exempted for a
-			// blocking child: it caps total lifetime, not silence, so a child that never returns
-			// (even one stuck waiting on a reply that never comes) still settles by a known deadline.
-			const hardMs = deps.hardTimeoutMs ?? 0;
-			let hardTimedOut = false;
+			// that settles a busy-but-non-converging child (the idle watchdog above never catches).
+			// It starts before session construction, matching the child engine's process lifetime cap.
+			const hardMs = isPositiveFiniteMs(deps.hardTimeoutMs) ? deps.hardTimeoutMs : 0;
 			let hardTimer: ReturnType<typeof setTimeout> | undefined;
 			const armHard = (): void => {
-				if (hardMs <= 0) return;
-				hardTimer = setTimeout(() => {
-					hardTimedOut = true;
-					abortSession();
-				}, hardMs);
+				if (hardMs <= 0 || hardTimer) return;
+				hardTimer = setTimeout(() => requestCancellation("hard"), hardMs);
 				hardTimer.unref?.();
 			};
 			const disarmHard = (): void => {
@@ -490,13 +511,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 
-			// Startup deadline (mirrors the child engine): a session that never makes PROGRESS
-			// (no completed turn / tokens / streamed output) within `startupMs` is aborted as a
-			// stalled start — the fast-fail the generous idle window is too slow for. The first
-			// real progress cancels it; bare lifecycle events and the echo of the delivered prompt
-			// do not. Skipped for a blocking coaching child (it may legitimately wait before emitting).
-			const startupMs = blockingChild ? 0 : (deps.startupTimeoutMs ?? 0);
-			let startupTimedOut = false;
+			// Startup deadline (mirrors the child engine): one window from construction to the first
+			// real progress (completed turn / tokens / streamed output), never restarted. A blocking
+			// coaching child remains exempt here because it may legitimately wait for a reply. During
+			// construction, however, the same configured deadline is always armed: initialization has
+			// no active supervisor reply to wait for and must not hang indefinitely.
+			const startupMs = isPositiveFiniteMs(deps.startupTimeoutMs) ? deps.startupTimeoutMs : 0;
 			let startupProgressed = false;
 			let startupTimer: ReturnType<typeof setTimeout> | undefined;
 			const disarmStartup = (): void => {
@@ -506,11 +526,10 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 			const armStartup = (): void => {
-				if (startupMs <= 0) return;
+				if (blockingChild || startupMs <= 0 || startupTimer) return;
 				startupTimer = setTimeout(() => {
 					if (startupProgressed) return;
-					startupTimedOut = true;
-					abortSession();
+					requestCancellation("startup");
 				}, startupMs);
 				startupTimer.unref?.();
 			};
@@ -523,13 +542,119 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 
+			// The Pi resource loader currently has no cancellation API. Start the deadline and
+			// caller-abort listener BEFORE invoking the factory, then keep the guard held until the
+			// factory promise itself settles. A timed-out run may return to its semaphore caller, but
+			// a late session is disposed and a late rejection is consumed by this handled promise.
+			let initializationTimer: ReturnType<typeof setTimeout> | undefined;
+			const disarmInitialization = (): void => {
+				if (initializationTimer) {
+					clearTimeout(initializationTimer);
+					initializationTimer = undefined;
+				}
+			};
+			const onAbort = (): void => requestCancellation("abort");
+			if (signal) {
+				if (signal.aborted) requestCancellation("abort");
+				else signal.addEventListener("abort", onAbort, { once: true });
+			}
+			if (cancellationRequested) {
+				if (signal) signal.removeEventListener("abort", onAbort);
+				releaseHandle();
+				return {
+					agent: spec.agent,
+					output: "",
+					usage: emptyUsage(),
+					ok: false,
+					error: `${tag} agent aborted`,
+					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
+					failureKind: "abort",
+				};
+			}
+
+			const safeDispose = (late: InProcSession): void => {
+				try {
+					late.dispose();
+				} catch {
+					// A late session has no consumer left to report disposal errors to; never turn
+					// cleanup into an unhandled rejection or strand the global guard.
+				}
+			};
+			type InitializationOutcome = { session?: InProcSession; error?: unknown };
+			let initializationSettled = false;
+
+			pushDisableGuard();
+			armHard();
+			armIdle();
+			armStartup();
+			const initialization = Promise.resolve()
+				.then(() => createSession({ ...sessionOpts, signal: initController.signal }))
+				.then(
+					(created) => {
+						if (cancellationRequested) {
+							safeDispose(created);
+							return {};
+						}
+						initializedSession = created;
+						return { session: created };
+					},
+					(error): InitializationOutcome => ({ error }),
+				)
+				.then((outcome) => {
+					initializationSettled = true;
+					// Do not pop this guard at the timeout boundary: the original factory may still
+					// be loading recursive extensions under PI_PERSONA_DISABLE=1.
+					popDisableGuard();
+					return outcome;
+				});
+			if (blockingChild && startupMs > 0) {
+				initializationTimer = setTimeout(() => requestCancellation("timeout"), startupMs);
+				initializationTimer.unref?.();
+			}
+
+			const initializationOutcome = await Promise.race([
+				initialization,
+				abortGate.then(() => undefined as InitializationOutcome | undefined),
+			]);
+			disarmInitialization();
+			if (cancellationRequested || !initializationOutcome || !initializationOutcome.session) {
+				if (cancellationRequested && initializedSession) {
+					const cancelledSession = initializedSession;
+					initializedSession = undefined;
+					safeDispose(cancelledSession);
+				}
+				if (signal) signal.removeEventListener("abort", onAbort);
+				disarmIdle();
+				disarmHard();
+				disarmStartup();
+				releaseHandle();
+				if (initializationOutcome && "error" in initializationOutcome && !cancellationRequested) throw initializationOutcome.error;
+				const initError = hardTimedOut
+					? `${tag} agent exceeded the ${hardMs}ms hard cap during session initialization`
+					: timedOut
+						? `${tag} agent timed out during session initialization — no events for ${watchdogMs}ms`
+					: initializationTimedOut || startupTimedOut
+						? `${tag} agent produced no output within the ${startupMs}ms startup window while initializing the session`
+						: `${tag} agent aborted`;
+				const cleanupHint = initializationSettled ? "" : "; initialization cancellation requested, but the host loader may still be unwinding. If initialization keeps hanging, restart Pi and use PI_PERSONA_ENGINE=child";
+				return {
+					agent: spec.agent,
+					output: "",
+					usage: emptyUsage(),
+					ok: false,
+					error: `${initError}${cleanupHint}`,
+					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
+					failureKind: hardTimedOut || timedOut || initializationTimedOut || startupTimedOut ? "timeout" : "abort",
+				};
+			}
+			session = initializationOutcome.session;
+
 			// From here to the run's own try/finally the child is live but its cleanup is not
 			// armed yet: the subscription, the caller-supplied `onSteerable`, and the delivery
 			// bridge's initial flush all run outside it. A throw in any of them must release the
 			// handle AND the session, never leave a phantom peer plus an orphaned live session.
 			let unsub: (() => void) | undefined;
 			let unsubBridge: (() => void) | undefined;
-			let aborted = false;
 			let steerable = true;
 			// Calls whose start crossed the progress seam but whose end has not. The tool NAME rides
 			// beside the id because the synthetic close below has to carry it, and stream.ts tracks
@@ -540,10 +665,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const emitProgress = (snap: ProgressSnapshot): void => {
 				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
 				else if (deps.onProgress) deps.onProgress(snap);
-			};
-			const onAbort = (): void => {
-				aborted = true;
-				abortSession();
 			};
 			let contractDef: ContractDef | undefined = requestedDef;
 			let task: string;
@@ -559,11 +680,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					noteStartupProgress(); // first real progress cancels the startup deadline
 					emitProgress(snapshot(state, toolEvent));
 				});
-
-				if (signal) {
-					if (signal.aborted) onAbort();
-					else signal.addEventListener("abort", onAbort, { once: true });
-				}
 
 				// Steering: the in-process engine can inject a user message into the running
 				// agent — the v0.4 payoff the one-shot child engine can't do.
@@ -633,6 +749,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				task = `${skillsPreamble}Task: ${spec.task}${contractTail}`;
 			} catch (e) {
 				disarmIdle();
+				disarmHard();
+				disarmStartup();
 				if (signal) signal.removeEventListener("abort", onAbort);
 				unsubBridge?.();
 				unsub?.();
@@ -650,7 +768,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			try {
 				armIdle(); // start the idle clock (reset on every session event)
 				armHard(); // start the lifetime ceiling (never reset)
-				armStartup(); // start the first-progress deadline (cancelled by the first real progress)
 				const runToIdle = async (): Promise<void> => {
 					await session.prompt(task);
 					// An abort may have won while prompt() was resolving. Do not start another host wait

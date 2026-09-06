@@ -1170,6 +1170,331 @@ test("a failed session construction does not strand the child's bus registration
 	assert.deepEqual(bus.participants(), ["supervisor"], "no phantom peer survives the failed construction");
 });
 
+test("inproc initialization deadline settles while a pending factory keeps the guard until late cleanup", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	let begin!: () => void;
+	const began = new Promise<void>((resolve) => {
+		begin = resolve;
+	});
+	let resolveInit!: (session: InProcSession) => void;
+	const init = new Promise<InProcSession>((resolve) => {
+		resolveInit = resolve;
+	});
+	let disposed = false;
+	let initSignalAborted = false;
+	const session: InProcSession = {
+		subscribe: () => () => {},
+		prompt: async () => {},
+		agent: { abort() {}, async waitForIdle() {}, steer() {} },
+		dispose: () => {
+			disposed = true;
+		},
+	};
+	const priorDisable = process.env.PI_PERSONA_DISABLE;
+	delete process.env.PI_PERSONA_DISABLE;
+	try {
+		const engine = makeInProcessEngine({
+			resolveAgent,
+			contracts,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			bus,
+			coaching: true,
+			startupTimeoutMs: 30,
+			createSession: async (opts) => {
+				begin();
+				(opts as CreateSessionOptions & { signal?: AbortSignal }).signal?.addEventListener("abort", () => {
+					initSignalAborted = true;
+				}, { once: true });
+				return init;
+			},
+		});
+		const pending = engine.run({ agent: "a", task: "t", peers: true });
+		await began;
+		const result = await Promise.race([
+			pending.then(() => "settled" as const),
+			new Promise<"stuck">((resolve) => setTimeout(() => resolve("stuck"), 100)),
+		]);
+		assert.equal(result, "settled", "startup timeout covers session creation");
+		const r = await pending;
+		assert.equal(r.ok, false);
+		assert.equal(r.failureKind, "timeout");
+		assert.equal(r.modelUsed, "stub/m");
+		assert.equal(initSignalAborted, true, "the factory receives cancellation");
+		assert.equal(process.env.PI_PERSONA_DISABLE, "1", "the guard remains while the factory is unresolved");
+		assert.deepEqual(bus.participants(), ["supervisor"], "the run releases its bus handle on timeout");
+
+		resolveInit(session);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(disposed, true, "a session resolving after timeout is disposed");
+		assert.equal(process.env.PI_PERSONA_DISABLE, undefined, "the guard is restored after late initialization settles");
+	} finally {
+		if (priorDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
+		else process.env.PI_PERSONA_DISABLE = priorDisable;
+	}
+});
+
+test("an external abort settles pending inproc initialization and disposes a late session", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	let begin!: () => void;
+	const began = new Promise<void>((resolve) => {
+		begin = resolve;
+	});
+	let resolveInit!: (session: InProcSession) => void;
+	const init = new Promise<InProcSession>((resolve) => {
+		resolveInit = resolve;
+	});
+	let disposed = false;
+	const session: InProcSession = {
+		subscribe: () => () => {},
+		prompt: async () => {},
+		agent: { abort() {}, async waitForIdle() {}, steer() {} },
+		dispose: () => {
+			disposed = true;
+		},
+	};
+	const ac = new AbortController();
+	const priorDisable = process.env.PI_PERSONA_DISABLE;
+	delete process.env.PI_PERSONA_DISABLE;
+	try {
+		const engine = makeInProcessEngine({
+			resolveAgent,
+			contracts,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			bus,
+			coaching: true,
+			startupTimeoutMs: 5_000,
+			createSession: async () => {
+				begin();
+				return init;
+			},
+		});
+		const pending = engine.run({ agent: "a", task: "t", peers: true }, undefined, ac.signal);
+		await began;
+		ac.abort();
+		const r = await pending;
+		assert.equal(r.ok, false);
+		assert.equal(r.failureKind, "abort");
+		assert.equal(r.modelUsed, "stub/m");
+		assert.equal(process.env.PI_PERSONA_DISABLE, "1", "abort does not drop the guard before the factory settles");
+		assert.deepEqual(bus.participants(), ["supervisor"]);
+
+		resolveInit(session);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(disposed, true);
+		assert.equal(process.env.PI_PERSONA_DISABLE, undefined);
+	} finally {
+		if (priorDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
+		else process.env.PI_PERSONA_DISABLE = priorDisable;
+	}
+});
+
+test("a late initialization rejection is consumed after timeout and restores the guard", async () => {
+	let begin!: () => void;
+	const began = new Promise<void>((resolve) => {
+		begin = resolve;
+	});
+	let rejectInit!: (error: Error) => void;
+	const init = new Promise<InProcSession>((_resolve, reject) => {
+		rejectInit = reject;
+	});
+	let unhandled = 0;
+	const onUnhandled = (): void => {
+		unhandled += 1;
+	};
+	process.on("unhandledRejection", onUnhandled);
+	const priorDisable = process.env.PI_PERSONA_DISABLE;
+	delete process.env.PI_PERSONA_DISABLE;
+	try {
+		const engine = makeInProcessEngine({
+			resolveAgent,
+			contracts,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			startupTimeoutMs: 30,
+			createSession: async () => {
+				begin();
+				return init;
+			},
+		});
+		const pending = engine.run({ agent: "a", task: "t" });
+		await began;
+		const r = await pending;
+		assert.equal(r.failureKind, "timeout");
+		assert.equal(process.env.PI_PERSONA_DISABLE, "1");
+
+		rejectInit(new Error("late loader failure"));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(unhandled, 0, "late factory rejection is observed");
+		assert.equal(process.env.PI_PERSONA_DISABLE, undefined);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+		if (priorDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
+		else process.env.PI_PERSONA_DISABLE = priorDisable;
+	}
+});
+
+test("a concurrent live initialization keeps the ref-counted guard after a sibling settles", async () => {
+	let resolveInit!: (session: InProcSession) => void;
+	const init = new Promise<InProcSession>((resolve) => {
+		resolveInit = resolve;
+	});
+	let builds = 0;
+	let disposed = false;
+	const lateSession: InProcSession = {
+		subscribe: () => () => {},
+		prompt: async () => {},
+		agent: { abort() {}, async waitForIdle() {}, steer() {} },
+		dispose: () => {
+			disposed = true;
+		},
+	};
+	const priorDisable = process.env.PI_PERSONA_DISABLE;
+	delete process.env.PI_PERSONA_DISABLE;
+	try {
+		const engine = makeInProcessEngine({
+			resolveAgent,
+			contracts,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			startupTimeoutMs: 30,
+			createSession: async () => {
+				builds += 1;
+				return builds === 1 ? init : fakeSession([msgEnd("done")]);
+			},
+		});
+		const first = engine.run({ agent: "a", task: "first" });
+		const second = engine.run({ agent: "a", task: "second" });
+		const secondResult = await second;
+		assert.equal(secondResult.ok, true);
+		const firstResult = await first;
+		assert.equal(firstResult.failureKind, "timeout");
+		assert.equal(process.env.PI_PERSONA_DISABLE, "1", "one late factory keeps the guard for both builds");
+
+		resolveInit(lateSession);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(disposed, true);
+		assert.equal(process.env.PI_PERSONA_DISABLE, undefined, "the last initialization settles before the guard is restored");
+	} finally {
+		if (priorDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
+		else process.env.PI_PERSONA_DISABLE = priorDisable;
+	}
+});
+
+test("failed session wiring disarms the startup and hard deadlines", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let aborts = 0;
+	const session = fakeSession([]);
+	session.agent.abort = () => { aborts += 1; };
+	const engine = makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+		startupTimeoutMs: 30, hardTimeoutMs: 40,
+		createSession: async () => session,
+	});
+	await assert.rejects(engine.run({ agent: "a", task: "t" }, undefined, undefined, () => {
+		throw new Error("wiring failed");
+	}), /wiring failed/);
+	t.mock.timers.tick(100);
+	assert.equal(aborts, 0, "disposed sessions must not receive stale deadline callbacks");
+});
+
+for (const deadline of ["startup", "hard"] as const) {
+	test(`the ${deadline} deadline is one window across initialization and the first turn`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		let resolveInit!: (session: InProcSession) => void;
+		const init = new Promise<InProcSession>((resolve) => { resolveInit = resolve; });
+		let settled = false;
+		const session = fakeSession([]);
+		session.prompt = () => new Promise<void>(() => {});
+		const engine = makeInProcessEngine({
+			resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+			...(deadline === "startup" ? { startupTimeoutMs: 100 } : { hardTimeoutMs: 100 }),
+			createSession: () => init,
+		});
+		const pending = engine.run({ agent: "a", task: "t" }).then((r) => { settled = true; return r; });
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		t.mock.timers.tick(60);
+		resolveInit(session);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		t.mock.timers.tick(39);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(settled, false, "the original window has not elapsed");
+		t.mock.timers.tick(1);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(settled, true, "construction must not restart the deadline");
+		assert.equal((await pending).failureKind, "timeout");
+	});
+}
+
+test("coaching initialization has an idle deadline even when the startup deadline is disabled", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let resolveInit!: (session: InProcSession) => void;
+	const init = new Promise<InProcSession>((resolve) => { resolveInit = resolve; });
+	let result: Awaited<ReturnType<ReturnType<typeof makeInProcessEngine>["run"]>> | undefined;
+	const engine = makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".", bus: new InProcessBus(),
+		coaching: true, allowBlocking: true, timeoutMs: 25, startupTimeoutMs: 0,
+		createSession: () => init,
+	});
+	const run = engine.run({ agent: "a", task: "t" }).then((r) => { result = r; });
+	try {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		t.mock.timers.tick(25);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(result?.failureKind, "timeout", "coaching cannot block on a supervisor before it exists");
+	} finally {
+		resolveInit(fakeSession([msgEnd("done")]));
+		await run;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+});
+
+test("the first cancellation cause survives reentrant host abort hooks", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const ac = new AbortController();
+	let started!: () => void;
+	const began = new Promise<void>((resolve) => { started = resolve; });
+	let aborts = 0;
+	const session = fakeSession([]);
+	session.prompt = () => { started(); return new Promise<void>(() => {}); };
+	session.agent.abort = () => { aborts += 1; t.mock.timers.tick(100); };
+	const engine = makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+		timeoutMs: 20, startupTimeoutMs: 30, hardTimeoutMs: 40,
+		createSession: async () => session,
+	});
+	const pending = engine.run({ agent: "a", task: "t" }, undefined, ac.signal);
+	await began;
+	ac.abort();
+	const result = await pending;
+	assert.equal(result.failureKind, "abort");
+	assert.equal(aborts, 1, "host abort is requested once even if other deadlines become due");
+});
+
+test("cancellation at each initialization handoff disposes the created session exactly once", async () => {
+	for (let phase = 0; phase < 9; phase += 1) {
+		const ac = new AbortController();
+		let disposals = 0;
+		const session = fakeSession([]);
+		session.prompt = () => new Promise<void>(() => {});
+		session.dispose = () => { disposals += 1; };
+		const scheduleAbort = (remaining: number): void => {
+			queueMicrotask(() => remaining === 0 ? ac.abort() : scheduleAbort(remaining - 1));
+		};
+		const engine = makeInProcessEngine({
+			resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+			createSession: () => { scheduleAbort(phase); return Promise.resolve(session); },
+		});
+		const result = await engine.run({ agent: "a", task: "t" }, undefined, ac.signal);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(result.failureKind, "abort", `handoff phase ${phase}`);
+		assert.equal(disposals, 1, `handoff phase ${phase} must neither leak nor double-dispose`);
+	}
+});
+
 test("a failed session construction drops the child from the run's peer registry", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

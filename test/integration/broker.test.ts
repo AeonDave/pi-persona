@@ -59,6 +59,29 @@ test("broker round-trip over a REAL socket/pipe: register, send, deliver, steer,
 	}
 });
 
+test("broker ask cancellation over a REAL socket/pipe settles the host-side ask", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint });
+	const client = makeBrokerClient({ endpoint, handle: "child#cancel" });
+	try {
+		await client.register();
+		const ac = new AbortController();
+		const pending = client.ask("supervisor", "decision", "cancel me", ac.signal);
+		await waitFor(() => bus.pending("supervisor").some((env) => env.expectsReply));
+		ac.abort();
+		await assert.rejects(() => pending, /abort/);
+		await waitFor(() => !bus.pending("supervisor").some((env) => env.expectsReply));
+	} finally {
+		client.close();
+		await waitFor(() => !bus.participants().includes("child#cancel"));
+		await host.close();
+	}
+});
+
 // ── contact_peer roster scoping (spec B7) — regression coverage for the extension.ts
 // `listPeersFor` closure, which must derive scope from `self`'s OWN recorded group (the
 // wire's `group` frame field is always unset per spec B6, so scoping by it directly —

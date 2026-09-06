@@ -145,6 +145,73 @@ function makeMockPi() {
 	};
 }
 
+test("fresh clock context reaches every run without changing the cached system prefix", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const ctx = makeCtx(REPO_ROOT).ctx;
+	await m.fire("session_start", {}, ctx);
+	const clock = mock.method(Date, "now", () => Date.parse("2026-09-06T10:00:00Z"));
+	try {
+		const first = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		clock.mock.mockImplementation(() => Date.parse("2026-09-06T10:00:25Z"));
+		const second = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		assert.match(first.message.content, /2026-09-06T10:00:00/);
+		assert.match(second.message.content, /2026-09-06T10:00:25/);
+		assert.equal(first.message.display, false);
+		assert.equal(first.systemPrompt, second.systemPrompt);
+	} finally { clock.mock.restore(); await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("monitor event wakes the extension only after the supervisor becomes idle", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor"]);
+	piPersona(m.pi);
+	const ctx = makeCtx(REPO_ROOT).ctx;
+	let idle = false;
+	ctx.isIdle = () => idle;
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as any;
+		assert.ok(tool, "monitor must be registered");
+		const result = await tool.execute("watch", { action: "arm", command: process.execPath, args: ["-e", "console.log('MONITOR_EXTENSION_EVENT')"], label: "local fixture", mode: "exit" }, undefined, undefined, ctx);
+		assert.equal(result.details.ok, true);
+		const deadline = Date.now() + 5000;
+		while (Date.now() < deadline) {
+			const list = await tool.execute("list", { action: "list" }, undefined, undefined, ctx);
+			if (list.details.count === 0) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(m.sentMessages().length, 0, "busy supervisor must not receive an immediate wake");
+		idle = true;
+		await m.fire("agent_settled", {}, ctx);
+		const message = m.sentMessages().find((e) => JSON.stringify(e.message).includes("MONITOR_EXTENSION_EVENT"));
+		assert.ok(message);
+		assert.deepEqual(message.options, { deliverAs: "followUp", triggerTurn: true });
+		assert.match(JSON.stringify(message.message), /untrusted/i);
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("switching to a persona without bash stops its monitors and hides command-watch guidance", async () => {
+	const cwd = tempDir("pi-persona-monitor-permission-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "observer-only.md"), "---\nname: observer-only\npersona: true\ntools:\n  deny: [bash]\n---\nObserve only.\n");
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const ctx = makeCtx(cwd).ctx;
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as any;
+		assert.equal((await tool.execute("watch", { action: "arm", command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], label: "pending", mode: "output" }, undefined, undefined, ctx)).details.ok, true);
+		await m.cmd("persona", "observer-only", ctx);
+		assert.equal((await tool.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count, 0);
+		const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
+		assert.doesNotMatch(prompt, /monitor watches a job/);
+		assert.match(prompt, /timer now/);
+		assert.equal((await tool.execute("denied", { action: "arm", command: process.execPath, label: "blocked", mode: "exit" }, undefined, undefined, ctx)).details.ok, false);
+	} finally { await m.fire("session_shutdown", {}, ctx); await fs.promises.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 const traceTheme = {
 	fg: (_color: string, text: string) => text,
 	bg: (_color: string, text: string) => text,
@@ -3607,6 +3674,58 @@ test("an ask answered while the supervisor is busy is dropped from the pending w
 	}
 });
 
+test("a disconnected child's buffered ask never wakes the supervisor after it goes idle", { timeout: 10_000 }, async () => {
+	const prevBroker = process.env.PI_PERSONA_BROKER;
+	const prevEngine = process.env.PI_PERSONA_ENGINE;
+	process.env.PI_PERSONA_BROKER = "1";
+	process.env.PI_PERSONA_ENGINE = "child";
+	const sessionId = randomUUID();
+	const clients: Array<ReturnType<typeof makeBrokerClient>> = [];
+	const m = makeMockPi();
+	const { ctx: base } = makeCtx(tempDir("pi-persona-retired-ask-"));
+	let idle = false;
+	const ctx = { ...base, isIdle: () => idle, sessionManager: { getSessionId: () => sessionId } };
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		await (m.tool("council") as { execute: AnyFn }).execute("ask-host", { question: "q", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, ctx);
+		for (const handle of ["departing-worker", "waiting-worker"]) {
+			const client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle });
+			clients.push(client);
+			await client.register();
+		}
+		const departing = clients[0]!.ask("supervisor", "decision", "DEPARTED_ASK_SHOULD_NOT_WAKE").catch(() => undefined);
+		clients[1]!.ask("supervisor", "decision", "LIVE_ASK_STILL_NEEDS_AN_ANSWER").catch(() => undefined);
+		const intercom = m.tool("intercom") as { execute: AnyFn };
+		let listed = "";
+		const deadline = Date.now() + 5000;
+		while (!listed.includes("DEPARTED_ASK_SHOULD_NOT_WAKE") || !listed.includes("LIVE_ASK_STILL_NEEDS_AN_ANSWER")) {
+			if (Date.now() > deadline) throw new Error("asks did not arrive");
+			listed += String((await intercom.execute("inbox", { action: "inbox" }, undefined, undefined, ctx)).content?.[0]?.text ?? "");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(m.sentMessages().length, 0, "busy supervisor has not received the buffered prompts");
+		clients[0]!.close();
+		await departing;
+		while ((await intercom.execute("peers", { action: "list" }, undefined, undefined, ctx)).details.peers.includes("departing-worker")) {
+			if (Date.now() > deadline) throw new Error("departed child still registered");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		idle = true;
+		await waitUntil(() => m.sentMessages().length > 0, "the live question to wake the supervisor");
+		const wake = m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
+		assert.doesNotMatch(wake, /DEPARTED_ASK_SHOULD_NOT_WAKE/);
+		assert.match(wake, /LIVE_ASK_STILL_NEEDS_AN_ANSWER/);
+	} finally {
+		for (const client of clients) client.close();
+		await m.fire("session_shutdown", undefined, ctx);
+		if (prevBroker === undefined) delete process.env.PI_PERSONA_BROKER;
+		else process.env.PI_PERSONA_BROKER = prevBroker;
+		if (prevEngine === undefined) delete process.env.PI_PERSONA_ENGINE;
+		else process.env.PI_PERSONA_ENGINE = prevEngine;
+	}
+});
+
 // ── a persona switch is a fresh supervisor contract (nudge.ts's documented reset points) ──
 
 test("switching persona clears the by-hand delegation run instead of billing it to the next persona", async () => {
@@ -3964,7 +4083,8 @@ test("--exocom=<code> joins another workspace while advertising the Pi's real wo
 		const brief = corpus.fire("before_agent_start", { systemPrompt: "BASE" }, corpusCtx).systemPrompt as string;
 		assert.match(brief, /joined workspace/i);
 		assert.match(brief, /different files.*inspect files in your own workspace/i);
-		assert.match(brief, /cannot use exocom_claim/i);
+		assert.match(brief, /cannot claim its home paths/i);
+		assert.doesNotMatch(brief, /exocom_claim\(/, "foreign membership must not teach an unavailable claim call");
 
 		await (team.tool("exocom_send") as { execute: AnyFn }).execute("cross-send", {
 			target: externalTarget,

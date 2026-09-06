@@ -18,6 +18,22 @@ import type { AgentResult } from "../../../src/orchestration/types.ts";
 const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 
+/** Let every member enter the injected engine before the test's first member aborts the run. */
+const entryBarrier = (expected: number): (() => Promise<void>) => {
+	let entered = 0;
+	let release = (): void => {};
+	const allEntered = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	return async () => {
+		entered++;
+		if (entered === expected) {
+			release();
+		}
+		await allEntered;
+	};
+};
+
 test("fanout runs every roster agent in parallel and aggregates the results", async () => {
 	const calls: string[] = [];
 	const engine: StrategyEngine = {
@@ -173,13 +189,15 @@ test("council-rounds falls back to best-by-confidence on the final round without
 	assert.equal(r.structured?.headline, "b");
 });
 
-test("council-rounds stops deliberating once the run is aborted mid-round", async () => {
+test("council-rounds stops deliberating once the run is aborted mid-round", { timeout: 1500 }, async () => {
 	const ac = new AbortController();
 	let calls = 0;
+	const awaitAllEntered = entryBarrier(3);
 	const engine: StrategyEngine = {
 		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
 			calls++;
-			ac.abort(); // the user stops the run while round 1 is in flight
+			await awaitAllEntered();
+			if (spec.agent === "a") ac.abort(); // the user stops the run while round 1 is in flight
 			// Both engines SETTLE an aborted leg (ok:false/abort) rather than throwing.
 			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
 		},
@@ -652,16 +670,18 @@ test("judge preserves the cause when every candidate is unusable", async () => {
 	}
 });
 
-test("judge does not convene the arbiter after the panel if the run is aborted", async () => {
+test("judge does not convene the arbiter after the panel if the run is aborted", { timeout: 1500 }, async () => {
 	const ac = new AbortController();
 	let arbiterCalls = 0;
+	const awaitAllEntered = entryBarrier(2);
 	const engine: StrategyEngine = {
 		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
 			if (spec.agent === "arbiter") {
 				arbiterCalls++;
 				return { agent: "arbiter", output: "A", structured: { vote: "A" }, usage: usage(), ok: true };
 			}
-			ac.abort();
+			await awaitAllEntered();
+			if (spec.agent === "p1") ac.abort();
 			return { agent: spec.agent, output: `candidate:${spec.agent}`, usage: usage(), ok: true };
 		},
 	};
@@ -1205,16 +1225,18 @@ const competitorEngine = (arbiterResult: AgentResult): StrategyEngine => ({
 	},
 });
 
-test("compete does not convene the arbiter after competitors finish if the run is aborted", async () => {
+test("compete does not convene the arbiter after competitors finish if the run is aborted", { timeout: 1500 }, async () => {
 	const ac = new AbortController();
 	let arbiterCalls = 0;
+	const awaitAllEntered = entryBarrier(2);
 	const engine: StrategyEngine = {
 		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
 			if (spec.agent === "arbiter") {
 				arbiterCalls++;
 				return { agent: "arbiter", output: "A", structured: { vote: "A" }, usage: usage(), ok: true };
 			}
-			ac.abort();
+			await awaitAllEntered();
+			if (spec.agent === "one") ac.abort();
 			return {
 				agent: spec.agent,
 				output: `approach of ${spec.agent}\n\n\`\`\`diff\ndiff --git a/${spec.agent}.txt b/${spec.agent}.txt\n+KEEP-${spec.agent}\n\`\`\``,
@@ -1388,13 +1410,15 @@ test("debate convenes nobody when the run is aborted before it starts", async ()
 	assert.equal(r.structured?.status, "cancelled");
 });
 
-test("magi skips the reflection round once the run is aborted", async () => {
+test("magi skips the reflection round once the run is aborted", { timeout: 1500 }, async () => {
 	const ac = new AbortController();
 	let calls = 0;
+	const awaitAllEntered = entryBarrier(3);
 	const engine: StrategyEngine = {
 		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
 			calls++;
-			ac.abort();
+			await awaitAllEntered();
+			if (spec.agent === "melchior") ac.abort();
 			return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
 		},
 	};

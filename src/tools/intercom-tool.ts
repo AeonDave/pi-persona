@@ -8,12 +8,13 @@ import { compactVisibleText } from "../ui/presentation.ts";
 import { coachingDisabledHint, expandDetailHint, reconcileAnsweredAsk } from "../extension/shared.ts";
 import {
 	type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildPeekDigest, buildWaitTimeoutNote,
+	MAX_ASYNC_STATUS_ROWS,
 	dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier,
 	renderCompletion, runDurationLabel,
 } from "../engine/async.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
-import { type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS, runIntercom } from "./intercom.ts";
+import { type IntercomOutcome, type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS, runIntercom } from "./intercom.ts";
 import { fenceIntercomOutcome, type PendingAsk } from "../extension/shared.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
 import type { PersonaController } from "../persona/controller.ts";
@@ -42,6 +43,23 @@ export interface IntercomToolDeps {
 	publishPersonaCost(): void;
 }
 
+/** Keep an aborted wait honest: its signal may end the join well before the configured window. */
+export function buildIntercomWaitStillNote(ids: readonly string[], timeoutMs: number, interrupted: boolean): string {
+	if (!interrupted) return buildWaitTimeoutNote(ids, timeoutMs);
+	const visibleIds = ids.slice(0, MAX_ASYNC_STATUS_ROWS).map((id) => sanitizeDisplayLabel(id, "run"));
+	const omitted = ids.length - visibleIds.length;
+	const idSummary = `${visibleIds.join(", ")}${omitted > 0 ? `, … +${omitted} more` : ""}`;
+	return (
+		`⏹ wait interrupted before the configured ${timeoutMs}ms window elapsed; still running: ${idSummary}. ` +
+		"Continue useful supervisor work; completion will notify you automatically. Use intercom wait again when ready."
+	);
+}
+
+/** Fence only child-authored payloads; missing-message diagnostics remain actionable tool prose. */
+export function fenceIntercomToolOutcome(out: IntercomOutcome, action: string, fence: (text: string) => string): string {
+	return action === "message" && out.details.ok ? fence(out.text) : fenceIntercomOutcome(out, fence);
+}
+
 export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): void {
 	// ── intercom tool (supervisor side of the comm plane: read/answer children) ───
 	const IntercomToolParams = Type.Object({
@@ -54,15 +72,17 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				Type.Literal("stop"),
 				Type.Literal("list"),
 				Type.Literal("inbox"),
+				Type.Literal("message"),
 				Type.Literal("reply"),
 				Type.Literal("send"),
 			],
 			{
 				description:
-					"peek = watch async sub-agents · result = retrieve one complete settled result by run id · wait = BLOCK until async run(s) settle and collect their bounded reports (a join) · steer = soft redirect into one by run id (it may ignore it) · stop = HARD-abort one by run id · list/inbox/reply/send = the coaching message d.bus (needs a coaching persona)",
+					"peek = watch async sub-agents · result = retrieve one complete settled result by run id · wait = BLOCK until async run(s) settle and collect their bounded reports (a join) · steer = soft redirect into one by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = coaching messages (needs a coaching persona)",
 			},
 		),
-		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek/wait: the async run id (e.g. 'run-1'; wait without it = all running) · send: the child d.bus handle (from `list`)" })),
+		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek/wait: the async run id (e.g. 'run-1'; wait without it = all running) · send: the child handle (from `list`)" })),
+		messageId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "message: the drained bus message id shown by `inbox`" })),
 		askId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "reply: the message id of the child's pending question" })),
 		message: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_MESSAGE_CHARS, description: "steer/reply/send: the text to deliver" })),
 		timeoutMs: Type.Optional(Type.Number({ description: "wait: max ms to hold your turn (default 600000, cap 600000) — on timeout you get what settled + what's still running" })),
@@ -76,7 +96,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			"payload by run id; `wait` blocks until runs settle and returns a bounded join report;",
 			"`steer` injects a course-correction into one (by run id) mid-run — in-process async",
 			"runs, and child-engine (MCP/worktree) async runs via the session broker.",
-			"`list`/`inbox`/`reply`/`send` are the message d.bus (a child reaching you via `contact_supervisor`)",
+			"`message` retrieves a drained bus message by its message id; `list`/`inbox`/`reply`/`send` exchange coaching messages (a child reaches you via `contact_supervisor`)",
 			"and need a `coaching: on` persona.",
 		].join(" "),
 		parameters: IntercomToolParams,
@@ -86,7 +106,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			// interpolate it into trusted prose without reducing it to compact identifier metadata.
 			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
 			// peek + wait + steer + stop are supervisor→child controls over the async d.tracker /
-			// steer handles — available to EVERY persona (no dependency on the coaching d.bus).
+			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
 				// No `to` → running legs PLUS any settled-but-not-yet-delivered ones (the settle→deliver
 				// gap), so a peek right after a leg finishes shows its result instead of "No async runs".
@@ -146,7 +166,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				if (ids.length === 0) {
 					return { content: [{ type: "text", text: "No async runs to wait for." }], details: { action: "wait", ok: true }, isError: false };
 				}
-				// Bounded join: never longer than a child's ask timeout (d.bus `ask` default 600s),
+				// Bounded join: never longer than a child's ask timeout (bus `ask` default 600s),
 				// so a coaching child blocking on OUR reply can't deadlock us past its own timeout.
 				// Default matches that ceiling — heavy sub-agents (30+ turns) routinely outlast a
 				// short window, and a premature "still running" forces a needless re-wait.
@@ -162,7 +182,9 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				d.completionNotifier.discard((run) => settledIds.has(run.id));
 				for (const id of settledIds) d.tracker.markCollected(id);
 				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => d.scanForSurrender(t)) : "";
-				const stillNote = still.length > 0 ? buildWaitTimeoutNote(still.map((r) => r.id), timeoutMs) : "";
+				const stillNote = still.length > 0
+					? buildIntercomWaitStillNote(still.map((r) => r.id), timeoutMs, _signal?.aborted === true)
+					: "";
 				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
 				const text = boundCompletionSurface(joined);
 				const billed = d.childUsage.accountMany(
@@ -191,20 +213,20 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// Routed through the guarded d.steerAgent so a just-finished/d.disposed handle can't throw.
 				const steered = d.steerAgent(nodeId, params.message);
 				return steered
-					? { content: [{ type: "text", text: `Steered ${displayTarget} (soft request; use action "stop" to hard-abort).` }], details: { action: "steer", ok: true }, isError: false }
+					? { content: [{ type: "text", text: `Steering sent to ${displayTarget} (soft request; use action "stop" to request cancellation).` }], details: { action: "steer", ok: true }, isError: false }
 					: { content: [{ type: "text", text: `Could not steer "${displayTarget}" — it may have just finished, or the message was empty.` }], details: failureDetails({ action: "steer", ok: false }), isError: true };
 			}
 			if (params.action === "stop") {
 				if (!params.to) {
 					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: failureDetails({ action: "stop", ok: false }), isError: true };
 				}
-				// HARD stop: aborts the run's signal → the engine calls the sub-agent's agent.abort()
-				// (child.ts escalates SIGTERM → force tree-kill, so this DOES kill a child-engine process).
+				// Abort the real run signal. The child backend can kill its process tree; the
+				// in-process backend requests host cancellation and settles its lifecycle separately.
 				const nodeId = `async:${params.to}`;
 				const repeated = d.stopRequested.has(nodeId);
 				const stopped = d.stopAgent(nodeId);
 				if (stopped && !repeated) {
-					return { content: [{ type: "text", text: `Aborting ${displayTarget} — the sub-agent is being hard-stopped; its run will settle as aborted shortly.` }], details: { action: "stop", ok: true }, isError: false };
+					return { content: [{ type: "text", text: `Cancellation requested for ${displayTarget}. Check its terminal result; changes already made are not undone.` }], details: { action: "stop", ok: true }, isError: false };
 				}
 				// A repeated stop has just invoked the REAL cancel handle again. Only now force-clear
 				// d.tracker state if engine settlement is still lagging; the handle remains registered
@@ -223,7 +245,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				};
 			}
 
-			// The message d.bus (coaching): list / inbox / reply / send.
+			// The message bus (coaching): list / inbox / message / reply / send.
 			const out = runIntercom(params as IntercomParams, d.bus, d.SUPERVISOR);
 			// An answered ask is settled on every surface it reached — never woken again, never
 			// re-listed (the ask envelope is NOT drained by the peek path, which skips expectsReply).
@@ -231,7 +253,9 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				reconcileAnsweredAsk(params.askId, d.intercomNotifier, d.bus, d.SUPERVISOR);
 			}
 			// Child-authored inbox bodies are untrusted, exactly like the d.drainBusBlock/peek copies.
-			let text = fenceIntercomOutcome(out, fenceUntrusted);
+			// A retrieved body is child-authored even though it is no longer an inbox batch; keep the
+			// same trust fence around it as inbox and automatic drain surfaces.
+			let text = fenceIntercomToolOutcome(out, params.action, fenceUntrusted);
 			if ((params.action === "list" || params.action === "inbox") && !d.controller.activePersona?.coaching) {
 				text += `\n\n${coachingDisabledHint(d.controller.activePersona?.name)}`;
 			}
@@ -242,6 +266,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			let target = "";
 			if (action === "wait" || action === "peek") target = compactInlineText(args.to ?? "all", { maxChars: 80 }) || "all";
 			else if (["result", "steer", "stop", "send"].includes(action)) target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
+			else if (action === "message") target = compactInlineText(args.messageId ?? "?", { maxChars: 80 }) || "?";
 			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
 			const timeout = action === "wait" && Number.isFinite(args.timeoutMs) && args.timeoutMs !== undefined
 				? ` · ${Math.max(0, Math.floor(args.timeoutMs))}ms`

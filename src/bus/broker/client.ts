@@ -3,7 +3,8 @@
  * session-scoped endpoint (`paths.ts`), performs the `register`/`registered` handshake,
  * and exposes the same shape a local `contact_supervisor`/`contact_peer` binding needs —
  * `send` (fire-and-forget), `ask` (a blocking `send{expectsReply}` correlated to a
- * `replied{askId}`, 10-minute cap, mirrors `bus.ask`), `reply` (answers a host-issued
+ * `replied{askId}`, 10-minute cap, mirrors `bus.ask`, and sends `cancel{msgId}` when
+ * aborted), `reply` (answers a host-issued
  * blocking `deliver`), `list` (the engine-scoped peer roster, B7), and `onDeliver`/`onSteer`
  * for inbound frames. A future bridge (`src/bridge.ts`) wires these onto Pi tools; this
  * module has no Pi imports.
@@ -121,9 +122,14 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 				registerSettle = undefined;
 				return;
 			case "error":
-				// Only the register handshake can be unambiguously correlated to a bare
-				// `error` frame (host.ts does not echo msgId/askId on ask failures); any
-				// other error is unresolvable here and is left to its own ask timeout.
+				// A correlated error belongs to one request on this connection. Do not let an
+				// unknown/stale correlation id affect the register handshake or another ask.
+				if (frame.msgId !== undefined) {
+					pendingAsks.get(frame.msgId)?.reject(new Error(frame.reason));
+					return;
+				}
+				// A bare error is reserved for the register handshake. Older hosts emit this
+				// shape, so keep accepting it for protocol compatibility.
 				registerSettle?.reject(new Error(frame.reason));
 				registerSettle = undefined;
 				return;
@@ -255,7 +261,9 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		return new Promise<string>((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;
 			const onAbort = (): void => {
+				const wasPending = pendingAsks.has(msgId);
 				finish();
+				if (wasPending) write({ t: "cancel", msgId });
 				reject(new Error("ask aborted"));
 			};
 			// Always drop the pending entry + timer + abort listener, so a settled ask never
@@ -266,7 +274,9 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 				signal?.removeEventListener("abort", onAbort);
 			};
 			timer = setTimeout(() => {
+				const wasPending = pendingAsks.has(msgId);
 				finish();
+				if (wasPending) write({ t: "cancel", msgId });
 				reject(new Error(`ask timeout after ${ASK_TIMEOUT_MS}ms`));
 			}, ASK_TIMEOUT_MS);
 			timer.unref?.();

@@ -212,8 +212,42 @@ test("ask rejects when the signal aborts before a reply arrives", async () => {
 	try {
 		const ac = new AbortController();
 		const askPromise = client.ask("supervisor", "decision", "?", ac.signal);
+		await new Promise((resolve) => setImmediate(resolve));
 		ac.abort();
 		await assert.rejects(() => askPromise, /abort/);
+	} finally {
+		client.close();
+	}
+});
+
+test("ask abort sends a cancel frame for its own request", async () => {
+	const { client, host } = await connectedClient();
+	try {
+		const ac = new AbortController();
+		const askPromise = client.ask("supervisor", "decision", "?", ac.signal);
+		await waitFor(() => host.frames.some((f) => f.t === "send" && f.expectsReply === true));
+		const send = host.frames.find((f) => f.t === "send" && f.expectsReply === true);
+		assert.ok(send && send.t === "send");
+		ac.abort();
+		await assert.rejects(() => askPromise, /abort/);
+		await waitFor(() => host.frames.some((f) => f.t === "cancel"));
+		const cancel = host.frames.find((f) => f.t === "cancel");
+		assert.ok(cancel && cancel.t === "cancel");
+		assert.equal(cancel.msgId, send.msgId, "abort cancels only the originating ask");
+	} finally {
+		client.close();
+	}
+});
+
+test("a correlated host error rejects the matching ask immediately", async () => {
+	const { client, host } = await connectedClient();
+	try {
+		const askPromise = client.ask("supervisor", "decision", "?");
+		await waitFor(() => host.frames.some((f) => f.t === "send" && f.expectsReply === true));
+		const send = host.frames.find((f) => f.t === "send" && f.expectsReply === true);
+		assert.ok(send && send.t === "send");
+		host.send({ t: "error", reason: "inbox full: ask was not delivered", msgId: send.msgId });
+		await assert.rejects(() => askPromise, /inbox full/);
 	} finally {
 		client.close();
 	}

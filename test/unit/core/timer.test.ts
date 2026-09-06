@@ -48,7 +48,13 @@ test("arm with delayMs schedules and fires at expiry", () => {
 	h.advance(60_000);
 	assert.equal(h.fired.length, 1, "fired at expiry");
 	assert.equal(h.fired[0]?.message, "spawn now");
+	assert.equal(h.fired[0]?.observedAtEpochMs, 1_060_000, "the fire records the scheduler-observed wall clock");
 	assert.equal(h.scheduler.size, 0, "removed from armed set after firing");
+});
+
+test("the scheduler exposes its injected current clock for fresh time reads", () => {
+	const h = harness();
+	assert.equal(h.scheduler.now(), 1_000_000);
 });
 
 test("arm with atEpochMs fires at the absolute time", () => {
@@ -77,6 +83,14 @@ test("rejects a past absolute time and a sub-minimum delay", () => {
 	const h = harness();
 	assert.equal(h.scheduler.arm({ message: "x", atEpochMs: 500_000 }).ok, false, "past time rejected");
 	assert.equal(h.scheduler.arm({ message: "x", delayMs: 100 }).ok, false, "below min delay rejected");
+});
+
+test("rejects an invalid injected clock instead of arming an unusable timer", () => {
+	const h = harness(Number.NaN);
+	const result = h.scheduler.arm({ message: "x", atEpochMs: 2_000_000 });
+	assert.equal(result.ok, false);
+	assert.match(result.error ?? "", /clock is not a finite number/);
+	assert.equal(h.scheduler.size, 0);
 });
 
 test("rejects a delay beyond the max", () => {
@@ -144,13 +158,14 @@ test("the follow-up message is length-bounded — it is re-injected into context
 
 test("renderTimerFire batches multiple fires into one wake message", () => {
 	const entries: TimerEntry[] = [
-		{ id: "timer-1", label: "release", fireAtEpochMs: 0, armedAtEpochMs: 0, message: "spawn Paperwork" },
-		{ id: "timer-2", label: "recheck", fireAtEpochMs: 0, armedAtEpochMs: 0, message: "re-run nmap" },
+		{ id: "timer-1", label: "release", fireAtEpochMs: 0, armedAtEpochMs: 0, observedAtEpochMs: 1_500, message: "check status" },
+		{ id: "timer-2", label: "recheck", fireAtEpochMs: 0, armedAtEpochMs: 0, observedAtEpochMs: 1_700, message: "summarize changes" },
 	];
 	const out = renderTimerFire(entries);
 	assert.match(out, /2 timers fired/);
-	assert.match(out, /spawn Paperwork/);
-	assert.match(out, /re-run nmap/);
+	assert.match(out, /due 1970-01-01T00:00:00\.000Z; observed 1970-01-01T00:00:01\.500Z/);
+	assert.match(out, /check status/);
+	assert.match(out, /summarize changes/);
 	assert.equal(renderTimerFire([]), "");
 });
 

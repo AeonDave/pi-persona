@@ -12,6 +12,7 @@ import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import type { DelegationNudge, PersistenceNudge } from "../core/nudge.ts";
 import { buildSessionAnchor } from "../core/time.ts";
+import { readClockSnapshot } from "./clock.ts";
 import { type AsyncRun, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
 import { constrainedTurnAllows } from "../exocom/gate.ts";
 import type { DisplayPeer } from "../exocom/plane.ts";
@@ -22,6 +23,7 @@ import {
 	type PendingAsk,
 } from "./shared.ts";
 import type { TimerEntry } from "../core/timer.ts";
+import type { MonitorSession } from "../monitor/session.ts";
 import type { FlowSpec } from "../orchestration/flow.ts";
 import { resolveStrategyName } from "../persona/orchestrate.ts";
 import type { PersonaController, PersonaHost } from "../persona/controller.ts";
@@ -66,6 +68,7 @@ export interface HookHost {
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
 	timerNotifier: IdleCoalescingNotifier<TimerEntry>;
 	timerScheduler: { cancelAll(): void };
+	monitors: MonitorSession;
 	peekWatcher: PeekWatcher;
 	stopPeek(): void;
 	stopRegistry: Map<string, () => void>;
@@ -176,7 +179,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				emit: (event) => eventBus?.emit?.(TELEMETRY_EVENT_NAME, event),
 				heartbeat: () => exocom.currentTelemetryInstance(h.lastCtx ?? ctx),
 				...(process.env.PI_PERSONA_DEBUG
-					? { onError: (error: unknown) => { process.stderr.write(`[pi-persona] h.telemetry: ${error instanceof Error ? error.message : String(error)}\n`); } }
+					? { onError: (error: unknown) => { process.stderr.write(`[pi-persona] telemetry: ${error instanceof Error ? error.message : String(error)}\n`); } }
 					: {}),
 			});
 			h.telemetry.start(exocom.currentTelemetryInstance(ctx));
@@ -204,6 +207,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		exocom.waitNotifier?.cancel();
 		h.timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
 		h.timerNotifier.cancel();
+		h.monitors.cancelAll();
 		// This instance is being torn down (a h.reload/new/resume rebinds a fresh one); abort in-flight
 		// sub-h.agents and reset control state so nothing is left orphaned or rendered stale.
 		for (const abort of [...h.stopRegistry.values()]) {
@@ -298,6 +302,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.completionNotifier.kick();
 		h.intercomNotifier.kick();
 		h.timerNotifier.kick();
+		h.monitors.kick();
 		exocom.notifier?.kick();
 		exocom.waitNotifier?.kick();
 	});
@@ -317,9 +322,18 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// append-only session file, so after /resume it is still the ORIGINAL start: that is what makes it
 		// answer "how long have I been on this problem" across restarts and not merely across turns.
 		// Placed BEFORE the briefs so the standing hand-off default keeps the last word at the tail; the
-		// elapsed reading is bucketed so this block stays byte-identical across an hour of turns.
-		const anchor = buildSessionAnchor(ctx.sessionManager?.getHeader?.() ?? null, Date.now());
+		// elapsed reading remains coarse to preserve caching; the precise clock goes in a new
+		// conversation message below, and timer now can refresh it within a long tool loop.
+		const now = Date.now();
+		const anchor = buildSessionAnchor(ctx.sessionManager?.getHeader?.() ?? null, now);
 		if (anchor) prompt = `${prompt}\n\n${anchor}`;
+		const wakeCaps = h.controller.capabilities;
+		const activeWakeTools = new Set(pi.getActiveTools());
+		const wakeAllows = (name: string) => activeWakeTools.has(name) && (!wakeCaps || canCallTool(wakeCaps, name));
+		const wakeGuidance: string[] = [];
+		if (wakeAllows("timer")) wakeGuidance.push("timer now reads the current clock; timer arm schedules a fixed-time wake (absolute times require a timezone).");
+		if (wakeAllows("monitor") && wakeAllows("bash")) wakeGuidance.push("monitor watches a job or event-producing program: mode=exit for job completion, mode=output for file/log/system changes reported as stdout lines. Filter changes in the producer; set a useful deadline and event count, and cancel the watch when its purpose ends.");
+		if (wakeGuidance.length) prompt = `${prompt}\n\n[Session wakes] ${wakeGuidance.join(" ")} Continue independent work while waiting; end your turn when only the event remains. These wakes require this Pi session to stay open. Use existing automatic sub-agent/peer notifications for their results; avoid duplicate watches or polling loops.`;
 		const brief = h.delegationBrief(ctx);
 		if (brief) prompt = `${prompt}\n\n${brief}`;
 		// Per-turn exocom peer AWARENESS (mirrors the delegation brief above): regenerated from the
@@ -372,7 +386,18 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				};
 			}), {
 				canDelegate,
-				canClaim: scope?.joined !== true && (!xcaps || canCallTool(xcaps, "exocom_claim")),
+				tools: {
+					name: !xcaps || canCallTool(xcaps, "exocom_name"),
+					list: !xcaps || canCallTool(xcaps, "exocom_list"),
+					send: !xcaps || canCallTool(xcaps, "exocom_send"),
+					claim: scope?.joined !== true && (!xcaps || canCallTool(xcaps, "exocom_claim")),
+					ask: !xcaps || canCallTool(xcaps, "exocom_ask"),
+					answer: !xcaps || canCallTool(xcaps, "exocom_answer"),
+					decline: !xcaps || canCallTool(xcaps, "exocom_decline"),
+					wait: !xcaps || canCallTool(xcaps, "exocom_wait"),
+					release: !xcaps || canCallTool(xcaps, "exocom_release"),
+					progress: !xcaps || canCallTool(xcaps, "exocom_progress"),
+				},
 				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
 				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
 				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
@@ -414,7 +439,11 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			}
 			h.pendingOrchestration = undefined;
 		}
-		return prompt === event.systemPrompt ? undefined : { systemPrompt: prompt };
+		const clock = readClockSnapshot(now);
+		return {
+			...(prompt !== event.systemPrompt ? { systemPrompt: prompt } : {}),
+			...(clock ? { message: { customType: "pi-persona-clock", content: clock, display: false } } : {}),
+		};
 	});
 
 	pi.on("tool_call", (event, ctx) => {
@@ -559,15 +588,18 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			const action = typeof telemetryInput.action === "string" ? telemetryInput.action : "";
 			// The open entry is the right to publish a terminal: once the turn-boundary drain has closed
 			// this call, a late result must not report it a second time.
-			const open = h.telemetryIntercomPending.delete(event.toolCallId);
-			if (open && (action === "send" || action === "reply")) {
+			const pending = h.telemetryIntercomPending.get(event.toolCallId);
+			h.telemetryIntercomPending.delete(event.toolCallId);
+			if (pending && (action === "send" || action === "reply")) {
 				const text = typeof telemetryInput.message === "string" ? telemetryInput.message : "";
 				const askId = typeof telemetryInput.askId === "string" ? telemetryInput.askId : undefined;
 				h.telemetry?.publish(action === "reply" ? "message.replied" : "message.sent", {
 					id: event.toolCallId,
 					channel: "intercom",
 					from: "supervisor",
-					to: h.intercomRecipient(telemetryInput, askId),
+					// Ask settlement has already retired its sender lookup. The tool-start
+					// snapshot owns the recipient for both queued and terminal telemetry.
+					to: pending.to,
 					kind: action,
 					status: event.isError ? "failed" : action === "reply" ? "replied" : "delivered",
 					expectsReply: false,
