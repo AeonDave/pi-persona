@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -16,6 +16,38 @@ function openOverlay(tree: AgentTree): AgentOverlay {
 
 function type(overlay: AgentOverlay, text: string): void {
 	for (const ch of text) overlay.handleInput(ch);
+}
+
+/**
+ * Count text sent through the real sanitizer/wrapper, without replacing their behavior.
+ * Absolute CPU or wall-time limits vary with CI hardware; this work budget catches a
+ * whole-buffer rebuild on each tick regardless of runner speed. Keep the private-method
+ * instrumentation here so production does not need a test-only performance hook.
+ */
+function observeRenderWork(t: TestContext, overlay: AgentOverlay): { settledChars: number; wrappedChars: number } {
+	const renderer = overlay as unknown as {
+		settledRows(chunk: string, width: number): string[];
+		wrapRows(text: string, width: number): string[];
+	};
+	const work = { settledChars: 0, wrappedChars: 0 };
+	const settledRows = renderer.settledRows;
+	const wrapRows = renderer.wrapRows;
+	t.mock.method(renderer, "settledRows", function (chunk: string, width: number): string[] {
+		work.settledChars += chunk.length;
+		return settledRows.call(renderer, chunk, width);
+	});
+	t.mock.method(renderer, "wrapRows", function (text: string, width: number): string[] {
+		work.wrappedChars += text.length;
+		return wrapRows.call(renderer, text, width);
+	});
+	return work;
+}
+
+function assertLinearRenderWork(work: { settledChars: number; wrappedChars: number }, reportLength: number): void {
+	// Allow bounded reprocessing at an incomplete escape sequence, but not the ~200x
+	// amplification from reprocessing all accumulated output over these 400 ticks.
+	assert.ok(work.settledChars <= reportLength * 2, `sanitizing settled lines processed ${work.settledChars} chars for a ${reportLength}-char report`);
+	assert.ok(work.wrappedChars <= reportLength * 2, `wrapping processed ${work.wrappedChars} chars for a ${reportLength}-char report`);
 }
 
 test("a half-typed steer does not follow the user to another agent when the drilled agent vanishes", () => {
@@ -200,50 +232,44 @@ test("a stop typed at a drilled-in agent that finishes first does not fall throu
 	overlay.dispose();
 });
 
-test("a drilled-in agent that streams a long report does not cost the render loop the whole buffer per tick", () => {
-	// Bound work charged to this process, not time spent descheduled while other test files
-	// compete for a shared CI runner. The CPU budget still catches whole-buffer rebuilds.
+test("a drilled-in agent that streams a long report does not cost the render loop the whole buffer per tick", (t) => {
 	const tree = new AgentTree();
 	tree.add({ id: "a", label: "alpha" });
 	const overlay = openOverlay(tree);
+	t.after(() => overlay.dispose());
 	overlay.handleInput("\n"); // drill in — the detail view sanitizes and wraps the output
+	const work = observeRenderWork(t, overlay);
 	const chunk = `${"lorem ipsum dolor sit amet ".repeat(38)}\n`;
 	let buffer = "";
-	const started = process.cpuUsage();
 	for (let tick = 0; tick < 400; tick++) {
 		buffer += chunk;
 		tree.update("a", { output: buffer }); // a progress snapshot carries the whole buffer
 	}
-	const cpu = process.cpuUsage(started);
-	const elapsed = (cpu.user + cpu.system) / 1000;
 	const rendered = overlay.render(80).join("\n");
 	assert.ok(rendered.includes("lorem ipsum"), "the streamed report is still displayed");
-	assert.ok(elapsed < 1000, `400 progress ticks over a ${buffer.length}-char report used ${Math.round(elapsed)}ms CPU`);
-	overlay.dispose();
+	assertLinearRenderWork(work, buffer.length);
 });
 
-test("a report that carries ANSI colour is still rendered incrementally", () => {
+test("a report that carries ANSI colour is still rendered incrementally", (t) => {
 	// Agents colour their output, and an untrusted child can emit one ESC on purpose. If a
 	// single escape anywhere in the settled text disables the row cache, the whole-buffer
 	// re-wrap — and the render-loop stall it causes — is back for the normal case.
 	const tree = new AgentTree();
 	tree.add({ id: "a", label: "alpha" });
 	const overlay = openOverlay(tree);
+	t.after(() => overlay.dispose());
 	overlay.handleInput("\n");
+	const work = observeRenderWork(t, overlay);
 	const chunk = `[32m${"lorem ipsum dolor sit amet ".repeat(38)}[0m\n`;
 	let buffer = "";
-	const started = process.cpuUsage();
 	for (let tick = 0; tick < 400; tick++) {
 		buffer += chunk;
 		tree.update("a", { output: buffer });
 	}
-	const cpu = process.cpuUsage(started);
-	const elapsed = (cpu.user + cpu.system) / 1000;
 	const rendered = overlay.render(80).join("\n");
 	assert.ok(rendered.includes("lorem ipsum"), "the streamed report is still displayed");
 	assert.doesNotMatch(rendered, //, "and the colour codes are still stripped");
-	assert.ok(elapsed < 1000, `400 coloured progress ticks over a ${buffer.length}-char report used ${Math.round(elapsed)}ms CPU`);
-	overlay.dispose();
+	assertLinearRenderWork(work, buffer.length);
 });
 
 test("a coloured report streamed one chunk at a time renders what the whole report renders", () => {
@@ -340,26 +366,24 @@ test("the incremental detail render survives arbitrary interleavings of escapes 
 	}
 });
 
-test("an unterminated control sequence cannot stall the detail render either", () => {
+test("an unterminated control sequence cannot stall the detail render either", (t) => {
 	// A child that opens `ESC ]` and never terminates it used to hold the seam open for
 	// the rest of the run, so every progress tick paid for the whole buffer again — and
 	// `x` (stop), the user's way out of a misbehaving agent, queued behind that rebuild.
 	const tree = new AgentTree();
 	tree.add({ id: "a", label: "alpha" });
 	const overlay = openOverlay(tree);
+	t.after(() => overlay.dispose());
 	overlay.handleInput("\n");
+	const work = observeRenderWork(t, overlay);
 	const chunk = `${"lorem ipsum dolor sit amet ".repeat(38)}\n`;
 	let buffer = "\u001b]0;never-terminated\n";
-	const started = process.cpuUsage();
 	for (let tick = 0; tick < 400; tick++) {
 		buffer += chunk;
 		tree.update("a", { output: buffer });
 	}
-	const cpu = process.cpuUsage(started);
-	const elapsed = (cpu.user + cpu.system) / 1000;
 	const rendered = overlay.render(80).join("\n");
 	assert.ok(rendered.includes("lorem ipsum"), "the report is still displayed");
 	assert.doesNotMatch(rendered, /\u001b/, "and the dangling introducer is still stripped");
-	assert.ok(elapsed < 1000, `400 ticks behind an unterminated OSC used ${Math.round(elapsed)}ms CPU`);
-	overlay.dispose();
+	assertLinearRenderWork(work, buffer.length);
 });
