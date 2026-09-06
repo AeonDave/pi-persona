@@ -12,6 +12,10 @@ This folder contains the long-form documentation that defines how the project is
   - Shared behavioral spine prompt layer and rollout controls.
 - [`TELEMETRY.md`](./TELEMETRY.md)
   - Vendor-neutral observer contract, privacy boundary, persistence, and consumer conformance.
+- [`EXPERIENCE.md`](./EXPERIENCE.md)
+  - Choosing a persona, supervising background work, and collaborating through Exocom.
+- [`MONITORS.md`](./MONITORS.md)
+  - Clock snapshots, timers, and background event sources that wake the supervisor.
 
 ## Supporting evidence
 
@@ -20,7 +24,7 @@ This folder contains the long-form documentation that defines how the project is
 
 ## Quick map
 
-- **For users / operators:** start from [README](../README.md) and follow links into these design docs as needed.
+- **For users / operators:** start from [README](../README.md) and [EXPERIENCE.md](./EXPERIENCE.md); follow the design docs for runtime details.
 - **For contributors:** begin at `ARCHITECTURE.md`, then `STRATEGIES.md` for implementation details.
 - **For behavior-layer changes:** consult `SPINE.md` and `src/core` / `src/persona/spine.ts` together.
 - **For telemetry producers or consumers:** start with `TELEMETRY.md` and its conformance corpus.

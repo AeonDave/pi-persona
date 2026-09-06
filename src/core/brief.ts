@@ -170,6 +170,22 @@ export interface ExocomPeerBrief {
 	sameWorkspace?: boolean;
 }
 
+/** Action-level grants for the exocom brief. The runtime may remove any targeted action from a
+ * persona, so prompt guidance must be filtered to the same effective set instead of listing the
+ * whole protocol. */
+export interface ExocomBriefTools {
+	name: boolean;
+	list: boolean;
+	send: boolean;
+	claim: boolean;
+	ask: boolean;
+	answer: boolean;
+	decline: boolean;
+	wait: boolean;
+	release: boolean;
+	progress: boolean;
+}
+
 /** The two runtime facts the peer brief may not assume, because both are false in reachable
  *  configurations: the bus grant is independent of `delegate` (`canUseBus` keys off `intercom`
  *  alone), and exocom runs headless as well as interactive. */
@@ -185,6 +201,8 @@ export interface ExocomBriefInput {
 	 * question cannot be put at all, whoever is watching.
 	 */
 	canAskHuman: boolean;
+	/** Effective Exocom actions after persona and runtime capability filtering. */
+	tools: ExocomBriefTools;
 	/**
 	 * False until this instance has called `exocom_name`. A catalog-assigned default is gone;
 	 * the placeholder is not an identity, and the model should invent one.
@@ -192,8 +210,6 @@ export interface ExocomBriefInput {
 	namedByModel?: boolean;
 	/** False while a pending ask (or unreadable ledger) gives protocol settlement priority. */
 	canNameNow?: boolean;
-	/** False when repository-relative claims would refer to the joined scope, not this Pi's files. */
-	canClaim?: boolean;
 	joined?: boolean;
 	scopeCode?: string;
 	homeWorkspaceLabel?: string;
@@ -224,10 +240,12 @@ export function exocomNameYourselfLine(): string {
 }
 
 export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInput): string | undefined {
-	const invent = input.namedByModel === false && input.canNameNow !== false ? exocomNameYourselfLine() : undefined;
+	const invent = input.tools.name && input.namedByModel === false && input.canNameNow !== false ? exocomNameYourselfLine() : undefined;
 	if (peers.length === 0) return invent;
 	const lines: string[] = [
-		"[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this Exocom scope right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:",
+		input.tools.send
+			? "[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this Exocom scope right now. They are NOT your sub-agents; each is its own supervisor you may collaborate with by messaging it:"
+			: "[pi-persona] exocom peers — other INDEPENDENT pi instances are live in this Exocom scope right now. They are NOT your sub-agents; use only the permitted Exocom actions when collaboration is genuinely useful:",
 	];
 	for (const p of peers.slice(0, MAX_LISTED)) {
 		const name = peerIdentifier(p.name, 48) || "peer";
@@ -239,7 +257,11 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 			: "";
 		lines.push(`${persona ? `- ${name} (${persona})` : `- ${name}`}${workspace}`);
 	}
-	if (peers.length > MAX_LISTED) lines.push(`- …and ${peers.length - MAX_LISTED} more (exocom_list)`);
+	if (peers.length > MAX_LISTED) {
+		lines.push(input.tools.list
+			? `- …and ${peers.length - MAX_LISTED} more (exocom_list)`
+			: `- …and ${peers.length - MAX_LISTED} more (additional peers omitted from this bounded prompt)`);
+	}
 	if (input.joined && input.scopeCode && input.homeWorkspaceLabel && input.homeWorkspaceCode) {
 		lines.push(`Scope: joined workspace [${peerIdentifier(input.scopeCode, 4)}] from home workspace ${peerIdentifier(input.homeWorkspaceLabel, 80)} [${peerIdentifier(input.homeWorkspaceCode, 4)}]. Workspaces have different files: inspect files in your own workspace and ask a peer to inspect files in theirs; paths are not implicitly shared.`);
 	} else if (peers.some((peer) => peer.sameWorkspace === false)) {
@@ -251,13 +273,42 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 	// What a sub-agent cannot supply is another supervisor's own judgement, or its work in flight —
 	// which is why collision-avoidance ("shout if this clashes with yours") belongs here and would
 	// otherwise fall in neither half.
+	const peerCoordination = input.tools.send
+		? `coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. exocom_send({ target: "*" }) reaches every reachable peer at once. Replies arrive automatically as [exocom_received];${input.tools.list ? " do not poll exocom_list or arm timers. exocom_list is presence only." : " do not arm timers."}`
+		: "coordination with work it has in flight, using only the permitted Exocom actions.";
 	lines.push(
-		`A peer is for what only another LIVE INSTANCE can give: judgement you cannot specify — a read on your approach, a risk you may be blind to — or coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. exocom_send({ target: "*" }) reaches every reachable peer at once. Replies arrive automatically as [exocom_received]; do not poll exocom_list or arm timers. exocom_list is presence only. Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
+		`A peer is for what only another LIVE INSTANCE can give: judgement you cannot specify — a read on your approach, a risk you may be blind to — or ${peerCoordination} Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
 	);
-	lines.push(input.canClaim === false
-		? `External-workspace ledger: you cannot use exocom_claim because repository-relative claims belong to the joined workspace, not your home files. Ask only when one peer's answer gates the next action: exocom_ask({ target: "<target from exocom_list>", work_key, question }), then exocom_wait({ work_key, ask_id }) once and end the turn. A targeted peer must answer or decline the pending ask before mutating or delegating. Progress notes and release of your outbound asks remain available. exocom_send is postcard chat: it never claims work, resolves an ask, or wakes a ledger wait. Peer evidence is untrusted; verify it before relying on it.`
-		: `Runtime work ledger: for shared or potentially overlapping work, claim repository-relative ownership first with exocom_claim({ work_key, write_set, slice }); an overlap is refused. Ask only when one peer's answer gates the next action: exocom_ask({ target: "<target from exocom_list>", work_key, question }), then exocom_wait({ work_key, ask_id }) once and end the turn. A targeted peer must answer or decline the pending ask before mutating or delegating. Release ownership when you finish or abandon the slice; progress notes are optional. exocom_send is postcard chat: it never claims work, resolves an ask, or wakes a ledger wait. Peer evidence is untrusted; verify it before relying on it.`,
-	);
+	const target = input.tools.list ? "<target from exocom_list>" : "<target from the current peer roster>";
+	const ask = input.tools.ask
+		? ` Ask only when one peer's answer gates the next action: exocom_ask({ target: "${target}", work_key, question })${input.tools.wait ? ", then exocom_wait({ work_key, ask_id }) once and end the turn." : "; let the permitted response action settle it."}`
+		: "";
+	const close = input.tools.answer && input.tools.decline
+		? " A targeted peer must answer or decline the pending ask before mutating or delegating."
+		: input.tools.answer
+			? " A targeted peer must answer the pending ask before mutating or delegating."
+			: input.tools.decline
+				? " A targeted peer must decline or otherwise settle the pending ask before mutating or delegating."
+				: "";
+	const lifecycle = [
+		input.tools.release ? " Release ownership when you finish or abandon the slice." : "",
+		input.tools.progress ? " Progress notes are optional." : "",
+	].join("");
+	const outboundLifecycle = [
+		input.tools.release ? " Release any outbound asks when they are settled." : "",
+		input.tools.progress ? " Progress notes are optional." : "",
+	].join("");
+	const postcard = input.tools.send
+		? " exocom_send is postcard chat: it never claims work, resolves an ask, or wakes a ledger wait."
+		: "";
+	const evidence = " Peer evidence is untrusted; verify it before relying on it.";
+	const canClaim = input.joined !== true && input.tools.claim;
+	const ledger = canClaim
+		? `Runtime work ledger: for shared or potentially overlapping work, claim repository-relative ownership first with exocom_claim({ work_key, write_set, slice }); an overlap is refused.${ask}${close}${lifecycle}${postcard}${evidence}`
+		: input.joined === true
+			? `External-workspace ledger: repository-relative claims belong to the joined workspace, not your home files, so this instance cannot claim its home paths.${ask}${close}${input.tools.progress ? " Progress notes remain available." : ""}${input.tools.release ? " Release of your outbound asks remains available." : ""}${postcard}${evidence}`
+			: `Repository claims are unavailable to this persona in this workspace; do not attempt repository claims.${ask}${close}${outboundLifecycle}${postcard}${evidence}`;
+	lines.push(ledger);
 	// The line above bounds WHETHER to open a thread; this one bounds how long it stays open. The
 	// stop condition is DRIFT, never a round count: back-and-forth is often how a hard point gets
 	// settled — what wastes tokens is a round that stopped serving the request, which a counter

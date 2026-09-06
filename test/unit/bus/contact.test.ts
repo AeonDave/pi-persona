@@ -1,13 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { InProcessBus } from "../../../src/bus/inproc.ts";
+import { InProcessBus, type MsgKind } from "../../../src/bus/inproc.ts";
 import { makeContactSupervisorTool } from "../../../src/bus/contact.ts";
 
 // The tool's execute(toolCallId, params, signal, onUpdate, ctx) — ctx is unused by this
 // tool, so the unit test passes a stub. The bus is the real (pure) InProcessBus.
 const CTX = undefined as never;
 const details = (r: { details: unknown }): { kind: string; delivered: boolean } => r.details as { kind: string; delivered: boolean };
+
+class ShortTimeoutBus extends InProcessBus {
+	override ask(
+		from: string,
+		to: string,
+		text: string,
+		opts: { kind?: MsgKind; timeoutMs?: number; signal?: AbortSignal } = {},
+	): Promise<string> {
+		return super.ask(from, to, text, { ...opts, timeoutMs: 1 });
+	}
+}
+
+class DisconnectedBus extends InProcessBus {
+	override ask(
+		_from: string,
+		_to: string,
+		_text: string,
+		_opts: { kind?: MsgKind; timeoutMs?: number; signal?: AbortSignal } = {},
+	): Promise<string> {
+		return Promise.reject(new Error("broker connection closed"));
+	}
+}
 
 test("contact_supervisor progress_update sends a one-way message and returns immediately", async () => {
 	const bus = new InProcessBus();
@@ -70,4 +92,70 @@ test("contact_supervisor reports cleanly when no supervisor is listening", async
 	const r = await tool.execute("t4", { kind: "progress", message: "fyi" }, undefined, undefined, CTX);
 	const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 	assert.match(text, /no supervisor|not listening|dropped/i);
+});
+
+test("contact_supervisor reports a full supervisor inbox as not delivered, without calling it a timeout", async () => {
+	const bus = new InProcessBus({ maxInbox: 1 });
+	bus.register("supervisor");
+	const holderAbort = new AbortController();
+	const holder = bus.ask("other-child", "supervisor", "hold this slot", { signal: holderAbort.signal });
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
+
+	const r = await tool.execute("t6", { kind: "decision", message: "is it full?" }, undefined, undefined, CTX);
+	const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /not delivered|retry later|consolidate/i);
+	assert.doesNotMatch(text, /did not reply in time/i);
+	assert.equal(details(r).delivered, false);
+
+	holderAbort.abort();
+	await assert.rejects(() => holder, /abort/i);
+});
+
+test("contact_supervisor reports an unregistered supervisor as unavailable, not waiting", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
+	const pending = tool.execute("t7", { kind: "decision", message: "still there?" }, undefined, undefined, CTX);
+	bus.unregister("supervisor");
+
+	const r = await pending;
+	const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /no longer available|unavailable|not delivered/i);
+	assert.doesNotMatch(text, /did not reply in time/i);
+});
+
+test("contact_supervisor reports a disconnected broker as unavailable, not waiting", async () => {
+	const bus = new DisconnectedBus();
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
+
+	const r = await tool.execute("t7b", { kind: "decision", message: "still connected?" }, undefined, undefined, CTX);
+	const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /no longer available|unavailable|not delivered/i);
+	assert.doesNotMatch(text, /did not reply in time/i);
+});
+
+test("contact_supervisor preserves the timeout diagnostic", async () => {
+	const bus = new ShortTimeoutBus();
+	bus.register("supervisor");
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
+
+	const r = await tool.execute("t8", { kind: "decision", message: "will anyone answer?" }, undefined, undefined, CTX);
+	const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /did not reply in time/i);
+	assert.equal(details(r).delivered, false);
+});
+
+test("contact_supervisor hides arbitrary internal ask failures behind a generic result", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.onMessage(() => {
+		throw new Error("secret internal failure");
+	});
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
+
+	const r = await tool.execute("t9", { kind: "decision", message: "can this complete?" }, undefined, undefined, CTX);
+	const text = r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /could not be completed/i);
+	assert.doesNotMatch(text, /secret internal failure/i);
+	assert.doesNotMatch(text, /did not reply in time/i);
 });

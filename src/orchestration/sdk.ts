@@ -8,7 +8,7 @@
 import type { RunLimits } from "../core/capabilities.ts";
 import { emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
-import { mapWithConcurrency } from "./parallel.ts";
+import { mapWithConcurrency, Semaphore } from "./parallel.ts";
 import { aggregateResults } from "./reducers.ts";
 import { roleHint, type RosterMember } from "./roster.ts";
 import type { AgentResult } from "./types.ts";
@@ -194,11 +194,20 @@ export function legFailure(agent: string, error: unknown, aborted: boolean): Inf
 	};
 }
 
+/** A run-level cancellation that arrived while this leg was waiting for an SDK slot. */
+function abortedLeg(agent: string): AgentResult {
+	return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
+}
+
 export function makeSDK(deps: SDKDeps): StrategySDK {
 	// Run-scoped enforcement of the declared limits — applied here so NO strategy can
 	// exceed them, however it calls agent() (I2: safety from runtime limits, not isolation).
 	let childrenSpawned = 0;
 	let tokensSpent = 0;
+	// One gate per SDK/run. This covers direct Promise.all callers as well as sdk.parallel's
+	// batch gate; a strategy cannot bypass maxConcurrency by choosing a different topology.
+	const maxConcurrency = Math.max(1, Number.isFinite(deps.limits.maxConcurrency) ? Math.floor(deps.limits.maxConcurrency) : 1);
+	const agentSlots = new Semaphore(maxConcurrency);
 	// Run-unique UI keys: the base is the agent name, or `agent · HINT` when the member
 	// carries a role — so an ensemble of one agent under several roles shows as distinct
 	// nodes. A `#N` suffix guards the degenerate case of an identical base twice. This
@@ -223,51 +232,85 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					failureKind: "contract",
 				};
 			}
-			if (childrenSpawned >= deps.limits.maxChildren) {
-				throw new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`);
-			}
-			if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
-				throw new Error(`run exceeded token budget (${deps.limits.budgetTokens})`);
-			}
-			childrenSpawned += 1;
 			const key = uiKeyFor(spec);
-			const ac = new AbortController();
-			deps.onAgentStart?.(spec.agent, () => ac.abort(), key);
-			deps.onAgentStatus?.(spec.agent, "running", undefined, key);
-			const onProgress = deps.onAgentProgress;
-			// The try covers the ENGINE CALL AND NOTHING ELSE. Widened over the bookkeeping below it,
-			// a throw from the HOST's own status callback — which formats the member's OUTPUT, so it
-			// can fail on a completed leg while the empty synthesised failure sails through — would
-			// launder a finished, already-billed result into an `ok:false` carrying the UI's error
-			// message: the exact loss this containment exists to prevent, with a lie attached.
-			let result: AgentResult;
+			let started = false;
+			const run = async (): Promise<AgentResult> => {
+				// These checks intentionally happen AFTER waiting for a slot. A queued leg must see
+				// the current child/token totals, not the stale snapshot from when it was enqueued.
+				if (childrenSpawned >= deps.limits.maxChildren) {
+					throw new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`);
+				}
+				if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
+					throw new Error(`run exceeded token budget (${deps.limits.budgetTokens})`);
+				}
+				childrenSpawned += 1;
+				started = true;
+				const ac = new AbortController();
+				let onRootAbort: (() => void) | undefined;
+				if (deps.signal) {
+					onRootAbort = () => ac.abort();
+					if (deps.signal.aborted) ac.abort();
+					else deps.signal.addEventListener("abort", onRootAbort, { once: true });
+				}
+				try {
+					deps.onAgentStart?.(spec.agent, () => ac.abort(), key);
+					deps.onAgentStatus?.(spec.agent, "running", undefined, key);
+					// A slot grant is not an engine start. The root may abort while the granted
+					// callback is crossing this seam; do not call the engine after that abort.
+					if (deps.signal?.aborted) {
+						const failed = abortedLeg(spec.agent);
+						deps.onAgentStatus?.(spec.agent, "failed", failed, key);
+						return failed;
+					}
+					const onProgress = deps.onAgentProgress;
+					// The try covers the ENGINE CALL AND NOTHING ELSE. Widened over the bookkeeping below it,
+					// a throw from the HOST's own status callback — which formats the member's OUTPUT, so it
+					// can fail on a completed leg while the empty synthesised failure sails through — would
+					// launder a finished, already-billed result into an `ok:false` carrying the UI's error
+					// message: the exact loss this containment exists to prevent, with a lie attached.
+					let result: AgentResult;
+					try {
+						result = await deps.engine.run(
+							spec,
+							onProgress ? (p) => onProgress(spec.agent, p, key) : undefined,
+							ac.signal,
+							deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer, key) : undefined,
+						);
+					} catch (err) {
+						// PER-LEG failure — contained, never rethrown: one blown engine call must not discard
+						// the fan-out's completed (already billed) sibling results. The RUN-FATAL breaches
+						// above (maxChildren, token budget) are thrown BEFORE this try, so they still stop
+						// the run instead of degrading into a "failed member" the strategy fans out past.
+						const failed = legFailure(spec.agent, err, ac.signal.aborted || (deps.signal?.aborted ?? false));
+						deps.onAgentStatus?.(spec.agent, "failed", failed, key);
+						return failed;
+					}
+					tokensSpent += result.usage.input + result.usage.output;
+					deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result, key);
+					return result;
+				} finally {
+					if (onRootAbort) deps.signal?.removeEventListener("abort", onRootAbort);
+				}
+			};
 			try {
-				result = await deps.engine.run(
-					spec,
-					onProgress ? (p) => onProgress(spec.agent, p, key) : undefined,
-					ac.signal,
-					deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer, key) : undefined,
-				);
-			} catch (err) {
-				// PER-LEG failure — contained, never rethrown: one blown engine call must not discard
-				// the fan-out's completed (already billed) sibling results. The RUN-FATAL breaches
-				// above (maxChildren, token budget) are thrown BEFORE this try, so they still stop
-				// the run instead of degrading into a "failed member" the strategy fans out past.
-				const failed = legFailure(spec.agent, err, ac.signal.aborted || (deps.signal?.aborted ?? false));
-				deps.onAgentStatus?.(spec.agent, "failed", failed, key);
-				return failed;
+				return await agentSlots.with(run, deps.signal);
+			} catch (error) {
+				// A queued leg has no engine result to report. Settle it as an abort when the
+				// run signal removed its waiter; all other errors retain their terminal semantics.
+				if (!started && deps.signal?.aborted) return abortedLeg(spec.agent);
+				throw error;
 			}
-			tokensSpent += result.usage.input + result.usage.output;
-			deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result, key);
-			return result;
 		},
-		parallel: (thunks, opts) =>
+		parallel: (thunks, opts) => {
 			// `agent()` already contains ENGINE failures per leg, so a rejection reaching here is
 			// run-fatal by construction — a limit breach, a host callback that threw, or a thunk that
 			// threw on its own. All three are the run's bug, not a member's; let them stop the run.
 			// The generic `T` is why containment can't live in `mapWithConcurrency`: only the caller
-			// knows what a failed member of its own value type looks like.
-			mapWithConcurrency(thunks, opts?.concurrency ?? deps.limits.maxConcurrency, (thunk) => thunk()),
+			// knows what a failed member of its own value type looks like. Clamp arbitrary thunk
+			// batches too, so the public parallel surface has the same ceiling as agent().
+			const requested = opts?.concurrency ?? maxConcurrency;
+			return mapWithConcurrency(thunks, Math.min(requested, maxConcurrency), (thunk) => thunk());
+		},
 		reduce: { aggregate: aggregateResults, vote: voteReduce, judge: prepareJudge },
 		roster: deps.roster,
 		signal: deps.signal,

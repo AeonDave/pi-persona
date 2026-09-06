@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildSessionAnchor, formatDuration, peerSentLabel, sessionElapsedLabel } from "../../../src/core/time.ts";
+import { buildClockSnapshot, buildSessionAnchor, formatDuration, parseInstant, peerSentLabel, sessionElapsedLabel } from "../../../src/core/time.ts";
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -92,7 +92,8 @@ test("sessionElapsedLabel flips a bounded number of times a day — the prompt-c
 
 test("buildSessionAnchor emits the constant absolute start plus the coarse elapsed, on one line", () => {
 	const started = "2026-08-20T09:14:37.812Z";
-	const anchor = buildSessionAnchor({ timestamp: started }, Date.parse(started) + 3 * HOUR + 40 * MIN);
+	const now = Date.parse(started) + 3 * HOUR + 40 * MIN;
+	const anchor = buildSessionAnchor({ timestamp: started }, now);
 	assert.ok(anchor);
 	assert.ok(!anchor.includes("\n"), "the anchor is one line");
 	assert.match(anchor, /2026-08-20T09:14Z/, "the absolute start is what actually survives a restart");
@@ -132,7 +133,7 @@ test("buildSessionAnchor yields NO anchor when the header is missing or unparsea
 });
 
 // Parseable is not the same as believable, and this reading goes into the SYSTEM PROMPT as fact —
-// so the anchor needs the plausibility bound the peer header already had.
+// so the session-age half needs the plausibility bound the peer header already had.
 test("buildSessionAnchor yields NO anchor for a start that parses but cannot be true", () => {
 	const now = Date.parse("2026-08-20T12:00:00Z");
 	assert.equal(buildSessionAnchor({ timestamp: "1970-01-01T00:00:00Z" }, now), undefined, "an epoch-zero header would claim 20685 days of work as fact");
@@ -163,4 +164,32 @@ test("a timestamp with no timezone is refused rather than read as local time", (
 	assert.equal(peerSentLabel("2026-08-20 ", now), "sent at an unknown time (peer clock)", "and neither is a padded one");
 	assert.equal(buildSessionAnchor({ timestamp: "  2026-08-20" }, now), undefined);
 	assert.ok(buildSessionAnchor({ timestamp: "2026-08-20T11:00:00+02:00" }, now), "and the anchor accepts the same qualified forms");
+});
+
+test("parseInstant accepts only unambiguous ISO instants", () => {
+	assert.equal(parseInstant("2026-08-20T11:40:00Z"), Date.parse("2026-08-20T11:40:00Z"));
+	assert.equal(parseInstant("2026-08-20T13:40:00+02:00"), Date.parse("2026-08-20T13:40:00+02:00"));
+	assert.equal(parseInstant("2026-08-20"), Date.parse("2026-08-20"), "a bare date is UTC midnight by spec");
+	assert.ok(Number.isNaN(parseInstant("2026-08-20T11:40:00")), "a date-time without a timezone is ambiguous");
+	assert.ok(Number.isNaN(parseInstant(" 2026-08-20T11:40:00Z")), "whitespace is not silently normalized");
+});
+
+test("buildClockSnapshot renders a fresh UTC instant and deterministic local projection", () => {
+	const now = Date.parse("2026-08-20T12:00:37.812Z");
+	assert.equal(
+		buildClockSnapshot(now, { timeZone: "Europe/Rome", offsetMinutes: 120 }),
+		"Current clock: UTC 2026-08-20T12:00:37Z; local 2026-08-20T14:00:37+02:00 (Europe/Rome; UTC+02:00).",
+	);
+	assert.equal(
+		buildClockSnapshot(now, { timeZone: "America/Los_Angeles", offsetMinutes: -420 }),
+		"Current clock: UTC 2026-08-20T12:00:37Z; local 2026-08-20T05:00:37-07:00 (America/Los_Angeles; UTC-07:00).",
+	);
+	assert.equal(
+		buildClockSnapshot(now),
+		"Current clock: UTC 2026-08-20T12:00:37Z; local 2026-08-20T12:00:37+00:00 (UTC; UTC+00:00).",
+		"the pure helper has an explicit UTC default when no runtime local projection is supplied",
+	);
+	assert.equal(buildClockSnapshot(Number.NaN), undefined);
+	assert.equal(buildClockSnapshot(now, { offsetMinutes: 30.5 }), undefined, "a fractional offset cannot be rendered as a valid timezone");
+	assert.equal(buildClockSnapshot(8_640_000_000_000_000, { offsetMinutes: 1_440 }), undefined, "an offset that overflows the date range stays unavailable");
 });

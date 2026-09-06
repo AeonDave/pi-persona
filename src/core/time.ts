@@ -7,17 +7,16 @@
  * peer reply that took twenty minutes reads exactly like an instant one. This module renders the
  * durations that fix that. Pure (every clock is an argument), so none of it needs a real one.
  *
- * The rule, which is why the three renderings have three different granularities:
+ * The rule, which is why the tail and session-anchor renderings have different granularities:
  *
  *   - Text APPENDED to the conversation TAIL (a tool result, a delivered message) is written once
  *     and never re-sent as the provider's cached prefix, so precision there is free —
  *     {@link formatDuration} and {@link peerSentLabel} may say "2m 5s".
- *   - Text in the SYSTEM PROMPT is re-sent every turn and IS the cached prefix. A minute-granular
- *     value there rewrites that prefix every minute and throws away the provider's cache of
- *     everything before it, for a signal nobody needed at that resolution. So the session anchor
- *     reads on a deliberately coarse ladder ({@link sessionElapsedLabel}) that steps a couple of
- *     dozen times a DAY. The companion pi-persona-mind module makes the same trade for the same
- *     reason (its `ageLabel` collapses the whole sub-day range into one bucket).
+ *   - Text in the SYSTEM PROMPT is re-sent every turn and IS the cached prefix. The session anchor
+ *     therefore uses a deliberately coarse ladder ({@link sessionElapsedLabel}) that steps a couple
+ *     of dozen times a DAY. The fresh current clock is delivered separately in the per-run tail, so
+ *     it can carry seconds without invalidating the cached system prefix. The companion
+ *     pi-persona-mind module makes the same trade for its stable age reading.
  *
  * Both readings state an elapsed time as fact, so both refuse the inputs that would turn that
  * statement into a lie — see {@link parseInstant} and the plausibility bound each one applies.
@@ -64,7 +63,7 @@ const QUALIFIED_INSTANT = /^[+-]?\d{4,6}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}(?::\d{2}
  * string is not a slightly-wrong time, it is an unknown one, so it is refused here rather than
  * guessed at.
  */
-function parseInstant(value: unknown): number {
+export function parseInstant(value: unknown): number {
 	if (typeof value !== "string" || !QUALIFIED_INSTANT.test(value)) return Number.NaN;
 	return Date.parse(value);
 }
@@ -132,9 +131,44 @@ export interface SessionAnchorHeader {
 	timestamp?: unknown;
 }
 
+export interface ClockSnapshotLocal {
+	/** IANA/local display name. Omit to use the explicit UTC default. */
+	timeZone?: string;
+	/** Local UTC offset in minutes east of UTC. Omit to use the explicit UTC default. */
+	offsetMinutes?: number;
+}
+
+function pad2(value: number): string {
+	return String(value).padStart(2, "0");
+}
+
 /**
- * The one-line session time anchor for the tail of the system prompt, or undefined when there is
- * no believable start to report.
+ * Fresh per-run clock text. The epoch and optional local projection are injected so this helper is
+ * deterministic and stays independent of the host timezone. Callers that want the operator's
+ * local zone should resolve it at the runtime boundary and pass both fields.
+ */
+export function buildClockSnapshot(now: number, local?: ClockSnapshotLocal): string | undefined {
+	if (!Number.isFinite(now)) return undefined;
+	const date = new Date(now);
+	if (!Number.isFinite(date.getTime())) return undefined;
+	const utc = date.toISOString().replace(/\.\d{3}Z$/, "Z");
+	const offsetMinutes = local?.offsetMinutes ?? 0;
+	if (!Number.isInteger(offsetMinutes) || Math.abs(offsetMinutes) > 24 * 60) return undefined;
+	const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+	const absoluteOffset = Math.abs(offsetMinutes);
+	const offset = `${offsetSign}${pad2(Math.floor(absoluteOffset / 60))}:${pad2(absoluteOffset % 60)}`;
+	// Project through UTC getters after applying the selected offset.
+	const localDate = new Date(now + offsetMinutes * 60_000);
+	if (!Number.isFinite(localDate.getTime())) return undefined;
+	const zone = local?.timeZone ?? "UTC";
+	const localIso = `${localDate.getUTCFullYear()}-${pad2(localDate.getUTCMonth() + 1)}-${pad2(localDate.getUTCDate())}` +
+		`T${pad2(localDate.getUTCHours())}:${pad2(localDate.getUTCMinutes())}:${pad2(localDate.getUTCSeconds())}${offset}`;
+	return `Current clock: UTC ${utc}; local ${localIso} (${zone}; UTC${offset}).`;
+}
+
+/**
+ * The one-line session time anchor for the cached system prompt, or undefined when there is no
+ * believable start to report.
  *
  * WHY the system prompt: the prompt is re-composed and re-sent every turn rather than summarized,
  * so an anchor placed there cannot be compacted away — the same fact placed in the conversation
@@ -146,12 +180,11 @@ export interface SessionAnchorHeader {
  *
  * The absolute start is a constant for the life of the session, so it costs the prompt cache
  * nothing and it is the half that actually survives; the elapsed reading is bucketed
- * ({@link sessionElapsedLabel}) so it flips rarely.
+ * ({@link sessionElapsedLabel}) so it flips rarely. Use {@link buildClockSnapshot} for the fresh
+ * second-precision reading in a per-run tail.
  */
 export function buildSessionAnchor(header: SessionAnchorHeader | null | undefined, now: number): string | undefined {
 	const started = parseInstant(header?.timestamp);
-	// A fresh in-memory session has no header at all, and a corrupt one must not become a confident
-	// wrong start: no anchor is better than an anchor that lies about when the work began.
 	if (!Number.isFinite(started) || !Number.isFinite(now)) return undefined;
 	// Parseable is not believable. An epoch-zero or year-0001 header parses cleanly and would put
 	// "you have been on it 20685d 12h" into the system prompt as fact; a start in the future is the

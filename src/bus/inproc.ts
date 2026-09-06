@@ -26,6 +26,34 @@ export interface Envelope {
 	expectsReply: boolean;
 }
 
+/** Retention is a bounded escape hatch for drained messages, not a second inbox. */
+export const MAX_RETAINED_MESSAGES = 256;
+export const MAX_RETAINED_MESSAGE_CHARS = 256_000;
+export const MAX_INBOX_MESSAGES = 200;
+
+export interface InProcessBusOptions {
+	/** Override the unread-envelope bound for focused tests or a future host policy. */
+	maxInbox?: number;
+}
+
+export type AskSettlementReason = "replied" | "aborted" | "timeout" | "unregistered" | "inbox-full" | "delivery-error";
+
+export interface AskSettlement {
+	id: string;
+	from: string;
+	to: string;
+	reason: AskSettlementReason;
+}
+
+interface PendingAsk {
+	envelope: Envelope;
+	resolve: (reply: string) => void;
+	reject: (error: Error) => void;
+	timer: ReturnType<typeof setTimeout> | undefined;
+	signal: AbortSignal | undefined;
+	onAbort: () => void;
+}
+
 let seq = 0;
 function nextId(): string {
 	seq += 1;
@@ -34,8 +62,18 @@ function nextId(): string {
 
 export class InProcessBus {
 	private readonly inboxes = new Map<string, Envelope[]>();
-	private readonly pendingAsks = new Map<string, (reply: string) => void>();
+	private readonly retainedMessages = new Map<string, Envelope>();
+	private retainedMessageChars = 0;
+	private readonly pendingAsks = new Map<string, PendingAsk>();
 	private readonly observers = new Set<(env: Envelope) => void>();
+	private readonly askSettledListeners = new Set<(event: AskSettlement) => void>();
+	private readonly maxInbox: number;
+
+	constructor(opts: InProcessBusOptions = {}) {
+		this.maxInbox = opts.maxInbox !== undefined && Number.isFinite(opts.maxInbox)
+			? Math.max(1, Math.floor(opts.maxInbox))
+			: MAX_INBOX_MESSAGES;
+	}
 
 	/** Observe every delivered message (for event-wake follow-ups). Returns an unsubscribe. */
 	onMessage(listener: (env: Envelope) => void): () => void {
@@ -43,19 +81,74 @@ export class InProcessBus {
 		return () => this.observers.delete(listener);
 	}
 
+	/** Observe ask settlement so notification surfaces can discard stale cached prompts. */
+	onAskSettled(listener: (event: AskSettlement) => void): () => void {
+		this.askSettledListeners.add(listener);
+		return () => this.askSettledListeners.delete(listener);
+	}
+
 	/** Cap on unread messages per inbox — a chatty child must not grow supervisor
 	 *  memory without bound when nobody drains. */
-	private static readonly MAX_INBOX = 200;
-
-	private deliver(box: Envelope[], env: Envelope): void {
-		if (box.length >= InProcessBus.MAX_INBOX) {
-			// Evict the oldest ONE-WAY note first; a blocking ask is kept whenever possible
-			// (silently dropping it would strand its sender until the ask timeout).
+	private deliver(box: Envelope[], env: Envelope): boolean {
+		if (box.length >= this.maxInbox) {
+			// Evict the oldest ONE-WAY note first. If every unread envelope is a live ask,
+			// reject this delivery instead of silently stranding an existing sender.
 			const idx = box.findIndex((e) => !e.expectsReply);
-			box.splice(idx >= 0 ? idx : 0, 1);
+			if (idx < 0) return false;
+			box.splice(idx, 1);
 		}
 		box.push(env);
 		for (const fn of this.observers) fn(env);
+		return true;
+	}
+
+	private retireAskEnvelope(pending: PendingAsk): void {
+		pending.envelope.expectsReply = false;
+		const { id, to: recipient } = pending.envelope;
+		const box = this.inboxes.get(recipient);
+		if (box) {
+			const index = box.findIndex((env) => env.id === id);
+			if (index >= 0) box.splice(index, 1);
+		}
+		const retained = this.retainedMessages.get(id);
+		if (retained?.to === recipient) retained.expectsReply = false;
+	}
+
+	private settleAsk(id: string, reason: AskSettlementReason, reply?: string, failure?: Error): boolean {
+		const pending = this.pendingAsks.get(id);
+		if (!pending) return false;
+		this.pendingAsks.delete(id);
+		if (pending.timer !== undefined) clearTimeout(pending.timer);
+		pending.signal?.removeEventListener("abort", pending.onAbort);
+		this.retireAskEnvelope(pending);
+		if (reason === "replied") pending.resolve(reply ?? "");
+		else pending.reject(failure ?? new Error(reason === "inbox-full" ? "inbox full: ask was not delivered" : `ask ${reason}`));
+		const event: AskSettlement = { id, from: pending.envelope.from, to: pending.envelope.to, reason };
+		for (const listener of this.askSettledListeners) {
+			try {
+				listener(event);
+			} catch {
+				// Settlement observers are cleanup hooks; one faulty observer must not alter the ask result.
+			}
+		}
+		return true;
+	}
+
+	private retain(env: Envelope): void {
+		if (env.text.length > MAX_RETAINED_MESSAGE_CHARS || this.retainedMessages.has(env.id)) return;
+		this.retainedMessages.set(env.id, env);
+		this.retainedMessageChars += env.text.length;
+		while (this.retainedMessages.size > MAX_RETAINED_MESSAGES || this.retainedMessageChars > MAX_RETAINED_MESSAGE_CHARS) {
+			const oldest = this.retainedMessages.keys().next().value;
+			if (oldest === undefined) break;
+			const removed = this.retainedMessages.get(oldest);
+			this.retainedMessages.delete(oldest);
+			if (removed) this.retainedMessageChars -= removed.text.length;
+		}
+	}
+
+	private retainAll(messages: readonly Envelope[]): void {
+		for (const message of messages) this.retain(message);
 	}
 
 	register(name: string): void {
@@ -64,6 +157,14 @@ export class InProcessBus {
 
 	unregister(name: string): void {
 		this.inboxes.delete(name);
+		for (const [id, pending] of this.pendingAsks) {
+			if (pending.envelope.from === name || pending.envelope.to === name) this.settleAsk(id, "unregistered");
+		}
+		for (const [id, message] of this.retainedMessages) {
+			if (message.to !== name) continue;
+			this.retainedMessages.delete(id);
+			this.retainedMessageChars -= message.text.length;
+		}
 	}
 
 	participants(): string[] {
@@ -74,8 +175,7 @@ export class InProcessBus {
 	send(from: string, to: string, text: string, kind: MsgKind = "progress"): boolean {
 		const box = this.inboxes.get(to);
 		if (!box) return false;
-		this.deliver(box, { id: nextId(), from, to, kind, text, expectsReply: false });
-		return true;
+		return this.deliver(box, { id: nextId(), from, to, kind, text, expectsReply: false });
 	}
 
 	/** Blocking request: resolves with the reply to this message, or rejects on timeout. */
@@ -90,56 +190,50 @@ export class InProcessBus {
 		const id = nextId();
 		const timeoutMs = opts.timeoutMs ?? 600_000;
 		return new Promise<string>((resolve, reject) => {
-			let timer: ReturnType<typeof setTimeout>;
+			const envelope: Envelope = { id, from, to, kind: opts.kind ?? "decision", text, expectsReply: true };
 			const onAbort = (): void => {
-				finish();
-				reject(new Error("ask aborted"));
+				this.settleAsk(id, "aborted");
 			};
-			// Always drop the pending entry + timer + abort listener, so a cancelled/timed-out ask
-			// never leaks a 10-minute timer or a stale resolver into the bus.
-			const finish = (): void => {
-				clearTimeout(timer);
-				this.pendingAsks.delete(id);
-				opts.signal?.removeEventListener("abort", onAbort);
+			const pending: PendingAsk = {
+				envelope,
+				resolve,
+				reject,
+				timer: undefined,
+				signal: opts.signal,
+				onAbort,
 			};
-			timer = setTimeout(() => {
-				finish();
-				reject(new Error(`ask timeout after ${timeoutMs}ms`));
-			}, timeoutMs);
-			timer.unref?.();
-			if (opts.signal) {
-				if (opts.signal.aborted) {
-					finish();
-					reject(new Error("ask aborted"));
-					return;
-				}
-				opts.signal.addEventListener("abort", onAbort, { once: true });
+			this.pendingAsks.set(id, pending);
+			if (opts.signal?.aborted) {
+				this.settleAsk(id, "aborted");
+				return;
 			}
-			this.pendingAsks.set(id, (reply) => {
-				finish();
-				resolve(reply);
-			});
+			pending.timer = setTimeout(() => {
+				this.settleAsk(id, "timeout", undefined, new Error(`ask timeout after ${timeoutMs}ms`));
+			}, timeoutMs);
+			pending.timer.unref?.();
+			if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
 			// Deliver only once the resolver is registered: `deliver` notifies observers
 			// synchronously, and one that answers inline would otherwise hit `reply`'s
 			// unknown-id path and strand this ask until its timeout.
-			this.deliver(box, { id, from, to, kind: opts.kind ?? "decision", text, expectsReply: true });
+			try {
+				if (!this.deliver(box, envelope)) this.settleAsk(id, "inbox-full");
+			} catch (error) {
+				this.settleAsk(id, "delivery-error", undefined, error instanceof Error ? error : new Error(String(error)));
+			}
 		});
 	}
 
 	/** Answer a pending ask by its message id. Returns false (a harmless no-op) for an
 	 *  unknown/expired id — so the caller can tell the child actually got the answer. */
 	reply(askId: string, text: string): boolean {
-		const resolver = this.pendingAsks.get(askId);
-		if (!resolver) return false;
-		this.pendingAsks.delete(askId);
-		resolver(text);
-		return true;
+		return this.settleAsk(askId, "replied", text);
 	}
 
 	/** Drain and return a participant's inbox. */
 	take(name: string): Envelope[] {
 		const box = this.inboxes.get(name) ?? [];
 		this.inboxes.set(name, []);
+		this.retainAll(box);
 		return box;
 	}
 
@@ -151,7 +245,14 @@ export class InProcessBus {
 		const kept: Envelope[] = [];
 		for (const env of box) (pred(env) ? taken : kept).push(env);
 		this.inboxes.set(name, kept);
+		this.retainAll(taken);
 		return taken;
+	}
+
+	/** Retrieve a drained message by id while it remains inside the bounded retention window. */
+	retrieve(messageId: string, recipient?: string): Envelope | undefined {
+		const message = this.retainedMessages.get(messageId);
+		return message && (recipient === undefined || message.to === recipient) ? message : undefined;
 	}
 
 	/** Peek at a participant's inbox without draining it. */

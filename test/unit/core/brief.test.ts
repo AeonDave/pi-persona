@@ -163,7 +163,19 @@ test("caps the agent list and says how many more", () => {
 });
 
 
-const XOPTS = { canDelegate: true, canAskHuman: true };
+const ALL_EXOCOM_TOOLS = {
+	name: true,
+	list: true,
+	send: true,
+	claim: true,
+	ask: true,
+	answer: true,
+	decline: true,
+	wait: true,
+	release: true,
+	progress: true,
+} as const;
+const XOPTS = { canDelegate: true, canAskHuman: true, tools: ALL_EXOCOM_TOOLS };
 const PEERS = [{ name: "orion", persona: "dev" }];
 
 test("buildExocomBrief: no peers → no brief", () => {
@@ -225,7 +237,7 @@ test("buildExocomBrief: cross-workspace peers are explicit file-bearing Pi insta
 		sameWorkspace: false,
 	}], {
 		...XOPTS,
-		canClaim: false,
+		tools: { ...ALL_EXOCOM_TOOLS, claim: false },
 		joined: true,
 		scopeCode: "Q7zM",
 		homeWorkspaceLabel: "document-corpus",
@@ -235,9 +247,43 @@ test("buildExocomBrief: cross-workspace peers are explicit file-bearing Pi insta
 	assert.match(brief, /workspace document-corpus \[Ab0T\].*external/i);
 	assert.match(brief, /different files.*inspect.*own workspace/i);
 	assert.match(brief, /joined.*\[Q7zM\]/i);
-	assert.match(brief, /cannot use exocom_claim/i);
+	assert.match(brief, /claims belong to the joined workspace/i);
 	assert.doesNotMatch(brief, /claim repository-relative ownership first with exocom_claim/);
 	assert.doesNotMatch(brief, /live in this workspace right now/i);
+});
+
+test("buildExocomBrief: same-workspace claim denial is not described as external", () => {
+	const brief = buildExocomBrief(PEERS, {
+		...XOPTS,
+		joined: false,
+		tools: { ...ALL_EXOCOM_TOOLS, claim: false },
+	}) ?? "";
+
+	assert.match(brief, /repository claims are unavailable to this persona/i);
+	assert.doesNotMatch(brief, /External-workspace ledger/i);
+	assert.doesNotMatch(brief, /claim repository-relative ownership first with exocom_claim/i);
+});
+
+test("buildExocomBrief: unavailable Exocom actions are not taught in the capability brief", () => {
+	const brief = buildExocomBrief(PEERS, {
+		...XOPTS,
+		namedByModel: false,
+		canNameNow: true,
+		tools: {
+			...ALL_EXOCOM_TOOLS,
+			name: false,
+			list: false,
+			send: false,
+			claim: false,
+			ask: false,
+			wait: false,
+			release: false,
+			progress: false,
+		},
+	}) ?? "";
+
+	assert.doesNotMatch(brief, /exocom_(name|list|send|claim|ask|wait|release|progress)/);
+	assert.match(brief, /answer or decline/i, "a permitted closer remains actionable");
 });
 
 // The two hand-off lines have to PARTITION the work, or they route the same task twice: a peer is
@@ -326,7 +372,7 @@ test("buildExocomBrief: the bound is pinned verbatim, so it cannot drift into a 
 	for (const canDelegate of [true, false]) {
 		for (const canAskHuman of [true, false]) {
 			for (const peers of [PEERS, Array.from({ length: 20 }, (_, i) => ({ name: `p${i}`, persona: "dev" }))]) {
-				const brief = buildExocomBrief(peers, { canDelegate, canAskHuman }) ?? "";
+				const brief = buildExocomBrief(peers, { canDelegate, canAskHuman, tools: ALL_EXOCOM_TOOLS }) ?? "";
 				const bound = brief.split(/\r?\n/).find((l) => l.startsWith("Relevance bound:"));
 				assert.equal(bound, expectedBound(canDelegate, canAskHuman));
 			}
@@ -337,8 +383,8 @@ test("buildExocomBrief: the bound is pinned verbatim, so it cannot drift into a 
 // `canUseBus` keys off `intercom` alone, so a persona can hold the peer bus with `delegate` denied
 // (or allowing no installed agent). Urging a hand-off the gate will refuse is worse than silence.
 test("buildExocomBrief: the sub-agent hand-off appears only when this persona can actually delegate", () => {
-	const yes = buildExocomBrief(PEERS, { canDelegate: true, canAskHuman: true }) ?? "";
-	const no = buildExocomBrief(PEERS, { canDelegate: false, canAskHuman: true }) ?? "";
+	const yes = buildExocomBrief(PEERS, { canDelegate: true, canAskHuman: true, tools: ALL_EXOCOM_TOOLS }) ?? "";
+	const no = buildExocomBrief(PEERS, { canDelegate: false, canAskHuman: true, tools: ALL_EXOCOM_TOOLS }) ?? "";
 	assert.match(yes, /goes to a sub-agent, which reports back instead of conversing/);
 	assert.doesNotMatch(no, /goes to a sub-agent/, "a persona that cannot fan out is not told to");
 	assert.doesNotMatch(no, /measure X/);
@@ -348,8 +394,8 @@ test("buildExocomBrief: the sub-agent hand-off appears only when this persona ca
 // exocom runs headless too (`shouldRun` has no UI gate), and "ask your human" has no addressee in a
 // `pi -p` run — the missing dialog channel is the answer, not permission to keep messaging the peer.
 test("buildExocomBrief: escalation addresses a human only when the run can put a question to one", () => {
-	const ui = buildExocomBrief(PEERS, { canDelegate: true, canAskHuman: true }) ?? "";
-	const headless = buildExocomBrief(PEERS, { canDelegate: true, canAskHuman: false }) ?? "";
+	const ui = buildExocomBrief(PEERS, { canDelegate: true, canAskHuman: true, tools: ALL_EXOCOM_TOOLS }) ?? "";
+	const headless = buildExocomBrief(PEERS, { canDelegate: true, canAskHuman: false, tools: ALL_EXOCOM_TOOLS }) ?? "";
 	// BOTH branches must name an action performable on a turn driven purely by an inbound peer
 	// message, where "decide it yourself" has no object you own; only the escalation differs.
 	assert.match(ui, /answer once and close it, or send nothing/, "the stop action fits an inbound-driven turn");

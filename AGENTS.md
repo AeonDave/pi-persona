@@ -48,6 +48,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
   share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async
   fan-out can't open more concurrent sessions than a sync one.
+  Each strategy SDK also gates every `agent()` call through one semaphore, including direct
+  `Promise.all` calls; `parallel` overrides cannot raise its concurrency ceiling. Token budgets
+  gate admission using completed usage, so already-running legs can overshoot the threshold.
+  In-process cancellation and deadlines cover session construction; coaching exemptions apply
+  after it finishes. A cancelled factory's late session is disposed, but its ref-counted guard
+  stays held until the factory settles because Pi's loader itself cannot be forcibly cancelled.
 - **Cross-process broker** (`src/bus/broker/{paths,framing,messages,host,client}.ts`, on by default,
   spec B1-B7; `PI_PERSONA_BROKER=off` restores pre-broker spawn): session-scoped (POSIX socket /
   Windows named pipe under the session id), supervisor-hosted, lazily started on the FIRST actual
@@ -88,6 +94,10 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   the pending completion follow-up so they are never double-reported). In interactive sessions
   `delegate` is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to
   sync so the single turn carries the result).
+  Message ids and run ids are separate: `intercom message { messageId }` retrieves retained bus
+  text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
+  drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears
+  unread and buffered prompts; broker errors/cancellation remain correlated to the original request.
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
 - **Delegation nudges** (`core/nudge.ts`, on by default): a `tool_result` hook watches the supervisor's
@@ -112,7 +122,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
   (`AgentRunSpec.peers` — the `debate` strategy does). The child gets a `contact_peer` tool
   (`bus/peers.ts`): `list`/`send`, ONE-WAY only (blocking stays supervisor-only, so peers can
-  never deadlock), peer list scoped per engine instance (never the whole bus), send budget 20.
+  never deadlock), peer list scoped per engine instance (never the whole bus), send budget 20,
+  message body limit 8,000 characters (oversized sends do not consume the budget).
   Delivery: the in-process engine's bridge steers incoming bus messages into the child session,
   fenced with the sender attributed OUTSIDE the fence — the same bridge delivers the supervisor's
   `intercom send` (previously a dead letter). Gated by `EffectiveCapabilities.canUseBus` (OFF iff
@@ -164,6 +175,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   run (concurrency, steer, worktree, and contact_supervisor are not fully provable from unit tests).
 
 ## Project structure
+
+- Session clock and event wakes: `timer now` refreshes the run-start clock snapshot; timer alarms
+  require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs
+  (`output`) or jobs (`exit`), with both `monitor` and `bash` permissions. Pure lifecycle is in
+  `src/core/monitor.ts`, process/delivery adapters in `src/monitor/`; use the existing idle notifier
+  and process-tree cleanup. Session-scoped, no restoration on restart. See [`docs/MONITORS.md`](docs/MONITORS.md).
 
 - `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).

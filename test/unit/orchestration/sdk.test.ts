@@ -173,3 +173,182 @@ test("a token-budget breach still rejects the fan-out instead of degrading into 
 		/budget/,
 	);
 });
+
+test("an engine rejection releases its SDK slot for the next queued leg", async () => {
+	let runs = 0;
+	const sdk = makeSDK({
+		engine: {
+			run: async (spec) => {
+				runs++;
+				if (spec.agent === "first") throw new Error("first leg failed");
+				return ok(spec.agent);
+			},
+		},
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxConcurrency: 1 },
+	});
+
+	const first = sdk.agent({ agent: "first", task: "t" });
+	const second = sdk.agent({ agent: "second", task: "t" });
+	const [firstResult, secondResult] = await Promise.all([first, second]);
+	assert.equal(firstResult.ok, false);
+	assert.equal(secondResult.ok, true);
+	assert.equal(runs, 2, "a rejected leg must not strand the SDK slot");
+});
+
+test("the SDK caps parallel overrides and independently launched agents at maxConcurrency", async () => {
+	let inFlight = 0;
+	let maxInFlight = 0;
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			inFlight++;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			inFlight--;
+			return ok(spec.agent);
+		},
+	};
+	const sdk = makeSDK({
+		engine,
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 20, maxConcurrency: 2 },
+	});
+
+	let rawInFlight = 0;
+	let rawMaxInFlight = 0;
+	await sdk.parallel(
+		Array.from({ length: 6 }, () => async () => {
+			rawInFlight++;
+			rawMaxInFlight = Math.max(rawMaxInFlight, rawInFlight);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			rawInFlight--;
+		}),
+		{ concurrency: 6 },
+	);
+	assert.equal(rawMaxInFlight, 2, `parallel override should use the configured ceiling: ${rawMaxInFlight}`);
+
+	await sdk.parallel(
+		Array.from({ length: 6 }, (_, i) => () => sdk.agent({ agent: `parallel-${i}`, task: "t" })),
+		{ concurrency: 6 },
+	);
+	assert.equal(maxInFlight, 2, `parallel override should use the configured ceiling: ${maxInFlight}`);
+
+	maxInFlight = 0;
+	await Promise.all(Array.from({ length: 6 }, (_, i) => sdk.agent({ agent: `direct-${i}`, task: "t" })));
+	assert.equal(maxInFlight, 2, `direct Promise.all should use the configured ceiling: ${maxInFlight}`);
+});
+
+test("a queued agent rechecks the token budget after it acquires a slot", async () => {
+	let releaseFirst = (): void => {};
+	let markFirstStarted = (): void => {};
+	const firstStarted = new Promise<void>((resolve) => {
+		markFirstStarted = resolve;
+	});
+	let runs = 0;
+	const sdk = makeSDK({
+		engine: {
+			run: async (spec) => {
+				runs++;
+				if (spec.agent === "first") {
+					markFirstStarted();
+					await new Promise<void>((resolve) => {
+						releaseFirst = resolve;
+					});
+				}
+				return { agent: spec.agent, output: "o", usage: { ...usage(), input: 100 }, ok: true };
+			},
+		},
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 4, maxConcurrency: 1, budgetTokens: 100 },
+	});
+
+	const first = sdk.agent({ agent: "first", task: "t" });
+	await firstStarted;
+	const second = sdk.agent({ agent: "second", task: "t" });
+	releaseFirst();
+	await first;
+	await assert.rejects(second, /budget/);
+	assert.equal(runs, 1, "the queued leg must not start after the first leg exhausts the budget");
+});
+
+test("a root abort cancels queued work and reaches the active engine leg", { timeout: 1000 }, async () => {
+	const root = new AbortController();
+	let markFirstStarted = (): void => {};
+	const firstStarted = new Promise<void>((resolve) => {
+		markFirstStarted = resolve;
+	});
+	let runs = 0;
+	let activeSawAbort = false;
+	const sdk = makeSDK({
+		engine: {
+			run: async (spec, _progress, signal) => {
+				runs++;
+				if (spec.agent === "first") {
+					markFirstStarted();
+					await new Promise<void>((resolve) => {
+						if (!signal) throw new Error("engine did not receive a per-leg signal");
+						if (signal.aborted) {
+							resolve();
+							return;
+						}
+						signal.addEventListener("abort", () => resolve(), { once: true });
+					});
+					activeSawAbort = signal?.aborted === true;
+					return { agent: spec.agent, output: "", usage: usage(), ok: false, error: "aborted", failureKind: "abort" };
+				}
+				return ok(spec.agent);
+			},
+		},
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 4, maxConcurrency: 1 },
+		signal: root.signal,
+	});
+
+	const first = sdk.agent({ agent: "first", task: "t" });
+	await firstStarted;
+	const queued = sdk.agent({ agent: "queued", task: "t" });
+	root.abort();
+	const [firstResult, queuedResult] = await Promise.all([first, queued]);
+
+	assert.equal(activeSawAbort, true, "the root signal must abort the active engine leg");
+	assert.equal(firstResult.failureKind, "abort");
+	assert.equal(queuedResult.failureKind, "abort");
+	assert.equal(runs, 1, "the queued leg must never reach the engine");
+});
+
+test("a root abort between a slot grant and the engine seam still prevents the queued leg", async () => {
+	const root = new AbortController();
+	let markFirstStarted = (): void => {};
+	let releaseFirst = (): void => {};
+	const firstStarted = new Promise<void>((resolve) => {
+		markFirstStarted = resolve;
+	});
+	const sdk = makeSDK({
+		engine: {
+			run: async (spec) => {
+				if (spec.agent === "first") {
+					markFirstStarted();
+					await new Promise<void>((resolve) => {
+						releaseFirst = resolve;
+					});
+				}
+				return ok(spec.agent);
+			},
+		},
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 4, maxConcurrency: 1 },
+		signal: root.signal,
+	});
+
+	const first = sdk.agent({ agent: "first", task: "t" });
+	await firstStarted;
+	const queued = sdk.agent({ agent: "queued", task: "t" });
+	releaseFirst();
+	// The first leg's completion releases the slot, then this queued microtask aborts before
+	// Semaphore.with can resume the granted waiter and cross the SDK's engine seam.
+	queueMicrotask(() => root.abort());
+	const [firstResult, queuedResult] = await Promise.all([first, queued]);
+
+	assert.equal(firstResult.ok, true);
+	assert.equal(queuedResult.failureKind, "abort");
+});

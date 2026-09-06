@@ -31,6 +31,17 @@ const ContactParams = Type.Object({
 
 type ContactDetails = { kind: MsgKind; delivered: boolean };
 
+type AskFailure = "aborted" | "timeout" | "inbox-full" | "unavailable" | "generic";
+
+function classifyAskFailure(error: unknown, signal: AbortSignal | undefined): AskFailure {
+	if (signal?.aborted) return "aborted";
+	const message = error instanceof Error ? error.message : "";
+	if (/^ask timeout(?:\s|$)/i.test(message)) return "timeout";
+	if (/^inbox full(?:\s|:|$)/i.test(message)) return "inbox-full";
+	if (/^ask unregistered(?:\s|$)/i.test(message) || /^broker (?:connection|client) closed(?:\s|$)/i.test(message)) return "unavailable";
+	return "generic";
+}
+
 function result(t: string, details: ContactDetails): { content: [{ type: "text"; text: string }]; details: ContactDetails } {
 	return { content: [{ type: "text", text: t }], details };
 }
@@ -95,10 +106,21 @@ export function makeContactSupervisorTool(
 			try {
 				const reply = await answer;
 				return result(`Supervisor: ${reply}`, { kind, delivered: true });
-			} catch {
-				const msg = signal?.aborted
-					? "(the request was cancelled before the supervisor replied)"
-					: "(the supervisor did not reply in time — proceed using your best judgement)";
+			} catch (error) {
+				const msg = (() => {
+					switch (classifyAskFailure(error, signal)) {
+						case "aborted":
+							return "(the request was cancelled before the supervisor replied)";
+						case "timeout":
+							return "(the supervisor did not reply in time — proceed using your best judgement)";
+						case "inbox-full":
+							return "(the supervisor inbox is full — this request was not delivered; retry later or consolidate the question)";
+						case "unavailable":
+							return "(the supervisor is no longer available — this request was not delivered; proceed using your best judgement)";
+						default:
+							return "(the supervisor request could not be completed — proceed using your best judgement)";
+					}
+				})();
 				return result(msg, { kind, delivered: false });
 			}
 		},

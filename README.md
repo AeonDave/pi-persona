@@ -106,6 +106,11 @@ An active persona can also borrow another installed persona's declared council f
 ## Bundled personas, agents & teams
 
 Installed by `/persona seed` (see the [opt-in note](#pi-persona) above). Switch persona with `f8`.
+For a practical guide to choosing a persona, following background work, and coordinating peers,
+see [Working comfortably with Pi Persona](docs/EXPERIENCE.md).
+
+Timers provide fixed-time reminders; [monitors](docs/MONITORS.md) bring job completion and
+program-produced file, log, or system events back to the supervisor automatically while Pi stays open.
 These are examples, not runtime identities: no code branch checks for `elite`, `dev`, or any other
 persona name. A user/project persona can declare the same delegation policy, council, strategy, team,
 flow, contracts, tools, and coaching behavior in its own frontmatter.
@@ -166,7 +171,7 @@ same: new *files* on this API, no new core.
 | `reduce.vote(candidates, opts)` | tally the candidates' **own** votes → `winner / tie / no_consensus / invalid_outputs`, dissent preserved |
 | `reduce.judge(candidates, order?)` | anonymise + label N candidates for an **impartial judge**: run `agent(judge, {task: ballot})`, then map the verdict back with `pick(label)` |
 | `roster.team(name)` | the agents of a named team |
-| `signal` · `limits` · `log` | cooperative abort · the hard ceilings (children/concurrency/budget/timeout) · progress |
+| `signal` · `limits` · `log` | cooperative abort · admission/runtime limits (children/concurrency/completed token usage/timeout) · progress |
 | *series & loops* | plain `await` / `for` — strategies are TS, so they sequence and iterate natively (that is all `pipeline` and `critic-loop` are) |
 
 **Supervisor surface** — what a persona / the LLM drives:
@@ -175,8 +180,9 @@ same: new *files* on this API, no new core.
 |---|---|
 | `delegate` tool | spawn sub-agent(s): single or parallel — background by default in interactive sessions (run ids now, results return as follow-ups; `sync: true` blocks the turn; headless defaults to sync) |
 | `council` tool | convene a biased roster → vote → ruling + tally + recorded dissent (the tool form of the vote strategy) |
-| `intercom` tool | interact with running sub-agents: `peek` (watch) · `result` (retrieve one settled payload in full) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (hard-abort) work for **any** persona; `list`/`inbox`/`reply`/`send` are the coaching message bus |
-| `timer` tool | arm a wall-clock **alarm** that wakes the session when it fires — the token-cheap way to wait for a fixed moment (a release, a rate-limit reset, a scheduled re-check) instead of a poll loop: `arm { message, delaySeconds \| atIso }` · `cancel { id }` · `list`. The fire is delivered through the same idle-gated path as async completions (a fresh turn), so the supervisor resumes on its own. In-memory per session (cleared on reload) |
+| `intercom` tool | interact with running sub-agents: `peek` (watch) · `result` (retrieve one settled payload in full) · `wait` (join async runs) · `steer` (soft redirect) · `stop` (abort); `list`/`inbox`/`message`/`reply`/`send` operate on the coaching message bus |
+| `timer` tool | read the fresh UTC/local clock with `now`, or schedule a fixed-time wake: `arm { message, delaySeconds \| atIso }` · `cancel { id }` · `list`. Absolute date-times require a timezone. Up to 32 one-shot alarms, delivered when the supervisor is idle; keep Pi open. In-memory per session (cleared on reload) |
+| `monitor` tool | run a background job (`mode: exit`) or event-producing program (`mode: output`) and wake the supervisor automatically: `arm` · `list` · `cancel`. Requires active `monitor` and `bash` permissions; bounded events, deadlines and owned-process cleanup. See [time and event wakes](docs/MONITORS.md) |
 | `flow` tool · `/flow` | run a DAG of strategies (`*.flow.json`), journaled so an interrupted flow resumes; a phase `gate: true` is a checkpoint (approve before its dependents run) |
 | `models` tool | list / search the authenticated model ids (`provider/id`) to pick an exact `model` for a `delegate` task — ★ marks the session provider |
 | persona `mode:` | `solo` (opportunistic) · `parallel` · `pipeline` · `strategy:<name>` · `flow:<name>` (mandatory — the engine runs the shape) |
@@ -215,8 +221,14 @@ children it spawned, in two layers, deliberately separate:
 
 - **Observe / join / steer / stop — any persona, no coaching needed.** `intercom { action: "peek" }`
   watches your async sub-agents; `wait` **joins** them (blocks until they settle, returns results);
-  `steer` injects a soft course-correction; `stop` **hard-aborts** one (a steer is only a request the
-  child may ignore). The `f9` overlay does the same by hand (`s` steer, `x` stop).
+  `steer` injects a soft course-correction; `stop` requests engine cancellation. Check the terminal
+  result after either action; cancelling a worker does not undo its existing changes.
+  The `f9` overlay does the same by hand (`s` steer, `x` stop).
+- **Retrieve the right payload.** `intercom { action: "result", to: "run-1" }` retrieves a
+  retained run result. `intercom { action: "message", messageId: "m1" }` retrieves a bus message
+  by the id shown in its inbox preview, including after automatic or explicit inbox draining.
+  Message history is session-local and bounded to 256 messages / 256,000 body characters; an
+  evicted or unknown id returns an explicit error. Neither retrieval starts a new worker.
 - **Message bus — needs `coaching: on`** (every delegating supervisor has it). Children get a
   `contact_supervisor` tool to *reach you*: `progress` surfaces in the result / `intercom inbox`, and
   a blocking `decision` wakes you with a follow-up you answer via `intercom reply`. Idle supervision
@@ -339,7 +351,7 @@ independent of Exocom identity.
 | | Intercom | Exocom |
 |---|---|---|
 | Shape | Hierarchical: supervisor → its spawned sub-agents | Flat: independent Pi ↔ Pi peers |
-| Control | `peek`, `result`, `wait`, `steer`, `stop`; optional coaching messages | Presence/postcards (`list`, `send`, `name`) plus the work ledger (`claim`, `ask`, `answer`/`decline`, non-blocking `wait`, `progress`, `release`) |
+| Control | `peek`, `result`, `wait`, `steer`, `stop`; coaching `inbox`/`message`/`reply`/`send` | Presence/postcards (`list`, `send`, `name`) plus the work ledger (`claim`, `ask`, `answer`/`decline`, non-blocking `wait`, `progress`, `release`) |
 | Lifecycle | Created by `delegate` / `council`, owned by the supervisor | Opt-in with `--exocom` / `PI_PERSONA_EXOCOM=1`; `--exocom=Ab0T` joins that workspace scope from another cwd |
 | Authority | Supervisor owns and can abort its children | No peer owns another; the initiator coordinates de facto but has no special authority |
 

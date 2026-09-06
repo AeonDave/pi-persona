@@ -23,16 +23,23 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 | `sdk.reduce.vote(candidates, opts)` | Tally the candidates' OWN votes → a `ReducerResult` (`voting.ts`). |
 | `sdk.reduce.judge(candidates, order?)` | Anonymise + reorder N candidates into a ballot for an impartial judge; `pick(label)` maps the verdict back. |
 | `sdk.roster.team(name)` | The members of a named team (bare names or inline `{ agent, role, model, skills }` specs). |
-| `sdk.signal` · `sdk.limits` · `sdk.log` | Cooperative abort · the hard ceilings · a progress line. |
+| `sdk.signal` · `sdk.limits` · `sdk.log` | Cooperative abort · admission/runtime limits · a progress line. |
 | series & loops | Plain `await` / `for` — a strategy is TypeScript, so `pipeline` and `critic-loop` are just native control flow. |
 
 Run limits (`RUN_LIMITS`) are enforced inside `makeSDK` regardless of how a strategy calls `agent()`:
 `maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window), `maxDepth`. On top of the
 idle window, every agent can also carry an **opt-in hard wall-clock cap** (`PI_PERSONA_AGENT_MAX_MS`,
 OFF by default = unlimited) — a lifetime ceiling that, when armed, settles a busy-but-non-converging
-worker the idle window never catches; left off, a healthy child runs to completion and the idle window
-+ token budget bound a wedged item. Safety comes from these runtime limits, not from
+worker the idle window never catches. Without that cap, an actively streaming child may continue
+indefinitely; the idle watchdog catches silence. Safety comes from these runtime limits, not from
 sandboxing the strategy (see the I2 invariant in [ARCHITECTURE.md](ARCHITECTURE.md)).
+
+Every `agent()` call in one SDK instance shares a concurrency semaphore, including direct
+`Promise.all` calls and overlapping `parallel()` batches. A requested batch concurrency may lower
+the ceiling, never raise it. Cancellation removes queued legs before they reach an engine.
+`budgetTokens` is an admission guard based on completed legs' input/output usage: queued work
+rechecks it when a slot opens, but already-running legs may exceed it. It is not a hard streaming
+token or billing cap.
 
 ## Roster-role ensembles
 

@@ -1,8 +1,8 @@
 /**
  * `TimerScheduler` — the pure kernel behind the supervisor-armable `timer` tool.
  *
- * Problem it solves: a supervisor that must WAIT for a fixed wall-clock moment (an HTB machine
- * release, a rate-limit window, a scheduled re-check) has no cheap way to "sleep and resume". The
+ * Problem it solves: a supervisor that must WAIT for a fixed wall-clock moment (a scheduled event,
+ * a service window, a scheduled re-check) has no cheap way to "sleep and resume". The
  * MCP/transport layer caps a blocking tool call at ~20-60s, so a 50-minute wait degenerates into
  * dozens of token-burning polls. The fix is an ALARM, not a sleep: arm a timer that, when it
  * expires, WAKES the session by injecting a follow-up (the extension routes the fire through the
@@ -22,12 +22,14 @@ export interface TimerEntry {
 	fireAtEpochMs: number;
 	/** When the timer was armed (epoch ms) — for the "armed Xs ago" view. */
 	armedAtEpochMs: number;
+	/** Receiver wall-clock observed when this fired. Present on the wake copy, absent while armed. */
+	observedAtEpochMs?: number;
 	/** The follow-up text delivered to the session on fire. */
 	message: string;
 }
 
 export interface TimerArmRequest {
-	/** Human label for the alarm (e.g. "Paperwork release"). Optional; defaults to the id. */
+	/** Human label for the alarm (e.g. "status review"). Optional; defaults to the id. */
 	label?: string;
 	/** The follow-up injected into the session when the timer fires. Required, non-empty. */
 	message: string;
@@ -50,6 +52,8 @@ export interface TimerArmResult {
 	ok: boolean;
 	error?: string;
 	entry?: TimerEntry;
+	/** Delay measured by the scheduler's injected clock at arm time. */
+	remainingMs?: number;
 }
 
 export interface TimerSchedulerDeps {
@@ -118,6 +122,7 @@ export class TimerScheduler {
 		}
 
 		const now = this.deps.now();
+		if (!Number.isFinite(now)) return { ok: false, error: "timer clock is not a finite number." };
 		const fireAt = hasDelay ? now + (req.delayMs as number) : (req.atEpochMs as number);
 		if (!Number.isFinite(fireAt)) return { ok: false, error: "timer fire time is not a finite number." };
 
@@ -139,7 +144,7 @@ export class TimerScheduler {
 		};
 		const handle = this.deps.setTimer(() => this.fire(id), delay);
 		this.timers.set(id, { entry, handle });
-		return { ok: true, entry };
+		return { ok: true, entry, remainingMs: delay };
 	}
 
 	/** Cancel an armed alarm by id. Returns false if unknown (already fired or never existed). */
@@ -176,11 +181,17 @@ export class TimerScheduler {
 		return this.timers.size;
 	}
 
+	/** Current wall-clock reading from the scheduler's injected clock. */
+	now(): number {
+		return this.deps.now();
+	}
+
 	private fire(id: string): void {
 		const scheduled = this.timers.get(id);
 		if (!scheduled) return; // cancelled between expiry and callback — nothing to do
 		this.timers.delete(id);
-		this.deps.onFire(scheduled.entry);
+		const observedAtEpochMs = this.deps.now();
+		this.deps.onFire(Number.isFinite(observedAtEpochMs) ? { ...scheduled.entry, observedAtEpochMs } : scheduled.entry);
 	}
 }
 
@@ -188,7 +199,13 @@ export class TimerScheduler {
 export function renderTimerFire(entries: TimerEntry[]): string {
 	if (entries.length === 0) return "";
 	const head = `[pi-persona] ⏰ ${entries.length} timer${entries.length === 1 ? "" : "s"} fired — resuming:`;
-	const blocks = entries.map((e) => `• ${e.label} (${e.id}): ${e.message}`);
+	const blocks = entries.map((e) => {
+		const due = new Date(e.fireAtEpochMs).toISOString();
+		const observed = Number.isFinite(e.observedAtEpochMs)
+			? `; observed ${new Date(e.observedAtEpochMs as number).toISOString()}`
+			: "";
+		return `• ${e.label} (${e.id}) — due ${due}${observed}: ${e.message}`;
+	});
 	return [head, ...blocks].join("\n");
 }
 

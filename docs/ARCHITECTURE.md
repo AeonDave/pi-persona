@@ -67,7 +67,9 @@ These are the guardrails a contributor must not violate. They are enforced in co
 - **I2 — Strategies are trusted project code, NOT a security sandbox.** Gated by Pi project-trust; the
   SDK is a constrained API *by convention*. Safety comes from **runtime limits, not isolation**:
   `RUN_LIMITS` (`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` idle window, `maxDepth`)
-  are enforced by the SDK on every `agent()` call and by the engine per child; depth is structural —
+  are enforced by the SDK on every `agent()` call and by the engine per child. Concurrency is shared
+  across all calls in one SDK instance; token admission uses completed usage and is rechecked after
+  queueing, so active legs can overshoot it. Depth is structural —
   children run with `PI_PERSONA_DISABLE=1` so they cannot spawn at all (the **fork-bomb guard**,
   ref-counted in `inproc.ts`), and with `PI_PERSONA_LEG=1` — a **dedicated** worker-leg marker,
   distinct from the user-settable `PI_PERSONA_DISABLE` kill switch, that a companion extension (e.g.
@@ -203,13 +205,23 @@ events for that long ⇒ abort; the inproc idle watchdog is disabled for coachin
 legitimately block on a supervisor reply), `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock
 cap** — a lifetime ceiling armed once and never reset that, when set, settles a busy-but-non-converging
 child (a loop that keeps emitting) the idle window never catches (OFF by default, 0 = unlimited, so a
-healthy, progressing child is never killed mid-work; the idle window + token budget remain the always-on
-backstops) — and `PI_PERSONA_AGENT_STARTUP_MS` as a **startup deadline** (default 300000, `0` disables):
+healthy, progressing child has no hard lifetime ceiling; the token budget gates later admissions from
+completed usage, rather than stopping an active stream) — and `PI_PERSONA_AGENT_STARTUP_MS` as a
+**startup deadline** (default 300000, `0` disables):
 a child that makes ZERO progress — no completed turn, no tokens, no streamed output — within the window
 is killed as a stalled start. It fast-fails the "never started" case the generous idle window is too
 slow for — notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; the
 first real progress cancels it, so a slow-but-streaming turn is never touched. All three classify as
 `failureKind: "timeout"` (never a provider reroute).
+
+In-process deadlines and caller cancellation are armed **before session construction**. Startup is
+one window from construction to the first real progress, and the hard cap covers the same lifetime
+without resetting. Coaching's idle/startup exemption applies only after construction, when a child
+can actually wait on a supervisor reply. Cancellation settles the run and releases its bus handle;
+a session returned late is disposed and a late factory rejection is consumed. Pi's resource loader
+does not expose forcible cancellation: the recursive-extension guard remains held until that factory
+settles. If the loader never returns, restart Pi and use `PI_PERSONA_ENGINE=child` for process-level
+termination. Run settlement does not promise that arbitrary in-process code has physically stopped.
 
 - **InProcessEngine** (default) — a `createAgentSession` per sub-agent: cheaper, shares the host's
   auth/model registry, and **steerable** (inject a live user message into a running sub-agent).
@@ -371,9 +383,15 @@ events and cannot route, reply, steer, or otherwise control agents.
 - **In-process bus** (`bus/inproc.ts`) — a handle-based mailbox: `send` (one-way), `ask` (blocks for a
   reply), `reply`, `onMessage`. `contact_supervisor` (child→supervisor, gated by a persona's
   `coaching: on`) and `contact_peer` (sibling→sibling) are the child-side tools bound onto it.
+  Each unread inbox holds at most 200 messages. Overflow evicts an old one-way note first; an inbox
+  full of live asks rejects new delivery rather than stranding an existing sender. Ask settlement
+  (reply, timeout, abort, departure or failed delivery) releases its timer/listener and unread entry.
+  `onAskSettled` retires buffered notifications and sender attribution. A previously retained question
+  remains readable with `expectsReply: false`, so old questions never advertise an active reply id.
 - **Sibling peer comm** — a strategy opts a run in via `AgentRunSpec.peers` (gated by `canUseBus`).
   The child gets `contact_peer` (`list`/`send`, ONE-WAY so peers can never deadlock; per-engine-instance
-  scoping; a send budget). The engine's **delivery bridge** steers incoming bus messages into the child
+  scoping; a 20-send budget and an 8,000-character body limit, enforced before consuming a send).
+  The engine's **delivery bridge** steers incoming bus messages into the child
   session, fenced with the sender attributed OUTSIDE the fence (`attributeInbound`, shared by both
   engines so the anti-spoofing format can't drift) — the same bridge delivers the supervisor's
   `intercom send`. `debate`/`pair` always use peers; `map`/`synthesize` opt in via `params.peers`;
@@ -386,6 +404,9 @@ events and cannot route, reply, steer, or otherwise control agents.
   `InProcessBus`**: a connected child is indistinguishable from an in-process one, so the supervisor
   side (intercom, idle notifier, f9, peek) is unchanged BY CONSTRUCTION. Off ⇒ the host never starts
   and the child spawns byte-identical to pre-broker pi-persona.
+  Ask failures echo the originating `msgId` so the client rejects the right request immediately.
+  A client cancellation propagates to the corresponding host ask; cancellation lookup is scoped
+  to the originating connection. It cannot cancel another connection's question.
 
 ### Presentation is a projection, not another comm plane
 
@@ -395,6 +416,11 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - async completions are coalesced and bounded fairly across legs; `intercom { action: "result", to:
   "<run-id>" }` retrieves one retained result in full and consumes a still-pending duplicate
   notification;
+- drained bus messages have a separate session-local retention window: at most 256 messages and
+  256,000 body characters across the bus, FIFO eviction. `intercom { action: "message", messageId:
+  "<message-id>" }` retrieves a retained message addressed to the supervisor; it never interprets a
+  message id as a run id. Explicit and automatic inbox drains both retain bodies. Oversized or
+  evicted messages return an unavailable diagnostic; retention is not durable evidence storage;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
   Pi's configured expand-key hint. Each surfaces failure at the top of its own card in the shape it
   has: the delegate card **sorts** failed legs ahead of successful ones (`extension.ts`), a failed
@@ -678,6 +704,12 @@ must pass. The broker's transport is the only OS-specific code, confined to `bus
   socket; teardown is idempotent.
 
 ## Reference: the core seams
+
+Session event monitors follow the [time and event wake contract](MONITORS.md). A pure bounded
+`MonitorManager` owns command-watch lifetimes; one process adapter reuses `killProcessTree`,
+and a bounded session queue delivers fenced events through the existing idle follow-up path.
+They are supervisor-owned resources, cancelled on shutdown or execution-permission revocation.
+They do not replace engine events, the semantic bus, or Exocom, and are not an OS authorization layer.
 
 The stable contracts other layers build on:
 
