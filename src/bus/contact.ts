@@ -24,7 +24,7 @@ import type { InProcessBus, MsgKind } from "./inproc.ts";
 const ContactParams = Type.Object({
 	kind: Type.Union([Type.Literal("progress"), Type.Literal("decision"), Type.Literal("interview")], {
 		description:
-			"progress = one-way status update (don't wait); decision = ask the supervisor to choose and WAIT for the answer; interview = ask a clarifying question and WAIT.",
+			"progress = one-way status update (don't wait); decision = ask the supervisor to choose; interview = ask a clarifying question. For decision/interview, async runs wait for a reply; synchronous runs post one-way and continue.",
 	}),
 	message: Type.String({ description: "What to tell or ask the supervisor — specific and self-contained." }),
 });
@@ -66,10 +66,13 @@ export function makeContactSupervisorTool(
 		description: [
 			"Reach the supervisor that delegated this task WHILE you work.",
 			"Use `progress` to report a milestone (one-way, don't wait).",
-			"Use `decision` when you hit a choice only the supervisor should make, or `interview` to ask a",
-			"clarifying question — both WAIT for the supervisor's reply before you continue.",
+			"Use `decision` when you hit a choice only the supervisor should make, or `interview` to ask a clarifying question.",
+			allowBlocking
+				? "This async run waits for the supervisor's reply before continuing."
+				: "This synchronous run cannot block: decision/interview are posted one-way and return immediately; proceed using your best judgement.",
+			`Messages longer than ${MAX_CONTACT_MESSAGE_CHARS} characters are shortened before delivery; use smaller messages to preserve full detail.`,
 		].join(" "),
-		promptSnippet: "contact_supervisor — report progress or ask the supervisor a blocking question",
+		promptSnippet: "contact_supervisor — report progress or ask the supervisor a question",
 		parameters: ContactParams,
 		async execute(_toolCallId, params: Static<typeof ContactParams>, signal, _onUpdate, _ctx) {
 			const kind = params.kind as MsgKind;

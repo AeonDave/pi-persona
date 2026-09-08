@@ -130,11 +130,20 @@ Follow the [installation instructions](../README.md#install), then start a codin
 pi --persona dev
 ```
 
-Delegate a bounded task and inspect it while it runs. This minimal call is an API illustration;
-personas with `requireBrief: true` require the complete six-field brief described in the recipe below:
+Delegate a bounded task with the complete brief that Dev requires:
 
 ```js
-delegate({ agent: "operator", name: "Login-Trace", task: "Inspect the failing login flow; report root cause and a minimal fix." })
+delegate({
+  agent: "scout", name: "Login-Trace", task: "Inspect the login flow and report the root cause.",
+  brief: {
+    objective: "Explain the login failure with code evidence",
+    scopeRoe: "Read this repository only; do not contact external systems",
+    position: "Start from the current checkout and its existing tests",
+    constraints: ["Do not modify files"],
+    requiredArtifacts: ["File and line references, with a suggested minimal fix"],
+    stopConditions: ["Stop after finding the cause or report the missing evidence"]
+  }
+})
 intercom({ action: "peek" })
 ```
 
@@ -221,6 +230,12 @@ Delegate bounded work, then accept completion only after fresh evidence.
 The six required `brief` fields are `objective`, `scopeRoe`, `position`, `constraints`,
 `requiredArtifacts`, and `stopConditions`. `verificationAgents` names ordinary installed agents;
 there is no built-in verifier identity.
+
+When `requireBrief` is enabled, it also applies to read-only scouts. Single-worker calls put the
+brief alongside `agent` and `task`; parallel calls put a complete brief inside **each** `tasks[]`
+entry. A top-level brief is not inherited by the batch, and prose in `task` does not replace these
+fields. A missing-brief error means the batch was rejected before any worker started: correct all
+affected entries before retrying.
 
 **A mandatory-orchestration persona** — `orchestration:` runs automatically every turn, while
 `council:` runs only when requested. Only `ok: true` is presented as a ruling; failures, cancellation,

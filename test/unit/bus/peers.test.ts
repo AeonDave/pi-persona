@@ -9,6 +9,11 @@ const CTX = undefined as never;
 const text = (r: { content: Array<{ type: string; text?: string }> }): string =>
 	r.content.map((c) => (c.type === "text" ? (c.text ?? "") : "")).join("");
 
+test("contact_peer description states the default send budget", () => {
+	const tool = makeContactPeerTool(new InProcessBus(), "a#1", { listPeers: () => [] });
+	assert.match(tool.description, /20.*send|send.*20/i);
+});
+
 test("contact_peer list shows only the run's own peers (engine-scoped), never the whole bus", async () => {
 	const bus = new InProcessBus();
 	for (const h of ["supervisor", "a#1", "b#2", "stranger#9"]) bus.register(h);

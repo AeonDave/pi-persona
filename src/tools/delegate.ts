@@ -44,8 +44,8 @@ export interface DelegateTask {
 	/** Route this task through the child engine so the sub-agent's MCP (`mcp*`/direct)
 	 *  tools initialize and work (the in-process engine leaves them "not initialized"). */
 	mcp?: boolean;
-	/** Per-leg override (ms) of the shared idle-timeout ceiling — lets ONE legitimately slow
-	 *  leg raise its own wall-clock budget without raising the default for its siblings. Ignored
+	/** Per-leg override (ms) of the shared idle-timeout ceiling — lets ONE legitimately quiet
+	 *  leg wait longer between progress events without changing its siblings' idle window. Ignored
 	 *  unless a finite, positive number (junk/≤0 falls back to the engine's default). */
 	timeoutMs?: number;
 	/** Files/directories this leg may modify. Parallel overlap is rejected before spawning. */
@@ -139,7 +139,10 @@ export function validateDelegationBrief(params: DelegateParams): string | undefi
 		if (missing.length > 0) {
 			return (
 				`delegate: ${target.label} requires a complete brief; missing or empty: ${missing.join(", ")}. ` +
-				`Provide all fields (${BRIEF_FIELDS.join(", ")}) before spawning the policy-controlled leg.`
+				`Provide all fields (${BRIEF_FIELDS.join(", ")}) before spawning the policy-controlled leg. ` +
+				(params.tasks && params.tasks.length > 0
+					? "Put a separate complete brief in every tasks[].brief, including read-only workers; a top-level brief is single-mode only. Correct the batch before retrying."
+					: "Put the structured brief in the brief field alongside agent and task; task prose does not replace it.")
 			);
 		}
 	}

@@ -22,6 +22,7 @@ import { Text } from "@earendil-works/pi-tui";
 
 import { fencePeer } from "../core/fence.ts";
 import { inventedExocomNameHint } from "../core/naming.ts";
+import { MAX_IDENTITY_NAME_CHARS } from "../core/session-identity.ts";
 import { ExocomPeerRejection, type DisplayPeer, type ExocomPlane } from "../exocom/plane.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 import type { ExocomScope } from "../exocom/scope.ts";
@@ -41,13 +42,17 @@ const ExocomListParams = Type.Object({
 });
 
 const ExocomSendParams = Type.Object({
-	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s qualified `target` from `exocom_list`; its session suffix stays routable if that peer later renames. A display name alone still works but can be reassigned. Use "*" to broadcast to every reachable peer.' }),
+	target: Type.String({ minLength: 1, maxLength: 80, description: 'The peer\'s qualified `target` from `exocom_list`, 1–80 characters; its session suffix stays routable if that peer later renames. A display name alone still works but can be reassigned. Use "*" to broadcast to every reachable peer.' }),
 	message: Type.String({ minLength: 1, maxLength: 1_000_000, description: "The message body." }),
-	in_reply_to: Type.Optional(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$", description: "The msg_id you're replying to, if this is a reply." })),
+	in_reply_to: Type.Optional(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$", description: 'The original `msg_id` token (1–128 characters matching [A-Za-z0-9._:-]) when replying; omit for a new message. Broadcast target "*" cannot carry a reply id.' })),
 });
 
 const ExocomNameParams = Type.Object({
-	name: Type.String({ minLength: 1, maxLength: 96, description: inventedExocomNameHint() }),
+	name: Type.String({
+		minLength: 1,
+		maxLength: 96,
+		description: `${inventedExocomNameHint()} Keep it to ${MAX_IDENTITY_NAME_CHARS} characters; longer legacy inputs are accepted for compatibility and clipped by the shared identity validator. Whitespace-only names are rejected.`,
+	}),
 });
 
 /** Single-target send vs. `target: "*"` broadcast — two distinct result shapes, so `execute`'s
@@ -450,6 +455,7 @@ export function registerExocomTools(
 		async execute(_toolCallId, params: Static<typeof ExocomNameParams>) {
 			const plane = getPlane();
 			if (!plane || !onRename) throw new Error("exocom is not active for this persona");
+			if (!params.name.trim()) throw new Error("exocom_name: name must contain visible characters");
 			const applied = normalizePeerName(onRename(normalizePeerName(params.name)));
 			return { content: [{ type: "text", text: `exocom: you are now "${applied}"` }], details: { name: applied } };
 		},

@@ -331,6 +331,24 @@ test("exocom_name applies the model's free-choice call-sign via onRename", async
 	assert.equal(current, "nightowl", "the rename callback actually ran");
 });
 
+test("exocom_name normalizes candidates and rejects whitespace-only input", async () => {
+	const m = mockPi();
+	const seen: string[] = [];
+	registerExocomTools(m.pi, () => stubPlane() as never, (raw) => {
+		seen.push(raw);
+		return raw;
+	});
+	await assert.rejects(
+		() => m.tools.get("exocom_name").execute("c", { name: "   " }, undefined, undefined, {}),
+		/name must contain visible characters/i,
+	);
+	assert.deepEqual(seen, [], "an empty candidate is rejected before the shared rename callback");
+
+	const result = await m.tools.get("exocom_name").execute("c", { name: "alpha#2" }, undefined, undefined, {});
+	assert.deepEqual(seen, ["alpha-2"], "Exocom normalizes its display label before invoking the rename callback");
+	assert.equal(result.details.name, "alpha-2");
+});
+
 // `plane.send` embeds the PEER's own NACK text in the Error it throws, and pi turns a thrown
 // execute() into model-facing tool-result text. Peer prose is untrusted (core/fence.ts), so the
 // single-target branch must flatten it exactly like the broadcast branch does — otherwise a peer

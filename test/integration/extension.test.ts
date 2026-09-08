@@ -1262,6 +1262,16 @@ test("a custom persona enforces its declarative delegate policy before spawn", a
 	assert.match(String(rejected.content?.[0]?.text ?? ""), /complete brief/i);
 	assert.equal(specs.length, 0, "policy failure must happen before any model call");
 
+	for (const async of [false, true]) {
+		const batch = await delegate.execute("custom-policy-batch-missing", {
+			tasks: Array.from({ length: 6 }, (_, i) => ({ agent: "scout", task: `Inspect component ${i}` })),
+			async,
+		}, undefined, undefined, ctx);
+		assert.equal(batch.isError, true);
+		assert.match(String(batch.content?.[0]?.text ?? ""), /tasks\[\]\.brief/);
+		assert.equal(specs.length, 0, "an incomplete batch must not start a worker in either delivery mode");
+	}
+
 	const accepted = await delegate.execute(
 		"custom-policy-complete",
 		{

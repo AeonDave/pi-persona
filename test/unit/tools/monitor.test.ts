@@ -17,7 +17,7 @@ function harness(allowed = true) {
 		},
 	});
 	const run = (params: unknown, signal?: AbortSignal) => tool.execute("call", params, signal, undefined, { cwd: "D:/project" });
-	return { run, started, cancelled };
+	return { run, started, cancelled, tool };
 }
 
 test("monitor requires execution permission before starting a background process", async () => {
@@ -60,4 +60,11 @@ test("monitor cancellation remains available when command execution is denied", 
 	const h = harness(false);
 	assert.equal((await h.run({ action: "cancel", id: "monitor-1" })).details.ok, true);
 	assert.deepEqual(h.cancelled, ["monitor-1"]);
+});
+
+test("monitor schema documents the aggregate argv bound", () => {
+	const { tool } = harness();
+	const args = (tool.parameters as any).properties.args;
+	assert.match(String(args.description), /24[,_ ]?000/);
+	assert.match(String(tool.description), /24[,_ ]?000/);
 });

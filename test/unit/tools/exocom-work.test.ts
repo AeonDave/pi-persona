@@ -40,6 +40,17 @@ test("exocom_claim TypeBox schema requires a non-empty write_set", () => {
 	assert.equal(schema.properties.write_set.minItems, 1);
 });
 
+test("exocom_wait TypeBox schema documents its permissive timeout clamp", () => {
+	const h = harness();
+	const schema = h.tools.get("exocom_wait").parameters as {
+		properties: { timeoutMs: { type?: string; minimum?: number; maximum?: number; description?: string } };
+	};
+	assert.equal(schema.properties.timeoutMs.type, "number");
+	assert.equal(schema.properties.timeoutMs.minimum, undefined);
+	assert.equal(schema.properties.timeoutMs.maximum, undefined);
+	assert.match(schema.properties.timeoutMs.description ?? "", /floor.*clamps to 1.*600000/i);
+});
+
 test("an external-workspace member cannot place repository-relative claims in the joined workspace ledger", async () => {
 	const h = harness({ canClaim: () => false });
 	await assert.rejects(
