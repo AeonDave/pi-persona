@@ -16,6 +16,8 @@ This folder contains the long-form documentation that defines how the project is
   - Choosing a persona, supervising background work, and collaborating through Exocom.
 - [`MONITORS.md`](./MONITORS.md)
   - Clock snapshots, timers, and background event sources that wake the supervisor.
+- [`REFERENCE.md`](./REFERENCE.md)
+  - Canonical Core API, configuration, environment variables, commands, and data-driven recipes.
 
 ## Supporting evidence
 
@@ -24,8 +26,8 @@ This folder contains the long-form documentation that defines how the project is
 
 ## Quick map
 
-- **For users / operators:** start from [README](../README.md) and [EXPERIENCE.md](./EXPERIENCE.md); follow the design docs for runtime details.
-- **For contributors:** begin at `ARCHITECTURE.md`, then `STRATEGIES.md` for implementation details.
+- **For users / operators:** start from [README](../README.md) and [EXPERIENCE.md](./EXPERIENCE.md); use `REFERENCE.md` for configuration and recipes.
+- **For contributors:** begin at `ARCHITECTURE.md`, then `REFERENCE.md` for runtime surfaces and `STRATEGIES.md` for implementation details.
 - **For behavior-layer changes:** consult `SPINE.md` and `src/core` / `src/persona/spine.ts` together.
 - **For telemetry producers or consumers:** start with `TELEMETRY.md` and its conformance corpus.
 
@@ -33,7 +35,7 @@ This folder contains the long-form documentation that defines how the project is
 
 When touching this folder:
 
-- Keep names stable (`ARCHITECTURE.md`, `STRATEGIES.md`, `SPINE.md`) because many docs and comments link to them directly.
+- Keep names stable (`ARCHITECTURE.md`, `STRATEGIES.md`, `SPINE.md`, `REFERENCE.md`) because many docs and comments link to them directly.
 - Prefer links to this folder over copying duplicate prose into code comments.
 - Update both this map and inbound links when adding new authoritative docs.
 - A few factual claims are machine-checked by `test/unit/docs/doc-claims.test.ts`. Know its blind
@@ -43,11 +45,10 @@ When touching this folder:
     real one is caught. It still never reads `scripts/`, so a variable only that tree consumes
     reads as undocumented-in-reverse: the check is one-directional (docs → source), and a source
     variable nothing documents is not flagged at all.
-  - **Strategy tables.** It fails when a registered strategy has anything other than exactly one row
-    in the strategy table proper (the one headed `| Strategy | … | Params …`) of the root README and
-    `STRATEGIES.md`, or when a declared param is not backticked in a cell *after* the row's name — so
-    neither a row that drifted into another table nor a row that only repeats its own name passes. It
-    still cannot tell whether the *description* of a param or its default is correct.
+  - **Strategy table.** It fails when a registered strategy has anything other than exactly one row
+    in the canonical table in `STRATEGIES.md` (the one headed `| Strategy | … | Params …`), or when a
+    declared param is not backticked in a cell *after* the row's name. It still cannot tell whether
+    the *description* of a param or its default is correct.
   - **Skip count.** It scans every `test/**/*.test.ts` for skip markers (an options-object `skip` key
     or a `.skip` shorthand), and fails unless AGENTS.md's stated word, its `skipped N` on Windows and
     its `skipped 0` elsewhere all match, every marker is gated on `process.platform === "win32"`, and

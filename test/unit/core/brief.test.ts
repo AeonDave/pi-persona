@@ -187,14 +187,14 @@ test("buildExocomBrief: an unnamed self still gets a name-yourself line with no 
 	assert.ok(brief);
 	assert.match(brief ?? "", /no call-sign yet/i);
 	assert.match(brief ?? "", /exocom_name/);
-	assert.match(brief ?? "", /current task that triggered this turn/i, "the first real task supplies the creative seed");
+	assert.match(brief ?? "", /current task or inbound peer request that triggered this turn/i, "either entry path supplies the creative seed");
 	assert.match(brief ?? "", /first action.*exocom_name/is, "naming happens at the start of the first task, not later in the session");
 	assert.match(brief ?? "", /before any prose or other tool call/i, "the ordering is operationally unambiguous");
 	assert.match(brief ?? "", /no built-in list or catalog/i, "the model invents rather than selecting a bundled identity");
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas|unnamed/i);
 });
 
-test("buildExocomBrief: a pending protocol obligation defers naming until the next unconstrained turn", () => {
+test("buildExocomBrief: an unavailable naming tool suppresses the bootstrap", () => {
 	assert.equal(
 		buildExocomBrief([], { ...XOPTS, namedByModel: false, canNameNow: false }),
 		undefined,

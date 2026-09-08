@@ -47,6 +47,9 @@ export const criticLoop: Strategy = {
 	},
 	async run(input, sdk) {
 		const rosterAgents = input.roster ? sdk.roster.team(input.roster) : [];
+		if (input.roster && rosterAgents.length === 0) {
+			throw new Error(`critic-loop: unknown roster "${input.roster}" (provide an installed non-empty roster, or omit roster for operator + verifier defaults)`);
+		}
 		// generator + critic are the roster's two members; a params NAME override selects a bare agent.
 		const memberSpec = (idx: number, override: unknown, fallback: string): AgentRunSpec => {
 			if (typeof override === "string" && override.trim()) return { agent: override.trim(), task: "" };

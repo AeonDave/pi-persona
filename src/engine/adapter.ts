@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
+import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { assignedIdentityPrompt } from "../core/naming.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -142,7 +144,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// `--append-system-prompt`, so a leg keeps Pi's full base prompt either way — the
 			// layer adds behavioral consistency, it does not fill a scaffolding gap.
 			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
-			const personaPrompt = [layer, cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim()].filter(Boolean).join("\n\n");
 			if (personaPrompt) childSpec.systemPrompt = personaPrompt;
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
@@ -166,7 +168,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.broker) {
 				handle = nextChildHandle(spec.agent);
 				const wantsPeers = spec.peers === true && (deps.canUseBus ?? true);
-				const label = spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
+				const label = spec.name?.trim()
+					? sanitizeDisplayLabel(spec.name, handle)
+					: spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
 				deps.broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
 				childOptions.env = {
 					...childOptions.env,

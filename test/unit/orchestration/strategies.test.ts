@@ -290,6 +290,39 @@ test("critic-loop takes generator + critic from the roster's two entities by def
 	assert.ok(seen.includes("skeptic"), "critic = roster[1]");
 });
 
+test("critic-loop rejects an unknown named roster before selecting fallback agents", async () => {
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			calls++;
+			return spec.agent === "verifier"
+				? { agent: spec.agent, output: "approved", structured: { stance: "approve" }, usage: usage(), ok: true }
+				: { agent: spec.agent, output: "draft", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: LIMITS });
+	await assert.rejects(
+		() => criticLoop.run({ task: "T", roster: "missing", params: {} }, sdk),
+		/critic-loop: unknown roster "missing"/,
+	);
+	assert.equal(calls, 0, "an unknown roster must not launch fallback agents");
+});
+
+test("critic-loop keeps operator + verifier defaults when no roster is provided", async () => {
+	const seen: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			seen.push(spec.agent);
+			return spec.agent === "verifier"
+				? { agent: spec.agent, output: "approved", structured: { stance: "approve" }, usage: usage(), ok: true }
+				: { agent: spec.agent, output: "draft", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: LIMITS });
+	await criticLoop.run({ task: "T", params: {} }, sdk);
+	assert.deepEqual(seen, ["operator", "verifier"]);
+});
+
 test("critic-loop stops at maxRounds even if the critic keeps rejecting", async () => {
 	let genCalls = 0;
 	const engine: StrategyEngine = {

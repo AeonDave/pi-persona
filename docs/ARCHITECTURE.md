@@ -529,15 +529,23 @@ workflow runtime.
   if it changes what someone does, otherwise send nothing". A delivery is a fresh prompt on the
   receiver, and a bare `Reply:` would make answering the default and silence the exception — which
   is how a settled point keeps running on agreement and thanks.
-- **Identity is session-stable, persona is presence metadata.** Each instance joins with no chosen
-  call-sign (a blank registry placeholder). If the active persona permits `exocom_name`, then on its
-  first unconstrained task turn the existing model is instructed to make that tool its first action
-  and invent a short handle from the task — no catalog and no extra naming model call. A pending
-  ledger ask owns the turn, so settlement precedes naming and the bootstrap returns on the next free
-  turn. A targeted deny suppresses the prompt as well as the tool. `exocom_name` replaces that display label only — the registry entry
+- **Identity is session-stable, persona is presence metadata.** `extension/identity.ts` owns one
+  handle independently of Exocom. Until chosen, a `pi-<session suffix>` label distinguishes the
+  instance without presenting its persona as its name. `agent_name` names a standalone session;
+  when Exocom is active, `exocom_name` updates the same identity and immediately refreshes presence.
+  Successful choices persist in a session-bound custom entry, survive resume/reload and persona
+  changes, and are not inherited by a fork with a different session id. Generic persona/agent
+  names are rejected when choosing a handle. No catalog or extra model call is used.
+  The `context` hook supplies identity guidance before every model call, including a first inbound
+  Exocom wake: Pi's custom-message path can bypass `before_agent_start`. A targeted deny suppresses
+  the naming invitation; the standalone tool cannot bypass an Exocom naming denial. A pending ask
+  permits `exocom_name` as display metadata only; it still gates work until answer/decline.
+  `exocom_name` replaces that display label only — the registry entry
   stays keyed by the session, so a rename cannot take over another peer's slot or its inbound
   replies. Persona, model, and context usage are refreshed on heartbeat; changing persona never
   changes the registry key or grants authority over another peer.
+  Delegated workers keep the leader's `delegate.name` from launch, including their initial prompt
+  and peer/broker display labels; routing handles and strategy role keys remain unchanged.
 - **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
   message is head-truncated, then delivered under a header the RECEIVER writes (`[label] —
   message|reply`) above a body quoted by `fencePeer` — the peer flavor of the same `core/fence.ts`

@@ -29,6 +29,12 @@ An effective request names the intended result and its constraints. For example:
 
 ## Follow the work without constant polling
 
+Your persona describes a role; your session has its own personal handle. Pi chooses it on the first
+task or inbound Exocom request when the naming tool is permitted. Until then it shows a distinct
+session suffix. The name survives persona changes and resume. `agent_name` sets it in standalone
+use; `exocom_name` sets the same identity when connected to peers. The leader can assign each
+delegated worker a `name` before launch, which reaches both its display and its first prompt.
+
 For a fixed-time reminder, ask for a timer. For a build finishing or a file, log, or system event,
 ask for a monitor. Pi runs a small event-producing program and brings the result back when the
 supervisor is free. Keep the session open, and cancel a watch when its purpose ends. See

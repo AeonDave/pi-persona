@@ -383,9 +383,13 @@ export function normalizeDelegateConcurrency(value: number | undefined, maximum:
  *  delegate path's field mapping. Exported so the async launch path (extension.ts) routes
  *  through the SAME mapping instead of duplicating it (a duplicated copy is how NP2's
  *  `timeoutMs` could silently miss the async fan-out, which is the interactive default). */
-export function specOf(t: DelegateTask): AgentRunSpec {
+export function specOf(t: DelegateTask, index = 0): AgentRunSpec {
 	const renderedBrief = renderDelegationBrief(t.brief);
-	const spec: AgentRunSpec = { agent: t.agent, task: renderedBrief ? `${t.task}\n\n${renderedBrief}` : t.task };
+	const spec: AgentRunSpec = {
+		agent: t.agent,
+		name: nameFor(t, index),
+		task: renderedBrief ? `${t.task}\n\n${renderedBrief}` : t.task,
+	};
 	if (t.skills && t.skills.length > 0) spec.skills = t.skills;
 	if (t.model) spec.model = t.model;
 	if (t.tools !== undefined) spec.tools = t.tools;
@@ -585,7 +589,7 @@ export async function runDelegate(
 			let r: AgentResult;
 			try {
 				r = await engine.run(
-					specOf(t),
+					specOf(t, i),
 					(p) => {
 						// Stream the leg's rolling output + current tool activity.
 						if (p.toolEvent) onLegToolEvent?.(i, p.toolEvent);

@@ -6,7 +6,7 @@ How a roster of sub-agents is coordinated. A **strategy** is a small TypeScript 
 **Strategy SDK**; a **persona** decides whether and how one runs. This document is the contributor's
 deep dive: the SDK contract, every built-in's mechanism and params, the bias-guard invariants you
 must not break, the param schema, and how personas select options. For the user-facing catalog and
-copy-paste recipes see the [README](../README.md); for the system design see
+copy-paste recipes see [`REFERENCE.md`](./REFERENCE.md); for the system design see
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## The Strategy SDK
@@ -154,8 +154,8 @@ them. Two consumers:
 - The **`council` tool** warns (via `ui.notify`, never hard-fails — I2 lenient) when a call passes a
   key the active strategy doesn't declare, e.g. `ignoring unknown param "reflct" for magi (known:
   reflect, aggregate)`. A correct call is behaviourally unchanged.
-- **`/doctor`** lists each strategy's params live, so the schema is discoverable and the README table
-  can't drift from the code.
+- **`/doctor`** lists each strategy's params live, so the schema is discoverable and this canonical
+  table can't drift from the code.
 
 The schema is for discovery and typo-catching, not enforcement: a strategy still reads its own
 `input.params` with inline guards, and unknown keys are ignored, not rejected.

@@ -26,6 +26,13 @@ test("specOf renders a complete delegation brief deterministically", () => {
 	);
 });
 
+test("specOf forwards a leader-assigned name and keeps the indexed generic fallback", () => {
+	const assigned = specOf({ agent: "operator", task: "Investigate", name: "Atlas audit" }, 0);
+	const fallback = specOf({ agent: "operator", task: "Investigate" }, 1);
+	assert.equal(assigned.name, "Atlas-audit");
+	assert.equal(fallback.name, "operator-2");
+});
+
 test("specOf and runDelegate preserve an explicit empty tool allowlist", async () => {
 	assert.deepEqual(specOf({ agent: "locked", task: "reason", tools: [] }).tools, []);
 	const seen: Array<string[] | undefined> = [];
@@ -464,6 +471,20 @@ test("runDelegate carries the display label in each view", async () => {
 	const engine = engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }));
 	const r = await runDelegate({ tasks: [{ agent: "operator", task: "t", model: "anthropic/claude-sonnet-4-6" }] }, engine);
 	assert.equal(r.views[0]?.label, "operator · sonnet-4-6");
+});
+
+test("runDelegate forwards the same assigned names shown by its views", async () => {
+	const seen: Array<{ name?: string; task: string }> = [];
+	const engine = engineThat((s) => {
+		seen.push(s);
+		return { agent: s.agent, output: "o", usage: usage(), ok: true };
+	});
+	const r = await runDelegate({ tasks: [
+		{ agent: "operator", task: "audit", name: "Atlas audit" },
+		{ agent: "operator", task: "verify" },
+	] }, engine, { maxConcurrency: 1, maxChildren: 2 });
+	assert.deepEqual(seen.map((s) => s.name), ["Atlas-audit", "operator-2"]);
+	assert.deepEqual(r.views.map((view) => view.label), ["Atlas-audit", "operator-2"]);
 });
 
 test("runDelegate exposes a per-leg abort via onLegStart", async () => {

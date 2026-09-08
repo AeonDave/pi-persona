@@ -369,6 +369,22 @@ test("inproc engine appends an on-the-fly `role` to the agent's own system promp
 	assert.match(spy.opts?.systemPrompt ?? "", /Rust unsafe-code auditor/, "the role is appended");
 });
 
+test("inproc engine appends the assigned identity as fenced JSON metadata", async () => {
+	const spy: Spy = {};
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("ok")], spy),
+	});
+	await engine.run({ agent: "a", task: "t", name: "Atlas audit" });
+	assert.match(
+		spy.opts?.systemPrompt ?? "",
+		/\[pi-persona assigned identity\]\s*\{"name":"Atlas-audit"\}\s*\[\/pi-persona assigned identity\]/,
+	);
+});
+
 test("inproc engine leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
 	const spy: Spy = {};
 	const mk = (deps: Partial<Parameters<typeof makeInProcessEngine>[0]>) =>
@@ -1021,15 +1037,15 @@ test("spec.peers binds contact_peer, scoped to the run's other members (self and
 		},
 	});
 	const runs = Promise.all([
-		engine.run({ agent: "a", task: "t", peers: true, role: "Focus ONLY on the SECURITY lens" }),
-		engine.run({ agent: "a", task: "t", peers: true, role: "Focus ONLY on the PERFORMANCE lens" }),
+		engine.run({ agent: "a", task: "t", peers: true, name: "security-scope", role: "Focus ONLY on the SECURITY lens" }),
+		engine.run({ agent: "a", task: "t", peers: true, name: "performance-scope", role: "Focus ONLY on the PERFORMANCE lens" }),
 	]);
 	await bothCreated;
 	assert.equal(tools.length, 2, "each member got exactly one custom tool");
 	assert.deepEqual(tools.map((t) => t.name), ["contact_peer", "contact_peer"], "no contact_supervisor without coaching");
 	const r = await tools[0]!.execute("t", { action: "list" });
 	const listed = r.content.map((c) => c.text ?? "").join("");
-	assert.match(listed, /a#\d+ \((SECURITY|PERFORMANCE)\)/, "the OTHER member is listed with its role hint");
+	assert.match(listed, /(?:security-scope|performance-scope)/, "the OTHER member is listed with its assigned name");
 	assert.doesNotMatch(listed, /supervisor/);
 	await runs;
 });

@@ -34,10 +34,12 @@ import { TelemetryProducer, type TelemetryAgentInput } from "../telemetry/produc
 import type { AgentTree, AgentNode } from "../ui/agent-tree.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { ExocomInstall } from "../exocom/install.ts";
+import type { SessionIdentity } from "./identity.ts";
 
 type MandatoryOutcome = { label: string; output: string; ok: boolean; error?: string; failureKind?: FailureKind };
 
 export interface HookHost {
+	readonly identity: SessionIdentity;
 	config: PiPersonaConfig;
 	controller: PersonaController;
 	personaHost: PersonaHost;
@@ -140,6 +142,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.reportDataRootMigration(ctx); // the one-time storage-root move ran at activation; this is its voice
 		h.reportSpineWarning(ctx);
 		h.reload(ctx.cwd);
+		h.identity.start(ctx); // restore session identity before persona activation can join Exocom
 		h.reportDefinitionCollisions(ctx);
 		h.personaConfigs = h.readConfigStore();
 		// Restore order: --persona flag > env pin (PI_PERSONA_DEFAULT) > remembered-on-disk. Read-only.
@@ -403,13 +406,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				// doc) — but the clause it gates is an ask, and an ask needs a channel, not a person.
 				canAskHuman: ctx.hasUI === true,
 				namedByModel: exocom.namedByModel,
-				// An ask already addressed to this session owns the turn. `exocom_name` is not a
-				// constrained-turn tool, so suppress the bootstrap until settlement rather than
-				// ordering a call the runtime will correctly refuse. Ledger uncertainty gets the
-				// same treatment because the fail-closed gate cannot prove naming is safe either.
-				canNameNow: pendingBlock === undefined
-					&& ledgerFailure === undefined
-					&& (!xcaps || canCallTool(xcaps, "exocom_name")),
+				// Naming changes display metadata only. Pending work still gates every work action.
+				canNameNow: pi.getActiveTools().includes("exocom_name") && (!xcaps || canCallTool(xcaps, "exocom_name")),
 				...(scope ? {
 					joined: scope.joined,
 					scopeCode: scope.scopeCode,
@@ -481,7 +479,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				const omitted = pending.length > 1 ? `; ${pending.length - 1} more pending` : "";
 				return {
 					block: true,
-					reason: `exocom: pending ask(s) to this session — only exocom_answer, exocom_decline, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id}${omitted})`,
+					reason: `exocom: pending ask(s) to this session — only exocom_name (identity metadata), exocom_answer, exocom_decline, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id}${omitted})`,
 				};
 			}
 		}

@@ -74,6 +74,7 @@ export {
 	type PendingAsk,
 } from "./extension/shared.ts";
 import { installExocom } from "./exocom/install.ts";
+import { installIdentity } from "./extension/identity.ts";
 import { parseExocomArgv } from "./exocom/activation.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
 import { registerIntercomTool } from "./tools/intercom-tool.ts";
@@ -1169,8 +1170,18 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		};
 	}
 
+	const identity = installIdentity(pi, {
+		capabilities: () => controller.capabilities,
+		reservedNames: () => [...personas.flatMap((p) => [p.name, p.label]), ...agents.map((a) => a.name)],
+		exocomActive: () => exocom.plane !== undefined,
+		onChanged: (ctx) => {
+			exocom.refreshIdentity();
+			telemetry?.publish("instance.updated", exocom.currentTelemetryInstance(ctx));
+		},
+	});
 	const exocom = installExocom(pi, {
 		pi,
+		identity,
 		get config() { return config; },
 		get controller() { return controller; },
 		get lastCtx() { return lastCtx; },
@@ -1673,6 +1684,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	const hookHost: HookHost = {
+		identity,
 		get config() { return config; },
 		get controller() { return controller; },
 		get personaHost() { return host; },

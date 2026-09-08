@@ -66,6 +66,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		description:
 			"On-the-fly specialist persona: extra system-prompt text appended to the agent's own (e.g. 'You are a Rust unsafe-code auditor…') — combine with `skills` to shape a dynamic sub-agent without authoring a file",
 	});
+	const LeaderNameDescription = `${inventedLegNameHint()} As the supervisor, assign and pass this name before launch so the worker sees it from its first turn; omission remains valid and uses the configured agent's generic fallback.`;
 	const BriefListSchema = Type.Union([Type.String(), Type.Array(Type.String())]);
 	const DelegationBriefSchema = Type.Object({
 		objective: Type.String({ description: "Verifiable objective and success signal" }),
@@ -83,7 +84,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
 		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString])),
 		name: Type.Optional(
-			Type.String({ description: inventedLegNameHint() }),
+			Type.String({ description: LeaderNameDescription }),
 		),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
@@ -107,7 +108,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
 		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString])),
-		name: Type.Optional(Type.String({ description: inventedLegNameHint() })),
+		name: Type.Optional(Type.String({ description: LeaderNameDescription })),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
@@ -290,6 +291,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
 			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
+			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
 			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
 			"candidates (or call `models`). Advanced knobs: name, tools, brief, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
@@ -441,7 +443,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					// Routed through specOf() (not a hand-rolled field list) so this, the interactive
 					// DEFAULT delegate path, never drifts from the sync path's mapping — NP2's per-leg
 					// `timeoutMs` (and any future knob) lands here for free instead of needing a second copy.
-					const spec = specOf(t);
+					const spec = specOf(t, nameOffset + i);
 					return launchAsyncRun(t.agent, t.task, spec, nameFor(t, nameOffset + i), batchSlots);
 				});
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${d.RUN_LIMITS.maxChildren}) were dropped.` : "";
@@ -459,11 +461,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			if (wantsAsync && params.agent && params.task) {
 				const agent = params.agent;
 				const task = params.task;
+				const nameIndex = asyncNameSequence++;
 				// Use the canonical mapper here too: explicit `none`/`false` and future fields must
 				// survive exactly as they do in fan-out and sync mode.
 				const single = { ...params, agent, task };
-				const runSpec = specOf(single);
-				const id = launchAsyncRun(agent, task, runSpec, nameFor(single, asyncNameSequence++));
+				const runSpec = specOf(single, nameIndex);
+				const id = launchAsyncRun(agent, task, runSpec, nameFor(single, nameIndex));
 				return {
 					content: [
 						{

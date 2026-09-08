@@ -11,7 +11,7 @@ import { knownParams, strategyNames } from "../../../src/orchestration/strategy.
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const read = (...parts: string[]): string => readFileSync(join(REPO, ...parts), "utf8");
 
-const DOCS = ["README.md", "AGENTS.md", join("docs", "ARCHITECTURE.md"), join("docs", "STRATEGIES.md"), join("docs", "SPINE.md"), join("docs", "README.md")];
+const DOCS = ["README.md", "AGENTS.md", join("docs", "ARCHITECTURE.md"), join("docs", "STRATEGIES.md"), join("docs", "SPINE.md"), join("docs", "README.md"), join("docs", "REFERENCE.md")];
 
 /** English number words up to the counts these docs plausibly state. */
 const WORD_COUNTS: Record<string, number> = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5 };
@@ -56,10 +56,9 @@ function skipMarkers(): { file: string; gate: string }[] {
 	return markers;
 }
 
-/** The rows of the ONE table that documents strategies: the run of `|` lines under the header
- *  whose first cell is `Strategy` and which names a params column. A row headed by a strategy's
- *  name elsewhere in the file (the persona catalog also lists `judge`) documents a persona, not
- *  a strategy, so matching a row header anywhere in the markdown proves nothing. */
+/** The rows of the canonical strategy table: the run of `|` lines under the header whose first
+ *  cell is `Strategy` and which names a params column. A row headed by a strategy's name elsewhere
+ *  in the file documents something else, so matching a row header anywhere proves nothing. */
 function strategyTableRows(markdown: string): string[] {
 	const lines = markdown.split("\n");
 	const header = lines.findIndex((line) => /^\|\s*Strategy\s*\|/.test(line) && /\bParams\b/.test(line));
@@ -105,20 +104,17 @@ test("every PI_* variable the docs name exists in the source", () => {
 	}
 });
 
-test("the README and STRATEGIES strategy tables cover every registered strategy and param", () => {
-	const readme = read("README.md");
+test("the canonical STRATEGIES table covers every registered strategy and param", () => {
 	const strategies = read("docs", "STRATEGIES.md");
 	for (const name of strategyNames()) {
 		const params = Object.keys(knownParams(name) ?? {});
-		for (const [label, markdown] of [["README.md", readme], ["docs/STRATEGIES.md", strategies]] as const) {
-			const rows = strategyTableRows(markdown).filter((row) => row.startsWith(`| \`${name}\` |`));
-			assert.equal(rows.length, 1, `${label}'s strategy table has ${rows.length} rows for the "${name}" strategy`);
-			// Skip the row's own header cell: `judge`'s required `judge` param would otherwise be
-			// satisfied by the name heading the row, whatever the row goes on to say.
-			const described = (rows[0] as string).split("|").slice(2).join("|");
-			for (const param of params) {
-				assert.ok(described.includes(`\`${param}\``), `${label}'s "${name}" row never mentions its \`${param}\` param`);
-			}
+		const rows = strategyTableRows(strategies).filter((row) => row.startsWith(`| \`${name}\` |`));
+		assert.equal(rows.length, 1, `STRATEGIES.md's strategy table has ${rows.length} rows for the "${name}" strategy`);
+		// Skip the row's own header cell: `judge`'s required `judge` param would otherwise be
+		// satisfied by the name heading the row, whatever the row goes on to say.
+		const described = (rows[0] as string).split("|").slice(2).join("|");
+		for (const param of params) {
+			assert.ok(described.includes(`\`${param}\``), `STRATEGIES.md's "${name}" row never mentions its \`${param}\` param`);
 		}
 	}
 });
