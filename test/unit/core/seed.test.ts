@@ -19,6 +19,17 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LEGACY_SPINE = fileURLToPath(new URL("../../fixtures/spine-1.8.0.md", import.meta.url));
 const LEGACY_WORKER_SPINE = fileURLToPath(new URL("../../fixtures/spine.worker-1.8.0.md", import.meta.url));
+const LEGACY_V1141_ELITE = fileURLToPath(new URL("../../fixtures/personas-1.14.1/elite.md", import.meta.url));
+const LEGACY_V1141_EVIDENCE_VERIFIER = fileURLToPath(new URL("../../fixtures/agents-1.14.1/evidence-verifier.md", import.meta.url));
+
+function v1141Blob(asset: "personas/elite.md" | "agents/evidence-verifier.md"): Buffer {
+	return fs.readFileSync(asset === "personas/elite.md" ? LEGACY_V1141_ELITE : LEGACY_V1141_EVIDENCE_VERIFIER);
+}
+
+function withLineEnding(bytes: Buffer, lineEnding: "\n" | "\r\n"): Buffer {
+	const lf = bytes.toString("utf8").replaceAll("\r\n", "\n");
+	return Buffer.from(lineEnding === "\n" ? lf : lf.replaceAll("\n", "\r\n"), "utf8");
+}
 
 /** A throwaway bundled layout (personas + agents + teams + flows + contracts + presets). */
 function bundled(): string {
@@ -632,4 +643,57 @@ test("the MAGI cores carry a legacy digest, so an existing install gains their v
 
 test("swarm carries a legacy digest, so an existing install gains the live-peer section", () => {
 	assert.ok(LEGACY_SEEDED_DEFAULTS["personas/swarm.md"], "personas/swarm.md has no legacy digest — its 1.12.2 live-peer section would ship inert");
+});
+
+test("v1.14.1 pristine Elite and evidence-verifier copies migrate for both checkout EOL forms", () => {
+	const assets = [
+		["personas/elite.md", "elite.md"],
+		["agents/evidence-verifier.md", "evidence-verifier.md"],
+	] as const;
+	const bundledDir = tempDir("pi-persona-v1141-bundled-");
+	fs.mkdirSync(path.join(bundledDir, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(bundledDir, "agents"), { recursive: true });
+	for (const [asset] of assets) {
+		const destination = path.join(bundledDir, asset);
+		fs.copyFileSync(path.join(REPO_ROOT, asset), destination);
+	}
+
+	for (const lineEnding of ["\n", "\r\n"] as const) {
+		const userDirForForm = userDir();
+		fs.mkdirSync(path.join(userDirForForm, "agents"), { recursive: true });
+		for (const [asset, name] of assets) {
+			fs.writeFileSync(path.join(userDirForForm, "agents", name), withLineEnding(v1141Blob(asset), lineEnding));
+		}
+
+		const result = migratePristineSeededDefaults(bundledDir, userDirForForm);
+		assert.deepEqual(result.migrated.sort(), assets.map(([, name]) => path.join(userDirForForm, "agents", name)).sort(), `migrates ${lineEnding === "\n" ? "LF" : "CRLF"} copies`);
+		assert.deepEqual(result.installed, [], "the already-seeded dependency is not reinstalled");
+		for (const [, name] of assets) {
+			assert.deepEqual(fs.readFileSync(path.join(userDirForForm, "agents", name)), fs.readFileSync(path.join(bundledDir, name === "elite.md" ? "personas/elite.md" : "agents/evidence-verifier.md")));
+		}
+	}
+});
+
+test("v1.14.1 custom Elite and evidence-verifier copies remain untouched", () => {
+	const assets = [
+		["personas/elite.md", "elite.md"],
+		["agents/evidence-verifier.md", "evidence-verifier.md"],
+	] as const;
+	const bundledDir = tempDir("pi-persona-v1141-custom-bundled-");
+	const userDirForCustom = userDir();
+	fs.mkdirSync(path.join(bundledDir, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(bundledDir, "agents"), { recursive: true });
+	fs.mkdirSync(path.join(userDirForCustom, "agents"), { recursive: true });
+	for (const [asset, name] of assets) {
+		fs.copyFileSync(path.join(REPO_ROOT, asset), path.join(bundledDir, asset));
+		const custom = Buffer.concat([v1141Blob(asset), Buffer.from("\n\n# local customization\n")]);
+		fs.writeFileSync(path.join(userDirForCustom, "agents", name), custom);
+	}
+
+	const result = migratePristineSeededDefaults(bundledDir, userDirForCustom);
+	assert.deepEqual(result.migrated, []);
+	assert.deepEqual(result.installed, []);
+	for (const [, name] of assets) {
+		assert.match(fs.readFileSync(path.join(userDirForCustom, "agents", name), "utf8"), /# local customization/);
+	}
 });

@@ -52,9 +52,11 @@ import type { ExocomSemanticFrame } from "./envelope.ts";
 import { prune as pruneExocom, type RegistryEntry } from "./registry.ts";
 import { registerExocomTools } from "../tools/exocom.ts";
 import { registerExocomWorkTools } from "../tools/exocom-work.ts";
+import type { SessionIdentity } from "../extension/identity.ts";
 
 export interface ExocomHost {
 	readonly pi: ExtensionAPI;
+	readonly identity: SessionIdentity;
 	readonly config: PiPersonaConfig;
 	readonly controller: PersonaController;
 	get lastCtx(): ExtensionContext | undefined;
@@ -68,6 +70,7 @@ export interface ExocomHost {
 }
 
 export interface ExocomInstall {
+	refreshIdentity(): void;
 	reconcile(ctx: ExtensionContext): Promise<void>;
 	queue(op: () => Promise<void>): Promise<void>;
 	stop(): Promise<void>;
@@ -100,8 +103,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomPlane: ExocomPlane | undefined;
 	let exocomLedgerFile = "";
 	let exocomSessionId = "";
-	let exocomName = "";
-	let exocomNamedByModel = false;
+	let refreshIdentity: (() => void) | undefined;
 	let exocomScope: ExocomScope | undefined;
 	interface ExocomWaiter { id: string; work_key: string; ask_id: string; handle: ReturnType<typeof setTimeout>; }
 	const exocomWaiters: ExocomWaiter[] = [];
@@ -194,9 +196,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
 		return EXOCOM_PALETTE[h % EXOCOM_PALETTE.length]!;
 	}
-	// Placeholder until the model invents a call-sign via `exocom_name`. Not a catalog pick —
-	// display-dedup turns concurrent blanks into unnamed / unnamed#2 until someone names themselves.
-	const EXOCOM_PLACEHOLDER_NAME = "unnamed";
 
 	function telemetrySessionId(ctx: ExtensionContext): string {
 		return (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? `legacy-${process.pid}`;
@@ -209,7 +208,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			getContextUsage?: () => { percent?: number } | undefined;
 		};
 		const personaName = host.controller.activePersona?.name ?? "";
-		const displayName = exocomSelfStatusLabel(exocomNamedByModel, exocomName, personaName);
+		const displayName = exocomSelfStatusLabel(host.identity.chosen, host.identity.name, personaName);
 		return {
 			displayName,
 			persona: host.controller.activePersona?.name ?? "",
@@ -269,8 +268,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const selfModel = sanitizePeerField(host.lastCtx.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
-			const ident = exocomSelfWidgetLabel(exocomNamedByModel, exocomName, selfPersona);
-			const roleBit = exocomNamedByModel && selfPersona ? ` · ${selfPersona}` : "";
+			const ident = exocomSelfWidgetLabel(host.identity.chosen, host.identity.name, selfPersona);
+			const roleBit = host.identity.chosen && selfPersona ? ` · ${selfPersona}` : "";
 			const scopeBit = exocomScope
 				? exocomScope.joined
 					? ` · home ${exocomScope.homeWorkspaceLabel} [${exocomScope.homeWorkspaceCode}] → scope [${exocomScope.scopeCode}]`
@@ -297,7 +296,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try {
 			host.lastCtx.ui.setStatus(
 				"persona-exocom",
-				`📡 ${exocomSelfStatusLabel(exocomNamedByModel, exocomName, host.controller.activePersona?.name ?? "")} · ${exocomScope?.joined ? `scope ${exocomScope.scopeCode} · home ${exocomScope.homeWorkspaceCode}` : `workspace ${exocomScope?.scopeCode ?? "?"}`} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
+				`📡 ${exocomSelfStatusLabel(host.identity.chosen, host.identity.name, host.controller.activePersona?.name ?? "")} · ${exocomScope?.joined ? `scope ${exocomScope.scopeCode} · home ${exocomScope.homeWorkspaceCode}` : `workspace ${exocomScope?.scopeCode ?? "?"}`} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
 			);
 		} catch {
 			/* cosmetic */
@@ -318,10 +317,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		const model = sanitizePeerField(host.lastCtx?.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 		const entry: RegistryEntry = {
 			session_id: sessionId,
-			name: exocomName,
+			name: host.identity.name,
 			persona,
 			purpose: host.controller.activePersona?.description ?? "",
-			color: exocomColorFor(exocomName),
+			color: exocomColorFor(host.identity.name),
 			model,
 			pid: process.pid,
 			endpoint: ep,
@@ -363,12 +362,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			const scope = exocomScope ?? selectExocomScope(agentDir, ctx.cwd, host.exocomArgs.joinCode);
 			exocomScope = scope;
 			const hash = scope.scopeWorkspaceId;
-			// Placeholder only. On the first unconstrained task turn, the prompt asks the model to
-			// invent the real call-sign via `exocom_name`; no catalog is assigned here. Registry key
-			// is session_id.
+			// Identity belongs to the session, including when Exocom is disabled or restarted.
+			// Until a name is chosen, the unique provisional label stays distinct from its persona.
 			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
-			exocomName = EXOCOM_PLACEHOLDER_NAME;
-			exocomNamedByModel = false;
 			const ep = exocomEndpointFor(agentDir, hash, sessionId, process.platform);
 			const persona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const model = sanitizePeerField(ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", 96);
@@ -548,10 +544,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				hash,
 				identity: {
 					session_id: sessionId,
-					name: exocomName,
+					get name() { return host.identity.name; },
 					persona,
 					purpose: host.controller.activePersona?.description ?? "",
-					color: exocomColorFor(exocomName),
+					color: exocomColorFor(host.identity.name),
 					model,
 					endpoint: ep,
 					cwd: ctx.cwd,
@@ -562,7 +558,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					},
 				},
 				getCard: () => ({
-					name: exocomName,
+					name: host.identity.name,
 					persona: sanitizePeerField(host.controller.activePersona?.name ?? "", 48),
 					model: sanitizePeerField(host.lastCtx?.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96),
 					context_pct: Math.round(host.lastCtx?.getContextUsage()?.percent ?? 0),
@@ -684,6 +680,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				onPoolChange: () => renderExocomWidget(),
 			});
 			await exocomPlane.start();
+			refreshIdentity = () => exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
 			renderExocomWidget();
 			// A throw from a bare timer callback is an uncaughtException — it would take the whole host
 			// session down over a transient registry write error (a full volume, an AV-held destination,
@@ -720,21 +717,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// `canUseBus` downgrade, and the tool bodies re-read it on every call, failing closed
 			// once it's gone (pi has no `unregisterTool`, so this is how revocation is made real).
 			registerExocomTools(pi, () => exocomPlane, (raw) => {
-				// The model's free-choice call-sign. Sanitized (a display label — strip control chars
-				// via sanitizeLabel, clamp to 32) so a crafted name can't break the widget/attribution;
-				// empty after sanitizing ⇒ keep the current one. Rewrite the entry at once so peers see it.
-				const chosen = sanitizePeerField(raw, 32);
-				if (chosen) {
-					exocomName = chosen;
-					exocomNamedByModel = true;
-					exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
-				}
-				return exocomName;
+				return host.identity.rename(raw, host.lastCtx ?? ctx);
 			}, () => exocomScope);
 			registerExocomWorkTools(pi, {
 				getPlane: () => exocomPlane,
 				sessionId: () => sessionId,
-				name: () => exocomName,
+				name: () => host.identity.name,
 				now: () => Date.now(),
 				canClaim: () => exocomScope?.joined !== true,
 				resolveTarget: (target) => {
@@ -868,7 +856,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						kind: "release",
 						work_key,
 						from_session: exocomSessionId,
-						from_name: exocomName || exocomSessionId,
+						from_name: host.identity.name || exocomSessionId,
 						msg_id: randomUUID(),
 						ts: new Date().toISOString(),
 					}, prune ? { prune } : {});
@@ -908,11 +896,11 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		} catch {
 			/* cosmetic */
 		}
-		exocomName = "";
-		exocomNamedByModel = false;
+		refreshIdentity = undefined;
 		syncExocomActiveTools();
 	}
 	return {
+		refreshIdentity() { refreshIdentity?.(); },
 		reconcile: reconcileExocom,
 		queue: queueExocom,
 		stop: stopExocom,
@@ -922,8 +910,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		currentTelemetryInstance,
 		publishTelemetryPeers,
 		get plane() { return exocomPlane; },
-		get name() { return exocomName; },
-		get namedByModel() { return exocomNamedByModel; },
+		get name() { return host.identity.name; },
+		get namedByModel() { return host.identity.chosen; },
 		get scope() { return exocomScope; },
 		renderWidget: renderExocomWidget,
 		get ledgerFile() { return exocomLedgerFile; },

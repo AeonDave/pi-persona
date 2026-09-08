@@ -25,6 +25,8 @@ import type { InProcessBus } from "../bus/inproc.ts";
 import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { makeContactPeerTool } from "../bus/peers.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
+import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { assignedIdentityPrompt } from "../core/naming.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
@@ -378,7 +380,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// loader's `appendSystemPrompt`, so a leg keeps Pi's full base prompt either way — the
 			// layer adds behavioral consistency, it does not fill a scaffolding gap.
 			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
-			const personaPrompt = [layer, cfg.systemPrompt?.trim(), spec.role?.trim()].filter(Boolean).join("\n\n");
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim()].filter(Boolean).join("\n\n");
 			if (personaPrompt) sessionOpts.systemPrompt = personaPrompt;
 
 			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle
@@ -400,7 +402,10 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					);
 				}
 				if (wantsPeers) {
-					peerLabels.set(childHandle, spec.role ? `${childHandle} (${roleHint(spec.role)})` : childHandle);
+					const label = spec.name?.trim()
+						? sanitizeDisplayLabel(spec.name, childHandle)
+						: spec.role ? `${childHandle} (${roleHint(spec.role)})` : childHandle;
+					peerLabels.set(childHandle, label);
 					const self = childHandle;
 					customTools.push(
 						makeContactPeerTool(deps.bus, self, {

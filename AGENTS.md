@@ -149,15 +149,17 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Postcards remain one-way and non-blocking: `exocom_list`/`exocom_send`
   plus `exocom_name` (a reply is a send with `in_reply_to` set). The separate shared JSONL work
   ledger adds `claim`/`ask`/`answer`/`decline`/non-blocking `wait`/`progress`/`release`: overlapping
-  open write sets NACK atomically, and a pending targeted ask gates that participant to answer/decline
-  plus read-only tools. Semantic frames are signed immediate-wake signals; the ledger is authoritative
+  open write sets NACK atomically, and a pending targeted ask gates that participant to answer/decline,
+  read-only tools, and `exocom_name` identity metadata. Semantic frames are signed immediate-wake signals; the ledger is authoritative
   if delivery is deferred. This is cooperative runtime coordination, not OS authorization. All ten
   tools remain in `EXOCOM_TOOL_NAMES` (with `claim` withheld for a foreign member), targeted denies win independently, and joining requires
   `canUseBus` plus at least one callable closer (`answer` or `decline`) so a published peer cannot be
   wedged by an obligation it has no way to settle. If `exocom_name` is permitted, an unnamed top-level
-  Pi is prompted to invent a task-derived call-sign as its first action on the first unconstrained
-  turn (no catalog or extra model call; pending ask settlement wins); a targeted deny suppresses that
-  prompt. The session-hash suffix of a qualified target survives renames and telemetry resolves the
+  Pi is prompted to invent a task-derived call-sign on its first user or inbound peer turn
+  (no catalog or extra model call). Naming is metadata permitted during pending asks, without
+  settling them; a targeted deny suppresses the prompt. Session identity is shared with standalone
+  `agent_name`, persisted across resume/persona changes, and refreshed through the `context` hook
+  because custom Exocom wakes can bypass `before_agent_start`. The session-hash suffix of a qualified target survives renames and telemetry resolves the
   same canonical session.
   Reuses the broker's wire framing
   (`bus/broker/framing.ts`) and the
@@ -175,6 +177,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   run (concurrency, steer, worktree, and contact_supervisor are not fully provable from unit tests).
 
 ## Project structure
+
+- Session identity: `src/core/session-identity.ts` defines validated names and session-bound
+  persistence; `src/extension/identity.ts` registers `agent_name` and per-call identity context.
+  Exocom uses that same state. A delegate's optional `AgentRunSpec.name` is leader-assigned
+  display identity, propagated to both engines without changing routing ids.
 
 - Session clock and event wakes: `timer now` refreshes the run-start clock snapshot; timer alarms
   require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs

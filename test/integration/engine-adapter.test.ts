@@ -96,10 +96,11 @@ test("makeEngine appends an on-the-fly `role` to the agent's prompt file (child 
 			},
 		},
 	});
-	const r = await eng.run({ agent: "scout", task: "t", role: "You are a CSS wizard." });
+	const r = await eng.run({ agent: "scout", task: "t", name: "Atlas CSS", role: "You are a CSS wizard." });
 	assert.equal(r.ok, true);
 	assert.match(promptFile, /You are scout\./, "the agent's own persona is kept");
 	assert.match(promptFile, /CSS wizard/, "the role is appended");
+	assert.match(promptFile, /\[pi-persona assigned identity\]\s*\{"name":"Atlas-CSS"\}\s*\[\/pi-persona assigned identity\]/);
 });
 
 test("makeEngine aborts the child when the per-call (UI stop) signal fires", async () => {
@@ -202,7 +203,7 @@ test("makeEngine (broker present): child env carries PI_PERSONA_BUS/PI_PERSONA_H
 			},
 		},
 	});
-	const r = await eng.run({ agent: "scout", task: "check [env]" });
+	const r = await eng.run({ agent: "scout", task: "check [env]", name: "Atlas scan" });
 	assert.equal(r.ok, true);
 	assert.ok(r.output.includes(`PI_PERSONA_BUS=${broker.endpoint}`), "child env carries the broker endpoint");
 	assert.match(r.output, /PI_PERSONA_HANDLE=scout#\d+/);
@@ -210,6 +211,7 @@ test("makeEngine (broker present): child env carries PI_PERSONA_BUS/PI_PERSONA_H
 
 	assert.equal(broker.registered.length, 1);
 	assert.match(broker.registered[0]!.handle, /^scout#\d+$/);
+	assert.equal(broker.registered[0]!.label, "Atlas-scan");
 	assert.equal(broker.calls.indexOf("register") < broker.calls.indexOf("spawn"), true, "register runs before spawn");
 
 	assert.deepEqual(broker.unregistered, [broker.registered[0]!.handle], "unregister runs on settle, with the minted handle");

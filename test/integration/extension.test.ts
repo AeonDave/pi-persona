@@ -4550,6 +4550,12 @@ test("a persona that cannot answer or decline leaves Exocom instead of advertisi
 		assert.ok(m.activeToolNames().includes("exocom_answer"), "a protocol closer remains callable");
 		const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
 		assert.doesNotMatch(prompt, /FIRST action.*exocom_name/is, "the system prompt never orders a denied tool");
+		const identityContext = m.fire("context", { messages: [] }, ctx);
+		assert.doesNotMatch(JSON.stringify(identityContext.messages), /call (?:agent_name|exocom_name)/, "standalone naming cannot bypass a denied Exocom name");
+		await assert.rejects(
+			() => (m.tool("agent_name") as { execute: AnyFn }).execute("alias-bypass", { name: "Copper-Kite" }, undefined, undefined, ctx),
+			/use exocom_name/,
+		);
 	} finally {
 		await m.fire("session_shutdown", undefined, ctx);
 		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
@@ -4869,7 +4875,43 @@ test("the ledger protocol canonicalizes ask targets, gates the receiver, and sur
 	}
 });
 
-test("a pending ask defers first-turn naming, which resumes once the protocol obligation is settled", async () => {
+test("a standalone identity is distinct from the persona and survives persona changes and resume", async () => {
+	const m = makeMockPi();
+	const sessionId = "standalone-identity-session";
+	const base = makeCtx(REPO_ROOT).ctx;
+	const ctx = { ...base, sessionManager: { getSessionId: () => sessionId, getBranch: () => [] } };
+	piPersona(m.pi);
+	m.pi.setActiveTools([...m.activeToolNames(), "agent_name"]);
+	try {
+		await m.fire("session_start", {}, ctx);
+		const bootstrap = m.fire("context", { messages: [] }, ctx);
+		assert.match(JSON.stringify(bootstrap.messages), /agent_name/);
+		assert.ok(!m.toolNames().includes("exocom_name"), "standalone naming does not start Exocom");
+		const nameTool = m.tool("agent_name") as { execute: AnyFn };
+		await assert.rejects(() => nameTool.execute("generic", { name: "dev" }, undefined, undefined, ctx));
+		await nameTool.execute("choose", { name: "Copper-Kite" }, undefined, undefined, ctx);
+		await m.cmd("persona", "researcher", ctx);
+		const renamed = m.fire("context", { messages: bootstrap.messages }, ctx);
+		assert.match(JSON.stringify(renamed.messages), /Copper-Kite/);
+		assert.doesNotMatch(JSON.stringify(renamed.messages), /FIRST action/i, "changing persona keeps the chosen identity");
+		const saved = m.entries().map((entry) => ({ type: "custom", ...entry }));
+		const restored = makeMockPi();
+		const restoredCtx = { ...ctx, sessionManager: { getSessionId: () => sessionId, getBranch: () => saved } };
+		piPersona(restored.pi);
+		try {
+			await restored.fire("session_start", {}, restoredCtx);
+			assert.match(JSON.stringify(restored.fire("context", { messages: [] }, restoredCtx).messages), /Copper-Kite/);
+		} finally { await restored.fire("session_shutdown", {}, restoredCtx); }
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("the first inbound Exocom ask can name the session without settling its work obligation", async (t) => {
+	const sentAs: string[] = [];
+	const send = ExocomPlane.prototype.send;
+	t.mock.method(ExocomPlane.prototype, "send", function (this: ExocomPlane, ...args: Parameters<typeof send>) {
+		sentAs.push(this.name);
+		return send.apply(this, args);
+	});
 	const prev = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";
 	const cwd = exocomWorkspace();
@@ -4895,7 +4937,17 @@ test("a pending ask defers first-turn naming, which resumes once the protocol ob
 
 		const constrained = b.fire("before_agent_start", { systemPrompt: "BASE" }, ctxB).systemPrompt as string;
 		assert.match(constrained, new RegExp(`ask_id=${askId}`), "the durable ask is the current obligation");
-		assert.doesNotMatch(constrained, /FIRST action.*exocom_name/is, "the prompt must not order a tool the pending gate forbids");
+		assert.match(constrained, /FIRST action.*exocom_name/is, "identity metadata is permitted before settling work");
+		// Real Pi custom-message wakes bypass before_agent_start. The context hook must
+		// independently supply the bootstrap even when no user prompt has ever arrived.
+		const wake = b.fire("context", { messages: [{ role: "custom", customType: "exocom_received", content: "A peer has a question", display: true, timestamp: 1 }] }, ctxB);
+		assert.match(JSON.stringify(wake.messages), /exocom_name/);
+		assert.equal(b.fire("tool_call", { toolName: "exocom_name", toolCallId: "name-self", input: { name: "Task-Firefly" } }, ctxB)?.block, undefined);
+		await (b.tool("exocom_name") as { execute: AnyFn }).execute("name-self", { name: "Task-Firefly" }, undefined, undefined, ctxB);
+		assert.equal(b.fire("tool_call", { toolName: "write", toolCallId: "pending-write", input: {} }, ctxB)?.block, true, "choosing a name never settles the pending ask");
+		const namedRoster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("named-list", {}, undefined, undefined, ctxA);
+		assert.equal(namedRoster.details.peers[0].displayName, "Task-Firefly", "the registry reflects the name immediately");
+		assert.equal(namedRoster.details.peers[0].target.split("@").at(-1), target.split("@").at(-1), "routing identity stays stable");
 
 		await (b.tool("exocom_answer") as { execute: AnyFn }).execute("name-answer", {
 			ask_id: askId,
@@ -4904,11 +4956,12 @@ test("a pending ask defers first-turn naming, which resumes once the protocol ob
 			evidence: "settled",
 		}, undefined, undefined, ctxB);
 		const ready = b.fire("before_agent_start", { systemPrompt: "BASE" }, ctxB).systemPrompt as string;
-		assert.match(ready, /FIRST action.*exocom_name/is, "naming resumes on the first unconstrained turn");
-
-		await (b.tool("exocom_name") as { execute: AnyFn }).execute("name-self", { name: "Task-Firefly" }, undefined, undefined, ctxB);
+		assert.doesNotMatch(ready, /FIRST action.*exocom_name/is, "settlement does not trigger a second identity");
 		const named = b.fire("before_agent_start", { systemPrompt: "BASE" }, ctxB).systemPrompt as string;
 		assert.doesNotMatch(named, /FIRST action.*exocom_name/is, "a chosen name ends the one-time bootstrap");
+		const peers = await (b.tool("exocom_list") as { execute: AnyFn }).execute("reply-list", {}, undefined, undefined, ctxB);
+		await (b.tool("exocom_send") as { execute: AnyFn }).execute("identity-reply", { target: peers.details.peers[0].target, message: "Completed the requested review." }, undefined, undefined, ctxB);
+		assert.equal(sentAs.at(-1), "Task-Firefly", "outgoing envelopes use the current name too");
 	} finally {
 		await a.fire("session_shutdown", undefined, ctxA);
 		await b.fire("session_shutdown", undefined, ctxB);

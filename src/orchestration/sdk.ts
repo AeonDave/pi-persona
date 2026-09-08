@@ -16,6 +16,9 @@ import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 
 export interface AgentRunSpec {
 	agent: string;
+	/** Supervisor-assigned display identity for this run. This is metadata only; handles and
+	 * routing continue to use the configured agent name and the engine-minted child handle. */
+	name?: string;
 	task: string;
 	model?: string;
 	tools?: string[];

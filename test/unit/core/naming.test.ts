@@ -26,10 +26,10 @@ test("the supervisor invents leg labels while a top-level Exocom identity is tas
 
 test("local UI never presents the placeholder as a chosen identity", () => {
 	assert.equal(exocomSelfStatusLabel(false, "unnamed"), "unnamed");
-	assert.equal(exocomSelfStatusLabel(false, "unnamed", "elite"), "elite");
+	assert.equal(exocomSelfStatusLabel(false, "pi-a1b2c3d4", "elite"), "pi-a1b2c3d4");
 	assert.equal(exocomSelfStatusLabel(false, ""), "unnamed");
 	assert.equal(exocomSelfWidgetLabel(false, "unnamed"), "unnamed (you)");
-	assert.equal(exocomSelfWidgetLabel(false, "unnamed", "elite"), "elite (you)");
+	assert.equal(exocomSelfWidgetLabel(false, "pi-a1b2c3d4", "elite"), "pi-a1b2c3d4 (you)");
 	assert.equal(exocomSelfWidgetLabel(true, "kiln"), "kiln (you)");
 	assert.equal(exocomSelfStatusLabel(true, "kiln", "elite"), "kiln");
 });

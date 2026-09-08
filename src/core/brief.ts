@@ -208,7 +208,7 @@ export interface ExocomBriefInput {
 	 * the placeholder is not an identity, and the model should invent one.
 	 */
 	namedByModel?: boolean;
-	/** False while a pending ask (or unreadable ledger) gives protocol settlement priority. */
+	/** False when the naming tool is unavailable; naming only changes session metadata. */
 	canNameNow?: boolean;
 	joined?: boolean;
 	scopeCode?: string;
@@ -234,7 +234,7 @@ function peerIdentifier(value: string, max: number): string {
 export function exocomNameYourselfLine(): string {
 	return (
 		`You have no call-sign yet. ${inventedExocomNameHint()} ` +
-		"Your FIRST action on the first unconstrained turn must be exocom_name({ name: \"<your invented call-sign>\" }), " +
+		"Your FIRST action on the first user or peer turn must be exocom_name({ name: \"<your invented call-sign>\" }), " +
 		"before any prose or other tool call."
 	);
 }
