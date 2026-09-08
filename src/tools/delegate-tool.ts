@@ -82,7 +82,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
-		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString])),
+		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString], {
+			description: "This worker's structured brief. Required when the active persona has requireBrief, including read-only scouts. Supply all six fields here in each tasks[] entry; task prose and a top-level brief do not replace it.",
+		})),
 		name: Type.Optional(
 			Type.String({ description: LeaderNameDescription }),
 		),
@@ -99,7 +101,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Boolean({ description: "true = give this sub-agent working MCP tools (runs it on the child engine so pi-mcp-adapter initializes; the default engine leaves MCP tools 'not initialized'). Pass any server session id in the task to share a server-keyed backend's state." }),
 		),
 		timeoutMs: Type.Optional(
-			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default for this task only" }),
+			Type.Number({ description: "Idle timeout in ms for this worker: resets on progress, not a total runtime cap. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
 		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
 		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for this leg" })),
@@ -107,7 +109,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
-		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString])),
+		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString], {
+			description: "Single-mode structured brief. Required when the active persona has requireBrief. For parallel mode, provide a separate complete brief inside every tasks[] entry instead; this top-level field is not shared with the batch.",
+		})),
 		name: Type.Optional(Type.String({ description: LeaderNameDescription })),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
@@ -120,7 +124,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Boolean({ description: "true = give the single sub-agent working MCP tools (runs it on the child engine; the default engine leaves MCP tools 'not initialized')" }),
 		),
 		timeoutMs: Type.Optional(
-			Type.Number({ description: "Per-leg wall-clock ceiling in ms; overrides the shared default (single mode)" }),
+			Type.Number({ description: "Single-mode idle timeout in ms: resets on progress, not a total runtime cap. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
 		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
 		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for the single leg" })),
@@ -128,7 +132,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Union([
 				Type.Array(Type.Union([DelegateTaskItem, JsonString])),
 				JsonString,
-			], { description: "Independent tasks as an array of objects (not a stringified JSON array). Give each a disjoint scope; parallel writers need writeSet." }),
+			], { description: `Independent tasks as an array of objects (at most ${d.RUN_LIMITS.maxChildren} workers per call; split larger batches). Each entry carries its own agent, task, and any policy-required brief; top-level single-mode fields are not inherited. Give each a bounded scope; parallel writers need disjoint writeSet values.` }),
 		),
 		concurrency: Type.Optional(
 			Type.Integer({ minimum: 1, description: `Max children to run at once (default ${d.RUN_LIMITS.maxConcurrency}; larger requests are clamped)` }),
@@ -136,13 +140,13 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		async: Type.Optional(
 			Type.Boolean({
 				description:
-					"Explicitly run in the background (already the DEFAULT in interactive sessions) — returns run ids at once; each result comes back to you automatically as a follow-up. Set false to force blocking.",
+					"Explicitly run in the background (already the DEFAULT in interactive sessions) — returns run ids at once; each result comes back to you automatically as a follow-up. Set false to force blocking. If both async and sync are supplied, async takes precedence.",
 			}),
 		),
 		sync: Type.Optional(
 			Type.Boolean({
 				description:
-					"Block this turn until the sub-agent(s) finish and return their results inline — only when you need them before your very next step. (Headless sessions already default to sync.)",
+					"Block this turn until the sub-agent(s) finish and return their results inline — only when you need them before your very next step. (Headless sessions already default to sync.) Omit async when using this flag; an explicit async value takes precedence.",
 			}),
 		),
 	});
@@ -285,15 +289,16 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		label: "Delegate",
 		description: [
 			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
-			'Minimum call: { agent: "operator", task: "<self-contained brief: objective, scope, success signal>" } — everything else is optional.',
-			"Fan out with tasks: [{ agent, task }, ...] (disjoint scopes — a JSON array of objects, never a string). A persona may declaratively require a six-field `brief`, a structured output contract, or disjoint `writeSet` ownership; those calls fail before spawn when incomplete.",
+			"Pass agent and task for one worker, or a tasks array for parallel workers. Follow the active persona's delegation policy for required fields.",
+			"When requireBrief is active, EVERY worker needs brief: { objective, scopeRoe, position, constraints, requiredArtifacts, stopConditions } with nonempty values, including read-only scouts. In parallel mode put it in each tasks[].brief; task prose and a top-level brief do not substitute. Read the current per-turn delegation brief for a complete example.",
+			"A persona may also require a structured output contract or disjoint writeSet ownership for parallel writers. Incomplete calls are rejected before any worker starts; fill the missing fields across the batch before retrying.",
 			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once, stay free,",
 			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
 			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
 			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
-			"candidates (or call `models`). Advanced knobs: name, tools, brief, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
+			"candidates (or call `models`). Other options: name, tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {

@@ -23,9 +23,9 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			description: "arm = schedule a wakeup · cancel = drop one by id · list = show armed alarms · now = read the fresh clock",
 		}),
 		message: Type.Optional(
-			Type.String({ description: "arm: the follow-up injected into the session when the timer fires (what to do on wake, e.g. 'check the status and summarize changes'). Required for arm." }),
+			Type.String({ description: "arm: the non-empty follow-up injected into the session when the timer fires (what to do on wake, e.g. 'check the status and summarize changes'). After trimming surrounding whitespace, maximum 4000 characters. Required for arm." }),
 		),
-		delaySeconds: Type.Optional(Type.Number({ description: "arm: fire this many seconds from now. Give this OR atIso, not both." })),
+		delaySeconds: Type.Optional(Type.Number({ description: "arm: fire this many seconds from now; it is rounded to milliseconds and must produce a delay from 1 second through 86400 seconds. Give this OR atIso, not both." })),
 		atIso: Type.Optional(Type.String({ description: "arm: fire at this absolute ISO-8601 instant (date-time must include Z or a numeric timezone offset, e.g. '2026-07-11T19:00:00Z'). Give this OR delaySeconds, not both." })),
 		label: Type.Optional(Type.String({ description: "arm: a short human label for the alarm (e.g. 'status review')." })),
 		id: Type.Optional(Type.String({ description: "cancel: the timer id to cancel (e.g. 'timer-1')." })),

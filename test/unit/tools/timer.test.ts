@@ -37,6 +37,12 @@ test("timer now returns a fresh UTC instant plus local timezone and offset", asy
 	assert.match(text, /local .* \([^)]*; UTC[+-]\d{2}:\d{2}\)/);
 });
 
+test("timer now ignores an action-irrelevant empty message", async () => {
+	const { tools } = harness();
+	const result = await tools.get("timer").execute("call-now", { action: "now", message: "" });
+	assert.equal(result.isError, false);
+});
+
 test("timer arm refuses a whitespace-only message instead of storing an empty follow-up", async () => {
 	const { tools } = harness();
 	const result = await tools.get("timer").execute("call-1", { action: "arm", message: "   ", delaySeconds: 60 });
@@ -89,4 +95,25 @@ test("timer description states the session-open dependency and finite alarm boun
 	assert.match(description, /session must remain open/i);
 	assert.match(description, /32/);
 	assert.doesNotMatch(description, /nmap|Paperwork/i);
+});
+
+test("timer schema documents the runtime message and delay bounds", () => {
+	const { tools } = harness();
+	const properties = (tools.get("timer").parameters as any).properties;
+	assert.equal(properties.message.minLength, undefined, "message is action-conditional and irrelevant to now");
+	assert.equal(properties.message.maxLength, undefined, "raw maxLength would reject valid padded text before runtime trimming");
+	assert.match(String(properties.message.description), /after trimming.*4000/i);
+	assert.match(String(properties.delaySeconds.description), /rounded to milliseconds/i);
+	assert.match(String(properties.delaySeconds.description), /1 second through 86400 seconds/i);
+});
+
+test("timer keeps valid padded messages and sub-second values that round to one second", async () => {
+	const { tools } = harness();
+	const result = await tools.get("timer").execute("call-1", {
+		action: "arm",
+		message: `wake${" ".repeat(4_001)}`,
+		delaySeconds: 0.9999,
+	});
+	assert.equal(result.isError, false);
+	assert.match(result.content[0]?.text ?? "", /On fire .*"wake"/);
 });

@@ -9,6 +9,12 @@ import { makeContactSupervisorTool } from "../../../src/bus/contact.ts";
 const CTX = undefined as never;
 const details = (r: { details: unknown }): { kind: string; delivered: boolean } => r.details as { kind: string; delivered: boolean };
 
+test("contact_supervisor description states sync downgrade and message bound", () => {
+	const tool = makeContactSupervisorTool(new InProcessBus(), "scout", "supervisor", { allowBlocking: false });
+	assert.match(tool.description, /one-way.*return immediately/i);
+	assert.match(tool.description, /8000.*shorten|shorten.*8000/i);
+});
+
 class ShortTimeoutBus extends InProcessBus {
 	override ask(
 		from: string,

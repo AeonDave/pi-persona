@@ -12,7 +12,7 @@ import { attributePeer } from "../core/fence.ts";
 import type { LedgerAnswer } from "../exocom/ledger.ts";
 import type { ExocomPlane } from "../exocom/plane.ts";
 import type { ExocomSemanticFrame } from "../exocom/envelope.ts";
-import { waitTimeoutMs } from "../exocom/wait.ts";
+import { EXOCOM_WAIT_MAX_MS, waitTimeoutMs } from "../exocom/wait.ts";
 import { normalizeMetadataText } from "../exocom/registry.ts";
 
 const TOKEN = { minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$" } as const;
@@ -24,7 +24,7 @@ const ClaimParams = Type.Object({
 });
 
 const AskParams = Type.Object({
-	work_key: Type.String({ ...TOKEN, description: "Work key this question belongs to." }),
+	work_key: Type.String({ ...TOKEN, description: "Stable work key for this question, 1–128 token characters matching [A-Za-z0-9._:-], e.g. `api-review`; a local claim is not required." }),
 	target: Type.String({ minLength: 1, maxLength: 80, description: "One peer's target exactly as exocom_list shows it (never *)." }),
 	question: Type.String({ minLength: 1, maxLength: 4_096, description: "The bounded question." }),
 	ask_id: Type.Optional(Type.String({ ...TOKEN, description: "Correlation id; generated if omitted." })),
@@ -44,13 +44,13 @@ const DeclineParams = Type.Object({
 });
 
 const WaitParams = Type.Object({
-	work_key: Type.String({ ...TOKEN, description: "Work key to join on." }),
-	ask_id: Type.String({ ...TOKEN, description: "The ask to join. A retained answer is returned immediately." }),
-	timeoutMs: Type.Optional(Type.Number({ description: "Wake budget (ms). Cap 600000; default 600000. Does not block this call." })),
+	work_key: Type.String({ ...TOKEN, description: "Work key paired with the outbound ask." }),
+	ask_id: Type.String({ ...TOKEN, description: "The ask_id returned by your outbound exocom_ask. A retained answer is returned immediately." }),
+	timeoutMs: Type.Optional(Type.Number({ description: `Requested wake budget in milliseconds (default ${EXOCOM_WAIT_MAX_MS}); runtime floors fractions and clamps to 1–${EXOCOM_WAIT_MAX_MS}. Does not block this call.` })),
 });
 
 const ReleaseParams = Type.Object({
-	work_key: Type.String({ ...TOKEN, description: "Work key whose claims this session releases." }),
+	work_key: Type.String({ ...TOKEN, description: "Work key whose claims and outbound asks this session releases." }),
 });
 
 const ProgressParams = Type.Object({
@@ -100,7 +100,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 	pi.registerTool({
 		name: "exocom_claim",
 		label: "Exocom Claim",
-		description: "Claim a write-set slice on the workspace work ledger. Overlap with an open claim is refused.",
+		description: "Claim a repository-relative write-set slice on the workspace work ledger. Overlap with an open claim is refused; a Pi joined from an external workspace cannot claim its home paths.",
 		parameters: ClaimParams,
 		async execute(_id, params: Static<typeof ClaimParams>) {
 			if (deps.canClaim?.() === false) {
@@ -128,7 +128,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 	pi.registerTool({
 		name: "exocom_ask",
 		label: "Exocom Ask",
-		description: "Ask one peer session a bounded question on a work key. Never broadcasts (*). One pending ask per (work_key, to).",
+		description: "Ask one peer session a bounded question on a work key. Use one exact `target` from `exocom_list`; never broadcast (`*`). One pending ask per (work_key, target session).",
 		parameters: AskParams,
 		async execute(_id, params: Static<typeof AskParams>) {
 			const { from_session, from_name, ts } = identity();
@@ -227,7 +227,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 	pi.registerTool({
 		name: "exocom_wait",
 		label: "Exocom Wait",
-		description: "Join one ask WITHOUT blocking this tool call. Returns a retained answer immediately, otherwise a follow-up wakes you on answer or timeout (cap 600000ms).",
+		description: `Join one ask WITHOUT blocking this tool call. Returns a retained answer immediately, otherwise a follow-up wakes you on answer or timeout (cap ${EXOCOM_WAIT_MAX_MS}ms).`,
 		parameters: WaitParams,
 		async execute(_id, params: Static<typeof WaitParams>) {
 			identity();

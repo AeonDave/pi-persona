@@ -148,9 +148,9 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 			'brief: { objective: "<verifiable objective + success signal>", scopeRoe: "<in-scope targets + hard boundaries>", position: "<minimum starting state>", constraints: ["<tool/noise/destructive limits>"], requiredArtifacts: ["<exact reproducible evidence>"], stopConditions: ["<when to stop and report>"] }',
 		);
 	}
-	if (input.requireDisjointWrites) callFields.push('writeSet: ["<repository-relative paths this leg alone may edit>"]');
 	if (input.outputContract?.trim()) callFields.push(`outputContract: ${JSON.stringify(input.outputContract.trim())}`);
 	const discipline: string[] = [];
+	if (input.requireBrief) discipline.push("A complete brief is required for every worker, including read-only scouts. For parallel calls, put the same six fields in every tasks[].brief; the top-level brief is single-mode only. Task prose does not replace the structured brief.");
 	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. Read-only scout (or tools limited to read/grep/find/ls) may fan out without writeSet.");
 	if (input.requireFreshVerification) discipline.push("After a material mutation, start a fresh verifier sequentially against the resulting state; a verifier launched before or during the mutation cannot approve completion.");
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
@@ -274,14 +274,14 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 	// which is why collision-avoidance ("shout if this clashes with yours") belongs here and would
 	// otherwise fall in neither half.
 	const peerCoordination = input.tools.send
-		? `coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. exocom_send({ target: "*" }) reaches every reachable peer at once. Replies arrive automatically as [exocom_received];${input.tools.list ? " do not poll exocom_list or arm timers. exocom_list is presence only." : " do not arm timers."}`
+		? `coordination with work it has in flight: exocom_send({ target: "<name>", message: "<request>" }), one-way and non-blocking. exocom_send({ target: "*", message: "<shared update>" }) reaches every reachable peer at once. Replies arrive automatically as [exocom_received];${input.tools.list ? " do not poll exocom_list or arm timers. exocom_list is presence only." : " do not arm timers."}`
 		: "coordination with work it has in flight, using only the permitted Exocom actions.";
 	lines.push(
 		`A peer is for what only another LIVE INSTANCE can give: judgement you cannot specify — a read on your approach, a risk you may be blind to — or ${peerCoordination} Coordinate only when it genuinely helps; a peer is a collaborator, not an obligation.`,
 	);
 	const target = input.tools.list ? "<target from exocom_list>" : "<target from the current peer roster>";
 	const ask = input.tools.ask
-		? ` Ask only when one peer's answer gates the next action: exocom_ask({ target: "${target}", work_key, question })${input.tools.wait ? ", then exocom_wait({ work_key, ask_id }) once and end the turn." : "; let the permitted response action settle it."}`
+		? ` Ask only when one peer's answer gates the next action: exocom_ask({ target: "${target}", work_key, question })${input.tools.wait ? ", then exocom_wait({ work_key, ask_id }) once. If it reports waiting, end the turn for the follow-up; if already answered, continue using the returned evidence." : "; let the permitted response action settle it."}`
 		: "";
 	const close = input.tools.answer && input.tools.decline
 		? " A targeted peer must answer or decline the pending ask before mutating or delegating."

@@ -112,6 +112,8 @@ test("a generic requireBrief policy advertises the complete cold-start packet", 
 		assert.match(brief ?? "", new RegExp(`\\b${field}\\b`), `missing ${field}`);
 	}
 	assert.match(brief ?? "", /outputContract: "finding"/);
+	assert.ok(brief?.includes("tasks[].brief"), "parallel workers need the same per-worker brief as single calls");
+	assert.match(brief ?? "", /read-only/);
 });
 
 test("generic write ownership and fresh-verification policies are advertised without persona names", () => {
@@ -128,6 +130,17 @@ test("generic write ownership and fresh-verification policies are advertised wit
 	assert.match(brief ?? "", /disjoint/i);
 	assert.match(brief ?? "", /read\/grep\/find\/ls/);
 	assert.match(brief ?? "", /fresh verifier/i);
+});
+
+test("a read-only minimum call does not request write ownership", () => {
+	const brief = buildDelegationBrief({
+		agents: [{ name: "scout", tools: ["read", "grep", "find", "ls"] }],
+		teams: {}, flows: [], standing: true, asyncDefault: true, requireDisjointWrites: true,
+	});
+	const call = brief?.match(/Minimum call: (delegate\(\{.*?\}\))\./)?.[1];
+	assert.ok(call, "the supervisor needs a complete minimum-call example");
+	assert.doesNotMatch(call, /writeSet:/, "read-only workers must not be prompted to invent writable paths");
+	assert.match(brief ?? "", /Parallel writers.*writeSet/);
 });
 
 test("without operator the example uses the first listed agent", () => {
@@ -180,6 +193,16 @@ const PEERS = [{ name: "orion", persona: "dev" }];
 
 test("buildExocomBrief: no peers → no brief", () => {
 	assert.equal(buildExocomBrief([], XOPTS), undefined);
+});
+
+test("every Exocom send example supplies a target and nonempty message", () => {
+	const brief = buildExocomBrief(PEERS, XOPTS) ?? "";
+	const examples = [...brief.matchAll(/exocom_send\((\{[^}]*\})\)/g)].map((match) => match[1] ?? "");
+	assert.ok(examples.length >= 2, "exercise both directed and broadcast examples");
+	for (const example of examples) {
+		assert.match(example, /\btarget: "[^"]+"/);
+		assert.match(example, /\bmessage: "[^"]+"/, "broadcast calls need a body just like directed sends");
+	}
 });
 
 test("buildExocomBrief: an unnamed self still gets a name-yourself line with no peers", () => {
@@ -351,6 +374,8 @@ test("buildExocomBrief: teaches the enforced ledger protocol separately from pos
 	assert.match(brief, /exocom_claim\(\{ work_key, write_set, slice \}\)/, "claim syntax is usable, not merely a tool-name list");
 	assert.match(brief, /target from exocom_list/, "ask uses the public routable target rather than an internal session id");
 	assert.match(brief, /exocom_wait\(\{ work_key, ask_id \}\).*end the turn/i, "the non-blocking join has an explicit stop action");
+	assert.match(brief, /if.*waiting.*end the turn/i, "only an armed wait has a future wake");
+	assert.match(brief, /already answered.*continue/i, "an immediate answer must not strand the supervisor");
 	assert.match(brief, /answer or decline.*before mutating or delegating/i, "the receiver-side runtime gate is stated honestly");
 	assert.match(brief, /release.*finish or abandon/i, "ownership has a lifecycle, not only acquisition");
 	assert.match(brief, /exocom_send.*never claims.*wakes a ledger wait/i, "chat cannot be mistaken for coordination state");

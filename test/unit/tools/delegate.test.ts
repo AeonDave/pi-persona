@@ -86,6 +86,15 @@ test("validateDelegationBrief checks the single shape and accepts a complete bri
 	assert.match(error ?? "", /agent \"a\"/);
 });
 
+test("parallel brief errors explain per-task placement instead of inheriting a top-level brief", () => {
+	const tasks = Array.from({ length: 6 }, (_, i) => ({ agent: "scout", task: `Inspect component ${i}` }));
+	const error = validateDelegationBrief({ tasks, brief: completeBrief() });
+	assert.match(error ?? "", /tasks\[0\]/);
+	assert.match(error ?? "", /tasks\[\]\.brief/);
+	assert.match(error ?? "", /top-level brief.*single/i);
+	assert.equal(validateDelegationBrief({ tasks: tasks.map((task) => ({ ...task, brief: completeBrief() })) }), undefined);
+});
+
 test("validateDelegationBrief validates the effective tasks[] mode, not ignored single-mode leftovers", () => {
 	assert.equal(
 		validateDelegationBrief({

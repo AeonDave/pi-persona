@@ -67,7 +67,7 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 			"`list` shows who is still reachable; `send` pushes a one-way note to one of them.",
 			"You never wait for a reply — a peer answers (if it chooses) with its own send, which",
 			'reaches you as a "[message from peer …]" turn. Keep notes short and substantive;',
-			"finalize your own answer once your position is stable.",
+			`finalize your own answer once your position is stable. This run allows at most ${maxSends} sends.`,
 		].join(" "),
 		promptSnippet: "contact_peer — list your run's sibling agents or send one a one-way note",
 		parameters: PeerParams,

@@ -45,9 +45,9 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 			}),
 		),
 		strategy: Type.Optional(
-			Type.String({ description: "Per-call strategy override (default: the selected or active persona's council strategy)" }),
+			Type.String({ description: 'Per-call strategy override (default: the selected or active council profile\'s strategy, or built-in "magi")' }),
 		),
-		roster: Type.Optional(Type.String({ description: "Per-call roster override (default: the selected or active persona's council roster)" })),
+		roster: Type.Optional(Type.String({ description: 'Per-call roster override (default: the selected or active profile\'s roster, then its orchestration roster, or built-in "magi")' })),
 		params: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), {
 				description:
@@ -60,7 +60,7 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 		label: "Council",
 		description: [
 			"Convene a council of specialists with controlled, complementary biases to deliberate a",
-			"decision and vote — returns the ruling (winner, tally, each member's view, recorded dissent).",
+			"decision — returns the selected strategy's result, preserving vote tally and dissent when produced.",
 			"Use it before any significant choice; then EXECUTE the ruling yourself and re-convene when",
 			"execution surfaces a new decision. Patterns: adversarial vote (magi, council-rounds), best-of-N",
 			"with an impartial arbiter (judge, compete), batch map, merged synthesis (synthesize).",
