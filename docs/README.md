@@ -19,11 +19,6 @@ This folder contains the long-form documentation that defines how the project is
 - [`REFERENCE.md`](./REFERENCE.md)
   - Canonical Core API, configuration, environment variables, commands, and data-driven recipes.
 
-## Supporting evidence
-
-- [`REVIEW-2026-09-04.md`](./REVIEW-2026-09-04.md)
-  - Quality review and real multi-Pi validation for the v1.13.0 release.
-
 ## Quick map
 
 - **For users / operators:** start from [README](../README.md) and [EXPERIENCE.md](./EXPERIENCE.md); use `REFERENCE.md` for configuration and recipes.
