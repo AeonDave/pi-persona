@@ -233,7 +233,10 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						// for ANY persona (these are supervisor→child controls, not child tools).
 					).run(runSpec, undefined, ac.signal, (steer) => {
 						d.steerRegistry.set(nodeId, steer);
-						d.agentTree.update(nodeId, { detail: "" }); // live now — clear the "queued" marker
+						// live now — clear the "queued" marker and re-stamp the clock from run time, not
+						// the queue-time seed, so the elapsed reading and stall badge are both honest.
+						const now = Date.now();
+						d.agentTree.update(nodeId, { detail: "", startedAt: now, lastAdvanceAt: now });
 					}),
 					ac.signal,
 				);

@@ -45,7 +45,7 @@ test("a failed host start warns the user once, withholds the endpoint from child
 	await settle();
 	assert.equal(starts(), 2, "the next build retries the start");
 	assert.equal(warnings.length, 1, "one warning per failure streak");
-	assert.match(broker.doctorLine(), /broker: on — failed — .*EADDRINUSE/);
+	assert.match(broker.doctorLine(), /^broker: failed — .*EADDRINUSE/, "spec §4.7: \"broker: failed — <reason>\", not the double-dash \"on — failed —\"");
 });
 
 test("a successful start after a failure clears the error and hands the endpoint out again", async () => {

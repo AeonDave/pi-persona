@@ -117,7 +117,7 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, isQueuedMarker, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
@@ -506,7 +506,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// state. Nothing ever sets `detail` to a waiting state — it is a usage string, an error, or
 		// `toolActivity(name, args)`, which splices the tool's own argument text — so a substring
 		// test for "waiting" could only ever fire on a leg that is running normally.
-		if (node.detail?.trim().toLowerCase() === "queued") return "queued";
+		if (isQueuedMarker(node.detail)) return "queued";
 		return "running";
 	}
 	function telemetryAgent(node: AgentNode): TelemetryAgentInput {
@@ -1266,7 +1266,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const id = `${rootId}/${nodeKey}`;
 				if (st === "running") {
 					// detail "" clears the seeded "queued" marker — this core is actually live now.
-					agentTree.add({ id, label: coreLabel(ctx, agent, nodeKey), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, agent), detail: "" });
+					// Stamp the clock here too: the seed's stamp (from AgentTree.add's upsert) is queue
+					// time, not run time, so a queued leg would otherwise show elapsed time it never
+					// spent running and could raise a false stall badge once it goes live.
+					const now = Date.now();
+					agentTree.add({ id, label: coreLabel(ctx, agent, nodeKey), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, agent), detail: "", startedAt: now, lastAdvanceAt: now });
 					return;
 				}
 				stopRegistry.delete(id);

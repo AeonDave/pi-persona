@@ -420,6 +420,17 @@ test("a refused stop shows a notice instead of silently doing nothing, cleared b
 	overlay.dispose();
 });
 
+test("an unhandled key that clears a notice still repaints, so a stale notice does not linger", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { onStop: () => false, canStop: () => false });
+	overlay.handleInput("x"); // refused stop → notice shown
+	assert.match(overlay.render(80).join("\n"), /nothing to stop for alpha/);
+	overlay.handleInput("q"); // unhandled in the list view — no branch matches
+	assert.doesNotMatch(overlay.render(80).join("\n"), /nothing to stop/, "the field was cleared, so the repaint must not still carry the old text");
+	overlay.dispose();
+});
+
 test("rows show elapsed time and the stall badge from the injected clock", () => {
 	const tree = new AgentTree(() => 0);
 	tree.add({ id: "a", label: "alpha", detail: "12k tok" });

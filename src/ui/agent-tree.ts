@@ -67,10 +67,20 @@ export interface RenderOptions {
 	stallMs?: number;
 }
 
+/** Whether `detail` is the literal "queued" marker a seeded-but-not-yet-live leg carries — shared
+ *  by `runningAnnotation` (suppresses the clock) and `telemetryStatus` (`extension.ts`, reports the
+ *  `queued` state). One predicate so the two readings of the marker cannot drift apart. */
+export function isQueuedMarker(detail: string | undefined): boolean {
+	return detail?.trim().toLowerCase() === "queued";
+}
+
 /** "1m 15s" while a running node keeps advancing; "⚠ stalled 1m 30s" once it has been quiet
- *  for `stallMs`. Undefined for settled nodes or nodes without clock data. Pure. */
-export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt">, now: number, stallMs: number): string | undefined {
+ *  for `stallMs`. Undefined for settled nodes, nodes without clock data, or a node still carrying
+ *  the "queued" marker — it was seeded ahead of the concurrency gate and has not started running
+ *  yet, so its clock (stamped at seed time) has nothing true to report. Pure. */
+export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail">, now: number, stallMs: number): string | undefined {
 	if (node.status !== "running" || node.startedAt === undefined) return undefined;
+	if (isQueuedMarker(node.detail)) return undefined;
 	const quietSince = node.lastAdvanceAt ?? node.startedAt;
 	if (stallMs > 0 && now - quietSince >= stallMs) return `⚠ stalled ${formatDuration(now - quietSince)}`;
 	return formatDuration(now - node.startedAt);

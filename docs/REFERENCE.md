@@ -54,7 +54,8 @@ backends, keeping a caller-provided run label available in the live tree and run
 `outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed
 (the only built-in is `default`). Naming one that isn't installed is rejected before any worker
 spawns, checked across every task in a parallel batch: `delegate: unknown output contract(s) "x" —
-nothing was spawned. Installed contracts: default, finding…`.
+nothing was spawned. Installed contracts: default, finding` (the list is capped at 16 names; a
+`, …` marker is appended only when more than 16 are installed).
 
 ### Supervising running sub-agents — the `intercom` plane
 
@@ -327,12 +328,14 @@ stop, `s` steer, and Esc close.
 **Commands** — `/persona [name|off|list|reload|seed|restore]` · `/models [query]` ·
 `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`.
 
-`/doctor` reports the cross-process broker's lifecycle on one line: `endpoint …` once the host is
-listening, `failed — …` after a bind error (children built while it is down spawn without a bus
-endpoint, so they never burn connect backoff against a dead socket; the next child-engine build
-retries), `(starting…)` mid-attempt, or `(not started — no child-engine build yet)` before any
-child-engine build has run. A connected broker child's status shows `⇄ <handle>`; if that connection
-drops, the status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
+`/doctor` reports the cross-process broker's lifecycle on one line: `broker: on — endpoint …` once
+the host is listening, `broker: on — (starting…)` mid-attempt, or
+`broker: on — (not started — no child-engine build yet)` before any child-engine build has run. A
+bind failure reports on its own, without the `on —` prefix or a connected-children count (there is
+neither while down): `broker: failed — <reason>` — children built while it is down spawn without a
+bus endpoint, so they never burn connect backoff against a dead socket, and the next child-engine
+build retries. A connected broker child's status shows `⇄ <handle>`; if that connection drops, the
+status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 **CLI flags** — `--persona <name>` starts with that installed persona and errors if it is missing;
 `--exocom` joins this workspace's Exocom plane; `--exocom=Ab0T` joins another workspace's scope
