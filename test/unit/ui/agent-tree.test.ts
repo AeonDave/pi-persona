@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { AgentTree, type AgentNode, flattenTree, renderAgentTree, renderAgentTreeSummary } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, flattenTree, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -131,4 +131,48 @@ test("removing a parent removes its descendants; isEmpty + hasRunning reflect st
 	assert.equal(tree.hasRunning(), false);
 	tree.remove("p");
 	assert.equal(tree.isEmpty(), true);
+});
+
+test("AgentTree stamps startedAt/lastAdvanceAt from its clock and lets a patch advance the clock", () => {
+	const tree = new AgentTree(() => 1_000);
+	tree.add({ id: "a", label: "A" });
+	assert.equal(tree.snapshot()[0]?.startedAt, 1_000);
+	assert.equal(tree.snapshot()[0]?.lastAdvanceAt, 1_000);
+	let changes = 0;
+	tree.onChange(() => changes++);
+	tree.update("a", { lastAdvanceAt: 5_000 });
+	assert.equal(tree.snapshot()[0]?.lastAdvanceAt, 5_000);
+	assert.equal(changes, 0, "a clock-only patch is not a tree change (the ticker paints it)");
+	tree.update("a", { lastAdvanceAt: 6_000, detail: "3k tok" });
+	assert.equal(changes, 1, "a patch that also changes visible state still notifies");
+});
+
+test("runningAnnotation shows elapsed time while advancing and a stall badge once quiet for stallMs", () => {
+	const node = { status: "running" as const, startedAt: 0, lastAdvanceAt: 60_000 };
+	assert.equal(runningAnnotation(node, 75_000, 90_000), "1m 15s");
+	assert.equal(runningAnnotation(node, 150_000, 90_000), "⚠ stalled 1m 30s");
+	assert.equal(runningAnnotation(node, 150_000, 0), "2m 30s", "stallMs 0 disables the badge");
+	assert.equal(runningAnnotation({ status: "done" as const, startedAt: 0 }, 5_000, 90_000), undefined);
+	assert.equal(runningAnnotation({ status: "running" as const }, 5_000, 90_000), undefined, "no clock data → no annotation");
+});
+
+test("renderAgentTree appends the running annotation after the detail, only when a clock is given", () => {
+	const nodes: AgentNode[] = [
+		{ id: "a", label: "alpha", parentId: undefined, status: "running", detail: "12k tok", startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "b", label: "bravo", parentId: undefined, status: "done", detail: "$0.01", startedAt: 0 },
+	];
+	assert.deepEqual(renderAgentTree(nodes), ["⏳ alpha  12k tok", "✓ bravo  $0.01"]);
+	assert.deepEqual(renderAgentTree(nodes, { now: 30_000, stallMs: 90_000 }), ["⏳ alpha  12k tok · 30s", "✓ bravo  $0.01"]);
+	assert.deepEqual(renderAgentTree([{ ...nodes[0]!, detail: undefined }], { now: 120_000, stallMs: 90_000 }), ["⏳ alpha  ⚠ stalled 2m"]);
+});
+
+test("renderAgentTreeSummary passes the clock through", () => {
+	const nodes: AgentNode[] = [{ id: "a", label: "alpha", parentId: undefined, status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 }];
+	assert.deepEqual(renderAgentTreeSummary(nodes, 8, { now: 5_000, stallMs: 90_000 }), ["⏳ alpha  5s"]);
+});
+
+test("progressPatch bumps lastAdvanceAt and prefers activity over a token count", () => {
+	assert.deepEqual(progressPatch({ output: "o", activity: "⚙ bash ls", tokens: 1500 }, 42), { lastAdvanceAt: 42, output: "o", detail: "⚙ bash ls" });
+	assert.deepEqual(progressPatch({ tokens: 164_005 }, 42), { lastAdvanceAt: 42, detail: "164k tok" });
+	assert.deepEqual(progressPatch({}, 42), { lastAdvanceAt: 42 });
 });

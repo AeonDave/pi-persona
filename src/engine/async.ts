@@ -12,9 +12,17 @@
 import type { ProgressSnapshot } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel } from "../core/display-label.ts";
+import { compactTokens } from "../core/format.ts";
 import { formatDuration } from "../core/time.ts";
 
 export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
+export { compactTokens } from "../core/format.ts";
+
+/** "possibly stuck" — the soft stall signal shared by the supervisor alert and the UI badge. It is
+ *  deliberately patient: a long scan, a big generation, or a blocking command shows no visible
+ *  progress yet is perfectly healthy, so both surfaces flag a leg only after a genuinely long quiet
+ *  spell. Purely advisory (no auto-abort); the idle watchdog + token budget are the enforcing backstops. */
+export const STALL_FLAG_MS = 90_000;
 
 export interface AsyncRun {
 	id: string;
@@ -307,15 +315,6 @@ export function dedupeRunsById(runs: AsyncRun[]): AsyncRun[] {
 	const byId = new Map<string, AsyncRun>();
 	for (const r of runs) if (!byId.has(r.id)) byId.set(r.id, r);
 	return [...byId.values()];
-}
-
-/** Compact token count for the status digests — 164005 → "164k", 1_234_567 → "1.2M". Exported so
- *  every OTHER raw token render (the agent-tree details in extension.ts) goes through the same
- *  compaction instead of drifting into its own raw `${n} tok` string. */
-export function compactTokens(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-	if (n >= 1_000) return `${Math.round(n / 1000)}k`;
-	return String(n);
 }
 
 /** One identity everywhere a tracked run is rendered: the launcher's codename when present,
