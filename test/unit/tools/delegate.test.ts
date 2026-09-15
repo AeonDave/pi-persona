@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { coerceDelegateParams, DelegationLedger, type DelegateView, labelFor, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, runDelegate, shortModel, shouldRecordDelegationOutcome, unknownAgentError, wantsAsyncRun, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
+import { coerceDelegateParams, DelegationLedger, type DelegateView, labelFor, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, runDelegate, shortModel, shouldRecordDelegationOutcome, unknownAgentError, unknownContractError, wantsAsyncRun, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
@@ -539,6 +539,27 @@ test("unknownAgentError: caps the installed list at 16", () => {
 	const err = unknownAgentError(["nope"], installed);
 	assert.match(err ?? "", /, …/);
 	assert.equal(/a19/.test(err ?? ""), false);
+});
+
+test("unknownContractError: all known or omitted → undefined", () => {
+	assert.equal(unknownContractError(["default", undefined, "finding"], ["default", "finding"]), undefined);
+	assert.equal(unknownContractError([undefined, "  "], ["default"]), undefined);
+});
+
+test("unknownContractError: names the installed contracts and tells the caller the field takes a NAME", () => {
+	const err = unknownContractError(["Report con: comando riproduzione + stacktrace", "Report con: comando riproduzione + stacktrace"], ["default", "finding"]);
+	assert.ok(err);
+	assert.equal((err ?? "").split("Report con").length, 2, "duplicate unknown names are deduped");
+	assert.match(err ?? "", /Installed contracts: default, finding/);
+	assert.match(err ?? "", /nothing was spawned/i);
+	assert.match(err ?? "", /requiredArtifacts/);
+});
+
+test("unknownContractError: caps the installed list at 16", () => {
+	const installed = Array.from({ length: 20 }, (_, i) => `c${i}`);
+	const err = unknownContractError(["nope"], installed);
+	assert.match(err ?? "", /, …/);
+	assert.equal(/c19/.test(err ?? ""), false);
 });
 
 // wantsAsyncRun — the background-by-default launch decision (extension.ts execute + renderCall).

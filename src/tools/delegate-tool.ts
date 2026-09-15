@@ -15,7 +15,7 @@ import { sumUsage } from "../orchestration/reducers.ts";
 import { expandDetailHint, failureDetails } from "../extension/shared.ts";
 import {
 	DelegationLedger, type DelegateView, type DelegateParams as DelegateCall, nameFor, normalizeDelegateConcurrency,
-	runDelegate, shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError,
+	runDelegate, shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError, unknownContractError,
 	validateDelegationBrief, validateParallelWriteSets, wantsAsyncRun, coerceDelegateParams,
 } from "./delegate.ts";
 import { Semaphore } from "../orchestration/parallel.ts";
@@ -35,6 +35,7 @@ export interface DelegateToolDeps {
 	set lastCtx(value: ExtensionContext | undefined);
 	controller: PersonaController;
 	agents: AgentConfig[];
+	contractNames: () => string[];
 	buildEngine: (signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, opts?: { async?: boolean }) => StrategyEngine;
 	agentTree: AgentTree;
 	nextRootId: (prefix: string) => string;
@@ -104,7 +105,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Number({ description: "Idle timeout in ms for this worker: resets on progress, not a total runtime cap. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
 		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
-		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for this leg" })),
+		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
 	});
 	const DelegateParams = Type.Object({
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
@@ -127,7 +128,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Number({ description: "Single-mode idle timeout in ms: resets on progress, not a total runtime cap. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
 		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
-		outputContract: Type.Optional(Type.String({ description: "Installed output contract enforced for the single leg" })),
+		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
 		tasks: Type.Optional(
 			Type.Union([
 				Type.Array(Type.Union([DelegateTaskItem, JsonString])),
@@ -402,6 +403,13 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				d.agents.map((a) => a.name),
 			);
 			if (agentErr) return { content: [{ type: "text", text: agentErr }], details: failureDetails({}), isError: true };
+			// Same pre-spawn rule for output contracts: a prose description or a typo here used to become a
+			// runtime engine failure on every leg; now it is one rejection that names the installed contracts.
+			const contractErr = unknownContractError(
+				params.tasks && params.tasks.length > 0 ? params.tasks.map((t) => t.outputContract) : [params.outputContract],
+				d.contractNames(),
+			);
+			if (contractErr) return { content: [{ type: "text", text: contractErr }], details: failureDetails({}), isError: true };
 			// Anti-loop veto (after model canonicalisation, so keys match retries): an
 			// identical delegation that already failed twice does not spawn again.
 			const requested =
