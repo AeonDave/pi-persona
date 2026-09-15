@@ -190,12 +190,12 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 						if (!root) {
 							return isolatedWorktreeFailure(spec, "worktree isolation requires a real Git cwd; remove isolation: \"worktree\" or run inside a Git checkout");
 						}
-						const preflight = worktreePreflight(root, defaultGitExec);
+						const preflight = await worktreePreflight(root, defaultGitExec);
 						if (!preflight.ok) return isolatedWorktreeFailure(spec, preflight.error);
 						try {
 							return await withWorktree(root, defaultGitExec, async (dir) => {
 								const result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
-								const artifact = captureWorktreeArtifact(dir, defaultGitExec);
+								const artifact = await captureWorktreeArtifact(dir, defaultGitExec);
 								const hasOutputArtifact = hasUnifiedDiff(result.output);
 								if (!result.ok) {
 									return artifact.ok && artifact.diff.trim().length > 0
