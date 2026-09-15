@@ -455,3 +455,14 @@ test("close is idempotent and rejects still-pending asks", async () => {
 	client.close(); // must not throw
 	await assert.rejects(() => askPromise);
 });
+
+test("a fresh ask or list after a host-side drop rejects at once instead of waiting for the ten-minute cap", { timeout: 1000 }, async () => {
+	const { client, hostSide } = await connectedClient();
+	let closes = 0;
+	client.onClose(() => closes++);
+	hostSide.destroy();
+	await waitFor(() => closes === 1);
+	await assert.rejects(() => client.ask("supervisor", "decision", "still there?"), /connection closed/);
+	await assert.rejects(() => client.list(), /connection closed/);
+	client.close();
+});
