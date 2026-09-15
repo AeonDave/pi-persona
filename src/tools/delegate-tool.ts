@@ -26,7 +26,7 @@ import type { PersonaController } from "../persona/controller.ts";
 import type { AgentTree } from "../ui/agent-tree.ts";
 import type { AsyncRunTracker } from "../engine/async.ts";
 import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "../engine/stream.ts";
-import { compactTokens } from "../engine/async.ts";
+import { progressPatch } from "../ui/agent-tree.ts";
 import type { AddNodeInput } from "../ui/agent-tree.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 
@@ -225,13 +225,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						(snap) => {
 							onProgress(snap);
 							if (snap.toolEvent) d.publishAgentTool(nodeId, snap.toolEvent);
-							const patch: { output?: string; detail?: string } = {};
-							if (snap.output) patch.output = snap.output;
-							// Mirrors the main subscription's onAgentProgress fallback: activity (e.g. the
-							// "✉ from …" transparency tick) wins over a bare token count.
-							if (snap.activity) patch.detail = snap.activity;
-							else if (snap.tokens) patch.detail = `${compactTokens(snap.tokens)} tok`;
-							if (patch.output !== undefined || patch.detail !== undefined) d.agentTree.update(nodeId, patch);
+							d.agentTree.update(nodeId, progressPatch(snap, Date.now()));
 						},
 						{ async: true },
 						// STOP via `ac.signal` (hard abort) and STEER via the run-id key (soft redirect) —

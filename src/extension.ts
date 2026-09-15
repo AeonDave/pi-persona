@@ -84,7 +84,7 @@ import { createMonitorSession, type MonitorSession } from "./monitor/session.ts"
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, compactTokens, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -117,7 +117,8 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
 import { ChildUsageLedger, formatPersonaCostStatus, formatUsage, PERSONA_COST_STATUS_KEY } from "./ui/usage.ts";
@@ -600,6 +601,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const fn = stopRegistry.get(nodeId);
 		if (!fn) return false;
 		fn();
+		agentTree.update(nodeId, { detail: "stopping…" }); // visible at once; the run's own settle path writes the terminal status
 		stopRequested.add(nodeId);
 		steerRegistry.delete(nodeId); // a hard-stopped agent is no longer steerable (mirror the strategy path)
 		return true;
@@ -633,7 +635,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (!lastCtx) return;
 		const empty = agentTree.isEmpty();
 		try {
-			const lines = empty ? undefined : renderAgentTreeSummary(agentTree.snapshot());
+			const lines = empty ? undefined : renderAgentTreeSummary(agentTree.snapshot(), 8, { now: Date.now(), stallMs: STALL_FLAG_MS });
 			lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
 		} catch {
 			/* cosmetic — the widget is best-effort */
@@ -644,7 +646,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			/* cosmetic */
 		}
 	}
-	agentTree.onChange(renderAgentWidget);
+	// The widget re-renders on every tree change AND once a second while anything runs, so elapsed
+	// time and the stall badge move without a progress event; the clock stops itself when idle.
+	const widgetClock = new LiveClock({ intervalMs: 1_000, isLive: () => agentTree.hasRunning(), onTick: renderAgentWidget });
+	agentTree.onChange((change) => {
+		renderAgentWidget();
+		if (change.type === "added" || change.type === "updated") widgetClock.start();
+	});
 
 	// The navigable agent overlay (f9 / /agents): ↑↓ navigate, ⏎ drill into an
 	// agent's output, esc back/close. Live — it re-renders as the tree changes.
@@ -1355,11 +1363,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			onAgentProgress: (agent: string, p: AgentProgress, key?: string) => {
 				const id = `${rootId}/${key ?? agent}`;
 				if (p.toolEvent) publishAgentTool(id, p.toolEvent);
-				const patch: { output?: string; detail?: string } = {
-					detail: p.activity || (p.tokens ? `${compactTokens(p.tokens)} tok` : ""),
-				};
-				if (p.output) patch.output = p.output;
-				agentTree.update(id, patch);
+				agentTree.update(id, progressPatch(p, Date.now()));
 			},
 		};
 	}
