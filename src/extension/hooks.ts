@@ -76,11 +76,7 @@ export interface HookHost {
 	stopRegistry: Map<string, () => void>;
 	stopRequested: Set<string>;
 	steerRegistry: Map<string, unknown>;
-	get brokerHost(): unknown;
-	set brokerHost(value: unknown);
-	get brokerHostPromise(): Promise<{ close(): Promise<void> }> | undefined;
-	set brokerHostPromise(value: Promise<{ close(): Promise<void> }> | undefined);
-	brokerPeers: Map<string, { label: string; group: string }>;
+	broker: { close(): Promise<void> };
 	get spineText(): string;
 	delegationBrief(ctx: ExtensionContext): string | undefined;
 	get agents(): AgentConfig[];
@@ -231,18 +227,9 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// (or never started) ⇒ a no-op.
 		await exocom.queue(() => exocom.stop());
 		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
-		// child engine (flag off, or on but unused) never started a h.personaHost, so this is a no-op.
-		if (h.brokerHostPromise) {
-			try {
-				const broker = await h.brokerHostPromise;
-				await broker.close();
-			} catch {
-				/* best-effort — never block shutdown on a broker teardown error */
-			}
-			h.brokerHost = undefined;
-			h.brokerHostPromise = undefined;
-			h.brokerPeers.clear();
-		}
+		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
+		// `SupervisorBroker.close()` is itself best-effort (never blocks shutdown on a teardown error).
+		await h.broker.close();
 		await h.telemetry?.stop(event?.reason);
 		h.telemetry = undefined;
 		h.telemetryToolStartedAt.clear();

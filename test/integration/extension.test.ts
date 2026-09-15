@@ -2677,7 +2677,7 @@ test("PI_PERSONA_BROKER unset (default-on): /doctor reports the flag as on but t
 	const { ctx, notes } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("doctor", "", ctx);
-	assert.match(notes.join("\n"), /broker: on — endpoint \(not started/);
+	assert.match(notes.join("\n"), /broker: on — \(not started/);
 	await m.fire("session_shutdown", undefined, ctx); // idempotent no-op teardown (nothing to close)
 });
 
@@ -2809,7 +2809,7 @@ test("PI_PERSONA_BROKER=1: /doctor reports the flag as on but the host stays uns
 		// which never touches `deps.broker`) — the host must not have been started.
 		await m.cmd("doctor", "", ctx);
 		const report = notes.join("\n");
-		assert.match(report, /broker: on — endpoint \(not started/);
+		assert.match(report, /broker: on — \(not started/);
 		await m.fire("session_shutdown", undefined, ctx); // idempotent no-op teardown (nothing to close)
 	} finally {
 		if (prev === undefined) delete process.env.PI_PERSONA_BROKER;
