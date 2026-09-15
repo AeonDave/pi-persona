@@ -64,6 +64,11 @@ export interface ChildEngineOptions {
 	 *  eval can spend minutes there, and this deadline kills such a leg outright (failureKind
 	 *  "timeout"); the idle watchdog would not, because it is re-armed by any stdout at all. */
 	startupTimeoutMs?: number;
+	/** The child may legitimately go silent while BLOCKED on a supervisor reply (`contact_supervisor`
+	 *  decision/interview over the broker, up to the bus ask cap). When true the idle watchdog and
+	 *  the startup deadline are NOT armed — parity with the in-process engine's `blockingChild`.
+	 *  The hard cap (`hardTimeoutMs`) still applies. */
+	allowBlocking?: boolean;
 	/** Override the cross-OS force tree-kill (used in tests). Defaults to
 	 *  {@link killProcessTree}. */
 	killProcessTree?: (pid: number) => void;
@@ -349,7 +354,7 @@ export async function runChildAgent(
 				hardTimer.unref?.();
 			};
 			const armTimeout = () => {
-				if (!opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
+				if (opts.allowBlocking || !opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
 				if (timer) clearTimeout(timer);
 				timer = setTimeout(() => {
 					timedOut = true;
@@ -364,7 +369,7 @@ export async function runChildAgent(
 			// the difference between a hung init and a first provider response that simply hasn't
 			// arrived, so the window has to be sized for the slowest acceptable cold start.
 			const armStartup = () => {
-				if (!opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
+				if (opts.allowBlocking || !opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
 				startupTimer = setTimeout(() => {
 					if (progressed) return;
 					startupTimedOut = true;

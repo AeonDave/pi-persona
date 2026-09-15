@@ -222,3 +222,20 @@ test("child adapter keeps the cause of death when a contract-bearing leg dies be
 	assert.match(r.error ?? "", /never started/, "the cause of death survives contract validation");
 	assert.doesNotMatch(r.error ?? "", /contract default failed/);
 });
+
+test("child adapter exempts a broker-connected async leg from the idle watchdog (allowBlocking parity)", { timeout: 3000 }, async () => {
+	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true };
+	const ac = new AbortController();
+	setTimeout(() => ac.abort(), 400);
+	const engine = makeEngine({
+		resolveAgent,
+		contracts,
+		broker,
+		allowBlocking: true,
+		signal: ac.signal,
+		childOptions: { resolveInvocation: resolveFake, timeoutMs: 100, killGraceMs: 100 },
+	});
+	const r = await engine.run({ agent: "a", task: "wait [sleep]" });
+	assert.notEqual(r.failureKind, "timeout", "an allowed-to-block leg is not idle-killed");
+	assert.equal(r.failureKind, "abort");
+});

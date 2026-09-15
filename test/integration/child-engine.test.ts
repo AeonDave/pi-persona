@@ -358,3 +358,19 @@ test("runChildAgent closes every still-running tool when the child is killed mid
 		{ phase: "end", callId: "call-2", name: "bash", failed: true },
 	], "the call that really ended keeps its own outcome; only the abandoned one is synthesised as failed");
 });
+
+test("runChildAgent does not idle-kill a child that is allowed to block on a supervisor reply", { timeout: 3000 }, async () => {
+	const ac = new AbortController();
+	const started = Date.now();
+	setTimeout(() => ac.abort(), 400); // the supervisor "answers" by ending the run well after the idle window
+	const r = await runChildAgent({ task: "wait [sleep]" }, ac.signal, {
+		resolveInvocation: resolveFake,
+		killGraceMs: 100,
+		timeoutMs: 100, // would fire at 100ms without the exemption
+		startupTimeoutMs: 100,
+		allowBlocking: true,
+	});
+	assert.equal(r.timedOut, false, "the idle watchdog must not fire for a blocking-allowed child");
+	assert.equal(r.aborted, true, "the run ended by the caller's abort, not a timeout");
+	assert.ok(Date.now() - started >= 350, "the child lived past the idle window");
+});
