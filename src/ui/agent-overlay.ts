@@ -22,7 +22,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentTree, type FlatRow, flattenTree, GLYPH, runningAnnotation } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, flattenTree, GLYPH, runningAnnotation } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
@@ -196,12 +196,16 @@ export class AgentOverlay extends Container {
 			if (this.listScroll > 0) this.addChild(new Text(t.fg("dim", `▲ ${this.listScroll} above`), 1, 0));
 			for (const row of rows.slice(this.listScroll, end)) {
 				const indent = "  ".repeat(row.depth);
-				const rowBudget = Math.max(24, this.inner() - visibleWidth(indent) - 4);
+				const clock = runningAnnotation(row.node, this.now(), this.actions.stallMs ?? 0);
+				// Reserve the clock annotation's width (plus its widest separator, " · ") from the
+				// row budget *before* splitting label/detail — otherwise a long label+detail plus a
+				// stall badge overflows `inner` and bleeds past the frame border.
+				const clockWidth = clock ? visibleWidth(clock) + visibleWidth(" · ") : 0;
+				const rowBudget = Math.max(24, this.inner() - visibleWidth(indent) - 4 - clockWidth);
 				const label = `${indent}${GLYPH[row.node.status]} ${safeInline(row.node.label, Math.max(16, Math.floor(rowBudget * 0.62))) || "agent"}`;
 				const detail = row.node.detail
 					? t.fg("dim", `  ${safeInline(row.node.detail, Math.max(16, Math.floor(rowBudget * 0.38)))}`)
 					: "";
-				const clock = runningAnnotation(row.node, this.now(), this.actions.stallMs ?? 0);
 				const clockText = clock ? t.fg("dim", `${detail ? " · " : "  "}${clock}`) : "";
 				const line = row.node.id === selected?.id ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
 				this.addChild(new Text(`${line}${detail}${clockText}`, 1, 0));
@@ -209,7 +213,7 @@ export class AgentOverlay extends Container {
 			if (end < rows.length) this.addChild(new Text(t.fg("dim", `▼ ${rows.length - end} below`), 1, 0));
 		}
 		this.addChild(new Spacer(1));
-		const stoppable = selected?.status === "running" && (this.actions.canStop?.(selected.id) ?? true);
+		const stoppable = selected !== undefined && this.canStopNode(selected);
 		const steerHint = selected && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false) ? "   s steer" : "";
 		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${stoppable ? "   x stop" : ""}${steerHint}   esc close`), 1, 0));
 		if (this.notice) this.addChild(new Text(t.fg("dim", this.notice), 1, 0));
@@ -308,7 +312,7 @@ export class AgentOverlay extends Container {
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
 
 		const steerable = live && (this.actions.canSteer?.(node.id) ?? false);
-		const stoppable = live && (this.actions.canStop?.(node.id) ?? true);
+		const stoppable = this.canStopNode(node);
 		if (this.steering && !steerable) this.steering = false; // agent finished mid-compose
 		this.addChild(new Spacer(1));
 		if (this.steering) {
@@ -319,6 +323,7 @@ export class AgentOverlay extends Container {
 		} else {
 			const steerHint = steerable ? "   ·   s steer" : "";
 			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${stoppable ? "   ·   x stop" : ""}${steerHint}`), 1, 0));
+			if (this.notice) this.addChild(new Text(t.fg("dim", this.notice), 1, 0));
 			if (live && !steerable) {
 				this.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
 			}
@@ -402,12 +407,20 @@ export class AgentOverlay extends Container {
 		}
 	}
 
-	/** Stop (abort) one agent by id. A refusal (no handle, or the caller declines) surfaces as a
-	 *  one-line notice rather than doing nothing — the user pressed a key and deserves feedback. */
+	/** Whether an agent can be stopped right now: it must be running, and the caller's `canStop`
+	 *  gate (defaulting to "yes" when omitted) must agree. Shared by both hints and `tryStop`, so
+	 *  the hint that advertises "x stop" and the handler that actually gates it never diverge. */
+	private canStopNode(node: Pick<AgentNode, "id" | "status">): boolean {
+		return node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
+	}
+
+	/** Stop (abort) one agent by id. A refusal — the node is gone, not stoppable, or the caller
+	 *  declines — surfaces as a one-line notice rather than doing nothing: the user pressed a key
+	 *  and deserves feedback, in the list view and the detail view alike. */
 	private tryStop(nodeId: string): void {
-		if (!this.actions.onStop?.(nodeId)) {
-			const label = this.tree.snapshot().find((n) => n.id === nodeId)?.label ?? nodeId;
-			this.notice = `nothing to stop for ${label}`;
+		const node = this.tree.snapshot().find((n) => n.id === nodeId);
+		if (!node || !this.canStopNode(node) || !this.actions.onStop?.(nodeId)) {
+			this.notice = `nothing to stop for ${node?.label ?? nodeId}`;
 		}
 		this.refresh();
 	}

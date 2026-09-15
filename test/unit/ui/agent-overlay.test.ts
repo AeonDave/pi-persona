@@ -2,7 +2,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 
 import { AgentOverlay } from "../../../src/ui/agent-overlay.ts";
 import { AgentTree } from "../../../src/ui/agent-tree.ts";
@@ -449,4 +449,37 @@ test("the overlay ticks while an agent runs and releases its timer on dispose", 
 	const after = renders;
 	t.mock.timers.tick(5_000);
 	assert.equal(renders, after, "no ticks after dispose");
+});
+
+test("a refused stop in the detail view shows the notice too, not just the list", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	const stopped: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+		canStop: () => false,
+	});
+	overlay.handleInput("\n"); // drill into alpha
+	overlay.handleInput("x");
+	assert.match(overlay.render(80).join("\n"), /nothing to stop for alpha/);
+	assert.deepEqual(stopped, [], "onStop must not be invoked once canStop has already refused");
+	overlay.handleInput("j");
+	assert.doesNotMatch(overlay.render(80).join("\n"), /nothing to stop/, "cleared by the next key, same as the list");
+	overlay.dispose();
+});
+
+test("a long label, long detail, and a stalled clock never push a list row past the frame border", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "L".repeat(200), detail: "D".repeat(200) });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { stallMs: 1, now: () => 1_000_000 });
+	const lines = overlay.render(60);
+	assert.ok(lines.length > 0, "the overlay renders at least the frame border");
+	const frameWidth = visibleWidth(lines[0] ?? "");
+	for (const line of lines) {
+		assert.ok(visibleWidth(line) <= frameWidth, `line exceeds the frame (${frameWidth}): ${JSON.stringify(line)}`);
+	}
+	overlay.dispose();
 });
