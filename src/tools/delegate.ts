@@ -521,6 +521,21 @@ export function unknownAgentError(requested: string[], installed: string[]): str
 	);
 }
 
+/** Pre-spawn contract validation (same all-or-nothing rule as `unknownAgentError`): a spec that
+ *  names an output contract that is not installed is rejected before ANY leg spawns, with the
+ *  installed names so the caller can self-correct — and never counts as a ledger strike. */
+export function unknownContractError(requested: Array<string | undefined>, installed: string[]): string | undefined {
+	const wanted = [...new Set(requested.map((n) => n?.trim()).filter((n): n is string => Boolean(n)))];
+	const unknown = wanted.filter((n) => !installed.includes(n));
+	if (unknown.length === 0) return undefined;
+	const who = unknown.map((n) => `"${n}"`).join(", ");
+	const list = installed.slice(0, 16).join(", ");
+	return (
+		`delegate: unknown output contract(s) ${who} — nothing was spawned. Installed contracts: ${list}${installed.length > 16 ? ", …" : ""}. ` +
+		"`outputContract` takes a contract NAME; omit it for free-form output and describe the report shape in `requiredArtifacts`."
+	);
+}
+
 /**
  * Should this `delegate` call run in the BACKGROUND (async)? An explicit `async` always wins;
  * otherwise an interactive session (`hasUI`) defaults to background — the supervisor stays free and

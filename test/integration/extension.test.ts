@@ -884,6 +884,36 @@ test("a sync delegate leg whose engine rejects under the RUN signal files as an 
 	assert.equal(agentNodeStatusForDelegate(view), "stopped", "so the tree shows the user's own stop instead of a failure");
 });
 
+test("delegate rejects an unknown output contract before spawning, naming the installed ones", async () => {
+	const cwd = tempDir("pi-persona-unknown-contract-");
+	let childRuns = 0;
+	const resultEngine: StrategyEngine = {
+		run: async (spec) => {
+			childRuns++;
+			return { agent: spec.agent, output: "must not run", usage: emptyUsage(), ok: true };
+		},
+	};
+	const factories: EngineFactories = {
+		makeInProcessEngine: () => ({ run: async (spec) => { childRuns++; return { agent: spec.agent, output: "must not run", usage: emptyUsage(), ok: true }; } }),
+		makeEngine: () => resultEngine,
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: factories });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const response = await delegate.execute(
+		"bad-contract",
+		{ agent: "scout", task: "probe", outputContract: "Report con: comando riproduzione + stacktrace" },
+		undefined,
+		undefined,
+		ctx,
+	);
+	assert.equal(response.isError, true);
+	assert.match(String(response.content?.[0]?.text ?? ""), /Installed contracts: default/);
+	assert.equal(childRuns, 0, "no leg should spawn when the output contract is unknown");
+});
+
 test("session_start loads the installed (seeded) personas and agents", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);

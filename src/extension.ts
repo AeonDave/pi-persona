@@ -1764,6 +1764,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		set lastCtx(value) { lastCtx = value; },
 		controller,
 		get agents() { return agents; },
+		contractNames: () => installedContractNames(contractDefs),
 		buildEngine,
 		agentTree,
 		nextRootId,
