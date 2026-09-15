@@ -175,6 +175,19 @@ test("child adapter's unknown-agent error names the installed agents when listAg
 	assert.match(r.error ?? "", /— installed agents: scout, operator/);
 });
 
+test("child adapter's missing-contract error names the installed contracts when listContracts is wired", async () => {
+	const engine = makeEngine({
+		resolveAgent,
+		contracts: () => undefined,
+		childOptions: { resolveInvocation: resolveFake },
+		listContracts: () => ["default", "finding"],
+	});
+	const r = await engine.run({ agent: "a", task: "decide", outputContract: "missing" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "contract");
+	assert.match(r.error ?? "", /output contract "missing" not found — installed contracts: default, finding/);
+});
+
 test("child adapter classifies a PRE-STREAM provider death as provider (fallback can reroute)", async () => {
 	// [provider-fail]: pi exits 1 with a 429 on stderr and NO stream events — no stop reason.
 	// Before evidence-based classification this was "agent" and the fallback never fired.

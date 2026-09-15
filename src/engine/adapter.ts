@@ -18,7 +18,8 @@ import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./chi
 import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
-import { emptyUsage, type ToolEvent } from "./stream.ts";
+import { unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
+import type { ToolEvent } from "./stream.ts";
 
 /** The engine-side face of the cross-process broker (spec B3/B4/B7) — a child-engine
  *  spawn's connection to the supervisor-hosted relay. The concrete implementation
@@ -43,6 +44,8 @@ export interface EngineAdapterDeps {
 	signal?: AbortSignal;
 	/** Known agent names, for self-correcting unknown-agent errors (mirrors the model path). */
 	listAgents?: () => string[];
+	/** Installed output-contract names (built-in `default` + files) for the self-correcting hint. */
+	listContracts?: () => string[];
 	/** Per-agent model override (e.g. a persona's configured ensemble models).
 	 *  Precedence: explicit spec.model > modelFor(agent) > the agent's own default. */
 	modelFor?: (agent: string) => string | undefined;
@@ -103,11 +106,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			onSteerable?: (steer: (text: string) => void) => void,
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
-			if (!cfg) {
-				const known = deps.listAgents?.() ?? [];
-				const hint = known.length > 0 ? ` — installed agents: ${known.slice(0, 12).join(", ")}${known.length > 12 ? ", …" : ""}` : "";
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)${hint}`, failureKind: "unknown-agent" };
-			}
+			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
 
 			// Resolved (and pinned) up front: the SAME def both instructs the member and
 			// validates its output — an instruction/validation drift is impossible. A named
@@ -115,16 +114,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// without its requested guard would silently turn a constrained call into prose.
 			const requestedContract = spec.outputContract?.trim();
 			const contractDef = requestedContract ? pinnedDef(requestedContract) : undefined;
-			if (requestedContract && !contractDef) {
-				return {
-					agent: spec.agent,
-					output: "",
-					usage: emptyUsage(),
-					ok: false,
-					error: `[${spec.agent}] output contract "${requestedContract}" not found`,
-					failureKind: "contract",
-				};
-			}
+			if (requestedContract && !contractDef) return unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []);
 			const withSkills =
 				spec.skills && spec.skills.length > 0
 					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`

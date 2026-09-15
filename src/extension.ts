@@ -21,7 +21,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
 import { resolveConfig } from "./core/config.ts";
-import { type ContractDef } from "./core/contract.ts";
+import { type ContractDef, installedContractNames } from "./core/contract.ts";
 import { type DataRootMigrationResult, migrateLegacyDataRoot } from "./core/data-root.ts";
 import {
 	inspectLegacySeededSpines,
@@ -1652,7 +1652,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		lines.push(`teams (${teamNames.length}): ${teamNames.join(", ") || "—"}`);
 		const flows = lastCtx ? listFlows(lastCtx.cwd) : [];
 		lines.push(`flows (${flows.length}): ${flows.join(", ") || "—"}`);
-		const contractNames = [...new Set(["default", ...Object.keys(contractDefs)])];
+		const contractNames = installedContractNames(contractDefs);
 		lines.push(`contracts (${contractNames.length}): ${contractNames.join(", ")}`);
 		if (shadowed.length > 0) {
 			lines.push("shadowed (lower-precedence, overridden):");

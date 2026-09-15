@@ -267,6 +267,21 @@ test("inproc engine fails closed when a requested contract is missing", async ()
 	assert.equal(created, false, "a missing contract must not create an unconstrained session");
 });
 
+test("inproc engine's missing-contract error names the installed contracts when listContracts is wired", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts: () => undefined,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("unconstrained")]),
+		listContracts: () => ["default", "finding"],
+	});
+	const r = await engine.run({ agent: "a", task: "decide", outputContract: "missing" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "contract");
+	assert.match(r.error ?? "", /output contract "missing" not found — installed contracts: default, finding/);
+});
+
 test("inproc engine appends the contract format to the task (and only when one is requested)", async () => {
 	// A generic agent (no JSON format in its .md) must still learn HOW to satisfy the
 	// contract — the engine derives the instructions from the SAME pinned def it validates

@@ -336,6 +336,11 @@ export function pinContract(def: ContractDef): PinnedContract {
 	return { name: def.name, hash: stableHash(def), def };
 }
 
+/** Every contract name a spec may reference: the built-in `default` plus the installed files. */
+export function installedContractNames(defs: Record<string, ContractDef>): string[] {
+	return [...new Set(["default", ...Object.keys(defs)])];
+}
+
 /** Validate a structured value against a contract. Unknown extra fields are kept. */
 export function validateAgainst(def: ContractDef, value: unknown): ValidationResult {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
