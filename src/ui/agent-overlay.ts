@@ -374,6 +374,7 @@ export class AgentOverlay extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		const hadNotice = this.notice !== undefined;
 		this.notice = undefined; // any key clears a previous refusal notice
 		const kb = getKeybindings();
 		if (this.detailId) {
@@ -396,7 +397,7 @@ export class AgentOverlay extends Container {
 				} else if (isPrintable(keyData)) {
 					this.steerBuffer += keyData;
 					this.refresh();
-				}
+				} else if (hadNotice) this.refresh();
 				return;
 			}
 			if (keyData === "s" && (this.actions.canSteer?.(this.detailId) ?? false)) {
@@ -413,7 +414,7 @@ export class AgentOverlay extends Container {
 			} else if (kb.matches(keyData, "tui.select.cancel")) {
 				this.detailId = undefined;
 				this.refresh();
-			}
+			} else if (hadNotice) this.refresh(); // unhandled key: still repaint so a cleared notice disappears
 			return;
 		}
 		const leaves = this.leafRows();
@@ -447,7 +448,7 @@ export class AgentOverlay extends Container {
 			if (leaf) this.tryStop(leaf.node.id);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.close();
-		}
+		} else if (hadNotice) this.refresh(); // unhandled key: still repaint so a cleared notice disappears
 	}
 
 	/** Whether an agent can be stopped right now: it must be running, and the caller's `canStop`

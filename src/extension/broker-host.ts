@@ -141,13 +141,14 @@ export class SupervisorBroker {
 	}
 
 	doctorLine(): string {
+		// Failed is reported on its own (spec §4.7: `broker: failed — <reason>`) rather than folded
+		// into the "on — …" family: there is no host and no connected-children count to report while
+		// down, so "broker: on — failed — …" was a confusing double dash for a state that isn't "on".
+		if (this.state() === "failed") return `broker: failed — ${this.lastError}`;
 		let status: string;
 		switch (this.state()) {
 			case "up":
 				status = `endpoint ${this.hostRef?.endpoint}`;
-				break;
-			case "failed":
-				status = `failed — ${this.lastError}`;
 				break;
 			case "starting":
 				status = "(starting…)";

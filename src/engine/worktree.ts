@@ -38,7 +38,7 @@ const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 /** Default git runner — `git <args>`, never throwing (returns the exit code). */
 export const defaultGitExec: GitExec = (args) =>
 	new Promise((resolveResult) => {
-		execFile("git", args, { encoding: "utf8", maxBuffer: GIT_MAX_BUFFER, windowsHide: true }, (err, stdout, stderr) => {
+		execFile("git", args, { encoding: "utf8", maxBuffer: GIT_MAX_BUFFER, windowsHide: true, timeout: 120_000 }, (err, stdout, stderr) => {
 			if (!err) {
 				resolveResult({ code: 0, stdout, stderr });
 				return;
@@ -74,12 +74,6 @@ export async function worktreePreflight(root: string, exec: GitExec = defaultGit
 		};
 	}
 	return { ok: true };
-}
-
-/** Whether `root` is inside a git work tree (worktree isolation needs a repo). */
-export async function isGitRepo(root: string, exec: GitExec = defaultGitExec): Promise<boolean> {
-	const result = await exec(["-C", root, "rev-parse", "--is-inside-work-tree"]);
-	return result.code === 0 && result.stdout.trim().toLowerCase() !== "false";
 }
 
 /** Capture the complete post-run worktree state as a portable unified diff. Tracked edits use
@@ -129,7 +123,10 @@ export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: s
 		return await body(dir);
 	} finally {
 		// Remove the worktree registration, then the dir (force: it may carry the agent's edits).
-		const remove = await exec(["-C", root, "worktree", "remove", "--force", dir]);
+		// Never throw: cleanup must not replace the body's result (or its error) — `defaultGitExec`
+		// never rejects, but an injected `GitExec` could, and a rejection here must not either.
+		const rejected = (): GitResult => ({ code: 1, stdout: "", stderr: "git exec rejected" });
+		const remove = await exec(["-C", root, "worktree", "remove", "--force", dir]).catch(rejected);
 		await rm(dir, { recursive: true, force: true }).catch(() => {
 			/* the worktree remove usually handles it; ignore races */
 		});
@@ -138,7 +135,7 @@ export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: s
 		// or stale ghosts accumulate across delegations until a manual `git worktree prune`.
 		// Never throw: cleanup must not replace the body's result (or its error).
 		if (remove.code !== 0) {
-			await exec(["-C", root, "worktree", "prune"]);
+			await exec(["-C", root, "worktree", "prune"]).catch(rejected);
 			if (process.env.PI_PERSONA_DEBUG) {
 				process.stderr.write(`[pi-persona] git worktree remove failed for ${dir} (pruned): ${remove.stderr.trim() || `git exited ${remove.code}`}\n`);
 			}

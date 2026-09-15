@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import * as worktree from "../../../src/engine/worktree.ts";
 import type { GitExec, WorktreeArtifact } from "../../../src/engine/worktree.ts";
-import { isGitRepo, withWorktree } from "../../../src/engine/worktree.ts";
+import { withWorktree } from "../../../src/engine/worktree.ts";
 
 /** A fake git that records calls and returns scripted results. */
 function fakeGit(results: Record<string, { code: number; stdout?: string }> = {}): { exec: GitExec; calls: string[][] } {
@@ -75,11 +75,6 @@ test("captureWorktreeArtifact rejects an artifact too large to return safely", a
 	if (!artifact.ok) assert.match(artifact.error, /too large|limit/i);
 });
 
-test("isGitRepo true only when rev-parse succeeds", async () => {
-	assert.equal(await isGitRepo("/r", fakeGit({ "rev-parse": { code: 0 } }).exec), true);
-	assert.equal(await isGitRepo("/r", fakeGit({ "rev-parse": { code: 128 } }).exec), false);
-});
-
 test("withWorktree adds a detached worktree, runs the body with its path, then removes it", async () => {
 	const { exec, calls } = fakeGit();
 	let ranIn = "";
@@ -132,4 +127,22 @@ test("withWorktree does not prune when the worktree was removed cleanly", async 
 	const { exec, calls } = fakeGit();
 	await withWorktree("/repo", exec, async () => "x");
 	assert.equal(calls.some((c) => c.includes("prune")), false, "no pruning of other live worktrees on the happy path");
+});
+
+test("withWorktree returns the body's result even when the remove step's GitExec rejects", async () => {
+	// `defaultGitExec` never rejects (M3/M4), but an injected fake can — the `finally` block's
+	// comment promises cleanup never replaces the body's result, and that promise must hold even
+	// when the exec itself throws, not just when it resolves with a non-zero code.
+	const calls: string[][] = [];
+	const exec: GitExec = async (args) => {
+		calls.push(args);
+		if (args.includes("remove")) throw new Error("git exec rejected");
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	const out = await withWorktree("/repo", exec, async () => "result");
+	assert.equal(out, "result", "a rejecting remove must not replace (or throw over) the body's result");
+	assert.ok(
+		calls.some((c) => c.includes("worktree") && c.includes("prune")),
+		"a failed (rejected) remove is treated as non-zero, so the stale registration is still pruned",
+	);
 });

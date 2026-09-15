@@ -244,6 +244,9 @@ on the child backend). Denylists are then applied independently through `exclude
 A spec naming an agent or output contract that isn't installed fails before anything spawns, on
 both backends alike (`engine/spec-preflight.ts`): the message names what IS installed, capped at 12
 names, so the caller can self-correct — one wording, one cap, so the two engines can't drift apart.
+The `delegate` tool runs its own earlier, self-correcting check with a different cap: `unknownAgentError`
+/ `unknownContractError` (`src/tools/delegate.ts`) reject a typo before either engine is ever reached,
+listing up to 16 installed names. Same idea, two layers, two caps — see docs/REFERENCE.md's example.
 
 `isolation: worktree` is fail-closed. It requires a clean Git checkout so the detached `HEAD` view
 cannot silently omit staged/unstaged/untracked supervisor work. A non-repository, dirty checkout,

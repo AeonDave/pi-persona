@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { AgentTree, type AgentNode, flattenTree, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, flattenTree, isQueuedMarker, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -147,13 +147,45 @@ test("AgentTree stamps startedAt/lastAdvanceAt from its clock and lets a patch a
 	assert.equal(changes, 1, "a patch that also changes visible state still notifies");
 });
 
+test("AgentTree.add upsert with startedAt/lastAdvanceAt overwrites the clock stamps and, alone, emits no change", () => {
+	const tree = new AgentTree(() => 1_000);
+	tree.add({ id: "a", label: "A" });
+	assert.equal(tree.snapshot()[0]?.startedAt, 1_000);
+	assert.equal(tree.snapshot()[0]?.lastAdvanceAt, 1_000);
+	let changes = 0;
+	tree.onChange(() => changes++);
+	// The real-start transition (extension.ts / delegate-tool.ts) re-adds the same id with fresh
+	// stamps once the leg actually goes live, rather than the clock's seed time.
+	tree.add({ id: "a", label: "A", startedAt: 9_000, lastAdvanceAt: 9_000 });
+	assert.equal(tree.snapshot()[0]?.startedAt, 9_000, "the upsert overwrites startedAt");
+	assert.equal(tree.snapshot()[0]?.lastAdvanceAt, 9_000, "the upsert overwrites lastAdvanceAt");
+	assert.equal(changes, 0, "a clock-only upsert is not a tree change (the ticker paints it)");
+});
+
 test("runningAnnotation shows elapsed time while advancing and a stall badge once quiet for stallMs", () => {
-	const node = { status: "running" as const, startedAt: 0, lastAdvanceAt: 60_000 };
+	const node = { status: "running" as const, startedAt: 0, lastAdvanceAt: 60_000, detail: undefined };
 	assert.equal(runningAnnotation(node, 75_000, 90_000), "1m 15s");
 	assert.equal(runningAnnotation(node, 150_000, 90_000), "⚠ stalled 1m 30s");
 	assert.equal(runningAnnotation(node, 150_000, 0), "2m 30s", "stallMs 0 disables the badge");
-	assert.equal(runningAnnotation({ status: "done" as const, startedAt: 0 }, 5_000, 90_000), undefined);
-	assert.equal(runningAnnotation({ status: "running" as const }, 5_000, 90_000), undefined, "no clock data → no annotation");
+	assert.equal(runningAnnotation({ status: "done" as const, startedAt: 0, detail: undefined }, 5_000, 90_000), undefined);
+	assert.equal(runningAnnotation({ status: "running" as const, detail: undefined }, 5_000, 90_000), undefined, "no clock data → no annotation");
+});
+
+test("runningAnnotation is suppressed while a node still carries the queued marker, even with old timestamps", () => {
+	const queued = { status: "running" as const, startedAt: 0, lastAdvanceAt: 0, detail: "queued" };
+	assert.equal(runningAnnotation(queued, 200_000, 90_000), undefined, "no elapsed reading and no false stall badge while queued");
+	assert.equal(runningAnnotation({ ...queued, detail: "Queued" }, 200_000, 90_000), undefined, "the marker match is case-insensitive, like telemetryStatus");
+	assert.equal(runningAnnotation({ ...queued, detail: "  queued  " }, 200_000, 90_000), undefined, "the marker match trims whitespace, like telemetryStatus");
+	assert.equal(runningAnnotation({ ...queued, detail: "queued for review", lastAdvanceAt: 200_000 }, 200_000, 90_000), "3m 20s", "only the exact literal marker suppresses, not any string containing it");
+});
+
+test("isQueuedMarker matches the literal marker only, trimmed and case-insensitively", () => {
+	assert.equal(isQueuedMarker("queued"), true);
+	assert.equal(isQueuedMarker("Queued"), true);
+	assert.equal(isQueuedMarker("  queued  "), true);
+	assert.equal(isQueuedMarker("queued for review"), false);
+	assert.equal(isQueuedMarker(undefined), false);
+	assert.equal(isQueuedMarker(""), false);
 });
 
 test("renderAgentTree appends the running annotation after the detail, only when a clock is given", () => {

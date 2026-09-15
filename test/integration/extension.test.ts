@@ -3359,7 +3359,11 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	// "running" long enough to observe the widget's clock and the stop acknowledgement.
 	const releases: Array<() => void> = [];
 	const stub: StrategyEngine = {
-		run: async (spec) => {
+		run: async (spec, _onProgress, _signal, onSteerable) => {
+			// Report steerable immediately: this is the real "go live" transition delegate-tool
+			// clears the "queued" marker on (src/tools/delegate-tool.ts:236), the same signal a real
+			// broker-backed leg sends once the child process is actually running.
+			onSteerable?.(() => true);
 			await new Promise<void>((resolve) => releases.push(resolve));
 			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
 		},
@@ -3390,10 +3394,10 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	const runningLines = widgets["persona-agents"] ?? [];
 	const legLine = runningLines.find((line) => line.includes("⏳"));
 	assert.ok(legLine, `expected a running leg row in the widget: ${JSON.stringify(runningLines)}`);
-	// The stub engine never reports steerable, so the detail may still read "queued" (delegate-tool's
-	// seeded marker, cleared only once the leg goes live) — the regex is loose on purpose: it only
-	// pins the elapsed reading (e.g. "queued · <1s"), not the detail text before it.
-	assert.match(legLine as string, /⏳ .*·\s*(<1s|\d+s)$/, "the widget row for a running leg carries an elapsed reading");
+	// The stub reports steerable, so the leg has left "queued" by the time we read the widget: the
+	// row is anchored end-to-end — no stray "queued" text and no false stall badge, just the label
+	// and an honest elapsed reading.
+	assert.match(legLine as string, /^⏳ scout {2}(<1s|\d+s)$/, "the widget row for a running leg is clean once it leaves \"queued\"");
 
 	// Act: stop it the way the F9 overlay does — through the same stopAgent the intercom "stop" action reaches.
 	const stopped = await intercom.execute("widget-clock-stop", { action: "stop", to: id }, undefined, undefined, ctx);

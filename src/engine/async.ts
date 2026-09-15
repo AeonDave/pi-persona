@@ -16,7 +16,6 @@ import { compactTokens } from "../core/format.ts";
 import { formatDuration } from "../core/time.ts";
 
 export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
-export { compactTokens } from "../core/format.ts";
 
 /** "possibly stuck" — the soft stall signal shared by the supervisor alert and the UI badge. It is
  *  deliberately patient: a long scan, a big generation, or a blocking command shows no visible
