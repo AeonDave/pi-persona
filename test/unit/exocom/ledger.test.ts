@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
 import type { ExocomSemanticFrame } from "../../../src/exocom/envelope.ts";
-import { answerFor, applyLedgerEvent, commitLedgerEvent, emptyLedger, LEDGER_LIMITS, loadLedger, parseLedger, pendingAskBlock, pendingAsksTo, pruneLedger } from "../../../src/exocom/ledger.ts";
+import { answerFor, applyLedgerEvent, commitLedgerEvent, droppedAskIds, emptyLedger, LEDGER_LIMITS, loadLedger, parseLedger, pendingAskBlock, pendingAsksTo, pruneLedger } from "../../../src/exocom/ledger.ts";
 
 const ts = "2026-09-01T00:00:00Z";
 
@@ -317,6 +317,20 @@ test("pure pruning uses registry liveness as the claim/ask lease and TTL only fo
 	const stale = pruneLedger(state, { now, ttlMs: 60_000, liveSessions: new Set(["sess-b"]) });
 	assert.equal(stale.claims.length, 0);
 	assert.equal(stale.asks.length, 0);
+});
+
+test("droppedAskIds names the asks a prune removed, in ledger order", () => {
+	const now = Date.parse(ts) + 1_000;
+	const first = applyLedgerEvent(emptyLedger(), ask());
+	assert.equal(first.ok, true);
+	if (!first.ok) return;
+	const second = applyLedgerEvent(first.state, ask({ ask_id: "ask-2", msg_id: "msg-ask-2", to_session: "sess-c" }));
+	assert.equal(second.ok, true);
+	if (!second.ok) return;
+	const state = second.state;
+	const pruned = pruneLedger(state, { now, ttlMs: 60_000, liveSessions: new Set(["sess-a", "sess-b"]) });
+	assert.deepEqual(droppedAskIds(state, pruned), ["ask-2"]);
+	assert.deepEqual(droppedAskIds(state, state), []);
 });
 
 test("release can cancel an outbound ask even when that work key has no write claim", () => {

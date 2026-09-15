@@ -280,6 +280,12 @@ export function pruneLedger(state: LedgerState, options: LedgerPruneOptions): Le
 	return { ...state, claims, asks, answers, askIds };
 }
 
+/** The pending asks a prune dropped (a party left the pool) — the ids a waiter must be woken for. */
+export function droppedAskIds(before: LedgerState, after: LedgerState): string[] {
+	const kept = new Set(after.asks.map((a) => a.ask_id));
+	return before.asks.filter((a) => !kept.has(a.ask_id)).map((a) => a.ask_id);
+}
+
 // `question` is capped at 4,096 UTF-16 code units on the wire. Three UTF-8 bytes per
 // code unit covers its worst valid encoding, so the one ask we expose remains complete.
 const PENDING_ASK_QUESTION_MAX_BYTES = 12_288;

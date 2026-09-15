@@ -4969,6 +4969,71 @@ test("the ledger protocol canonicalizes ask targets, gates the receiver, and sur
 	}
 });
 
+test("exocom_wait wakes with a peer-left notice, well before its timeout, when the awaited peer leaves the pool", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "wait-peer-leaves-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "wait-peer-leaves-b");
+	try {
+		// Both heartbeats are driven by the same fake clock so the test controls exactly when A's
+		// heartbeat tick observes B's disappearance, without waiting on real wall-clock intervals.
+		mock.timers.enable({ apis: ["setInterval"] });
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("list-wait-peer-leaves", {}, undefined, undefined, ctxA);
+		const target = (roster.details as { peers: Array<{ target: string }> }).peers[0]?.target;
+		assert.ok(target);
+
+		const asked = await (a.tool("exocom_ask") as { execute: AnyFn }).execute("ask-wait-peer-leaves", {
+			target,
+			work_key: "wait-peer-leaves",
+			question: "Are you still able to verify this slice?",
+		}, undefined, undefined, ctxA);
+		const askId = (asked.details as { ask_id: string }).ask_id;
+
+		const armed = await (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-peer-leaves", {
+			work_key: "wait-peer-leaves",
+			ask_id: askId,
+			timeoutMs: 60_000,
+		}, undefined, undefined, ctxA);
+		assert.match(String(armed.content?.[0]?.text ?? ""), /waiting on.*End this turn/i);
+
+		// B leaves the pool. Replacing the entry path with a directory blocks B's own (also fake-timed)
+		// heartbeat from resurrecting it on the same tick — the same trick the vanished-owner claim
+		// test above uses.
+		const vanished = entryFileFor(cwd, "wait-peer-leaves-b");
+		fs.rmSync(vanished, { force: true });
+		fs.mkdirSync(vanished);
+
+		mock.timers.tick(30_000); // one heartbeat tick on A: B is no longer in the live registry
+		await waitUntil(() => a.sentMessages().length > 0, "the peer-left wait notice");
+
+		const delivered = a.sentMessages().map((sent) => String((sent.message as { content?: string }).content ?? ""));
+		const notice = delivered.find((content) => content.includes("exocom wait ended"));
+		assert.ok(notice, `expected a wait-ended notice — delivered: ${JSON.stringify(delivered)}`);
+		assert.match(notice ?? "", new RegExp(`exocom wait ended: the peer left the pool before answering · work_key=\\S+ ask_id=${askId}`));
+		assert.doesNotMatch(delivered.join("\n"), /timed out/i, "the peer-left notice must preempt the generic timeout notice");
+
+		// The waiter's timer was cleared, not merely raced — no further delivery follows shortly after.
+		const countAfterNotice = a.sentMessages().length;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		assert.equal(a.sentMessages().length, countAfterNotice, "no second (timeout) notice trails the peer-left notice");
+	} finally {
+		mock.timers.reset();
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("a standalone identity is distinct from the persona and survives persona changes and resume", async () => {
 	const m = makeMockPi();
 	const sessionId = "standalone-identity-session";

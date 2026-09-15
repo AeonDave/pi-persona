@@ -37,6 +37,7 @@ import { selectExocomScope, type ExocomScope } from "./scope.ts";
 import {
 	answerFor,
 	commitLedgerEvent,
+	droppedAskIds,
 	loadLedger,
 	pendingAskBlock,
 	pendingAsksTo,
@@ -157,11 +158,31 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		}
 	}
 
+	// Declared with `function` (not a const arrow) so hoisting makes it callable from
+	// `currentLedgerState` above regardless of definition order — it only touches `exocomWaiters`/
+	// `exocomWaitNotifier`, both already in scope at the top of `installExocom`.
+	/** Wake every waiter whose ask was pruned because a party left the pool — the next heartbeat,
+	 *  not the ten-minute cap, is when the supervisor learns the answer will never come. */
+	function expireWaiters(askIds: string[]): void {
+		if (askIds.length === 0 || exocomWaiters.length === 0) return;
+		const gone = new Set(askIds);
+		for (let i = exocomWaiters.length - 1; i >= 0; i--) {
+			const waiter = exocomWaiters[i]!;
+			if (!gone.has(waiter.ask_id)) continue;
+			clearTimeout(waiter.handle);
+			exocomWaiters.splice(i, 1);
+			exocomWaitNotifier?.notify(`[pi-persona] exocom wait ended: the peer left the pool before answering · work_key=${waiter.work_key} ask_id=${waiter.ask_id}`);
+		}
+	}
+
 	function currentLedgerState(): LedgerState {
 		if (!exocomLedgerFile) throw new Error("exocom ledger is not available");
 		const state = loadLedger(exocomLedgerFile);
 		const prune = currentLedgerPruneOptions();
-		return prune ? pruneLedger(state, prune) : state;
+		if (!prune) return state;
+		const pruned = pruneLedger(state, prune);
+		expireWaiters(droppedAskIds(state, pruned));
+		return pruned;
 	}
 
 	function pendingAsksFor(ctx: ExtensionContext): LedgerAsk[] {
@@ -339,6 +360,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		// since the write above is exactly what keeps us in it. Only the registration decides that.
 		try {
 			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
+			if (exocomWaiters.length > 0) currentLedgerState(); // a waiter's peer may have just been pruned
 			renderExocomWidget();
 		} catch (err) {
 			if (process.env.PI_PERSONA_DEBUG) {
