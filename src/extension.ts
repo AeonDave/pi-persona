@@ -1210,6 +1210,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		runLimits: RUN_LIMITS,
 		bus,
 		supervisorHandle: SUPERVISOR,
+		onFallback: (info) => {
+			try {
+				lastCtx?.ui.notify(`${info.agent}: ${info.from} failed, retrying on ${info.to}`, "warning");
+			} catch {
+				/* cosmetic — a toast must never break a run */
+			}
+		},
 	}));
 	const childUsage = new ChildUsageLedger();
 	const publishPersonaCost = (): void => {

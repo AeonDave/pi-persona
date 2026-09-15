@@ -42,6 +42,8 @@ export interface BuildEngineDeps {
 	runLimits: RunLimits;
 	bus: InProcessBus;
 	supervisorHandle: string;
+	/** Breadcrumb for a provider reroute (toast + log); absent ⇒ silent, as before. */
+	onFallback?: (info: { from: string; to: string; agent: string }) => void;
 }
 
 export type BuildEngine = (signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, engOpts?: { async?: boolean }) => StrategyEngine;
@@ -51,7 +53,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 		const {
 			agents, contractDefs, controller, host, config, personaConfigs, lastCtx, workerSpineText,
 			engineFactories, makeBrokerDeps, userAgentDir, childPiSettingsEnv, runLimits: RUN_LIMITS,
-			bus, supervisorHandle: SUPERVISOR,
+			bus, supervisorHandle: SUPERVISOR, onFallback,
 		} = d();
 			const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
 			// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
@@ -180,7 +182,11 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			const wrapFallback = (eng: StrategyEngine): StrategyEngine => {
 				if (!lastCtx) return eng;
 				const prefer = lastCtx.model?.provider;
-				return withModelFallback(eng, { models: configuredModels(lastCtx), ...(prefer ? { preferProvider: prefer } : {}) });
+				return withModelFallback(eng, {
+					models: configuredModels(lastCtx),
+					...(prefer ? { preferProvider: prefer } : {}),
+					...(onFallback ? { onFallback } : {}),
+				});
 			};
 			const root = lastCtx?.cwd;
 			return wrapFallback({
