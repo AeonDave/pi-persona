@@ -17,6 +17,7 @@ import {
 	getKeybindings,
 	Spacer,
 	Text,
+	truncateToWidth,
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -41,6 +42,53 @@ function isPrintable(key: string): boolean {
 	if (key.length !== 1) return false;
 	const c = key.charCodeAt(0);
 	return c >= 0x20 && c !== 0x7f;
+}
+
+/** Pure inputs for one list row: everything {@link composeAgentRow} needs and nothing it can
+ *  reach into the overlay for. Keeping this a plain function (not a method) means the frame-width
+ *  invariant is testable directly, without constructing a whole overlay. */
+export interface AgentRowInput {
+	node: AgentNode;
+	depth: number;
+	selected: boolean;
+	inner: number;
+	now: number;
+	stallMs: number;
+	theme: Theme;
+}
+
+/**
+ * One list row, guaranteed to fit within `inner` columns. The clock suffix (elapsed/stall badge)
+ * is reserved and appended *after* the label+detail body is clamped, so a tight budget always
+ * eats into the label/detail — truncating a stall badge would hide the one signal it exists to
+ * show. `safeInline` has its own internal floor (never truncates below ~16 columns), so the
+ * computed label/detail budgets are best-effort; the final clamp on the body is what makes the
+ * overall width hold regardless.
+ */
+export function composeAgentRow(input: AgentRowInput): string {
+	const { node, depth, selected, inner, now, stallMs, theme: t } = input;
+	const indent = "  ".repeat(depth);
+	const clock = runningAnnotation(node, now, stallMs);
+	// Reserve the clock's exact width plus its widest separator (" · ") up front — this portion
+	// of the row is never truncated.
+	const clockCols = clock ? visibleWidth(clock) + visibleWidth(" · ") : 0;
+	const bodyMax = Math.max(0, inner - clockCols);
+
+	const prefixCols = 2 + visibleWidth(indent); // "▸ " or "  ", then the indent
+	const avail = Math.max(0, bodyMax - prefixCols - 2); // 2 = glyph + space
+	const labelMax = Math.max(8, Math.floor(avail * 0.62));
+	const label = safeInline(node.label, labelMax) || "agent";
+	const detailMax = node.detail ? Math.max(0, avail - labelMax - 2) : 0;
+	const detail = detailMax > 0 ? safeInline(node.detail ?? "", detailMax) : "";
+	const detailText = detail ? t.fg("dim", `  ${detail}`) : "";
+
+	const labelLine = `${indent}${GLYPH[node.status]} ${label}`;
+	const prefixed = selected ? t.fg("accent", `▸ ${labelLine}`) : `  ${labelLine}`;
+	let body = `${prefixed}${detailText}`;
+	if (visibleWidth(body) > bodyMax) body = truncateToWidth(body, bodyMax, "");
+
+	const clockText = clock ? t.fg("dim", `${detail ? " · " : "  "}${clock}`) : "";
+	return `${body}${clockText}`;
 }
 
 /** Trailing callbacks and clock config for {@link AgentOverlay}, grouped as one object so a
@@ -195,20 +243,16 @@ export class AgentOverlay extends Container {
 			const end = Math.min(rows.length, this.listScroll + vp);
 			if (this.listScroll > 0) this.addChild(new Text(t.fg("dim", `▲ ${this.listScroll} above`), 1, 0));
 			for (const row of rows.slice(this.listScroll, end)) {
-				const indent = "  ".repeat(row.depth);
-				const clock = runningAnnotation(row.node, this.now(), this.actions.stallMs ?? 0);
-				// Reserve the clock annotation's width (plus its widest separator, " · ") from the
-				// row budget *before* splitting label/detail — otherwise a long label+detail plus a
-				// stall badge overflows `inner` and bleeds past the frame border.
-				const clockWidth = clock ? visibleWidth(clock) + visibleWidth(" · ") : 0;
-				const rowBudget = Math.max(24, this.inner() - visibleWidth(indent) - 4 - clockWidth);
-				const label = `${indent}${GLYPH[row.node.status]} ${safeInline(row.node.label, Math.max(16, Math.floor(rowBudget * 0.62))) || "agent"}`;
-				const detail = row.node.detail
-					? t.fg("dim", `  ${safeInline(row.node.detail, Math.max(16, Math.floor(rowBudget * 0.38)))}`)
-					: "";
-				const clockText = clock ? t.fg("dim", `${detail ? " · " : "  "}${clock}`) : "";
-				const line = row.node.id === selected?.id ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
-				this.addChild(new Text(`${line}${detail}${clockText}`, 1, 0));
+				const composed = composeAgentRow({
+					node: row.node,
+					depth: row.depth,
+					selected: row.node.id === selected?.id,
+					inner: this.inner(),
+					now: this.now(),
+					stallMs: this.actions.stallMs ?? 0,
+					theme: t,
+				});
+				this.addChild(new Text(composed, 1, 0));
 			}
 			if (end < rows.length) this.addChild(new Text(t.fg("dim", `▼ ${rows.length - end} below`), 1, 0));
 		}

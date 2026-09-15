@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 
-import { AgentOverlay } from "../../../src/ui/agent-overlay.ts";
-import { AgentTree } from "../../../src/ui/agent-tree.ts";
+import { AgentOverlay, composeAgentRow } from "../../../src/ui/agent-overlay.ts";
+import { type AgentNode, AgentTree } from "../../../src/ui/agent-tree.ts";
 
 const THEME = { fg: (_role: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
 const TUI_STUB = { requestRender: () => {} } as unknown as TUI;
@@ -471,15 +471,37 @@ test("a refused stop in the detail view shows the notice too, not just the list"
 	overlay.dispose();
 });
 
-test("a long label, long detail, and a stalled clock never push a list row past the frame border", () => {
-	const tree = new AgentTree(() => 0);
-	tree.add({ id: "a", label: "L".repeat(200), detail: "D".repeat(200) });
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { stallMs: 1, now: () => 1_000_000 });
-	const lines = overlay.render(60);
-	assert.ok(lines.length > 0, "the overlay renders at least the frame border");
-	const frameWidth = visibleWidth(lines[0] ?? "");
-	for (const line of lines) {
-		assert.ok(visibleWidth(line) <= frameWidth, `line exceeds the frame (${frameWidth}): ${JSON.stringify(line)}`);
-	}
-	overlay.dispose();
+test("composeAgentRow keeps a long label + long detail + a stalled clock within the frame, and never truncates the clock", () => {
+	const node: AgentNode = {
+		id: "a",
+		label: "L".repeat(200),
+		parentId: undefined,
+		status: "running",
+		detail: "D".repeat(200),
+		startedAt: 0,
+		lastAdvanceAt: 0,
+	};
+	const wide = composeAgentRow({ node, depth: 0, selected: true, inner: 56, now: 1_000_000, stallMs: 1, theme: THEME });
+	assert.ok(visibleWidth(wide) <= 56, `row exceeds inner=56 (${visibleWidth(wide)}): ${JSON.stringify(wide)}`);
+	assert.match(wide, /⚠ stalled \d+m( \d+s)?$/, "the stall badge survives intact — a tight budget must eat the label/detail, not the clock");
+
+	const narrow = composeAgentRow({ node, depth: 0, selected: true, inner: 30, now: 1_000_000, stallMs: 1, theme: THEME });
+	assert.ok(visibleWidth(narrow) <= 30, `row exceeds inner=30 (${visibleWidth(narrow)}): ${JSON.stringify(narrow)}`);
+});
+
+test("composeAgentRow leaves an ordinary row untruncated", () => {
+	const node: AgentNode = {
+		id: "b",
+		label: "L".repeat(40),
+		parentId: undefined,
+		status: "running",
+		detail: undefined,
+		startedAt: 0,
+		lastAdvanceAt: 0,
+	};
+	// now - startedAt = 75s, well short of the 90s stall threshold: an ordinary elapsed badge.
+	const row = composeAgentRow({ node, depth: 0, selected: false, inner: 56, now: 75_000, stallMs: 90_000, theme: THEME });
+	assert.ok(visibleWidth(row) <= 56, `row exceeds inner=56 (${visibleWidth(row)}): ${JSON.stringify(row)}`);
+	assert.ok(row.includes("L"), "the label still renders");
+	assert.ok(row.endsWith("1m 15s"), "the elapsed badge renders untruncated at the end of the row");
 });
