@@ -3354,6 +3354,60 @@ test("the published \"N agents\" status is the in-flight count, not the has-a-pa
 	assert.equal(statuses.at(-1), undefined, "the status clears when the tree empties");
 });
 
+test("the agent widget shows a running leg's elapsed time and stopAgent acknowledges immediately", async () => {
+	// A hanging engine: `run` never settles until its release is invoked, so the leg stays
+	// "running" long enough to observe the widget's clock and the stop acknowledgement.
+	const releases: Array<() => void> = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			await new Promise<void>((resolve) => releases.push(resolve));
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx: base } = makeCtx(os.tmpdir());
+	const widgets: Record<string, string[] | undefined> = {};
+	const ctx = {
+		...base,
+		ui: {
+			...base.ui,
+			setWidget: (id: string, lines: string[] | undefined) => {
+				widgets[id] = lines;
+			},
+		},
+	};
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+
+	const launched = await delegate.execute("widget-clock-leg", { agent: "scout", task: "watch the clock", async: true }, undefined, undefined, ctx);
+	const id = launched.details?.runId as string | undefined;
+	assert.ok(id, "the async leg gets a run id");
+	for (let i = 0; i < 20 && releases.length < 1; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(releases.length, 1, "the fake engine must actually be running, not queued behind a semaphore");
+
+	const runningLines = widgets["persona-agents"] ?? [];
+	const legLine = runningLines.find((line) => line.includes("⏳"));
+	assert.ok(legLine, `expected a running leg row in the widget: ${JSON.stringify(runningLines)}`);
+	assert.match(legLine as string, /⏳ .*·\s*(<1s|\d+s)$/, "the widget row for a running leg carries an elapsed reading");
+
+	// Act: stop it the way the F9 overlay does — through the same stopAgent the intercom "stop" action reaches.
+	const stopped = await intercom.execute("widget-clock-stop", { action: "stop", to: id }, undefined, undefined, ctx);
+	assert.equal(stopped.isError, false, "the stop handle is live while the engine is still running");
+
+	const afterStopLines = widgets["persona-agents"] ?? [];
+	const stoppingLine = afterStopLines.find((line) => line.includes("stopping…"));
+	assert.ok(stoppingLine, `expected the widget to acknowledge the stop before the engine settles: ${JSON.stringify(afterStopLines)}`);
+
+	// Release the hung engine and let the run settle; the node must leave the tree (existing behaviour).
+	releases.shift()?.();
+	for (let i = 0; i < 40 && widgets["persona-agents"] !== undefined; i++) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	assert.equal(widgets["persona-agents"], undefined, "the leg's node leaves the tree once the released engine settles");
+});
+
 // ── concurrent runs of one strategy/flow must not share a tree root id ──────────────────
 
 test("makeRootIdAllocator hands every run its own root id under the same prefix", () => {
