@@ -62,6 +62,15 @@ export class SupervisorBroker {
 		return this.lastError;
 	}
 
+	/** The lifecycle state `adapterDeps`, `steerFrame`, and `doctorLine` each branch on, named
+	 *  once so they can never read it as three different ad hoc conditions. */
+	private state(): "idle" | "starting" | "up" | "failed" {
+		if (this.hostRef) return "up";
+		if (this.lastError !== undefined) return "failed";
+		if (this.promise) return "starting";
+		return "idle";
+	}
+
 	/** Start the host once per endpoint attempt; retried on the next call after a failure. */
 	ensure(endpoint: string): void {
 		if (this.promise) return;
@@ -102,7 +111,7 @@ export class SupervisorBroker {
 
 	/** The adapter-facing deps, or undefined while the last start failed (children spawn bus-less). */
 	adapterDeps(endpoint: string): EngineAdapterBroker | undefined {
-		const failedBefore = this.lastError !== undefined && this.hostRef === undefined;
+		const failedBefore = this.state() === "failed";
 		this.ensure(endpoint);
 		if (failedBefore) return undefined;
 		return {
@@ -122,7 +131,7 @@ export class SupervisorBroker {
 			},
 			steerFrame: (handle, text) => {
 				if (this.hostRef) return this.hostRef.steer(handle, text);
-				if (this.lastError !== undefined || !this.expected.has(handle) || !text.trim()) return false;
+				if (this.state() === "failed" || !this.expected.has(handle) || !text.trim()) return false;
 				const queued = this.preHostSteers.get(handle) ?? [];
 				queued.push(text);
 				this.preHostSteers.set(handle, queued);
@@ -132,13 +141,20 @@ export class SupervisorBroker {
 	}
 
 	doctorLine(): string {
-		const status = this.hostRef
-			? `endpoint ${this.hostRef.endpoint}`
-			: this.lastError !== undefined
-				? `failed — ${this.lastError}`
-				: this.promise
-					? "(starting…)"
-					: "(not started — no child-engine build yet)";
+		let status: string;
+		switch (this.state()) {
+			case "up":
+				status = `endpoint ${this.hostRef?.endpoint}`;
+				break;
+			case "failed":
+				status = `failed — ${this.lastError}`;
+				break;
+			case "starting":
+				status = "(starting…)";
+				break;
+			default:
+				status = "(not started — no child-engine build yet)";
+		}
 		return `broker: on — ${status}, connected children: ${this.hostRef?.connectedHandles().length ?? 0}`;
 	}
 

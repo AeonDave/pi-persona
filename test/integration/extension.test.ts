@@ -3390,6 +3390,9 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	const runningLines = widgets["persona-agents"] ?? [];
 	const legLine = runningLines.find((line) => line.includes("⏳"));
 	assert.ok(legLine, `expected a running leg row in the widget: ${JSON.stringify(runningLines)}`);
+	// The stub engine never reports steerable, so the detail may still read "queued" (delegate-tool's
+	// seeded marker, cleared only once the leg goes live) — the regex is loose on purpose: it only
+	// pins the elapsed reading (e.g. "queued · <1s"), not the detail text before it.
 	assert.match(legLine as string, /⏳ .*·\s*(<1s|\d+s)$/, "the widget row for a running leg carries an elapsed reading");
 
 	// Act: stop it the way the F9 overlay does — through the same stopAgent the intercom "stop" action reaches.

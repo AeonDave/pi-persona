@@ -173,6 +173,19 @@ export interface AgentNodePatch {
 	lastAdvanceAt?: number;
 }
 
+/** Apply the fields `add`'s upsert branch and `update` both accept, in place — the one place
+ *  that lists them, so the two callers can never let a field drift out of sync between them. */
+function applyPatch(node: AgentNode, patch: AgentNodePatch): void {
+	if (patch.status) node.status = patch.status;
+	if (patch.kind !== undefined) node.kind = patch.kind;
+	if (patch.agent !== undefined) node.agent = patch.agent;
+	if (patch.model !== undefined) node.model = patch.model;
+	if (patch.detail !== undefined) node.detail = patch.detail;
+	if (patch.output !== undefined) node.output = patch.output;
+	if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
+	if (patch.lastAdvanceAt !== undefined) node.lastAdvanceAt = patch.lastAdvanceAt;
+}
+
 /** A small mutable registry with change notification. The extension owns one. */
 export class AgentTree {
 	private nodes: AgentNode[] = [];
@@ -190,14 +203,7 @@ export class AgentTree {
 			const before = { ...existing };
 			existing.label = input.label;
 			if (input.parentId !== undefined) existing.parentId = input.parentId;
-			if (input.status) existing.status = input.status;
-			if (input.kind !== undefined) existing.kind = input.kind;
-			if (input.agent !== undefined) existing.agent = input.agent;
-			if (input.model !== undefined) existing.model = input.model;
-			if (input.detail !== undefined) existing.detail = input.detail;
-			if (input.output !== undefined) existing.output = input.output;
-			if (input.startedAt !== undefined) existing.startedAt = input.startedAt;
-			if (input.lastAdvanceAt !== undefined) existing.lastAdvanceAt = input.lastAdvanceAt;
+			applyPatch(existing, input);
 			if (!sameNode(before, existing)) this.emit({ type: "updated", node: { ...existing } });
 			return;
 		}
@@ -223,14 +229,7 @@ export class AgentTree {
 		const node = this.nodes.find((n) => n.id === id);
 		if (!node) return;
 		const before = { ...node };
-		if (patch.status) node.status = patch.status;
-		if (patch.kind !== undefined) node.kind = patch.kind;
-		if (patch.agent !== undefined) node.agent = patch.agent;
-		if (patch.model !== undefined) node.model = patch.model;
-		if (patch.detail !== undefined) node.detail = patch.detail;
-		if (patch.output !== undefined) node.output = patch.output;
-		if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
-		if (patch.lastAdvanceAt !== undefined) node.lastAdvanceAt = patch.lastAdvanceAt;
+		applyPatch(node, patch);
 		if (!sameNode(before, node)) this.emit({ type: "updated", node: { ...node } });
 	}
 

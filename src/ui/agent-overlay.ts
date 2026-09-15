@@ -258,9 +258,9 @@ export class AgentOverlay extends Container {
 		}
 		this.addChild(new Spacer(1));
 		const stoppable = selected !== undefined && this.canStopNode(selected);
-		const steerHint = selected && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false) ? "   s steer" : "";
-		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${stoppable ? "   x stop" : ""}${steerHint}   esc close`), 1, 0));
-		if (this.notice) this.addChild(new Text(t.fg("dim", this.notice), 1, 0));
+		const steerable = selected !== undefined && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false);
+		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${this.hintLine("list", stoppable, steerable)}   esc close`), 1, 0));
+		this.renderNotice();
 	}
 
 	/**
@@ -365,9 +365,8 @@ export class AgentOverlay extends Container {
 			for (const line of wrapTextWithAnsi(composed, w)) this.addChild(new Text(line, 1, 0));
 			this.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
 		} else {
-			const steerHint = steerable ? "   ·   s steer" : "";
-			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${stoppable ? "   ·   x stop" : ""}${steerHint}`), 1, 0));
-			if (this.notice) this.addChild(new Text(t.fg("dim", this.notice), 1, 0));
+			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
+			this.renderNotice();
 			if (live && !steerable) {
 				this.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
 			}
@@ -456,6 +455,18 @@ export class AgentOverlay extends Container {
 	 *  the hint that advertises "x stop" and the handler that actually gates it never diverge. */
 	private canStopNode(node: Pick<AgentNode, "id" | "status">): boolean {
 		return node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
+	}
+
+	/** The trailing "x stop"/"s steer" hint fragment for an action line — the list's three-space
+	 *  style or the detail view's " · " style, the two views' only difference here. */
+	private hintLine(kind: "list" | "detail", stoppable: boolean, steerable: boolean): string {
+		const sep = kind === "list" ? "   " : "   ·   ";
+		return `${stoppable ? `${sep}x stop` : ""}${steerable ? `${sep}s steer` : ""}`;
+	}
+
+	/** The one-line refusal notice, shown identically under the list and the detail view. */
+	private renderNotice(): void {
+		if (this.notice) this.addChild(new Text(this.theme.fg("dim", this.notice), 1, 0));
 	}
 
 	/** Stop (abort) one agent by id. A refusal — the node is gone, not stoppable, or the caller
