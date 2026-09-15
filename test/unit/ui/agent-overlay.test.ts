@@ -11,7 +11,7 @@ const THEME = { fg: (_role: string, s: string) => s, bold: (s: string) => s } as
 const TUI_STUB = { requestRender: () => {} } as unknown as TUI;
 
 function openOverlay(tree: AgentTree): AgentOverlay {
-	return new AgentOverlay(tree, TUI_STUB, THEME, () => {}, undefined, undefined, () => true);
+	return new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canSteer: () => true });
 }
 
 function type(overlay: AgentOverlay, text: string): void {
@@ -70,7 +70,7 @@ test("re-opening the steer compose starts from an empty buffer", () => {
 	const tree = new AgentTree();
 	tree.add({ id: "async:A", label: "A" });
 	let steerable = true;
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, undefined, undefined, () => steerable);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canSteer: () => steerable });
 	overlay.handleInput("\n");
 	overlay.handleInput("s");
 	type(overlay, "stale text");
@@ -103,21 +103,17 @@ test("list selection follows the chosen agent when an earlier sibling is pruned"
 	tree.add({ id: "c", label: "charlie" });
 	const stopped: string[] = [];
 	const steered: string[] = [];
-	const overlay = new AgentOverlay(
-		tree,
-		TUI_STUB,
-		THEME,
-		() => {},
-		(id) => {
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
 			stopped.push(id);
 			return true;
 		},
-		(id, text) => {
+		onSteer: (id, text) => {
 			steered.push(`${id}:${text}`);
 			return true;
 		},
-		() => true,
-	);
+		canSteer: () => true,
+	});
 	overlay.handleInput("j"); // aim at bravo
 	tree.remove("a"); // alpha settles and its node is pruned under the user
 	assert.match(overlay.render(80).join("\n"), /▸ ⏳ bravo/, "the selection marker stays on bravo");
@@ -141,10 +137,12 @@ test("a stop aimed at an agent that settles first re-anchors and refuses, instea
 	tree.add({ id: "b", label: "bravo" });
 	tree.add({ id: "c", label: "charlie" });
 	const stopped: string[] = [];
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
-		stopped.push(id);
-		return true;
-	}, undefined, () => true);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+	});
 	overlay.handleInput("j"); // aim at bravo
 	tree.remove("b"); // the aimed-at agent is the one that vanishes
 	assert.match(overlay.render(80).join("\n"), /▸ ⏳ alpha/, "the marker visibly falls back to the top");
@@ -160,10 +158,13 @@ test("a steer aimed at an agent that settles first is refused the same way", () 
 	tree.add({ id: "a", label: "alpha" });
 	tree.add({ id: "b", label: "bravo" });
 	const steered: string[] = [];
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, undefined, (id, text) => {
-		steered.push(`${id}:${text}`);
-		return true;
-	}, () => true);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onSteer: (id, text) => {
+			steered.push(`${id}:${text}`);
+			return true;
+		},
+		canSteer: () => true,
+	});
 	overlay.handleInput("j"); // aim at bravo
 	tree.remove("b");
 	overlay.handleInput("s");
@@ -183,10 +184,13 @@ test("moving the marker after a lost aim re-arms the directed keys at once", () 
 	tree.add({ id: "b", label: "bravo" });
 	tree.add({ id: "c", label: "charlie" });
 	const stopped: string[] = [];
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
-		stopped.push(id);
-		return true;
-	}, undefined, () => true);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+		canSteer: () => true,
+	});
 	overlay.handleInput("j"); // aim at bravo
 	tree.remove("b"); // aim lost — the marker falls back to alpha
 	overlay.handleInput("j"); // and the user aims again, at charlie
@@ -200,10 +204,13 @@ test("drilling into a row after a lost aim re-arms the directed keys too", () =>
 	tree.add({ id: "a", label: "alpha" });
 	tree.add({ id: "b", label: "bravo" });
 	const stopped: string[] = [];
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
-		stopped.push(id);
-		return true;
-	}, undefined, () => true);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+		canSteer: () => true,
+	});
 	overlay.handleInput("j"); // aim at bravo
 	tree.remove("b"); // aim lost — the marker falls back to alpha
 	overlay.handleInput("\n"); // read alpha's output, then esc back out to the list
@@ -220,10 +227,13 @@ test("a stop typed at a drilled-in agent that finishes first does not fall throu
 	tree.add({ id: "a", label: "alpha" });
 	tree.add({ id: "b", label: "bravo" });
 	const stopped: string[] = [];
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, (id) => {
-		stopped.push(id);
-		return true;
-	}, undefined, () => true);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+		canSteer: () => true,
+	});
 	overlay.handleInput("j"); // aim at bravo
 	overlay.handleInput("\n"); // drill into it
 	tree.remove("b"); // it settles while the user is reading its output
@@ -386,4 +396,57 @@ test("an unterminated control sequence cannot stall the detail render either", (
 	assert.ok(rendered.includes("lorem ipsum"), "the report is still displayed");
 	assert.doesNotMatch(rendered, /\u001b/, "and the dangling introducer is still stripped");
 	assertLinearRenderWork(work, buffer.length);
+});
+
+test("the list hint offers x stop only when the aimed agent is stoppable", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	const stoppable = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canStop: () => true });
+	assert.match(stoppable.render(80).join("\n"), /x stop/);
+	stoppable.dispose();
+	const frozen = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canStop: () => false });
+	assert.doesNotMatch(frozen.render(80).join("\n"), /x stop/);
+	frozen.dispose();
+});
+
+test("a refused stop shows a notice instead of silently doing nothing, cleared by the next key", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { onStop: () => false, canStop: () => false });
+	overlay.handleInput("x");
+	assert.match(overlay.render(80).join("\n"), /nothing to stop for alpha/);
+	overlay.handleInput("j");
+	assert.doesNotMatch(overlay.render(80).join("\n"), /nothing to stop/);
+	overlay.dispose();
+});
+
+test("rows show elapsed time and the stall badge from the injected clock", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha", detail: "12k tok" });
+	tree.add({ id: "b", label: "bravo" });
+	tree.update("a", { lastAdvanceAt: 100_000 });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { stallMs: 90_000, now: () => 130_000 });
+	const text = overlay.render(100).join("\n");
+	assert.match(text, /alpha.*12k tok · 2m 10s/);
+	assert.match(text, /bravo.*⚠ stalled 2m 10s/);
+	overlay.dispose();
+});
+
+test("the overlay ticks while an agent runs and releases its timer on dispose", (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	let now = 0;
+	let renders = 0;
+	const tui = { requestRender: () => renders++ } as unknown as TUI;
+	const overlay = new AgentOverlay(tree, tui, THEME, () => {}, { now: () => now });
+	const before = renders;
+	now = 2_000;
+	t.mock.timers.tick(2_000);
+	assert.ok(renders >= before + 2, "two ticks → at least two re-renders");
+	assert.match(overlay.render(80).join("\n"), /alpha  2s/);
+	overlay.dispose();
+	const after = renders;
+	t.mock.timers.tick(5_000);
+	assert.equal(renders, after, "no ticks after dispose");
 });

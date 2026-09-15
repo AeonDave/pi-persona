@@ -84,7 +84,7 @@ import { createMonitorSession, type MonitorSession } from "./monitor/session.ts"
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, compactTokens, IdleCoalescingNotifier, PeekWatcher, renderCompletion } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, compactTokens, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
 import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
@@ -131,14 +131,6 @@ const RUN_LIMITS: RunLimits = {
 	timeoutMs: 180_000, // IDLE window (resets on output) — kills a hung child, not a busy one
 	budgetTokens: 1_000_000,
 };
-
-// A running async child that hasn't ADVANCED (output/turns/tokens) for this long is flagged
-// "possibly stuck" — the soft stall signal. It is deliberately patient: a long scan, a big
-// generation, or a blocking command shows no visible progress yet is perfectly healthy, so we wake
-// the supervisor only after a genuinely long quiet spell. Purely advisory (no auto-abort); the idle
-// watchdog (RUN_LIMITS.timeoutMs, reset on progress) + token budget are the always-on enforcing
-// backstops, with the OPT-IN hard cap (PI_PERSONA_AGENT_MAX_MS, off by default) as an extra ceiling.
-const STALL_FLAG_MS = 90_000;
 
 const BUNDLED_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = "persona";
@@ -663,7 +655,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 		await ctx.ui.custom<void>(
 			(tui, theme, _kb, done) =>
-				new AgentOverlay(agentTree, tui, theme, () => done(undefined), stopAgent, steerAgent, (id) => steerRegistry.has(id)),
+				new AgentOverlay(agentTree, tui, theme, () => done(undefined), {
+					onStop: stopAgent,
+					onSteer: steerAgent,
+					canSteer: (id) => steerRegistry.has(id),
+					canStop: (id) => stopRegistry.has(id),
+					stallMs: STALL_FLAG_MS,
+				}),
 			// Near-fullscreen: watching sub-agents work is a reading surface, not a popup.
 			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%" } },
 		);

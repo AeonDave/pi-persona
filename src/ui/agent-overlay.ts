@@ -22,7 +22,8 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentTree, type FlatRow, flattenTree, GLYPH } from "./agent-tree.ts";
+import { type AgentTree, type FlatRow, flattenTree, GLYPH, runningAnnotation } from "./agent-tree.ts";
+import { LiveClock } from "./live-clock.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
 
@@ -42,14 +43,28 @@ function isPrintable(key: string): boolean {
 	return c >= 0x20 && c !== 0x7f;
 }
 
+/** Trailing callbacks and clock config for {@link AgentOverlay}, grouped as one object so a
+ *  new capability (stall threshold, injected clock) does not grow the constructor's arity. */
+export interface AgentOverlayActions {
+	onStop?: (nodeId: string) => boolean;
+	onSteer?: (nodeId: string, text: string) => boolean;
+	canSteer?: (nodeId: string) => boolean;
+	canStop?: (nodeId: string) => boolean;
+	/** Stall threshold for the ⚠ badge; 0/omitted ⇒ no badge. */
+	stallMs?: number;
+	/** Clock; tests inject a fixed one. */
+	now?: () => number;
+}
+
 export class AgentOverlay extends Container {
 	private tree: AgentTree;
 	private tui: TUI;
 	private theme: Theme;
 	private done: () => void;
-	private onStop: ((nodeId: string) => boolean) | undefined;
-	private onSteer: ((nodeId: string, text: string) => boolean) | undefined;
-	private canSteer: ((nodeId: string) => boolean) | undefined;
+	private readonly actions: AgentOverlayActions;
+	private readonly clock: LiveClock;
+	private readonly now: () => number;
+	private notice: string | undefined;
 	private unsubscribe: () => void;
 	private selectedId: string | undefined; // the selected agent's *id*, never its row index
 	private aimLost = false; // the aimed-at agent settled: swallow the next directed keystroke
@@ -61,25 +76,21 @@ export class AgentOverlay extends Container {
 	private lastWidth = 100;
 	private displayCache: { source: string; width: number; rows: string[] } | undefined;
 
-	constructor(
-		tree: AgentTree,
-		tui: TUI,
-		theme: Theme,
-		done: () => void,
-		onStop?: (nodeId: string) => boolean,
-		onSteer?: (nodeId: string, text: string) => boolean,
-		canSteer?: (nodeId: string) => boolean,
-	) {
+	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void, actions: AgentOverlayActions = {}) {
 		super();
 		this.tree = tree;
 		this.tui = tui;
 		this.theme = theme;
 		this.done = done;
-		this.onStop = onStop;
-		this.onSteer = onSteer;
-		this.canSteer = canSteer;
-		this.unsubscribe = tree.onChange(() => this.refresh());
+		this.actions = actions;
+		this.now = actions.now ?? Date.now;
+		this.clock = new LiveClock({ intervalMs: 1_000, isLive: () => tree.hasRunning(), onTick: () => this.refresh() });
+		this.unsubscribe = tree.onChange(() => {
+			this.refresh();
+			this.clock.start(); // new work may have appeared while the clock was stopped
+		});
 		this.rebuild();
+		this.clock.start();
 	}
 
 	private refresh(): void {
@@ -190,14 +201,18 @@ export class AgentOverlay extends Container {
 				const detail = row.node.detail
 					? t.fg("dim", `  ${safeInline(row.node.detail, Math.max(16, Math.floor(rowBudget * 0.38)))}`)
 					: "";
+				const clock = runningAnnotation(row.node, this.now(), this.actions.stallMs ?? 0);
+				const clockText = clock ? t.fg("dim", `${detail ? " · " : "  "}${clock}`) : "";
 				const line = row.node.id === selected?.id ? t.fg("accent", `▸ ${label}`) : `  ${label}`;
-				this.addChild(new Text(`${line}${detail}`, 1, 0));
+				this.addChild(new Text(`${line}${detail}${clockText}`, 1, 0));
 			}
 			if (end < rows.length) this.addChild(new Text(t.fg("dim", `▼ ${rows.length - end} below`), 1, 0));
 		}
 		this.addChild(new Spacer(1));
-		const steerHint = selected && selected.status === "running" && (this.canSteer?.(selected.id) ?? false) ? "   s steer" : "";
-		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open   x stop${steerHint}   esc close`), 1, 0));
+		const stoppable = selected?.status === "running" && (this.actions.canStop?.(selected.id) ?? true);
+		const steerHint = selected && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false) ? "   s steer" : "";
+		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${stoppable ? "   x stop" : ""}${steerHint}   esc close`), 1, 0));
+		if (this.notice) this.addChild(new Text(t.fg("dim", this.notice), 1, 0));
 	}
 
 	/**
@@ -292,7 +307,8 @@ export class AgentOverlay extends Container {
 		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
 
-		const steerable = live && (this.canSteer?.(node.id) ?? false);
+		const steerable = live && (this.actions.canSteer?.(node.id) ?? false);
+		const stoppable = live && (this.actions.canStop?.(node.id) ?? true);
 		if (this.steering && !steerable) this.steering = false; // agent finished mid-compose
 		this.addChild(new Spacer(1));
 		if (this.steering) {
@@ -302,7 +318,7 @@ export class AgentOverlay extends Container {
 			this.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
 		} else {
 			const steerHint = steerable ? "   ·   s steer" : "";
-			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${live ? "   ·   x stop" : ""}${steerHint}`), 1, 0));
+			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${stoppable ? "   ·   x stop" : ""}${steerHint}`), 1, 0));
 			if (live && !steerable) {
 				this.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
 			}
@@ -310,6 +326,7 @@ export class AgentOverlay extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		this.notice = undefined; // any key clears a previous refusal notice
 		const kb = getKeybindings();
 		if (this.detailId) {
 			// Steer mode: type a message into the running agent. Capture all printable keys
@@ -323,7 +340,7 @@ export class AgentOverlay extends Container {
 					const text = this.steerBuffer.trim();
 					this.steering = false;
 					this.steerBuffer = "";
-					if (text) this.onSteer?.(this.detailId, text);
+					if (text) this.actions.onSteer?.(this.detailId, text);
 					this.refresh();
 				} else if (keyData === "\x7f" || keyData === "\b") {
 					this.steerBuffer = this.steerBuffer.slice(0, -1);
@@ -334,7 +351,7 @@ export class AgentOverlay extends Container {
 				}
 				return;
 			}
-			if (keyData === "s" && (this.canSteer?.(this.detailId) ?? false)) {
+			if (keyData === "s" && (this.actions.canSteer?.(this.detailId) ?? false)) {
 				this.steering = true;
 				this.steerBuffer = "";
 				this.refresh();
@@ -370,7 +387,7 @@ export class AgentOverlay extends Container {
 			// Steer straight from the list: drill into the selected agent with the
 			// compose line already open (same gate as the detail view's `s`).
 			const leaf = this.aimedLeaf(leaves);
-			if (leaf && leaf.node.status === "running" && (this.canSteer?.(leaf.node.id) ?? false)) {
+			if (leaf && leaf.node.status === "running" && (this.actions.canSteer?.(leaf.node.id) ?? false)) {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0;
 				this.steering = true;
@@ -385,17 +402,24 @@ export class AgentOverlay extends Container {
 		}
 	}
 
-	/** Stop (abort) one agent by id, if it's running and stoppable. */
+	/** Stop (abort) one agent by id. A refusal (no handle, or the caller declines) surfaces as a
+	 *  one-line notice rather than doing nothing — the user pressed a key and deserves feedback. */
 	private tryStop(nodeId: string): void {
-		if (this.onStop?.(nodeId)) this.refresh();
+		if (!this.actions.onStop?.(nodeId)) {
+			const label = this.tree.snapshot().find((n) => n.id === nodeId)?.label ?? nodeId;
+			this.notice = `nothing to stop for ${label}`;
+		}
+		this.refresh();
 	}
 
 	private close(): void {
+		this.clock.stop();
 		this.unsubscribe();
 		this.done();
 	}
 
 	dispose(): void {
+		this.clock.stop();
 		this.unsubscribe();
 	}
 }
