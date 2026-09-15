@@ -27,7 +27,8 @@ export interface FallbackDeps {
 	routingPolicy?: ModelRoutingPolicy;
 	/** Explicitly opt a provider-qualified model into cross-provider recovery. */
 	allowCrossProviderFallback?: boolean;
-	/** Notified on each reroute, for transparency (a tree/log breadcrumb). */
+	/** Notified on each reroute, for transparency: the extension wires this to a warning toast, not
+	 *  a tree/log breadcrumb. */
 	onFallback?: (info: { from: string; to: string; agent: string }) => void;
 }
 

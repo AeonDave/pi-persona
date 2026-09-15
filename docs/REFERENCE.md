@@ -51,6 +51,11 @@ hard-fail.
 The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reaches both engine
 backends, keeping a caller-provided run label available in the live tree and runtime result.
 
+`outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed
+(the only built-in is `default`). Naming one that isn't installed is rejected before any worker
+spawns, checked across every task in a parallel batch: `delegate: unknown output contract(s) "x" —
+nothing was spawned. Installed contracts: default, finding…`.
+
 ### Supervising running sub-agents — the `intercom` plane
 
 The supervisor's internal communication with children has three layers:
@@ -64,7 +69,9 @@ The supervisor's internal communication with children has three layers:
 
 Delegated output is untrusted and is fenced before it reaches the supervisor. Async runs report
 failures to the supervisor, and a repeated identical failed delegation is stopped by the runtime
-ledger before another child is spawned.
+ledger before another child is spawned. A run whose model's provider fails at call time (auth,
+outage, 5xx) may retry the same model id through a fallback provider; each reroute surfaces to the
+supervisor as a warning toast, `<agent>: <from> failed, retrying on <to>`.
 
 The cross-process broker is on by default for child-engine, worktree, and MCP legs. It provides the
 same supervisor communication surface over a session-scoped POSIX socket or Windows named pipe.
@@ -319,6 +326,13 @@ stop, `s` steer, and Esc close.
 
 **Commands** — `/persona [name|off|list|reload|seed|restore]` · `/models [query]` ·
 `/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`.
+
+`/doctor` reports the cross-process broker's lifecycle on one line: `endpoint …` once the host is
+listening, `failed — …` after a bind error (children built while it is down spawn without a bus
+endpoint, so they never burn connect backoff against a dead socket; the next child-engine build
+retries), `(starting…)` mid-attempt, or `(not started — no child-engine build yet)` before any
+child-engine build has run. A connected broker child's status shows `⇄ <handle>`; if that connection
+drops, the status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 **CLI flags** — `--persona <name>` starts with that installed persona and errors if it is missing;
 `--exocom` joins this workspace's Exocom plane; `--exocom=Ab0T` joins another workspace's scope
