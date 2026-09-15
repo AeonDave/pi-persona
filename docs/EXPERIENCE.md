@@ -40,8 +40,12 @@ ask for a monitor. Pi runs a small event-producing program and brings the result
 supervisor is free. Keep the session open, and cancel a watch when its purpose ends. See
 [time and event wakes](MONITORS.md) for examples and limits.
 
-- **F9** opens the agent tree. Enter opens a selectable worker's output; `s` sends a course correction;
-  `x` requests cancellation; Escape goes back or closes the panel.
+- **F9** opens the agent tree. Every running row shows its elapsed time and switches to `⚠ stalled
+  <duration>` once it has gone 90 seconds without progress — the same threshold behind the
+  supervisor's stall alert. Enter opens a selectable worker's output; `s` sends a course correction;
+  `x` requests cancellation and appears only when the run can actually be stopped, marking the row
+  `stopping…` at once; a stop that can't be applied says so instead of doing nothing. Escape goes
+  back or closes the panel.
 - **`/peek`** gives a compact progress view. A quiet worker is a reason to inspect its last
   progress and current activity, not to launch a duplicate immediately.
 - **Background results arrive automatically.** A supervisor can continue independent work while

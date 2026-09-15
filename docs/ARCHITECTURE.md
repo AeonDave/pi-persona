@@ -155,9 +155,11 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `time` (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the
   elapsed-time readings and the prompt-cache rule that sets each one's granularity), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
-  (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback), `async.ts` (async
-  tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event → state),
-  `handles.ts` (one bus-handle sequence shared by BOTH engines), `signals.ts` (`combineSignals`).
+  (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback),
+  `spec-preflight.ts` (the one unknown-agent/unknown-contract preflight shared by both engines),
+  `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event →
+  state), `handles.ts` (one bus-handle sequence shared by BOTH engines), `signals.ts`
+  (`combineSignals`).
 - **`src/orchestration/`** — the heart: `sdk.ts` (the Strategy SDK), `strategy.ts` (registry +
   `knownParams`), `strategies/*.ts`, `voting.ts`, `judge.ts` (anonymise-for-judge), `reducers.ts`,
   `roster.ts` (teams + `rosterSpec`), `flow*.ts` (DAG + JSONL journal + gates), `render.ts`.
@@ -214,6 +216,11 @@ slow for — notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on 
 first real progress cancels it, so a slow-but-streaming turn is never touched. All three classify as
 `failureKind: "timeout"` (never a provider reroute).
 
+The child-process engine mirrors the in-process coaching exemption for an async (background) leg:
+`allowBlocking` disables both the idle and startup watchdogs (`engine/child.ts`) so a
+`decision`/`interview` round-trip over the broker is never killed as if it had stalled. The hard
+wall-clock cap still applies regardless.
+
 In-process deadlines and caller cancellation are armed **before session construction**. Startup is
 one window from construction to the first real progress, and the hard cap covers the same lifetime
 without resetting. Coaching's idle/startup exemption applies only after construction, when a child
@@ -234,11 +241,17 @@ a non-empty array is an allowlist, and an explicit empty array means no tools (`
 on the child backend). Denylists are then applied independently through `excludeTools` /
 `--exclude-tools`; no mapper may collapse the empty grant into the absent/default state.
 
+A spec naming an agent or output contract that isn't installed fails before anything spawns, on
+both backends alike (`engine/spec-preflight.ts`): the message names what IS installed, capped at 12
+names, so the caller can self-correct — one wording, one cap, so the two engines can't drift apart.
+
 `isolation: worktree` is fail-closed. It requires a clean Git checkout so the detached `HEAD` view
 cannot silently omit staged/unstaged/untracked supervisor work. A non-repository, dirty checkout,
 worktree creation failure, successful leg without a real unified-diff artifact, or artifact over the
 bounded return limit fails the leg; the base engine is never invoked against the user's real tree as
 an isolation fallback. The generated diff is returned to the supervisor before the temporary tree is
+removed. Every git invocation is asynchronous (`child_process.execFile`), so the extension host
+keeps rendering, ticking timers, and serving broker sockets while a large checkout is created or
 removed.
 
 Transient retries inside one agent session belong to the host **Pi runtime** and its `retry.*`
@@ -407,6 +420,12 @@ events and cannot route, reply, steer, or otherwise control agents.
   Ask failures echo the originating `msgId` so the client rejects the right request immediately.
   A client cancellation propagates to the corresponding host ask; cancellation lookup is scoped
   to the originating connection. It cannot cancel another connection's question.
+  `extension/broker-host.ts`'s `SupervisorBroker` owns this lifecycle end-to-end on the supervisor
+  side: it starts the host lazily on the first child-engine build, warns once on a failed bind
+  (children built while it stays down spawn without a bus endpoint, so they never burn connect
+  backoff against a dead socket), and the next build retries. `/doctor` surfaces its state as one
+  line. A dropped client connection flips the child-side bridge status to `⇄ offline` and fails a
+  fresh ask fast rather than hanging (`bus/broker/client.ts`'s `onClose`, `src/bridge.ts`).
 
 ### Presentation is a projection, not another comm plane
 
@@ -439,7 +458,14 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   shows. Runs settle and are pruned under the cursor while a keystroke is in flight, so when the
   aimed-at agent is the one that vanished, the selection re-anchors visibly and that keypress is
   spent re-aiming (`src/ui/agent-overlay.ts`) — aborting an agent the user never chose is not
-  undoable. ↑↓, ⏎ and the scroll keys never refuse: they cost nothing to repeat.
+  undoable. ↑↓, ⏎ and the scroll keys never refuse: they cost nothing to repeat;
+- every agent-tree node carries `startedAt`/`lastAdvanceAt`; `LiveClock` (`src/ui/live-clock.ts`)
+  repaints the sticky widget and the F9 overlay once a second while any node is running and stops
+  itself the instant nothing is, so an idle session owns no timer. A running row's annotation is
+  elapsed time until it has gone `STALL_FLAG_MS` (90s) quiet, then the same `⚠ stalled <duration>`
+  badge the async peek watchdog uses. `x` marks the target `stopping…` at once — the run's own
+  settle path writes the terminal status — and is offered only when a live stop handle exists; a
+  refusal (no handle, already settled) surfaces as a one-line notice instead of silently no-op'ing.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.
@@ -464,7 +490,10 @@ count; the tool gate repeats only its `ask_id`, not the peer text. Registry disp
 `from_session`, never envelope `from_name`. `exocom_wait` is non-blocking and wakes on a separate
 idle notifier from postcard `exocom_received` delivery. Clean shutdown attempts to release this
 session's claims and outbound asks; if that best-effort write cannot complete, the vanished registry
-owner is pruned on the next ledger transaction (live registry sessions are the lease). This gate is
+owner is pruned on the next ledger transaction (live registry sessions are the lease). A prune that
+drops a pending ask does not leave its waiter hanging: `expireWaiters` wakes it on the same idle-wake
+path a real answer would use, with `[pi-persona] exocom wait ended: the peer left the pool before
+answering · work_key=… ask_id=…`, rather than leaving `exocom_wait` armed forever. This gate is
 cooperative coordination for participating local Pi processes, not filesystem authorization or
 isolation from another same-user process. It is not a delegate/council replacement and not a task/run
 workflow runtime.
