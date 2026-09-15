@@ -48,6 +48,7 @@ function makeFakeClient(opts: {
 } = {}) {
 	const deliverCbs: Array<(evt: DeliverEvent) => void> = [];
 	const steerCbs: Array<(text: string) => void> = [];
+	const closeCbs: Array<() => void> = [];
 	const sends: Array<{ to: string; kind: string; text: string }> = [];
 	let closed = false;
 	const client: BrokerClient = {
@@ -64,6 +65,9 @@ function makeFakeClient(opts: {
 		onSteer: (cb) => {
 			steerCbs.push(cb);
 		},
+		onClose: (cb) => {
+			closeCbs.push(cb);
+		},
 		close: () => {
 			closed = true;
 		},
@@ -73,6 +77,7 @@ function makeFakeClient(opts: {
 		sends,
 		deliver: (evt: DeliverEvent) => deliverCbs.forEach((cb) => cb(evt)),
 		steer: (text: string) => steerCbs.forEach((cb) => cb(text)),
+		drop: () => closeCbs.forEach((cb) => cb()),
 		isClosed: () => closed,
 	};
 }
@@ -259,4 +264,25 @@ test("contact_peer's first list awaits and coalesces the broker roster refresh",
 	const result = await first;
 	const text = result.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
 	assert.match(text, /reviewer/, "the first list exposes the roster returned by the broker");
+});
+
+test("after the broker connection drops, the bridge marks the bus offline and progress reports are honest", async () => {
+	const pi = makeFakePi();
+	const statuses: Array<string | undefined> = [];
+	const ctx = { ui: { setStatus: (_k: string, v?: string) => { statuses.push(v); } } } as unknown as ExtensionContext;
+	const fake = makeFakeClient();
+	installBridge(pi.pi, ctx, {
+		env: { PI_PERSONA_BUS: "/tmp/x.sock", PI_PERSONA_HANDLE: "scout#1" },
+		makeClient: () => fake.client,
+	});
+	// Let the already-resolved register() promise settle (microtask) and mark the bridge connected.
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(statuses.at(-1), "⇄ scout#1");
+	fake.drop();
+	assert.equal(statuses.at(-1), "⇄ offline");
+	const tool = pi.tool("contact_supervisor")!;
+	const r = await tool.execute("t1", { kind: "progress", message: "halfway" }, undefined, undefined, ctx);
+	const text = r.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
+	assert.match(text, /no supervisor listening|dropped/i);
 });

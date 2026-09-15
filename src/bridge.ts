@@ -170,6 +170,17 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 		sendFollowUp(pi, `[steer from your supervisor]\n${trimmed}`);
 	});
 
+	// A live connection that drops (host teardown/crash) must not keep reporting "delivered":
+	// flip the bus offline so progress says "dropped" and asks fail fast as "unavailable".
+	client.onClose(() => {
+		bus.connected = false;
+		try {
+			ctx.ui.setStatus("persona-bridge", "⇄ offline");
+		} catch {
+			/* cosmetic */
+		}
+	});
+
 	bridgeReady = client.register().then(
 		() => {
 			bus.connected = true;

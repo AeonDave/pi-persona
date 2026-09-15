@@ -51,6 +51,8 @@ export interface BrokerClient {
 	list(): Promise<Array<{ handle: string; label: string }>>;
 	onDeliver(cb: (evt: DeliverEvent) => void): void;
 	onSteer(cb: (text: string) => void): void;
+	/** Fired once when a live connection drops (peer-initiated); not fired by close(). */
+	onClose(cb: () => void): void;
 	/** Sends `bye` (best-effort) and disposes the socket; idempotent. */
 	close(): void;
 }
@@ -85,10 +87,12 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 
 	let socket: net.Socket | undefined;
 	let closed = false;
+	let disconnected = false;
 	let registerSettle: { resolve: () => void; reject: (err: Error) => void } | undefined;
 
 	const deliverListeners = new Set<(evt: DeliverEvent) => void>();
 	const steerListeners = new Set<(text: string) => void>();
+	const closeListeners = new Set<() => void>();
 	const pendingAsks = new Map<string, { resolve: (text: string) => void; reject: (err: Error) => void }>();
 	const pendingLists = new Map<string, { resolve: (peers: Array<{ handle: string; label: string }>) => void; reject: (err: Error) => void }>();
 
@@ -236,7 +240,11 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 			// reply would otherwise leave register() pending for the child's whole life.
 			registerSettle?.reject(new Error("connection closed during register"));
 			registerSettle = undefined;
-			if (!closed) rejectAllPending("broker connection closed");
+			if (!closed) {
+				rejectAllPending("broker connection closed");
+				disconnected = true;
+				for (const cb of closeListeners) safely(cb);
+			}
 		});
 
 		return new Promise<void>((resolve, reject) => {
@@ -256,7 +264,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function ask(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<string> {
-		if (closed) return Promise.reject(new Error("broker client closed"));
+		if (closed || disconnected) return Promise.reject(new Error(closed ? "broker client closed" : "broker connection closed"));
 		const msgId = randomUUID();
 		return new Promise<string>((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;
@@ -307,7 +315,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function list(): Promise<Array<{ handle: string; label: string }>> {
-		if (closed) return Promise.reject(new Error("broker client closed"));
+		if (closed || disconnected) return Promise.reject(new Error(closed ? "broker client closed" : "broker connection closed"));
 		const reqId = randomUUID();
 		return new Promise((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;
@@ -336,6 +344,10 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		steerListeners.add(cb);
 	}
 
+	function onClose(cb: () => void): void {
+		closeListeners.add(cb);
+	}
+
 	function close(): void {
 		if (closed) return;
 		closed = true;
@@ -357,5 +369,5 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		rejectAllPending("broker client closed");
 	}
 
-	return { register, send, ask, reply, list, onDeliver, onSteer, close };
+	return { register, send, ask, reply, list, onDeliver, onSteer, onClose, close };
 }
