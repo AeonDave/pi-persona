@@ -169,6 +169,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
 					...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),
 				};
+				// The same flag the child reads as PI_PERSONA_ALLOW_BLOCKING: the parent-side watchdogs must
+				// not kill a leg that is waiting on the supervisor's answer (inproc parity).
+				if (deps.allowBlocking) childOptions.allowBlocking = true;
 				const broker = deps.broker;
 				const h = handle;
 				onSteerable?.((text) => broker.steerFrame(h, text));
