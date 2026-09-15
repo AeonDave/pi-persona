@@ -35,6 +35,7 @@ import type { AgentResult } from "../orchestration/types.ts";
 import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
+import { unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
 
 /** The minimal slice of Pi's AgentSession the engine drives — also the test seam. */
@@ -111,6 +112,8 @@ export interface InProcessDeps {
 	onProgress?: (snap: ProgressSnapshot) => void;
 	/** Known agent names, for self-correcting unknown-agent errors (mirrors the model path). */
 	listAgents?: () => string[];
+	/** Installed output-contract names (built-in `default` + files) for the self-correcting hint. */
+	listContracts?: () => string[];
 	/** Session factory — defaults to a real `createAgentSession`; injected in tests. */
 	createSession?: CreateInProcSession;
 	/** The semantic comm plane: when present + `coaching`, each child gets a
@@ -298,25 +301,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 	return {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
-			if (!cfg) {
-				const known = deps.listAgents?.() ?? [];
-				const hint = known.length > 0 ? ` — installed agents: ${known.slice(0, 12).join(", ")}${known.length > 12 ? ", …" : ""}` : "";
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `[${spec.agent}] unknown agent (not found in registry)${hint}`, failureKind: "unknown-agent" };
-			}
+			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
 			// A requested contract is a runtime guard, not merely prompt decoration. Resolve it
 			// before model/session construction so a missing name can never run unconstrained.
 			const requestedContract = spec.outputContract?.trim();
 			const requestedDef = requestedContract ? pinnedDef(requestedContract) : undefined;
-			if (requestedContract && !requestedDef) {
-				return {
-					agent: spec.agent,
-					output: "",
-					usage: emptyUsage(),
-					ok: false,
-					error: `[${spec.agent}] output contract "${requestedContract}" not found`,
-					failureKind: "contract",
-				};
-			}
+			if (requestedContract && !requestedDef) return unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []);
 
 			const ref = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model ?? deps.defaultModel;
 			const model = resolveModel(deps.modelRegistry, ref);

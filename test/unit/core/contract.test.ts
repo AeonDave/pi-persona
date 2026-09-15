@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type ContractDef, contractInstructions, DEFAULT_CONTRACT, extractJsonCandidate, parseAndValidate, parseContract, pinContract, validateAgainst } from "../../../src/core/contract.ts";
+import { type ContractDef, contractInstructions, DEFAULT_CONTRACT, extractJsonCandidate, installedContractNames, parseAndValidate, parseContract, pinContract, validateAgainst } from "../../../src/core/contract.ts";
 
 test("parseContract reads a contracts/*.contract.json into a ContractDef", () => {
 	const r = parseContract(
@@ -217,4 +217,9 @@ test("the shipped finding contract requires live-exploit provenance (a substanti
 	// a result with no proof is rejected; a result WITH a live-exploit proof passes
 	assert.equal(parseAndValidate('{"result":"rooted"}', r.def).ok, false);
 	assert.equal(parseAndValidate('{"result":"rooted","proof":"id → uid=0(root) via CVE-2021-4034 pkexec, live"}', r.def).ok, true);
+});
+
+test("installedContractNames always lists the built-in default first and never duplicates it", () => {
+	assert.deepEqual(installedContractNames({}), ["default"]);
+	assert.deepEqual(installedContractNames({ finding: {} as never, default: {} as never }), ["default", "finding"]);
 });

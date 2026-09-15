@@ -4,7 +4,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../agents/agent.ts";
-import { type ContractDef, DEFAULT_CONTRACT } from "../core/contract.ts";
+import { type ContractDef, DEFAULT_CONTRACT, installedContractNames } from "../core/contract.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { isThinkingLevel } from "../core/types.ts";
@@ -56,6 +56,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
 			// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
 			const contracts = (n: string): ContractDef | undefined => contractDefs[n] ?? (n === "default" ? DEFAULT_CONTRACT : undefined);
+			const contractNames = (): string[] => installedContractNames(contractDefs);
 			const modelFor = (agent: string): string | undefined => {
 				const persona = controller.activePersona?.name;
 				return persona ? personaModels(personaConfigs, persona)[agent] : undefined;
@@ -94,6 +95,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			const childEngineAt = (cwd: string): StrategyEngine => {
 				const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
 				deps.listAgents = () => agents.map((a) => a.name);
+				deps.listContracts = contractNames;
 				if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 				if (signal) deps.signal = signal;
 				deps.childOptions = {
@@ -122,6 +124,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
 				const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
 				ideps.listAgents = () => agents.map((a) => a.name);
+				ideps.listContracts = contractNames;
 				if (legSpine) ideps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 				ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
 				ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
@@ -144,6 +147,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=child\n");
 				const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
 				deps.listAgents = () => agents.map((a) => a.name);
+				deps.listContracts = contractNames;
 				if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
 				if (signal) deps.signal = signal;
 				if (lastCtx?.cwd) deps.cwd = lastCtx.cwd;
