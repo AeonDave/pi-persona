@@ -1,3 +1,5 @@
+import { compactTokens } from "../core/format.ts";
+import { formatDuration } from "../core/time.ts";
 import { compactInlineText } from "./presentation.ts";
 
 /**
@@ -25,6 +27,10 @@ export interface AgentNode {
 	detail: string | undefined;
 	/** The agent's output buffer, shown when the user drills into the node. */
 	output?: string;
+	/** Clock data (ms since epoch). Set by the tree on add; `lastAdvanceAt` moves on real progress.
+	 *  Excluded from change notifications — the live clock paints them. */
+	startedAt?: number;
+	lastAdvanceAt?: number;
 }
 
 export type AgentTreeChange =
@@ -54,12 +60,38 @@ export function flattenTree(nodes: AgentNode[]): FlatRow[] {
 /** Status → glyph, shared by every agent surface (tree, overlay). */
 export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗", stopped: "■" };
 
+export interface RenderOptions {
+	/** Current time; omitted ⇒ no elapsed/stall annotation (pure renders stay byte-identical). */
+	now?: number;
+	/** Quiet time after which a running row shows the stall badge; 0/omitted ⇒ never. */
+	stallMs?: number;
+}
+
+/** "1m 15s" while a running node keeps advancing; "⚠ stalled 1m 30s" once it has been quiet
+ *  for `stallMs`. Undefined for settled nodes or nodes without clock data. Pure. */
+export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt">, now: number, stallMs: number): string | undefined {
+	if (node.status !== "running" || node.startedAt === undefined) return undefined;
+	const quietSince = node.lastAdvanceAt ?? node.startedAt;
+	if (stallMs > 0 && now - quietSince >= stallMs) return `⚠ stalled ${formatDuration(now - quietSince)}`;
+	return formatDuration(now - node.startedAt);
+}
+
+/** The tree patch for one progress snapshot: every snapshot is an advance; activity wins over
+ *  a bare token count as the visible detail. One helper for every progress site. */
+export function progressPatch(snap: { output?: string; activity?: string; tokens?: number }, now: number): AgentNodePatch {
+	const patch: AgentNodePatch = { lastAdvanceAt: now };
+	if (snap.output) patch.output = snap.output;
+	if (snap.activity) patch.detail = snap.activity;
+	else if (snap.tokens) patch.detail = `${compactTokens(snap.tokens)} tok`;
+	return patch;
+}
+
 function safeInline(value: string): string {
 	return compactInlineText(value, { maxChars: 96 });
 }
 
 /** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
-export function renderAgentTree(nodes: AgentNode[]): string[] {
+export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): string[] {
 	const lines: string[] = [];
 	const childrenOf = (parentId: string | undefined): AgentNode[] => nodes.filter((n) => n.parentId === parentId);
 
@@ -71,7 +103,9 @@ export function renderAgentTree(nodes: AgentNode[]): string[] {
 			const branch = isRoot ? "" : isLast ? "└─ " : "├─ ";
 			const label = safeInline(node.label) || safeInline(node.id) || "agent";
 			const detailText = node.detail ? safeInline(node.detail) : "";
-			const detail = detailText ? `  ${detailText}` : "";
+			const clock = opts.now !== undefined ? runningAnnotation(node, opts.now, opts.stallMs ?? 0) : undefined;
+			const tail = [detailText, clock].filter((s): s is string => Boolean(s)).join(" · ");
+			const detail = tail ? `  ${tail}` : "";
 			lines.push(`${prefix}${branch}${GLYPH[node.status]} ${label}${detail}`);
 			const childPrefix = isRoot ? "" : `${prefix}${isLast ? "   " : "│  "}`;
 			walk(node.id, childPrefix);
@@ -86,8 +120,8 @@ export function renderAgentTree(nodes: AgentNode[]): string[] {
  * Bounded above-editor digest. Large fan-outs belong in the scrollable F9
  * overlay; they must not push the editor and conversation off the screen.
  */
-export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8): string[] {
-	const rows = renderAgentTree(nodes);
+export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}): string[] {
+	const rows = renderAgentTree(nodes, opts);
 	const limit = Math.max(1, Math.floor(maxRows));
 	if (rows.length <= limit) return rows;
 	const failed = nodes.filter((node) => node.status === "failed");
@@ -124,6 +158,8 @@ export interface AddNodeInput {
 	model?: string;
 	detail?: string;
 	output?: string;
+	startedAt?: number;
+	lastAdvanceAt?: number;
 }
 
 export interface AgentNodePatch {
@@ -133,12 +169,19 @@ export interface AgentNodePatch {
 	model?: string;
 	detail?: string;
 	output?: string;
+	startedAt?: number;
+	lastAdvanceAt?: number;
 }
 
 /** A small mutable registry with change notification. The extension owns one. */
 export class AgentTree {
 	private nodes: AgentNode[] = [];
 	private listeners = new Set<(change: AgentTreeChange) => void>();
+	private readonly now: () => number;
+
+	constructor(now: () => number = Date.now) {
+		this.now = now;
+	}
 
 	/** Insert a node, or upsert (relabel / restatus / reparent) when the id already exists. */
 	add(input: AddNodeInput): void {
@@ -153,15 +196,20 @@ export class AgentTree {
 			if (input.model !== undefined) existing.model = input.model;
 			if (input.detail !== undefined) existing.detail = input.detail;
 			if (input.output !== undefined) existing.output = input.output;
+			if (input.startedAt !== undefined) existing.startedAt = input.startedAt;
+			if (input.lastAdvanceAt !== undefined) existing.lastAdvanceAt = input.lastAdvanceAt;
 			if (!sameNode(before, existing)) this.emit({ type: "updated", node: { ...existing } });
 			return;
 		}
+		const t = this.now();
 		const node: AgentNode = {
 			id: input.id,
 			label: input.label,
 			parentId: input.parentId,
 			status: input.status ?? "running",
 			detail: input.detail,
+			startedAt: input.startedAt ?? t,
+			lastAdvanceAt: input.lastAdvanceAt ?? input.startedAt ?? t,
 			...(input.kind !== undefined ? { kind: input.kind } : {}),
 			...(input.agent !== undefined ? { agent: input.agent } : {}),
 			...(input.model !== undefined ? { model: input.model } : {}),
@@ -181,6 +229,8 @@ export class AgentTree {
 		if (patch.model !== undefined) node.model = patch.model;
 		if (patch.detail !== undefined) node.detail = patch.detail;
 		if (patch.output !== undefined) node.output = patch.output;
+		if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
+		if (patch.lastAdvanceAt !== undefined) node.lastAdvanceAt = patch.lastAdvanceAt;
 		if (!sameNode(before, node)) this.emit({ type: "updated", node: { ...node } });
 	}
 
@@ -233,7 +283,8 @@ export class AgentTree {
 	}
 }
 
+const CLOCK_KEYS = new Set<keyof AgentNode>(["startedAt", "lastAdvanceAt"]);
 function sameNode(a: AgentNode, b: AgentNode): boolean {
-	const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-	return [...keys].every((key) => a[key as keyof AgentNode] === b[key as keyof AgentNode]);
+	const keys = new Set([...Object.keys(a), ...Object.keys(b)] as Array<keyof AgentNode>);
+	return [...keys].every((key) => CLOCK_KEYS.has(key) || a[key] === b[key]);
 }
