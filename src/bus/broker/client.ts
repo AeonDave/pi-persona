@@ -263,8 +263,14 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		write({ t: "send", to, kind, text, msgId: randomUUID(), expectsReply: false });
 	}
 
+	/** Why `ask`/`list` refuse to send right now — distinguishes a disposed client from one that
+	 *  merely lost its connection (an unexpected disconnect is never auto-reconnected; see header). */
+	function unavailableReason(): string {
+		return closed ? "broker client closed" : "broker connection closed";
+	}
+
 	function ask(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<string> {
-		if (closed || disconnected) return Promise.reject(new Error(closed ? "broker client closed" : "broker connection closed"));
+		if (closed || disconnected) return Promise.reject(new Error(unavailableReason()));
 		const msgId = randomUUID();
 		return new Promise<string>((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;
@@ -315,7 +321,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function list(): Promise<Array<{ handle: string; label: string }>> {
-		if (closed || disconnected) return Promise.reject(new Error(closed ? "broker client closed" : "broker connection closed"));
+		if (closed || disconnected) return Promise.reject(new Error(unavailableReason()));
 		const reqId = randomUUID();
 		return new Promise((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout>;

@@ -496,6 +496,17 @@ export function shouldRecordDelegationOutcome(result: Partial<InfrastructureFail
 	return result.failureKind !== "abort" && !isInfrastructureFailure(result);
 }
 
+/** Quote each name for an inline error list: `"a", "b"`. */
+function quoted(names: string[]): string {
+	return names.map((n) => `"${n}"`).join(", ");
+}
+
+/** The first `cap` names, comma-joined, with a trailing "…" marker when more were elided —
+ *  shared by every self-correcting error that lists installed names. */
+function namesList(names: string[], cap: number): string {
+	return `${names.slice(0, cap).join(", ")}${names.length > cap ? ", …" : ""}`;
+}
+
 /**
  * Pre-spawn agent validation for the `delegate` tool — mirrors the model-name path
  * (extension.ts's `resolveDelegateModels`): a wrong agent name must return a SELF-CORRECTING
@@ -507,16 +518,15 @@ export function shouldRecordDelegationOutcome(result: Partial<InfrastructureFail
 export function unknownAgentError(requested: string[], installed: string[]): string | undefined {
 	const unknown = [...new Set(requested.filter((n) => !installed.includes(n)))];
 	if (unknown.length === 0) return undefined;
-	const who = unknown.map((n) => `"${n}"`).join(", ");
+	const who = quoted(unknown);
 	if (installed.length === 0) {
 		return (
 			`delegate: no sub-agents are installed, so ${who} cannot run — nothing was spawned. ` +
 			"Ask the user to run `/persona seed` once (it installs the bundled agents), or add agent files under `.pi/agents/`."
 		);
 	}
-	const list = installed.slice(0, 16).join(", ");
 	return (
-		`delegate: unknown agent(s) ${who} — nothing was spawned. Installed agents: ${list}${installed.length > 16 ? ", …" : ""}. ` +
+		`delegate: unknown agent(s) ${who} — nothing was spawned. Installed agents: ${namesList(installed, 16)}. ` +
 		"Pick one of those, or shape `operator` on the fly with `role` + `skills`."
 	);
 }
@@ -528,10 +538,8 @@ export function unknownContractError(requested: Array<string | undefined>, insta
 	const wanted = [...new Set(requested.map((n) => n?.trim()).filter((n): n is string => Boolean(n)))];
 	const unknown = wanted.filter((n) => !installed.includes(n));
 	if (unknown.length === 0) return undefined;
-	const who = unknown.map((n) => `"${n}"`).join(", ");
-	const list = installed.slice(0, 16).join(", ");
 	return (
-		`delegate: unknown output contract(s) ${who} — nothing was spawned. Installed contracts: ${list}${installed.length > 16 ? ", …" : ""}. ` +
+		`delegate: unknown output contract(s) ${quoted(unknown)} — nothing was spawned. Installed contracts: ${namesList(installed, 16)}. ` +
 		"`outputContract` takes a contract NAME; omit it for free-form output and describe the report shape in `requiredArtifacts`."
 	);
 }

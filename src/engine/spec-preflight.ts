@@ -5,7 +5,7 @@
  * installed. One wording, one cap, so the two engines can never drift apart again.
  */
 
-import type { AgentResult } from "../orchestration/types.ts";
+import type { AgentResult, FailureKind } from "../orchestration/types.ts";
 import { emptyUsage } from "./stream.ts";
 
 /** Names shown in a self-correcting hint before the list is elided. */
@@ -18,24 +18,16 @@ export function installedHint(kind: "agents" | "contracts", names: string[]): st
 	return ` — installed ${kind}: ${shown}${names.length > HINT_CAP ? ", …" : ""}`;
 }
 
+/** The result skeleton both preflight rejections share; only the error text and failureKind
+ *  differ between "unknown agent" and "unknown contract". */
+function failure(agent: string, error: string, failureKind: FailureKind): AgentResult {
+	return { agent, output: "", usage: emptyUsage(), ok: false, error, failureKind };
+}
+
 export function unknownAgentFailure(agent: string, installed: string[]): AgentResult {
-	return {
-		agent,
-		output: "",
-		usage: emptyUsage(),
-		ok: false,
-		error: `[${agent}] unknown agent (not found in registry)${installedHint("agents", installed)}`,
-		failureKind: "unknown-agent",
-	};
+	return failure(agent, `[${agent}] unknown agent (not found in registry)${installedHint("agents", installed)}`, "unknown-agent");
 }
 
 export function unknownContractFailure(agent: string, requested: string, installed: string[]): AgentResult {
-	return {
-		agent,
-		output: "",
-		usage: emptyUsage(),
-		ok: false,
-		error: `[${agent}] output contract "${requested}" not found${installedHint("contracts", installed)}`,
-		failureKind: "contract",
-	};
+	return failure(agent, `[${agent}] output contract "${requested}" not found${installedHint("contracts", installed)}`, "contract");
 }
