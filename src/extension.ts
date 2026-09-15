@@ -40,6 +40,7 @@ import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
 import { type EngineAdapterBroker } from "./engine/adapter.ts";
+import { SupervisorBroker } from "./extension/broker-host.ts";
 import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type EngineFactories } from "./extension/engine.ts";
 import { installHooks, type HookHost } from "./extension/hooks.ts";
 import {
@@ -86,7 +87,6 @@ import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
 import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
-import { type BrokerHost, startBrokerHost } from "./bus/broker/host.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
@@ -151,8 +151,8 @@ function personaDataDir(): string {
 }
 
 /** Cross-process `contact_peer` roster (spec B7): scopes `brokerPeers` — the process-wide,
- *  pre-spawn registry keyed by handle (populated in `makeBrokerDeps`'s `register`, see
- *  below) — to the SAME per-engine group as the caller `self`, mirroring `engine/inproc.ts`'s
+ *  pre-spawn registry keyed by handle (populated in `SupervisorBroker.adapterDeps`'s `register`,
+ *  see below) — to the SAME per-engine group as the caller `self`, mirroring `engine/inproc.ts`'s
  *  per-engine-instance `peerLabels` map. `self`'s OWN recorded group is the source of truth
  *  here, NOT the wire's `group` argument the host would otherwise pass: the child's env
  *  carries no group (spec B6, the wire `register` frame stays minimal), so every wire group
@@ -160,14 +160,8 @@ function personaDataDir(): string {
  *  concurrent run's peers into one flat list (the host's own default `group=""` scoping).
  *  `self` not found (not registered with `peers: true`) ⇒ empty roster, never a leak.
  *  Exported for direct unit/integration testing — `extension.ts`'s activation closure itself
- *  isn't a testable unit. */
-export function listPeersForGroup(brokerPeers: ReadonlyMap<string, { label: string; group: string }>, self: string): Array<{ handle: string; label: string }> {
-	const g = brokerPeers.get(self)?.group;
-	if (g === undefined) return [];
-	return [...brokerPeers.entries()]
-		.filter(([handle, p]) => p.group === g && handle !== self)
-		.map(([handle, p]) => ({ handle, label: p.label }));
-}
+ *  isn't a testable unit. Implementation lives in `./extension/broker-host.ts` now. */
+export { listPeersForGroup } from "./extension/broker-host.ts";
 
 interface CommandResultEntry {
 	label: string;
@@ -1081,99 +1075,24 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	// Cross-process broker (v0.5, spec B1-B7): on by default so MCP/worktree/child-engine
-	// legs expose steer. Off (`PI_PERSONA_BROKER=off`) ⇒ none of the state below is ever
-	// touched, so `deps.broker` stays undefined and the child engine spawns byte-identical
-	// to pre-broker pi-persona.
-	let brokerHost: BrokerHost | undefined;
-	let brokerHostPromise: Promise<BrokerHost> | undefined;
-	// Pre-spawn peer registrations (handle → {label, group}): the child's env carries no group
-	// (the wire register frame stays minimal, spec B6), so the host's own client-populated
-	// registry can't scope `list` per engine instance. `EngineAdapterBroker.register` is called
-	// BEFORE spawn with the correct `group` (adapter.ts's per-engine-instance `peerGroup`) —
-	// recorded here and used to override the host's default peer lookup, mirroring
-	// `engine/inproc.ts`'s per-engine-instance `peerLabels` map (this one is process-wide since
-	// several engine instances share the ONE host, each contributing its own group).
-	const brokerPeers = new Map<string, { label: string; group: string }>();
-
-	// Lazily starts the host on the FIRST child-engine build (fire-and-forget — the child's own
-	// capped-backoff connect tolerates the brief startup race; `endpoint` is a pure function of
-	// the session id, so it's known and handed to the child immediately, without waiting on the
-	// listen to complete). Idempotent; a failed bind clears the promise so a later build retries.
-	const expectedBrokerHandles = new Set<string>();
-	const preHostSteers = new Map<string, string[]>();
-
-	function ensureBrokerHost(endpoint: string): void {
-		if (brokerHostPromise) return;
-		if (process.platform !== "win32") {
-			try {
-				mkdirSync(dirname(endpoint), { recursive: true }); // POSIX sockets are filesystem paths
-			} catch {
-				/* best-effort — a failed mkdir surfaces as a listen error below */
+	// legs expose steer. Off (`PI_PERSONA_BROKER=off`) ⇒ `broker.ensure`/`adapterDeps` are never
+	// called, so `deps.broker` stays undefined and the child engine spawns byte-identical to
+	// pre-broker pi-persona. Lifecycle (lazy start, failure warning, doctor, teardown) lives in
+	// `SupervisorBroker` — see `extension/broker-host.ts`.
+	const broker = new SupervisorBroker({
+		bus,
+		supervisorHandle: SUPERVISOR,
+		warn: (message) => {
+			let shown = false;
+			if (lastCtx?.hasUI) {
+				try { lastCtx.ui.notify(message, "warning"); shown = true; } catch { /* session may be tearing down */ }
 			}
-		}
-		brokerHostPromise = startBrokerHost({
-			bus,
-			supervisorHandle: SUPERVISOR,
-			endpoint,
-			// Ignore the wire-supplied `group` (always "" — the child's env carries no group,
-			// spec B6) — see `listPeersForGroup`'s header for why deriving scope from `self`'s
-			// own `brokerPeers` entry is required instead.
-			listPeersFor: (_group, self) => listPeersForGroup(brokerPeers, self),
-		});
-		brokerHostPromise.then(
-			(h) => {
-				brokerHost = h;
-				for (const handle of expectedBrokerHandles) h.expect(handle);
-				for (const [handle, texts] of preHostSteers) {
-					for (const text of texts) h.steer(handle, text);
-				}
-				preHostSteers.clear();
-			},
-			(err) => {
-				brokerHostPromise = undefined; // never started — a later build gets another chance
-				if (process.env.PI_PERSONA_DEBUG) {
-					process.stderr.write(`[pi-persona] broker: host failed to start on ${endpoint}: ${err instanceof Error ? err.message : String(err)}\n`);
-				}
-			},
-		);
-	}
-
-	// The `EngineAdapterBroker` handed to every child-engine build while the flag is on (spec
-	// B1-B7's supervisor-side face — register/unregister run directly against the LOCAL bus +
-	// peer map; a remote child is otherwise indistinguishable from an in-process one, by
-	// construction). `steerFrame` degrades to a silent no-op before the host has finished
-	// starting or after the target has disconnected — "sends report undelivered", never a throw.
-	// construction). `steerFrame` returns false when the handle was never expected (unknown /
-	// already forgotten). An expected handle that has not connected yet buffers the steer
-	// (host.expect + pending flush on register), so spawn→connect is reported as delivered.
-	function makeBrokerDeps(ctx: ExtensionContext): EngineAdapterBroker {
+			if (!shown || process.env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] ${message}\n`);
+		},
+	});
+	function makeBrokerDeps(ctx: ExtensionContext): EngineAdapterBroker | undefined {
 		const sessionId = (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? "";
-		const endpoint = brokerEndpoint(sessionId);
-		ensureBrokerHost(endpoint);
-		return {
-			endpoint,
-			register: (info) => {
-				bus.register(info.handle);
-				expectedBrokerHandles.add(info.handle);
-				if (info.peers) brokerPeers.set(info.handle, { label: info.label ?? info.handle, group: info.group ?? "" });
-				brokerHost?.expect(info.handle);
-			},
-			unregister: (handle) => {
-				expectedBrokerHandles.delete(handle);
-				preHostSteers.delete(handle);
-				brokerPeers.delete(handle);
-				bus.unregister(handle);
-				brokerHost?.forget(handle);
-			},
-			steerFrame: (handle, text) => {
-				if (brokerHost) return brokerHost.steer(handle, text);
-				if (!expectedBrokerHandles.has(handle) || !text.trim()) return false;
-				const queued = preHostSteers.get(handle) ?? [];
-				queued.push(text);
-				preHostSteers.set(handle, queued);
-				return true;
-			},
-		};
+		return broker.adapterDeps(brokerEndpoint(sessionId));
 	}
 
 	const identity = installIdentity(pi, {
@@ -1685,10 +1604,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const peek = config.peekEveryMs > 0 ? `${config.peekEveryMs}ms` : "off";
 		const checkIn = config.checkInEveryMs > 0 ? `${config.checkInEveryMs}ms` : "off";
 		lines.push(`comm plane: coaching=${coaching ? "on (children get contact_supervisor)" : "off"}, peek-watchdog=${peek}, check-in=${checkIn}, bus-peers=${bus.participants().length}`);
-		if (config.broker) {
-			const status = brokerHost ? brokerHost.endpoint : brokerHostPromise ? "(starting…)" : "(not started — no child-engine build yet)";
-			lines.push(`broker: on — endpoint ${status}, connected children: ${brokerHost?.connectedHandles().length ?? 0}`);
-		}
+		if (config.broker) lines.push(broker.doctorLine());
 		return lines.join("\n");
 	}
 
@@ -1730,11 +1646,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		stopRegistry,
 		stopRequested,
 		steerRegistry,
-		get brokerHost() { return brokerHost; },
-		set brokerHost(value) { brokerHost = value as typeof brokerHost; },
-		get brokerHostPromise() { return brokerHostPromise; },
-		set brokerHostPromise(value) { brokerHostPromise = value as typeof brokerHostPromise; },
-		brokerPeers,
+		broker,
 		get spineText() { return spineText; },
 		delegationBrief,
 		get agents() { return agents; },

@@ -36,7 +36,7 @@ export interface BuildEngineDeps {
 	lastCtx: ExtensionContext | undefined;
 	workerSpineText: string;
 	engineFactories: EngineFactories;
-	makeBrokerDeps: (ctx: ExtensionContext) => EngineAdapterBroker;
+	makeBrokerDeps: (ctx: ExtensionContext) => EngineAdapterBroker | undefined;
 	userAgentDir: () => string;
 	childPiSettingsEnv: () => Record<string, string>;
 	runLimits: RunLimits;
