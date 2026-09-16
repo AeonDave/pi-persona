@@ -33,6 +33,7 @@ test("the child engine and the inproc engine mint bus handles from ONE sequence 
 			register: (info) => minted.push(info.handle),
 			unregister: () => {},
 			steerFrame: () => true,
+			hasPendingAskFrom: () => false,
 		},
 	});
 	await childEngine.run({ agent: "a", task: "t" });

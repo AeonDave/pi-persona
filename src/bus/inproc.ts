@@ -264,4 +264,16 @@ export class InProcessBus {
 	hasPending(name: string): boolean {
 		return (this.inboxes.get(name)?.length ?? 0) > 0;
 	}
+
+	/** Whether `handle` currently has a live ask (`decision`/`interview`) awaiting a reply.
+	 *  The one question an idle/startup watchdog needs to tell real silence from a leg
+	 *  legitimately blocked on the supervisor: re-arm while this is true, kill once it goes
+	 *  false (settled by reply, abort, or timeout — {@link settleAsk} removes it from
+	 *  `pendingAsks` on every settlement path). */
+	hasPendingAskFrom(handle: string): boolean {
+		for (const pending of this.pendingAsks.values()) {
+			if (pending.envelope.from === handle) return true;
+		}
+		return false;
+	}
 }

@@ -269,6 +269,38 @@ test("hasPending reflects whether a peer has undrained messages", () => {
 	assert.equal(bus.hasPending("sup"), false);
 });
 
+test("hasPendingAskFrom is true only while an expectsReply ask from that handle is outstanding", async () => {
+	const bus = new InProcessBus();
+	bus.register("sup");
+	assert.equal(bus.hasPendingAskFrom("child"), false, "nothing asked yet");
+
+	const answer = bus.ask("child", "sup", "decide?", { kind: "decision" });
+	assert.equal(bus.hasPendingAskFrom("child"), true, "the ask is live and awaiting a reply");
+	assert.equal(bus.hasPendingAskFrom("someone-else"), false, "scoped to the asking handle");
+
+	const id = bus.pending("sup")[0]!.id;
+	assert.equal(bus.reply(id, "OFF"), true);
+	await answer;
+	assert.equal(bus.hasPendingAskFrom("child"), false, "settled by reply");
+});
+
+test("hasPendingAskFrom goes false once an ask is cancelled (abort or timeout)", async () => {
+	const bus = new InProcessBus();
+	bus.register("sup");
+
+	const ac = new AbortController();
+	const aborted = bus.ask("child", "sup", "?", { signal: ac.signal });
+	assert.equal(bus.hasPendingAskFrom("child"), true);
+	ac.abort();
+	await assert.rejects(() => aborted, /abort/i);
+	assert.equal(bus.hasPendingAskFrom("child"), false, "settled by abort");
+
+	const timedOut = bus.ask("child", "sup", "?", { timeoutMs: 20 });
+	assert.equal(bus.hasPendingAskFrom("child"), true);
+	await assert.rejects(() => timedOut, /timeout/i);
+	assert.equal(bus.hasPendingAskFrom("child"), false, "settled by timeout");
+});
+
 test("onMessage observers fire on send and ask; unsubscribe stops them", () => {
 	const bus = new InProcessBus();
 	bus.register("sup");

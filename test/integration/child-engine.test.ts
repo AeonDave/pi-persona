@@ -359,38 +359,40 @@ test("runChildAgent closes every still-running tool when the child is killed mid
 	], "the call that really ended keeps its own outcome; only the abandoned one is synthesised as failed");
 });
 
-test("runChildAgent does not idle-kill a child that is allowed to block on a supervisor reply", { timeout: 3000 }, async () => {
+test("runChildAgent does not idle-kill a child the bus reports as blocked on a supervisor reply", { timeout: 3000 }, async () => {
 	const ac = new AbortController();
 	const started = Date.now();
 	setTimeout(() => ac.abort(), 400); // the supervisor "answers" by ending the run well after the idle window
 	const r = await runChildAgent({ task: "wait [sleep]" }, ac.signal, {
 		resolveInvocation: resolveFake,
 		killGraceMs: 100,
-		timeoutMs: 100, // would fire at 100ms without the exemption
+		timeoutMs: 100, // would fire at 100ms without the re-arm
 		startupTimeoutMs: 100,
-		allowBlocking: true,
+		isBlocked: () => true,
 	});
-	assert.equal(r.timedOut, false, "the idle watchdog must not fire for a blocking-allowed child");
+	assert.equal(r.timedOut, false, "the idle/startup watchdogs must re-arm while the bus reports a pending ask");
 	assert.equal(r.aborted, true, "the run ended by the caller's abort, not a timeout");
 	assert.ok(Date.now() - started >= 350, "the child lived past the idle window");
 });
 
-test("a blocking-allowed child with no explicit hard cap is still bounded by blockingCapMs", { timeout: 3000 }, async () => {
+test("runChildAgent idle-kills once isBlocked flips back to false", { timeout: 3000 }, async () => {
+	const started = Date.now();
+	let blocked = true;
+	setTimeout(() => { blocked = false; }, 200); // the ask settles; the next idle check must see real silence
 	const r = await runChildAgent({ task: "wait [sleep]" }, undefined, {
 		resolveInvocation: resolveFake,
 		killGraceMs: 100,
 		timeoutMs: 100,
-		startupTimeoutMs: 100,
-		allowBlocking: true,
-		blockingCapMs: 300,
+		isBlocked: () => blocked,
 	});
-	assert.equal(r.timedOut, true, "the blocking ceiling fires");
-	assert.match(r.errorMessage ?? "", /hard cap/);
+	assert.equal(r.timedOut, true, "the idle watchdog fires once the bus no longer reports a pending ask");
+	const elapsed = Date.now() - started;
+	assert.ok(elapsed >= 200 && elapsed < 500, `expected the kill shortly after the ask settled at 200ms, got ${elapsed}ms`);
 });
 
-test("an explicit hardTimeoutMs wins over blockingCapMs", { timeout: 3000 }, async () => {
+test("the hard cap fires for a blocked leg regardless of isBlocked", { timeout: 3000 }, async () => {
 	const r = await runChildAgent({ task: "wait [sleep]" }, undefined, {
-		resolveInvocation: resolveFake, killGraceMs: 100, timeoutMs: 100, allowBlocking: true, hardTimeoutMs: 250, blockingCapMs: 5_000,
+		resolveInvocation: resolveFake, killGraceMs: 100, timeoutMs: 100, isBlocked: () => true, hardTimeoutMs: 250,
 	});
 	assert.equal(r.timedOut, true);
 	assert.match(r.errorMessage ?? "", /250ms hard cap/);

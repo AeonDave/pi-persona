@@ -926,9 +926,9 @@ test("inproc engine does NOT time out a fast run (the watchdog is disarmed on co
 	assert.equal(r.output, "quick");
 });
 
-test("inproc engine disables the idle watchdog for coaching children that may block on a reply", async () => {
-	// A child blocked on contact_supervisor's decision ask emits no events while it
-	// waits — with coaching + allowBlocking the watchdog must NOT kill it.
+test("inproc engine re-arms the idle watchdog while the bus reports a pending ask from this child (R9)", async () => {
+	// A child blocked on contact_supervisor's decision ask emits no events while it waits —
+	// the idle watchdog must consult the bus and re-arm instead of killing it.
 	const bus = new InProcessBus();
 	bus.register("supervisor");
 	const engine = makeInProcessEngine({
@@ -938,26 +938,32 @@ test("inproc engine disables the idle watchdog for coaching children that may bl
 		cwd: ".",
 		bus,
 		coaching: true,
-		allowBlocking: true,
+		allowBlocking: true, // so contact_supervisor's decision ask actually blocks (bus.ask), not a one-way send
 		timeoutMs: 20,
-		createSession: async () => ({
-			subscribe: () => () => {},
-			prompt: async () => {},
-			agent: {
-				abort: () => {
-					throw new Error("the watchdog must not fire for a blocking-capable child");
+		createSession: async (opts) => {
+			const contact = (opts.customTools ?? []).find((t) => t.name === "contact_supervisor");
+			// Fire-and-forget: bus.ask registers the pending entry synchronously before this
+			// awaits the reply — exactly the silence the idle watchdog must not misread.
+			void contact?.execute("c", { kind: "decision", message: "which way?" }, undefined, undefined, undefined as never);
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: {
+					abort: () => {
+						throw new Error("the watchdog must not fire while the bus reports a pending ask");
+					},
+					waitForIdle: () => new Promise((r) => setTimeout(r, 70)), // several idle windows past timeoutMs
+					steer: () => {},
 				},
-				waitForIdle: () => new Promise((r) => setTimeout(r, 60)), // longer than timeoutMs
-				steer: () => {},
-			},
-			dispose: () => {},
-		}),
+				dispose: () => {},
+			};
+		},
 	});
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true, "the silent-but-legitimately-waiting child survived");
 });
 
-test("inproc engine bounds a blocking coaching child with blockingCapMs when no hard cap is set", async () => {
+test("inproc engine idle-kills once the bus reports no pending ask from this child (R9)", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");
 	let abortCalled = false;
@@ -967,10 +973,8 @@ test("inproc engine bounds a blocking coaching child with blockingCapMs when no 
 		modelRegistry: fakeRegistry,
 		cwd: ".",
 		bus,
-		coaching: true,
-		allowBlocking: true,
+		coaching: true, // contact_supervisor is bound, but nothing ever calls it — the silence is real
 		timeoutMs: 20,
-		blockingCapMs: 40,
 		createSession: async () => ({
 			subscribe: () => () => {},
 			prompt: async () => {},
@@ -978,14 +982,14 @@ test("inproc engine bounds a blocking coaching child with blockingCapMs when no 
 				abort: () => {
 					abortCalled = true;
 				},
-				waitForIdle: () => new Promise(() => {}), // never resolves — only blockingCapMs can settle this
+				waitForIdle: () => new Promise(() => {}), // never resolves — only the idle watchdog can settle this
 				steer: () => {},
 			},
 			dispose: () => {},
 		}),
 	});
 	const r = await engine.run({ agent: "a", task: "t" });
-	assert.equal(abortCalled, true, "the blocking ceiling aborted the session");
+	assert.equal(abortCalled, true, "no pending ask on the bus ⇒ the idle watchdog fires");
 	assert.equal(r.failureKind, "timeout");
 });
 
@@ -1492,14 +1496,14 @@ for (const deadline of ["startup", "hard"] as const) {
 	});
 }
 
-test("coaching initialization has an idle deadline even when the startup deadline is disabled", async (t) => {
+test("coaching initialization has an idle deadline even when the startup deadline is disabled (no session yet ⇒ no pending ask to re-arm on)", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	let resolveInit!: (session: InProcSession) => void;
 	const init = new Promise<InProcSession>((resolve) => { resolveInit = resolve; });
 	let result: Awaited<ReturnType<ReturnType<typeof makeInProcessEngine>["run"]>> | undefined;
 	const engine = makeInProcessEngine({
 		resolveAgent, modelRegistry: fakeRegistry, cwd: ".", bus: new InProcessBus(),
-		coaching: true, allowBlocking: true, timeoutMs: 25, startupTimeoutMs: 0,
+		coaching: true, timeoutMs: 25, startupTimeoutMs: 0,
 		createSession: () => init,
 	});
 	const run = engine.run({ agent: "a", task: "t" }).then((r) => { result = r; });

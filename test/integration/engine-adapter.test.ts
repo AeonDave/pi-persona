@@ -180,6 +180,7 @@ function makeSpyBroker(endpoint = "fake-broker-endpoint") {
 			steered.push({ handle, text });
 			return true;
 		},
+		hasPendingAskFrom: () => false,
 	};
 }
 
