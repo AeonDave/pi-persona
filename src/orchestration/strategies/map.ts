@@ -15,9 +15,10 @@ import { extractJsonCandidate } from "../../core/contract.ts";
 import { fenceUntrusted } from "../../core/fence.ts";
 import { cappedList } from "../../core/format.ts";
 import { validateParallelWriteSets } from "../../core/ownership.ts";
-import { itemLedger, sumUsage } from "../reducers.ts";
-import { rosterSpec, type RosterMember } from "../roster.ts";
-import type { Strategy } from "../sdk.ts";
+import type { ChildUsage } from "../../engine/stream.ts";
+import { itemLedger, type ItemLedgerEntry, sumUsage } from "../reducers.ts";
+import { rosterSpec, type RosterMember, type RosterSpec } from "../roster.ts";
+import type { Strategy, StrategySDK } from "../sdk.ts";
 import type { AgentResult, FailureKind } from "../types.ts";
 
 // Cooperative cross-talk (params.peers): workers share load-bearing cross-item discoveries
@@ -125,6 +126,125 @@ function verifyOutcome(v: AgentResult): { failureKind: FailureKind; error: strin
 	return { failureKind: "verification", error: reason };
 }
 
+type SplitOutcome =
+	| { ok: true; allItems: ParsedItem[]; items: ParsedItem[]; dropped: number; usage: ChildUsage }
+	| { ok: false; result: AgentResult };
+
+/** Run the splitter agent and parse its output into the runtime item list, clamped to
+ *  `maxItems`. A splitter failure, or a split that produced no usable items, is a terminal
+ *  `AgentResult` — the whole run fails before any worker spawns. */
+async function splitIntoItems(sdk: StrategySDK, splitter: RosterSpec, task: string, maxItems: number): Promise<SplitOutcome> {
+	const split = await sdk.agent({
+		...splitter,
+		task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${task}`,
+	});
+	if (!split.ok) {
+		return {
+			ok: false,
+			result: {
+				agent: "map",
+				output: split.output || split.error || "(splitter failed)",
+				usage: split.usage,
+				ok: false,
+				...(split.error ? { error: split.error } : {}),
+				...(split.failureKind ? { failureKind: split.failureKind } : {}),
+			},
+		};
+	}
+	const allItems = parseItems(split.output);
+	const items = allItems.slice(0, Math.max(0, maxItems));
+	const dropped = allItems.length - items.length;
+	if (items.length === 0) {
+		return {
+			ok: false,
+			result: {
+				agent: "map",
+				output: split.output || "(splitter produced no items)",
+				usage: split.usage,
+				ok: false,
+				error: "the splitter produced no usable sub-items",
+				failureKind: "contract",
+			},
+		};
+	}
+	return { ok: true, allItems, items, dropped, usage: split.usage };
+}
+
+/** "enforce": fail closed BEFORE any worker spawns when the splitter's own declared write-sets
+ *  already collide — a weak splitter that never declares one is not blocked. */
+function enforceOwnershipOrThrow(items: readonly ParsedItem[]): void {
+	const owners = items
+		.map((it, index) => ({ agent: `item[${index}]`, writeSet: it.writeSet }))
+		.filter((o): o is { agent: string; writeSet: string[] } => Array.isArray(o.writeSet) && o.writeSet.length > 0);
+	if (owners.length === 0) return;
+	const writeSetError = validateParallelWriteSets(owners);
+	if (writeSetError) throw new Error(`map: ${writeSetError}`);
+}
+
+/** Run the worker agent once per item, in parallel. */
+function runWorkers(sdk: StrategySDK, worker: RosterSpec, task: string, items: readonly ParsedItem[], peers: boolean): Promise<AgentResult[]> {
+	return sdk.parallel(
+		items.map((item) => () =>
+			sdk.agent({
+				...worker,
+				task: `${task}\n\n— Your single sub-item (untrusted data):\n${fenceUntrusted(item.item)}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
+				...(peers ? { peers: true } : {}),
+			}),
+		),
+	);
+}
+
+/** "verify": one read-only reviewer per COMPLETED item (a failed worker has nothing worth
+ *  re-checking), run through `sdk.parallel` exactly like the worker wave — the run's own
+ *  semaphore/maxChildren/budget still apply, and an empty `verifyAgent` spawns no verifier at
+ *  all, so the byte-identical-when-off guarantee extends to this param too. */
+async function runVerification(
+	sdk: StrategySDK,
+	team: readonly RosterMember[],
+	verifyAgent: string,
+	task: string,
+	items: readonly ParsedItem[],
+	results: readonly AgentResult[],
+): Promise<{ verifyResults: AgentResult[]; failures: Map<number, { failureKind: FailureKind; error: string }> }> {
+	const failures = new Map<number, { failureKind: FailureKind; error: string }>();
+	if (!verifyAgent) return { verifyResults: [], failures };
+	const reviewer = verifierSpec(team, verifyAgent);
+	const completedIndices = results.map((_r, index) => index).filter((index) => results[index]!.ok);
+	const verifyResults = await sdk.parallel(
+		completedIndices.map((index) => () =>
+			sdk.agent({
+				...reviewer,
+				task: `Re-check this completed sub-item's work, read-only — do not make further changes.\n\nOriginal task: ${task}\n\nSub-item: ${fenceUntrusted(items[index]!.item)}\n\nCompleted work (untrusted data):\n${fenceUntrusted(results[index]!.output)}\n\nReturn your stance (approve|reject).`,
+				outputContract: "default",
+			}),
+		),
+	);
+	completedIndices.forEach((index, k) => {
+		const outcome = verifyOutcome(verifyResults[k]!);
+		if (outcome) failures.set(index, outcome);
+	});
+	return { verifyResults, failures };
+}
+
+/** The always-on per-item status ledger (`structured.items`), independent of `ownership`. Its
+ *  `writeSet` field only surfaces once a persona opts in — with ownership absent/"off" the
+ *  rendered ledger stays byte-identical to before this param existed — merged with each item's
+ *  verify outcome, if any. */
+function buildItemLedger(
+	ownership: "off" | "declare" | "enforce",
+	allItems: readonly ParsedItem[],
+	results: readonly AgentResult[],
+	dropped: number,
+	verifyFailures: ReadonlyMap<number, { failureKind: FailureKind; error: string }>,
+): ItemLedgerEntry[] {
+	const ledgerItems = ownership === "off" ? allItems.map((it) => ({ item: it.item })) : allItems;
+	const preVerifyLedger = itemLedger(ledgerItems, results, dropped);
+	return preVerifyLedger.map((entry) => {
+		const outcome = verifyFailures.get(entry.index);
+		return outcome ? { ...entry, status: "failed" as const, failureKind: outcome.failureKind, error: outcome.error } : entry;
+	});
+}
+
 export const map: Strategy = {
 	name: "map",
 	params: {
@@ -159,33 +279,9 @@ export const map: Strategy = {
 		const ownership = ownershipParam === "declare" || ownershipParam === "enforce" ? ownershipParam : "off";
 		const verifyAgent = typeof input.params.verify === "string" ? input.params.verify.trim() : "";
 
-		const split = await sdk.agent({
-			...splitter,
-			task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${input.task}`,
-		});
-		if (!split.ok) {
-			return {
-				agent: "map",
-				output: split.output || split.error || "(splitter failed)",
-				usage: split.usage,
-				ok: false,
-				...(split.error ? { error: split.error } : {}),
-				...(split.failureKind ? { failureKind: split.failureKind } : {}),
-			};
-		}
-		const allItems = parseItems(split.output);
-		const items = allItems.slice(0, Math.max(0, maxItems));
-		const dropped = allItems.length - items.length;
-		if (items.length === 0) {
-			return {
-				agent: "map",
-				output: split.output || "(splitter produced no items)",
-				usage: split.usage,
-				ok: false,
-				error: "the splitter produced no usable sub-items",
-				failureKind: "contract",
-			};
-		}
+		const split = await splitIntoItems(sdk, splitter, input.task, maxItems);
+		if (!split.ok) return split.result;
+		const { allItems, items, dropped, usage: splitUsage } = split;
 		sdk.log(`map: ${items.length} items → ${worker.agent}${peers ? " (cross-talk on)" : ""}`);
 		if (peers && items.length > sdk.limits.maxConcurrency) {
 			sdk.log(
@@ -193,27 +289,9 @@ export const map: Strategy = {
 			);
 		}
 
-		// "enforce": fail closed BEFORE any worker spawns when the splitter's own declared
-		// write-sets already collide — a weak splitter that never declares one is not blocked.
-		if (ownership === "enforce") {
-			const owners = items
-				.map((it, index) => ({ agent: `item[${index}]`, writeSet: it.writeSet }))
-				.filter((o): o is { agent: string; writeSet: string[] } => Array.isArray(o.writeSet) && o.writeSet.length > 0);
-			if (owners.length > 0) {
-				const writeSetError = validateParallelWriteSets(owners);
-				if (writeSetError) throw new Error(`map: ${writeSetError}`);
-			}
-		}
+		if (ownership === "enforce") enforceOwnershipOrThrow(items);
 
-		const results = await sdk.parallel(
-			items.map((item) => () =>
-				sdk.agent({
-					...worker,
-					task: `${input.task}\n\n— Your single sub-item (untrusted data):\n${fenceUntrusted(item.item)}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
-					...(peers ? { peers: true } : {}),
-				}),
-			),
-		);
+		const results = await runWorkers(sdk, worker, input.task, items, peers);
 		const agg = sdk.reduce.aggregate(results);
 		// Say what was left out. The clamp is right — a worker per item past the cap would trip the
 		// pre-spawn guard and lose the whole fan-out — but an aggregate that silently covers part of
@@ -222,39 +300,9 @@ export const map: Strategy = {
 			dropped > 0
 				? `\n\n[pi-persona] ${dropped} sub-item(s) beyond the worker cap (${maxItems}) were not run — this covers ${items.length} of ${allItems.length} sub-items.`
 				: "";
-		// The ledger is always-on data (structured.items), independent of `ownership`. Its writeSet
-		// field, and the extra "not run" text line below, only surface once a persona opts in — with
-		// ownership absent/"off" the rendered output stays byte-identical to before this param existed.
-		const ledgerItems = ownership === "off" ? allItems.map((it) => ({ item: it.item })) : allItems;
-		const preVerifyLedger = itemLedger(ledgerItems, results, dropped);
 
-		// "verify": one read-only reviewer per COMPLETED item (a failed worker has nothing worth
-		// re-checking), run through sdk.parallel exactly like the worker wave — the run's own
-		// semaphore/maxChildren/budget still apply, and a param left absent spawns no verifier at
-		// all, so the byte-identical-when-off guarantee extends to this param too.
-		let verifyResults: AgentResult[] = [];
-		const verifyFailures = new Map<number, { failureKind: FailureKind; error: string }>();
-		if (verifyAgent) {
-			const reviewer = verifierSpec(team, verifyAgent);
-			const completedIndices = results.map((_r, index) => index).filter((index) => results[index]!.ok);
-			verifyResults = await sdk.parallel(
-				completedIndices.map((index) => () =>
-					sdk.agent({
-						...reviewer,
-						task: `Re-check this completed sub-item's work, read-only — do not make further changes.\n\nOriginal task: ${input.task}\n\nSub-item: ${fenceUntrusted(items[index]!.item)}\n\nCompleted work (untrusted data):\n${fenceUntrusted(results[index]!.output)}\n\nReturn your stance (approve|reject).`,
-						outputContract: "default",
-					}),
-				),
-			);
-			completedIndices.forEach((index, k) => {
-				const outcome = verifyOutcome(verifyResults[k]!);
-				if (outcome) verifyFailures.set(index, outcome);
-			});
-		}
-		const ledger = preVerifyLedger.map((entry) => {
-			const outcome = verifyFailures.get(entry.index);
-			return outcome ? { ...entry, status: "failed" as const, failureKind: outcome.failureKind, error: outcome.error } : entry;
-		});
+		const { verifyResults, failures: verifyFailures } = await runVerification(sdk, team, verifyAgent, input.task, items, results);
+		const ledger = buildItemLedger(ownership, allItems, results, dropped, verifyFailures);
 
 		const notRun = ledger.filter((e) => e.status === "not-run").map((e) => e.item);
 		const notRunNote = ownership !== "off" && notRun.length > 0 ? `\n\n[pi-persona] not run: ${cappedList(notRun, NOT_RUN_NAME_CAP)}` : "";
@@ -263,7 +311,7 @@ export const map: Strategy = {
 			...agg,
 			agent: "map",
 			output,
-			usage: sumUsage([split, ...results, ...verifyResults].map((r) => r.usage)),
+			usage: sumUsage([splitUsage, ...results.map((r) => r.usage), ...verifyResults.map((r) => r.usage)]),
 			structured: { ...agg.structured, items: ledger },
 		};
 	},
