@@ -90,6 +90,12 @@ export interface PiPersonaConfig {
 	 *  together express the four measurement arms of docs/SPINE.md (off / supervisor-only /
 	 *  legs-only / both), which one selector cannot. */
 	spineLegs: string;
+	/** Files-changed report for a non-worktree leg (`engine/change-report.ts`): on by default,
+	 *  matching the existing behavior. Costs up to two `git status` spawns per leg (one at launch,
+	 *  one at settle) with no per-leg way to skip it otherwise — a large monorepo running many
+	 *  parallel legs may want to opt out. Off-word convention mirrors `broker`/`exocom`
+	 *  ({@link OFF_WORDS}); PI_PERSONA_LEG_CHANGE_REPORT=off/0/false disables it. */
+	changeReport: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -169,6 +175,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		ledgerV2: false,
 		spine: "",
 		spineLegs: "",
+		changeReport: !isOff(env.PI_PERSONA_LEG_CHANGE_REPORT ?? "on"),
 	};
 	// A valid finite value >= 0 sets the interval (0 opts out); junk/negative keeps the default.
 	const peekRaw = env.PI_PERSONA_PEEK_MS?.trim();

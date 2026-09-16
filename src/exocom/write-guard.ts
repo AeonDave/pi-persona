@@ -1,7 +1,10 @@
 /** Advisory write-vs-claim overlap guard — warn-then-allow (Task 7). Pure except WriteWarnings'
- *  memory. Imports only `../core/ownership.ts` (path overlap) and `./untrusted.ts` (the sanitizer
- *  shared by every exocom surface that renders peer-authored ledger fields), per layering. */
+ *  memory. Imports only `../core/ownership.ts` (path overlap), `../core/fence.ts` (`fencePeer`,
+ *  for the peer-authored slice/write_set — the same trust boundary `status.ts` fences), and
+ *  `./untrusted.ts` (the sanitizer shared by every exocom surface that renders peer-authored
+ *  ledger fields), per layering. */
 import { posix, win32 } from "node:path";
+import { fencePeer } from "../core/fence.ts";
 import { normalizeWritePath, pathsOverlap } from "../core/ownership.ts";
 import { renderWriteSet, untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
 import type { LedgerClaim } from "./ledger.ts";
@@ -48,14 +51,17 @@ export function writeWarningKey(claim: LedgerClaim, path: string): string {
 /** Build the write-guard's tool-result reason. `claim.slice`, `claim.write_set`, and `label` are
  *  all PEER-AUTHORED and only length-bounded at the wire (envelope.ts); this reason reaches both
  *  a terminal notification and the model's tool result, so every peer field is sanitized
- *  ({@link untrusted}) before it is interpolated. `path` is the caller's own tool argument, not
- *  peer-authored, and is passed through unsanitized. Exported (rather than built inline in
- *  hooks.ts) so the sanitization is directly testable and the hook stays thin. */
+ *  ({@link untrusted}) before it is interpolated. The claim's own slice/write_set additionally go
+ *  through {@link fencePeer} — quoted as data on their own line, OUTSIDE the authoritative
+ *  instruction sentence — so the model reads them as untrusted content, not part of the
+ *  instruction, the same standard `status.ts` applies to peer-claims text. `path` is the caller's
+ *  own tool argument, not peer-authored, and is passed through unsanitized. Exported (rather than
+ *  built inline in hooks.ts) so the sanitization is directly testable and the hook stays thin. */
 export function writeWarningReason(path: string, claim: LedgerClaim, label: string): string {
 	const who = untrusted(label, UNTRUSTED_MAX.label);
 	const slice = untrusted(claim.slice, UNTRUSTED_MAX.slice);
 	const writeSet = renderWriteSet(claim.write_set);
-	return `exocom: ${path} is inside ${who}'s open claim (${slice}: ${writeSet}) — coordinate with exocom_ask or claim it; call the tool again to proceed (this warning shows once per path)`;
+	return `exocom: ${path} is inside ${who}'s open claim — coordinate with exocom_ask or claim it; call the tool again to proceed (this warning shows once per path)\n${fencePeer(`${slice}: ${writeSet}`)}`;
 }
 
 /** Warn-once memory for the write guard. A bare unbounded set would grow for the life of the

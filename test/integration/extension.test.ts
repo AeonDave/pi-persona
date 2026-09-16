@@ -2785,6 +2785,48 @@ test("council exposes critic-loop exhaustion as an error with the unresolved rev
 	assert.match(text, /tests still fail/, "the supervisor receives the actionable final critique");
 });
 
+test("council surfaces map's per-item verification ledger: details.items is present and a rejection is named in the ruling text", async () => {
+	const cwd = tempDir("pi-persona-map-verify-");
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "teams.yaml"), ["mapteam: [splitter, worker]", ""].join(String.fromCharCode(10)));
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec) => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["alpha","beta"]', usage: emptyUsage(), ok: true };
+			if (spec.agent === "worker") return { agent: "worker", output: spec.task.includes("> alpha") ? "did alpha" : "did beta", usage: emptyUsage(), ok: true };
+			const approve = spec.task.includes("did alpha");
+			return {
+				agent: "verifier",
+				output: approve ? "approve" : "reject",
+				structured: { stance: approve ? "approve" : "reject", result: approve ? "" : "beta's fix is incomplete" },
+				usage: emptyUsage(),
+				ok: true,
+			};
+		},
+	};
+	const factories: EngineFactories = { makeInProcessEngine: () => engine, makeEngine: () => engine };
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: factories });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const council = m.tool("council") as { execute: AnyFn };
+	const result = await council.execute(
+		"map-verify-1",
+		{ question: "process the batch", strategy: "map", roster: "mapteam", params: { verify: "verifier" } },
+		undefined,
+		undefined,
+		ctx,
+	);
+	assert.equal(result.isError, false, "the workers all succeeded — a rejected verifier does not fail the whole run");
+	const items = result.details?.items as Array<{ item: string; status: string; failureKind?: string }> | undefined;
+	assert.ok(items, "details.items is present on a council run so a UI can reach the per-item ledger");
+	const byItem = Object.fromEntries(items!.map((i) => [i.item, i]));
+	assert.equal(byItem.alpha?.status, "completed");
+	assert.equal(byItem.beta?.status, "failed");
+	assert.equal(byItem.beta?.failureKind, "verification");
+	const text = String(result.content?.[0]?.text ?? "");
+	assert.match(text, /verification failed: beta/, "the rejection is visible in the rendered ruling, not just the ledger");
+});
+
 test("/doctor lists each strategy's declared params (or \"no params\")", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);

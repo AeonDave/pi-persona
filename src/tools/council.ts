@@ -112,7 +112,14 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				}
 				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: mergedParams };
 				const result = await d.runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
-				const s = (result?.structured ?? {}) as { headline?: string; status?: string; tally?: Record<string, number>; usedFallback?: boolean; count?: number };
+				const s = (result?.structured ?? {}) as {
+					headline?: string;
+					status?: string;
+					tally?: Record<string, number>;
+					usedFallback?: boolean;
+					count?: number;
+					items?: unknown;
+				};
 				const ruling = result?.output ?? "(the council returned no ruling)";
 				const uiBody = result ? (humanizeAggregateResult(result) ?? result.output) : "";
 				const headline = s.headline ?? (typeof s.count === "number" ? `${s.count} member results` : s.status ?? "");
@@ -123,6 +130,7 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					status: s.status,
 					tally: s.tally,
 					usedFallback: s.usedFallback,
+					items: s.items,
 					body: uiBody,
 					strategy,
 					roster,

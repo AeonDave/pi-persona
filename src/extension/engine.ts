@@ -11,7 +11,7 @@ import { isThinkingLevel } from "../core/types.ts";
 import { personaModels, type PersonaConfigStore } from "../persona/config-store.ts";
 import type { PersonaController, PersonaHost } from "../persona/controller.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "../engine/adapter.ts";
-import { captureStatus, diffStatus, renderChangeReport } from "../engine/change-report.ts";
+import { captureStatus, diffStatus, findGitRoot, renderChangeReport } from "../engine/change-report.ts";
 import { withModelFallback } from "../engine/fallback.ts";
 import { captureWorktreeArtifact, defaultGitExec, type GitExec, withWorktree, worktreePreflight } from "../engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "../engine/inproc.ts";
@@ -197,13 +197,21 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			// Files-changed report for a leg that does NOT run in its own worktree: it shares the
 			// real checkout, so the only honest signal is "what did `git status` see change while
 			// this leg ran" — a before/after snapshot, not a private diff (see change-report.ts).
-			// Skipped for the worktree path below, which already returns a real diff artifact.
+			// Skipped for the worktree path below, which already returns a real diff artifact, and
+			// for the whole feature when `PI_PERSONA_LEG_CHANGE_REPORT` is off.
+			//
+			// The repository root is resolved ONCE here (a pure filesystem walk, no process spawn)
+			// and threaded into BOTH captures as their `knownGitRoot` — each then skips its own
+			// walk AND its `rev-parse` liveness gate, so a leg pays for exactly two `git status`
+			// spawns (one at launch, one at settle) instead of four.
 			const withChangeReport = async (run: () => Promise<AgentResult>, spec: AgentRunSpec): Promise<AgentResult> => {
-				if (!root) return run();
-				const before = await captureStatus(root, gitExec);
+				if (!root || config.changeReport === false) return run();
+				const gitRoot = findGitRoot(root);
+				if (!gitRoot) return run();
+				const before = await captureStatus(gitRoot, gitExec, gitRoot);
 				const result = await run();
 				if (!before) return result;
-				const after = await captureStatus(root, gitExec);
+				const after = await captureStatus(gitRoot, gitExec, gitRoot);
 				if (!after) return result;
 				const block = renderChangeReport(diffStatus(before, after), spec.writeSet);
 				return block ? appendBlock(result, block) : result;

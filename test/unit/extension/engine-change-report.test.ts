@@ -79,8 +79,9 @@ test("a non-worktree leg with no status change returns the raw output untouched"
 	assert.equal(r.output, "done");
 });
 
-test("a failing rev-parse produces no block and does not throw", async () => {
-	const engine = createBuildEngine(baseDeps(fakeGit([], { code: 128, stdout: "" })))();
+test("a failing git status produces no block and does not throw (the resolved root is trusted here, so rev-parse is never consulted — see change-report.test.ts for that gate)", async () => {
+	const failStatus: GitExec = async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" });
+	const engine = createBuildEngine(baseDeps(failStatus))();
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true);
 	assert.equal(r.output, "done");
@@ -94,6 +95,38 @@ test("a leg that aborted with empty output still gets a clean block, never leadi
 	assert.equal(r.error, "aborted");
 	assert.match(r.output, /^--- FILES CHANGED DURING THIS LEG/);
 	assert.doesNotMatch(r.output, /^\s*\n/, "the block must not be preceded by blank lines when there was no output to trim");
+});
+
+test("a full leg (before + after capture) spawns exactly two git processes, not four — no redundant rev-parse", async () => {
+	const repoRoot = tempDir("pi-persona-engine-change-report-spawns-");
+	mkdirSync(join(repoRoot, ".git"));
+	let calls = 0;
+	const exec: GitExec = async (args) => {
+		calls += 1;
+		if (args.includes("status")) return { code: 0, stdout: calls === 1 ? "" : " M src/a.ts\0", stderr: "" };
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	const engine = createBuildEngine(baseDeps(exec, repoRoot))();
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /FILES CHANGED DURING THIS LEG/);
+	assert.equal(calls, 2, "one status call per capture, no rev-parse gate on either");
+});
+
+test("PI_PERSONA_LEG_CHANGE_REPORT off: no git process is spawned and the leg's output carries no report block", async () => {
+	const repoRoot = tempDir("pi-persona-engine-change-report-off-");
+	mkdirSync(join(repoRoot, ".git"));
+	let calls = 0;
+	const exec: GitExec = async () => {
+		calls += 1;
+		return { code: 0, stdout: " M src/a.ts\0", stderr: "" };
+	};
+	const deps = baseDeps(exec, repoRoot);
+	const engine = createBuildEngine(() => ({ ...deps(), config: { engine: "child", broker: false, changeReport: false } as never }))();
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	assert.equal(r.output, "done", "no report block appended");
+	assert.equal(calls, 0, "the knob being off must not spawn any git process at all");
 });
 
 test("a leg's cwd nested below the repository top still gets a files-changed block", async () => {

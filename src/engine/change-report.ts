@@ -92,12 +92,21 @@ export function findGitRoot(start: string, exists: (p: string) => boolean = exis
  *  Gated by {@link findGitRoot}: a cwd that plainly isn't inside any repository (within the walk's
  *  bound) never spawns a real `git` process — a genuine per-leg cost otherwise paid on every run
  *  outside a repository. The discovered repository top, not `root` itself, is passed to `git -C`
- *  below (the porcelain output is repo-relative either way). */
-export async function captureStatus(root: string, exec: GitExec): Promise<StatusSnapshot | undefined> {
-	const gitRoot = findGitRoot(root);
+ *  below (the porcelain output is repo-relative either way).
+ *
+ *  `knownGitRoot` lets a caller that already resolved (and, via a PRIOR call to this function,
+ *  vouched for) the repository root skip BOTH the filesystem walk and the `rev-parse` liveness
+ *  gate — `withChangeReport`'s before/after pair shares one root, so only the FIRST capture needs
+ *  to prove it; the second trusts that proof rather than re-spawning `rev-parse` for no new
+ *  information. Omit it for the general case (an unresolved `root`, or a standalone caller with no
+ *  prior proof), which keeps today's full discover-then-verify behavior unchanged. */
+export async function captureStatus(root: string, exec: GitExec, knownGitRoot?: string): Promise<StatusSnapshot | undefined> {
+	const gitRoot = knownGitRoot ?? findGitRoot(root);
 	if (!gitRoot) return undefined;
-	const repo = await exec(["-C", gitRoot, "rev-parse", "--is-inside-work-tree"]);
-	if (repo.code !== 0 || repo.stdout.trim().toLowerCase() !== "true") return undefined;
+	if (knownGitRoot === undefined) {
+		const repo = await exec(["-C", gitRoot, "rev-parse", "--is-inside-work-tree"]);
+		if (repo.code !== 0 || repo.stdout.trim().toLowerCase() !== "true") return undefined;
+	}
 	const status = await exec(["-C", gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "-z"]);
 	if (status.code !== 0) return undefined;
 	return parsePorcelainZ(status.stdout);

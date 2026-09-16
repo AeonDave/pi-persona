@@ -73,6 +73,14 @@ test("PI_PERSONA_BROKER is on by default so MCP/worktree/child-engine legs are s
 	assert.equal(resolveConfig({ PI_PERSONA_BROKER: "" }).broker, false);
 });
 
+test("PI_PERSONA_LEG_CHANGE_REPORT is on by default; off-words opt out", () => {
+	assert.equal(resolveConfig({}).changeReport, true, "on by default — the files-changed report is the existing behavior");
+	assert.equal(resolveConfig({ PI_PERSONA_LEG_CHANGE_REPORT: "1" }).changeReport, true);
+	assert.equal(resolveConfig({ PI_PERSONA_LEG_CHANGE_REPORT: "off" }).changeReport, false);
+	assert.equal(resolveConfig({ PI_PERSONA_LEG_CHANGE_REPORT: "0" }).changeReport, false);
+	assert.equal(resolveConfig({ PI_PERSONA_LEG_CHANGE_REPORT: "false" }).changeReport, false);
+});
+
 test("PI_PERSONA_DIRS splits on ';' and ',' and trims", () => {
 	assert.deepEqual(resolveConfig({ PI_PERSONA_DIRS: "/a;/b, /c " }).extraDirs, ["/a", "/b", "/c"]);
 });
