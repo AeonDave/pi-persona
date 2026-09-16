@@ -156,8 +156,18 @@ export interface InProcessDeps {
 	startupTimeoutMs?: number;
 }
 
-// The sub-agent must never re-enter the supervisor's orchestration surface.
-const ORCHESTRATION_TOOLS = ["delegate", "council", "orchestrate", "flow"];
+// The sub-agent must never re-enter the supervisor's orchestration surface. This is the SECOND
+// line of defense (the first is that a child's whole pi-persona activation short-circuits under
+// PI_PERSONA_DISABLE=1 and registers no tools at all, on either engine — see I2 in
+// docs/ARCHITECTURE.md); nesting depth is capped at 1 structurally, not by a numeric run limit.
+export const ORCHESTRATION_TOOLS = ["delegate", "council", "orchestrate", "flow"];
+
+/** Union a child session's excludeTools with `ORCHESTRATION_TOOLS`, so a delegated leg has no
+ *  tool call that could start a grandchild, however it is asked to — regardless of what the
+ *  agent's own config additionally excludes. */
+export function withOrchestrationToolsExcluded(extra: readonly string[] | undefined): string[] {
+	return [...new Set([...ORCHESTRATION_TOOLS, ...(extra ?? [])])];
+}
 
 /** Preserve the semantic difference between an absent allowlist (Pi defaults) and an explicit
  * empty one (no tools). Custom communication tools join only a non-empty allowlist; an empty
@@ -203,7 +213,7 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		...(opts.modelRuntime !== undefined
 			? { modelRuntime: opts.modelRuntime as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["modelRuntime"]> }
 			: {}),
-		excludeTools: [...new Set([...ORCHESTRATION_TOOLS, ...(opts.excludeTools ?? [])])],
+		excludeTools: withOrchestrationToolsExcluded(opts.excludeTools),
 		...(tools !== undefined ? { tools } : {}),
 		...(opts.customTools && opts.customTools.length > 0 ? { customTools: opts.customTools } : {}),
 		// `opts.thinkingLevel` is our local ThinkingLevel superset — cast to pi's field type at the

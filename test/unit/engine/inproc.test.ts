@@ -15,7 +15,15 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
-import { type CreateInProcSession, type CreateSessionOptions, type InProcSession, makeInProcessEngine, mergeSessionToolAllowlist } from "../../../src/engine/inproc.ts";
+import {
+	type CreateInProcSession,
+	type CreateSessionOptions,
+	type InProcSession,
+	makeInProcessEngine,
+	mergeSessionToolAllowlist,
+	ORCHESTRATION_TOOLS,
+	withOrchestrationToolsExcluded,
+} from "../../../src/engine/inproc.ts";
 
 // A stub registry: one model, resolvable by provider/id or bare id.
 const stubModel = { provider: "stub", id: "m" };
@@ -185,6 +193,24 @@ test("an explicit empty inproc allowlist does not re-enable injected custom tool
 	assert.deepEqual(mergeSessionToolAllowlist([], ["contact_supervisor", "contact_peer"]), []);
 	assert.deepEqual(mergeSessionToolAllowlist(["read"], ["contact_supervisor"]), ["read", "contact_supervisor"]);
 	assert.equal(mergeSessionToolAllowlist(undefined, ["contact_supervisor"]), undefined);
+});
+
+// Nesting depth is structural, not a numeric run limit (I2, docs/ARCHITECTURE.md): the real
+// production session factory (`createPiSession`, not exported/mockable) unions EVERY child
+// session's excludeTools with ORCHESTRATION_TOOLS via this exported helper — so a delegated
+// leg's effective tool list can never contain delegate/council/orchestrate/flow, whatever the
+// agent's own config or the caller additionally excludes.
+test("withOrchestrationToolsExcluded always excludes delegate/council/orchestrate/flow, on top of any of an agent's own excludes", () => {
+	assert.equal(ORCHESTRATION_TOOLS.length, 4, "pin the exact set the docs promise");
+	for (const name of ["delegate", "council", "orchestrate", "flow"]) assert.ok(ORCHESTRATION_TOOLS.includes(name));
+
+	const bare = withOrchestrationToolsExcluded(undefined);
+	for (const name of ORCHESTRATION_TOOLS) assert.ok(bare.includes(name), `${name} must always be excluded`);
+
+	const withAgentExcludes = withOrchestrationToolsExcluded(["edit"]);
+	for (const name of ORCHESTRATION_TOOLS) assert.ok(withAgentExcludes.includes(name), `${name} survives alongside the agent's own excludes`);
+	assert.ok(withAgentExcludes.includes("edit"), "the agent's own excludes are preserved, not replaced");
+	assert.equal(new Set(withAgentExcludes).size, withAgentExcludes.length, "no duplicate entries");
 });
 
 test("inproc engine restores PI_PERSONA_DISABLE and PI_PERSONA_LEG after the sub-session is built", async () => {

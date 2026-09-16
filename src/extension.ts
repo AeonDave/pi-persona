@@ -129,7 +129,6 @@ const RUN_LIMITS: RunLimits = {
 	// A generous anti-runaway backstop, not a council-size cap: a declared ensemble
 	// (e.g. 9 members × several rounds) must fit; the token budget is the real cost guard.
 	maxChildren: 64,
-	maxDepth: 2,
 	maxConcurrency: 4,
 	timeoutMs: 180_000, // IDLE window (resets on output) — kills a hung child, not a busy one
 	budgetTokens: 1_000_000,

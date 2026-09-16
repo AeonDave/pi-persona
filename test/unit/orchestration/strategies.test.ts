@@ -15,7 +15,7 @@ import { pipeline } from "../../../src/orchestration/strategies/pipeline.ts";
 import { synthesize } from "../../../src/orchestration/strategies/synthesize.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
-const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
+const LIMITS = { maxChildren: 8, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 
 /** Let every member enter the injected engine before the test's first member aborts the run. */

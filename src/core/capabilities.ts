@@ -11,7 +11,6 @@ import { isAllowed, type Permission } from "./permissions.ts";
 
 export interface RunLimits {
 	maxChildren: number;
-	maxDepth: number;
 	maxConcurrency: number;
 	timeoutMs: number;
 	budgetTokens: number;

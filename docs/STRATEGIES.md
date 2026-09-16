@@ -27,12 +27,17 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 | series & loops | Plain `await` / `for` — a strategy is TypeScript, so `pipeline` and `critic-loop` are just native control flow. |
 
 Run limits (`RUN_LIMITS`) are enforced inside `makeSDK` regardless of how a strategy calls `agent()`:
-`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window), `maxDepth`. On top of the
+`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window). Nesting depth is not a
+numeric knob on this list — it is structurally 1: a spawned child's whole pi-persona extension
+disables itself under `PI_PERSONA_DISABLE=1`, so it has no `delegate`/`council`/`orchestrate`/`flow`
+tool to call however a strategy or persona tries to nest it (the in-process engine additionally
+excludes those tools from the child session directly, as a second line of defense). On top of the
 idle window, every agent can also carry an **opt-in hard wall-clock cap** (`PI_PERSONA_AGENT_MAX_MS`,
 OFF by default = unlimited) — a lifetime ceiling that, when armed, settles a busy-but-non-converging
 worker the idle window never catches. Without that cap, an actively streaming child may continue
-indefinitely; the idle watchdog catches silence. Safety comes from these runtime limits, not from
-sandboxing the strategy (see the I2 invariant in [ARCHITECTURE.md](ARCHITECTURE.md)).
+indefinitely; the idle watchdog catches silence. Safety comes from these runtime limits plus the
+structural depth-1 guarantee, not from sandboxing the strategy (see the I2 invariant in
+[ARCHITECTURE.md](ARCHITECTURE.md)).
 
 Every `agent()` call in one SDK instance shares a concurrency semaphore, including direct
 `Promise.all` calls and overlapping `parallel()` batches. A requested batch concurrency may lower
