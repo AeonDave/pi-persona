@@ -402,6 +402,7 @@ export function specOf(t: DelegateTask, index = 0): AgentRunSpec {
 	if (t.isolation !== undefined) spec.isolation = t.isolation;
 	if (t.mcp !== undefined) spec.mcp = t.mcp;
 	if (isPositiveFiniteMs(t.timeoutMs)) spec.timeoutMs = t.timeoutMs;
+	if (t.writeSet && t.writeSet.length > 0) spec.writeSet = [...t.writeSet];
 	return spec;
 }
 

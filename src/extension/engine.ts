@@ -11,8 +11,9 @@ import { isThinkingLevel } from "../core/types.ts";
 import { personaModels, type PersonaConfigStore } from "../persona/config-store.ts";
 import type { PersonaController, PersonaHost } from "../persona/controller.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "../engine/adapter.ts";
+import { captureStatus, diffStatus, renderChangeReport } from "../engine/change-report.ts";
 import { withModelFallback } from "../engine/fallback.ts";
-import { captureWorktreeArtifact, defaultGitExec, withWorktree, worktreePreflight } from "../engine/worktree.ts";
+import { captureWorktreeArtifact, defaultGitExec, type GitExec, withWorktree, worktreePreflight } from "../engine/worktree.ts";
 import { type InProcessDeps, makeInProcessEngine } from "../engine/inproc.ts";
 import { emptyUsage, type ProgressSnapshot } from "../engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
@@ -44,6 +45,9 @@ export interface BuildEngineDeps {
 	supervisorHandle: string;
 	/** Breadcrumb for a provider reroute (toast + log); absent ⇒ silent, as before. */
 	onFallback?: (info: { from: string; to: string; agent: string }) => void;
+	/** Injected git runner for the non-worktree files-changed report (tests only); defaults to
+	 *  `defaultGitExec`. */
+	gitExec?: GitExec;
 }
 
 export type BuildEngine = (signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, engOpts?: { async?: boolean }) => StrategyEngine;
@@ -192,6 +196,21 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				});
 			};
 			const root = lastCtx?.cwd;
+			const gitExec = d().gitExec ?? defaultGitExec;
+			// Files-changed report for a leg that does NOT run in its own worktree: it shares the
+			// real checkout, so the only honest signal is "what did `git status` see change while
+			// this leg ran" — a before/after snapshot, not a private diff (see change-report.ts).
+			// Skipped for the worktree path below, which already returns a real diff artifact.
+			const withChangeReport = async (run: () => Promise<AgentResult>, spec: AgentRunSpec): Promise<AgentResult> => {
+				if (!root) return run();
+				const before = await captureStatus(root, gitExec);
+				const result = await run();
+				if (!before) return result;
+				const after = await captureStatus(root, gitExec);
+				if (!after) return result;
+				const block = renderChangeReport(diffStatus(before, after), spec.writeSet);
+				return block ? { ...result, output: `${result.output.trimEnd()}\n\n${block}` } : result;
+			};
 			return wrapFallback({
 				async run(spec, perProgress, perSignal, perSteer) {
 					const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
@@ -234,8 +253,8 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 					// MCP session — for a server-keyed backend (HTTP MCP) the caller passes a session id
 					// in the task to share state. Steer rides the broker (same as worktree / child engine).
 					const wantsMcp = spec.mcp ?? resolveAgent(spec.agent)?.mcp;
-					if (wantsMcp && root) return childEngineAt(root).run(spec, perProgress, perSignal, perSteer);
-					return base.run(spec, perProgress, perSignal, perSteer);
+					if (wantsMcp && root) return withChangeReport(() => childEngineAt(root).run(spec, perProgress, perSignal, perSteer), spec);
+					return withChangeReport(() => base.run(spec, perProgress, perSignal, perSteer), spec);
 				},
 			});
 	};

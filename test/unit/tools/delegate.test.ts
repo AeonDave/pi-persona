@@ -33,6 +33,12 @@ test("specOf forwards a leader-assigned name and keeps the indexed generic fallb
 	assert.equal(fallback.name, "operator-2");
 });
 
+test("specOf copies a non-empty writeSet, and omits the field when writeSet is absent or empty", () => {
+	assert.deepEqual(specOf({ agent: "scout", task: "t", writeSet: ["src/a.ts"] }).writeSet, ["src/a.ts"]);
+	assert.equal(specOf({ agent: "scout", task: "t", writeSet: [] }).writeSet, undefined);
+	assert.equal(specOf({ agent: "scout", task: "t" }).writeSet, undefined);
+});
+
 test("specOf and runDelegate preserve an explicit empty tool allowlist", async () => {
 	assert.deepEqual(specOf({ agent: "locked", task: "reason", tools: [] }).tools, []);
 	const seen: Array<string[] | undefined> = [];
