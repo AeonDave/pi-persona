@@ -39,6 +39,7 @@ import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/ca
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
+import { installedPiVersion, MIN_PI_VERSION, satisfiesFloor } from "./core/pi-compat.ts";
 import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
 import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type EngineFactories } from "./extension/engine.ts";
@@ -1541,6 +1542,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
 		lines.push(`engine backend: ${config.engine === "child" ? "child-process" : "in-process"}`);
+		const piVersion = installedPiVersion();
+		lines.push(`pi: ${piVersion ?? "unknown"} (requires ≥ ${MIN_PI_VERSION})${piVersion && !satisfiesFloor(piVersion, MIN_PI_VERSION) ? " — BELOW FLOOR" : ""}`);
 		const spineRole = (selector: string, source: string | undefined): string => {
 			if (!selector) return "off";
 			return source ? `${selector} -> ${source}` : `${selector} -> degraded`;

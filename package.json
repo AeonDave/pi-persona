@@ -37,10 +37,10 @@
     "drive": "node --import tsx scripts/drive.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-agent-core": ">=0.83.0",
+    "@earendil-works/pi-ai": ">=0.83.0",
+    "@earendil-works/pi-coding-agent": ">=0.83.0",
+    "@earendil-works/pi-tui": ">=0.83.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-agent-core": {
