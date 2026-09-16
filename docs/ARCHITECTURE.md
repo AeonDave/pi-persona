@@ -271,7 +271,9 @@ that model family. A provider-qualified `spec.model` is an explicit provider and
 strict by default; callers must deliberately opt it into cross-provider recovery. Only
 `failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal — engines
 classify the cause on the `AgentResult`. This prevents an explicitly selected OpenAI or native Claude
-leg from silently moving to an unrelated paid provider.
+leg from silently moving to an unrelated paid provider. (`"verification"` is a further terminal
+value, but never appears on an `AgentResult` — see `map`'s `verify` param in
+[`docs/STRATEGIES.md`](./STRATEGIES.md).)
 
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 

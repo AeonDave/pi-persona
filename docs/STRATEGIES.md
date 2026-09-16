@@ -61,7 +61,7 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 |---|---|---|---|
 | `fanout` | Every roster agent on the same task in parallel, then `aggregate`. | — | roster-role |
 | `pipeline` | Roster in SEQUENCE, each builds on the prior output; answer = last step. | — | roster-role |
-| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1, the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger) | roster-role, opt-in peers |
+| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1, the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
 | `critic-loop` | Generator proposes, critic attacks; `reject`/`revise` triggers another draft, and only explicit `approve` succeeds. Exhaustion fails closed with the last reviewed draft + unresolved critique (never an unreviewed tail revision). | `generator` (roster[0]), `critic` (roster[1]), `rounds` (positive integer, 3) | roster-role, `outputContract` |
 | `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. | `aggregate` ("majority"), `reflect` (true) | vote reducer |
 | `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
@@ -72,6 +72,20 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 | `compete` | N competitors implement the same task in ISOLATED git worktrees; a successful blind judge picks; the winner is returned as a unified diff for the SUPERVISOR to apply. If judging fails, every valid diff is returned unjudged and the strategy fails closed. | `judge` (required), `ballotDiffChars` (6000) | **`isolation: worktree`**, judge reducer |
 
 `fanout`, `pipeline`, `pair` read no params and omit the schema.
+
+`map`'s `verify` is the one mechanism here with a measured multi-agent gain in the literature: a
+single read-only review pass per completed unit of work, not swarm autonomy for its own sake. It
+runs one extra child per COMPLETED item (a failed item has nothing to re-check), through the same
+`sdk.parallel` wave as the workers, so `maxChildren`/`maxConcurrency`/`budgetTokens` still bound it
+— sizing `maxItems` with headroom for roughly double the child count is the caller's job when
+`verify` is set. It pays for a batch where a wrong answer is expensive and hard to eyeball after
+the fact (security-sensitive edits, long-tail correctness); it costs more than it is worth for a
+low-risk sweep a supervisor can spot-check itself. A verifier's stance is read via the SAME
+`outputContract: "default"` machinery `critic-loop` uses for its critic (`structured.stance`):
+`"approve"` passes, anything else — an explicit reject/revise, a missing stance, or a verifier leg
+that itself failed to run — flips that item's `structured.items` ledger entry to `status: "failed"`
+(`failureKind: "verification"` for an actual negative verdict; the verifier's own `failureKind` when
+its leg couldn't run at all).
 
 Every strategy that runs more than one round or step (`council-rounds`, `debate`, `magi`,
 `critic-loop`, `pipeline`) stops at its own round/step boundary when the run is cancelled: an aborted
