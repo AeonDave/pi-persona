@@ -140,6 +140,7 @@ export class SupervisorBroker {
 				this.preHostSteers.set(handle, queued);
 				return true;
 			},
+			hasPendingAskFrom: (handle) => this.deps.bus.hasPendingAskFrom(handle),
 		};
 	}
 

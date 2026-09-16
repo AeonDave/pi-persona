@@ -65,13 +65,12 @@ export interface ChildEngineOptions {
 	 *  "timeout"); the idle watchdog would not, because it is re-armed by any stdout at all. */
 	startupTimeoutMs?: number;
 	/** The child may legitimately go silent while BLOCKED on a supervisor reply (`contact_supervisor`
-	 *  decision/interview over the broker, up to the bus ask cap). When true the idle watchdog and
-	 *  the startup deadline are NOT armed — parity with the in-process engine's `blockingChild`.
-	 *  The hard cap (`hardTimeoutMs`) still applies. */
-	allowBlocking?: boolean;
-	/** Ceiling applied ONLY when `allowBlocking` disabled the idle/startup watchdogs and no explicit
-	 *  `hardTimeoutMs` was configured — a blocked leg must still end. 0/absent = none. */
-	blockingCapMs?: number;
+	 *  decision/interview over the broker, up to the bus ask cap). The idle watchdog and the startup
+	 *  deadline stay armed regardless — silence is ambiguous on its own — but when either FIRES, this
+	 *  is consulted first: true means the bus confirms a live pending ask from this child, so the
+	 *  watchdog re-arms instead of killing; false means the silence is real. Absent ⇒ never blocked,
+	 *  i.e. today's behavior. The hard cap (`hardTimeoutMs`) still applies unconditionally either way. */
+	isBlocked?: () => boolean;
 	/** Override the cross-OS force tree-kill (used in tests). Defaults to
 	 *  {@link killProcessTree}. */
 	killProcessTree?: (pid: number) => void;
@@ -189,7 +188,7 @@ export async function runChildAgent(
 	let aborted = false;
 	let timedOut = false;
 	let hardTimedOut = false;
-	let hardCapMs = 0; // the value that actually armed the hard cap (hardTimeoutMs OR blockingCapMs) — for the error message
+	let hardCapMs = 0; // the value that actually armed the hard cap (opts.hardTimeoutMs) — for the error message
 	let startupTimedOut = false;
 	let killSignal: NodeJS.Signals | undefined; // the signal that ended the child, if any (POSIX)
 	let progressed = false; // set once the child produces its FIRST real progress (turn/tokens/output)
@@ -350,12 +349,7 @@ export async function runChildAgent(
 			// Hard wall-clock cap: armed ONCE, never re-armed by output — a definite lifetime ceiling
 			// that kills a busy-but-non-converging child the idle window above never catches.
 			const armHardCap = () => {
-				const capMs =
-					opts.hardTimeoutMs && opts.hardTimeoutMs > 0
-						? opts.hardTimeoutMs
-						: opts.allowBlocking && opts.blockingCapMs && opts.blockingCapMs > 0
-							? opts.blockingCapMs
-							: 0;
+				const capMs = opts.hardTimeoutMs && opts.hardTimeoutMs > 0 ? opts.hardTimeoutMs : 0;
 				if (capMs <= 0 || settled || killing) return;
 				hardCapMs = capMs;
 				hardTimer = setTimeout(() => {
@@ -365,9 +359,16 @@ export async function runChildAgent(
 				hardTimer.unref?.();
 			};
 			const armTimeout = () => {
-				if (opts.allowBlocking || !opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
+				if (!opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
 				if (timer) clearTimeout(timer);
 				timer = setTimeout(() => {
+					// The bus, not this local flag, is the source of truth for "still blocked": a
+					// child mid-ask legitimately emits nothing, and only the supervisor's bus knows
+					// whether that ask is still outstanding right now.
+					if (opts.isBlocked?.()) {
+						armTimeout();
+						return;
+					}
 					timedOut = true;
 					kill();
 				}, opts.timeoutMs);
@@ -380,9 +381,13 @@ export async function runChildAgent(
 			// the difference between a hung init and a first provider response that simply hasn't
 			// arrived, so the window has to be sized for the slowest acceptable cold start.
 			const armStartup = () => {
-				if (opts.allowBlocking || !opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
+				if (!opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
 				startupTimer = setTimeout(() => {
 					if (progressed) return;
+					if (opts.isBlocked?.()) {
+						armStartup();
+						return;
+					}
 					startupTimedOut = true;
 					kill();
 				}, opts.startupTimeoutMs);

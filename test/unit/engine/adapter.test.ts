@@ -223,19 +223,30 @@ test("child adapter keeps the cause of death when a contract-bearing leg dies be
 	assert.doesNotMatch(r.error ?? "", /contract default failed/);
 });
 
-test("child adapter exempts a broker-connected async leg from the idle watchdog (allowBlocking parity)", { timeout: 3000 }, async () => {
-	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true };
+test("child adapter re-arms the idle watchdog while the broker reports a pending ask from this leg", { timeout: 3000 }, async () => {
+	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => true };
 	const ac = new AbortController();
 	setTimeout(() => ac.abort(), 400);
 	const engine = makeEngine({
 		resolveAgent,
 		contracts,
 		broker,
-		allowBlocking: true,
 		signal: ac.signal,
 		childOptions: { resolveInvocation: resolveFake, timeoutMs: 100, killGraceMs: 100 },
 	});
 	const r = await engine.run({ agent: "a", task: "wait [sleep]" });
-	assert.notEqual(r.failureKind, "timeout", "an allowed-to-block leg is not idle-killed");
+	assert.notEqual(r.failureKind, "timeout", "a leg the bus reports as blocked is not idle-killed");
 	assert.equal(r.failureKind, "abort");
+});
+
+test("child adapter idle-kills once the broker reports no pending ask from this leg", { timeout: 3000 }, async () => {
+	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => false };
+	const engine = makeEngine({
+		resolveAgent,
+		contracts,
+		broker,
+		childOptions: { resolveInvocation: resolveFake, timeoutMs: 100, killGraceMs: 100 },
+	});
+	const r = await engine.run({ agent: "a", task: "wait [sleep]" });
+	assert.equal(r.failureKind, "timeout", "no pending ask ⇒ the silence is real");
 });

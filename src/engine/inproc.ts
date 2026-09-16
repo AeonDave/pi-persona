@@ -130,24 +130,21 @@ export interface InProcessDeps {
 	 *  When false, a spec's `peers` request is ignored (no `contact_peer` tool is bound). */
 	canUseBus?: boolean;
 	/** IDLE window (ms): a session that emits NO events for this long is treated as hung
-	 *  and aborted (mirrors the child engine's idle kill). 0/absent = no watchdog.
-	 *  Ignored when `coaching` + `allowBlocking` — a child legitimately blocked on a
-	 *  supervisor reply (bus ask, 10-minute timeout) emits nothing and must not be killed. */
+	 *  and aborted (mirrors the child engine's idle kill). 0/absent = no watchdog. Stays armed
+	 *  for every child, coaching or not: when it fires, the bus is asked whether THIS child has
+	 *  a live ask outstanding (`bus.hasPendingAskFrom`) — true re-arms the window instead of
+	 *  killing, false means the silence is real (R9). */
 	timeoutMs?: number;
 	/** HARD wall-clock cap (ms): a definite lifetime ceiling, armed ONCE and never reset by
 	 *  events — so it catches a busy-but-non-converging child (a loop that keeps emitting) that
-	 *  the idle watchdog, which any event re-arms, never would. 0/absent = no cap. Also skipped
-	 *  for a `coaching` + `allowBlocking` child (it may legitimately block a long time on a reply). */
+	 *  the idle watchdog, which any event re-arms, never would. 0/absent = no cap. Applies
+	 *  unconditionally, including to a coaching child legitimately blocked on a reply. */
 	hardTimeoutMs?: number;
-	/** Ceiling applied ONLY when `coaching` + `allowBlocking` disabled the idle/startup watchdogs
-	 *  and no explicit `hardTimeoutMs` was configured — a blocked leg must still end. 0/absent =
-	 *  none. */
-	blockingCapMs?: number;
 	/** STARTUP deadline (ms): a session that never makes PROGRESS (no completed turn, no tokens,
 	 *  no streamed output) within this window is aborted as a stalled start — the case the idle
 	 *  window is too generous for. The FIRST progress cancels it permanently, so a
-	 *  slow-but-streaming turn is never touched. 0/absent = no startup deadline. Skipped for a
-	 *  `coaching` + `allowBlocking` child (it may legitimately block before emitting anything).
+	 *  slow-but-streaming turn is never touched. 0/absent = no startup deadline. Stays armed for
+	 *  every child, same bus consult as the idle window above before it actually cancels (R9).
 	 *
 	 *  CHOOSE THE VALUE FOR THE FIRST PROVIDER ROUND TRIP, not for init alone. Only the child's
 	 *  OWN assistant output counts as progress — pi emits message_start/message_end for the
@@ -437,7 +434,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let timedOut = false;
 			let hardTimedOut = false;
 			let startupTimedOut = false;
-			let initializationTimedOut = false;
 			let cancellationRequested = false;
 			const initController = new AbortController();
 			const abortSession = (): void => {
@@ -450,7 +446,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					releaseAbortGate();
 				}
 			};
-			const requestCancellation = (kind: "abort" | "idle" | "timeout" | "startup" | "hard"): void => {
+			const requestCancellation = (kind: "abort" | "idle" | "startup" | "hard"): void => {
 				// Host abort hooks can synchronously emit more events or cancellation signals.
 				// Preserve the first cause and invoke the host abort hook only once.
 				if (cancellationRequested) return;
@@ -458,10 +454,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				if (kind === "abort") aborted = true;
 				else if (kind === "idle") timedOut = true;
 				else if (kind === "hard") hardTimedOut = true;
-				else {
-					if (kind === "timeout") initializationTimedOut = true;
-					startupTimedOut = true;
-				}
+				else startupTimedOut = true;
 				if (!initController.signal.aborted) initController.abort();
 				abortSession();
 			};
@@ -469,12 +462,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// Idle watchdog (mirrors the child engine's idle kill): a session that emits no
 			// events for `timeoutMs` is hung (e.g. a stuck provider stream) — without this the
 			// DEFAULT engine would await `waitForIdle()` forever and the run would never settle.
-			// Any event re-arms the clock, so a long-but-active agent is never killed. Disabled
-			// for coaching children that may block on a supervisor reply (see InProcessDeps).
-			const blockingChild = deps.coaching && (deps.allowBlocking ?? false);
-			// NP2: a per-leg spec.timeoutMs override raises (or shortens) just THIS leg's idle
-			// ceiling without touching deps.timeoutMs — the shared default other legs still see.
-			// Junk (non-finite/≤0) is ignored and falls back to deps.timeoutMs.
+			// Any event re-arms the clock, so a long-but-active agent is never killed. Stays armed
+			// for every child, coaching or not: when it fires, the bus is consulted first (R9) —
+			// a live pending ask from THIS child re-arms the window instead of killing.
 			const specTimeoutMs = isPositiveFiniteMs(spec.timeoutMs) ? spec.timeoutMs : undefined;
 			const watchdogMs = specTimeoutMs ?? (isPositiveFiniteMs(deps.timeoutMs) ? deps.timeoutMs : 0);
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -486,8 +476,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			};
 			const armIdle = (): void => {
 				disarmIdle();
-				if (watchdogMs <= 0 || cancellationRequested || (blockingChild && initializedSession)) return;
+				if (watchdogMs <= 0 || cancellationRequested) return;
 				idleTimer = setTimeout(() => {
+					if (childHandle && deps.bus?.hasPendingAskFrom(childHandle)) {
+						armIdle();
+						return;
+					}
 					requestCancellation("idle");
 				}, watchdogMs);
 				idleTimer.unref?.();
@@ -496,13 +490,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// Hard wall-clock cap: armed ONCE, never reset by events — a definite lifetime ceiling
 			// that settles a busy-but-non-converging child (the idle watchdog above never catches).
 			// It starts before session construction, matching the child engine's process lifetime cap.
-			// A blocking child has its idle/startup watchdogs disarmed above, so — absent an explicit
-			// hardTimeoutMs — blockingCapMs becomes its ceiling instead: a blocked leg must still end.
-			const hardMs = isPositiveFiniteMs(deps.hardTimeoutMs)
-				? deps.hardTimeoutMs
-				: blockingChild && isPositiveFiniteMs(deps.blockingCapMs)
-					? deps.blockingCapMs
-					: 0;
+			// Applies unconditionally — including to a coaching child legitimately blocked on a reply.
+			const hardMs = isPositiveFiniteMs(deps.hardTimeoutMs) ? deps.hardTimeoutMs : 0;
 			let hardTimer: ReturnType<typeof setTimeout> | undefined;
 			const armHard = (): void => {
 				if (hardMs <= 0 || hardTimer) return;
@@ -517,10 +506,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			};
 
 			// Startup deadline (mirrors the child engine): one window from construction to the first
-			// real progress (completed turn / tokens / streamed output), never restarted. A blocking
-			// coaching child remains exempt here because it may legitimately wait for a reply. During
-			// construction, however, the same configured deadline is always armed: initialization has
-			// no active supervisor reply to wait for and must not hang indefinitely.
+			// real progress (completed turn / tokens / streamed output). Stays armed for every child,
+			// including one that may block on a supervisor reply before ever emitting anything — the
+			// bus consult below re-arms it for as long as that ask is genuinely pending (R9). During
+			// construction there is no session yet, so no ask can possibly be pending: the window
+			// behaves exactly as it always has while initializing.
 			const startupMs = isPositiveFiniteMs(deps.startupTimeoutMs) ? deps.startupTimeoutMs : 0;
 			let startupProgressed = false;
 			let startupTimer: ReturnType<typeof setTimeout> | undefined;
@@ -531,9 +521,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 			const armStartup = (): void => {
-				if (blockingChild || startupMs <= 0 || startupTimer) return;
+				disarmStartup();
+				if (startupMs <= 0) return;
 				startupTimer = setTimeout(() => {
 					if (startupProgressed) return;
+					if (childHandle && deps.bus?.hasPendingAskFrom(childHandle)) {
+						armStartup();
+						return;
+					}
 					requestCancellation("startup");
 				}, startupMs);
 				startupTimer.unref?.();
@@ -547,17 +542,10 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			};
 
-			// The Pi resource loader currently has no cancellation API. Start the deadline and
-			// caller-abort listener BEFORE invoking the factory, then keep the guard held until the
-			// factory promise itself settles. A timed-out run may return to its semaphore caller, but
-			// a late session is disposed and a late rejection is consumed by this handled promise.
-			let initializationTimer: ReturnType<typeof setTimeout> | undefined;
-			const disarmInitialization = (): void => {
-				if (initializationTimer) {
-					clearTimeout(initializationTimer);
-					initializationTimer = undefined;
-				}
-			};
+			// The Pi resource loader currently has no cancellation API. `armIdle`/`armHard`/`armStartup`
+			// (below) already start before the factory is invoked and stay held until the factory
+			// promise itself settles, so a timed-out run may return to its semaphore caller while a
+			// late session is disposed and a late rejection is consumed by this handled promise.
 			const onAbort = (): void => requestCancellation("abort");
 			if (signal) {
 				if (signal.aborted) requestCancellation("abort");
@@ -612,16 +600,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					popDisableGuard();
 					return outcome;
 				});
-			if (blockingChild && startupMs > 0) {
-				initializationTimer = setTimeout(() => requestCancellation("timeout"), startupMs);
-				initializationTimer.unref?.();
-			}
 
 			const initializationOutcome = await Promise.race([
 				initialization,
 				abortGate.then(() => undefined as InitializationOutcome | undefined),
 			]);
-			disarmInitialization();
 			if (cancellationRequested || !initializationOutcome || !initializationOutcome.session) {
 				if (cancellationRequested && initializedSession) {
 					const cancelledSession = initializedSession;
@@ -638,7 +621,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					? `${tag} agent exceeded the ${hardMs}ms hard cap during session initialization`
 					: timedOut
 						? `${tag} agent timed out during session initialization — no events for ${watchdogMs}ms`
-					: initializationTimedOut || startupTimedOut
+					: startupTimedOut
 						? `${tag} agent produced no output within the ${startupMs}ms startup window while initializing the session`
 						: `${tag} agent aborted`;
 				const cleanupHint = initializationSettled ? "" : "; initialization cancellation requested, but the host loader may still be unwinding. If initialization keeps hanging, restart Pi and use PI_PERSONA_ENGINE=child";
@@ -649,7 +632,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					ok: false,
 					error: `${initError}${cleanupHint}`,
 					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
-					failureKind: hardTimedOut || timedOut || initializationTimedOut || startupTimedOut ? "timeout" : "abort",
+					failureKind: hardTimedOut || timedOut || startupTimedOut ? "timeout" : "abort",
 				};
 			}
 			session = initializationOutcome.session;

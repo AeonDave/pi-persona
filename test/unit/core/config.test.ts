@@ -53,12 +53,6 @@ test("PI_PERSONA_AGENT_STARTUP_MS sets the per-agent startup deadline (default 3
 	assert.equal(resolveConfig({ PI_PERSONA_AGENT_STARTUP_MS: "-5" }).agentStartupTimeoutMs, 300_000, "negative ⇒ default");
 });
 
-test("PI_PERSONA_AGENT_BLOCKING_MAX_MS sets the ceiling for blocking-exempt legs (default 1_800_000; explicit 0 disables)", () => {
-	assert.equal(resolveConfig({}).agentBlockingMaxMs, 1_800_000, "30 minutes by default");
-	assert.equal(resolveConfig({ PI_PERSONA_AGENT_BLOCKING_MAX_MS: "0" }).agentBlockingMaxMs, 0, "explicit 0 disables the ceiling");
-	assert.equal(resolveConfig({ PI_PERSONA_AGENT_BLOCKING_MAX_MS: "abc" }).agentBlockingMaxMs, 1_800_000, "non-numeric ⇒ default");
-});
-
 test("PI_PERSONA_NUDGE=off disables the delegation nudge (default on)", () => {
 	assert.equal(resolveConfig({}).nudge, true, "the delegation nudge is on by default");
 	assert.equal(resolveConfig({ PI_PERSONA_NUDGE: "off" }).nudge, false, "explicit off opts out");

@@ -36,6 +36,10 @@ export interface EngineAdapterBroker {
 	/** Pushes a `steer` frame to the connected (or not-yet-connected) child.
 	 *  Returns false when the handle is unknown (not pre-registered / already forgotten). */
 	steerFrame(handle: string, text: string): boolean;
+	/** Whether `handle` currently has a live ask (`decision`/`interview`) awaiting a reply — the
+	 *  parent-side idle/startup watchdogs consult this before killing a silent leg (R9): a leg
+	 *  blocked on the supervisor is re-armed, not killed. */
+	hasPendingAskFrom(handle: string): boolean;
 }
 
 export interface EngineAdapterDeps {
@@ -169,9 +173,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
 					...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),
 				};
-				// The same flag the child reads as PI_PERSONA_ALLOW_BLOCKING: the parent-side watchdogs must
-				// not kill a leg that is waiting on the supervisor's answer (inproc parity).
-				if (deps.allowBlocking) childOptions.allowBlocking = true;
+				// The parent-side watchdogs must not kill a leg that is genuinely waiting on the
+				// supervisor's answer (R9, inproc parity) — ask the bus, don't guess from a static flag.
+				childOptions.isBlocked = () => deps.broker!.hasPendingAskFrom(handle!);
 				const broker = deps.broker;
 				const h = handle;
 				onSteerable?.((text) => broker.steerFrame(h, text));
