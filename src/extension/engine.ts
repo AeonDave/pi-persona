@@ -209,7 +209,9 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				const after = await captureStatus(root, gitExec);
 				if (!after) return result;
 				const block = renderChangeReport(diffStatus(before, after), spec.writeSet);
-				return block ? { ...result, output: `${result.output.trimEnd()}\n\n${block}` } : result;
+				if (!block) return result;
+				const output = result.output.trim() ? `${result.output.trimEnd()}\n\n${block}` : block;
+				return { ...result, output };
 			};
 			return wrapFallback({
 				async run(spec, perProgress, perSignal, perSteer) {
