@@ -25,3 +25,16 @@ export const UNTRUSTED_MAX = {
 	question: 200,
 	label: 48,
 } as const;
+
+/** A single claim's write_set is peer-controlled in length up to 64 paths (envelope.ts); the
+ *  rendered row stays one bounded line rather than growing with the claim — shared by the ledger
+ *  status view (status.ts) and the write-guard warning (write-guard.ts) so the shape can't drift. */
+const MAX_WRITE_SET_ENTRIES = 8;
+
+/** Sanitize and bound-format a peer's `write_set` for display: `"a, b, c"`, or the first
+ *  {@link MAX_WRITE_SET_ENTRIES} entries plus `"... +N more"` once it exceeds that count. */
+export function renderWriteSet(writeSet: readonly string[]): string {
+	const paths = writeSet.map((path) => untrusted(path, UNTRUSTED_MAX.writePath));
+	if (paths.length <= MAX_WRITE_SET_ENTRIES) return paths.join(", ");
+	return `${paths.slice(0, MAX_WRITE_SET_ENTRIES).join(", ")}, +${paths.length - MAX_WRITE_SET_ENTRIES} more`;
+}

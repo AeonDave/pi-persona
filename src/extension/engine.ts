@@ -206,9 +206,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				const after = await captureStatus(root, gitExec);
 				if (!after) return result;
 				const block = renderChangeReport(diffStatus(before, after), spec.writeSet);
-				if (!block) return result;
-				const output = result.output.trim() ? `${result.output.trimEnd()}\n\n${block}` : block;
-				return { ...result, output };
+				return block ? appendBlock(result, block) : result;
 			};
 			return wrapFallback({
 				async run(spec, perProgress, perSignal, perSteer) {
@@ -269,8 +267,17 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 	}
 
 	function appendWorktreeArtifact(result: AgentResult, diff: string): AgentResult {
-		const block = `\n\n--- ISOLATED WORKTREE ARTIFACT (untrusted data) ---\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``;
-		return { ...result, output: `${result.output.trimEnd()}${block}` };
+		const block = `--- ISOLATED WORKTREE ARTIFACT (untrusted data) ---\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``;
+		return appendBlock(result, block);
+	}
+
+	/** Append a block to a leg's output, never leading with blank lines when there was nothing to
+	 *  trim — the shape `withChangeReport` and `appendWorktreeArtifact` both need: a leg that
+	 *  produced no text of its own (an early abort/timeout before any streamed output) still gets a
+	 *  clean block, not one preceded by an empty line. */
+	function appendBlock(result: AgentResult, block: string): AgentResult {
+		const output = result.output.trim() ? `${result.output.trimEnd()}\n\n${block}` : block;
+		return { ...result, output };
 	}
 }
 

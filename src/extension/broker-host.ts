@@ -105,7 +105,7 @@ export class SupervisorBroker {
 				if (!this.warned) {
 					this.warned = true;
 					this.deps.warn(
-						`pi-persona: child-agent bus unavailable — ${this.lastError}; child legs run without live steer/contact until it starts${dropped > 0 ? `; ${dropped} queued steer${dropped === 1 ? "" : "s"} were dropped` : ""}`,
+						`pi-persona: child-agent bus unavailable — ${this.lastError}; child legs run without live steer/contact until it starts${dropped > 0 ? `; ${dropped} queued steer${dropped === 1 ? "" : "s"} ${dropped === 1 ? "was" : "were"} dropped` : ""}`,
 					);
 				}
 			},
