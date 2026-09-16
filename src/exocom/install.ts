@@ -88,6 +88,12 @@ export interface ExocomInstall {
 	get ledgerFile(): string;
 	pendingAsks(ctx: ExtensionContext): LedgerAsk[];
 	pendingAskPrompt(ctx: ExtensionContext): string | undefined;
+	/** Current ledger snapshot (pruned + expired the same way every ledger read is). */
+	ledgerState(): LedgerState;
+	/** This session's own exocom session id, or "" when exocom is not active. */
+	get sessionId(): string;
+	/** A peer's display name for a session id, or undefined when it cannot be resolved. */
+	peerLabelFor(sessionId: string): string | undefined;
 	get notifier(): IdleCoalescingNotifier<string> | undefined;
 	get waitNotifier(): IdleCoalescingNotifier<string> | undefined;
 	kickWait(): void;
@@ -190,15 +196,19 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		return pendingAsksTo(currentLedgerState(), exocomSessionId || ctx.sessionManager.getSessionId());
 	}
 
+	/** A peer's display name for a session id, or undefined when the registry can't resolve it.
+	 *  Session ids are validated tokens and remain safe fallback attribution on their own. */
+	function peerLabelFor(sessionId: string): string | undefined {
+		try {
+			return exocomPlane?.listPeers().find((peer) => peer.session_id === sessionId)?.displayName;
+		} catch {
+			return undefined;
+		}
+	}
+
 	function pendingAskPromptFor(ctx: ExtensionContext): string | undefined {
 		const asks = pendingAsksFor(ctx);
-		let labels = new Map<string, string>();
-		try {
-			labels = new Map(exocomPlane?.listPeers().map((peer) => [peer.session_id, peer.displayName]) ?? []);
-		} catch {
-			/* Session ids are validated tokens and remain safe fallback attribution. */
-		}
-		return pendingAskBlock(asks, (sessionId) => labels.get(sessionId));
+		return pendingAskBlock(asks, peerLabelFor);
 	}
 
 	function renderLedgerAnswer(answer: LedgerAnswer, label = answer.from_session): string {
@@ -754,6 +764,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				},
 				dispatch: dispatchSemantic,
 				armWait: armExocomWait,
+				ledger: () => currentLedgerState(),
+				labelFor: peerLabelFor,
 			});
 		} catch (err) {
 			// `plane.start()` may have bound its server before a later registry write failed.
@@ -939,6 +951,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		get ledgerFile() { return exocomLedgerFile; },
 		pendingAsks: pendingAsksFor,
 		pendingAskPrompt: pendingAskPromptFor,
+		ledgerState: currentLedgerState,
+		get sessionId() { return exocomSessionId; },
+		peerLabelFor,
 		get notifier() { return exocomNotifier; },
 		get waitNotifier() { return exocomWaitNotifier; },
 		kickWait() { exocomWaitNotifier?.kick(); },

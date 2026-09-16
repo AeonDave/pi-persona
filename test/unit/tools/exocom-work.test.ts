@@ -4,12 +4,15 @@ import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import type { ExocomSemanticFrame } from "../../../src/exocom/envelope.ts";
+import type { LedgerState } from "../../../src/exocom/ledger.ts";
 import { registerExocomWorkTools, type ExocomWaitArmResult } from "../../../src/tools/exocom-work.ts";
 
 function harness(over: {
 	armWait?: (workKey: string, askId: string, timeoutMs: number) => ExocomWaitArmResult;
 	dispatch?: (frame: ExocomSemanticFrame) => Promise<{ msg_id: string; peerWakeDeferred?: true }>;
 	canClaim?: () => boolean;
+	ledger?: () => LedgerState;
+	labelFor?: (sessionId: string) => string | undefined;
 } = {}) {
 	const tools = new Map<string, any>();
 	const dispatched: ExocomSemanticFrame[] = [];
@@ -30,6 +33,8 @@ function harness(over: {
 			return { msg_id: frame.msg_id };
 		}),
 		armWait: over.armWait ?? (() => ({ status: "waiting", id: "wait-1" })),
+		ledger: over.ledger ?? (() => ({ claims: [], asks: [], answers: [], askIds: [], seen: [] })),
+		labelFor: over.labelFor ?? (() => undefined),
 	});
 	return { tools, dispatched, resolvedTargets };
 }
@@ -148,13 +153,35 @@ test("exocom_wait returns an already-landed answer without arming or losing its 
 	assert.doesNotMatch(text, /End this turn|waiting on/i);
 });
 
+test("exocom_status reports the formatted ledger view and claim/ask counts", async () => {
+	const state: LedgerState = {
+		claims: [
+			{ work_key: "wk1", from_session: "session-a", from_name: "orion", write_set: ["src/a.ts"], slice: "alpha", msg_id: "m1", ts: "2026-09-01T00:00:00Z" },
+			{ work_key: "wk2", from_session: "session-b", from_name: "vega", write_set: ["src/b.ts"], slice: "beta", msg_id: "m2", ts: "2026-09-01T00:00:00Z" },
+		],
+		asks: [
+			{ ask_id: "a1", work_key: "wk2", from_session: "session-b", from_name: "vega", to_session: "session-a", question: "overlap?", msg_id: "m3", ts: "2026-09-01T00:00:00Z" },
+		],
+		answers: [],
+		askIds: ["a1"],
+		seen: [],
+	};
+	const h = harness({ ledger: () => state, labelFor: () => "vega" });
+	const result = await h.tools.get("exocom_status").execute("status-1", {});
+	assert.equal(result.details.claims, 2);
+	assert.equal(result.details.asks, 1);
+	assert.match(result.content[0].text, /your claims:/);
+	assert.match(result.content[0].text, /peer claims:/);
+	assert.match(result.content[0].text, /asks waiting for you:/);
+});
+
 test("every work-tool renderer marks host failures as errors", () => {
 	const h = harness();
 	const theme = {
 		fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
 		bold: (text: string) => text,
 	};
-	for (const name of ["exocom_claim", "exocom_ask", "exocom_answer", "exocom_decline", "exocom_wait", "exocom_release", "exocom_progress"]) {
+	for (const name of ["exocom_claim", "exocom_ask", "exocom_answer", "exocom_decline", "exocom_wait", "exocom_release", "exocom_progress", "exocom_status"]) {
 		const rendered = h.tools.get(name).renderResult(
 			{ content: [{ type: "text", text: `${name} failed` }], details: {}, isError: true },
 			{ expanded: false },
