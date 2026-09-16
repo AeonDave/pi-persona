@@ -3,7 +3,7 @@
  *  shared by every exocom surface that renders peer-authored ledger fields), per layering. */
 import { posix, win32 } from "node:path";
 import { normalizeWritePath, pathsOverlap } from "../core/ownership.ts";
-import { untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
+import { renderWriteSet, untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
 import type { LedgerClaim } from "./ledger.ts";
 
 /** Built-in tools whose `input.path` can land a write; the only ones this guard inspects. */
@@ -43,17 +43,6 @@ export function peerClaimFor(
 /** One warning per (claim, normalized path) — the retry that follows a block is allowed through. */
 export function writeWarningKey(claim: LedgerClaim, path: string): string {
 	return `${claim.msg_id}|${normalizeWritePath(path).value}`;
-}
-
-/** A single claim's write_set is peer-controlled in length up to 64 paths (envelope.ts); the
- *  rendered warning stays one bounded line rather than growing with the claim — the same shape
- *  status.ts's `renderWriteSet` uses for the ledger view. */
-const MAX_WRITE_SET_ENTRIES = 8;
-
-function renderWriteSet(writeSet: readonly string[]): string {
-	const paths = writeSet.map((path) => untrusted(path, UNTRUSTED_MAX.writePath));
-	if (paths.length <= MAX_WRITE_SET_ENTRIES) return paths.join(", ");
-	return `${paths.slice(0, MAX_WRITE_SET_ENTRIES).join(", ")}, +${paths.length - MAX_WRITE_SET_ENTRIES} more`;
 }
 
 /** Build the write-guard's tool-result reason. `claim.slice`, `claim.write_set`, and `label` are

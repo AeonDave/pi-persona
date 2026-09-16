@@ -19,14 +19,11 @@
 import type { LedgerAsk, LedgerClaim, LedgerState } from "./ledger.ts";
 import { formatDuration } from "../core/time.ts";
 import { fencePeer } from "../core/fence.ts";
-import { untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
+import { renderWriteSet, untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
 
 /** No section may hand the model an unbounded ledger — a long-lived scope with many claims stays
  *  one bounded read, same discipline as the pending-ask block and the peer roster. */
 const MAX_ROWS = 20;
-/** A single claim's write_set is peer-controlled in length up to 64 paths (envelope.ts); the row
- *  itself stays one bounded line rather than growing with the claim. */
-const MAX_WRITE_SET_ENTRIES = 8;
 
 function ageFor(ts: string, now: number): string {
 	return formatDuration(now - Date.parse(ts));
@@ -34,12 +31,6 @@ function ageFor(ts: string, now: number): string {
 
 function byTsAscending(a: { ts: string }, b: { ts: string }): number {
 	return Date.parse(a.ts) - Date.parse(b.ts);
-}
-
-function renderWriteSet(writeSet: readonly string[]): string {
-	const paths = writeSet.map((path) => untrusted(path, UNTRUSTED_MAX.writePath));
-	if (paths.length <= MAX_WRITE_SET_ENTRIES) return paths.join(", ");
-	return `${paths.slice(0, MAX_WRITE_SET_ENTRIES).join(", ")}, +${paths.length - MAX_WRITE_SET_ENTRIES} more`;
 }
 
 function resolveLabel(sessionId: string, labelFor: (sessionId: string) => string | undefined): string {
