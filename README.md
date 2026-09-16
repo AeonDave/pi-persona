@@ -8,7 +8,7 @@ Watch their progress, send a correction, or bring another Pi session into the co
 
 ## Install
 
-Requires **Pi**, **Node.js 22+**, and **Git**. Configure a model provider in Pi first.
+Requires **Pi ≥ 0.83**, **Node.js 22+**, and **Git**. Configure a model provider in Pi first.
 
 Run in your terminal:
 
