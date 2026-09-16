@@ -5,6 +5,7 @@
  * installed. One wording, one cap, so the two engines can never drift apart again.
  */
 
+import { cappedList } from "../core/format.ts";
 import type { AgentResult, FailureKind } from "../orchestration/types.ts";
 import { emptyUsage } from "./stream.ts";
 
@@ -14,8 +15,7 @@ const HINT_CAP = 12;
 /** `" — installed agents: a, b, …"`; empty when nothing is installed (no misleading hint). */
 export function installedHint(kind: "agents" | "contracts", names: string[]): string {
 	if (names.length === 0) return "";
-	const shown = names.slice(0, HINT_CAP).join(", ");
-	return ` — installed ${kind}: ${shown}${names.length > HINT_CAP ? ", …" : ""}`;
+	return ` — installed ${kind}: ${cappedList(names, HINT_CAP)}`;
 }
 
 /** The result skeleton both preflight rejections share; only the error text and failureKind

@@ -80,6 +80,18 @@ test("steers queued before the host is up are flushed on start and refused once 
 	assert.deepEqual(steers, [["child#1", "go left"]]);
 });
 
+test("a start that fails after steers were buffered says how many were dropped", async () => {
+	let reject!: (e: Error) => void;
+	const pending = new Promise<BrokerHost>((_, r) => { reject = r; });
+	const { broker, warnings } = make(() => pending);
+	const deps = broker.adapterDeps("/x")!;
+	deps.register({ handle: "child#1" });
+	deps.steerFrame("child#1", "left"); deps.steerFrame("child#1", "right");
+	reject(new Error("EADDRINUSE"));
+	await settle();
+	assert.match(warnings[0] ?? "", /2 queued steers? were dropped/);
+});
+
 test("close tears the host down and forgets the peers", async () => {
 	let closed = 0;
 	const { host } = fakeHost("/x");

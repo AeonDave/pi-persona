@@ -482,13 +482,17 @@ export class AgentOverlay extends Container {
 	}
 
 	private close(): void {
-		this.clock.stop();
-		this.unsubscribe();
+		this.dispose();
 		this.done();
 	}
 
 	dispose(): void {
 		this.clock.stop();
 		this.unsubscribe();
+	}
+
+	/** Read-only for tests: whether the live-clock tick is still armed. */
+	get clockRunning(): boolean {
+		return this.clock.running;
 	}
 }

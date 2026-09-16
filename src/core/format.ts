@@ -5,3 +5,9 @@ export function compactTokens(n: number): string {
 	if (n >= 1_000) return `${Math.round(n / 1000)}k`;
 	return String(n);
 }
+
+/** The first `cap` names, comma-joined, with a trailing "…" marker when more were elided —
+ *  shared by every self-correcting error/hint that lists installed names. */
+export function cappedList(names: readonly string[], cap: number): string {
+	return `${names.slice(0, cap).join(", ")}${names.length > cap ? ", …" : ""}`;
+}

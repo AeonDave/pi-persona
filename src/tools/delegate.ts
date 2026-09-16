@@ -9,6 +9,7 @@
 
 import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { mapWithConcurrency } from "../orchestration/parallel.ts";
+import { cappedList } from "../core/format.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { findWriteSetOverlaps, writeSetPathError } from "../core/ownership.ts";
 import { aggregateResults } from "../orchestration/reducers.ts";
@@ -501,12 +502,6 @@ function quoted(names: string[]): string {
 	return names.map((n) => `"${n}"`).join(", ");
 }
 
-/** The first `cap` names, comma-joined, with a trailing "…" marker when more were elided —
- *  shared by every self-correcting error that lists installed names. */
-function namesList(names: string[], cap: number): string {
-	return `${names.slice(0, cap).join(", ")}${names.length > cap ? ", …" : ""}`;
-}
-
 /**
  * Pre-spawn agent validation for the `delegate` tool — mirrors the model-name path
  * (extension.ts's `resolveDelegateModels`): a wrong agent name must return a SELF-CORRECTING
@@ -526,7 +521,7 @@ export function unknownAgentError(requested: string[], installed: string[]): str
 		);
 	}
 	return (
-		`delegate: unknown agent(s) ${who} — nothing was spawned. Installed agents: ${namesList(installed, 16)}. ` +
+		`delegate: unknown agent(s) ${who} — nothing was spawned. Installed agents: ${cappedList(installed, 16)}. ` +
 		"Pick one of those, or shape `operator` on the fly with `role` + `skills`."
 	);
 }
@@ -539,7 +534,7 @@ export function unknownContractError(requested: Array<string | undefined>, insta
 	const unknown = wanted.filter((n) => !installed.includes(n));
 	if (unknown.length === 0) return undefined;
 	return (
-		`delegate: unknown output contract(s) ${quoted(unknown)} — nothing was spawned. Installed contracts: ${namesList(installed, 16)}. ` +
+		`delegate: unknown output contract(s) ${quoted(unknown)} — nothing was spawned. Installed contracts: ${cappedList(installed, 16)}. ` +
 		"`outputContract` takes a contract NAME; omit it for free-form output and describe the report shape in `requiredArtifacts`."
 	);
 }
