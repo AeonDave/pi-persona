@@ -5,7 +5,7 @@ import type { StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { resolveStrategyName, runPersonaStrategy } from "../../../src/persona/orchestrate.ts";
 
-const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
+const LIMITS = { maxChildren: 8, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 
 test("resolveStrategyName resolves an explicit strategy, or parallel → fanout", () => {

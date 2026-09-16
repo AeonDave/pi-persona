@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { isInfrastructureFailure, makeSDK, type StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
-const LIMITS = { maxChildren: 8, maxDepth: 2, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
+const LIMITS = { maxChildren: 8, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 const ok = (agent: string): AgentResult => ({ agent, output: `out:${agent}`, usage: usage(), ok: true });
 
