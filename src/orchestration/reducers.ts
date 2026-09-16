@@ -51,6 +51,44 @@ export function sumUsage(usages: ChildUsage[]): ChildUsage {
 	return total;
 }
 
+export type ItemStatus = "completed" | "failed" | "not-run";
+
+/** One status entry per `map` sub-item — the batch's audit trail, independent of `ownership`. */
+export interface ItemLedgerEntry {
+	index: number;
+	item: string;
+	status: ItemStatus;
+	agent?: string;
+	failureKind?: FailureKind;
+	error?: string;
+	writeSet?: string[];
+}
+
+/** One ledger entry per item the splitter produced: `completed`/`failed` for an item a worker
+ *  actually ran (from `results`, in item order), `not-run` for the `dropped` tail that never got
+ *  a worker slot. Pure; carries the item's declared `writeSet` through when the caller kept it. */
+export function itemLedger(
+	allItems: readonly { item: string; writeSet?: string[] }[],
+	results: readonly AgentResult[],
+	dropped: number,
+): ItemLedgerEntry[] {
+	const ranCount = Math.max(0, allItems.length - dropped);
+	return allItems.map((it, index) => {
+		const writeSet = it.writeSet ? { writeSet: it.writeSet } : {};
+		const result = index < ranCount ? results[index] : undefined;
+		if (!result) return { index, item: it.item, status: "not-run", ...writeSet };
+		return {
+			index,
+			item: it.item,
+			status: result.ok ? "completed" : "failed",
+			agent: result.agent,
+			...(result.failureKind ? { failureKind: result.failureKind } : {}),
+			...(!result.ok && result.error ? { error: result.error } : {}),
+			...writeSet,
+		};
+	});
+}
+
 /** Combine fan-out results into one labeled-section result; ok iff all ok. */
 export function aggregateResults(results: AgentResult[]): AgentResult {
 	const sections = results.map((r) => {

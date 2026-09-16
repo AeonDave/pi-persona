@@ -11,7 +11,7 @@ import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts
 import { mapWithConcurrency } from "../orchestration/parallel.ts";
 import { cappedList } from "../core/format.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
-import { findWriteSetOverlaps, writeSetPathError } from "../core/ownership.ts";
+import { validateParallelWriteSets } from "../core/ownership.ts";
 import { aggregateResults } from "../orchestration/reducers.ts";
 import {
 	type AgentRunSpec,
@@ -150,30 +150,9 @@ export function validateDelegationBrief(params: DelegateParams): string | undefi
 	return undefined;
 }
 
-export { findWriteSetOverlaps, type WriteSetOverlap } from "../core/ownership.ts";
-
-/** Return an actionable error for a parallel write-set collision; undefined means safe to spawn. */
-export function validateParallelWriteSets(tasks: readonly Pick<DelegateTask, "agent" | "writeSet">[]): string | undefined {
-	for (const [index, task] of tasks.entries()) {
-		for (const path of task.writeSet ?? []) {
-			const err = writeSetPathError(path);
-			if (!err) continue;
-			if (err.startsWith("empty")) {
-				return `delegate: task[${index}] ("${task.agent}") has an empty writeSet path; remove it or provide a repository-relative path.`;
-			}
-			return `delegate: task[${index}] ("${task.agent}") writeSet path "${path}" is ${err}.`;
-		}
-	}
-	const overlap = findWriteSetOverlaps(tasks)[0];
-	if (!overlap) return undefined;
-	const first = tasks[overlap.firstIndex];
-	const second = tasks[overlap.secondIndex];
-	return (
-		`delegate: parallel writeSet overlap between task[${overlap.firstIndex}] ("${first?.agent ?? "?"}") ` +
-		`path "${overlap.firstPath}" and task[${overlap.secondIndex}] ("${second?.agent ?? "?"}") ` +
-		`path "${overlap.secondPath}". Split the paths, serialize these tasks, or remove the overlap before spawning.`
-	);
-}
+// Moved to core/ownership.ts (so a strategy can call it without importing a tool module);
+// re-exported here unchanged for this file's own call sites and existing tests.
+export { findWriteSetOverlaps, validateParallelWriteSets, type WriteSetOverlap } from "../core/ownership.ts";
 
 function unwrapJsonish(value: unknown, label: string): { ok: true; value: unknown } | { ok: false; error: string } {
 	let current = value;

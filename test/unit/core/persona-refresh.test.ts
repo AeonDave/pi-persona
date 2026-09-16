@@ -40,7 +40,13 @@ for (const name of PERSONAS) {
 			const { body: _body, description: _description, source: _source, ...contract } = persona;
 			return contract;
 		};
-		assert.deepEqual(behavior(current), behavior(old));
+		const expected = behavior(old);
+		// swarm deliberately gained a declared `ownership: declare` council param (task 13: `map`'s
+		// per-item write-set ledger) — an intentional orchestration change, not a refresh regression.
+		if (name === "swarm") {
+			expected.council = { ...expected.council, params: { ownership: "declare" } };
+		}
+		assert.deepEqual(behavior(current), expected);
 	});
 }
 

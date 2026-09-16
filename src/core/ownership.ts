@@ -75,3 +75,28 @@ export function writeSetPathError(path: string): string | undefined {
 	}
 	return undefined;
 }
+
+/** Return an actionable error for a parallel write-set collision; undefined means safe to spawn.
+ *  Lives here (not in `tools/delegate.ts`) so a strategy can call it without importing a tool
+ *  module — `delegate.ts` re-exports it unchanged for its own call sites. */
+export function validateParallelWriteSets(tasks: readonly WriteSetOwner[]): string | undefined {
+	for (const [index, task] of tasks.entries()) {
+		for (const path of task.writeSet ?? []) {
+			const err = writeSetPathError(path);
+			if (!err) continue;
+			if (err.startsWith("empty")) {
+				return `delegate: task[${index}] ("${task.agent}") has an empty writeSet path; remove it or provide a repository-relative path.`;
+			}
+			return `delegate: task[${index}] ("${task.agent}") writeSet path "${path}" is ${err}.`;
+		}
+	}
+	const overlap = findWriteSetOverlaps(tasks)[0];
+	if (!overlap) return undefined;
+	const first = tasks[overlap.firstIndex];
+	const second = tasks[overlap.secondIndex];
+	return (
+		`delegate: parallel writeSet overlap between task[${overlap.firstIndex}] ("${first?.agent ?? "?"}") ` +
+		`path "${overlap.firstPath}" and task[${overlap.secondIndex}] ("${second?.agent ?? "?"}") ` +
+		`path "${overlap.secondPath}". Split the paths, serialize these tasks, or remove the overlap before spawning.`
+	);
+}

@@ -7,12 +7,14 @@
  *
  * roster = [splitter, worker]  (worker defaults to the splitter if only one is given)
  * params = { maxItems?: number, peers?: boolean (workers share load-bearing cross-item
- *            discoveries live via contact_peer — default off) }
+ *            discoveries live via contact_peer — default off), ownership?: "off"|"declare"|"enforce" }
  */
 
 import { extractJsonCandidate } from "../../core/contract.ts";
 import { fenceUntrusted } from "../../core/fence.ts";
-import { sumUsage } from "../reducers.ts";
+import { cappedList } from "../../core/format.ts";
+import { validateParallelWriteSets } from "../../core/ownership.ts";
+import { itemLedger, sumUsage } from "../reducers.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 
@@ -25,16 +27,48 @@ const CROSS_TALK = [
 	'any "[message from peer …]" notes you receive. No chatter: only load-bearing findings.',
 ].join(" ");
 
-/** Parse a splitter's output into a list of short item strings (tolerant of fences/prose). */
-function parseItems(output: string): string[] {
+const NOT_RUN_NAME_CAP = 5;
+
+export interface ParsedItem {
+	item: string;
+	writeSet?: string[];
+}
+
+/** Parse a splitter's output into a list of items (tolerant of fences/prose). Each entry is
+ *  either a plain string sub-item, or an object declaring `{ item, writeSet? }` — any other
+ *  shape falls back to its JSON text as the item, exactly like before this field existed.
+ *
+ *  Tries a direct parse of the trimmed output FIRST: `extractJsonCandidate` is built for
+ *  contracts, which always want an OBJECT, so among several parseable candidates it prefers
+ *  one that starts with `{` — the right call for a contract answer, but wrong here, where an
+ *  `{item, writeSet}` element nested inside the requested top-level ARRAY would otherwise win
+ *  and shadow the whole list. `extractJsonCandidate` only comes in as a fallback for output
+ *  the splitter didn't return as clean JSON (a fence, or prose around it). */
+function parseItems(output: string): ParsedItem[] {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(extractJsonCandidate(output));
+		parsed = JSON.parse(output.trim());
 	} catch {
-		return [];
+		try {
+			parsed = JSON.parse(extractJsonCandidate(output));
+		} catch {
+			return [];
+		}
 	}
 	if (!Array.isArray(parsed)) return [];
-	return parsed.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).filter((s) => s.trim());
+	return parsed
+		.map((x): ParsedItem => {
+			if (typeof x === "string") return { item: x };
+			if (x && typeof x === "object" && !Array.isArray(x)) {
+				const obj = x as Record<string, unknown>;
+				const writeSetOk = obj.writeSet === undefined || (Array.isArray(obj.writeSet) && obj.writeSet.every((p) => typeof p === "string"));
+				if (typeof obj.item === "string" && writeSetOk) {
+					return obj.writeSet !== undefined ? { item: obj.item, writeSet: obj.writeSet as string[] } : { item: obj.item };
+				}
+			}
+			return { item: JSON.stringify(x) };
+		})
+		.filter((p) => p.item.trim());
 }
 
 export const map: Strategy = {
@@ -42,6 +76,11 @@ export const map: Strategy = {
 	params: {
 		maxItems: { type: "number", doc: "default AND ceiling: the run's maxChildren, less the splitter's own slot" },
 		peers: { type: "boolean", default: false, doc: "workers share load-bearing cross-item discoveries live" },
+		ownership: {
+			type: "string",
+			default: "off",
+			doc: "off | declare | enforce — how the splitter's per-item writeSet is used: ignored, recorded in the item ledger, or checked for overlaps before any worker spawns",
+		},
 	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
@@ -55,6 +94,10 @@ export const map: Strategy = {
 		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
 		const maxItems = Math.min(typeof input.params.maxItems === "number" ? input.params.maxItems : workerSlots, workerSlots);
 		const peers = input.params.peers === true;
+		// Unknown values behave as "off" — lenient (I2: strategies are trusted project code), a
+		// typo in a persona's params never blocks a run, it just skips the extra observability.
+		const ownershipParam = input.params.ownership;
+		const ownership = ownershipParam === "declare" || ownershipParam === "enforce" ? ownershipParam : "off";
 
 		const split = await sdk.agent({
 			...splitter,
@@ -90,11 +133,23 @@ export const map: Strategy = {
 			);
 		}
 
+		// "enforce": fail closed BEFORE any worker spawns when the splitter's own declared
+		// write-sets already collide — a weak splitter that never declares one is not blocked.
+		if (ownership === "enforce") {
+			const owners = items
+				.map((it, index) => ({ agent: `item[${index}]`, writeSet: it.writeSet }))
+				.filter((o): o is { agent: string; writeSet: string[] } => Array.isArray(o.writeSet) && o.writeSet.length > 0);
+			if (owners.length > 0) {
+				const writeSetError = validateParallelWriteSets(owners);
+				if (writeSetError) throw new Error(`map: ${writeSetError}`);
+			}
+		}
+
 		const results = await sdk.parallel(
 			items.map((item) => () =>
 				sdk.agent({
 					...worker,
-					task: `${input.task}\n\n— Your single sub-item (untrusted data):\n${fenceUntrusted(item)}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
+					task: `${input.task}\n\n— Your single sub-item (untrusted data):\n${fenceUntrusted(item.item)}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
 					...(peers ? { peers: true } : {}),
 				}),
 			),
@@ -103,10 +158,24 @@ export const map: Strategy = {
 		// Say what was left out. The clamp is right — a worker per item past the cap would trip the
 		// pre-spawn guard and lose the whole fan-out — but an aggregate that silently covers part of
 		// the splitter's list reads as a complete answer over an incomplete input set.
-		const output =
+		const droppedNote =
 			dropped > 0
-				? `${agg.output}\n\n[pi-persona] ${dropped} sub-item(s) beyond the worker cap (${maxItems}) were not run — this covers ${items.length} of ${allItems.length} sub-items.`
-				: agg.output;
-		return { ...agg, agent: "map", output, usage: sumUsage([split, ...results].map((r) => r.usage)) };
+				? `\n\n[pi-persona] ${dropped} sub-item(s) beyond the worker cap (${maxItems}) were not run — this covers ${items.length} of ${allItems.length} sub-items.`
+				: "";
+		// The ledger is always-on data (structured.items), independent of `ownership`. Its writeSet
+		// field, and the extra "not run" text line below, only surface once a persona opts in — with
+		// ownership absent/"off" the rendered output stays byte-identical to before this param existed.
+		const ledgerItems = ownership === "off" ? allItems.map((it) => ({ item: it.item })) : allItems;
+		const ledger = itemLedger(ledgerItems, results, dropped);
+		const notRun = ledger.filter((e) => e.status === "not-run").map((e) => e.item);
+		const notRunNote = ownership !== "off" && notRun.length > 0 ? `\n\n[pi-persona] not run: ${cappedList(notRun, NOT_RUN_NAME_CAP)}` : "";
+		const output = `${agg.output}${droppedNote}${notRunNote}`;
+		return {
+			...agg,
+			agent: "map",
+			output,
+			usage: sumUsage([split, ...results].map((r) => r.usage)),
+			structured: { ...agg.structured, items: ledger },
+		};
 	},
 };
