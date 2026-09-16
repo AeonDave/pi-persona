@@ -377,6 +377,15 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_EXOCOM` | off | `1` joins the current workspace Exocom scope; cross-workspace selection is CLI-only |
 | `PI_PERSONA_SPINE` | off | `on` or a path enables the shared behavioral layer; see [`SPINE.md`](./SPINE.md) |
 | `PI_PERSONA_SPINE_LEGS` | follows `PI_PERSONA_SPINE` | selector for delegated legs, allowing all four spine measurement arms |
+| `PI_PERSONA_DISABLE` | unset | any non-empty value disables the whole extension for this process (also set internally as the fork-bomb guard on delegated legs) |
+| `PI_PERSONA_DIRS` | none | extra discovery directories (`;`/`,`-separated), searched alongside the user and project agent folders |
+| `PI_PERSONA_DEFAULT` | none | persona activated automatically when no persona is otherwise selected |
+| `PI_PERSONA_KEY` | `f8` | keybinding that cycles installed personas |
+| `PI_PERSONA_PERSIST` | on | `off` stops remembering the last-selected persona across sessions |
+| `PI_PERSONA_DELEGATE_DEFAULT` | allow | `deny` (or an off-word) makes an unlisted delegate target default-deny instead of default-allow |
+| `PI_PERSONA_STATE_FILE` | a global default path | overrides where the last-selected-persona state is stored |
+| `PI_PERSONA_ASYNC_RETAIN` | 25 | how many settled-but-uncollected async runs are retained before FIFO-evicting the oldest |
+| `PI_PERSONA_LEDGER_V2` | off | `on` widens the delegation-ledger retry-veto key to also include role/tools/isolation, not just agent+model+task |
 
 ## Development
 
