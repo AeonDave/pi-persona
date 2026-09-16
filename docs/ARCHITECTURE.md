@@ -71,9 +71,12 @@ These are the guardrails a contributor must not violate. They are enforced in co
   calls in one SDK instance; token admission uses completed usage and is rechecked after queueing, so
   active legs can overshoot it. Nesting depth is not one of these numeric knobs — it is structural,
   capped at 1: a child's whole pi-persona extension activation short-circuits under
-  `PI_PERSONA_DISABLE=1` (the **fork-bomb guard**, ref-counted in `inproc.ts`), so it registers NO
-  tools at all — `delegate`/`council`/`orchestrate`/`flow` included — on either engine. The in-process
-  engine also excludes `ORCHESTRATION_TOOLS` from the child session directly (`engine/inproc.ts`) as a
+  `PI_PERSONA_DISABLE=1` (the **fork-bomb guard**), so it registers NO tools at all —
+  `delegate`/`council`/`orchestrate`/`flow` included. On the child engine this is a one-shot env var
+  set on each spawned process; the in-process engine instead shares one Node process across
+  concurrently-building sub-sessions, so it ref-counts the guard (`inproc.ts`) to keep it set until the
+  LAST one finishes. The in-process engine also excludes `ORCHESTRATION_TOOLS` from the child session
+  directly (`engine/inproc.ts`) as a
   second line of defense, in case anything else ever left the extension active. `PI_PERSONA_LEG=1`
   rides alongside `PI_PERSONA_DISABLE` — a **dedicated** worker-leg marker, distinct from the
   user-settable `PI_PERSONA_DISABLE` kill switch, that a companion extension (e.g. pi-persona-mind)
@@ -151,18 +154,15 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `validateParallelWriteSets` / `writeSetPathError` — parallel write-set overlap, shared by
   `delegate` and `map`'s `ownership` param), `pi-compat` (`MIN_PI_VERSION`, `installedPiVersion`,
   `satisfiesFloor` — the one place the supported host floor is declared; `package.json`
-  `peerDependencies`, `/doctor`'s `pi:` line, and the README's stated floor all trace back to this
-  constant), `models`, `brief` (`buildDelegationBrief` — the per-turn
-  delegation brief: live roster + standing hand-off default, rendered to the system-prompt tail; and
-  `buildExocomBrief` — the per-turn peer brief: live exocom peers as bounded identifiers, the
-  peer-vs-sub-agent split, and the relevance bound on an exchange),
-  `nudge` (the two runtime-reinforcement state machines, `DelegationNudge` + `PersistenceNudge`),
-  `display-label` (`sanitizeDisplayLabel` — an untrusted name reduced to bounded identifier metadata
-  before it is interpolated outside a fence),
-  `timer` (`TimerScheduler` — the pure alarm engine behind the supervisor `timer` tool; on fire it
-  wakes the session through the same idle-gated delivery as async completions),
-  `time` (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the
-  elapsed-time readings and the prompt-cache rule that sets each one's granularity), `types`.
+  `peerDependencies`, `/doctor`'s `pi:` line, and the README's stated floor trace back to this
+  constant), `models`, `brief` (`buildDelegationBrief` — the per-turn delegation brief: live roster +
+  standing hand-off default; and `buildExocomBrief` — the per-turn peer brief: live peers, the
+  peer-vs-sub-agent split, and the relevance bound on an exchange), `nudge` (the two
+  runtime-reinforcement state machines, `DelegationNudge` + `PersistenceNudge`), `display-label`
+  (`sanitizeDisplayLabel` — an untrusted name reduced to bounded metadata before interpolation
+  outside a fence), `timer` (`TimerScheduler` — the pure alarm engine behind the `timer` tool), `time`
+  (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the elapsed-time
+  readings and the prompt-cache rule that sets each one's granularity), `types`.
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback),
   `spec-preflight.ts` (the one unknown-agent/unknown-contract preflight shared by both engines),
@@ -181,20 +181,17 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   bind/join/teardown + reconnect), `activation.ts` (the exact optional-value CLI shim), `codes.ts`
   (persistent four-character alias allocation), `scope.ts` (home identity versus selected scope),
   `registry.ts` (scope-selected presence + stale pruning), `paths.ts` (pure path layout),
-  `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
-  delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
-  `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (scope JSONL work ledger),
-  `untrusted.ts` (`untrusted()`/`UNTRUSTED_MAX` — the ONE sanitizer every surface that renders a
-  peer-authored ledger field, e.g. `slice`/`write_set`/a peer label, runs it through first, so a
-  hostile peer's terminal escapes or instruction-shaped text never reach a report, notification, or
-  tool result unfenced), `status.ts` (`formatLedgerStatus` — the ownership view `exocom_status` and
-  `/exocom` both render: your claims, peers' claims, asks waiting on you, your own open asks),
-  `write-guard.ts` (`peerClaimFor`/`writeWarningReason`/`WriteWarnings` — the advisory,
-  warn-once-then-allow guard on a supervisor `write`/`edit` whose path overlaps a peer's open
-  claim; built on `core/ownership.ts`'s path-overlap primitives, never a separate implementation),
-  `wait.ts`/`gate.ts` (non-blocking join + inbound constrained-turn allowlist),
-  `install.ts` (the feature's composition adapter: session-scoped plane + ledger + wait/tool/hook
-  wiring; not an ExtensionFactory and not constrained to the transport layer's dependencies).
+  `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed delivery chain: hop cap, dedup,
+  budgets, truncation, fence/attribute), `limits.ts` (constants), `guards.ts`
+  (`SenderBudget`/`SeenMessages`), `ledger.ts` (scope JSONL work ledger), `untrusted.ts`
+  (`untrusted()`/`UNTRUSTED_MAX` — the ONE sanitizer every surface rendering a peer-authored ledger
+  field runs first, so a hostile peer's escapes or instruction-shaped text never reach output
+  unfenced), `status.ts` (`formatLedgerStatus` — the ownership view `exocom_status`/`/exocom`
+  render), `write-guard.ts` (`peerClaimFor`/`writeWarningReason`/`WriteWarnings` — the advisory,
+  warn-once-then-allow guard on a `write`/`edit` overlapping a peer's open claim, built on
+  `core/ownership.ts`'s path-overlap primitives), `wait.ts`/`gate.ts` (non-blocking join + inbound
+  constrained-turn allowlist), `install.ts` (the feature's composition adapter: session-scoped plane +
+  ledger + wait/tool/hook wiring).
 - **`src/telemetry/`** — a generic, versioned observer/export contract for future plugins: projected
   lifecycle metadata only, never an agent-message router or control surface.
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
@@ -221,130 +218,105 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
 ## The two engines
 
 Both backends sit behind the `StrategyEngine` seam (`run(spec, onProgress?, signal?, onSteerable?) →
-AgentResult`) and enforce three independent deadlines: `RUN_LIMITS.timeoutMs` as an **idle window** (no
-events for that long ⇒ abort), `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock cap** — a
-lifetime ceiling armed once and never reset that, when set, settles a busy-but-non-converging child (a
-loop that keeps emitting) the idle window never catches (OFF by default, 0 = unlimited, so a healthy,
-progressing child has no hard lifetime ceiling; the token budget gates later admissions from completed
-usage, rather than stopping an active stream) — and `PI_PERSONA_AGENT_STARTUP_MS` as a **startup
-deadline** (default 300000, `0` disables):
-a child that makes ZERO progress — no completed turn, no tokens, no streamed output — within the window
-is killed as a stalled start. It fast-fails the "never started" case the generous idle window is too
-slow for — notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; the
-first real progress cancels it, so a slow-but-streaming turn is never touched. All three classify as
-`failureKind: "timeout"` (never a provider reroute).
+AgentResult`) and enforce three independent deadlines, all classified as `failureKind: "timeout"`
+(never a provider reroute): `RUN_LIMITS.timeoutMs`, an **idle window** (no events for that long ⇒
+abort); `PI_PERSONA_AGENT_MAX_MS`, an **opt-in hard wall-clock cap** — a lifetime ceiling, armed once
+and never reset, that settles a busy-but-non-converging child (a loop that keeps emitting) the idle
+window never catches (OFF by default = unlimited, so a healthy child has no lifetime ceiling); and
+`PI_PERSONA_AGENT_STARTUP_MS`, a **startup deadline** (default 300000, `0` disables) that kills a
+child making ZERO progress — no completed turn, no tokens, no streamed output. It fast-fails the
+"never started" case the generous idle window is too slow for — notably a headless `mcp: true` leg
+whose `pi-mcp-adapter` hangs on interactive OAuth; the first real progress cancels it.
 
-The idle window and the startup deadline stay ARMED for every child, coaching or not — a blind
-per-leg exemption used to disable both outright while a child could legitimately block on a
-supervisor reply, which meant a genuinely stalled coaching leg ran forever. Instead, when either
-fires, the source of truth is asked directly: does THIS child have a live `decision`/`interview`
-ask still outstanding right now? In-process consults the bus (`hasPendingAskFrom`, `bus/inproc.ts`);
-the child-process engine consults the broker through the same shape (`isBlocked`, wired in
-`engine/adapter.ts`, checked in `engine/child.ts`). A live pending ask re-arms the window and the
-leg keeps waiting; no pending ask means the silence is real and the leg is killed as timed out. The
-hard wall-clock cap is the one ceiling that still applies unconditionally — including to a coaching
-child legitimately blocked on a reply — so a supervisor that never answers still has a backstop.
+The idle window and startup deadline stay ARMED for every child, coaching or not — a blind exemption
+that once disabled both while a child could legitimately block on a supervisor reply let a genuinely
+stalled coaching leg run forever. Instead, when either fires, the source of truth is asked directly:
+does this child have a live `decision`/`interview` ask outstanding right now? In-process consults the
+bus (`hasPendingAskFrom`); the child-process engine consults the broker through the same shape
+(`isBlocked`). A live pending ask re-arms the window; no pending ask means the silence is real and the
+leg is killed. The hard wall-clock cap is the one ceiling that still applies unconditionally —
+including to a coaching child blocked on a reply — so a supervisor that never answers still has a
+backstop.
 
-In-process deadlines and caller cancellation are armed **before session construction**. Startup is
-one window from construction to the first real progress, and the hard cap covers the same lifetime
-without resetting. The bus consult that can re-arm idle/startup only matters after construction, when
-a child can actually have registered an ask — during construction there is no session yet, so no ask
-can possibly be pending and the window behaves exactly as a plain deadline. Cancellation settles the
-run and releases its bus handle;
-a session returned late is disposed and a late factory rejection is consumed. Pi's resource loader
-does not expose forcible cancellation: the recursive-extension guard remains held until that factory
-settles. If the loader never returns, restart Pi and use `PI_PERSONA_ENGINE=child` for process-level
-termination. Run settlement does not promise that arbitrary in-process code has physically stopped.
+In-process deadlines and caller cancellation are armed **before session construction**; the bus
+consult that re-arms idle/startup only matters after construction, since no ask can be pending before
+a session exists. Cancellation settles the run and releases its bus handle; a session returned late is
+disposed and a late factory rejection is consumed. Pi's resource loader does not expose forcible
+cancellation — the recursive-extension guard stays held until that factory settles, so a loader that
+never returns needs a Pi restart (and `PI_PERSONA_ENGINE=child` for process-level termination). Run
+settlement does not promise that arbitrary in-process code has physically stopped.
 
 - **InProcessEngine** (default) — a `createAgentSession` per sub-agent: cheaper, shares the host's
   auth/model registry, and **steerable** (inject a live user message into a running sub-agent).
 - **ChildProcessEngine** (`PI_PERSONA_ENGINE=child`, the correctness baseline) — spawns `pi --mode
   json -p`, delivering the task over **stdin** (never argv — a flow-phase task would blow Windows'
-  ~32 KiB command-line cap). The path worktree isolation always uses the child engine.
+  ~32 KiB command-line cap). Worktree isolation always uses this engine.
 
-Tool grants have three distinct states on both engines: absent inherits Pi's session defaults,
-a non-empty array is an allowlist, and an explicit empty array means no tools (`--no-tools`
-on the child backend). Denylists are then applied independently through `excludeTools` /
-`--exclude-tools`; no mapper may collapse the empty grant into the absent/default state.
+Tool grants have three distinct states on both engines: absent inherits Pi's session defaults, a
+non-empty array is an allowlist, and an explicit empty array means no tools (`--no-tools` on the
+child backend); denylists apply independently via `excludeTools`/`--exclude-tools`.
 
-A spec naming an agent or output contract that isn't installed fails before anything spawns, on
-both backends alike (`engine/spec-preflight.ts`): the message names what IS installed, capped at 12
-names, so the caller can self-correct — one wording, one cap, so the two engines can't drift apart.
-The `delegate` tool runs its own earlier, self-correcting check with a different cap: `unknownAgentError`
-/ `unknownContractError` (`src/tools/delegate.ts`) reject a typo before either engine is ever reached,
-listing up to 16 installed names. Same idea, two layers, two caps — see docs/REFERENCE.md's example.
+A spec naming an agent or output contract that isn't installed fails before anything spawns, on both
+backends alike (`engine/spec-preflight.ts`): the message names what IS installed, capped at 12 names.
+The `delegate` tool runs its own earlier check with a different cap — `unknownAgentError`/
+`unknownContractError` (`src/tools/delegate.ts`) reject a typo before either engine is reached, listing
+up to 16 names. Same idea, two layers, two caps — see docs/REFERENCE.md's example.
 
 `isolation: worktree` is fail-closed. It requires a clean Git checkout so the detached `HEAD` view
-cannot silently omit staged/unstaged/untracked supervisor work. A non-repository, dirty checkout,
-worktree creation failure, successful leg without a real unified-diff artifact, or artifact over the
-bounded return limit fails the leg; the base engine is never invoked against the user's real tree as
-an isolation fallback. The generated diff is returned to the supervisor before the temporary tree is
-removed. Every git invocation is asynchronous (`child_process.execFile`), so the extension host
-keeps rendering, ticking timers, and serving broker sockets while a large checkout is created or
-removed.
+cannot silently omit staged/unstaged/untracked supervisor work; a non-repository, dirty checkout,
+worktree creation failure, missing diff artifact, or an artifact over the return limit fails the leg —
+the base engine is never invoked against the real tree as a fallback. The diff returns to the
+supervisor before the temporary tree is removed, and every git call is asynchronous so the extension
+host keeps rendering, ticking timers, and serving broker sockets while a large checkout runs.
 
-Transient retries inside one agent session belong to the host **Pi runtime** and its `retry.*`
-settings. pi-persona neither parses retry notation from prompts nor schedules its own backoff. Both
-backends read those settings from the same resolved global agent directory: the in-process backend
-passes it to `createAgentSession`, and spawned child Pi processes receive it as
-`PI_CODING_AGENT_DIR`. Exact attempt counts and delays therefore follow the installed Pi version and
-configuration, not a persona contract.
+Transient retries inside one agent session belong to the host **Pi runtime**'s `retry.*` settings, not
+a persona contract — pi-persona neither parses retry notation nor schedules its own backoff. Both
+backends read the same resolved global agent directory (`PI_CODING_AGENT_DIR` for spawned children).
 
 `buildEngine` wraps the chosen backend with **provider fallback** (`engine/fallback.ts`): a run whose
-model's PROVIDER fails at call time (auth/outage/5xx/model-not-supported) can retry the same model id
-only when the selection was unpinned/default, and only through the data-driven provider policy for
-that model family. A provider-qualified `spec.model` is an explicit provider and billing pin, so it is
-strict by default; callers must deliberately opt it into cross-provider recovery. Only
-`failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal — engines
-classify the cause on the `AgentResult`. This prevents an explicitly selected OpenAI or native Claude
-leg from silently moving to an unrelated paid provider. (`"verification"` is a further terminal
-value, but never appears on an `AgentResult` — see `map`'s `verify` param in
-[`docs/STRATEGIES.md`](./STRATEGIES.md).)
+model's provider fails at call time (auth/outage/5xx/model-not-supported) can retry the same model id
+only when the selection was unpinned/default, through the data-driven provider policy for that model
+family. A provider-qualified `spec.model` is an explicit pin and stays strict by default. Only
+`failureKind === "provider"` reroutes; abort/timeout/contract/unknown/agent are terminal — this
+prevents an explicitly selected OpenAI or native Claude leg from silently moving to an unrelated paid
+provider. (`"verification"` is a further terminal value that never appears on an `AgentResult` — see
+`map`'s `verify` param in [`docs/STRATEGIES.md`](./STRATEGIES.md).)
 
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 
 **A sub-agent does NOT share the supervisor's MCP session, and an in-process sub-agent gets NO MCP at
-all.** MCP servers in Pi are provided by a separate extension (`pi-mcp-adapter`), which opens its
-connections inside a `session_start` hook. Two consequences of the seam:
+all.** MCP servers are provided by a separate extension (`pi-mcp-adapter`), which opens its
+connections inside a `session_start` hook:
 
-- The **in-process engine** builds a fresh `createAgentSession` and only ever calls `session.prompt()`
-  — it never fires the session's `session_start` lifecycle (that requires `AgentSession.bindExtensions`).
-  So `pi-mcp-adapter` registers its `mcp*`/direct tools at load (they *appear* in the sub-agent) but
-  never initializes the connection: calls come back **"MCP not initialized"**. The tools are present
-  but dead.
+- The **in-process engine** builds a fresh `createAgentSession` and only calls `session.prompt()` — it
+  never fires `session_start` (that requires `AgentSession.bindExtensions`). `pi-mcp-adapter` registers
+  its `mcp*`/direct tools at load (they *appear*) but never initializes: calls come back **"MCP not
+  initialized"** — the tools are present but dead.
 - The **child engine** spawns a real `pi -p`, whose normal startup DOES fire `session_start`, so
-  `pi-mcp-adapter` initializes — but as that child's **own** connection (its own `npx`/stdio servers,
-  its own HTTP clients). It is a *separate* MCP session, not the supervisor's: it does not see the
-  supervisor's MCP workspace/interactive-shell state.
+  `pi-mcp-adapter` initializes as that child's **own** connection (its own stdio/HTTP clients) — a
+  *separate* MCP session that does not see the supervisor's MCP workspace/interactive-shell state.
 
-Firing `session_start` for every in-process sub-agent is deliberately NOT done: each would spin up the
-full MCP fleet (every stdio server spawned, every HTTP server reconnected) N times per fan-out, and the
-adapter's OAuth/UI/consent machinery assumes an interactive session. There is no cheap way to *share*
-one live MCP connection across sessions through the current seam.
+Firing `session_start` for every in-process sub-agent is deliberately NOT done: it would spin up the
+full MCP fleet N times per fan-out, and the adapter's OAuth/UI/consent machinery assumes an interactive
+session. There is no cheap way to *share* one live MCP connection across sessions here.
 
-**The `mcp: true` opt-in — a delegable MCP leg.** Because the child engine DOES fire `session_start`
-(it spawns a real `pi -p`), a sub-agent that needs live MCP tools is routed there: mark the agent
-`mcp: true` in its frontmatter, or pass `mcp: true` on a `delegate` task/leg (`AgentRunSpec.mcp`). The
-engine wrapper then runs that one leg through `childEngineAt(root)` — the exact mechanism a
-`isolation: worktree` leg already uses for MCP, minus the git worktree. The child loads `pi-mcp-adapter`
-(it is in the user's `packages`; children never pass `noExtensions`) and connects to the SAME MCP
-servers from `~/.pi/agent/mcp.json`. Cost is one `pi` spawn per leg — for an **HTTP** MCP server it is
-just a client reconnect to an already-running endpoint, not an N× stdio fleet spawn.
+**The `mcp: true` opt-in — a delegable MCP leg.** Because the child engine fires `session_start`, a
+sub-agent that needs live MCP tools is routed there: mark the agent `mcp: true` in its frontmatter, or
+pass it on a `delegate` task (`AgentRunSpec.mcp`). The engine runs that leg through `childEngineAt(root)`
+— the same mechanism `isolation: worktree` uses for MCP, minus the git worktree — connecting to the
+SAME servers from `~/.pi/agent/mcp.json`. Cost is one `pi` spawn per leg; for an **HTTP** server it is
+just a client reconnect, not an N× stdio fleet spawn.
 
-**Shared state via a server-keyed backend.** The child gets its OWN MCP *session*, not the supervisor's
-handle — but many servers key their state (workspaces, interactive shells, artifacts) by a **session id
-passed as a tool argument**, and an HTTP server keeps that state in its own process. So a child that
-reconnects to the same HTTP endpoint AND is handed the supervisor's session id operates on the SAME
-server-side state. Put the session id in the task packet; the leg then drives the shared workspace
-directly. (A pure stdio server whose state lives in-process is genuinely separate — there `mcp: true`
-gives the leg its own clean session, not a shared one.)
+**Shared state via a server-keyed backend.** The child gets its own MCP session, not the supervisor's
+handle — but a server that keys state (workspaces, shells, artifacts) by a **session id passed as a
+tool argument** lets a child that reconnects to the same HTTP endpoint AND is handed that session id
+operate on the SAME server-side state. Put the session id in the task packet. (A stdio server whose
+state lives in-process is genuinely separate — `mcp: true` there gives the leg its own clean session.)
 
-**Guidance.** Default: treat MCP as a **supervisor capability** — do the MCP-dependent work up top and
-hand sub-agents the resulting **artifacts** (files, findings, targets) to reason over. When a leg must
-DRIVE MCP itself (breadth enumeration you want off the supervisor's context, an independent tool run),
-delegate it with `mcp: true` and pass the session id — the leg reaches the tools and, on an HTTP
-backend, the shared workspace. Do not over-restrict such an agent's `tools` allowlist, or the `mcp*`
-tools get filtered out of its active set.
+**Guidance.** Default: treat MCP as a **supervisor capability** — do MCP-dependent work up top and
+hand sub-agents the resulting **artifacts** to reason over. When a leg must DRIVE MCP itself, delegate
+with `mcp: true` and pass the session id. Do not over-restrict such an agent's `tools` allowlist, or
+the `mcp*` tools get filtered out.
 
 ## The spine — one shared behavioral layer
 
@@ -425,38 +397,34 @@ events and cannot route, reply, steer, or otherwise control agents.
 ## The comm plane in practice
 
 - **In-process bus** (`bus/inproc.ts`) — a handle-based mailbox: `send` (one-way), `ask` (blocks for a
-  reply), `reply`, `onMessage`. `contact_supervisor` (child→supervisor, gated by a persona's
-  `coaching: on`) and `contact_peer` (sibling→sibling) are the child-side tools bound onto it.
-  Each unread inbox holds at most 200 messages. Overflow evicts an old one-way note first; an inbox
-  full of live asks rejects new delivery rather than stranding an existing sender. Ask settlement
-  (reply, timeout, abort, departure or failed delivery) releases its timer/listener and unread entry.
-  `onAskSettled` retires buffered notifications and sender attribution. A previously retained question
-  remains readable with `expectsReply: false`, so old questions never advertise an active reply id.
-- **Sibling peer comm** — a strategy opts a run in via `AgentRunSpec.peers` (gated by `canUseBus`).
-  The child gets `contact_peer` (`list`/`send`, ONE-WAY so peers can never deadlock; per-engine-instance
-  scoping; a 20-send budget and an 8,000-character body limit, enforced before consuming a send).
-  The engine's **delivery bridge** steers incoming bus messages into the child
-  session, fenced with the sender attributed OUTSIDE the fence (`attributeInbound`, shared by both
-  engines so the anti-spoofing format can't drift) — the same bridge delivers the supervisor's
-  `intercom send`. `debate`/`pair` always use peers; `map`/`synthesize` opt in via `params.peers`;
-  `magi`/`judge`/`fanout`/`compete`/`council-rounds` stay peer-less by design (independence is a bias
-  guard — see [STRATEGIES.md](STRATEGIES.md#bias-guard-invariants-do-not-fix-these)).
-- **Cross-process broker** (on by default; `PI_PERSONA_BROKER=off` to restore pre-broker spawn;
-  `bus/broker/`) — gives child-process runs, every `isolation: worktree` leg, and every `mcp: true`
-  leg the SAME comm plane and **steer** the in-process ones have. It is a session-scoped (POSIX
-  socket / Windows named pipe under the session id), supervisor-hosted **relay into the local
-  `InProcessBus`**: a connected child is indistinguishable from an in-process one, so the supervisor
-  side (intercom, idle notifier, f9, peek) is unchanged BY CONSTRUCTION. Off ⇒ the host never starts
-  and the child spawns byte-identical to pre-broker pi-persona.
-  Ask failures echo the originating `msgId` so the client rejects the right request immediately.
-  A client cancellation propagates to the corresponding host ask; cancellation lookup is scoped
-  to the originating connection. It cannot cancel another connection's question.
-  `extension/broker-host.ts`'s `SupervisorBroker` owns this lifecycle end-to-end on the supervisor
-  side: it starts the host lazily on the first child-engine build, warns once on a failed bind
-  (children built while it stays down spawn without a bus endpoint, so they never burn connect
-  backoff against a dead socket), and the next build retries. `/doctor` surfaces its state as one
-  line. A dropped client connection flips the child-side bridge status to `⇄ offline` and fails a
-  fresh ask fast rather than hanging (`bus/broker/client.ts`'s `onClose`, `src/bridge.ts`).
+  reply), `reply`, `onMessage`. `contact_supervisor` (child→supervisor, gated by `coaching: on`) and
+  `contact_peer` (sibling→sibling) are the child-side tools bound onto it. Each unread inbox holds at
+  most 200 messages; overflow evicts an old one-way note first, and an inbox full of live asks rejects
+  new delivery rather than stranding a sender. Ask settlement (reply, timeout, abort, departure, or
+  failed delivery) releases its timer/listener and unread entry; a previously retained question stays
+  readable with `expectsReply: false`, so old questions never advertise an active reply id.
+- **Sibling peer comm** — a strategy opts a run in via `AgentRunSpec.peers` (gated by `canUseBus`). The
+  child gets `contact_peer` (`list`/`send`, ONE-WAY so peers can never deadlock; per-engine-instance
+  scoping; a 20-send budget and an 8,000-character body limit, enforced before consuming a send). The
+  engine's **delivery bridge** steers incoming bus messages into the child session, fenced with the
+  sender attributed OUTSIDE the fence (`attributeInbound`, shared by both engines so the anti-spoofing
+  format can't drift) — the same bridge delivers the supervisor's `intercom send`. `debate`/`pair`
+  always use peers; `map`/`synthesize` opt in via `params.peers`; `magi`/`judge`/`fanout`/`compete`/
+  `council-rounds` stay peer-less by design (independence is a bias guard — see
+  [STRATEGIES.md](STRATEGIES.md#bias-guard-invariants-do-not-fix-these)).
+- **Cross-process broker** (on by default; `PI_PERSONA_BROKER=off` restores pre-broker spawn;
+  `bus/broker/`) — gives child-process runs, every `isolation: worktree` leg, and every `mcp: true` leg
+  the same comm plane and **steer** the in-process ones have. It is a session-scoped (POSIX socket /
+  Windows named pipe under the session id), supervisor-hosted relay into the local `InProcessBus`: a
+  connected child is indistinguishable from an in-process one, so the supervisor side (intercom, idle
+  notifier, f9, peek) is unchanged by construction. Off ⇒ the host never starts and the child spawns
+  byte-identical to pre-broker pi-persona. Ask failures echo the originating `msgId` so the client
+  rejects the right request immediately, and a client cancellation propagates only to that connection's
+  own host ask. `extension/broker-host.ts`'s `SupervisorBroker` owns the lifecycle: it starts the host
+  lazily on the first child-engine build, warns once on a failed bind (children built while it's down
+  spawn without a bus endpoint, so they never burn connect backoff against a dead socket), and the next
+  build retries; `/doctor` surfaces its state on one line. A dropped client connection flips the
+  child-side bridge to `⇄ offline` and fails a fresh ask fast rather than hanging.
 
 ### Presentation is a projection, not another comm plane
 
@@ -468,212 +436,151 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   notification;
 - drained bus messages have a separate session-local retention window: at most 256 messages and
   256,000 body characters across the bus, FIFO eviction. `intercom { action: "message", messageId:
-  "<message-id>" }` retrieves a retained message addressed to the supervisor; it never interprets a
-  message id as a run id. Explicit and automatic inbox drains both retain bodies. Oversized or
-  evicted messages return an unavailable diagnostic; retention is not durable evidence storage;
+  "<message-id>" }` retrieves a retained message; it never interprets a message id as a run id.
+  Oversized or evicted messages return an unavailable diagnostic — retention is not durable evidence
+  storage;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
-  Pi's configured expand-key hint. Each surfaces failure at the top of its own card in the shape it
-  has: the delegate card **sorts** failed legs ahead of successful ones (`extension.ts`), a failed
-  council/flow card leads with the cause in its title, and an `intercom wait` card leads with the
-  `N settled — X done, Y failed` tally (the per-leg causes sit in the body, below the preview cut —
-  `buildCompletionReport` emits DONE blocks before the failure block, and `wait` reports
-  `details.ok: true` because the *wait* succeeded, so the card gets no `failed` prefix);
+  Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card **sorts**
+  failed legs first, a failed council/flow card leads with the cause in its title, and an
+  `intercom wait` card leads with the `N settled — X done, Y failed` tally (per-leg causes sit in the
+  body, below the preview cut, so `wait`'s own success doesn't get a `failed` prefix);
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
   preview until expanded; terminal escape/control sequences are removed from the visible projection;
-- the sticky agent and exocom widgets have fixed row budgets. F9/`/agents` and paginated
-  `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot
-  permanently push the editor off screen or dump an entire peer registry into model context;
-- `/flow` and `/orchestrate` append durable, TUI-only expandable result entries. They do not dump a
-  large notification and do not add a second copy to the model context;
+- the sticky agent and exocom widgets have fixed row budgets — F9/`/agents` and paginated
+  `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot push the
+  editor off screen or dump an entire peer registry into model context;
+- `/flow` and `/orchestrate` append durable, TUI-only expandable result entries rather than dumping a
+  large notification or a second copy into the model context;
 - the F9 overlay's *directed* keys (`x` stop, `s` steer) act only on the agent the ▸ marker still
-  shows. Runs settle and are pruned under the cursor while a keystroke is in flight, so when the
-  aimed-at agent is the one that vanished, the selection re-anchors visibly and that keypress is
-  spent re-aiming (`src/ui/agent-overlay.ts`) — aborting an agent the user never chose is not
-  undoable. ↑↓, ⏎ and the scroll keys never refuse: they cost nothing to repeat;
+  shows; if that agent settles and is pruned mid-keystroke, the selection re-anchors visibly and the
+  keypress is spent re-aiming instead of aborting an agent the user never chose. ↑↓, ⏎, and the scroll
+  keys never refuse;
 - every agent-tree node carries `startedAt`/`lastAdvanceAt`; `LiveClock` (`src/ui/live-clock.ts`)
   repaints the sticky widget and the F9 overlay once a second while any node is running and stops
-  itself the instant nothing is, so an idle session owns no timer. A running row's annotation is
-  elapsed time until it has gone `STALL_FLAG_MS` (90s) quiet, then the same `⚠ stalled <duration>`
-  badge the async peek watchdog uses. `x` marks the target `stopping…` at once — the run's own
-  settle path writes the terminal status — and is offered only when a live stop handle exists; a
-  refusal (no handle, already settled) surfaces as a one-line notice instead of silently no-op'ing.
+  itself once nothing is. A running row shows elapsed time until it goes `STALL_FLAG_MS` (90s) quiet,
+  then the same `⚠ stalled <duration>` badge the async peek watchdog uses. `x` marks the target
+  `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,
+  already settled) surfaces as a one-line notice instead of silently no-op'ing.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.
 
 ## exocom — the external plane
 
-A separate plane (`src/exocom/`) from everything above, with a different shape entirely: every plane
-in "the comm plane in practice" is **internal** to one supervisor's own run — hierarchical, keyed by
-that supervisor's session id, talking to children *it* spawned. **exocom is flat and external**:
-independent, top-level pi instances sharing one explicit Exocom scope — normally the same workspace,
-or a Pi in another workspace that joined by code — discover each other and message peer-to-peer. There
-is no parent/child relationship. (The names encode the split: intercom = internal comm; exocom =
+`src/exocom/` is a separate plane from everything above: every plane in "the comm plane in practice"
+is **internal** to one supervisor's own run — hierarchical, keyed by that session id, talking to
+children *it* spawned. **exocom is flat and external**: independent, top-level Pi instances sharing
+one explicit scope — normally the same workspace, or a Pi that joined by code — discover each other
+and message peer-to-peer, with no parent/child relationship. (intercom = internal comm; exocom =
 external comm.)
 
-Exocom still supplies fenced one-way postcards and presence; chat `message` never mutates shared
-work state. On top of that, a workspace work ledger (`ledger.ts`, tools in `tools/exocom-work.ts`)
-records claims/asks/answers/progress/releases. `exocom_ask` canonicalizes the public `exocom_list` target
-through `plane.resolvePeer` (raw session ids on the ledger, never the display name). A pending ask
-to this session constrains the turn (`gate.ts`: answer/decline plus read-only tools) and both the
-prompt renders a bounded `pendingAskPrompt` — one complete, fenced next question plus an omitted
-count; the tool gate repeats only its `ask_id`, not the peer text. Registry display name is keyed by
-`from_session`, never envelope `from_name`. `exocom_wait` is non-blocking and wakes on a separate
-idle notifier from postcard `exocom_received` delivery. Clean shutdown attempts to release this
-session's claims and outbound asks; if that best-effort write cannot complete, the vanished registry
-owner is pruned on the next ledger transaction (live registry sessions are the lease). A prune that
-drops a pending ask does not leave its waiter hanging: `expireWaiters` wakes it on the same idle-wake
-path a real answer would use, with `[pi-persona] exocom wait ended: the peer left the pool before
-answering · work_key=… ask_id=…`, rather than leaving `exocom_wait` armed forever. This gate is
-cooperative coordination for participating local Pi processes, not filesystem authorization or
-isolation from another same-user process. It is not a delegate/council replacement and not a task/run
-workflow runtime.
+Exocom supplies fenced one-way postcards and presence; chat `message` never mutates shared work
+state. Separately, a workspace work ledger (`ledger.ts`, tools in `tools/exocom-work.ts`) records
+claims/asks/answers/progress/releases. `exocom_ask` canonicalizes its target through
+`plane.resolvePeer` (raw session ids on the ledger, never the display name); registry display name is
+keyed by `from_session`, never the envelope's self-reported `from_name`. A pending ask constrains the
+turn (`gate.ts`: answer/decline plus read-only tools) behind a bounded `pendingAskPrompt`.
+`exocom_wait` is non-blocking. Clean shutdown releases this session's claims/asks; if that best-effort
+write fails, the vanished owner is pruned on the next ledger transaction (live registry sessions are
+the lease), and `expireWaiters` wakes any waiter left behind instead of leaving `exocom_wait` armed
+forever. This gate is cooperative coordination for participating local Pi processes — not filesystem
+authorization, not isolation from another same-user process, and not a delegate/council or task/run
+replacement.
 
-- **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` (env) or bare `--exocom` joins the current
-  workspace. `--exocom=Ab0T` joins the existing workspace scope identified by that exact,
-  case-sensitive four-character Base62 alias from any other cwd. Pi's extension flag API cannot
-  express a boolean flag with an optional string value, so the extension keeps the registered flag
-  boolean for backward compatibility and recovers only the exact equals form from raw argv. Unknown,
-  malformed, or conflicting codes fail closed without falling back to the caller's workspace. The
-  selection is frozen for the session. Participation is additionally gated by the active persona's
-  `canUseBus` and ability to call at least
-  one obligation closer (`exocom_answer` or `exocom_decline`), re-evaluated on every persona switch
-  (`reconcileExocom`). A bus-restricted or answerless persona leaves the registry rather than
-  advertising a participant that can be permanently wedged by an inbound ask; switching back to an
-  admissible persona rejoins. Individual targeted tool denies still win. OFF ⇒ no bind, no registry
-  entry, no tools registered.
-- **Discovery — a scope-selected file registry, not an elected hub.** Bare Exocom preserves the
-  existing workspace-hash paths byte-for-byte. A persistent alias map under the effective agent
-  directory resolves each four-character code to that full 24-hex workspace identity. Allocation is
-  atomic, collision-aware, bounded, and never assigns a reserved code to another workspace; the short
-  code is presentation/routing convenience, not the storage identity. Each instance binds its own
-  socket (POSIX) / named pipe (Windows), self-registers one JSON entry under
-  `<agentDir>/persona/exocom/<workspace-hash>/agents/<session-key>.json` (`sessionKey` — a hash of
-  the session id, so the name is path-safe; a read drops any entry whose filename is not the hash of
-  its own `session_id`), and heartbeats it; discovery is
-  just reading that directory. `persona` is the plugin's ONE storage root under the agent dir (the
-  npm package name is not a path); an install written by an earlier release has its legacy
-  `pi-persona` root folded into it once, at activation — `src/core/data-root.ts`. Dead-pid and
-  stale-heartbeat entries are pruned on read — no host election, no failover, genuinely
-  peer-to-peer.
-- **Workspace identity remains the Pi's actual cwd.** The chosen scope controls registry, endpoint,
-  ledger, and artifact paths. It never overwrites the member's home workspace identity. Every new
-  registry entry publishes an all-or-none safe tuple (`workspace_id`, four-character
-  `workspace_code`, bounded `workspace_label`); peer lists, the standing brief, widget, and `/exocom`
-  label a peer as same-workspace or external without putting its absolute `cwd` in model output.
-  External peers are full Pi instances that can inspect the files in their own workspace; paths are
-  not implicitly shared.
-- **Interaction model — postcards plus a durable, non-blocking join.** `exocom_send` returns a
-  `msg_id` immediately; a chat reply is just another `exocom_send` with `in_reply_to` set, delivered
-  back as a correlated follow-up. `target: "*"` broadcasts postcards to every live peer
-  (best-effort; one unreachable peer doesn't fail the rest). Work coordination is separate:
+- **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` or bare `--exocom` joins the current workspace;
+  `--exocom=Ab0T` joins an existing scope by its exact, case-sensitive four-character Base62 alias
+  from another cwd (Pi's flag API can't express an optional-value boolean, so the extension recovers
+  the equals form from raw argv). Unknown/malformed/conflicting codes fail closed rather than falling
+  back to the caller's workspace; selection is frozen for the session. Participation also requires
+  the active persona's `canUseBus` plus at least one obligation closer
+  (`exocom_answer`/`exocom_decline`), re-evaluated on every persona switch — a persona that loses
+  either leaves the registry rather than advertising a peer that could be permanently wedged by an
+  inbound ask, and rejoins once an admissible persona is active. OFF ⇒ no bind, no registry entry, no
+  tools registered.
+- **Discovery — a scope-selected file registry, not an elected hub.** A persistent alias map under
+  the agent directory resolves each four-character code to its full 24-hex workspace identity
+  (allocation is atomic, collision-aware, bounded); the code is a routing convenience, never the
+  storage identity. Each instance binds its own socket (POSIX) / named pipe (Windows) and
+  self-registers one JSON entry under `<agentDir>/persona/exocom/<workspace-hash>/agents/<session-key>.json`
+  (a hash of the session id, so a read drops any entry whose filename doesn't match its own
+  `session_id`), heartbeating it; discovery is just reading that directory. Dead-pid and
+  stale-heartbeat entries are pruned on read — no host election, no failover. Cleanup is
+  ownership-aware (`session_id` + endpoint + signing key) and atomically claims an entry before
+  deletion, so a failed/replaced session cannot erase a live replacement's slot.
+- **Workspace identity is the Pi's actual cwd.** The chosen scope controls registry, endpoint, ledger,
+  and artifact paths but never overwrites the member's home workspace identity. Peer lists, the
+  standing brief, and `/exocom` label a peer as same-workspace or external without exposing its
+  absolute `cwd`. External peers are full Pi instances that can inspect files in their own workspace;
+  paths are never implicitly shared.
+- **Postcards plus a durable, non-blocking join.** `exocom_send` returns a `msg_id` immediately; a
+  reply is another `exocom_send` with `in_reply_to` set. `target: "*"` broadcasts postcards
+  best-effort (one unreachable peer doesn't fail the rest). Work coordination is separate:
   `exocom_ask` commits an obligation to the ledger, `answer`/`decline` settles it, and `exocom_wait`
-  arms a bounded idle wake rather than blocking the tool call. The signed semantic frame is a wake
-  signal; the shared ledger remains the source of truth if delivery is deferred.
-- **Cross-workspace writes are advisory-only in v1.** Repository-relative claim paths have meaning
-  only in the workspace that owns the selected scope. A member whose home workspace differs from the
-  scope therefore does not receive `exocom_claim`, and the tool and signed-frame receiver both reject
-  a foreign claim. It may still send postcards, inspect its own files, ask, answer/decline, wait,
-  journal progress, and release its outbound asks. General multi-repository write coordination would
-  require a versioned resource namespace; path strings from unrelated repositories are never compared
-  as if they named the same files.
-- **Reply routing is session-stable.** `exocom_list` keeps human display names (`name`/`name#2`),
-  while sends and inbound reply hints use `name@<96-bit session hash>`. The name prefix is
-  presentation only; routing uses the session hash, so a retained qualified target remains valid
-  after that peer renames. Multiple matches for the same suffix fail closed as ambiguous rather than
-  guessing; the telemetry projection mirrors this rule so a successful retained-target send does not
-  lose its `message.sent` edge. The authenticated registry entry
-  (endpoint and signing key) is cached with the bounded inbound context, so a stale/pruned sender
-  cannot be retargeted to a same-name twin and its live socket can still receive the reply. The hint
-  is CONDITIONAL, not an invitation: it carries the target and the correlation id under "reply only
-  if it changes what someone does, otherwise send nothing". A delivery is a fresh prompt on the
-  receiver, and a bare `Reply:` would make answering the default and silence the exception — which
-  is how a settled point keeps running on agreement and thanks.
+  arms a bounded idle wake rather than blocking. The signed frame is a wake signal; the ledger remains
+  the source of truth if delivery is deferred.
+- **Cross-workspace writes are advisory-only in v1.** A repository-relative claim path has meaning
+  only in the workspace that owns the selected scope, so a member whose home workspace differs from
+  the scope cannot `exocom_claim` (the tool and the signed-frame receiver both reject a foreign
+  claim) — it can still send, inspect its own files, ask, answer/decline, wait, and release its own
+  asks. Multi-repository write coordination would need a versioned resource namespace; paths from
+  unrelated repositories are never compared as if they named the same files.
+- **Reply routing is session-stable.** `exocom_list` shows human display names (`name`/`name#2`);
+  sends and inbound reply hints use `name@<96-bit session hash>`, so a retained qualified target
+  stays valid after a rename. Ambiguous suffix matches fail closed rather than guess. The
+  authenticated registry entry (endpoint + signing key) is cached with the bounded inbound context,
+  so a stale/pruned sender can't be retargeted to a same-name twin. The reply hint is CONDITIONAL —
+  reply only if it changes what someone does — so a settled point can keep running on agreement and
+  thanks instead of a bare `Reply:` making answering the default.
 - **Identity is session-stable, persona is presence metadata.** `extension/identity.ts` owns one
-  handle independently of Exocom. Until chosen, a `pi-<session suffix>` label distinguishes the
-  instance without presenting its persona as its name. `agent_name` names a standalone session;
-  when Exocom is active, `exocom_name` updates the same identity and immediately refreshes presence.
-  Successful choices persist in a session-bound custom entry, survive resume/reload and persona
-  changes, and are not inherited by a fork with a different session id. Generic persona/agent
-  names are rejected when choosing a handle. No catalog or extra model call is used.
-  The `context` hook supplies identity guidance before every model call, including a first inbound
-  Exocom wake: Pi's custom-message path can bypass `before_agent_start`. A targeted deny suppresses
-  the naming invitation; the standalone tool cannot bypass an Exocom naming denial. A pending ask
-  permits `exocom_name` as display metadata only; it still gates work until answer/decline.
-  `exocom_name` replaces that display label only — the registry entry
-  stays keyed by the session, so a rename cannot take over another peer's slot or its inbound
-  replies. Persona, model, and context usage are refreshed on heartbeat; changing persona never
-  changes the registry key or grants authority over another peer.
-  Delegated workers keep the leader's `delegate.name` from launch, including their initial prompt
-  and peer/broker display labels; routing handles and strategy role keys remain unchanged.
+  handle independent of Exocom. `agent_name` names a standalone session; `exocom_name` does the same
+  while Exocom is active and refreshes presence immediately. A chosen name persists in a session-bound
+  entry, survives resume/reload/persona changes, and is not inherited by a fork with a new session id;
+  generic persona/agent names are rejected. `exocom_name` only replaces the display label — the
+  registry key stays the session, so a rename can't take over another peer's slot or its inbound
+  replies, and changing persona never changes the key or grants authority over another peer. Delegated
+  workers keep the leader's `delegate.name` from launch, including peer/broker display labels.
 - **Fenced and attributed from the REGISTRY, never the envelope — the security core.** An inbound
-  message is head-truncated, then delivered under a header the RECEIVER writes (`[label] —
-  message|reply`) above a body quoted by `fencePeer` — the peer flavor of the same `core/fence.ts`
-  primitives the planes above use (`fenceUntrusted`/`attributeInbound`), same anti-injection
-  discipline, worded for an equal-status collaborator instead of a leg you commissioned. Attribution
-  sits OUTSIDE the fence, so a payload can't spoof its sender by closing the block, and `label` comes
+  message is head-truncated and delivered under a header the RECEIVER writes, above a body quoted by
+  `fencePeer` (the peer flavor of `core/fence.ts`'s `fenceUntrusted`/`attributeInbound`). Attribution
+  sits OUTSIDE the fence so a payload can't spoof its sender by closing the block, and the label comes
   from the registry entry keyed by the connecting session, never the envelope's self-reported
-  `from_name`, so a peer cannot spoof its identity. A message over the inline budget spills to a
-  scope-selected artifact file (a small preview stays inline) rather than landing whole in the
-  receiver's context. The spill is an exact, validated descriptor (`preview`, `path`, `size`) rendered
-  as readable fenced metadata; arbitrary JSON is ordinary peer text, and an inline-only truncation
-  never claims that an artifact exists. A descriptor is verified at the RECEIVER's transport boundary
-  before anything reaches its model: the path must be the selected scope's own `artifacts/<msg_id>.txt`,
-  the file must be a regular unlinked file whose size equals the declared one, and that size must sit
-  between the inline cap and `ARTIFACT_MAX_BYTES`. The receiver then reads through one held,
-  identity-checked descriptor, rechecks that the source did not change, and writes an unpredictable
-  receiver-owned snapshot with exclusive creation; only that snapshot path is advertised to the
-  model. Anything else is NACKed rather than exposed as readable. Received snapshots join sender
-  spills under the same TTL/file-cap cleanup. The per-sender byte window charges only what crossed
-  the wire, not a spill's declared size, so a legitimate large spill is delivered instead of being
-  refused as "budget".
-  Transport guardrails — enforced at the boundary, and not the whole discipline: a hop cap, a
-  per-sender rate+byte budget, and a (sender, msg_id)
-  dedup set so an at-least-once resend can't double-trigger a turn. Reply-hop history is keyed by
-  that same sender identity, so two peers reusing a `msg_id` cannot reset each other's loop depth.
-  The fencing and registry attribution above are part of the same set, and an exchange's LENGTH is
-  bounded prompt-side instead: the per-turn peer brief (`core/brief.ts`) carries a relevance bound —
-  send only what changes what someone does, stop once a round no longer moves the work the turn is
-  for — plus the peer/sub-agent split (a peer for judgement you cannot specify, a sub-agent for work
-  you can; the sub-agent half is rendered only where this persona can actually reach one).
-  Deliberately not a round count: rounds are often how a hard point gets settled, and a counter
-  cannot see whether one still serves the work. `hops` is not the reason — it bounds a THREADED
-  reply chain only (it is derived from the inbound context when `in_reply_to` is set and is `0`
-  otherwise), so two peers alternating untreaded sends are not depth-bounded by the transport.
-  Registry cleanup is ownership-aware (`session_id` + endpoint + signing key) and atomically claims
-  an entry before deletion, so a failed/replaced session cannot erase the live replacement's slot;
-  socket-file cleanup is likewise conditional on that plane having completed the bind itself.
+  `from_name`. A message over the inline budget spills to a scope-selected artifact file (a small
+  preview stays inline); the spill descriptor (`preview`, `path`, `size`) is verified at the
+  RECEIVER's transport boundary before anything reaches its model — the path must be the selected
+  scope's own `artifacts/<msg_id>.txt`, a regular unlinked file whose size matches the declared one
+  and sits between the inline cap and `ARTIFACT_MAX_BYTES`. The receiver then reads through one held,
+  identity-checked descriptor, rechecks the source didn't change, and writes an unpredictable
+  receiver-owned snapshot with exclusive creation — only that snapshot path reaches the model.
+  Anything else is NACKed rather than exposed. Received snapshots join sender spills under the same
+  TTL/file-cap cleanup, and the per-sender byte window charges only what crossed the wire (not a
+  spill's declared size), so a legitimate large spill is delivered rather than refused as "budget".
+  Transport guardrails enforced at the boundary: a hop cap (bounds only a THREADED reply chain,
+  derived from `in_reply_to`; untreaded alternating sends aren't depth-bounded by the transport), a
+  per-sender rate+byte budget, and a (sender, msg_id) dedup set so an at-least-once resend can't
+  double-trigger a turn. An exchange's LENGTH is instead bounded prompt-side: the per-turn peer brief
+  (`core/brief.ts`) carries a relevance bound — send only what changes what someone does — deliberately
+  not a round count, since a counter can't see whether a round still serves the work.
 - **Tools are lazy and fail closed.** `exocom_list({ offset?, limit? })` exposes bounded, paginated
-  presence (with exact totals and `nextOffset`),
-  `exocom_send({ target, message, in_reply_to? })` sends one-way messages — a target that LOOKS like
-  a session-qualified token is resolved only as one and never falls back to a display name (names are
-  self-chosen, so the fallback was an interception route), and a peer whose call-sign happens to take
-  that shape is reachable through the qualified address the refusal names — and
-  `exocom_name({ name })` rebrands this instance's display call-sign (the registry key stays the
-  session id, so a rename moves no state, invalidates no retained qualified target, and grants
-  nothing). The ledger tools are
-  `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`,
-  `exocom_progress`, and `exocom_release`; they are capability-gated with the postcard tools. Pi has
-  no dynamic
-  unregister API, so definitions registered by a prior join may remain in the registry; the live
-  accessor, capability gate, and active-tool set all deny them whenever the plane is stopped. Plane
-  admission requires at least one of `exocom_answer`/`exocom_decline`, because every published peer
-  may receive a durable ask and must retain a runtime path to settle it.
-- **Inbound delivery is bounded without loss.** Each external message is injected under the same
-  byte cap whether it is plain text or an artifact descriptor. Bursts remain FIFO-queued; each
-  rate-limited wake drains as many whole messages as fit the bounded batch surface, leaving the rest
-  queued in order. Collapsed cards show only a short preview, while expanding the card reveals the
-  delivered batch. A presentation cap never discards the rest of the queue.
+  presence; `exocom_send({ target, message, in_reply_to? })` sends one-way (a session-qualified-looking
+  target resolves only as one, never falling back to a display name, since names are self-chosen);
+  `exocom_name({ name })` rebrands the display call-sign without moving any state. The ledger tools —
+  `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`, `exocom_progress`,
+  `exocom_release` — are capability-gated with the postcard tools; the live accessor, capability gate,
+  and active-tool set all deny them once the plane stops, since Pi has no dynamic tool-unregister API.
+  Admission requires at least one obligation closer, because every published peer may receive a
+  durable ask and must retain a way to settle it.
+- **Inbound delivery is bounded without loss.** Each message is injected under the same byte cap
+  whether plain text or an artifact descriptor. Bursts stay FIFO-queued; each rate-limited wake drains
+  as many whole messages as fit, leaving the rest queued. A presentation cap on the collapsed card
+  never discards the rest of the queue.
 
-exocom never touches the delegate/council/broker path. A single instance can be **both** a supervisor
-(delegating its own spawned children via intercom/broker) **and** an exocom peer (collaborating with
-independent sibling instances) at once — the planes are independent and independently gated.
-The process that initiates a collaboration is merely the coordinator de facto: the plane remains
-flat, and no peer gains stop/steer authority over another. Those controls exist only on the
-hierarchical intercom plane.
-The join code is not authentication. Exocom remains cooperative same-user, same-host coordination
-between processes that use the same effective Pi agent directory; it is not a remote/network plane,
-and a local process able to modify that directory is inside the existing trust boundary.
+exocom never touches the delegate/council/broker path. One instance can be **both** a supervisor
+(delegating its own children) **and** an exocom peer at once — the planes are independent and
+independently gated. Whoever initiates a collaboration is merely the coordinator de facto: the plane
+stays flat, and no peer gains stop/steer authority over another (that exists only on the hierarchical
+intercom plane). The join code is not authentication: exocom is cooperative same-user, same-host
+coordination between processes sharing one effective Pi agent directory, not a remote/network plane —
+a local process able to modify that directory is already inside the trust boundary.
 
 ## Supervision & the waiting model
 
@@ -686,46 +593,37 @@ and a local process able to modify that directory is inside the existing trust b
   signals: a **fast** wakeup (`PI_PERSONA_PEEK_MS`, ~30s, `0` disables) when a child NEWLY crosses the
   `STALL_FLAG_MS` (90s) stall window (a focused *possibly stuck* alert, framed patience-first — ask the
   leg, don't probe its environment) or messages the supervisor; and a **slow routine check-in**
-  (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) that delivers the compact ProgressView digest — never
+  (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) delivering the compact ProgressView digest — never
   full transcripts — so the supervisor can catch a leg going off-track early. Both let an idle
-  supervisor steer/stop a wedged or drifting child even when NO completion has fired; the enforcing
+  supervisor steer/stop a wedged or drifting child even with NO completion fired; the enforcing
   backstop is the engines' hard wall-clock cap (above). The full digest is also on demand via `/peek`.
-  Async failures are ALWAYS reported (never suppressed);
-  the runtime `DelegationLedger` vetoes a blind retry loop (an identical agent+model+task delegation
-  that failed twice is stopped before it spawns). Coaching is gated by `coaching: on` AND `canUseBus`.
+  Async failures are ALWAYS reported; the runtime `DelegationLedger` vetoes a blind retry loop (an
+  identical agent+model+task delegation that failed twice is stopped before it spawns). Coaching is
+  gated by `coaching: on` AND `canUseBus`.
 
-**Runtime reinforcement of the hand-off default** comes as a standing part and a reactive part, because a
-persona directive lives at the TOP of the prompt and its pull decays as recent tool output balloons:
+**Runtime reinforcement of the hand-off default** comes as a standing part and a reactive part, because
+a persona directive lives at the TOP of the prompt and its pull decays as recent tool output balloons:
 
-- The **delegation brief** (`core/brief.ts`) is the STANDING half: a compact block — live roster (installed
-  agents + teams + flows) and the hand-off default — appended to the system-prompt TAIL every turn, where
-  recency wins the tug-of-war a top-of-prompt line loses. It is regenerated from the live registry (so it
-  can't desync) and filtered to the active persona's `delegate` allowlist (a persona that denies `delegate`
-  gets none). It never dictates how MANY sub-agents or which shape — that is each persona's own method.
-- The **nudges** (`core/nudge.ts`, on by default) are
-  the REACTIVE half, landing in RECENT context on the very event that warrants them:
-  - **DelegationNudge** — a `tool_result` hook watches the *supervisor's own* tool stream and, when a
-    delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council` crosses a
-    threshold), appends a one-line "hand it off" reminder to that command's result. Sub-agents run in their
-    own sessions, so the hook only ever sees the supervisor's tools; a successful hand-off resets the
-    streak, while a failed one keeps the streak and returns an actionable re-dispatch hint.
-  - **PersistenceNudge** — the counterweight to premature surrender: when a delegated leg's report carries an
-    explicit `[BLOCKED]`/`FLAG: UNKNOWN` marker, it appends a "don't bank it yet" reminder. All three
-    delivery paths carry it — the sync `delegate`/`council` result, the background completion report, and
-    the `intercom wait` join (the latter two through `engine/async.ts`'s `renderCompletion`) — but they do
-    not scan the same text, so the coverage is not identical:
-    - the sync path (`PersistenceNudge.observe`) scans the WHOLE `delegate`/`council` tool result, and
-      `aggregateResults` folds every leg's body into it, failed legs included — so a leg that fails
-      carrying `[BLOCKED]` still gets the note;
-    - `renderCompletion` scans only `status === "done"` runs (`r.result?.output`), by design: a FAILED run
-      is already surfaced as a failure by `buildCompletionReport`. So a background/`wait` leg that FAILED
-      while emitting `[BLOCKED]` gets the failure block and its salvaged partial output, but NOT the
-      persistence note. Same marker, same leg, different counterweight depending on how it was collected.
-  - **The off switch covers every path.** `config.nudge` (`PI_PERSONA_NUDGE=off`) gates the
-    `tool_result` hook — silencing the DelegationNudge entirely and the PersistenceNudge on a sync
-    `delegate`/`council` result — and both `renderCompletion` call sites (the background completion
-    notifier and `intercom wait`) take their `scan` through the same gate, so "off" means off wherever
-    a settled leg is collected, not only on the synchronous path.
+- The **delegation brief** (`core/brief.ts`) is the STANDING half: live roster (agents + teams + flows)
+  and the hand-off default, appended to the system-prompt TAIL every turn, where recency wins the
+  tug-of-war a top-of-prompt line loses. It regenerates from the live registry (so it can't desync) and
+  filters to the active persona's `delegate` allowlist. It never dictates how MANY sub-agents or which
+  shape — that is each persona's own method.
+- The **nudges** (`core/nudge.ts`, on by default) are the REACTIVE half, landing in RECENT context on
+  the event that warrants them:
+  - **DelegationNudge** — a `tool_result` hook watches the supervisor's own tool stream and, when a
+    delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council`
+    crosses a threshold), appends a one-line "hand it off" reminder to that command's result. A
+    successful hand-off resets the streak; a failed one keeps it and returns a re-dispatch hint.
+  - **PersistenceNudge** — the counterweight to premature surrender: a delegated leg's report carrying
+    `[BLOCKED]`/`FLAG: UNKNOWN` gets a "don't bank it yet" reminder. All three delivery paths carry it
+    (sync `delegate`/`council`, background completion, `intercom wait`), but coverage isn't identical:
+    the sync path scans the WHOLE tool result including failed legs, while `renderCompletion` scans
+    only `status === "done"` runs by design — a failed background/`wait` leg already gets a failure
+    block, so a `[BLOCKED]` marker there doesn't also get the persistence note. Same marker, same leg,
+    different counterweight depending on how it was collected.
+  - **The off switch covers every path.** `PI_PERSONA_NUDGE=off` silences DelegationNudge entirely and
+    PersistenceNudge on every collection path (sync result, background notifier, `intercom wait`).
 
 ## Discovery & seeding
 
@@ -764,8 +662,8 @@ must pass. The broker's transport is the only OS-specific code, confined to `bus
   is not a failure.
 - Model/thinking baseline is snapshot-once and restored on omit; tools are restored from the **full**
   registry, never the active subset ("never strip Pi power").
-- The completion/mutation guard keeps child-claimed success ≠ runtime-verified; the depth guard blocks
-  fan-out **visibly** at the cap (not hidden).
+- The completion/mutation guard keeps child-claimed success ≠ runtime-verified; the `maxChildren` cap
+  rejects an oversized fan-out **visibly** (an error before spawn), never by silently trimming it.
 - Sub-agent output is UNTRUSTED — fenced (`fenceUntrusted`) before it reaches the supervisor as a
   follow-up or tool result (prompt-injection defense).
 - The broker host is `unref`'d (never keeps Pi alive) with a permanent error sink; never unlink a live
