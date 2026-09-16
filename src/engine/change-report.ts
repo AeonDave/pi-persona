@@ -7,11 +7,13 @@
  * report says so plainly rather than reading like an authoritative per-leg diff.
  *
  * Pure over `GitExec` (see worktree.ts) so it is unit-tested without a real repository; the only
- * process boundary is `captureStatus`'s two `git` calls (rev-parse gate + porcelain status).
+ * process boundary is `captureStatus`'s two `git` calls (rev-parse gate + porcelain status), gated
+ * by `findGitRoot`'s synchronous filesystem walk so a cwd outside any repository never pays for
+ * them at all.
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { normalizeWritePath, pathsOverlap } from "../core/ownership.ts";
 import type { GitExec } from "./worktree.ts";
@@ -59,21 +61,44 @@ export function parsePorcelainZ(stdout: string): StatusSnapshot {
 	return { entries };
 }
 
-/** `undefined` when `root` is not a Git repository or `git status` fails — never throws (mirrors
- *  `GitExec`'s own never-throw contract), so a leg without a repo, or one whose git is briefly
- *  unavailable, degrades to "no report" rather than breaking the leg it only observes.
+/** How many ancestor directories {@link findGitRoot} will check above `start` before giving up —
+ *  generous for any real project nesting, but finite so a pathological path can't loop. */
+const MAX_GIT_ROOT_ANCESTORS = 12;
+
+/** Walk up from `start` looking for a `.git` entry (a directory for a normal checkout, a file for
+ *  a submodule/worktree pointer) — what real `git -C <dir> ...` does internally when `<dir>` is a
+ *  subdirectory of the repository. Reimplemented here as a synchronous, injectable `exists` check
+ *  (default `existsSync`) so `captureStatus` can skip the real `git` round trip for a cwd that
+ *  plainly isn't inside ANY repository, without missing one whose top level is merely an ANCESTOR
+ *  of `start` — the common case of a Pi session started in a package subdirectory of a larger
+ *  repo. `undefined` when no ancestor within {@link MAX_GIT_ROOT_ANCESTORS} has `.git`, or once the
+ *  filesystem root is reached. Pure over the injected `exists`, so it is unit-tested without a
+ *  filesystem. */
+export function findGitRoot(start: string, exists: (p: string) => boolean = existsSync): string | undefined {
+	let current = resolve(start);
+	for (let i = 0; i < MAX_GIT_ROOT_ANCESTORS; i++) {
+		if (exists(join(current, ".git"))) return current;
+		const parent = dirname(current);
+		if (parent === current) return undefined; // reached the filesystem root
+		current = parent;
+	}
+	return undefined;
+}
+
+/** `undefined` when `root` is not (inside) a Git repository or `git status` fails — never throws
+ *  (mirrors `GitExec`'s own never-throw contract), so a leg without a repo, or one whose git is
+ *  briefly unavailable, degrades to "no report" rather than breaking the leg it only observes.
  *
- *  Gated by a cheap, synchronous `.git` pre-check: a delegate leg's `root` is nearly always a
- *  scratch cwd or a real repository's TOP level (the same assumption `worktreePreflight` already
- *  makes), so skipping straight to "no report" when `.git` is plainly absent avoids spawning a
- *  real `git` process — a genuine per-leg cost — for every leg run outside a repository. The one
- *  case this under-reports is `root` being a repo reached only via an ancestor's `.git` (cwd nested
- *  below the repo top); accepted, since the report is best-effort by design. */
+ *  Gated by {@link findGitRoot}: a cwd that plainly isn't inside any repository (within the walk's
+ *  bound) never spawns a real `git` process — a genuine per-leg cost otherwise paid on every run
+ *  outside a repository. The discovered repository top, not `root` itself, is passed to `git -C`
+ *  below (the porcelain output is repo-relative either way). */
 export async function captureStatus(root: string, exec: GitExec): Promise<StatusSnapshot | undefined> {
-	if (!existsSync(join(root, ".git"))) return undefined;
-	const repo = await exec(["-C", root, "rev-parse", "--is-inside-work-tree"]);
+	const gitRoot = findGitRoot(root);
+	if (!gitRoot) return undefined;
+	const repo = await exec(["-C", gitRoot, "rev-parse", "--is-inside-work-tree"]);
 	if (repo.code !== 0 || repo.stdout.trim().toLowerCase() !== "true") return undefined;
-	const status = await exec(["-C", root, "status", "--porcelain=v1", "--untracked-files=all", "-z"]);
+	const status = await exec(["-C", gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "-z"]);
 	if (status.code !== 0) return undefined;
 	return parsePorcelainZ(status.stdout);
 }
