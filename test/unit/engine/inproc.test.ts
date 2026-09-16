@@ -957,6 +957,38 @@ test("inproc engine disables the idle watchdog for coaching children that may bl
 	assert.equal(r.ok, true, "the silent-but-legitimately-waiting child survived");
 });
 
+test("inproc engine bounds a blocking coaching child with blockingCapMs when no hard cap is set", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	let abortCalled = false;
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		bus,
+		coaching: true,
+		allowBlocking: true,
+		timeoutMs: 20,
+		blockingCapMs: 40,
+		createSession: async () => ({
+			subscribe: () => () => {},
+			prompt: async () => {},
+			agent: {
+				abort: () => {
+					abortCalled = true;
+				},
+				waitForIdle: () => new Promise(() => {}), // never resolves — only blockingCapMs can settle this
+				steer: () => {},
+			},
+			dispose: () => {},
+		}),
+	});
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(abortCalled, true, "the blocking ceiling aborted the session");
+	assert.equal(r.failureKind, "timeout");
+});
+
 test("inproc engine exposes a steer handle that injects a user message into the running agent", async () => {
 	const spy: Spy = {};
 	let gotHandle = false;

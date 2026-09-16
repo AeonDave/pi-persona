@@ -139,6 +139,10 @@ export interface InProcessDeps {
 	 *  the idle watchdog, which any event re-arms, never would. 0/absent = no cap. Also skipped
 	 *  for a `coaching` + `allowBlocking` child (it may legitimately block a long time on a reply). */
 	hardTimeoutMs?: number;
+	/** Ceiling applied ONLY when `coaching` + `allowBlocking` disabled the idle/startup watchdogs
+	 *  and no explicit `hardTimeoutMs` was configured — a blocked leg must still end. 0/absent =
+	 *  none. */
+	blockingCapMs?: number;
 	/** STARTUP deadline (ms): a session that never makes PROGRESS (no completed turn, no tokens,
 	 *  no streamed output) within this window is aborted as a stalled start — the case the idle
 	 *  window is too generous for. The FIRST progress cancels it permanently, so a
@@ -492,7 +496,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// Hard wall-clock cap: armed ONCE, never reset by events — a definite lifetime ceiling
 			// that settles a busy-but-non-converging child (the idle watchdog above never catches).
 			// It starts before session construction, matching the child engine's process lifetime cap.
-			const hardMs = isPositiveFiniteMs(deps.hardTimeoutMs) ? deps.hardTimeoutMs : 0;
+			// A blocking child has its idle/startup watchdogs disarmed above, so — absent an explicit
+			// hardTimeoutMs — blockingCapMs becomes its ceiling instead: a blocked leg must still end.
+			const hardMs = isPositiveFiniteMs(deps.hardTimeoutMs)
+				? deps.hardTimeoutMs
+				: blockingChild && isPositiveFiniteMs(deps.blockingCapMs)
+					? deps.blockingCapMs
+					: 0;
 			let hardTimer: ReturnType<typeof setTimeout> | undefined;
 			const armHard = (): void => {
 				if (hardMs <= 0 || hardTimer) return;

@@ -374,3 +374,24 @@ test("runChildAgent does not idle-kill a child that is allowed to block on a sup
 	assert.equal(r.aborted, true, "the run ended by the caller's abort, not a timeout");
 	assert.ok(Date.now() - started >= 350, "the child lived past the idle window");
 });
+
+test("a blocking-allowed child with no explicit hard cap is still bounded by blockingCapMs", { timeout: 3000 }, async () => {
+	const r = await runChildAgent({ task: "wait [sleep]" }, undefined, {
+		resolveInvocation: resolveFake,
+		killGraceMs: 100,
+		timeoutMs: 100,
+		startupTimeoutMs: 100,
+		allowBlocking: true,
+		blockingCapMs: 300,
+	});
+	assert.equal(r.timedOut, true, "the blocking ceiling fires");
+	assert.match(r.errorMessage ?? "", /hard cap/);
+});
+
+test("an explicit hardTimeoutMs wins over blockingCapMs", { timeout: 3000 }, async () => {
+	const r = await runChildAgent({ task: "wait [sleep]" }, undefined, {
+		resolveInvocation: resolveFake, killGraceMs: 100, timeoutMs: 100, allowBlocking: true, hardTimeoutMs: 250, blockingCapMs: 5_000,
+	});
+	assert.equal(r.timedOut, true);
+	assert.match(r.errorMessage ?? "", /250ms hard cap/);
+});
