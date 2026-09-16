@@ -260,6 +260,21 @@ test("a drilled-in agent that streams a long report does not cost the render loo
 	assertLinearRenderWork(work, buffer.length);
 });
 
+test("coalesces tree changes until the host paints the overlay", () => {
+	const tree = new AgentTree();
+	let requests = 0;
+	const tui = { requestRender: () => requests++ } as unknown as TUI;
+	tree.add({ id: "a", label: "alpha" });
+	const overlay = new AgentOverlay(tree, tui, THEME, () => {});
+	tree.update("a", { detail: "first" });
+	tree.update("a", { detail: "second" });
+	assert.equal(requests, 1, "one pending host frame should absorb a burst of tree updates");
+	assert.match(overlay.render(80).join("\n"), /second/, "the paint uses the newest tree state");
+	tree.update("a", { detail: "third" });
+	assert.equal(requests, 2, "a new burst after paint requests a new frame");
+	overlay.dispose();
+});
+
 test("a report that carries ANSI colour is still rendered incrementally", (t) => {
 	// Agents colour their output, and an untrusted child can emit one ESC on purpose. If a
 	// single escape anywhere in the settled text disables the row cache, the whole-buffer
@@ -454,7 +469,10 @@ test("the overlay ticks while an agent runs and releases its timer on dispose", 
 	const before = renders;
 	now = 2_000;
 	t.mock.timers.tick(2_000);
-	assert.ok(renders >= before + 2, "two ticks → at least two re-renders");
+	overlay.render(80); // the host clears the coalescing guard when it paints
+	t.mock.timers.tick(1_000);
+	overlay.render(80);
+	assert.ok(renders >= before + 2, "two ticks with a paint between them → two re-renders");
 	assert.match(overlay.render(80).join("\n"), /alpha  2s/);
 	overlay.dispose();
 	const after = renders;

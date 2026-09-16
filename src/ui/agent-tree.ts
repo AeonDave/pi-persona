@@ -103,10 +103,18 @@ function safeInline(value: string): string {
 /** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
 export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): string[] {
 	const lines: string[] = [];
-	const childrenOf = (parentId: string | undefined): AgentNode[] => nodes.filter((n) => n.parentId === parentId);
+	// Build the hierarchy once. Filtering the complete node array at every recursive step made
+	// wide fan-outs quadratic, exactly where progress snapshots cause the most UI activity.
+	const childrenByParent = new Map<string | undefined, AgentNode[]>();
+	for (const node of nodes) {
+		const siblings = childrenByParent.get(node.parentId);
+		if (siblings) siblings.push(node);
+		else childrenByParent.set(node.parentId, [node]);
+	}
 
 	const walk = (parentId: string | undefined, prefix: string): void => {
-		const kids = childrenOf(parentId);
+		const kids = childrenByParent.get(parentId);
+		if (!kids) return;
 		kids.forEach((node, i) => {
 			const isRoot = parentId === undefined;
 			const isLast = i === kids.length - 1;

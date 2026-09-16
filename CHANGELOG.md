@@ -34,6 +34,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
+- Agent-tree UI work is now bounded to the terminal's 16 ms frame cadence: structural fan-out and
+  streamed progress share one sticky-widget composition, unchanged widget/status publications are
+  suppressed, the F9 overlay rebuilds lazily on the next paint, and tree rendering indexes the
+  hierarchy once instead of rescanning the whole fan-out for every row. Explicit stop feedback and
+  shutdown clearing remain synchronous.
 - The idle and startup watchdogs now stay armed for every child, coaching or not, and consult the
   bus (in-process) or the broker (child-process) for a live pending ask before closing a silent
   leg — re-arming while a supervisor reply is genuinely pending, closing it once the silence is

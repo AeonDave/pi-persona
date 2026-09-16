@@ -86,6 +86,9 @@ you informed; you can inspect or redirect a worker at any point.
 | `/models <query>` | Find an available model |
 | `/doctor` | Check configuration and available capabilities |
 
+The sticky summary and F9 panel coalesce streaming updates to the terminal's frame cadence, so a
+wide fan-out stays responsive while the full live detail remains available in the panel.
+
 Each session has a personal name, separate from its persona. Naming is prompted on the first task
 or incoming Exocom message; the name survives persona switches and session resume. The supervisor
 can assign worker names before launch.

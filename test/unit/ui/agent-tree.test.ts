@@ -21,6 +21,32 @@ test("renderAgentTree nests children under their parent with status glyphs + det
 	assert.match(text, /└─ ■ Stopped/);
 });
 
+test("renderAgentTree indexes a fan-out instead of rescanning the source for every parent", () => {
+	const nodes: AgentNode[] = [
+		{ id: "root", label: "root", parentId: undefined, status: "running", detail: undefined },
+		...Array.from({ length: 64 }, (_, i): AgentNode => ({
+			id: `root/${i}`,
+			label: `worker-${i}`,
+			parentId: "root",
+			status: "running",
+			detail: undefined,
+		})),
+	];
+	let sourceScans = 0;
+	const observed = new Proxy(nodes, {
+		get(target, property, receiver) {
+			if (property !== "filter") return Reflect.get(target, property, receiver);
+			return (predicate: (node: AgentNode, index: number, array: AgentNode[]) => unknown): AgentNode[] => {
+				sourceScans++;
+				return target.filter(predicate);
+			};
+		},
+	});
+
+	assert.equal(renderAgentTree(observed).length, nodes.length);
+	assert.equal(sourceScans, 0, "tree rendering should build one adjacency index, not filter the full array per node");
+});
+
 test("renderAgentTreeSummary bounds a wide fan-out and points to the full overlay", () => {
 	const nodes: AgentNode[] = [
 		{ id: "fanout", label: "fanout", parentId: undefined, status: "running", detail: undefined },

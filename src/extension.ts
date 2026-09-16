@@ -195,8 +195,15 @@ export function announceAsyncRunSettlement(
  *  run is a leaf that has none, and a settled leg still sits in the tree until its root is torn
  *  down. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
 export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus }>): number {
-	const parents = new Set(nodes.map((n) => n.parentId));
-	return nodes.filter((n) => n.status === "running" && !parents.has(n.id)).length;
+	const parents = new Set<string>();
+	for (const node of nodes) {
+		if (node.parentId !== undefined) parents.add(node.parentId);
+	}
+	let count = 0;
+	for (const node of nodes) {
+		if (node.status === "running" && !parents.has(node.id)) count++;
+	}
+	return count;
 }
 
 /** Per-invocation tree root ids. Two concurrent runs of the SAME strategy or flow (two
@@ -597,6 +604,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (!fn) return false;
 		fn();
 		agentTree.update(nodeId, { detail: "stopping…" }); // visible at once; the run's own settle path writes the terminal status
+		flushAgentWidgetRender();
 		stopRequested.add(nodeId);
 		steerRegistry.delete(nodeId); // a hard-stopped agent is no longer steerable (mirror the strategy path)
 		return true;
@@ -622,30 +630,117 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// The live count of agents in flight (leaf cores/legs), published as a status so a
 	// custom UI (e.g. pi-1337's frame) can show "N agents" — covers strategy/council
 	// cores too, which pi-1337's own delegate-only counter misses.
-	function agentCount(): number {
-		return inFlightAgentCount(agentTree.snapshot());
+	const WIDGET_RENDER_DELAY_MS = 16;
+	let widgetTimer: ReturnType<typeof setTimeout> | undefined;
+	let widgetRenderPending = false;
+	let widgetLinesInitialized = false;
+	let lastWidgetLines: readonly string[] | undefined;
+	let widgetStatusInitialized = false;
+	let lastWidgetStatus: string | undefined;
+	const widgetNodeStatuses = new Map<string, AgentNodeStatus>();
+	function sameWidgetLines(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+		if (a === b) return true;
+		if (!a || !b || a.length !== b.length) return false;
+		return a.every((line, i) => line === b[i]);
 	}
-
-	function renderAgentWidget(): void {
+	function renderAgentWidget(nodes: readonly AgentNode[] = agentTree.snapshot()): void {
 		if (!lastCtx) return;
-		const empty = agentTree.isEmpty();
+		const empty = nodes.length === 0;
+		const lines = empty ? undefined : renderAgentTreeSummary([...nodes], 8, { now: Date.now(), stallMs: STALL_FLAG_MS });
+		const status = empty ? undefined : String(inFlightAgentCount(nodes));
 		try {
-			const lines = empty ? undefined : renderAgentTreeSummary(agentTree.snapshot(), 8, { now: Date.now(), stallMs: STALL_FLAG_MS });
-			lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
+			if (!widgetLinesInitialized || !sameWidgetLines(lastWidgetLines, lines)) {
+				lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
+				lastWidgetLines = lines;
+				widgetLinesInitialized = true;
+			}
 		} catch {
 			/* cosmetic — the widget is best-effort */
 		}
 		try {
-			lastCtx.ui.setStatus("persona-agents", empty ? undefined : String(agentCount()));
+			if (!widgetStatusInitialized || lastWidgetStatus !== status) {
+				lastCtx.ui.setStatus("persona-agents", status);
+				lastWidgetStatus = status;
+				widgetStatusInitialized = true;
+			}
 		} catch {
 			/* cosmetic */
 		}
 	}
-	// The widget re-renders on every tree change AND once a second while anything runs, so elapsed
-	// time and the stall badge move without a progress event; the clock stops itself when idle.
+	function renderAgentStatus(): void {
+		if (!lastCtx) return;
+		const nodes = agentTree.snapshot();
+		const status = nodes.length === 0 ? undefined : String(inFlightAgentCount(nodes));
+		try {
+			if (!widgetStatusInitialized || lastWidgetStatus !== status) {
+				lastCtx.ui.setStatus("persona-agents", status);
+				lastWidgetStatus = status;
+				widgetStatusInitialized = true;
+			}
+		} catch {
+			/* cosmetic */
+		}
+	}
+	/** Track status transitions in O(1), so output-only progress snapshots do not rescan the tree
+	 * merely to rediscover the same published count. Structural changes still recompute the leaf
+	 * count because adding/removing a child can change whether its running parent counts. */
+	function widgetStatusMayHaveChanged(change: AgentTreeChange): boolean {
+		if (change.type === "added") {
+			widgetNodeStatuses.set(change.node.id, change.node.status);
+			return true;
+		}
+		if (change.type === "updated") {
+			const previous = widgetNodeStatuses.get(change.node.id);
+			widgetNodeStatuses.set(change.node.id, change.node.status);
+			return previous !== change.node.status;
+		}
+		if (change.type === "removed") {
+			for (const node of change.nodes) widgetNodeStatuses.delete(node.id);
+			return true;
+		}
+		widgetNodeStatuses.clear();
+		return true;
+	}
+	function cancelAgentWidgetRender(): void {
+		if (widgetTimer !== undefined) clearTimeout(widgetTimer);
+		widgetTimer = undefined;
+		widgetRenderPending = false;
+	}
+	function requestAgentWidgetRender(refreshStatus: boolean): void {
+		if (!lastCtx || disposed) return;
+		if (refreshStatus) renderAgentStatus();
+		widgetRenderPending = true;
+		if (widgetTimer !== undefined) return;
+		widgetTimer = setTimeout(() => {
+			widgetTimer = undefined;
+			if (!widgetRenderPending || disposed) {
+				widgetRenderPending = false;
+				return;
+			}
+			widgetRenderPending = false;
+			renderAgentWidget();
+		}, WIDGET_RENDER_DELAY_MS);
+		widgetTimer.unref?.();
+	}
+	function flushAgentWidgetRender(): void {
+		if (!widgetRenderPending) return;
+		cancelAgentWidgetRender();
+		renderAgentWidget();
+	}
+	// All tree deltas share the host's 16ms frame cadence: a wide fan-out and a streamed output burst
+	// each produce at most one widget/status composition per frame. A one-second live clock keeps
+	// elapsed time and the stall badge moving without a progress event, and stops itself when idle.
 	const widgetClock = new LiveClock({ intervalMs: 1_000, isLive: () => agentTree.hasRunning(), onTick: renderAgentWidget });
 	agentTree.onChange((change) => {
-		renderAgentWidget();
+		const refreshStatus = widgetStatusMayHaveChanged(change);
+		if (disposed) {
+			// session_shutdown clears the tree after marking this activation disposed. Keep teardown
+			// synchronous so the old widget/status cannot leak into the next session.
+			cancelAgentWidgetRender();
+			renderAgentWidget();
+			return;
+		}
+		requestAgentWidgetRender(refreshStatus);
 		if (change.type === "added" || change.type === "updated") widgetClock.start();
 	});
 

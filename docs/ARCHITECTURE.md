@@ -448,7 +448,10 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   preview until expanded; terminal escape/control sequences are removed from the visible projection;
 - the sticky agent and exocom widgets have fixed row budgets — F9/`/agents` and paginated
   `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot push the
-  editor off screen or dump an entire peer registry into model context;
+  editor off screen or dump an entire peer registry into model context. Agent-tree deltas share one
+  16 ms widget composition per terminal frame; identical lines/status are not republished, hierarchy
+  rendering uses one adjacency index, and the F9 overlay rebuilds lazily when Pi paints rather than
+  once per streamed token;
 - `/flow` and `/orchestrate` append durable, TUI-only expandable result entries rather than dumping a
   large notification or a second copy into the model context;
 - the F9 overlay's *directed* keys (`x` stop, `s` steer) act only on the agent the ▸ marker still

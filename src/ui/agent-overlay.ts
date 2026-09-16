@@ -122,6 +122,11 @@ export class AgentOverlay extends Container {
 	private steering = false; // typing a steer message into the drilled-in agent
 	private steerBuffer = "";
 	private lastWidth = 100;
+	/** State changed since the last host paint. Rebuilding here (instead of in the tree listener)
+	 *  lets Pi-TUI's own 16ms frame coalescer absorb a burst of streamed progress snapshots. */
+	private dirty = false;
+	/** A host frame has already been requested for the current invalidation burst. */
+	private frameRequested = false;
 	private displayCache: { source: string; width: number; rows: string[] } | undefined;
 
 	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void, actions: AgentOverlayActions = {}) {
@@ -134,7 +139,14 @@ export class AgentOverlay extends Container {
 		this.now = actions.now ?? Date.now;
 		this.clock = new LiveClock({ intervalMs: 1_000, isLive: () => tree.hasRunning(), onTick: () => this.refresh() });
 		this.unsubscribe = tree.onChange(() => {
-			this.refresh();
+			// A tree change can arrive while a compose is open. If its live handle disappeared,
+			// retire the compose state now; the next key must not be interpreted with stale text
+			// while the lazy rebuild waits for the host's paint.
+			if (this.steering && this.detailId && !(this.actions.canSteer?.(this.detailId) ?? false)) {
+				this.steering = false;
+				this.steerBuffer = "";
+			}
+			this.scheduleRefresh();
 			this.clock.start(); // new work may have appeared while the clock was stopped
 		});
 		this.rebuild();
@@ -142,13 +154,28 @@ export class AgentOverlay extends Container {
 	}
 
 	private refresh(): void {
-		this.rebuild();
+		this.scheduleRefresh();
+	}
+
+	/** Mark the component stale and ask the host for one paint. The actual rebuild happens from
+	 *  render(), so several tree changes before that paint do not repeatedly clear/recompose all
+	 *  children (or re-wrap a streamed detail buffer). */
+	private scheduleRefresh(): void {
+		this.dirty = true;
+		if (this.frameRequested) return;
+		this.frameRequested = true;
 		this.tui.requestRender();
 	}
 
 	/** Frame the panel in a box so it stands out from the chat background. */
 	override render(width: number): string[] {
+		this.frameRequested = false;
+		if (this.lastWidth !== width) this.dirty = true;
 		this.lastWidth = width;
+		if (this.dirty) {
+			this.rebuild();
+			this.dirty = false;
+		}
 		const inner = this.inner();
 		const t = this.theme;
 		const b = (s: string): string => t.fg("accent", s);
@@ -224,6 +251,7 @@ export class AgentOverlay extends Container {
 		this.clear();
 		if (this.detailId) this.renderDetail();
 		else this.renderList();
+		this.dirty = false;
 	}
 
 	private renderList(): void {
