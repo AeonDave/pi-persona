@@ -8,17 +8,20 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 import { createBuildEngine, type BuildEngineDeps } from "../../../src/extension/engine.ts";
 import type { GitExec } from "../../../src/engine/worktree.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
+import { tempDir } from "../../setup/temp-dir.ts";
 
 const usage = { input: 0, output: 0, turns: 0 } as never;
 const okResult = (): AgentResult => ({ agent: "a", output: "done", usage, ok: true });
 
-function baseDeps(gitExec: GitExec): () => BuildEngineDeps {
+function baseDeps(gitExec: GitExec, cwd: string = process.cwd()): () => BuildEngineDeps {
 	const ctx = {
-		cwd: process.cwd(),
+		cwd,
 		model: { provider: "anthropic", id: "m" },
 		modelRegistry: {
 			getAll: () => [{ provider: "anthropic", id: "m" }],
@@ -81,4 +84,16 @@ test("a failing rev-parse produces no block and does not throw", async () => {
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true);
 	assert.equal(r.output, "done");
+});
+
+test("a leg's cwd nested below the repository top still gets a files-changed block", async () => {
+	const repoRoot = tempDir("pi-persona-engine-change-report-");
+	mkdirSync(join(repoRoot, ".git"));
+	const nested = join(repoRoot, "packages", "app");
+	mkdirSync(nested, { recursive: true });
+	const engine = createBuildEngine(baseDeps(fakeGit(["", " M src/a.ts\0"]), nested))();
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, true);
+	assert.match(r.output, /^done\n\n--- FILES CHANGED DURING THIS LEG/);
+	assert.match(r.output, /- src\/a\.ts \(M\)/);
 });
