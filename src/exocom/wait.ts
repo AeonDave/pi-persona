@@ -8,18 +8,6 @@ export function waitTimeoutMs(requested: number | undefined, cap = EXOCOM_WAIT_M
 	return Math.min(ceiling, Math.max(1, Math.floor(requested)));
 }
 
-export interface WaitMatch {
-	work_key: string;
-	ask_id?: string;
-}
-
-/** A waiter for `work_key` (and optional `ask_id`) fires on a matching answer/release. */
-export function waitMatches(waiter: WaitMatch, event: WaitMatch): boolean {
-	if (waiter.work_key !== event.work_key) return false;
-	if (waiter.ask_id === undefined || waiter.ask_id === "") return true;
-	return event.ask_id === waiter.ask_id;
-}
-
 /** Match cleanup notices only through extension-owned metadata. A substring search confuses `a`
  * with `a1` and, worse, lets untrusted postcard prose containing `ask_id=...` discard an unrelated
  * queued delivery. Notifier items are still strings, so recognize only their trusted header lines. */
