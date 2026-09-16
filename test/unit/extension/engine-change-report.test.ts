@@ -19,7 +19,7 @@ import { tempDir } from "../../setup/temp-dir.ts";
 const usage = { input: 0, output: 0, turns: 0 } as never;
 const okResult = (): AgentResult => ({ agent: "a", output: "done", usage, ok: true });
 
-function baseDeps(gitExec: GitExec, cwd: string = process.cwd()): () => BuildEngineDeps {
+function baseDeps(gitExec: GitExec, cwd: string = process.cwd(), result: () => AgentResult = okResult): () => BuildEngineDeps {
 	const ctx = {
 		cwd,
 		model: { provider: "anthropic", id: "m" },
@@ -38,7 +38,7 @@ function baseDeps(gitExec: GitExec, cwd: string = process.cwd()): () => BuildEng
 		personaConfigs: {} as never,
 		lastCtx: ctx,
 		workerSpineText: "",
-		engineFactories: { makeEngine: () => ({ run: async () => okResult() }) as never, makeInProcessEngine: () => ({ run: async () => okResult() }) as never },
+		engineFactories: { makeEngine: () => ({ run: async () => result() }) as never, makeInProcessEngine: () => ({ run: async () => result() }) as never },
 		makeBrokerDeps: () => undefined as never,
 		userAgentDir: () => process.cwd(),
 		childPiSettingsEnv: () => ({}),
@@ -84,6 +84,16 @@ test("a failing rev-parse produces no block and does not throw", async () => {
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true);
 	assert.equal(r.output, "done");
+});
+
+test("a leg that aborted with empty output still gets a clean block, never leading blank lines", async () => {
+	const abortResult = (): AgentResult => ({ agent: "a", output: "", usage, ok: false, error: "aborted", failureKind: "abort" });
+	const engine = createBuildEngine(baseDeps(fakeGit(["", " M src/a.ts\0"]), undefined, abortResult))();
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, false);
+	assert.equal(r.error, "aborted");
+	assert.match(r.output, /^--- FILES CHANGED DURING THIS LEG/);
+	assert.doesNotMatch(r.output, /^\s*\n/, "the block must not be preceded by blank lines when there was no output to trim");
 });
 
 test("a leg's cwd nested below the repository top still gets a files-changed block", async () => {
