@@ -46,6 +46,8 @@ export interface AgentRunSpec {
 	 *  strategies (e.g. `debate`). In-process engine only — the child engine ignores it;
 	 *  gated at bind time by the persona's `canUseBus` capability. */
 	peers?: boolean;
+	/** Declared ownership (from delegate `writeSet`), used only to annotate the files-changed report. */
+	writeSet?: string[];
 }
 
 /** Is `x` a genuine positive, finite `timeoutMs` override — vs. absent/junk (undefined, NaN,
