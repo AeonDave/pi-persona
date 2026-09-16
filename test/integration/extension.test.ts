@@ -4976,6 +4976,50 @@ test("the ledger protocol canonicalizes ask targets, gates the receiver, and sur
 	}
 });
 
+test("a write landing inside a peer's open claim is warned once, then allowed on retry (Task 7)", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "write-guard-a");
+	const { ctx: ctxBBase, notes } = makeExocomCtx(cwd, "write-guard-b");
+	const ctxB = { ...ctxBBase, hasUI: true };
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+
+		await (a.tool("exocom_claim") as { execute: AnyFn }).execute("claim-write-guard", {
+			work_key: "write-guard",
+			write_set: ["src/a.ts"],
+			slice: "owner A",
+		}, undefined, undefined, ctxA);
+
+		const blocked = b.fire("tool_call", { toolCallId: "write-guard-1", toolName: "write", input: { path: "src/a.ts" } }, ctxB);
+		assert.equal(blocked?.block, true, "the first write inside the peer's claim is blocked once");
+		assert.match(blocked?.reason ?? "", /inside .*'s open claim .*call the tool again/);
+
+		const retried = b.fire("tool_call", { toolCallId: "write-guard-2", toolName: "write", input: { path: "src/a.ts" } }, ctxB);
+		assert.equal(retried?.block, undefined, "the retry with the same claim + path is allowed");
+
+		const otherPath = b.fire("tool_call", { toolCallId: "write-guard-3", toolName: "write", input: { path: "src/other.ts" } }, ctxB);
+		assert.equal(otherPath?.block, undefined, "a path outside the claim is never warned");
+
+		const editRetry = b.fire("tool_call", { toolCallId: "write-guard-4", toolName: "edit", input: { path: "src/a.ts" } }, ctxB);
+		assert.equal(editRetry?.block, undefined, "edit shares the write-warning key with write for the same claim + path");
+
+		assert.equal(notes.filter((note) => /open claim/.test(note)).length, 1, "the operator sees the warning exactly once");
+	} finally {
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("exocom_wait wakes with a peer-left notice, well before its timeout, when the awaited peer leaves the pool", async () => {
 	const prev = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";
