@@ -17,8 +17,8 @@ Start by enumerating the items and deciding whether they are truly independent. 
 the `council` map or a bounded delegate call with one uniquely named leg per item. Discover real
 agents and skills before dispatching. Every leg gets a complete brief with its item, scope, position,
 constraints, required artifact, success signal, and stop condition. Have the splitter declare each
-item's write-set; overlaps are reported in the per-item status ledger, and refused before any worker
-starts when the persona sets `ownership: enforce`. Peers can exchange findings, but cross-process
+item's write-set; it is recorded in the per-item status ledger, and an overlap between items is
+refused before any worker starts when the persona sets `ownership: enforce`. Cross-process
 serialization against another Pi still runs through the exocom claim, not this declaration alone.
 
 Consolidate the batch with an explicit status for every item: **completed**, **failed**, or

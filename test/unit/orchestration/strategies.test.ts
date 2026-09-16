@@ -878,6 +878,53 @@ test("map's splitter items may declare {item, writeSet}; the worker task text is
 	);
 });
 
+test("map parses an array of {item, writeSet} objects wrapped in a ```json fence — the shape a model most often emits", async () => {
+	const workerTasks: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") {
+				const arr = JSON.stringify([
+					{ item: "port a.ts", writeSet: ["src/a.ts"] },
+					{ item: "port b.ts", writeSet: ["src/b.ts"] },
+				]);
+				return { agent: "splitter", output: `Here is the split:\n\`\`\`json\n${arr}\n\`\`\`\nLet me know if you need more.`, usage: usage(), ok: true };
+			}
+			workerTasks.push(spec.task);
+			return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { ownership: "declare" } }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(workerTasks.length, 2);
+	assert.ok(workerTasks.some((t) => t.includes("> port a.ts")));
+	assert.ok(workerTasks.some((t) => t.includes("> port b.ts")));
+	const items = r.structured?.items as Array<{ item: string; writeSet?: string[] }>;
+	assert.deepEqual(
+		items.map((i) => i.writeSet).sort(),
+		[["src/a.ts"], ["src/b.ts"]],
+	);
+});
+
+test("map parses a bare array surrounded by prose (no fence) — the pre-existing extractJsonCandidate fallback keeps working", async () => {
+	const workerTasks: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") {
+				return { agent: "splitter", output: 'Sure thing, here you go: ["alpha","beta"] — hope that helps!', usage: usage(), ok: true };
+			}
+			workerTasks.push(spec.task);
+			return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: {} }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(workerTasks.length, 2);
+	assert.ok(workerTasks.some((t) => t.includes("> alpha")));
+	assert.ok(workerTasks.some((t) => t.includes("> beta")));
+});
+
 test("map with ownership absent is byte-identical to before the param existed, even when items are dropped over the cap", async () => {
 	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
 	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);
