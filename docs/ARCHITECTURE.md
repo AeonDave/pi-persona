@@ -147,7 +147,12 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `persona: false` sibling of the persona parser; both share one frontmatter engine).
 - **`src/core/`** — pure kernel (no Pi imports, unit-tested): `frontmatter`, `permissions` +
   `capabilities`, `contract` (+`parseContract`), `config`, `discovery`, `seed`, `fence`
-  (`fenceUntrusted` / `attributeInbound`), `models`, `brief` (`buildDelegationBrief` — the per-turn
+  (`fenceUntrusted` / `attributeInbound`), `ownership` (`findWriteSetOverlaps` /
+  `validateParallelWriteSets` / `writeSetPathError` — parallel write-set overlap, shared by
+  `delegate` and `map`'s `ownership` param), `pi-compat` (`MIN_PI_VERSION`, `installedPiVersion`,
+  `satisfiesFloor` — the one place the supported host floor is declared; `package.json`
+  `peerDependencies`, `/doctor`'s `pi:` line, and the README's stated floor all trace back to this
+  constant), `models`, `brief` (`buildDelegationBrief` — the per-turn
   delegation brief: live roster + standing hand-off default, rendered to the system-prompt tail; and
   `buildExocomBrief` — the per-turn peer brief: live exocom peers as bounded identifiers, the
   peer-vs-sub-agent split, and the relevance bound on an exchange),
@@ -161,9 +166,11 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback),
   `spec-preflight.ts` (the one unknown-agent/unknown-contract preflight shared by both engines),
-  `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event →
-  state), `handles.ts` (one bus-handle sequence shared by BOTH engines), `signals.ts`
-  (`combineSignals`).
+  `change-report.ts` (`captureStatus`/`diffStatus`/`renderChangeReport` — the files-changed report
+  `src/extension/engine.ts` appends to a non-worktree leg's result; pure over the injected `GitExec`
+  from `worktree.ts`), `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation),
+  `stream.ts` (event → state), `handles.ts` (one bus-handle sequence shared by BOTH engines),
+  `signals.ts` (`combineSignals`).
 - **`src/orchestration/`** — the heart: `sdk.ts` (the Strategy SDK), `strategy.ts` (registry +
   `knownParams`), `strategies/*.ts`, `voting.ts`, `judge.ts` (anonymise-for-judge), `reducers.ts`,
   `roster.ts` (teams + `rosterSpec`), `flow*.ts` (DAG + JSONL journal + gates), `render.ts`.
@@ -177,6 +184,14 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `envelope.ts`/`inbound.ts` (wire format + the pure guardrailed
   delivery chain: hop cap, dedup, budgets, truncation, fence/attribute), `limits.ts` (constants),
   `guards.ts` (`SenderBudget`/`SeenMessages`), `ledger.ts` (scope JSONL work ledger),
+  `untrusted.ts` (`untrusted()`/`UNTRUSTED_MAX` — the ONE sanitizer every surface that renders a
+  peer-authored ledger field, e.g. `slice`/`write_set`/a peer label, runs it through first, so a
+  hostile peer's terminal escapes or instruction-shaped text never reach a report, notification, or
+  tool result unfenced), `status.ts` (`formatLedgerStatus` — the ownership view `exocom_status` and
+  `/exocom` both render: your claims, peers' claims, asks waiting on you, your own open asks),
+  `write-guard.ts` (`peerClaimFor`/`writeWarningReason`/`WriteWarnings` — the advisory,
+  warn-once-then-allow guard on a supervisor `write`/`edit` whose path overlaps a peer's open
+  claim; built on `core/ownership.ts`'s path-overlap primitives, never a separate implementation),
   `wait.ts`/`gate.ts` (non-blocking join + inbound constrained-turn allowlist),
   `install.ts` (the feature's composition adapter: session-scoped plane + ledger + wait/tool/hook
   wiring; not an ExtensionFactory and not constrained to the transport layer's dependencies).
@@ -207,28 +222,35 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
 
 Both backends sit behind the `StrategyEngine` seam (`run(spec, onProgress?, signal?, onSteerable?) →
 AgentResult`) and enforce three independent deadlines: `RUN_LIMITS.timeoutMs` as an **idle window** (no
-events for that long ⇒ abort; the inproc idle watchdog is disabled for coaching children that
-legitimately block on a supervisor reply), `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock
-cap** — a lifetime ceiling armed once and never reset that, when set, settles a busy-but-non-converging
-child (a loop that keeps emitting) the idle window never catches (OFF by default, 0 = unlimited, so a
-healthy, progressing child has no hard lifetime ceiling; the token budget gates later admissions from
-completed usage, rather than stopping an active stream) — and `PI_PERSONA_AGENT_STARTUP_MS` as a
-**startup deadline** (default 300000, `0` disables):
+events for that long ⇒ abort), `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock cap** — a
+lifetime ceiling armed once and never reset that, when set, settles a busy-but-non-converging child (a
+loop that keeps emitting) the idle window never catches (OFF by default, 0 = unlimited, so a healthy,
+progressing child has no hard lifetime ceiling; the token budget gates later admissions from completed
+usage, rather than stopping an active stream) — and `PI_PERSONA_AGENT_STARTUP_MS` as a **startup
+deadline** (default 300000, `0` disables):
 a child that makes ZERO progress — no completed turn, no tokens, no streamed output — within the window
 is killed as a stalled start. It fast-fails the "never started" case the generous idle window is too
 slow for — notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; the
 first real progress cancels it, so a slow-but-streaming turn is never touched. All three classify as
 `failureKind: "timeout"` (never a provider reroute).
 
-The child-process engine mirrors the in-process coaching exemption for an async (background) leg:
-`allowBlocking` disables both the idle and startup watchdogs (`engine/child.ts`) so a
-`decision`/`interview` round-trip over the broker is never killed as if it had stalled. The hard
-wall-clock cap still applies regardless.
+The idle window and the startup deadline stay ARMED for every child, coaching or not — a blind
+per-leg exemption used to disable both outright while a child could legitimately block on a
+supervisor reply, which meant a genuinely stalled coaching leg ran forever. Instead, when either
+fires, the source of truth is asked directly: does THIS child have a live `decision`/`interview`
+ask still outstanding right now? In-process consults the bus (`hasPendingAskFrom`, `bus/inproc.ts`);
+the child-process engine consults the broker through the same shape (`isBlocked`, wired in
+`engine/adapter.ts`, checked in `engine/child.ts`). A live pending ask re-arms the window and the
+leg keeps waiting; no pending ask means the silence is real and the leg is killed as timed out. The
+hard wall-clock cap is the one ceiling that still applies unconditionally — including to a coaching
+child legitimately blocked on a reply — so a supervisor that never answers still has a backstop.
 
 In-process deadlines and caller cancellation are armed **before session construction**. Startup is
 one window from construction to the first real progress, and the hard cap covers the same lifetime
-without resetting. Coaching's idle/startup exemption applies only after construction, when a child
-can actually wait on a supervisor reply. Cancellation settles the run and releases its bus handle;
+without resetting. The bus consult that can re-arm idle/startup only matters after construction, when
+a child can actually have registered an ask — during construction there is no session yet, so no ask
+can possibly be pending and the window behaves exactly as a plain deadline. Cancellation settles the
+run and releases its bus handle;
 a session returned late is disposed and a late factory rejection is consumed. Pi's resource loader
 does not expose forcible cancellation: the recursive-extension guard remains held until that factory
 settles. If the loader never returns, restart Pi and use `PI_PERSONA_ENGINE=child` for process-level

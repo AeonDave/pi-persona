@@ -74,6 +74,15 @@ ledger before another child is spawned. A run whose model's provider fails at ca
 outage, 5xx) may retry the same model id through a fallback provider; each reroute surfaces to the
 supervisor as a warning toast, `<agent>: <from> failed, retrying on <to>`.
 
+Any leg that does NOT run in `isolation: worktree` shares the real checkout, so its result gets a
+"what changed" block appended: `--- FILES CHANGED DURING THIS LEG (shared checkout; parallel legs
+may overlap) ---` followed by one `- <path> (<M|A|D|R|?>)` line per path (capped at 40, `+N more`
+beyond that); a changed path outside the leg's own declared `writeSet` is flagged
+`⚠ outside declared writeSet`. This is a `git status` before/after snapshot, not a private diff — a
+parallel sibling touching the same file can appear here too — and it is skipped when there is
+nothing to report, or when the leg IS worktree-isolated (that path already returns a real unified
+diff instead).
+
 The cross-process broker is on by default for child-engine, worktree, and MCP legs. It provides the
 same supervisor communication surface over a session-scoped POSIX socket or Windows named pipe.
 `PI_PERSONA_BROKER=off` restores the pre-broker child spawn behavior. See the comm-plane contract in
@@ -107,6 +116,13 @@ fenced postcards, and a durable claim/ask ledger. `--exocom` joins the current w
 `--exocom=Ab0T` joins an existing workspace scope from another cwd. The four-character code is a
 same-host join reference, not authentication. Foreign members advertise the workspace they can
 actually inspect and cannot claim repository-relative paths in another workspace's ledger.
+
+`exocom_status` (a tool, taking no arguments) and `/exocom` (a command, which additionally lists
+live peers) both render the same ownership view: your claims, peers' claims, asks waiting on you,
+and your own open asks. A claim's `write_set` is advisory, not enforced: a supervisor's own
+`write`/`edit` call whose path overlaps a PEER's open claim is blocked once with a reason to
+coordinate (`exocom_ask`) or claim the path itself; calling the same tool again on the same path is
+then allowed through (one warning per claim + normalized path, not a standing lock).
 
 ## Configuration and data
 
@@ -336,6 +352,11 @@ neither while down): `broker: failed — <reason>` — children built while it i
 bus endpoint, so they never burn connect backoff against a dead socket, and the next child-engine
 build retries. A connected broker child's status shows `⇄ <handle>`; if that connection drops, the
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
+
+`/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
+(requires ≥ 0.83.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
+resolved (a non-standard install layout) — not a failed check.
 
 **CLI flags** — `--persona <name>` starts with that installed persona and errors if it is missing;
 `--exocom` joins this workspace's Exocom plane; `--exocom=Ab0T` joins another workspace's scope
