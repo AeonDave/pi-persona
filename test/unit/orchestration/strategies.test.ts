@@ -850,6 +850,122 @@ test("map appends no truncation note when every sub-item was worked", async () =
 	assert.doesNotMatch(r.output, /sub-item/, "a complete map does not carry a truncation footer");
 });
 
+test("map's splitter items may declare {item, writeSet}; the worker task text is always just the item string", async () => {
+	const workerTasks: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") {
+				return {
+					agent: "splitter",
+					output: JSON.stringify(["alpha", { item: "port b.ts", writeSet: ["src/b.ts"] }, { weird: true }]),
+					usage: usage(),
+					ok: true,
+				};
+			}
+			workerTasks.push(spec.task);
+			return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: {} }, sdk);
+	assert.equal(r.ok, true);
+	assert.equal(workerTasks.length, 3);
+	assert.ok(workerTasks.some((t) => t.includes("> alpha")), "a plain string item stays a plain item");
+	assert.ok(workerTasks.some((t) => t.includes("> port b.ts")), "an {item, writeSet} object is destructured to its item text, not stringified");
+	assert.ok(
+		workerTasks.some((t) => t.includes(JSON.stringify({ weird: true }))),
+		"a shape that isn't a string or {item, writeSet} keeps today's JSON.stringify fallback",
+	);
+});
+
+test("map with ownership absent is byte-identical to before the param existed, even when items are dropped over the cap", async () => {
+	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);
+	const sections = Array.from({ length: LIMITS.maxChildren - 1 }, () => "### [worker] ok\n\nworked").join("\n\n---\n\n");
+	const expected = `${sections}\n\n[pi-persona] 3 sub-item(s) beyond the worker cap (${LIMITS.maxChildren - 1}) were not run — this covers 7 of 10 sub-items.`;
+	assert.equal(r.output, expected, "no ownership param means no extra rendered line — the pre-existing footer is the whole story");
+});
+
+test('map ownership "enforce" fails the whole run BEFORE any worker spawns when declared writeSets overlap', async () => {
+	let spawns = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			spawns++;
+			if (spec.agent === "splitter") {
+				return {
+					agent: "splitter",
+					output: JSON.stringify([
+						{ item: "port a.ts", writeSet: ["src/a.ts"] },
+						{ item: "port b.ts", writeSet: ["src/a.ts"] },
+					]),
+					usage: usage(),
+					ok: true,
+				};
+			}
+			return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	await assert.rejects(() => map.run({ task: "T", roster: "m", params: { ownership: "enforce" } }, sdk), /src\/a\.ts/);
+	assert.equal(spawns, 1, "only the splitter ran — the overlap was caught before any worker spawned");
+});
+
+test('map ownership "enforce" never blocks an item that declares no writeSet — a weak splitter must not brick the run', async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["alpha","beta"]', usage: usage(), ok: true };
+			return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { ownership: "enforce" } }, sdk);
+	assert.equal(r.ok, true);
+});
+
+test('map ownership "declare" runs items with an overlapping writeSet (no gate) and records both in structured.items', async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") {
+				return {
+					agent: "splitter",
+					output: JSON.stringify([
+						{ item: "port a.ts", writeSet: ["src/a.ts"] },
+						{ item: "port b.ts", writeSet: ["src/a.ts"] },
+					]),
+					usage: usage(),
+					ok: true,
+				};
+			}
+			return { agent: spec.agent, output: "worked", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { ownership: "declare" } }, sdk);
+	assert.equal(r.ok, true, "declare never gates — both workers run");
+	assert.equal(r.structured?.count, 2);
+	const items = r.structured?.items as Array<{ item: string; status: string; writeSet?: string[] }>;
+	assert.equal(items.length, 2);
+	assert.deepEqual(items[0]?.writeSet, ["src/a.ts"]);
+	assert.deepEqual(items[1]?.writeSet, ["src/a.ts"]);
+	assert.ok(items.every((i) => i.status === "completed"));
+});
+
+test("map's item ledger (structured.items) is always emitted and names not-run items once ownership opts in", async () => {
+	const roster = { team: () => ["splitter", "worker"] };
+	const off = await map.run(
+		{ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } },
+		makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster, limits: LIMITS }),
+	);
+	const declared = await map.run(
+		{ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren, ownership: "declare" } },
+		makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster, limits: LIMITS }),
+	);
+	const notRun = (r: AgentResult) => (r.structured?.items as Array<{ status: string; item: string }>).filter((i) => i.status === "not-run");
+	assert.deepEqual(notRun(off).map((i) => i.item).sort(), ["item7", "item8", "item9"], "structured.items is always populated, regardless of the param");
+	assert.doesNotMatch(off.output, /not run:/, "off adds no rendered line — see the byte-identical pin above");
+	assert.match(declared.output, /not run: item7, item8, item9/, "declare (or enforce) names the not-run item(s) in the rendered text too");
+});
+
 test("debate requires a roster of at least 2", async () => {
 	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => ["solo"] }, limits: LIMITS });
