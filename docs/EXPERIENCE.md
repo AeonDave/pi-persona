@@ -75,11 +75,22 @@ Exchange decisions and evidence when they affect the work; acknowledgement-only 
 add noise. If a peer has joined from another workspace, agree which workspace owns each artifact.
 That peer's membership does not grant it a write claim in the selected workspace.
 
+`exocom_status` (or `/exocom`) shows who owns what right now: your open claims, a peer's open
+claims, and any asks waiting on either side. Claims are advisory, not a lock — if you write into a
+path a peer has claimed, that write is blocked once with a reminder to coordinate or claim it
+yourself first; asking again on the same path goes through, so the warning never repeats for work
+you've already been told about.
+
 ## Read completion as an evidence statement
 
 A useful completion tells you what changed, which checks ran against the final state, and what
 still needs attention. A successful review, a passing mocked test, and a live integration check
 answer different questions. Skipped checks and partial batch coverage remain visible.
+
+A worker that did not run in its own isolated worktree has its report followed by a "files changed"
+block: every path `git status` saw move since the worker started, flagging anything outside what it
+was asked to touch. Treat it as a same-checkout approximation, not a private diff — a sibling
+running at the same time can touch the same file.
 
 The bundled persona prompts guide these habits. Tool capabilities, engine limits, and filesystem
 isolation are enforced separately by the runtime; a persona's prose does not create a sandbox.
