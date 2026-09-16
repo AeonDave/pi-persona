@@ -8,7 +8,8 @@
  * `slice`, `write_set`, `question`, and every peer display name are PEER-AUTHORED and only
  * length-bounded at the wire boundary (envelope.ts) — a hostile peer can put terminal escapes or
  * instruction-shaped text in any of them. Every such field is stripped and collapsed
- * ({@link untrusted}) before it is rendered, own rows included (defense in depth: this session's
+ * ({@link untrusted}, shared by every exocom surface that renders these fields — see
+ * `untrusted.ts`) before it is rendered, own rows included (defense in depth: this session's
  * own prior tool calls are not a different trust boundary from the ledger file itself). The two
  * sections that can ONLY contain a peer's own claims or a peer's own question — "peer claims" and
  * "asks waiting for you" — are additionally wrapped in one `fencePeer` per section, so the model
@@ -17,7 +18,8 @@
  */
 import type { LedgerAsk, LedgerClaim, LedgerState } from "./ledger.ts";
 import { formatDuration } from "../core/time.ts";
-import { fencePeer, stripTerminalControls } from "../core/fence.ts";
+import { fencePeer } from "../core/fence.ts";
+import { untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
 
 /** No section may hand the model an unbounded ledger — a long-lived scope with many claims stays
  *  one bounded read, same discipline as the pending-ask block and the peer roster. */
@@ -25,12 +27,6 @@ const MAX_ROWS = 20;
 /** A single claim's write_set is peer-controlled in length up to 64 paths (envelope.ts); the row
  *  itself stays one bounded line rather than growing with the claim. */
 const MAX_WRITE_SET_ENTRIES = 8;
-
-/** Strip terminal controls, collapse the field to one line, and bound its length. Every
- *  peer-authored ledger field goes through this before it is ever interpolated into the report. */
-function untrusted(value: string, max: number): string {
-	return stripTerminalControls(value).replace(/\s+/g, " ").trim().slice(0, max);
-}
 
 function ageFor(ts: string, now: number): string {
 	return formatDuration(now - Date.parse(ts));
@@ -41,24 +37,24 @@ function byTsAscending(a: { ts: string }, b: { ts: string }): number {
 }
 
 function renderWriteSet(writeSet: readonly string[]): string {
-	const paths = writeSet.map((path) => untrusted(path, 120));
+	const paths = writeSet.map((path) => untrusted(path, UNTRUSTED_MAX.writePath));
 	if (paths.length <= MAX_WRITE_SET_ENTRIES) return paths.join(", ");
 	return `${paths.slice(0, MAX_WRITE_SET_ENTRIES).join(", ")}, +${paths.length - MAX_WRITE_SET_ENTRIES} more`;
 }
 
 function resolveLabel(sessionId: string, labelFor: (sessionId: string) => string | undefined): string {
-	return untrusted(labelFor(sessionId) ?? sessionId, 48);
+	return untrusted(labelFor(sessionId) ?? sessionId, UNTRUSTED_MAX.label);
 }
 
 function claimRow(claim: LedgerClaim, self: string, labelFor: (sessionId: string) => string | undefined, now: number): string {
 	// Own rows omit the label — a session does not need to be told its own name.
 	const prefix = claim.from_session === self ? "" : `${resolveLabel(claim.from_session, labelFor)} · `;
-	return `• ${prefix}${untrusted(claim.slice, 80)} · ${renderWriteSet(claim.write_set)} · ${ageFor(claim.ts, now)}`;
+	return `• ${prefix}${untrusted(claim.slice, UNTRUSTED_MAX.slice)} · ${renderWriteSet(claim.write_set)} · ${ageFor(claim.ts, now)}`;
 }
 
 function askRow(ask: LedgerAsk, otherSession: string, labelFor: (sessionId: string) => string | undefined, now: number): string {
 	const label = resolveLabel(otherSession, labelFor);
-	return `• ${label} · ${ask.work_key} · ${ask.ask_id} · "${untrusted(ask.question, 200)}" · ${ageFor(ask.ts, now)}`;
+	return `• ${label} · ${ask.work_key} · ${ask.ask_id} · "${untrusted(ask.question, UNTRUSTED_MAX.question)}" · ${ageFor(ask.ts, now)}`;
 }
 
 /** `fence: true` wraps the WHOLE section body in one `fencePeer` call — the title stays outside

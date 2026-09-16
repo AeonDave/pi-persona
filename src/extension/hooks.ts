@@ -17,7 +17,7 @@ import { type AsyncRun, type IdleCoalescingNotifier, type PeekWatcher } from "..
 import { constrainedTurnAllows } from "../exocom/gate.ts";
 import type { LedgerClaim } from "../exocom/ledger.ts";
 import type { DisplayPeer } from "../exocom/plane.ts";
-import { peerClaimFor, WRITE_TOOLS, writeWarningKey } from "../exocom/write-guard.ts";
+import { peerClaimFor, WRITE_TOOLS, writeWarningKey, writeWarningReason } from "../exocom/write-guard.ts";
 import {
 	canonicalExocomTelemetryTargets,
 	piPersonaToolErrorPatch,
@@ -476,7 +476,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				// Advisory: a ledger read failure here must not block an otherwise-allowed write.
 				let claim: LedgerClaim | undefined;
 				try {
-					claim = peerClaimFor(input.path, exocom.ledgerState().claims, exocom.sessionId);
+					claim = peerClaimFor(input.path, exocom.ledgerState().claims, exocom.sessionId, ctx.cwd);
 				} catch {
 					claim = undefined;
 				}
@@ -484,8 +484,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 					const key = writeWarningKey(claim, input.path);
 					if (!exocom.writeWarnings.seen(key)) {
 						exocom.writeWarnings.remember(key);
-						const who = exocom.peerLabelFor(claim.from_session) ?? claim.from_name;
-						const reason = `exocom: ${input.path} is inside ${who}'s open claim (${claim.slice}: ${claim.write_set.join(", ")}) — coordinate with exocom_ask or claim it; call the tool again to proceed (this warning shows once per path)`;
+						const label = exocom.peerLabelFor(claim.from_session) ?? claim.from_name;
+						const reason = writeWarningReason(input.path, claim, label);
 						try { if (ctx.hasUI) ctx.ui.notify(reason, "warning"); } catch { /* cosmetic */ }
 						h.telemetryToolStartedAt.delete(event.toolCallId);
 						h.telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
