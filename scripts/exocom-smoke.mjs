@@ -25,11 +25,11 @@
  *   - the correlated reply wakes A; closing both sessions removes both registry entries
  * Capture the transcript from both terminals.
  */
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { attributePeer } from "../src/core/fence.ts";
 import { SeenMessages, SenderBudget } from "../src/exocom/guards.ts";
 import { buildInboundDelivery } from "../src/exocom/inbound.ts";
 import { EXOCOM } from "../src/exocom/limits.ts";
@@ -49,8 +49,14 @@ function check(label, ok) {
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function planeFor(name, onInbound) {
-	const session_id = `sid-${name}-${process.pid}`;
+// Deterministic given `name` and this process — shared by planeFor (to build the identity) and
+// main() (to stamp from_session on a hand-built semantic frame), so the two never drift apart.
+function sessionIdFor(name) {
+	return `sid-${name}-${process.pid}`;
+}
+
+function planeFor(name, onInbound, onSemantic) {
+	const session_id = sessionIdFor(name);
 	return new ExocomPlane({
 		agentDir, hash: HASH,
 		identity: {
@@ -59,6 +65,7 @@ function planeFor(name, onInbound) {
 		},
 		getCard: () => ({ name, persona: name, model: "smoke/model", context_pct: 0, inbox: 0 }),
 		onInbound,
+		onSemantic,
 	});
 }
 
@@ -72,15 +79,23 @@ async function main() {
 	const budget = new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES });
 	const seen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
 	const bDecisions = []; // { msg, fromEntry, decision }
-	const b = planeFor("smoke-b", (msg, fromEntry) => {
-		const label = fromEntry ? `${fromEntry.name}${fromEntry.persona ? ` (${fromEntry.persona})` : ""}` : msg.from_session;
-		const decision = buildInboundDelivery(msg, label, {
-			budget, seen, injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
-			fence: (t) => t,
-			attribute: attributePeer,
-		});
-		bDecisions.push({ msg, fromEntry, decision });
-	});
+	const bSemantic = []; // { frame, fromEntry }
+	const b = planeFor(
+		"smoke-b",
+		(msg, fromEntry) => {
+			const label = fromEntry ? `${fromEntry.name}${fromEntry.persona ? ` (${fromEntry.persona})` : ""}` : msg.from_session;
+			const decision = buildInboundDelivery(msg, label, {
+				budget, seen, injectMaxBytes: EXOCOM.INJECT_MAX_BYTES,
+			});
+			bDecisions.push({ msg, fromEntry, decision });
+		},
+		// Mirrors src/exocom/install.ts's accept path (no ledger gating here — this smoke only
+		// checks that a semantic frame is delivered end-to-end with the same msg_id).
+		(frame, fromEntry) => {
+			bSemantic.push({ frame, fromEntry });
+			return { accepted: true };
+		},
+	);
 
 	try {
 		await a.start();
@@ -117,7 +132,22 @@ async function main() {
 		check("correlated reply: A's onInbound fired", aInbound.length === 1);
 		check("correlated reply: in_reply_to matches the original msg_id", aInbound[0]?.in_reply_to === firstMsgId);
 
-		// ── 4. budget cap (R2) ────────────────────────────────────────────────
+		// ── 4. semantic frame (claim) ─────────────────────────────────────────
+		const claimFrame = {
+			kind: "claim",
+			work_key: "smoke-wk",
+			from_session: sessionIdFor("smoke-a"),
+			from_name: "smoke-a",
+			write_set: ["README.md"],
+			slice: "smoke",
+			msg_id: randomUUID(),
+			ts: new Date().toISOString(),
+		};
+		const sentClaim = await a.sendSemantic("smoke-b", claimFrame);
+		await delay(150);
+		check("semantic claim frame delivered", bSemantic.some((s) => s.frame.msg_id === sentClaim.msg_id));
+
+		// ── 5. budget cap (R2) ────────────────────────────────────────────────
 		// One message already spent from A's bucket in step 2 — fire enough more to cross
 		// EXOCOM.SENDER_MAX_MSGS and force at least one { drop: "budget" } out of the real guard.
 		const extra = EXOCOM.SENDER_MAX_MSGS + 5;
@@ -126,7 +156,7 @@ async function main() {
 		check(`budget cap: at least one of ${extra + 1} sends from A was dropped as { drop: "budget" }`,
 			bDecisions.some((d) => "drop" in d.decision && d.decision.drop === "budget"));
 
-		// ── 5. clean stop ─────────────────────────────────────────────────────
+		// ── 6. clean stop ─────────────────────────────────────────────────────
 		await a.stop();
 		const stillRegistered = readAll(agentDir, HASH).some((e) => e.name === "smoke-a");
 		check("clean stop: A's registry entry is removed", !stillRegistered);
