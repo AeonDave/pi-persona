@@ -144,6 +144,7 @@ For optional long-term memory, add [pi-persona-mind](https://github.com/AeonDave
 | [Architecture](docs/ARCHITECTURE.md) | Runtime behavior, boundaries, and design decisions |
 | [Shared prompts](docs/SPINE.md) | The optional behavioral layer shared across personas |
 | [Telemetry](docs/TELEMETRY.md) | Integration events for companion extensions |
+| [Changelog](CHANGELOG.md) | Notable changes, release by release |
 
 ## Develop
 
