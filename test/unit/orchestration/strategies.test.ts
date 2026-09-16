@@ -828,6 +828,12 @@ test("map budgets the splitter's own child slot, so a full-size split still fits
 	assert.equal(r.structured?.count, LIMITS.maxChildren - 1, "one item fewer than maxChildren — the splitter took a slot");
 });
 
+test("map budgets the splitter's own child slot AND the verifier wave, so a full-size split with verify set still fits maxChildren", async () => {
+	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: { verify: "verifier" } }, sdk);
+	assert.equal(r.ok, true, "the splitter + workers + one verifier per completed item must not exceed maxChildren");
+});
+
 test("map clamps an explicit params.maxItems to the worker slots left after the splitter", async () => {
 	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
 	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);
@@ -1067,6 +1073,21 @@ test('map "verify" runs one reviewer per COMPLETED item (fenced item + fenced wo
 	assert.equal(byItem.gamma?.status, "failed", "a rejecting verdict flips a completed item to failed");
 	assert.equal(byItem.gamma?.failureKind, "verification");
 	assert.equal(byItem.gamma?.error, "gamma's fix is incomplete");
+	assert.match(r.output, /verification failed: gamma/, "a rejected item is named in the rendered output, not just the ledger");
+	assert.doesNotMatch(r.output, /verification failed:.*beta/, "beta's own worker failure is not relabeled as a verification rejection");
+});
+
+test('map "verify" names rejected items in the output even when ownership is "off" — verification is independent of ownership', async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["alpha"]', usage: usage(), ok: true };
+			if (spec.agent === "worker") return { agent: "worker", output: "did alpha", usage: usage(), ok: true };
+			return { agent: "verifier", output: "reject", structured: { stance: "reject", result: "incomplete" }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { verify: "verifier" } }, sdk);
+	assert.match(r.output, /verification failed: alpha/, "ownership defaults to \"off\" but the rejection still renders");
 });
 
 test('map "verify" treats a verifier leg that itself couldn\'t run as that leg\'s OWN failureKind, not "verification" (no verdict was ever reached)', async () => {

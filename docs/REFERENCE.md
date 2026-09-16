@@ -386,6 +386,7 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_STATE_FILE` | a global default path | overrides where the last-selected-persona state is stored |
 | `PI_PERSONA_ASYNC_RETAIN` | 25 | how many settled-but-uncollected async runs are retained before FIFO-evicting the oldest |
 | `PI_PERSONA_LEDGER_V2` | off | `on` widens the delegation-ledger retry-veto key to also include role/tools/isolation, not just agent+model+task |
+| `PI_PERSONA_LEG_CHANGE_REPORT` | on | `off` disables the non-worktree files-changed report (two `git status` spawns per leg) |
 
 ## Development
 

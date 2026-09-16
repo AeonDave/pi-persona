@@ -107,3 +107,17 @@ test("captureStatus finds a repository whose top level is an ancestor of a neste
 	assert.deepEqual([...(snapshot?.entries.entries() ?? [])], [["src/a.ts", " M"]]);
 	assert.ok(calls.every((args) => args.includes("-C") && args.includes(repoRoot)), "git must run with -C at the discovered repository root, not the nested cwd");
 });
+
+test("captureStatus skips both its own findGitRoot walk and the rev-parse gate when given an already-resolved gitRoot", async () => {
+	const repoRoot = tempDir("pi-persona-change-report-known-root-");
+	mkdirSync(join(repoRoot, ".git"));
+	const calls: string[][] = [];
+	const exec: GitExec = async (args) => {
+		calls.push(args);
+		return { code: 0, stdout: " M src/a.ts\0", stderr: "" };
+	};
+	const snapshot = await captureStatus(repoRoot, exec, repoRoot);
+	assert.deepEqual([...(snapshot?.entries.entries() ?? [])], [["src/a.ts", " M"]]);
+	assert.equal(calls.length, 1, "only the status call runs — no rev-parse — when the caller already resolved and vouched for the root");
+	assert.ok(!calls[0]!.includes("rev-parse"));
+});

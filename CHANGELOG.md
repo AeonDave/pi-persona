@@ -15,7 +15,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - A warning toast announces a provider-fallback reroute (`<agent>: <from> failed, retrying on
   <to>`) instead of switching silently.
 - A non-worktree leg's result now gets a "files changed" report appended: every path `git status`
-  saw change while the leg ran, flagging anything outside the leg's own declared `writeSet`.
+  saw change while the leg ran, flagging anything outside the leg's own declared `writeSet`. Costs
+  two `git status` spawns per leg (down from four — the repository root is resolved once and
+  reused, skipping a redundant `rev-parse` gate); `PI_PERSONA_LEG_CHANGE_REPORT=off` disables it.
 - A supported Pi host version floor (0.83) is declared once and enforced consistently:
   `peerDependencies`, `/doctor`'s new `pi: <version> (requires ≥ 0.83.0)` line, and the README.
 - `exocom_status` (tool) and `/exocom` (command) now show who owns what in the current Exocom

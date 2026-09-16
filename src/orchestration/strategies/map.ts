@@ -267,17 +267,20 @@ export const map: Strategy = {
 		if (!splitterMember) throw new Error("map: a roster with at least a splitter agent is required");
 		const splitter = rosterSpec(splitterMember);
 		const worker = team[1] ? rosterSpec(team[1]) : splitter;
-		// The splitter spends one child slot before any worker runs, so the worker cap is one
-		// BELOW maxChildren — at the cap the last worker would trip the run's pre-spawn guard
-		// and take the whole (mostly finished) fan-out down with it.
-		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
-		const maxItems = Math.min(typeof input.params.maxItems === "number" ? input.params.maxItems : workerSlots, workerSlots);
 		const peers = input.params.peers === true;
 		// Unknown values behave as "off" — lenient (I2: strategies are trusted project code), a
 		// typo in a persona's params never blocks a run, it just skips the extra observability.
 		const ownershipParam = input.params.ownership;
 		const ownership = ownershipParam === "declare" || ownershipParam === "enforce" ? ownershipParam : "off";
 		const verifyAgent = typeof input.params.verify === "string" ? input.params.verify.trim() : "";
+		// The splitter spends one child slot before any worker runs, so the worker cap is one
+		// BELOW maxChildren — at the cap the last worker would trip the run's pre-spawn guard
+		// and take the whole (mostly finished) fan-out down with it. When `verify` is set, the
+		// verifier wave asks for ONE MORE child per completed item on top of that, so the cap is
+		// halved instead — splitter + workers + verifiers must all fit under the same ceiling.
+		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
+		const cap = verifyAgent ? Math.max(1, Math.floor((sdk.limits.maxChildren - 1) / 2)) : workerSlots;
+		const maxItems = Math.min(typeof input.params.maxItems === "number" ? input.params.maxItems : cap, cap);
 
 		const split = await splitIntoItems(sdk, splitter, input.task, maxItems);
 		if (!split.ok) return split.result;
@@ -306,7 +309,13 @@ export const map: Strategy = {
 
 		const notRun = ledger.filter((e) => e.status === "not-run").map((e) => e.item);
 		const notRunNote = ownership !== "off" && notRun.length > 0 ? `\n\n[pi-persona] not run: ${cappedList(notRun, NOT_RUN_NAME_CAP)}` : "";
-		const output = `${agg.output}${droppedNote}${notRunNote}`;
+		// Independent of `ownership` — verification runs (and costs a child) whenever `verify` is
+		// set, so its verdict must be visible whenever it runs, not only when a persona also opted
+		// into the ownership ledger. Without this the aggregate still reads as a complete "ok"
+		// answer even though a completed item's work was rejected.
+		const rejected = ledger.filter((e) => e.failureKind === "verification").map((e) => e.item);
+		const verifyNote = rejected.length > 0 ? `\n\n[pi-persona] verification failed: ${cappedList(rejected, NOT_RUN_NAME_CAP)}` : "";
+		const output = `${agg.output}${droppedNote}${notRunNote}${verifyNote}`;
 		return {
 			...agg,
 			agent: "map",
