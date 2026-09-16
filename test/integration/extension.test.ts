@@ -3432,6 +3432,10 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	assert.ok(id, "the async leg gets a run id");
 	for (let i = 0; i < 20 && releases.length < 1; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 	assert.equal(releases.length, 1, "the fake engine must actually be running, not queued behind a semaphore");
+	await waitUntil(
+		() => widgets["persona-agents"]?.some((line) => line.includes("⏳")) ?? false,
+		"the coalesced running-agent widget frame",
+	);
 
 	const runningLines = widgets["persona-agents"] ?? [];
 	const legLine = runningLines.find((line) => line.includes("⏳"));
@@ -3451,10 +3455,54 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 
 	// Release the hung engine and let the run settle; the node must leave the tree (existing behaviour).
 	releases.shift()?.();
-	for (let i = 0; i < 40 && widgets["persona-agents"] !== undefined; i++) {
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
+	await waitUntil(() => widgets["persona-agents"] === undefined, "the coalesced widget clear");
 	assert.equal(widgets["persona-agents"], undefined, "the leg's node leaves the tree once the released engine settles");
+});
+
+test("coalesces structural and streamed agent widget work and suppresses duplicate status publishes", async () => {
+	const CHUNKS = 200;
+	const stub: StrategyEngine = {
+		run: async (spec, onProgress) => {
+			let output = "";
+			for (let i = 0; i < CHUNKS; i++) {
+				output += `chunk ${i}\n`;
+				onProgress?.({ output, tokens: i + 1 });
+			}
+			return { agent: spec.agent, output, usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx: base } = makeCtx(os.tmpdir());
+	let widgetCalls = 0;
+	let statusCalls = 0;
+	const ctx = {
+		...base,
+		hasUI: true,
+		ui: {
+			...base.ui,
+			setWidget: (id: string) => {
+				if (id === "persona-agents") widgetCalls++;
+			},
+			setStatus: (id: string) => {
+				if (id === "persona-agents") statusCalls++;
+			},
+		},
+	};
+	await m.fire("session_start", undefined, ctx);
+	try {
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		await delegate.execute("widget-coalesce", { agent: "scout", task: "stream", async: false }, undefined, undefined, ctx);
+
+		// The seed/live/progress/settle burst must share one frame; status may publish only its few
+		// actual count transitions, never one update per streamed chunk.
+		assert.ok(widgetCalls <= 2, `expected one coalesced widget burst, got ${widgetCalls} publishes`);
+		assert.ok(statusCalls <= 6, `expected only semantic status transitions, got ${statusCalls} publishes`);
+		await new Promise<void>((resolve) => setTimeout(resolve, 30));
+		assert.ok(widgetCalls >= 1, "the pending frame eventually publishes the final widget");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+	}
 });
 
 // ── concurrent runs of one strategy/flow must not share a tree root id ──────────────────
@@ -3488,6 +3536,17 @@ function makeTreeFrameCtx(base: ReturnType<typeof makeCtx>["ctx"]) {
 	return { ctx, sizes };
 }
 
+/** Keep two otherwise-real fan-outs alive on opposite sides of a 16 ms UI frame. The task label
+ * makes one run settle first, so the widget can prove that pruning it leaves the sibling subtree. */
+function makeTreeTimingEngine(): StrategyEngine {
+	return {
+		run: async (spec) => {
+			await new Promise<void>((resolve) => setTimeout(resolve, spec.task.includes("slow") ? 140 : 40));
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+}
+
 test("two concurrent runs of ONE strategy hold separate subtrees — the first to settle keeps the second alive", async () => {
 	// `/orchestrate` is the fixed-prefix path (the council tool disambiguates by tool-call id
 	// already), so the run's own root id is the only thing keeping two of them apart.
@@ -3495,17 +3554,19 @@ test("two concurrent runs of ONE strategy hold separate subtrees — the first t
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "agents", "rootid-orch.md"),
-		"---\nname: rootid-orch\npersona: true\norchestration:\n  mode: strategy\n  strategy: no-such-strategy-xyz\n  roster: magi\n---\nConcurrent-root test supervisor.",
+		"---\nname: rootid-orch\npersona: true\norchestration:\n  mode: strategy\n  strategy: fanout\n  roster: magi\n---\nConcurrent-root test supervisor.",
 	);
 	const m = makeMockPi();
-	piPersona(m.pi);
+	const engine = makeTreeTimingEngine();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
 	const { ctx, sizes } = makeTreeFrameCtx(makeCtx(cwd).ctx);
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "rootid-orch", ctx);
-	// Both runs suspend on the same awaits, so run B seeds its roster while run A's is still up —
-	// the real interleaving, not a simulation. An unknown strategy settles each one right after.
+	// Both runs suspend inside their real fan-out strategy, so run B seeds its roster while run A's
+	// is still up. The delayed engine then settles the fast run first.
 	sizes.length = 0;
-	await Promise.all([m.cmd("orchestrate", "audit the repo", ctx), m.cmd("orchestrate", "audit the repo", ctx)]);
+	await Promise.all([m.cmd("orchestrate", "audit the repo fast", ctx), m.cmd("orchestrate", "audit the repo slow", ctx)]);
+	await waitUntil(() => sizes.at(-1) === 0, "the coalesced strategy widget clear");
 
 	const peak = sizes.lastIndexOf(8);
 	assert.ok(peak >= 0, `both runs must be live at once as 2 roots × (root + 3 cores); frame sizes were [${sizes}]`);
@@ -3522,34 +3583,30 @@ test("two concurrent runs of ONE flow hold separate subtrees too", async () => {
 	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "flows", "rootid.flow.json"),
-		JSON.stringify({
-			name: "rootid",
-			phases: [
-				{ id: "gather", strategy: "no-such-strategy-xyz", roster: "magi" },
-				{ id: "decide", strategy: "no-such-strategy-xyz", roster: "magi", needs: ["gather"] },
-			],
-		}),
+		JSON.stringify({ name: "rootid", phases: [{ id: "gather", strategy: "fanout", roster: "magi" }] }),
 	);
 	const m = makeMockPi();
-	piPersona(m.pi);
+	const engine = makeTreeTimingEngine();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
 	const { ctx, sizes } = makeTreeFrameCtx(makeCtx(cwd).ctx);
 	await m.fire("session_start", undefined, ctx);
 	const flow = m.tool("flow") as { execute: AnyFn };
 	await Promise.all([
-		flow.execute("flow-a", { name: "rootid", task: "review" }, undefined, undefined, ctx),
-		flow.execute("flow-b", { name: "rootid", task: "review" }, undefined, undefined, ctx),
+		flow.execute("flow-a", { name: "rootid", task: "review fast" }, undefined, undefined, ctx),
+		flow.execute("flow-b", { name: "rootid", task: "review slow" }, undefined, undefined, ctx),
 	]);
+	await waitUntil(() => sizes.at(-1) === 0, "the coalesced flow widget clear");
 
-	const peak = sizes.lastIndexOf(6);
+	const peak = sizes.lastIndexOf(8);
 	assert.ok(
 		peak >= 0,
-		`both flow runs must be live at once (2 × flow-root + 2 phases); frame sizes were [${sizes}]`,
+		`both flow runs must be live at once (10 rows, bounded to the 8-row widget); frame sizes were [${sizes}]`,
 	);
 	const distinctSizes = sizes.slice(peak).filter((size, index, all) => index === 0 || size !== all[index - 1]);
 	assert.deepEqual(
 		distinctSizes,
-		[6, 3, 0],
-		"an unknown strategy fails after the phase tree is seeded, before cores spawn — the first flow removes only its subtree",
+		[8, 5, 0],
+		"the first flow removes only its own root, phase, and three cores while the slow sibling remains live",
 	);
 });
 
@@ -3569,13 +3626,14 @@ test("an aborted flow PHASE reaches its strategy's own cooperative check, not ju
 		...base,
 		ui: {
 			...base.ui,
+			setStatus: (id: string, value?: string) => {
+				// The synchronous semantic count reaches three only after the phase has seeded all
+				// roster cores; unlike a coalesced widget frame, it is safe as an execution witness.
+				if (id === "persona-agents" && value === "3") ac.abort();
+			},
 			setWidget: (_id: string, lines: string[] | undefined) => {
 				if (!lines) return;
 				frames.push(lines);
-				// runFlow's own abort check runs BEFORE the wave, so an up-front abort would stop the
-				// flow without ever entering a phase. Stop it once the phase has seeded its cores —
-				// the point where only the signal handed to the PHASE's strategy can still cut it short.
-				if (lines.some((line) => line.includes("melchior"))) ac.abort();
 			},
 		},
 	};
