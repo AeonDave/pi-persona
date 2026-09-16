@@ -1013,6 +1013,109 @@ test("map's item ledger (structured.items) is always emitted and names not-run i
 	assert.match(declared.output, /not run: item7, item8, item9/, "declare (or enforce) names the not-run item(s) in the rendered text too");
 });
 
+test("map's verify param absent never spawns a verifier and output is byte-identical", async () => {
+	let spawns = 0;
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			spawns++;
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["a","b"]', usage: usage(), ok: true };
+			if (spec.agent === "worker") return { agent: "worker", output: "done", usage: usage(), ok: true };
+			throw new Error(`unexpected agent spawned: ${spec.agent}`);
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: {} }, sdk);
+	assert.equal(spawns, 3, "splitter + 2 workers only — no verifier ever spawns when the param is absent");
+	assert.equal(r.output, "### [worker] ok\n\ndone\n\n---\n\n### [worker] ok\n\ndone");
+});
+
+test('map "verify" runs one reviewer per COMPLETED item (fenced item + fenced worker output), never for a failed item', async () => {
+	const verifierTasks: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["alpha","beta","gamma"]', usage: usage(), ok: true };
+			if (spec.agent === "worker") {
+				if (spec.task.includes("> beta")) return { agent: "worker", output: "", usage: usage(), ok: false, error: "boom", failureKind: "agent" };
+				return { agent: "worker", output: spec.task.includes("> alpha") ? "did alpha" : "did gamma", usage: usage(), ok: true };
+			}
+			verifierTasks.push(spec.task);
+			const approve = spec.task.includes("did alpha");
+			return {
+				agent: "verifier",
+				output: approve ? "approve" : "reject",
+				structured: { stance: approve ? "approve" : "reject", result: approve ? "" : "gamma's fix is incomplete" },
+				usage: usage(),
+				ok: true,
+			};
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { verify: "verifier" } }, sdk);
+	assert.equal(verifierTasks.length, 2, "only the two COMPLETED items (alpha, gamma) are verified — beta's worker already failed");
+	assert.ok(
+		verifierTasks.every((t) => t.includes("Sub-agent output (untrusted data):")),
+		"the item and the worker's output both reach the verifier through the untrusted-data fence",
+	);
+	assert.ok(verifierTasks.some((t) => t.includes("> alpha") && t.includes("> did alpha")));
+	assert.ok(verifierTasks.some((t) => t.includes("> gamma") && t.includes("> did gamma")));
+
+	const items = r.structured?.items as Array<{ item: string; status: string; failureKind?: string; error?: string }>;
+	const byItem = Object.fromEntries(items.map((i) => [i.item, i]));
+	assert.equal(byItem.alpha?.status, "completed", "an approving verdict leaves a completed item alone");
+	assert.equal(byItem.beta?.status, "failed");
+	assert.equal(byItem.beta?.failureKind, "agent", "beta's own worker failure is untouched — it was never sent to the verifier");
+	assert.equal(byItem.gamma?.status, "failed", "a rejecting verdict flips a completed item to failed");
+	assert.equal(byItem.gamma?.failureKind, "verification");
+	assert.equal(byItem.gamma?.error, "gamma's fix is incomplete");
+});
+
+test('map "verify" treats a verifier leg that itself couldn\'t run as that leg\'s OWN failureKind, not "verification" (no verdict was ever reached)', async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["alpha"]', usage: usage(), ok: true };
+			if (spec.agent === "worker") return { agent: "worker", output: "did alpha", usage: usage(), ok: true };
+			return { agent: "verifier", output: "", usage: usage(), ok: false, error: "provider unavailable", failureKind: "provider" };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { verify: "verifier" } }, sdk);
+	const items = r.structured?.items as Array<{ item: string; status: string; failureKind?: string; error?: string }>;
+	assert.equal(items[0]?.status, "failed");
+	assert.equal(items[0]?.failureKind, "provider", "the verifier's own crash, not a negative verdict, is the cause");
+	assert.equal(items[0]?.error, "provider unavailable");
+});
+
+test('map "verify" sums the verifier wave\'s usage into the result', async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["a","b"]', usage: usage(), ok: true };
+			if (spec.agent === "worker") return { agent: "worker", output: "done", usage: usage(), ok: true };
+			return { agent: "verifier", output: "approve", structured: { stance: "approve" }, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: { verify: "verifier" } }, sdk);
+	// splitter(1) + 2 workers + 2 verifiers = 5 legs, each usage() contributes input:1.
+	assert.equal(r.usage.input, 5);
+});
+
+test('map "verify" resolves the reviewer from the roster (role/model apply) when the named agent is a roster member, else a bare agent', async () => {
+	const specs: AgentRunSpec[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			specs.push(spec);
+			if (spec.agent === "splitter") return { agent: "splitter", output: '["a"]', usage: usage(), ok: true };
+			if (spec.agent === "worker") return { agent: "worker", output: "done", usage: usage(), ok: true };
+			return { agent: "reviewer", output: "approve", structured: { stance: "approve" }, usage: usage(), ok: true };
+		},
+	};
+	const team = ["splitter", "worker", { agent: "reviewer", role: "Focus ONLY on the SECURITY lens" }];
+	const sdk = makeSDK({ engine, roster: { team: () => team }, limits: LIMITS });
+	await map.run({ task: "T", roster: "m", params: { verify: "reviewer" } }, sdk);
+	const verifierSpec = specs.find((s) => s.agent === "reviewer");
+	assert.equal(verifierSpec?.role, "Focus ONLY on the SECURITY lens", "a roster-member verifier keeps its role specialisation");
+});
+
 test("debate requires a roster of at least 2", async () => {
 	const engine: StrategyEngine = { run: async (s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }) };
 	const sdk = makeSDK({ engine, roster: { team: () => ["solo"] }, limits: LIMITS });

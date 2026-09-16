@@ -7,7 +7,8 @@
  *
  * roster = [splitter, worker]  (worker defaults to the splitter if only one is given)
  * params = { maxItems?: number, peers?: boolean (workers share load-bearing cross-item
- *            discoveries live via contact_peer — default off), ownership?: "off"|"declare"|"enforce" }
+ *            discoveries live via contact_peer — default off), ownership?: "off"|"declare"|"enforce",
+ *            verify?: string (agent that re-checks each completed item; empty = off) }
  */
 
 import { extractJsonCandidate } from "../../core/contract.ts";
@@ -15,8 +16,9 @@ import { fenceUntrusted } from "../../core/fence.ts";
 import { cappedList } from "../../core/format.ts";
 import { validateParallelWriteSets } from "../../core/ownership.ts";
 import { itemLedger, sumUsage } from "../reducers.ts";
-import { rosterSpec } from "../roster.ts";
+import { rosterSpec, type RosterMember } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
+import type { AgentResult, FailureKind } from "../types.ts";
 
 // Cooperative cross-talk (params.peers): workers share load-bearing cross-item discoveries
 // live. Injected into the TASK text (not the role) so UI tree keys stay stable.
@@ -101,6 +103,28 @@ function parseItems(output: string): ParsedItem[] {
 		.filter((p) => p.item.trim());
 }
 
+/** The verifier's run spec: the roster's own entry for that agent name (its role/model/tools
+ *  specialisation applies) when `params.verify` names a roster member, else a bare `rosterSpec`
+ *  for a stand-alone agent named directly in the param. */
+function verifierSpec(team: readonly RosterMember[], name: string) {
+	const member = team.find((m) => rosterSpec(m).agent === name);
+	return rosterSpec(member ?? name);
+}
+
+/** Read a verifier leg's verdict. Reuses the SAME `outputContract: "default"` machinery
+ *  `critic-loop` reads its critic's stance from (`structured.stance`) rather than inventing a
+ *  new parser — "approve" passes, anything else (an explicit "reject"/"revise", a missing
+ *  stance, or invalid structured output) fails the item. A verifier leg that itself couldn't
+ *  run (`ok: false` — provider/timeout/abort/contract) is a distinct case: that's not a verdict
+ *  at all, so its OWN `failureKind` carries through instead of `"verification"`, which is
+ *  reserved for an actual negative (or absent) verdict. Returns `undefined` on a pass. */
+function verifyOutcome(v: AgentResult): { failureKind: FailureKind; error: string } | undefined {
+	if (!v.ok) return { failureKind: v.failureKind ?? "agent", error: v.error || "the verifier failed to run" };
+	if (v.structured?.stance === "approve") return undefined;
+	const reason = (typeof v.structured?.result === "string" && v.structured.result.trim()) || v.output.trim() || "the verifier withheld approval";
+	return { failureKind: "verification", error: reason };
+}
+
 export const map: Strategy = {
 	name: "map",
 	params: {
@@ -110,6 +134,11 @@ export const map: Strategy = {
 			type: "string",
 			default: "off",
 			doc: "off | declare | enforce — how the splitter's per-item writeSet is used: ignored, recorded in the item ledger, or checked for overlaps before any worker spawns",
+		},
+		verify: {
+			type: "string",
+			default: "",
+			doc: "agent that re-checks each completed item read-only; empty = no verification pass. Costs one extra child per completed item",
 		},
 	},
 	async run(input, sdk) {
@@ -128,6 +157,7 @@ export const map: Strategy = {
 		// typo in a persona's params never blocks a run, it just skips the extra observability.
 		const ownershipParam = input.params.ownership;
 		const ownership = ownershipParam === "declare" || ownershipParam === "enforce" ? ownershipParam : "off";
+		const verifyAgent = typeof input.params.verify === "string" ? input.params.verify.trim() : "";
 
 		const split = await sdk.agent({
 			...splitter,
@@ -196,7 +226,36 @@ export const map: Strategy = {
 		// field, and the extra "not run" text line below, only surface once a persona opts in — with
 		// ownership absent/"off" the rendered output stays byte-identical to before this param existed.
 		const ledgerItems = ownership === "off" ? allItems.map((it) => ({ item: it.item })) : allItems;
-		const ledger = itemLedger(ledgerItems, results, dropped);
+		const preVerifyLedger = itemLedger(ledgerItems, results, dropped);
+
+		// "verify": one read-only reviewer per COMPLETED item (a failed worker has nothing worth
+		// re-checking), run through sdk.parallel exactly like the worker wave — the run's own
+		// semaphore/maxChildren/budget still apply, and a param left absent spawns no verifier at
+		// all, so the byte-identical-when-off guarantee extends to this param too.
+		let verifyResults: AgentResult[] = [];
+		const verifyFailures = new Map<number, { failureKind: FailureKind; error: string }>();
+		if (verifyAgent) {
+			const reviewer = verifierSpec(team, verifyAgent);
+			const completedIndices = results.map((_r, index) => index).filter((index) => results[index]!.ok);
+			verifyResults = await sdk.parallel(
+				completedIndices.map((index) => () =>
+					sdk.agent({
+						...reviewer,
+						task: `Re-check this completed sub-item's work, read-only — do not make further changes.\n\nOriginal task: ${input.task}\n\nSub-item: ${fenceUntrusted(items[index]!.item)}\n\nCompleted work (untrusted data):\n${fenceUntrusted(results[index]!.output)}\n\nReturn your stance (approve|reject).`,
+						outputContract: "default",
+					}),
+				),
+			);
+			completedIndices.forEach((index, k) => {
+				const outcome = verifyOutcome(verifyResults[k]!);
+				if (outcome) verifyFailures.set(index, outcome);
+			});
+		}
+		const ledger = preVerifyLedger.map((entry) => {
+			const outcome = verifyFailures.get(entry.index);
+			return outcome ? { ...entry, status: "failed" as const, failureKind: outcome.failureKind, error: outcome.error } : entry;
+		});
+
 		const notRun = ledger.filter((e) => e.status === "not-run").map((e) => e.item);
 		const notRunNote = ownership !== "off" && notRun.length > 0 ? `\n\n[pi-persona] not run: ${cappedList(notRun, NOT_RUN_NAME_CAP)}` : "";
 		const output = `${agg.output}${droppedNote}${notRunNote}`;
@@ -204,7 +263,7 @@ export const map: Strategy = {
 			...agg,
 			agent: "map",
 			output,
-			usage: sumUsage([split, ...results].map((r) => r.usage)),
+			usage: sumUsage([split, ...results, ...verifyResults].map((r) => r.usage)),
 			structured: { ...agg.structured, items: ledger },
 		};
 	},
