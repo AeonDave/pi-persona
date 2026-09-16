@@ -205,7 +205,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   in, `/persona restore` force-restores originals (`src/core/seed.ts`). First-run auto-install is
   **opt-in**: off by default, enable with `PI_PERSONA_SEED=on` (guarded once by marker
   `.pi-persona-seeded`). Contracts/presets/teams keep a builtin layer (they aren't personas).
-- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip). `test/` — unit + integration.
+- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic claim; run via `npm run smoke:exocom`). `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
 
