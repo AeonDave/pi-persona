@@ -1276,12 +1276,11 @@ test("replyTargetFor is stable and independent of listPeers() display numbering"
 		assert.equal(peers.length, 2, "both same-named peers are live");
 		for (const p of peers) {
 			assert.match(viewer.replyTargetFor(p), /^twin@[a-f0-9]{24}$/, "the reply target is stable and routable");
-			assert.equal(viewer.displayNameFor(p), viewer.replyTargetFor(p), "the compatibility alias matches the stable target");
 		}
 		assert.deepEqual(peers.map((p) => p.displayName).sort(), ["twin", "twin#2"], "human display names remain deduped in the live roster");
 
 		writeEntry(dir, "h", lapsed); // listPeers() above already reaped it — put it back
-		assert.match(viewer.displayNameFor(lapsed), /^lapsed@[a-f0-9]{24}$/, "an unlisted sender gets a routable qualified target");
+		assert.match(viewer.replyTargetFor(lapsed), /^lapsed@[a-f0-9]{24}$/, "an unlisted sender gets a routable qualified target");
 		assert.ok(existsSync(lapsedFile), "resolving a name left the registry alone");
 	} finally {
 		removeEntry(dir, "h", lapsedSession);

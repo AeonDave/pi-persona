@@ -644,11 +644,6 @@ export class ExocomPlane {
 		return qualifiedTarget(entry);
 	}
 
-	/** Compatibility alias for callers that used the old reply-hint method name. */
-	displayNameFor(entry: RegistryEntry): string {
-		return this.replyTargetFor(entry);
-	}
-
 	/** Human-facing, stable label for an authenticated registry entry. This is deliberately
 	 * separate from replyTargetFor(): display labels may be `name#2`, while routing always uses
 	 * the qualified session token. A registry read failure degrades to the entry's own sanitized

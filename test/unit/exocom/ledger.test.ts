@@ -111,7 +111,7 @@ test("ask NACKs missing/self to_session and one pending ask per (work_key, to)",
 	assert.match(self.error, /self/i);
 });
 
-test("answer requires the ask's to_session, drops the ask, and signals wake", () => {
+test("answer requires the ask's to_session and drops the ask", () => {
 	const opened = applyLedgerEvent(emptyLedger(), ask());
 	assert.equal(opened.ok, true);
 	if (!opened.ok) return;
@@ -122,7 +122,6 @@ test("answer requires the ask's to_session, drops the ask, and signals wake", ()
 	assert.equal(ok.ok, true);
 	if (!ok.ok) return;
 	assert.equal(ok.state.asks.length, 0);
-	assert.deepEqual(ok.wake, { kind: "answer", work_key: "wk1", ask_id: "ask-1" });
 });
 
 test("release is owner-only and drops that owner's claims plus outbound pending asks", () => {
@@ -144,7 +143,6 @@ test("release is owner-only and drops that owner's claims plus outbound pending 
 	if (!owned.ok) return;
 	assert.equal(owned.state.claims.length, 0);
 	assert.equal(owned.state.asks.length, 0);
-	assert.deepEqual(owned.wake, { kind: "release", work_key: "wk1" });
 });
 
 test("progress journals only", () => {
@@ -156,7 +154,6 @@ test("progress journals only", () => {
 	if (!p.ok) return;
 	assert.equal(p.state.claims.length, 1);
 	assert.equal(p.state.asks.length, 0);
-	assert.equal(p.wake, undefined);
 	assert.ok(p.state.seen.includes("msg-prog-1"));
 });
 

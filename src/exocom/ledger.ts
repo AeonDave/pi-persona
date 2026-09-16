@@ -35,9 +35,8 @@ export interface LedgerState {
 	seen: string[];
 }
 
-export type LedgerWake = { kind: "answer"; work_key: string; ask_id: string } | { kind: "release"; work_key: string };
 export type ApplyResult =
-	| { ok: true; state: LedgerState; duplicate?: true; wake?: LedgerWake }
+	| { ok: true; state: LedgerState; duplicate?: true }
 	| { ok: false; error: string };
 
 /** Explicit in-memory and on-disk bounds. The store fails closed rather than silently dropping a transition. */
@@ -134,7 +133,7 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 			if (event.from_session !== ask.to_session) return { ok: false, error: "answer from_session is not the ask's to_session" };
 			const asks = state.asks.filter((candidate) => candidate.ask_id !== event.ask_id);
 			const answers = [...state.answers, answerOf(event, ask)].slice(-LEDGER_LIMITS.maxResults);
-			return { ok: true, state: remember({ ...state, asks, answers }, event.msg_id), wake: { kind: "answer", work_key: event.work_key, ask_id: event.ask_id } };
+			return { ok: true, state: remember({ ...state, asks, answers }, event.msg_id) };
 		}
 		case "release": {
 			const owned = state.claims.filter((claim) => claim.work_key === event.work_key && claim.from_session === event.from_session);
@@ -142,7 +141,7 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 			if (owned.length === 0 && outbound.length === 0) return { ok: false, error: "release: no owned claim or outbound ask on that work_key" };
 			const claims = state.claims.filter((claim) => !(claim.work_key === event.work_key && claim.from_session === event.from_session));
 			const asks = state.asks.filter((ask) => !(ask.work_key === event.work_key && ask.from_session === event.from_session));
-			return { ok: true, state: remember({ ...state, claims, asks }, event.msg_id), wake: { kind: "release", work_key: event.work_key } };
+			return { ok: true, state: remember({ ...state, claims, asks }, event.msg_id) };
 		}
 		case "progress": return { ok: true, state: remember(state, event.msg_id) };
 	}
