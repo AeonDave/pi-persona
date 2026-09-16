@@ -34,21 +34,51 @@ export interface ParsedItem {
 	writeSet?: string[];
 }
 
+/** Every ```-fenced block's contents, last fence first (the model, told to "Return ONLY a JSON
+ *  array", most often either answers bare or wraps that same array in one ```/```json fence).
+ *  A miniature, map-local copy of `contract.ts`'s private `fencedBlocks` — that module's helpers
+ *  aren't exported, and this one only ever needs the fence, never the object-preferring picker
+ *  built on top of it there. */
+function fencedBlocks(text: string): string[] {
+	const out: string[] = [];
+	const re = /```[^\n`]*\n([\s\S]*?)```/g;
+	let m = re.exec(text);
+	while (m !== null) {
+		if (m[1] !== undefined) out.push(m[1].trim());
+		m = re.exec(text);
+	}
+	return out.reverse();
+}
+
 /** Parse a splitter's output into a list of items (tolerant of fences/prose). Each entry is
  *  either a plain string sub-item, or an object declaring `{ item, writeSet? }` — any other
  *  shape falls back to its JSON text as the item, exactly like before this field existed.
  *
- *  Tries a direct parse of the trimmed output FIRST: `extractJsonCandidate` is built for
- *  contracts, which always want an OBJECT, so among several parseable candidates it prefers
- *  one that starts with `{` — the right call for a contract answer, but wrong here, where an
- *  `{item, writeSet}` element nested inside the requested top-level ARRAY would otherwise win
- *  and shadow the whole list. `extractJsonCandidate` only comes in as a fallback for output
- *  the splitter didn't return as clean JSON (a fence, or prose around it). */
+ *  Tries a direct parse of the trimmed output, then of each fenced block, accepting only a
+ *  candidate that parses to an ARRAY — `extractJsonCandidate` (src/core/contract.ts) is built
+ *  for contracts, which always want an OBJECT, so among several parseable candidates it prefers
+ *  one that starts with `{`. That is the right call for a contract answer, but wrong here: an
+ *  `{item, writeSet}` element nested inside the requested top-level ARRAY would win and shadow
+ *  the whole list — including when that array sits inside a fence, the most likely shape a
+ *  model actually emits. `extractJsonCandidate` only comes in as a last-resort fallback, for
+ *  prose-wrapped output with no fence (where, absent a nested object item, its preference never
+ *  triggers). */
 function parseItems(output: string): ParsedItem[] {
 	let parsed: unknown;
-	try {
-		parsed = JSON.parse(output.trim());
-	} catch {
+	let found = false;
+	for (const candidate of [output.trim(), ...fencedBlocks(output)]) {
+		try {
+			const value: unknown = JSON.parse(candidate);
+			if (Array.isArray(value)) {
+				parsed = value;
+				found = true;
+				break;
+			}
+		} catch {
+			// try the next candidate
+		}
+	}
+	if (!found) {
 		try {
 			parsed = JSON.parse(extractJsonCandidate(output));
 		} catch {
