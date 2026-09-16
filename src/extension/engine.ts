@@ -104,6 +104,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 					timeoutMs: RUN_LIMITS.timeoutMs,
 					hardTimeoutMs: config.agentHardTimeoutMs,
 					startupTimeoutMs: config.agentStartupTimeoutMs,
+					blockingCapMs: config.agentBlockingMaxMs,
 					env: childPiSettingsEnv(),
 				};
 				// Feed progress here too (mirrors the plain-child branch): without it a worktree/mcp async leg
@@ -131,6 +132,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				ideps.timeoutMs = RUN_LIMITS.timeoutMs; // idle watchdog — a hung session must settle, like the child engine's idle kill
 				ideps.hardTimeoutMs = config.agentHardTimeoutMs; // hard lifetime ceiling — catches a busy loop the idle watchdog never would
 				ideps.startupTimeoutMs = config.agentStartupTimeoutMs; // first-progress deadline — fast-fail a child that never started
+				ideps.blockingCapMs = config.agentBlockingMaxMs; // ceiling for a coaching+allowBlocking child when no explicit hard cap is set
 				if (signal) ideps.signal = signal;
 				if (onProgress) ideps.onProgress = onProgress;
 				if (lastCtx.model) ideps.defaultModel = `${lastCtx.model.provider}/${lastCtx.model.id}`;
@@ -157,6 +159,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 					timeoutMs: RUN_LIMITS.timeoutMs,
 					hardTimeoutMs: config.agentHardTimeoutMs,
 					startupTimeoutMs: config.agentStartupTimeoutMs,
+					blockingCapMs: config.agentBlockingMaxMs,
 					env: childPiSettingsEnv(),
 				}; // idle watchdog + hard cap + startup deadline on every child; same Pi settings dir as inproc
 				if (onProgress) deps.childOptions.onProgress = onProgress;

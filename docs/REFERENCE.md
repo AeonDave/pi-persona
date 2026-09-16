@@ -352,6 +352,7 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_CHECKIN_MS` | 300000 | routine direction check-in while async children run; `0` disables it |
 | `PI_PERSONA_AGENT_MAX_MS` | off | opt-in per-agent hard wall-clock cap; unset leaves healthy work running |
 | `PI_PERSONA_AGENT_STARTUP_MS` | 300000 | startup deadline for a child that makes no progress; `0` disables it |
+| `PI_PERSONA_AGENT_BLOCKING_MAX_MS` | 1800000 | ceiling for a leg allowed to block on a supervisor reply (its idle/startup watchdogs are off); 0 disables; PI_PERSONA_AGENT_MAX_MS overrides |
 | `PI_PERSONA_NUDGE` | on | `off` silences delegation and persistence nudges |
 | `PI_PERSONA_EXOCOM` | off | `1` joins the current workspace Exocom scope; cross-workspace selection is CLI-only |
 | `PI_PERSONA_SPINE` | off | `on` or a path enables the shared behavioral layer; see [`SPINE.md`](./SPINE.md) |

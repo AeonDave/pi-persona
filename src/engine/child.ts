@@ -69,6 +69,9 @@ export interface ChildEngineOptions {
 	 *  the startup deadline are NOT armed — parity with the in-process engine's `blockingChild`.
 	 *  The hard cap (`hardTimeoutMs`) still applies. */
 	allowBlocking?: boolean;
+	/** Ceiling applied ONLY when `allowBlocking` disabled the idle/startup watchdogs and no explicit
+	 *  `hardTimeoutMs` was configured — a blocked leg must still end. 0/absent = none. */
+	blockingCapMs?: number;
 	/** Override the cross-OS force tree-kill (used in tests). Defaults to
 	 *  {@link killProcessTree}. */
 	killProcessTree?: (pid: number) => void;
@@ -186,6 +189,7 @@ export async function runChildAgent(
 	let aborted = false;
 	let timedOut = false;
 	let hardTimedOut = false;
+	let hardCapMs = 0; // the value that actually armed the hard cap (hardTimeoutMs OR blockingCapMs) — for the error message
 	let startupTimedOut = false;
 	let killSignal: NodeJS.Signals | undefined; // the signal that ended the child, if any (POSIX)
 	let progressed = false; // set once the child produces its FIRST real progress (turn/tokens/output)
@@ -346,11 +350,18 @@ export async function runChildAgent(
 			// Hard wall-clock cap: armed ONCE, never re-armed by output — a definite lifetime ceiling
 			// that kills a busy-but-non-converging child the idle window above never catches.
 			const armHardCap = () => {
-				if (!opts.hardTimeoutMs || opts.hardTimeoutMs <= 0 || settled || killing) return;
+				const capMs =
+					opts.hardTimeoutMs && opts.hardTimeoutMs > 0
+						? opts.hardTimeoutMs
+						: opts.allowBlocking && opts.blockingCapMs && opts.blockingCapMs > 0
+							? opts.blockingCapMs
+							: 0;
+				if (capMs <= 0 || settled || killing) return;
+				hardCapMs = capMs;
 				hardTimer = setTimeout(() => {
 					hardTimedOut = true;
 					kill();
-				}, opts.hardTimeoutMs);
+				}, capMs);
 				hardTimer.unref?.();
 			};
 			const armTimeout = () => {
@@ -486,7 +497,7 @@ export async function runChildAgent(
 		// stream message hide why the child actually stopped.
 		const streamErr = state.errorMessage;
 		if (hardTimedOut) {
-			result.errorMessage = `agent exceeded the ${opts.hardTimeoutMs}ms hard cap${streamErr ? ` (last error: ${streamErr})` : ""}`;
+			result.errorMessage = `agent exceeded the ${hardCapMs}ms hard cap${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (startupTimedOut) {
 			// Two readings fit the same evidence and the engine cannot distinguish them, so name
 			// both: claiming "it never started" would misdirect the operator of a leg that did

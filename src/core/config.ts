@@ -53,6 +53,10 @@ export interface PiPersonaConfig {
 	 *  more than a dead leg settling slowly, so the default is deliberately generous.
 	 *  300000 (5 min) by default; PI_PERSONA_AGENT_STARTUP_MS=0 disables it. */
 	agentStartupTimeoutMs: number;
+	/** Ceiling for a leg whose idle/startup watchdogs are disabled because it may block on a
+	 *  supervisor reply. Default 30 minutes; 0 = no ceiling. Ignored when PI_PERSONA_AGENT_MAX_MS
+	 *  is set. */
+	agentBlockingMaxMs: number;
 	/** Delegation nudge: when a delegating supervisor grinds a RUN of hands-on commands by hand (a
 	 *  by-hand sweep) without a hand-off, append a reminder to the offending tool's result. On by
 	 *  default; PI_PERSONA_NUDGE=off opts out. */
@@ -159,6 +163,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// always-on backstops; set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a wall-clock ceiling.
 		agentHardTimeoutMs: 0,
 		agentStartupTimeoutMs: 300_000,
+		agentBlockingMaxMs: 1_800_000,
 		// On unless explicitly turned off (mirrors PI_PERSONA_PERSIST's `!== "off"` convention).
 		nudge: env.PI_PERSONA_NUDGE?.trim().toLowerCase() !== "off",
 		// On unless explicitly turned off, so an MCP/worktree/child-engine async leg is
@@ -190,6 +195,11 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 	if (startupRaw !== undefined && startupRaw !== "") {
 		const startup = Number(startupRaw);
 		if (Number.isFinite(startup) && startup >= 0) config.agentStartupTimeoutMs = startup;
+	}
+	const blockingMaxRaw = env.PI_PERSONA_AGENT_BLOCKING_MAX_MS?.trim();
+	if (blockingMaxRaw !== undefined && blockingMaxRaw !== "") {
+		const blockingMax = Number(blockingMaxRaw);
+		if (Number.isFinite(blockingMax) && blockingMax >= 0) config.agentBlockingMaxMs = blockingMax;
 	}
 	// A finite value >= 1 sets the retention bound; 0 isn't meaningful here (unlike the interval
 	// knobs above, where 0 opts out) so it — like junk/negative — falls back to the default 25.
