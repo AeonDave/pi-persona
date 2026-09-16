@@ -482,6 +482,18 @@ test("a refused stop in the detail view shows the notice too, not just the list"
 	overlay.dispose();
 });
 
+test("close stops the clock once even though the host also calls dispose", (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	let done = 0;
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => done++, {});
+	overlay.handleInput("\x1b"); // esc → close
+	overlay.dispose();
+	assert.equal(done, 1);
+	assert.equal(overlay.clockRunning, false);
+});
+
 test("composeAgentRow keeps a long label + long detail + a stalled clock within the frame, and never truncates the clock", () => {
 	const node: AgentNode = {
 		id: "a",

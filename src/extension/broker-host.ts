@@ -100,10 +100,13 @@ export class SupervisorBroker {
 			(err) => {
 				this.promise = undefined; // a later build retries
 				this.lastError = err instanceof Error ? err.message : String(err);
+				const dropped = [...this.preHostSteers.values()].reduce((n, texts) => n + texts.length, 0);
 				this.preHostSteers.clear();
 				if (!this.warned) {
 					this.warned = true;
-					this.deps.warn(`pi-persona: child-agent bus unavailable — ${this.lastError}; child legs run without live steer/contact until it starts`);
+					this.deps.warn(
+						`pi-persona: child-agent bus unavailable — ${this.lastError}; child legs run without live steer/contact until it starts${dropped > 0 ? `; ${dropped} queued steer${dropped === 1 ? "" : "s"} were dropped` : ""}`,
+					);
 				}
 			},
 		);
