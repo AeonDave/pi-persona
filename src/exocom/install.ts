@@ -54,6 +54,7 @@ import { prune as pruneExocom, type RegistryEntry } from "./registry.ts";
 import { registerExocomTools } from "../tools/exocom.ts";
 import { registerExocomWorkTools } from "../tools/exocom-work.ts";
 import type { SessionIdentity } from "../extension/identity.ts";
+import { WriteWarnings } from "./write-guard.ts";
 
 export interface ExocomHost {
 	readonly pi: ExtensionAPI;
@@ -94,6 +95,8 @@ export interface ExocomInstall {
 	get sessionId(): string;
 	/** A peer's display name for a session id, or undefined when it cannot be resolved. */
 	peerLabelFor(sessionId: string): string | undefined;
+	/** Warn-once memory for writes landing inside a peer's open claim (Task 7). Cleared on stop(). */
+	readonly writeWarnings: WriteWarnings;
 	get notifier(): IdleCoalescingNotifier<string> | undefined;
 	get waitNotifier(): IdleCoalescingNotifier<string> | undefined;
 	kickWait(): void;
@@ -126,6 +129,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomHeartbeat: ReturnType<typeof setInterval> | undefined;
 	let exocomHeartbeatFailures = 0; // consecutive failed ticks — drives the report cadence, reset by any success
 	let exocomResetTimer: ReturnType<typeof setInterval> | undefined;
+	// Lives for the whole install (not just one plane instance), so it survives a stop/start
+	// cycle's OWN teardown — but stopExocom() still clears it, since a fresh plane means fresh
+	// claims and a stale "already warned" memory would silently hide a real overlap.
+	const writeWarnings = new WriteWarnings();
 
 	function exocomRequested(): boolean {
 		return host.config.exocom
@@ -901,6 +908,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		}
 		exocomLedgerFile = "";
 		exocomSessionId = "";
+		writeWarnings.clear();
 		exocomInboxFull = false; // a later plane reports its own first full inbox, not this one's tail
 		exocomToastNotifier?.cancel();
 		exocomToastNotifier = undefined;
@@ -954,6 +962,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		ledgerState: currentLedgerState,
 		get sessionId() { return exocomSessionId; },
 		peerLabelFor,
+		writeWarnings,
 		get notifier() { return exocomNotifier; },
 		get waitNotifier() { return exocomWaitNotifier; },
 		kickWait() { exocomWaitNotifier?.kick(); },
