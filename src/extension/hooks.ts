@@ -387,6 +387,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 					wait: !xcaps || canCallTool(xcaps, "exocom_wait"),
 					release: !xcaps || canCallTool(xcaps, "exocom_release"),
 					progress: !xcaps || canCallTool(xcaps, "exocom_progress"),
+					status: !xcaps || canCallTool(xcaps, "exocom_status"),
 				},
 				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
 				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's

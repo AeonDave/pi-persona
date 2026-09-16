@@ -5220,6 +5220,69 @@ test("a claim whose owner vanished from the live registry is pruned before the n
 	}
 });
 
+test("exocom_status and /exocom show cross-session ownership; the read stays available during a pending ask", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA } = makeExocomCtx(cwd, "status-owner-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "status-peer-b");
+	try {
+		piPersona(a.pi);
+		piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+
+		await (a.tool("exocom_name") as { execute: AnyFn }).execute("status-name", { name: "Orion-Status" }, undefined, undefined, ctxA);
+		await (a.tool("exocom_claim") as { execute: AnyFn }).execute("status-claim", {
+			work_key: "status-review",
+			write_set: ["src/status.ts"],
+			slice: "status view",
+		}, undefined, undefined, ctxA);
+
+		const status = await (b.tool("exocom_status") as { execute: AnyFn }).execute("status-check", {}, undefined, undefined, ctxB);
+		const statusText = String(status.content?.[0]?.text ?? "");
+		assert.match(statusText, /peer claims/);
+		assert.match(statusText, /Orion-Status/);
+		assert.match(statusText, /src\/status\.ts/);
+		assert.equal(status.details.claims, 1);
+		assert.equal(status.details.asks, 0);
+
+		await b.cmd("exocom", "", ctxB);
+		const commandOutput = String((b.entries().at(-1)?.data as { content?: string } | undefined)?.content ?? "");
+		assert.match(commandOutput, /peer claims/);
+		assert.match(commandOutput, /Orion-Status/);
+		assert.match(commandOutput, /src\/status\.ts/);
+
+		const roster = await (a.tool("exocom_list") as { execute: AnyFn }).execute("status-list", {}, undefined, undefined, ctxA);
+		const target = (roster.details as { peers: Array<{ target: string }> }).peers[0]?.target;
+		assert.ok(target);
+		await (a.tool("exocom_ask") as { execute: AnyFn }).execute("status-ask", {
+			target,
+			work_key: "status-review",
+			question: "does this overlap?",
+		}, undefined, undefined, ctxA);
+
+		assert.equal(
+			b.fire("tool_call", { toolName: "write", toolCallId: "status-write-blocked", input: {} }, ctxB)?.block,
+			true,
+			"a durable pending ask still blocks mutation",
+		);
+		assert.equal(
+			b.fire("tool_call", { toolName: "exocom_status", toolCallId: "status-not-blocked", input: {} }, ctxB)?.block,
+			undefined,
+			"exocom_status is a read and stays available during a pending ask",
+		);
+	} finally {
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // buildExocomBrief's two conditional clauses are only as true as the facts the CALL SITE feeds it,
 // and that wiring is one line in before_agent_start: `canDelegate` must be read from the live
 // persona (holding the bus says nothing about `delegate` — `canUseBus` keys off `intercom` alone)

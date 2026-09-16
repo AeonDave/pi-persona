@@ -9,7 +9,8 @@ import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 import { attributePeer } from "../core/fence.ts";
-import type { LedgerAnswer } from "../exocom/ledger.ts";
+import type { LedgerAnswer, LedgerState } from "../exocom/ledger.ts";
+import { formatLedgerStatus } from "../exocom/status.ts";
 import type { ExocomPlane } from "../exocom/plane.ts";
 import type { ExocomSemanticFrame } from "../exocom/envelope.ts";
 import { EXOCOM_WAIT_MAX_MS, waitTimeoutMs } from "../exocom/wait.ts";
@@ -71,6 +72,10 @@ export interface ExocomWorkDeps {
 	dispatch: (frame: ExocomSemanticFrame) => Promise<{ msg_id: string; peerWakeDeferred?: true }>;
 	/** Read-before-arm closes the answer-before-wait race. */
 	armWait: (work_key: string, ask_id: string, timeoutMs: number) => ExocomWaitArmResult;
+	/** Current ledger snapshot for the read-only ownership view. */
+	ledger: () => LedgerState;
+	/** Peer display name for a session id, or undefined when it cannot be resolved. */
+	labelFor: (sessionId: string) => string | undefined;
 }
 
 export type ExocomWaitArmResult =
@@ -296,6 +301,26 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderResult(res, { expanded }, theme) {
 			const first = res.content.find((item) => item.type === "text");
 			const text = first?.type === "text" ? first.text : "Exocom progress failed";
+			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "exocom_status",
+		label: "Exocom Status",
+		description: "Who owns what in this Exocom scope: your claims, peers' claims, asks waiting for you, your open asks.",
+		parameters: Type.Object({}),
+		async execute() {
+			const state = deps.ledger();
+			return result(formatLedgerStatus(state, deps.sessionId(), deps.labelFor, deps.now()), { claims: state.claims.length, asks: state.asks.length });
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("Exocom Status")), 0, 0);
+		},
+		renderResult(res, { expanded }, theme) {
+			const first = res.content.find((item) => item.type === "text");
+			const text = first?.type === "text" ? first.text : "Exocom status failed";
 			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
 			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
 		},

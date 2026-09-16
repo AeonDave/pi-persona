@@ -78,6 +78,7 @@ export {
 import { installExocom } from "./exocom/install.ts";
 import { installIdentity } from "./extension/identity.ts";
 import { parseExocomArgv } from "./exocom/activation.ts";
+import { formatLedgerStatus } from "./exocom/status.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
 import { registerIntercomTool } from "./tools/intercom-tool.ts";
 import { registerTimerTool } from "./tools/timer.ts";
@@ -1949,11 +1950,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					? `joined scope [${scope.scopeCode}] · home ${scope.homeWorkspaceLabel} [${scope.homeWorkspaceCode}] · advisory for writes`
 					: `workspace ${scope.homeWorkspaceLabel} [${scope.scopeCode}]`
 				: "scope unavailable";
+			const peerLines = peers.length === 0
+				? `${scopeLine}\nno other peers in this scope right now`
+				: `${scopeLine}\n${peers.length} peer${peers.length === 1 ? "" : "s"}:\n${lines.join("\n")}`;
 			appendCommandResult(
 				`exocom ${exocom.name}`,
-				peers.length === 0
-					? `${scopeLine}\nno other peers in this scope right now`
-					: `${scopeLine}\n${peers.length} peer${peers.length === 1 ? "" : "s"}:\n${lines.join("\n")}`,
+				`${peerLines}\n${formatLedgerStatus(exocom.ledgerState(), exocom.sessionId, exocom.peerLabelFor, Date.now())}`,
 				true,
 			);
 		},

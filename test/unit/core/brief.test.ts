@@ -187,6 +187,7 @@ const ALL_EXOCOM_TOOLS = {
 	wait: true,
 	release: true,
 	progress: true,
+	status: true,
 } as const;
 const XOPTS = { canDelegate: true, canAskHuman: true, tools: ALL_EXOCOM_TOOLS };
 const PEERS = [{ name: "orion", persona: "dev" }];
