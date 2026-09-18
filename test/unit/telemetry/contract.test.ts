@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseTelemetryEvent, TELEMETRY_VERSION, type TelemetryEvent } from "../../../src/telemetry/contract.ts";
+import { parseTelemetryEvent, TELEMETRY_PRODUCER_VERSION, TELEMETRY_VERSION, type TelemetryEvent } from "../../../src/telemetry/contract.ts";
 
 test("v2 accepts a namespaced event from a future producer", () => {
   const event = {
@@ -101,4 +101,14 @@ test("known common payload validation enforces lifecycle phases and numeric boun
   assert.equal(parseTelemetryEvent({ ...base, type: "tool.finished", payload: { callId: "tc", agentId: "a", name: "x", status: "running" } }), undefined);
   assert.equal(parseTelemetryEvent({ ...base, type: "instance.heartbeat", payload: { contextPercent: Number.NaN } }), undefined);
   assert.equal(parseTelemetryEvent({ ...base, type: "peers.snapshot", payload: { peers: [{ sessionId: "p", displayName: "p", contextPercent: -1, status: "online", sent: -1, received: 0 }] } }), undefined);
+});
+
+// The wire's producerVersion is what a consumer dashboard shows and pins behaviour to. It has
+// silently drifted from the package version twice before, with no guard; this is the guard.
+test("TELEMETRY_PRODUCER_VERSION matches the package version", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { fileURLToPath } = await import("node:url");
+	const pkgPath = fileURLToPath(new URL("../../../package.json", import.meta.url));
+	const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version: string };
+	assert.equal(TELEMETRY_PRODUCER_VERSION, pkg.version, "bump TELEMETRY_PRODUCER_VERSION in src/telemetry/contract.ts with every release");
 });
