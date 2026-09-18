@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
-## [Unreleased]
+## [1.15.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.0) - 2026-09-18
 
 ### Added
 
