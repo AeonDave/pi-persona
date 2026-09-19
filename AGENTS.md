@@ -158,8 +158,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Pi is prompted to invent a task-derived call-sign on its first user or inbound peer turn
   (no catalog or extra model call). Naming is metadata permitted during pending asks, without
   settling them; a targeted deny suppresses the prompt. Session identity is shared with standalone
-  `agent_name`, persisted across resume/persona changes, and refreshed through the `context` hook
-  because custom Exocom wakes can bypass `before_agent_start`. The session-hash suffix of a qualified target survives renames and telemetry resolves the
+  `agent_name` and persisted across resume/persona changes. Until a handle is chosen, its actionable
+  naming bootstrap is delivered through the `context` hook because custom Exocom wakes can bypass
+  `before_agent_start`; after selection the hook stays silent. The session-hash suffix of a qualified target survives renames and telemetry resolves the
   same canonical session.
   Reuses the broker's wire framing
   (`bus/broker/framing.ts`) and the
@@ -179,7 +180,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 ## Project structure
 
 - Session identity: `src/core/session-identity.ts` defines validated names and session-bound
-  persistence; `src/extension/identity.ts` registers `agent_name` and per-call identity context.
+  persistence; `src/extension/identity.ts` registers `agent_name` and the pre-name context bootstrap.
   Exocom uses that same state. A delegate's optional `AgentRunSpec.name` is leader-assigned
   display identity, propagated to both engines without changing routing ids.
 

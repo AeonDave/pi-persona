@@ -538,7 +538,9 @@ replacement.
   handle independent of Exocom. `agent_name` names a standalone session; `exocom_name` does the same
   while Exocom is active and refreshes presence immediately. A chosen name persists in a session-bound
   entry, survives resume/reload/persona changes, and is not inherited by a fork with a new session id;
-  generic persona/agent names are rejected. `exocom_name` only replaces the display label — the
+  generic persona/agent names are rejected. Before selection, the `context` hook supplies the
+  actionable naming bootstrap to ordinary turns and custom Exocom wakes; after selection it injects
+  no identity pseudo-turn. `exocom_name` only replaces the display label — the
   registry key stays the session, so a rename can't take over another peer's slot or its inbound
   replies, and changing persona never changes the key or grants authority over another peer. Delegated
   workers keep the leader's `delegate.name` from launch, including peer/broker display labels.

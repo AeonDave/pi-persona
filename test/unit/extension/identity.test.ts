@@ -100,6 +100,21 @@ test("agent_name is capability-gated and refuses the Exocom plane", async () => 
 	assert.equal(identity.chosen, false);
 });
 
+test("agent_name reports an unchanged name without confirming a fresh identity", async () => {
+	const m = makePi();
+	const identity = installIdentity(m.pi, makeHost());
+	const ctx = makeContext();
+	identity.start(ctx);
+	const tool = m.tool("agent_name");
+	const first = await tool.execute("1", { name: "Blue Sky" }, undefined, undefined, ctx);
+	const repeated = await tool.execute("2", { name: "Blue Sky" }, undefined, undefined, ctx);
+	assert.match(first.content[0].text, /you are now "Blue-Sky"/);
+	assert.deepEqual(first.details, { name: "Blue-Sky", changed: true });
+	assert.equal(repeated.content[0].text, 'agent: name already set to "Blue-Sky"');
+	assert.deepEqual(repeated.details, { name: "Blue-Sky", changed: false });
+	assert.equal(m.entries.length, 1);
+});
+
 test("context hook replaces its prior hidden message and uses the callable naming tool", () => {
 	const m = makePi(["agent_name"]);
 	const identity = installIdentity(m.pi, makeHost());
@@ -124,4 +139,31 @@ test("context hook prefers exocom_name on the active plane and never copies peer
 	const message = result.messages.at(-1);
 	assert.match(message.content, /exocom_name/);
 	assert.doesNotMatch(message.content, /IGNORE_THIS_PEER_PAYLOAD/);
+});
+
+test("context hook stops injecting identity after a handle is chosen", () => {
+	const m = makePi(["agent_name"]);
+	const identity = installIdentity(m.pi, makeHost());
+	const ctx = makeContext();
+	identity.start(ctx);
+	identity.rename("Blue Sky", ctx);
+	const hook = m.hook("context")!;
+	const old = { role: "custom", customType: IDENTITY_CONTEXT_CUSTOM_TYPE, content: "old", display: false, timestamp: 1 };
+	let messages = [old, { role: "user", content: "task" }];
+	for (let i = 0; i < 100; i++) {
+		const result = hook({ type: "context", messages }, ctx);
+		assert.equal(result.messages.filter((message: any) => message.customType === IDENTITY_CONTEXT_CUSTOM_TYPE).length, 0);
+		assert.doesNotMatch(JSON.stringify(result.messages), /Blue-Sky/);
+		messages = result.messages;
+	}
+	assert.deepEqual(messages, [{ role: "user", content: "task" }]);
+});
+
+test("context hook stays silent when no naming tool is callable", () => {
+	const m = makePi([]);
+	const identity = installIdentity(m.pi, makeHost());
+	identity.start(makeContext());
+	const hook = m.hook("context")!;
+	const result = hook({ type: "context", messages: [{ role: "user", content: "task" }] }, makeContext());
+	assert.deepEqual(result.messages, [{ role: "user", content: "task" }]);
 });

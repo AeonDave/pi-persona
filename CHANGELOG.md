@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- A chosen session identity is no longer re-injected as a hidden user-like message before every
+  provider request. The context hook now emits only the actionable, pre-name bootstrap, preventing
+  tool-loop continuations from narrating repeated identity confirmations.
+- Repeating `agent_name` with the active handle reports it as unchanged instead of announcing a
+  fresh identity again.
+
 ## [1.15.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.0) - 2026-09-18
 
 ### Added

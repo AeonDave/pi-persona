@@ -5202,15 +5202,14 @@ test("a standalone identity is distinct from the persona and survives persona ch
 		await nameTool.execute("choose", { name: "Copper-Kite" }, undefined, undefined, ctx);
 		await m.cmd("persona", "researcher", ctx);
 		const renamed = m.fire("context", { messages: bootstrap.messages }, ctx);
-		assert.match(JSON.stringify(renamed.messages), /Copper-Kite/);
-		assert.doesNotMatch(JSON.stringify(renamed.messages), /FIRST action/i, "changing persona keeps the chosen identity");
+		assert.equal(renamed.messages.length, 0, "a chosen identity removes the bootstrap without adding another pseudo-turn");
 		const saved = m.entries().map((entry) => ({ type: "custom", ...entry }));
 		const restored = makeMockPi();
 		const restoredCtx = { ...ctx, sessionManager: { getSessionId: () => sessionId, getBranch: () => saved } };
 		piPersona(restored.pi);
 		try {
 			await restored.fire("session_start", {}, restoredCtx);
-			assert.match(JSON.stringify(restored.fire("context", { messages: [] }, restoredCtx).messages), /Copper-Kite/);
+			assert.deepEqual(restored.fire("context", { messages: [] }, restoredCtx).messages, [], "resume restores runtime identity without reinjecting it into the model transcript");
 		} finally { await restored.fire("session_shutdown", {}, restoredCtx); }
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
