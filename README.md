@@ -29,7 +29,7 @@ The defaults are opt-in: `/persona seed` adds missing files and preserves your c
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l git:github.com/AeonDave/pi-persona` |
-| Pin this release | `pi install git:github.com/AeonDave/pi-persona@v1.15.0` |
+| Pin this release | `pi install git:github.com/AeonDave/pi-persona@v1.15.1` |
 | Update an unpinned install | `pi update git:github.com/AeonDave/pi-persona` |
 
 Restart Pi after updating. For a pinned install, install the new tag explicitly.
@@ -158,6 +158,10 @@ npm ci
 npm run typecheck
 npm test
 ```
+
+Release metadata moves together: `package.json`, both root versions in `package-lock.json`,
+`TELEMETRY_PRODUCER_VERSION`, the changelog heading, and the pinned install command above. The test
+suite checks this set so a release cannot silently advertise or emit an older version.
 
 Pi loads the TypeScript extension directly; there is no build step.
 See [AGENTS.md](AGENTS.md) for contribution conventions. Licensed under [MIT](LICENSE).
