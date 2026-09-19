@@ -6,6 +6,15 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.15.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.1) - 2026-09-20
+
+### Changed
+
+- Development validation now uses the current Pi `0.85.1` packages, TypeBox `1.3.34`, and the
+  current Node 22 tooling line while retaining the supported Pi `>=0.83.0` runtime floor.
+- Release metadata is now guarded as one version set across the package manifest, lockfile,
+  telemetry producer, changelog, and README install pin.
+
 ### Fixed
 
 - A chosen session identity is no longer re-injected as a hidden user-like message before every
