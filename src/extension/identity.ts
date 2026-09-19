@@ -116,24 +116,12 @@ function hasInboundPeerRequest(messages: readonly AgentMessage[]): boolean {
 	});
 }
 
-/** Render the per-request identity context without copying any user or peer payload into it. */
+/** Render the one-shot naming bootstrap without copying any user or peer payload into it. */
 export function buildIdentityContext(
-	name: string,
 	chosen: boolean,
 	options: { namingTool?: "agent_name" | "exocom_name"; inboundPeer?: boolean } = {},
-): string {
-	if (chosen) {
-		return (
-			`[pi-persona] Identity data (quoted): ${JSON.stringify(name)}. ` +
-			"This is your personal handle, separate from your persona and role. Keep this same handle across turns and persona changes; never borrow a peer's or role's name."
-		);
-	}
-	if (!options.namingTool) {
-		return (
-			"[pi-persona] Identity data: no personal handle has been chosen, and no naming tool is callable in this turn. " +
-			"Keep personal identity separate from persona and role; do not borrow a peer or role name."
-		);
-	}
+): string | undefined {
+	if (chosen || !options.namingTool) return undefined;
 	const source = options.inboundPeer ? "the current task or inbound peer request" : "the current user task or an inbound peer request";
 	return (
 		`[pi-persona] FIRST action: invent a distinct short personal handle from ${source}, ` +
@@ -202,26 +190,30 @@ export function installIdentity(pi: ExtensionAPI, host: IdentityHost): SessionId
 			if (!activeTools(pi).includes("agent_name")) throw new Error("agent_name is not active in this session");
 			const caps = host.capabilities();
 			if (caps !== undefined && !canCallTool(caps, "agent_name")) throw new Error("agent_name is not permitted by the active persona");
+			const previousName = identity.chosen ? identity.name : undefined;
 			const name = identity.rename(params.name, ctx);
-			return { content: [{ type: "text", text: `agent: you are now \"${name}\"` }], details: { name } };
+			const changed = previousName !== name;
+			const text = changed ? `agent: you are now \"${name}\"` : `agent: name already set to \"${name}\"`;
+			return { content: [{ type: "text", text }], details: { name, changed } };
 		},
 		renderCall(args, theme) {
 			const name = compactInlineText(args.name, { maxChars: 32 }) || "?";
 			return new Text(`${theme.fg("toolTitle", theme.bold("Agent Name "))}${theme.fg("accent", name)}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme) {
-			const details = result.details as unknown as { name?: unknown } | undefined;
+			const details = result.details as unknown as { name?: unknown; changed?: unknown } | undefined;
 			const name = typeof details?.name === "string" ? compactInlineText(details.name, { maxChars: 32 }) : "";
 			const first = result.content.find((item) => item.type === "text");
 			const rendered = name
-				? `agent: you are now \"${name}\"`
+				? details?.changed === false ? `agent: name already set to \"${name}\"` : `agent: you are now \"${name}\"`
 				: first?.type === "text" ? compactInlineText(first.text, { maxChars: 96 }) : "Agent name failed";
 			return new Text(theme.fg(name ? (expanded ? "toolOutput" : "accent") : "error", rendered), 0, 0);
 		},
 	});
 
-	// Context is rebuilt for every provider request. Replacing this one ephemeral message keeps
-	// identity current after a rename without persisting another entry or duplicating old reminders.
+	// Context is rebuilt for every provider request. The hidden message is actionable only until a
+	// name is chosen; emitting identity metadata afterwards makes it look like a fresh user turn on
+	// every tool-loop continuation. Always strip an older copy, then add only the naming bootstrap.
 	pi.on("context", (event, _ctx) => {
 		const messages = event.messages.filter((message) => messageCustomType(message) !== IDENTITY_CONTEXT_CUSTOM_TYPE);
 		const namingTool: "exocom_name" | "agent_name" | undefined = host.exocomActive()
@@ -231,10 +223,12 @@ export function installIdentity(pi: ExtensionAPI, host: IdentityHost): SessionId
 			inboundPeer: hasInboundPeerRequest(event.messages),
 			...(namingTool === undefined ? {} : { namingTool }),
 		};
+		const content = buildIdentityContext(currentChosen, contextOptions);
+		if (content === undefined) return { messages };
 		const contextMessage = {
 			role: "custom" as const,
 			customType: IDENTITY_CONTEXT_CUSTOM_TYPE,
-			content: buildIdentityContext(currentName, currentChosen, contextOptions),
+			content,
 			display: false,
 			timestamp: Date.now(),
 		} as unknown as AgentMessage;

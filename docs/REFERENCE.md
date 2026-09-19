@@ -102,7 +102,8 @@ An unnamed standalone session receives a provisional process/session-derived han
 turn where `agent_name` is callable, the runtime context asks the model to invent a
 short handle and call `agent_name` before other work. The chosen handle is separate from the active
 persona and role, is persisted in the session identity entry, and remains across later turns and
-persona changes. `agent_name` is unavailable while Exocom is active; its call-time capability check
+persona changes. Once chosen, it is not re-injected into every provider request; the runtime and
+session entry remain authoritative. `agent_name` is unavailable while Exocom is active; its call-time capability check
 also rejects empty, unsafe, generic, or reserved persona/agent names.
 
 With Exocom active, the corresponding tool is `exocom_name`. The first incoming peer wake can be the
