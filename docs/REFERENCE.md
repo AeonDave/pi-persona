@@ -374,7 +374,7 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_CHECKIN_MS` | 300000 | routine direction check-in while async children run; `0` disables it |
 | `PI_PERSONA_AGENT_MAX_MS` | off | opt-in per-agent hard wall-clock cap; unset leaves healthy work running |
 | `PI_PERSONA_AGENT_STARTUP_MS` | 300000 | startup deadline for a child that makes no progress; `0` disables it. Like the idle window, a leg waiting on a supervisor reply is not idle: the watchdog re-arms while its ask is pending, instead of killing on a blind ceiling |
-| `PI_PERSONA_NUDGE` | on | `off` silences delegation and persistence nudges |
+| `PI_PERSONA_NUDGE` | on | `off` silences delegation and persistence nudges; synchronous checkpoints stay in model-visible tool results and are mirrored to durable, expandable TUI-only cards |
 | `PI_PERSONA_EXOCOM` | off | `1` joins the current workspace Exocom scope; cross-workspace selection is CLI-only |
 | `PI_PERSONA_SPINE` | off | `on` or a path enables the shared behavioral layer; see [`SPINE.md`](./SPINE.md) |
 | `PI_PERSONA_SPINE_LEGS` | follows `PI_PERSONA_SPINE` | selector for delegated legs, allowing all four spine measurement arms |

@@ -1745,10 +1745,10 @@ test("PI_PERSONA_NUDGE=off silences the premature-surrender note on the BACKGROU
 	};
 
 	const on = await collect(undefined);
-	assert.match(on, /Don't bank it yet/, "by default a blocked leg still gets the counterweight");
+	assert.match(on, /delegated result needs verification/, "by default a blocked leg still gets the counterweight");
 	const off = await collect("off");
 	assert.match(off, /BLOCKED/, "the completion report itself is unaffected");
-	assert.doesNotMatch(off, /Don't bank it yet/, "the documented off switch silences this path as well");
+	assert.doesNotMatch(off, /delegated result needs verification/, "the documented off switch silences this path as well");
 });
 
 test("intercom result retrieves one complete async payload by id without a duplicate follow-up", async () => {
@@ -3928,6 +3928,57 @@ test("a disconnected child's buffered ask never wakes the supervisor after it go
 });
 
 // ── a persona switch is a fresh supervisor contract (nudge.ts's documented reset points) ──
+
+test("a delegation checkpoint stays in model context and gets a durable visible TUI card", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const sentBefore = m.sentMessages().length;
+	const entriesBefore = m.entries().length;
+	const original = "x".repeat(2_000);
+	const event = { toolName: "read", content: [{ type: "text", text: original }] };
+	let patch: { content?: Array<{ type: string; text?: string }> } | undefined;
+	for (let i = 0; i < 5; i++) patch = m.fire("tool_result", event, ctx) as typeof patch;
+	assert.ok(patch?.content, "the threshold-crossing tool result is patched in place");
+	assert.equal(patch.content[0]?.text, original, "the original visible tool output is preserved");
+	assert.match(patch.content[1]?.text ?? "", /^⟢ pi-persona · delegation checkpoint$/m);
+	assert.equal(m.sentMessages().length, sentBefore, "no custom prompt message carries the checkpoint");
+	const cards = m.entries().slice(entriesBefore);
+	assert.equal(cards.length, 1, "one threshold crossing appends one durable TUI card");
+	assert.equal(cards[0]?.customType, "pi-persona-nudge");
+	assert.match(String((cards[0]?.data as { content?: string } | undefined)?.content ?? ""), /^⟢ pi-persona · delegation checkpoint$/m);
+
+	const renderer = m.entryRenderer("pi-persona-nudge");
+	assert.ok(renderer, "nudge cards have a dedicated TUI-only renderer");
+	const collapsed = renderComponent(renderer(cards[0], { expanded: false }, traceTheme));
+	assert.match(collapsed, /delegation checkpoint/);
+	assert.match(collapsed, /Trigger:/);
+	assert.match(collapsed, /Action:/);
+	assert.match(collapsed, /expand/i, "collapsed cards advertise the full detail");
+	const expanded = renderComponent(renderer(cards[0], { expanded: true }, traceTheme));
+	assert.match(expanded, /Scope: since the last successful hand-off/);
+	assert.match(expanded, /Keep local: session-bound work/);
+});
+
+test("failed-hand-off and persistence checkpoints each append exactly one visible card", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const baseline = m.entries().length;
+	const failed = { toolName: "delegate", content: [{ type: "text", text: "unknown agent" }], isError: true };
+	m.fire("tool_result", failed, ctx);
+	assert.equal(m.entries().length, baseline + 1);
+	assert.match(String((m.entries().at(-1)?.data as { content?: string }).content), /hand-off repair/);
+	m.fire("tool_result", failed, ctx);
+	assert.equal(m.entries().length, baseline + 1, "backoff-suppressed notes do not duplicate their TUI card");
+	m.fire("tool_result", { toolName: "delegate", content: [{ type: "text", text: "[BLOCKED] need access" }], isError: false }, ctx);
+	assert.equal(m.entries().length, baseline + 2);
+	assert.match(String((m.entries().at(-1)?.data as { content?: string }).content), /delegated result needs verification/);
+});
 
 test("switching persona clears the by-hand delegation run instead of billing it to the next persona", async () => {
 	const m = makeMockPi();

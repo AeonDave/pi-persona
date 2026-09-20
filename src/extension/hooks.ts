@@ -68,6 +68,7 @@ export interface HookHost {
 	telemetryAgent(node: AgentNode): TelemetryAgentInput;
 	delegationNudge: DelegationNudge;
 	persistenceNudge: PersistenceNudge;
+	appendNudgeEntry(content: string): void;
 	completionNotifier: IdleCoalescingNotifier<AsyncRun>;
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
 	timerNotifier: IdleCoalescingNotifier<TimerEntry>;
@@ -633,7 +634,12 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		const surrender = h.persistenceNudge.observe(event.toolName, text);
 		if (surrender) notes.push(surrender);
 		if (notes.length === 0) return errorPatch;
-		return { ...errorPatch, content: [...event.content, { type: "text", text: notes.join("\n\n") }] };
+		const joined = notes.join("\n\n");
+		// Keep the semantic copy in the tool result for the model, and add a TUI-only durable card for
+		// the operator. Built-in/custom tool renderers are free to hide `content` when collapsed (some
+		// ignore it even when expanded), so the entry is the only cross-tool visibility guarantee.
+		h.appendNudgeEntry(joined);
+		return { ...errorPatch, content: [...event.content, { type: "text", text: joined }] };
 	});
 
 	// Mandatory orchestration: when the active persona declares a strategy/parallel/
