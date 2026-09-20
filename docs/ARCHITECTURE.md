@@ -618,8 +618,12 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
   the event that warrants them:
   - **DelegationNudge** — a `tool_result` hook watches the supervisor's own tool stream and, when a
     delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council`
-    crosses a threshold), appends a one-line "hand it off" reminder to that command's result. A
-    successful hand-off resets the streak; a failed one keeps it and returns a re-dispatch hint.
+    crosses a threshold), appends a compact labelled checkpoint (`Trigger` / `Scope` / `Action`) to
+    that command's result for the model and mirrors it into a durable, expandable
+    `pi-persona-nudge` custom entry for the operator. The entry is TUI-only (no duplicate model
+    context or turn) and guarantees visibility even when a built-in/custom tool renderer suppresses
+    result `content`. A successful hand-off resets the streak; a failed one keeps it and returns the
+    same visible re-dispatch checkpoint.
   - **PersistenceNudge** — the counterweight to premature surrender: a delegated leg's report carrying
     `[BLOCKED]`/`FLAG: UNKNOWN` gets a "don't bank it yet" reminder. All three delivery paths carry it
     (sync `delegate`/`council`, background completion, `intercom wait`), but coverage isn't identical:

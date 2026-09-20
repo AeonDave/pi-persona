@@ -103,8 +103,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - **Delegation nudges** (`core/nudge.ts`, on by default): a `tool_result` hook watches the supervisor's
   OWN tool stream and, when a delegating persona grinds heavy work by hand (output burn since the
   last `delegate`/`council` crosses a threshold),
-  APPENDS a reminder to that command's result — runtime reinforcement in recent context, where a
-  top-of-prompt persona directive has decayed. Pure state machine (`DelegationNudge`); gated to
+  APPENDS a compact labelled checkpoint to that command's result for the model AND emits the same
+  checkpoint as a durable, expandable `pi-persona-nudge` TUI-only entry for the operator. It is never
+  hidden/context-only: tool renderers may suppress their own `content`, but cannot suppress the
+  separate card. This is runtime reinforcement in recent context, where a top-of-prompt persona
+  directive has decayed. Pure state machine (`DelegationNudge`); gated to
   personas holding the `delegate` tool; sub-agents run in separate sessions so the hook only sees the
   supervisor. Its counterweight is **`PersistenceNudge`** — a leg that comes back `[BLOCKED]`/`FLAG:
   UNKNOWN` gets a "don't bank it yet" reminder on each of the three delivery paths (sync result,

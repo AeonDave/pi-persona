@@ -24,7 +24,7 @@ test("fires on a RUN of substantive hands-on commands (a by-hand sweep)", () => 
 	const nudge = n.observe("bash", 50); // run 4 ≥ 4 → fires
 	assert.ok(nudge, "a run of substantive commands is a sweep");
 	assert.match(nudge ?? "", /delegate/i);
-	assert.match(nudge ?? "", /in a row/i);
+	assert.match(nudge ?? "", /substantive direct tool calls/i);
 });
 
 test("one big read is NOT a sweep — volume alone never fires (grep-first, not delegate)", () => {
@@ -62,7 +62,7 @@ test("fires on a single very heavy result (a fat one-shot dump like linpeas/ffuf
 	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 99, minStepChars: 10, minSweepBurnChars: 0 });
 	const nudge = n.observe("bash", 120); // >= singleHeavyChars → fires on its own despite run of 1
 	assert.ok(nudge, "a single huge result nudges immediately");
-	assert.match(nudge ?? "", /in one result/i);
+	assert.match(nudge ?? "", /one direct tool result/i);
 	assert.match(nudge ?? "", /delegate/i);
 });
 
@@ -82,7 +82,9 @@ test("a failed delegate remains actionable and does not erase the by-hand run", 
 	n.observe("grep", 50);
 	n.observe("read", 50); // run 3, one short of the sweep
 	const repair = n.observe("delegate", 500, false);
-	assert.match(repair ?? "", /failed.*hand-off|re-dispatch/i);
+	assert.match(repair ?? "", /^⟢ pi-persona · hand-off repair$/m);
+	assert.match(repair ?? "", /^  Trigger: .*failed before useful work landed/m);
+	assert.match(repair ?? "", /^  Action: .*agent.*tool grant.*re-dispatch/m);
 	assert.ok(n.observe("bash", 50), "the failed hand-off did not buy a false reset");
 });
 
@@ -124,25 +126,30 @@ test("backoff: each un-actioned nudge widens the next run window (early reminder
 	assert.ok(n.observe("bash", 50), "re-fires only after the WIDENED window"); // run 12, 12-4=8 ≥ 8
 });
 
-test("a sweep nudge names the run, not a single dump, and acknowledges non-delegable work", () => {
+test("a sweep nudge is a compact visible checkpoint with trigger, action, and local-work guidance", () => {
 	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
 	let note: string | undefined;
 	for (let i = 0; i < 4 && !note; i++) note = n.observe("bash", 1_000); // 4 substantive, none single-heavy
 	assert.ok(note, "a run of substantive commands nudges");
 	assert.doesNotMatch(note ?? "", /in one result/, "not framed as a single fat dump");
-	assert.match(note ?? "", /in a row/i);
-	assert.match(note ?? "", /interactive session a sub-agent can't inherit/i, "acknowledges non-delegable work");
-	assert.match(note ?? "", /agent.*tool.*re-dispatch/i, "a weak hand-off is corrected instead of absorbed by the supervisor");
+	assert.match(note ?? "", /^⟢ pi-persona · delegation checkpoint$/m);
+	assert.match(note ?? "", /^  Trigger: 4 substantive direct tool calls · ~1k estimated output tokens\.$/m);
+	assert.match(note ?? "", /^  Scope: since the last successful hand-off\.$/m);
+	assert.match(note ?? "", /^  Action: delegate independent work; repair weak hand-offs, then re-dispatch\.$/m);
+	assert.match(note ?? "", /^  Keep local: session-bound work; keep it lean and grep-first\.$/m, "acknowledges non-delegable work");
+	assert.equal((note ?? "").split("\n").length, 5, "the expanded checkpoint has a stable five-line shape");
+	assert.ok((note ?? "").split("\n").every((line) => line.length <= 88), "each labelled line stays narrow enough to avoid gratuitous wrapping");
 	assert.ok((note ?? "").length <= 360, "the reminder itself must not become another wall of text");
 });
 
-test("the single-dump nudge names the burn in tokens and points at delegate", () => {
+test("the single-dump nudge labels its token count as an estimate and points at delegation", () => {
 	const n = new DelegationNudge({ singleHeavyChars: 40_000, runLength: 99, minStepChars: 200, minSweepBurnChars: 0 });
 	const nudge = n.observe("bash", 48_000); // ~12k tokens single dump
 	assert.ok(nudge);
-	assert.match(nudge ?? "", /~12k tokens/);
-	assert.match(nudge ?? "", /delegate/i);
-	assert.match(nudge ?? "", /burns context or budget/i);
+	assert.match(nudge ?? "", /^⟢ pi-persona · delegation checkpoint$/m);
+	assert.match(nudge ?? "", /^  Trigger: one direct tool result · ~12k estimated output tokens\.$/m);
+	assert.match(nudge ?? "", /^  Scope: ~12k in the current direct-work streak\.$/m);
+	assert.match(nudge ?? "", /^  Action: delegate independent work/m);
 });
 
 test("the dump trigger de-escalates like the sweep: repeated fat one-shots don't nudge every time", () => {
@@ -212,7 +219,11 @@ test("PersistenceNudge fires when a delegated leg reports a blocked marker", () 
 	const n = new PersistenceNudge();
 	const note = n.observe("delegate", "tried A, B, C. [BLOCKED: need domain creds]");
 	assert.ok(note, "an explicit BLOCKED in a leg report nudges the supervisor");
-	assert.match(note ?? "", /recovery pass/i);
+	assert.match(note ?? "", /^⟢ pi-persona · delegated result needs verification$/m);
+	assert.match(note ?? "", /^  Trigger: a delegated leg returned BLOCKED\/UNKNOWN\.$/m);
+	assert.match(note ?? "", /^  Verify: accept only concrete external blockers/m);
+	assert.match(note ?? "", /^  Otherwise: run the recovery pass or re-dispatch/m);
+	assert.equal((note ?? "").split("\n").length, 4, "the visible reminder has a stable four-line shape");
 });
 
 test("PersistenceNudge fires on a CTF give-up (FLAG: UNKNOWN), case/spacing tolerant", () => {

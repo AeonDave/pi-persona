@@ -81,6 +81,15 @@ export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
 const toK = (chars: number): number => Math.round(chars / 4 / 1000);
 
 /**
+ * Keep runtime reinforcement structured for both its semantic tool-result copy and the dedicated
+ * TUI card. It is never moved to a hidden-only context channel; expanding either surface reveals
+ * the same labelled checkpoint.
+ */
+function renderVisibleCheckpoint(title: string, lines: readonly string[]): string {
+	return [`⟢ pi-persona · ${title}`, ...lines.map((line) => `  ${line}`)].join("\n");
+}
+
+/**
  * Honest lead: name what actually tripped the nudge. A single fat dump blames THAT command; a
  * cumulative streak names the accumulated burn (never the tiny command that merely crossed the
  * line — printing its ~0k size looked like the nudge fired on nothing). The tail acknowledges that
@@ -88,15 +97,15 @@ const toK = (chars: number): number => Math.round(chars / 4 / 1000);
  * (a live shell, a specific tunnel) stays with you — then the fix is to keep it lean, not to hand off.
  */
 function renderNudge(reason: "dump" | "sweep", run: number, burn: number, size: number): string {
-	const lead =
+	const signal =
 		reason === "dump"
-			? `one direct command dumped ~${toK(size)}k tokens in one result (~${toK(burn)}k since the last hand-off).`
-			: `${run} hands-on commands in a row (~${toK(burn)}k tokens) since the last hand-off.`;
-	return (
-		`⟢ pi-persona — ${lead} ` +
-		"Delegate work that burns context or budget. Weak hand-off? Fix its agent/tool grant and re-dispatch; don't absorb the scope. " +
-		"If work is bound to one interactive session a sub-agent can't inherit, keep it lean and grep-first."
-	);
+			? [`Trigger: one direct tool result · ~${toK(size)}k estimated output tokens.`, `Scope: ~${toK(burn)}k in the current direct-work streak.`]
+			: [`Trigger: ${run} substantive direct tool calls · ~${toK(burn)}k estimated output tokens.`, "Scope: since the last successful hand-off."];
+	return renderVisibleCheckpoint("delegation checkpoint", [
+		...signal,
+		"Action: delegate independent work; repair weak hand-offs, then re-dispatch.",
+		"Keep local: session-bound work; keep it lean and grep-first.",
+	]);
 }
 
 export class DelegationNudge {
@@ -143,7 +152,10 @@ export class DelegationNudge {
 					this.failedHandoffKey = key;
 					this.failedHandoffRepeats = 0;
 				}
-				return "⟢ pi-persona — the hand-off failed before useful work landed. Fix the agent, model, brief, or tool grant and re-dispatch; do not absorb the delegated scope. The direct-work streak remains active.";
+				return renderVisibleCheckpoint("hand-off repair", [
+					"Trigger: hand-off failed before useful work landed; direct-work streak remains active.",
+					"Action: fix agent/model/brief/tool grant, then re-dispatch.",
+				]);
 			}
 			// The operator delegated successfully — the by-hand run is over; the hand-off itself never nudges.
 			this.reset();
@@ -197,12 +209,11 @@ const REPORT_TOOLS = new Set(["delegate", "council"]);
 /** Explicit surrender/blocked markers the operator + CTF protocols emit (operator.md). */
 const SURRENDER_MARKERS: readonly RegExp[] = [/\[BLOCKED\b/i, /\bFLAG:\s*UNKNOWN\b/i];
 
-const PERSISTENCE_NOTE =
-	"⟢ pi-persona — a delegated leg came back BLOCKED/UNKNOWN. Don't bank it yet: a real block names a " +
-	"missing external capability (access, credential, authorization, an unobtainable tool). If it's " +
-	"out-of-ideas with budget left, steer it back with the recovery pass (probe the unverified, re-read " +
-	"recon, simplest attack of the class, empirical payloads to leak structure) or re-dispatch with a " +
-	"sharper packet.";
+const PERSISTENCE_NOTE = renderVisibleCheckpoint("delegated result needs verification", [
+	"Trigger: a delegated leg returned BLOCKED/UNKNOWN.",
+	"Verify: accept only concrete external blockers (access, credentials, or tools).",
+	"Otherwise: run the recovery pass or re-dispatch with a sharper brief.",
+]);
 
 export class PersistenceNudge {
 	/**

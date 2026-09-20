@@ -6,6 +6,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Changed
+
+- Delegation, failed-hand-off, and persistence nudges are now compact labelled checkpoints with an
+  explicit trigger and action. Token counts are identified as estimates, session-bound work is
+  separated from delegable work, and each synchronous checkpoint is mirrored from its semantic tool
+  result into a durable, expandable TUI-only card. This keeps it visible even when a tool renderer
+  suppresses result content without duplicating it into model context or triggering another turn.
+
 ## [1.15.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.1) - 2026-09-20
 
 ### Changed

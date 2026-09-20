@@ -172,6 +172,10 @@ interface CommandResultEntry {
 	error?: string;
 }
 
+interface NudgeEntry {
+	content: string;
+}
+
 /**
  * Keep the immediate operator-facing settlement toast and the semantic completion delivery on one
  * path. A supervisor-requested abort is terminal, but it is not an execution error: the tracker
@@ -304,6 +308,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
 		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 	});
+	pi.registerEntryRenderer("pi-persona-nudge", (entry, { expanded }, theme) => {
+		const data = entry.data as NudgeEntry;
+		const full = sanitizeTerminalText(data.content || "⟢ pi-persona · checkpoint");
+		const lines = full.split("\n").map((line) => line.trim()).filter(Boolean);
+		const header = compactInlineText(lines[0]?.replace(/^⟢\s*/, "") ?? "", { maxChars: 96 }) || "pi-persona · checkpoint";
+		const details = lines.slice(1);
+		const title = theme.fg("warning", theme.bold(`⟢ ${header}`));
+		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", details.join("\n") || "(no detail)")}`, 0, 0);
+		const trigger = details.find((line) => line.startsWith("Trigger:"));
+		const action = details.find((line) => /^(?:Action|Verify|Otherwise):/.test(line));
+		const selected = [trigger, action].filter((line): line is string => line !== undefined);
+		const previewLines = selected.length > 0 ? selected : details.slice(0, 2);
+		const preview = compactVisibleText(previewLines.join("\n"), { maxLines: 2, maxLineChars: 100 });
+		const hasMore = preview.truncated || details.some((line) => !previewLines.includes(line));
+		const hint = hasMore ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+	});
+	const appendNudgeEntry = (content: string): void => {
+		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
+	};
 	const appendCommandResult = (
 		label: string,
 		content: string,
@@ -1738,6 +1762,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		telemetryAgent,
 		delegationNudge,
 		persistenceNudge,
+		appendNudgeEntry,
 		completionNotifier,
 		intercomNotifier,
 		timerNotifier,
