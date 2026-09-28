@@ -35,7 +35,7 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l git:github.com/AeonDave/pi-persona` |
-| Pin this release | `pi install git:github.com/AeonDave/pi-persona@v1.15.1` |
+| Pin this release | `pi install git:github.com/AeonDave/pi-persona@v1.15.2` |
 | Update an unpinned install | `pi update git:github.com/AeonDave/pi-persona` |
 
 Restart Pi after updating. For a pinned install, install the new tag explicitly.

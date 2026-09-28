@@ -6,6 +6,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.15.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.2) - 2026-09-28
+
 ### Fixed
 
 - Add stable supervisor-side runtime guidance against repeated identity/prefetch acknowledgements,
@@ -24,6 +26,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   separated from delegable work, and each synchronous checkpoint is mirrored from its semantic tool
   result into a durable, expandable TUI-only card. This keeps it visible even when a tool renderer
   suppresses result content without duplicating it into model context or triggering another turn.
+- Refresh the README with a clearer installation guide, the Prism banner, and an illustrated
+  supervisor/worker workflow.
+
+After updating, let active delegated runs settle, then restart Pi or use `/reload` before the next
+user turn. `/persona reload` refreshes persona definitions, not extension code. Existing chat
+history is preserved; the runtime guidance discourages repetition without filtering model output.
 
 ## [1.15.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.1) - 2026-09-20
 
