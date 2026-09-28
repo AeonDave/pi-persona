@@ -318,6 +318,8 @@ test("buildPeekAlert renders only stalled legs, patience-first, and never the fu
 	assert.match(out, /environment/i, "the ask-the-leg / don't-self-probe boundary");
 	assert.match(out, /1 background leg may be stalled:/, "singular head");
 	assert.doesNotMatch(out, /Async runs:/, "not the full on-demand digest");
+	assert.match(out, /1k cumulative input \+ output tokens/, "the compact count is labelled as cumulative input and output");
+	assert.match(out, /not current context occupancy/i, "the progress count is not presented as context occupancy");
 	const two = buildPeekAlert([runningRun(0, { id: "run-2" }), runningRun(0, { id: "run-3" })], { now: 90_000 });
 	assert.match(two, /2 background legs may be stalled:/, "plural head");
 	assert.match(two, /run-2/);
@@ -332,6 +334,8 @@ test("buildCheckIn frames the full digest as an occasional glance and keeps the 
 	assert.match(out, /possibly stuck/, "forwards the stall window so a wedge shows on the glance");
 	assert.match(out, /Routine check-in/);
 	assert.match(out, /off-track/);
+	assert.match(out, /internal status update, not a new task/i);
+	assert.match(out, /don't reply just to acknowledge unchanged progress/i);
 });
 
 test("launch passes the run id to the thunk (so the launcher can key a steer handle by it)", async () => {
@@ -477,8 +481,10 @@ test("buildPeekDigest compacts large token counts (164005 → 164k)", () => {
 	const digest = buildPeekDigest([
 		{ id: "run-1", agent: "operator", task: "t", status: "running", progress: { output: "x", turns: 53, tokens: 164_005 } },
 	]);
-	assert.match(digest, /164k tok/, "tokens shown compact");
+	assert.match(digest, /164k cumulative input \+ output tokens/, "compact progress count is labelled as cumulative input and output");
+	assert.match(digest, /Cumulative tokens show total input \+ output so far, not current context occupancy\./);
 	assert.doesNotMatch(digest, /164005/, "not the raw count");
+	assert.doesNotMatch(digest, /164k tok/, "bare token count is not shown");
 });
 
 test("buildPeekDigest shows the canonical <label> · <model> name — the SAME name the agent-tree node uses — not the bare agent type", () => {

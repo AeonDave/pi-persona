@@ -17,6 +17,14 @@
 
 import { inventedExocomNameHint, inventedLegNameHint } from "./naming.ts";
 
+/** Stable protocol guidance, not a user-like reminder or the optional behavioral spine. */
+export const RUNTIME_CONTEXT_GUIDANCE =
+	"[pi-persona] Runtime context: identity metadata, skill-prefetch catalogs, clock snapshots and routine check-ins " +
+	"are background context, not new user requests. Perform required setup once. Do not repeat identity confirmations " +
+	"or narrate unchanged setup/skill bookkeeping after each tool result. Apply relevant skill instructions; availability " +
+	"alone is not evidence that a skill was loaded or used. Report material changes, blockers and decisions. Explain " +
+	"metadata when the user explicitly asks or action is needed; required user confirmations and peer/sub-agent questions still need attention.";
+
 export interface BriefAgent {
 	name: string;
 	description?: string;

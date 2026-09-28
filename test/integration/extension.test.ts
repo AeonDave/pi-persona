@@ -45,6 +45,7 @@ import { makeBrokerClient } from "../../src/bus/broker/client.ts";
 import { brokerEndpoint } from "../../src/bus/broker/paths.ts";
 import { IdleCoalescingNotifier, MAX_COMPLETION_REPORT_CHARS } from "../../src/engine/async.ts";
 import { attributePeer, fenceUntrusted } from "../../src/core/fence.ts";
+import { RUNTIME_CONTEXT_GUIDANCE } from "../../src/core/brief.ts";
 import { EXOCOM_TOOL_NAMES } from "../../src/core/capabilities.ts";
 import { endpoint as endpointFor, ledgerPath, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
 import { ExocomPlane } from "../../src/exocom/plane.ts";
@@ -2081,7 +2082,7 @@ test("an unreadable PI_PERSONA_SPINE degrades to no spine — a warning, never a
 		const ctx = { ...base, hasUI: true };
 		await m.fire("session_start", undefined, ctx);
 		const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
-		assert.ok(bare.startsWith("BASE\n\n[pi-persona] Sub-agents:"), "the turn composes exactly as it would with no spine configured");
+		assert.ok(bare.startsWith(`BASE\n\n${RUNTIME_CONTEXT_GUIDANCE}\n\n[pi-persona] Sub-agents:`), "degradation keeps normal runtime guidance and discovery without the optional spine");
 		assert.ok(
 			notes.some((n) => /spine/i.test(n) && /no-such-spine/.test(n)),
 			`the degradation is reported, not silent — notes: ${JSON.stringify(notes)}`,
@@ -2121,7 +2122,7 @@ test("with NO ui the spine degradation still reaches the operator — on stderr,
 		);
 		// and the session still runs, unspined
 		const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
-		assert.ok(bare.startsWith("BASE\n\n[pi-persona] Sub-agents:"), "a missing prompt file never costs the user their session");
+		assert.ok(bare.startsWith(`BASE\n\n${RUNTIME_CONTEXT_GUIDANCE}\n\n[pi-persona] Sub-agents:`), "a missing prompt file never costs the user their session or runtime guidance");
 	} finally {
 		process.stderr.write = realWrite;
 		delete process.env.PI_PERSONA_SPINE;
@@ -5233,6 +5234,71 @@ test("exocom_wait wakes with a peer-left notice, well before its timeout, when t
 		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
 		else process.env.PI_PERSONA_EXOCOM = prev;
 		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runtime metadata guidance survives resume without adding acknowledgement turns or rewriting history", async () => {
+	const m = makeMockPi();
+	const sessionId = "metadata-resume-session";
+	const saved = [{ type: "custom", customType: "pi-persona:identity", data: { version: 1, sessionId, name: "Copper-Kite" } }];
+	const ctx = { ...makeCtx(REPO_ROOT).ctx, sessionManager: { getSessionId: () => sessionId, getBranch: () => saved } };
+	const history = [
+		{ role: "assistant", content: [{ type: "text", text: "Handle confirmed. Prefetch is the skill catalog." }] },
+		{ role: "user", content: "Continue the actual task." },
+	];
+	piPersona(m.pi);
+	try {
+		await m.fire("session_start", {}, ctx);
+		for (const persona of ["off", "dev", "off"]) {
+			await m.cmd("persona", persona, ctx);
+			const first = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+			const second = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
+			assert.match(first.systemPrompt, /\[pi-persona\] Runtime context/);
+			assert.match(first.systemPrompt, /Do not repeat identity confirmations/);
+			assert.match(first.systemPrompt, /skill-prefetch/);
+			assert.match(first.systemPrompt, /explicitly asks/);
+			assert.equal(first.systemPrompt.split("[pi-persona] Runtime context").length - 1, 1);
+			assert.equal(first.systemPrompt, second.systemPrompt, "unchanged runtime guidance is cache-stable");
+			assert.doesNotMatch(JSON.stringify(first.message), /Copper-Kite|identity|skill-prefetch/, "guidance must not become a new user-like message");
+			for (let i = 0; i < 5; i++) {
+				const result = m.fire("context", { messages: history }, ctx);
+				assert.deepEqual(result.messages, history, "old prose and real user requests stay intact");
+				assert.equal(result.messages[0], history[0], "do not clone or redact assistant history");
+			}
+		}
+		assert.equal(m.entries().filter((entry) => entry.customType === "pi-persona:identity").length, 0, "restoring identity does not persist it again");
+		assert.equal(m.sentMessages().length, 0, "no extra acknowledgement or corrective follow-up");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("runtime metadata guidance also reaches custom replace personas that opt out of the spine", async () => {
+	const cwd = tempDir("pi-persona-runtime-guidance-");
+	const previousSpine = process.env.PI_PERSONA_SPINE;
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	for (const mode of ["append", "replace"]) {
+		fs.writeFileSync(path.join(cwd, ".pi", "agents", `protocol-${mode}.md`),
+			`---\nname: protocol-${mode}\npersona: true\nsystemPromptMode: ${mode}\nspine: false\n---\nCUSTOM PROTOCOL PERSONA.`);
+	}
+	process.env.PI_PERSONA_SPINE = "on";
+	const m = makeMockPi();
+	const ctx = makeCtx(cwd).ctx;
+	piPersona(m.pi);
+	try {
+		await m.fire("session_start", {}, ctx);
+		for (const mode of ["append", "replace"]) {
+			await m.cmd("persona", `protocol-${mode}`, ctx);
+			const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
+			assert.match(prompt, /CUSTOM PROTOCOL PERSONA/);
+			assert.equal(prompt.includes("BASE"), mode === "append");
+			assert.doesNotMatch(prompt, /Answer first, then show your work/, "the optional spine really is off");
+			assert.match(prompt, /\[pi-persona\] Runtime context/);
+			assert.match(prompt, /Perform required setup once/);
+			assert.match(prompt, /questions still need attention/);
+		}
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		if (previousSpine === undefined) delete process.env.PI_PERSONA_SPINE;
+		else process.env.PI_PERSONA_SPINE = previousSpine;
 	}
 });
 
