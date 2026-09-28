@@ -126,8 +126,13 @@ export function buildIdentityContext(
 	return (
 		`[pi-persona] FIRST action: invent a distinct short personal handle from ${source}, ` +
 		`then call ${options.namingTool}({ name: "<your invented handle>" }) before other work. ` +
-		"The handle is separate from your persona and role, persists across turns and persona changes, and must never borrow a peer's or role's name. Do not make an extra model call."
+		"The handle is separate from your persona and role, persists across turns and persona changes, and must never borrow a peer's or role's name. Do not make an extra model call. " +
+		"After the naming tool succeeds, continue the task; no separate acknowledgement is needed."
 	);
+}
+
+function identityReceipt(name: string, changed: boolean): string {
+	return `Session handle: "${name}" (${changed ? "saved" : "unchanged"}).`;
 }
 
 export function installIdentity(pi: ExtensionAPI, host: IdentityHost): SessionIdentity {
@@ -193,7 +198,7 @@ export function installIdentity(pi: ExtensionAPI, host: IdentityHost): SessionId
 			const previousName = identity.chosen ? identity.name : undefined;
 			const name = identity.rename(params.name, ctx);
 			const changed = previousName !== name;
-			const text = changed ? `agent: you are now \"${name}\"` : `agent: name already set to \"${name}\"`;
+			const text = identityReceipt(name, changed);
 			return { content: [{ type: "text", text }], details: { name, changed } };
 		},
 		renderCall(args, theme) {
@@ -205,7 +210,7 @@ export function installIdentity(pi: ExtensionAPI, host: IdentityHost): SessionId
 			const name = typeof details?.name === "string" ? compactInlineText(details.name, { maxChars: 32 }) : "";
 			const first = result.content.find((item) => item.type === "text");
 			const rendered = name
-				? details?.changed === false ? `agent: name already set to \"${name}\"` : `agent: you are now \"${name}\"`
+				? identityReceipt(name, details?.changed !== false)
 				: first?.type === "text" ? compactInlineText(first.text, { maxChars: 96 }) : "Agent name failed";
 			return new Text(theme.fg(name ? (expanded ? "toolOutput" : "accent") : "error", rendered), 0, 0);
 		},

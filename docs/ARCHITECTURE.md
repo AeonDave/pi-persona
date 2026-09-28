@@ -344,6 +344,21 @@ the content and the A/B that gates its default; the architectural shape is:
   (64 KiB, refused on its `stat` so the bytes never enter the process) degrades to a warning and no
   layer — a prompt file is never a hard failure.
 
+## Runtime metadata is not a new user request
+
+The supervisor system prompt carries one fixed runtime-context rule, after persona/spine composition
+and before the time anchor and live rosters. It applies with no persona, append/replace personas and
+`spine: false`: it is protocol guidance, not an activation of the optional behavioral spine. Identity,
+skill-prefetch, clock and routine status metadata do not require repeated acknowledgements. Initial
+setup and actionable questions still require attention; explicit user questions about metadata are
+answered normally. Skill availability alone is not evidence that instructions were loaded or used.
+
+The rule contains no interpolated handle or changing counters, creates no conversation message and
+does not redact assistant history. The pre-name identity bootstrap remains actionable and disappears
+once naming succeeds. An old session may contain repetitive prose; updating the extension does not
+rewrite it. Reload extension code with Pi's `/reload` (when delegated work has settled), not merely
+`/persona reload`, which only reloads persona data.
+
 ## Time awareness — one rule, three granularities
 
 Pi's base prompt carries no date and no time, so from inside a turn five minutes of work and five
@@ -602,6 +617,9 @@ a local process able to modify that directory is already inside the trust bounda
   full transcripts — so the supervisor can catch a leg going off-track early. Both let an idle
   supervisor steer/stop a wedged or drifting child even with NO completion fired; the enforcing
   backstop is the engines' hard wall-clock cap (above). The full digest is also on demand via `/peek`.
+  Progress tokens are labelled **cumulative input/output**, not context occupancy; cache-read/write
+  accounting is separate. Do not infer a full context window from that counter. File age or line-count
+  changes alone likewise do not establish a stall, a passing test or completed work.
   Async failures are ALWAYS reported; the runtime `DelegationLedger` vetoes a blind retry loop (an
   identical agent+model+task delegation that failed twice is stopped before it spawns). Coaching is
   gated by `coaching: on` AND `canUseBus`.

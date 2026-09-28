@@ -108,10 +108,16 @@ test("agent_name reports an unchanged name without confirming a fresh identity",
 	const tool = m.tool("agent_name");
 	const first = await tool.execute("1", { name: "Blue Sky" }, undefined, undefined, ctx);
 	const repeated = await tool.execute("2", { name: "Blue Sky" }, undefined, undefined, ctx);
-	assert.match(first.content[0].text, /you are now "Blue-Sky"/);
+	assert.equal(first.content[0].text, 'Session handle: "Blue-Sky" (saved).');
 	assert.deepEqual(first.details, { name: "Blue-Sky", changed: true });
-	assert.equal(repeated.content[0].text, 'agent: name already set to "Blue-Sky"');
+	assert.equal(repeated.content[0].text, 'Session handle: "Blue-Sky" (unchanged).');
 	assert.deepEqual(repeated.details, { name: "Blue-Sky", changed: false });
+	const theme = { fg: (_color: string, text: string) => text };
+	for (const result of [first, repeated]) {
+		for (const expanded of [false, true]) {
+			assert.equal(tool.renderResult(result, { expanded }, theme).render(100).join("\n").trimEnd(), result.content[0].text);
+		}
+	}
 	assert.equal(m.entries.length, 1);
 });
 
@@ -128,6 +134,7 @@ test("context hook replaces its prior hidden message and uses the callable namin
 	assert.equal(message.display, false);
 	assert.match(message.content, /agent_name/);
 	assert.match(message.content, /current user task/i);
+	assert.match(message.content, /no separate acknowledgement/i, "one naming action must not invite a second prose ritual");
 });
 
 test("context hook prefers exocom_name on the active plane and never copies peer text", () => {

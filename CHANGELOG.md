@@ -6,6 +6,17 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Fixed
+
+- Add stable supervisor-side runtime guidance against repeated identity/prefetch acknowledgements,
+  including resumed sessions and custom/replace personas without the optional spine. The naming
+  bootstrap now explicitly ends at the successful tool action. No extra corrective turns are injected,
+  no history is rewritten, and explicit user questions or unresolved actions remain actionable.
+- Replace conversational naming confirmations with a neutral saved/unchanged handle receipt, shared
+  by the model-facing result and the visible renderer.
+- Label async progress token counts as cumulative input/output rather than leaving them open to
+  interpretation as current context usage. Routine updates distinguish status from a new user task.
+
 ### Changed
 
 - Delegation, failed-hand-off, and persistence nudges are now compact labelled checkpoints with an

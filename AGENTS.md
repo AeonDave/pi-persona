@@ -186,6 +186,10 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   persistence; `src/extension/identity.ts` registers `agent_name` and the pre-name context bootstrap.
   Exocom uses that same state. A delegate's optional `AgentRunSpec.name` is leader-assigned
   display identity, propagated to both engines without changing routing ids.
+  Runtime metadata guidance belongs in the stable supervisor system prompt, not a new user-like
+  acknowledgement message. Keep initial setup/actionable asks working, preserve user-visible history,
+  and never re-inject a chosen identity. Progress `tokens` is cumulative input/output usage, not live
+  context occupancy; labels must make that distinction explicit.
 
 - Session clock and event wakes: `timer now` refreshes the run-start clock snapshot; timer alarms
   require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs

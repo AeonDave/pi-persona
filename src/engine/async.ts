@@ -23,6 +23,8 @@ export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
  *  spell. Purely advisory (no auto-abort); the idle watchdog + token budget are the enforcing backstops. */
 export const STALL_FLAG_MS = 90_000;
 
+const PROGRESS_TOKEN_NOTE = "Cumulative tokens show total input + output so far, not current context occupancy.";
+
 export interface AsyncRun {
 	id: string;
 	agent: string;
@@ -457,7 +459,7 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		const name = runDisplayName(r);
 		const head = `[${r.id}] ${name} — ${r.status}`;
 		if (r.status === "running") {
-			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
+			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
 			if (now !== undefined && stallMs !== undefined && stallMs > 0 && r.lastAdvanceAt !== undefined) {
 				const stalledFor = now - r.lastAdvanceAt;
 				if (stalledFor >= stallMs) line += ` ⚠ possibly stuck (no progress for ${Math.round(stalledFor / 1000)}s)`;
@@ -475,6 +477,7 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 	});
 	const omitted = runs.length - visibleRuns.length;
 	if (omitted > 0) lines.push(`… ${omitted} additional async runs omitted from this bounded status view.`);
+	if (running > 0) lines.push(PROGRESS_TOKEN_NOTE);
 	return [`Async runs: ${runs.length} (${running} running)`, ...lines].join("\n");
 }
 
@@ -524,10 +527,11 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
 	const visibleStuck = stuck.slice(0, MAX_ASYNC_STATUS_ROWS);
 	const lines = visibleStuck.map((r) => {
 		const secs = Math.round((opts.now - (r.lastAdvanceAt ?? opts.now)) / 1000);
-		return `⚠ ${r.id} (${runDisplayName(r)}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} tok)`;
+		return `⚠ ${r.id} (${runDisplayName(r)}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
 	});
 	const omitted = stuck.length - visibleStuck.length;
 	if (omitted > 0) lines.push(`… ${omitted} additional stalled-run alerts omitted from this bounded view.`);
+	lines.push(PROGRESS_TOKEN_NOTE);
 	return [
 		`${stuck.length} background ${stuck.length === 1 ? "leg" : "legs"} may be stalled:`,
 		...lines,
@@ -547,8 +551,8 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
 export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number }): string {
 	return (
 		`${buildPeekDigest(runs, opts)}\n\n` +
-		"Routine check-in — glance at where your legs are and step in only if one is off-track (wrong " +
-		"target, rabbit hole) or wedged. If they're progressing, carry on; each result returns to you on its own."
+		"Routine check-in — internal status update, not a new task: don't reply just to acknowledge unchanged progress. Continue your current " +
+		"work and step in only if a leg is off-track (wrong target, rabbit hole) or wedged. Each result returns to you on its own."
 	);
 }
 

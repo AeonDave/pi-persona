@@ -106,6 +106,11 @@ persona changes. Once chosen, it is not re-injected into every provider request;
 session entry remain authoritative. `agent_name` is unavailable while Exocom is active; its call-time capability check
 also rejects empty, unsafe, generic, or reserved persona/agent names.
 
+Naming needs one tool action, not a recurring prose confirmation. A stable system-level runtime rule
+also distinguishes skill-prefetch and routine check-ins from new user requests; it neither hides
+updates nor rewrites conversation history. After updating extension code, use Pi's `/reload` once
+delegated work has settled (or restart/resume); `/persona reload` reloads definitions only.
+
 With Exocom active, the corresponding tool is `exocom_name`. The first incoming peer wake can be the
 first model turn in an RPC session; the context hook supplies the naming bootstrap for that custom
 wake as well as for an ordinary user turn. A chosen Exocom handle updates the live registry while
