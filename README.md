@@ -1,10 +1,15 @@
+# pi-persona
+
 <p align="center">
   <img src="assets/banner.png" alt="pi-persona — personas and multi-agent collaboration for Pi">
 </p>
 
 **Give [Pi](https://github.com/earendil-works/pi) a team you can follow.**
-Choose a persona, describe the outcome, and let your supervisor delegate work to specialists.
+`pi-persona` is an extension for switchable personas and supervised multi-agent work.
+Choose a persona, describe the outcome, and let the supervisor delegate independent work to specialists.
 Watch their progress, send a correction, or bring another Pi session into the conversation.
+
+[Install](#install) · [Personas](#choose-a-persona) · [Team workflow](#work-with-your-team) · [Documentation](#documentation) · [Development](#develop)
 
 ## Install
 
@@ -24,7 +29,8 @@ Then run these commands **inside Pi** to install the bundled personas and start 
 /persona dev
 ```
 
-The defaults are opt-in: `/persona seed` adds missing files and preserves your customizations.
+Bundled personas are not installed automatically. `/persona seed` adds missing files and preserves
+your customizations.
 
 | Install option | Command |
 |---|---|
@@ -48,7 +54,7 @@ Restart Pi after updating. For a pinned install, install the new tag explicitly.
 
 ## Choose a persona
 
-Start with `dev` for everyday coding. Switch with **F8** or `/persona <name>`.
+Start with `dev` for everyday coding, or choose a persona for the work ahead.
 
 | Persona | Best for |
 |---|---|
@@ -72,6 +78,12 @@ Once seeded, you can start directly with `pi --persona dev`. Describe the work i
 > Fix the cancellation bug. Delegate independent investigations, preserve the public API,
 > implement the fix, and run the relevant checks.
 
+![Example workflow: your goal reaches the supervisor, which delegates independent code-path, test, and API-contract investigations. Findings return to the same supervisor to integrate, verify, and report.](assets/workflow.png)
+
+For example, specialists can investigate code paths, tests, and the API contract in parallel.
+Their findings return to the **same supervisor**, which integrates them, verifies the fix, and reports
+the outcome. This is one possible workflow, not a fixed pipeline; dependent steps run in order.
+
 Interactive delegation runs in the background by default. The supervisor gathers results and keeps
 you informed; you can inspect or redirect a worker at any point.
 
@@ -86,23 +98,14 @@ you informed; you can inspect or redirect a worker at any point.
 | `/models <query>` | Find an available model |
 | `/doctor` | Check configuration and available capabilities |
 
-The sticky summary and F9 panel coalesce streaming updates to the terminal's frame cadence, so a
-wide fan-out stays responsive while the full live detail remains available in the panel.
-
-Each session has a personal name, separate from its persona. Naming is prompted on the first task
-or incoming Exocom message; the name survives persona switches and session resume. The supervisor
-can assign worker names before launch.
-
 For time-based work, ask “remind me in ten minutes.” For an event, ask “let me know when this build
-finishes.” **Keep the Pi session open** for timers and monitors; watches are not restored after a
-restart. See [timers and monitors](docs/MONITORS.md) for examples.
+finishes.” Keep Pi open while timers and monitors are running; they are not restored after a restart.
+See [timers and monitors](docs/MONITORS.md) for examples.
 
 ## Collaborate with another Pi
 
-| | Use it for |
-|---|---|
-| **Intercom** | The supervisor communicating with its own sub-agents |
-| **Exocom** | Independent Pi sessions sharing findings and coordinating work |
+Use Intercom to message workers managed by the current supervisor. Use Exocom to share findings or
+coordinate work between independent Pi sessions.
 
 To enable Exocom, open two terminals in the same workspace and start each with:
 
@@ -128,8 +131,7 @@ See the [collaboration guide](docs/EXPERIENCE.md#work-with-another-pi-through-ex
 ## Make it yours
 
 Edit installed personas and agents in `~/.pi/agent/persona/agents/`, or add project-specific
-overrides in `.pi/agents/`. Run `/persona reload` after editing. Teams and flows let you reuse a
-working setup across tasks.
+overrides in `.pi/agents/`. Run `/persona reload` after editing.
 
 `/persona seed` preserves existing files. **`/persona restore` replaces bundled defaults**, so use it
 only when you intend to discard customizations to those files.
@@ -158,10 +160,6 @@ npm ci
 npm run typecheck
 npm test
 ```
-
-Release metadata moves together: `package.json`, both root versions in `package-lock.json`,
-`TELEMETRY_PRODUCER_VERSION`, the changelog heading, and the pinned install command above. The test
-suite checks this set so a release cannot silently advertise or emit an older version.
 
 Pi loads the TypeScript extension directly; there is no build step.
 See [AGENTS.md](AGENTS.md) for contribution conventions. Licensed under [MIT](LICENSE).
