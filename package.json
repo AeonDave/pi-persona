@@ -98,7 +98,7 @@
   },
   "pi": {
     "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.15.2/assets/banner.png",
-    "video": "https://raw.githubusercontent.com/AeonDave/pi-persona/main/assets/demo1.mp4",
+    "video": "https://cdn.jsdelivr.net/gh/AeonDave/pi-persona@6655d281ce7965a75303dd704bd29db73db04070/assets/demo1.mp4",
     "extensions": [
       "./src/extension.ts"
     ]
