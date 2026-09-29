@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Oldest Pi this extension is written against. 0.83 made `message_update` delta-only (src/engine/stream.ts);
- *  older hosts are feature-detected where cheap but are not supported. Keep in sync with package.json. */
+ *  older hosts are feature-detected where cheap but are not supported. Keep in sync with README.md;
+ *  npm host peers use "*" because Pi supplies them through its extension loader. */
 export const MIN_PI_VERSION = "0.83.0";
 
 function parse(v: string): [number, number, number] | undefined {

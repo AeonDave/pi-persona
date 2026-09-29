@@ -1,7 +1,7 @@
 # AGENTS.md — pi-persona
 
-A single Pi coding-agent extension (`@earendil-works/pi-*`) that makes the agent a **supervisor**
-of switchable **personas** + file-based **orchestration strategies**. Loaded by Pi via tsx/jiti —
+A single Pi coding-agent extension for **supervised multi-agent orchestration**: async workers,
+live steering, cross-session collaboration, and switchable personas. Loaded by Pi via tsx/jiti —
 no build step. Design contract (binding on any conflict): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
 the orchestration layer in depth: [`docs/STRATEGIES.md`](docs/STRATEGIES.md);
 the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
@@ -28,6 +28,10 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `noUnusedLocals` + `noUnusedParameters`. Keep `tsc` clean before moving on.
 - `src/core/*` is **pure** (no Pi imports) and unit-tested. Import host packages from
   `@earendil-works/pi-*`; never bundle copies.
+- npm publishes as `@aeondave/pi-persona`. Pi supplies the four `@earendil-works/pi-*` packages
+  and `typebox`: keep them as `peerDependencies: "*"` with development-only copies, never runtime
+  dependencies. The supported host floor lives in `MIN_PI_VERSION` and the README. Keep the npm
+  `files` allowlist explicit for docs/artwork, inspect `npm pack --dry-run`, and never publish drafts.
 - **Cross-OS**: use Pi's spawn/kill/path/temp helpers (`getPiInvocation`, `killProcessTree`), not raw
   `child_process`. Windows kill goes straight to `taskkill /F /T`; always attach an `error` listener.
 - Two engines behind the `StrategyEngine` seam: **InProcessEngine** (`engine/inproc`,
