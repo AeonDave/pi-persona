@@ -8,6 +8,17 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [1.15.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.2) - 2026-09-28
 
+### Distribution
+
+- First npm publication on 2026-09-29 as `@aeondave/pi-persona@1.15.2`, with the same runtime
+  version. The existing GitHub tag is unchanged; npm adds scoped package metadata and installation
+  instructions. The registry's `gitHead` identifies the packaging commit.
+- Declare Pi-provided packages and TypeBox as wildcard peers, with pinned development copies only.
+  Explicitly allowlist public documentation and selected artwork; exclude drafts and development
+  harnesses from the npm tarball. Add the gallery banner and F8 persona-switching video preview.
+- Lead the README and package description with supervised multi-agent orchestration, live steering,
+  and cross-session collaboration; personas configure that workflow.
+
 ### Fixed
 
 - Add stable supervisor-side runtime guidance against repeated identity/prefetch acknowledgements,

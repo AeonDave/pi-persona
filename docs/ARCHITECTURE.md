@@ -9,8 +9,8 @@ in depth see [STRATEGIES.md](STRATEGIES.md); for the contributor quick-reference
 conventions, gotchas) see [AGENTS.md](../AGENTS.md).
 
 pi-persona is a single Pi coding-agent extension (`@earendil-works/pi-*`, loaded via tsx/jiti — no
-build step) that turns one agent into a **supervisor** of switchable **personas** and file-based
-**orchestration strategies**. It fuses three concerns — delegation/engine, coordination/bus,
+build step) for **supervised multi-agent orchestration**: async workers, live steering, cross-session
+collaboration, and switchable personas. It fuses three concerns — delegation/engine, coordination/bus,
 persona/identity — into one cohesive, cross-OS, data-driven codebase.
 
 ## The model

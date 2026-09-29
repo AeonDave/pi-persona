@@ -1,15 +1,16 @@
 # pi-persona
 
 <p align="center">
-  <img src="assets/banner.png" alt="pi-persona — personas and multi-agent collaboration for Pi">
+  <img src="assets/banner.png" alt="pi-persona — supervised multi-agent orchestration for Pi">
 </p>
 
-**Give [Pi](https://github.com/earendil-works/pi) a team you can follow.**
-`pi-persona` is an extension for switchable personas and supervised multi-agent work.
-Choose a persona, describe the outcome, and let the supervisor delegate independent work to specialists.
-Watch their progress, send a correction, or bring another Pi session into the conversation.
+**Give Pi a supervised team.**
+`pi-persona` brings supervised multi-agent orchestration to [Pi](https://github.com/earendil-works/pi):
+async workers, live steering, cross-session collaboration, and switchable personas.
+Describe the outcome. A supervisor delegates work, gathers results, and checks the outcome;
+you can inspect workers, redirect them, or stop a run while it is in progress.
 
-[Install](#install) · [Personas](#choose-a-persona) · [Team workflow](#work-with-your-team) · [Documentation](#documentation) · [Development](#develop)
+[Install](#install) · [Team workflow](#work-with-your-team) · [Cross-session collaboration](#collaborate-with-another-pi) · [Personas](#choose-a-persona) · [Documentation](#documentation)
 
 ## Install
 
@@ -18,7 +19,7 @@ Requires **Pi ≥ 0.83**, **Node.js 22+**, and **Git**. Configure a model provid
 Run in your terminal:
 
 ```bash
-pi install git:github.com/AeonDave/pi-persona
+pi install npm:@aeondave/pi-persona
 pi
 ```
 
@@ -34,42 +35,26 @@ your customizations.
 
 | Install option | Command |
 |---|---|
-| This project only | `pi install -l git:github.com/AeonDave/pi-persona` |
-| Pin this release | `pi install git:github.com/AeonDave/pi-persona@v1.15.2` |
-| Update an unpinned install | `pi update git:github.com/AeonDave/pi-persona` |
+| This project only | `pi install -l npm:@aeondave/pi-persona` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.15.2` |
+| Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
+| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.15.2` |
 
-Restart Pi after updating. For a pinned install, install the new tag explicitly.
+Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
+If switching from a Git install, remove that source first with
+`pi remove git:github.com/AeonDave/pi-persona` (use your exact pinned source if applicable),
+then install the npm package. Keep only one source configured to avoid loading the extension twice.
 
 ## What it does
 
 | Capability | What you get |
 |---|---|
-| **Switchable personas** | Different ways to approach coding, research, planning, and review |
-| **Specialist sub-agents** | Workers with their own roles, skills, and models; independent tasks can run in parallel |
-| **Background work** | Results arrive automatically while the supervisor continues other work |
-| **Live supervision** | Inspect a worker, send guidance, or stop a run from the agent panel |
+| **Async workers** | Specialists with their own roles, skills, and models; results return while the supervisor continues other work |
+| **Live steering** | Inspect a worker, send guidance, or stop a run from the agent panel |
+| **Cross-session collaboration** | Exocom connects independent Pi sessions to exchange findings and coordinate work |
 | **Councils and flows** | Compare perspectives, run repair-and-check loops, or organize work into stages |
 | **Timers and monitors** | Ask for a reminder or a notification when a build, file watcher, or event-producing program reports a change |
-| **Exocom** | Connect independent Pi sessions to exchange findings and coordinate work |
-
-## Choose a persona
-
-Start with `dev` for everyday coding, or choose a persona for the work ahead.
-
-| Persona | Best for |
-|---|---|
-| `dev` | Implementing, fixing, and reviewing code |
-| `planner` | Turning an idea into a plan before changing code |
-| `researcher` | Investigating questions and collecting sourced findings |
-| `audit` | Reviewing a change from security, performance, and testing perspectives |
-| `verify` | Repairing failures and checking the result with fresh tests |
-| `swarm` | Applying the same operation across many independent items |
-| `magi` | Comparing three perspectives through a vote, with dissent preserved |
-| `judge` | Having an independent reviewer choose between competing proposals |
-| `elite` | Scoped security assessment and evidence review |
-
-These are editable starting points. Browse the bundled [personas](personas) and [worker agents](agents),
-or read the [practical guide](docs/EXPERIENCE.md) for help choosing a workflow.
+| **Switchable personas** | Choose how the supervisor approaches and orchestrates the work |
 
 ## Work with your team
 
@@ -127,6 +112,28 @@ share a Pi agent directory. A peer joining from another workspace can advise and
 it cannot claim files in the joined workspace.
 
 See the [collaboration guide](docs/EXPERIENCE.md#work-with-another-pi-through-exocom) for day-to-day use.
+
+## Choose a persona
+
+Personas configure the supervisor's approach and orchestration defaults. Start with `dev` for
+everyday coding, or choose one for the work ahead.
+
+![F8 cycles between installed supervisor personas.](assets/demo1.gif)
+
+| Persona | Best for |
+|---|---|
+| `dev` | Implementing, fixing, and reviewing code |
+| `planner` | Turning an idea into a plan before changing code |
+| `researcher` | Investigating questions and collecting sourced findings |
+| `audit` | Reviewing a change from security, performance, and testing perspectives |
+| `verify` | Repairing failures and checking the result with fresh tests |
+| `swarm` | Applying the same operation across many independent items |
+| `magi` | Comparing three perspectives through a vote, with dissent preserved |
+| `judge` | Having an independent reviewer choose between competing proposals |
+| `elite` | Scoped security assessment and evidence review |
+
+These are editable starting points. Browse the bundled [personas](personas) and [worker agents](agents),
+or read the [practical guide](docs/EXPERIENCE.md) for help choosing a workflow.
 
 ## Make it yours
 
