@@ -16,6 +16,11 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Keep typings aligned with the oldest Node runtime we support.
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
   - package-ecosystem: github-actions
     directory: /
     schedule:

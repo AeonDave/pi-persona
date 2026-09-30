@@ -87,16 +87,11 @@
   "engines": {
     "node": ">=22"
   },
-  "overrides": {
-    "@earendil-works/pi-coding-agent@0.85.1": {
-      "undici": "8.10.2"
-    }
-  },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1",
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1",
     "@types/node": "^22.20.4",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
