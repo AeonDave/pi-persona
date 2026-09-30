@@ -36,8 +36,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   token permissions read-only, grant write permissions only to the reporting job that needs them,
   and disable persisted checkout credentials. Dependabot proposes updates; it does not auto-merge.
   Keep the four Pi development packages in one update group so their APIs stay aligned.
-  The narrow `pi-coding-agent@0.85.1` override pins its development-only Undici to patched 8.10.2;
-  re-evaluate/remove it when upgrading Pi instead of carrying it to unrelated host versions.
+  Keep security overrides scoped to the affected development dependency and version; remove them
+  when upgrading Pi if the new dependency graph no longer needs them.
   Run the full dependency audit (including development dependencies), tests and typecheck after
   lockfile updates. A development override does not patch a user's installed Pi host.
 - **Cross-OS**: use Pi's spawn/kill/path/temp helpers (`getPiInvocation`, `killProcessTree`), not raw
