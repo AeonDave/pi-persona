@@ -50,6 +50,7 @@
     "README.md",
     "AGENTS.md",
     "CHANGELOG.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
@@ -85,6 +86,11 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent@0.85.1": {
+      "undici": "8.10.2"
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.85.1",

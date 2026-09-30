@@ -32,6 +32,14 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   and `typebox`: keep them as `peerDependencies: "*"` with development-only copies, never runtime
   dependencies. The supported host floor lives in `MIN_PI_VERSION` and the README. Keep the npm
   `files` allowlist explicit for docs/artwork, inspect `npm pack --dry-run`, and never publish drafts.
+- Supply-chain controls: pin every GitHub Action to a verified full commit SHA; keep top-level
+  token permissions read-only, grant write permissions only to the reporting job that needs them,
+  and disable persisted checkout credentials. Dependabot proposes updates; it does not auto-merge.
+  Keep the four Pi development packages in one update group so their APIs stay aligned.
+  The narrow `pi-coding-agent@0.85.1` override pins its development-only Undici to patched 8.10.2;
+  re-evaluate/remove it when upgrading Pi instead of carrying it to unrelated host versions.
+  Run the full dependency audit (including development dependencies), tests and typecheck after
+  lockfile updates. A development override does not patch a user's installed Pi host.
 - **Cross-OS**: use Pi's spawn/kill/path/temp helpers (`getPiInvocation`, `killProcessTree`), not raw
   `child_process`. Windows kill goes straight to `taskkill /F /T`; always attach an `error` listener.
 - Two engines behind the `StrategyEngine` seam: **InProcessEngine** (`engine/inproc`,
