@@ -25,7 +25,8 @@ export function brokerEndpoint(sessionId: string, home: string = homedir(), plat
 	// Session ids are uuidv7 (36 chars), so an ordinary-but-longish $HOME already pushes the
 	// readable name past sun_path; a hashed one is short and still derived purely from the
 	// session id, so host and client compute the same endpoint independently. The hashed form
-	// costs `$HOME` + 41 bytes, so a $HOME past 62 bytes stays out of reach either way —
+	// costs `$HOME` + 38 bytes, so a $HOME past 65 bytes stays out of reach either way —
 	// nothing under the user's own dir would fit.
-	return join(dir, `b-${createHash("sha1").update(sid).digest("hex").slice(0, 12)}.sock`);
+	// base64url packs 72 SHA-256 bits into the same 12 path bytes as the old hex suffix.
+	return join(dir, `b-${createHash("sha256").update(sid).digest("base64url").slice(0, 12)}.sock`);
 }
