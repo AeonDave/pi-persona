@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { brokerEndpoint, sanitizeSegment } from "../../../../src/bus/broker/paths.ts";
@@ -21,6 +22,8 @@ test("a POSIX endpoint stays within the sun_path limit for a long home + uuid se
 	const sid = "0192f3ab-1c2d-7e4f-8a9b-0c1d2e3f4a5b";
 	const ep = brokerEndpoint(sid, home, "linux");
 	assert.ok(Buffer.byteLength(ep) <= 103, `endpoint is ${Buffer.byteLength(ep)} bytes: ${ep}`);
+	const digest = createHash("sha256").update(sid).digest("base64url").slice(0, 12);
+	assert.equal(ep, join(home, ".pi", "agent", "persona", `b-${digest}.sock`));
 	assert.equal(ep, brokerEndpoint(sid, home, "linux"), "both sides of the dial derive the same path");
 	assert.notEqual(ep, brokerEndpoint("0192f3ab-1c2d-7e4f-8a9b-0c1d2e3f4a5c", home, "linux"));
 	assert.ok(ep.startsWith(join(home, ".pi", "agent", "persona")), "stays in the user's pi dir");
