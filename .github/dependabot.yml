@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      pi-host:
+        patterns:
+          - "@earendil-works/pi-*"
+      npm-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@earendil-works/pi-*"
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

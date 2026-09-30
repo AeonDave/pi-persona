@@ -56,7 +56,7 @@ test("npm publication is public and explicitly allowlists documentation and artw
 		assert.ok(readFileSync(new URL(asset, root)).length > 0);
 	}
 	for (const path of ["src", "personas", "agents", "prompts", "flows", "contracts", "presets", "teams.yaml",
-		"docs/ARCHITECTURE.md", "docs/REFERENCE.md", "assets/banner.png", "assets/workflow.png", "CHANGELOG.md", "LICENSE"]) {
+		"docs/ARCHITECTURE.md", "docs/REFERENCE.md", "assets/banner.png", "assets/workflow.png", "CHANGELOG.md", "SECURITY.md", "LICENSE"]) {
 		assert.ok(pkg.files.includes(path), `publish required resource: ${path}`);
 	}
 	for (const path of pkg.files) {

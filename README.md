@@ -4,6 +4,8 @@
   <img src="assets/banner.png" alt="pi-persona — supervised multi-agent orchestration for Pi">
 </p>
 
+[![CI](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/AeonDave/pi-persona/badge)](https://scorecard.dev/viewer/?uri=github.com/AeonDave/pi-persona) [![npm version](https://img.shields.io/npm/v/@aeondave/pi-persona?logo=npm)](https://www.npmjs.com/package/@aeondave/pi-persona) [![License](https://img.shields.io/github/license/AeonDave/pi-persona)](LICENSE)
+
 **Give Pi a supervised team.**
 `pi-persona` brings supervised multi-agent orchestration to [Pi](https://github.com/earendil-works/pi):
 async workers, live steering, cross-session collaboration, and switchable personas.
@@ -169,4 +171,9 @@ npm test
 ```
 
 Pi loads the TypeScript extension directly; there is no build step.
-See [AGENTS.md](AGENTS.md) for contribution conventions. Licensed under [MIT](LICENSE).
+The [CI workflow](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) runs strict
+typechecking, dependency auditing and the test suite on Linux and Windows. The OpenSSF badge links to the project's
+scored supply-chain checks; it is not a certification that the code is free of vulnerabilities.
+
+See [AGENTS.md](AGENTS.md) for contribution conventions and the [security policy](SECURITY.md)
+for private vulnerability reporting. Licensed under [MIT](LICENSE).
