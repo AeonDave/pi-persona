@@ -36,6 +36,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   token permissions read-only, grant write permissions only to the reporting job that needs them,
   and disable persisted checkout credentials. Dependabot proposes updates; it does not auto-merge.
   Keep the four Pi development packages in one update group so their APIs stay aligned.
+  Match `@types/node` to the oldest supported Node major, including in CI; upgrade them together.
   Keep security overrides scoped to the affected development dependency and version; remove them
   when upgrading Pi if the new dependency graph no longer needs them.
   Run the full dependency audit (including development dependencies), tests and typecheck after
