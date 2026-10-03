@@ -6,12 +6,15 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.16.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.0) - 2026-10-03
+
 ### Compatibility
 
-- Update the development cohort to Pi 1.0's four coordinated host-package pins and audit compatible
-  API use. This does not raise the supported floor: pi-persona still supports Pi ≥ 0.83. The current
-  Pi host packages require Node.js ≥ 22.19; this is a host runtime requirement, not a pi-persona
-  floor change. No release has been made; package version remains 1.15.2.
+- Require Pi ≥ 1.0.0 and Node.js ≥ 22.19. Update the development cohort to Pi 1.0's four coordinated
+  host-package pins and qualify its SDK and tool lifecycle. Pre-1.0 Pi hosts are no longer supported;
+  the host packages and TypeBox remain wildcard peers supplied by Pi, not bundled runtime copies.
+- Update the live control harness to use Pi 1.0's session `modelRuntime` through the public
+  `ModelRegistry` facade instead of the removed session registry property.
 - An authored `council.members` field is now validated. Older malformed fields that were ignored
   must be corrected or removed; council calls fail with the field diagnostic instead of selecting
   an unrelated fallback panel.
@@ -79,6 +82,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   [`docs/TELEMETRY.md`](docs/TELEMETRY.md) for the retention contract.
 - Reuse one tree snapshot per F9 list redraw for rows, selection and waiting state; remove an
   unreachable delegate-title branch and distinguish event liveness from proof of useful progress.
+- Align the README and technical guides on async snapshots/joins, steering delivery, model-selection
+  precedence, members-only councils, and automatic `map` verifier headroom.
+
+After updating, let active workers settle and restart Pi (or use `/reload`). `/persona reload`
+refreshes definitions, not extension code. Existing custom personas and provider pins are preserved.
 
 ## [1.15.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.2) - 2026-09-28
 

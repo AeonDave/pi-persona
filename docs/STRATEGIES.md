@@ -17,7 +17,7 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 
 | Primitive | Contract |
 |---|---|
-| `sdk.agent(spec)` | Run ONE sub-agent → `AgentResult`. `spec`: `{ agent, task, model?, tools?, skills?, role?, outputContract?, isolation?, mcp?, timeoutMs?, peers? }`. |
+| `sdk.agent(spec, { reserveChildren? }?)` | Run ONE sub-agent → `AgentResult`. `spec`: `{ agent, task, name?, model?, tools?, skills?, role?, outputContract?, isolation?, mcp?, timeoutMs?, peers? }`. Optional `reserveChildren` protects mandatory later legs from spending their slots on recovery. |
 | `sdk.parallel(thunks, {concurrency?})` | Run many at once, capped at `limits.maxConcurrency`. The basis of every fan-out (`parallel(items.map(…))`). |
 | `sdk.reduce.aggregate(results)` | Concatenate N results into one (fan-out's merge). |
 | `sdk.reduce.vote(candidates, opts)` | Tally the candidates' OWN votes → a `ReducerResult` (`voting.ts`). |
@@ -81,7 +81,7 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 |---|---|---|---|
 | `fanout` | Every roster agent on the same task in parallel, then `aggregate`. | — | roster-role |
 | `pipeline` | Roster in SEQUENCE, each builds on the prior output; answer = last step. | — | roster-role |
-| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1, the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
+| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1 without verification, halved and rounded down with `verify`, minimum 1; the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
 | `critic-loop` | Generator proposes, critic attacks; `reject`/`revise` triggers another draft, and only explicit `approve` succeeds. Exhaustion fails closed with the last reviewed draft + unresolved critique (never an unreviewed tail revision). | `generator` (roster[0]), `critic` (roster[1]), `rounds` (positive integer, 3) | roster-role, `outputContract` |
 | `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. | `aggregate` ("majority"), `reflect` (true) | vote reducer |
 | `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
@@ -97,10 +97,12 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 single read-only review pass per completed unit of work, not swarm autonomy for its own sake. It
 runs one extra child per COMPLETED item (a failed item has nothing to re-check), through the same
 `sdk.parallel` wave as the workers, so `maxChildren`/`maxConcurrency`/`budgetTokens` still bound it
-— sizing `maxItems` with headroom for roughly double the child count is the caller's job when
-`verify` is set. It pays for a batch where a wrong answer is expensive and hard to eyeball after
-the fact (security-sensitive edits, long-tail correctness); it costs more than it is worth for a
-low-risk sweep a supervisor can spot-check itself. A verifier's stance is read via the SAME
+— `map` automatically reduces the item ceiling to leave one verifier slot per item. With the default
+`maxChildren: 64`, that allows 31 items (1 splitter + 31 workers + 31 verifiers); a lower `maxItems`
+can leave more room for optional model recovery. It pays for a batch where a wrong answer is
+expensive and hard to eyeball after the fact (security-sensitive edits, long-tail correctness);
+it costs more than it is worth for a low-risk sweep a supervisor can spot-check itself.
+A verifier's stance is read via the SAME
 `outputContract: "default"` machinery `critic-loop` uses for its critic (`structured.stance`):
 `"approve"` passes, anything else — an explicit reject/revise, a missing stance, or a verifier leg
 that itself failed to run — flips that item's `structured.items` ledger entry to `status: "failed"`
@@ -198,12 +200,12 @@ The schema is for discovery and typo-catching, not enforcement: a strategy still
 Options reach a strategy's `input.params` from four surfaces, all overridable by the supervisor
 per-call:
 
-1. **Author default (static)** — a persona's `council: { strategy, roster, params }` (tool-driven) or
+1. **Author default (static)** — a persona's `council: { strategy?, roster?, members?, params? }` (tool-driven) or
    mandatory `orchestration: { mode, strategy, roster, params }` both carry a `params` map
    (`persona.ts` → `orchestrate.ts`). E.g. `council: { strategy: magi, params: { reflect: false } }`.
 2. **Borrowed persona profile (dynamic)** — `council({ persona: "magi", question: … })` resolves that
    installed persona's already-expanded `council:` block. The caller remains active and retains its
-   prompt, model, tools, and capability gates; only strategy/roster/params are borrowed. An unknown
+   prompt, model, tools, and capability gates; only strategy/roster/members/params are borrowed. An unknown
    persona or one without a usable council is a hard error, never a silent MAGI fallback.
 3. **Supervisor override (dynamic)** — the `council` tool accepts a per-call `strategy`, named
    `roster`, temporary `members`, and `params`. Params merge over the selected (or active) profile when the strategy stays the same.
@@ -216,6 +218,12 @@ per-call:
    into `{ strategy, roster, params }`; authored fields win, params merge (`expandCouncilPreset`).
    Strategy/roster names are trimmed, and only those three preset fields are copied. Inline `members`
    belong in the persona's validated council declaration or the tool call, not in preset JSON.
+
+An authored members-only declaration such as `council: { members: [reviewer, research] }` is valid
+and defaults to `magi`. Its params remain in effect when a call explicitly selects that same default
+strategy. Empty or malformed authored `members` are a configuration error, not an absent roster:
+the parser retains the diagnostic and council resolution fails instead of choosing a fallback panel.
+Correct or remove the field before calling that persona's council, even with per-call overrides.
 
 The mandatory `orchestration:` path fires pre-turn on the raw user text, so it takes no dynamic
 per-call params (author params are threaded intact) — that is the difference between the two modes:

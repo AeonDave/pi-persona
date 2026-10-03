@@ -30,7 +30,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `@earendil-works/pi-*`; never bundle copies.
 - npm publishes as `@aeondave/pi-persona`. Pi supplies the four `@earendil-works/pi-*` packages
   and `typebox`: keep them as `peerDependencies: "*"` with development-only copies, never runtime
-  dependencies. The supported host floor lives in `MIN_PI_VERSION` and the README. Keep the npm
+  dependencies. The supported host floor is Pi ≥ 1.0.0 (`MIN_PI_VERSION` and the README); Node.js
+  must be ≥ 22.19 to match that host. Keep the npm
   `files` allowlist explicit for docs/artwork, inspect `npm pack --dry-run`, and never publish drafts.
 - Supply-chain controls: pin every GitHub Action to a verified full commit SHA; keep top-level
   token permissions read-only, grant write permissions only to the reporting job that needs them,
@@ -107,11 +108,13 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   blind retry loops are stopped by the runtime `DelegationLedger` (an identical agent+model+task
   delegation that failed twice is vetoed before it spawns).
 - Dynamic sub-agents: `delegate` shapes an on-the-fly specialist with `role` (extra system prompt,
-  appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate. Async runs
-  are joined with intercom `wait` (bounded ≤ the bus-ask timeout; collected results are discarded from
-  the pending completion follow-up so they are never double-reported). In interactive sessions
-  `delegate` is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to
-  sync so the single turn carries the result).
+  appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate. Intercom
+  `wait` snapshots already-settled reports by default in interactive/RPC sessions; `sync: true` opts
+  into a bounded join (≤ the bus-ask timeout). Headless waits default to joining; `sync: false` takes
+  a snapshot. Collected reports are discarded from the pending completion follow-up so they are
+  never double-reported; snapshots leave running children active. In interactive sessions `delegate`
+  is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to sync so the
+  single turn carries the result). An explicit `async` flag takes precedence over `sync` and the default.
   Message ids and run ids are separate: `intercom message { messageId }` retrieves retained bus
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
   drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears
@@ -134,9 +137,10 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   fills with every leg's body, failures included), while `renderCompletion` scans only `status: "done"`
   runs. A background leg that FAILED while emitting `[BLOCKED]` therefore gets the failure block but no
   persistence note — deliberate (see the `renderCompletion` doc comment), not a bug to "fix" silently.
-  Nested reports retain bounded parent-call provenance; only an outer result that relays the surrender
-  marker gets the note/card. Nested programmatic data is never patched with a reminder, and discarded
-  reports never generate an invisible one. Relay state is cleared at turn/session settlement.
+  Nested reports from codemode's `ctx.executeTool` retain bounded provenance through Pi's explicit
+  `parentToolCallId`; never infer nesting from the call-id string. Only an outer result that relays
+  the surrender marker gets the note/card. Nested programmatic data is never patched with a reminder,
+  and discarded reports never generate an invisible one. Relay state clears at turn/session settlement.
   `config.nudge` (`PI_PERSONA_NUDGE=off`) silences all of it: the `tool_result` hook (the by-hand
   reminder and the sync-result persistence one) and both `renderCompletion` call sites, which take
   their `scan` through the same gate — so a background/`intercom wait` report carries no note either.

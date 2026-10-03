@@ -59,9 +59,11 @@ supervisor is free. Keep the session open, and cancel a watch when its purpose e
 - **Answer a waiting worker before joining it.** A coaching worker may need a decision from its
   supervisor before it can finish. An unanswered question is actionable work.
 - **Steering is a request.** Check the subsequent output to see whether the worker incorporated
-  it. Steering does not interrupt an explicitly blocking `intercom wait`; queued input is applied
-  after the current tool batch returns. End the supervisor turn rather than join merely to idle. Check the terminal result after requesting
-  cancellation; changes already made are not undone.
+  it. In-process workers can receive guidance mid-run; child-engine workers (including MCP/worktree
+  runs) receive it as a queued follow-up. Neither promises to interrupt arbitrary tool work, and
+  steering does not preempt an explicitly blocking `intercom wait`. End the supervisor turn rather
+  than join merely to idle. Check the terminal result after requesting cancellation; changes already
+  made are not undone.
 
 Launch cards and targeted Intercom calls show the same worker alias as the live tree. A steering
 receipt previews the message that was actually queued; expand it (`Ctrl+O` by default, or your

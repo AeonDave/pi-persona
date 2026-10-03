@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 import { makeInProcessEngine } from "../src/engine/inproc.ts";
 import { flowHash, parseFlow } from "../src/orchestration/flow.ts";
@@ -19,10 +19,11 @@ const { session: probe } = await createAgentSession({});
 const op = { name: "operator", model: MODEL, systemPrompt: "Follow instructions EXACTLY. Work ONE file per turn — never batch.", source: "h", tools: ["read"] };
 const engine = makeInProcessEngine({
 	resolveAgent: (n) => (n === "operator" ? op : undefined),
-	modelRegistry: probe.modelRegistry,
+	modelRegistry: new ModelRegistry(probe.modelRuntime),
 	cwd: process.cwd(),
 	agentDir: process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent"),
 	defaultModel: MODEL,
+	childThinking: "xhigh",
 });
 const READ8 = "Read these files ONE PER TURN (never batch) and summarise each in one line: package.json, README.md, AGENTS.md, tsconfig.json, src/extension.ts, src/engine/inproc.ts, src/orchestration/sdk.ts, src/persona/persona.ts.";
 

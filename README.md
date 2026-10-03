@@ -8,9 +8,8 @@
 
 **Give Pi a supervised team.**
 `pi-persona` adds supervised multi-agent orchestration to [Pi](https://github.com/earendil-works/pi):
-async workers, live steering, cross-session collaboration, and switchable personas. Pi's native SDK, event hooks,
-MCP, and codemode provide useful primitives; they are not themselves pi-persona's orchestration
-policies, supervised worker lifecycle, internal bus, or Exocom collaboration plane.
+async workers, live steering, cross-session collaboration, and switchable personas. It builds on
+Pi's native SDK and tool hooks; the extension adds worker supervision and coordination.
 Describe the outcome. A supervisor delegates work, gathers results, and checks the outcome;
 you can inspect workers, redirect them, or stop a run while it is in progress.
 
@@ -18,8 +17,7 @@ you can inspect workers, redirect them, or stop a run while it is in progress.
 
 ## Install
 
-Requires **Pi ≥ 0.83**, **Node.js ≥ 22.19** (the current Pi host runtime requirement), and
-**Git**. Configure a model provider in Pi first.
+Requires **Pi ≥ 1.0.0**, **Node.js ≥ 22.19**, and **Git**. Configure a model provider in Pi first.
 
 Run in your terminal:
 
@@ -41,9 +39,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.15.2` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.16.0` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.15.2` |
+| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.16.0` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with
@@ -74,8 +72,12 @@ For example, specialists can investigate code paths, tests, and the API contract
 Their findings return to the **same supervisor**, which integrates them, verifies the fix, and reports
 the outcome. This is one possible workflow, not a fixed pipeline; dependent steps run in order.
 
-Interactive delegation runs in the background by default. The supervisor gathers results and keeps
-you informed; you can inspect or redirect a worker at any point.
+Interactive delegation runs in the background by default. Results return automatically when the
+supervisor is free; you can inspect or redirect a worker at any point.
+
+Launch and control cards show the worker's name. Steering receipts preview the message sent;
+expand with `Ctrl+O` (the default binding) to read it in full. A queued message is not proof that
+the worker has acted on it.
 
 | Key or command | Action |
 |---|---|
@@ -142,8 +144,9 @@ or read the [practical guide](docs/EXPERIENCE.md) for help choosing a workflow.
 
 Strategies are not restricted to the similarly named persona: `council` can select `judge`, `magi`,
 `debate`, `critic-loop`, or another installed shape when it adds value. Temporary `members` allow
-custom role-based groups without team files. Model selection includes external arbiters; a failed
-model choice can recover once on the main model, with the switch visible and both attempts accounted.
+custom role-based groups without team files. Model selection includes external arbiters. In councils
+and flows, a provider failure or unavailable model can recover once on the supervisor's model, with
+the switch visible and both attempts accounted; ordinary delegates keep explicit provider pins strict.
 See [the reference](docs/REFERENCE.md) for an inline council example and recovery limits.
 
 ## Make it yours
