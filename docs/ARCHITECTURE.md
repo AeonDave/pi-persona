@@ -197,7 +197,8 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   constrained-turn allowlist), `install.ts` (the feature's composition adapter: session-scoped plane +
   ledger + wait/tool/hook wiring).
 - **`src/telemetry/`** — a generic, versioned observer/export contract for future plugins: projected
-  lifecycle metadata only, never an agent-message router or control surface.
+  lifecycle metadata only, never an agent-message router or control surface. See
+  [`TELEMETRY.md`](./TELEMETRY.md) for privacy, retention, writer leases, and shutdown behavior.
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
   `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`, `state.ts` (last-selected persona),
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
@@ -295,9 +296,9 @@ child/token budgets do not recover. Both attempts are accounted, and a warning p
 identify the switch. A per-role model assignment can supplement the legacy per-agent assignment;
 preflight model selection includes external arbiters and other declared agent-valued parameters.
 Live tree and telemetry labels use those participant identities for auxiliary actors too, with
-inline model pins taking precedence. If distinct full roles share a short display hint, that hint
-cannot identify one model safely: the display omits it rather than borrowing another role's choice.
-Routing still resolves the full role key, not the display hint.
+inline model pins taking precedence. If distinct full roles share a short display hint, the display
+keeps the hint (with `#N` suffixes for repeated node keys) but omits the uncertain model label rather
+than borrowing another role's choice. Routing still resolves the full role key, not the display hint.
 
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 
@@ -688,10 +689,11 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
     only `status === "done"` runs by design — a failed background/`wait` leg already gets a failure
     block, so a `[BLOCKED]` marker there doesn't also get the persistence note. Same marker, same leg,
     different counterweight depending on how it was collected.
-    Nested calls leave their programmatic result untouched. A bounded set of parent call ids carries
-    report provenance through wrappers only while their output relays a surrender marker; the outer
-    model-visible result alone gets the note/card. Suppressed reports produce neither, and turn/session
-    settlement clears abandoned relay state.
+    Nested calls through codemode's `ctx.executeTool` leave their programmatic result untouched.
+    Pi's explicit `parentToolCallId` supplies the parent identity; call-id string shapes are never
+    used to infer nesting. A bounded set of parent call ids carries report provenance through wrappers
+    only while their output relays a surrender marker; the outer model-visible result alone gets the
+    note/card. Suppressed reports produce neither, and turn/session settlement clears abandoned relay state.
   - **The off switch covers every path.** `PI_PERSONA_NUDGE=off` silences DelegationNudge entirely and
     PersistenceNudge on every collection path (sync result, background notifier, `intercom wait`).
 

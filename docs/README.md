@@ -1,6 +1,8 @@
 # pi-persona documentation
 
 This folder contains the long-form documentation that defines how the project is designed and run.
+It follows the current checkout; consult the [changelog](../CHANGELOG.md) for the release that
+introduced a behavior. An `Unreleased` entry is not yet part of a published release.
 
 ## Canonical docs
 

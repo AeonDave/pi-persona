@@ -16,7 +16,7 @@ plus a file that calls `parallel` and `reduce.vote`.
 
 | Primitive | Does |
 |---|---|
-| `agent(spec)` | run one sub-agent and return a structured `AgentResult`; `spec` may carry `name`, model, tools, skills, or `outputContract` |
+| `agent(spec, { reserveChildren? }?)` | run one sub-agent and return a structured `AgentResult`; `spec` may carry `name`, model, tools, skills, or `outputContract`; optional reservations protect mandatory later legs from model recovery |
 | `parallel(thunks, {concurrency})` | run many at once, bounded by the run limits; this also provides the basis of `map` |
 | `reduce.aggregate(results)` | merge N results into one, used by fan-out |
 | `reduce.vote(candidates, opts)` | tally the candidates' own votes and preserve `winner`, `tie`, `no_consensus`, `invalid_outputs`, and dissent |
@@ -52,6 +52,8 @@ The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reac
 backends, keeping a caller-provided run label available in the live tree and runtime result. Every
 settled async run also emits an immediate UI banner with that name and its terminal outcome. The
 model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
+An explicit `delegate` `async` flag overrides both `sync` and the session default: `async: true`
+forces background execution; `async: false` forces synchronous execution.
 
 ### Pi 1.0 codemode
 
@@ -66,29 +68,40 @@ Only printed/returned script output reaches the model. Nested results therefore 
 raw bytes or invisible reminders to pi-persona's context-burn nudges; an actual successful nested
 `delegate`/`council` still resets the hand-off streak.
 
+Pi identifies calls made through codemode's `ctx.executeTool` with `parentToolCallId`. If a nested
+delegation report is relayed with `[BLOCKED]` or `FLAG: UNKNOWN`, only the outer model-visible result
+gets the persistence checkpoint and its expandable card. Discarding the report creates no reminder
+and never alters the programmatic inner result. See [the nudge contract](./ARCHITECTURE.md#supervision--the-waiting-model)
+for the differences between synchronous and background reports.
+
 The outer code/result card belongs to Pi, not pi-persona's delegate renderer. Keep bulky details
 expandable (`Ctrl+O` by default; `/hotkeys` shows active bindings). `Ctrl+T` toggles thinking blocks
 separately. A smaller script output also reduces model context; merely collapsing its card does not.
 No replacement sandbox or renderer is required for this integration.
 
 `outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed
-(the only built-in is `default`). Naming one that isn't installed is rejected before any worker
+(the built-in `default` and bundled `finding` are available without custom files). Naming one that
+isn't installed is rejected before any worker
 spawns, checked across every task in a parallel batch: `delegate: unknown output contract(s) "x" —
 nothing was spawned. Installed contracts: default, finding` (the list is capped at 16 names; a
 `, …` marker is appended only when more than 16 are installed).
 
 ### Supervising running sub-agents — the `intercom` plane
 
-The supervisor's internal communication with children has three layers. Tree/F9/peek distinguish
+The supervisor's internal communication with children exposes these surfaces. Tree/F9/peek distinguish
 queued, running, waiting for supervisor, suspected stalled and terminal runs. Waiting is derived from
 a live pending ask on the exact child handle, never inferred from its last activity text:
 
-| Layer | Needs | What you get |
+| Surface | Needs | What you get |
 |---|---|---|
 | **Observe and control** | any persona | `peek` inspects async sub-agents; `wait` is nonblocking by default with UI (`sync: true` joins; headless defaults to joining, with `sync: false` for snapshots); `steer` sends a soft correction; `stop` requests cancellation. The `f9` overlay provides the same controls (`s`, `x`). Queued steering does not preempt an active join. Cancelling a worker does not undo existing changes |
 | **Retrieve** | any persona | `result { to }` returns one retained run payload; `message { messageId }` returns one retained bus message. History is bounded to 256 messages and 256,000 body characters, and retrieval never starts a worker |
 | **Message bus** | `coaching: true` | children get `contact_supervisor`; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
 | **Sibling peer comm** | strategy opt-in | `debate` and `pair` members always get one-way `contact_peer`; `map` and `synthesize` add it with `params: { peers: true }` |
+
+With coaching enabled, an async child's `decision` or `interview` waits for a supervisor reply.
+A synchronous child posts the question one-way and continues instead: the supervisor is holding
+that turn and cannot answer a blocking ask. Progress messages are always one-way.
 
 Delegated output is untrusted and is fenced before it reaches the supervisor. Interactive async
 work is background-first: continue independent work, and when only children remain, end the turn for
@@ -278,11 +291,19 @@ council({
 ```
 
 `members` overrides the named roster for this invocation only. Roles/skills do not grant tools or
-bypass capability gates. Explicit member models and saved assignments are respected; with UI,
-unassigned participants can be picked once and saved, including role-specific members and external
-arbiters. Headless runs never prompt. An unavailable choice is not overwritten: its failed attempt
-may recover once on the main model, and the switch is reported. MAGI retains its canonical core team;
-Judge retains impartial arbitration. Other personas choose whichever strategy fits the task.
+bypass capability gates. Model selection covers roster members and declared auxiliary actors such
+as `judge` and `synthesizer`; supported agent-valued params accept inline member specs too. Model
+precedence is inline `model`, saved role assignment, saved agent assignment, agent frontmatter,
+then the session model (`src/persona/model-participants.ts`).
+
+With an active persona, UI, and at least two configured models, unassigned participants can be
+picked and saved for the active persona, even when borrowing another persona's council profile.
+Dismissing a picker suppresses another prompt for that participant during the session, not for
+later teams with different participants. Headless runs never prompt.
+An unavailable choice is not overwritten: a provider or unknown-model failure may recover once
+on the main model, with the switch reported and both attempts accounted. This does not relax
+ordinary delegate provider pins. The MAGI persona retains its canonical core team; the Judge
+persona retains impartial arbitration. Other personas choose whichever strategy fits the task.
 
 **A delegation policy on any persona** — fields are generic and are never keyed to a persona name.
 The runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects
@@ -409,7 +430,7 @@ build retries. A connected broker child's status shows `⇄ <handle>`; if that c
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 `/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
-(requires ≥ 0.83.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+(requires ≥ 1.0.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 
