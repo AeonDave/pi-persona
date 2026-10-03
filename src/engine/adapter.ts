@@ -12,7 +12,7 @@ import { type ContractDef, contractInstructions, parseAndValidate, pinContract, 
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
+import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
 import { looksLikeProviderError } from "./errors.ts";
@@ -51,8 +51,10 @@ export interface EngineAdapterDeps {
 	/** Installed output-contract names (built-in `default` + files) for the self-correcting hint. */
 	listContracts?: () => string[];
 	/** Per-agent model override (e.g. a persona's configured ensemble models).
-	 *  Precedence: explicit spec.model > modelFor(agent) > the agent's own default. */
-	modelFor?: (agent: string) => string | undefined;
+	 *  Precedence: explicit spec.model > modelFor(agent, role) > the agent's own default. `role` is
+	 *  the on-the-fly role this run carries, when it has one, so a member's own assignment key
+	 *  (`agent#hash`) resolves ahead of the bare agent's. */
+	modelFor?: (agent: string, role?: string) => string | undefined;
 	/** Explicit thinking level appended to the child model (`model:level`) so it can't
 	 *  fall into a model's default "adaptive" mode, which some models reject. */
 	childThinking?: string;
@@ -107,7 +109,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			onProgress?: (p: { output: string; tokens?: number; activity?: string; toolEvent?: ToolEvent }) => void,
 			callSignal?: AbortSignal,
 			/** Called once with a steer handle when the broker is on (in-process parity). */
-			onSteerable?: (steer: (text: string) => void) => void,
+			onSteerable?: (steer: SteerFn) => void,
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
@@ -125,7 +127,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					: spec.task;
 			const task = contractDef ? `${withSkills}\n\n${contractInstructions(contractDef)}` : withSkills;
 			const childSpec: ChildRunSpec = { task };
-			let model = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model;
+			let model = spec.model ?? deps.modelFor?.(spec.agent, spec.role) ?? cfg.model;
 			// Append an explicit thinking level (model:level) unless one is already present —
 			// a child without it defaults to "adaptive", which some models reject.
 			if (model && deps.childThinking && !model.includes(":")) model = `${model}:${deps.childThinking}`;
@@ -178,7 +180,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				childOptions.isBlocked = () => deps.broker!.hasPendingAskFrom(handle!);
 				const broker = deps.broker;
 				const h = handle;
-				onSteerable?.((text) => broker.steerFrame(h, text));
+				const steer: SteerFn = Object.assign((text: string) => broker.steerFrame(h, text), {
+					isWaitingForSupervisor: () => broker.hasPendingAskFrom(h),
+				});
+				onSteerable?.(steer);
 			}
 
 			let child: Awaited<ReturnType<typeof runChildAgent>>;

@@ -7,8 +7,10 @@
 [![CI](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/AeonDave/pi-persona/badge)](https://scorecard.dev/viewer/?uri=github.com/AeonDave/pi-persona) [![npm version](https://img.shields.io/npm/v/@aeondave/pi-persona?logo=npm)](https://www.npmjs.com/package/@aeondave/pi-persona) [![License](https://img.shields.io/github/license/AeonDave/pi-persona)](LICENSE)
 
 **Give Pi a supervised team.**
-`pi-persona` brings supervised multi-agent orchestration to [Pi](https://github.com/earendil-works/pi):
-async workers, live steering, cross-session collaboration, and switchable personas.
+`pi-persona` adds supervised multi-agent orchestration to [Pi](https://github.com/earendil-works/pi):
+async workers, live steering, cross-session collaboration, and switchable personas. Pi's native SDK, event hooks,
+MCP, and codemode provide useful primitives; they are not themselves pi-persona's orchestration
+policies, supervised worker lifecycle, internal bus, or Exocom collaboration plane.
 Describe the outcome. A supervisor delegates work, gathers results, and checks the outcome;
 you can inspect workers, redirect them, or stop a run while it is in progress.
 
@@ -16,7 +18,8 @@ you can inspect workers, redirect them, or stop a run while it is in progress.
 
 ## Install
 
-Requires **Pi ≥ 0.83**, **Node.js 22+**, and **Git**. Configure a model provider in Pi first.
+Requires **Pi ≥ 0.83**, **Node.js ≥ 22.19** (the current Pi host runtime requirement), and
+**Git**. Configure a model provider in Pi first.
 
 Run in your terminal:
 
@@ -136,6 +139,12 @@ everyday coding, or choose one for the work ahead.
 
 These are editable starting points. Browse the bundled [personas](personas) and [worker agents](agents),
 or read the [practical guide](docs/EXPERIENCE.md) for help choosing a workflow.
+
+Strategies are not restricted to the similarly named persona: `council` can select `judge`, `magi`,
+`debate`, `critic-loop`, or another installed shape when it adds value. Temporary `members` allow
+custom role-based groups without team files. Model selection includes external arbiters; a failed
+model choice can recover once on the main model, with the switch visible and both attempts accounted.
+See [the reference](docs/REFERENCE.md) for an inline council example and recovery limits.
 
 ## Make it yours
 

@@ -10,7 +10,7 @@ import { buildExocomBrief, RUNTIME_CONTEXT_GUIDANCE } from "../core/brief.ts";
 import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
-import type { DelegationNudge, PersistenceNudge } from "../core/nudge.ts";
+import { HANDOFF_TOOL_NAMES, type DelegationNudge, type PersistenceNudge } from "../core/nudge.ts";
 import { buildSessionAnchor } from "../core/time.ts";
 import { readClockSnapshot } from "./clock.ts";
 import { type AsyncRun, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
@@ -34,6 +34,7 @@ import type { PersonaConfigStore } from "../persona/config-store.ts";
 import { TELEMETRY_EVENT_NAME, type TelemetryEvent } from "../telemetry/contract.ts";
 import { TelemetryProducer, type TelemetryAgentInput } from "../telemetry/producer.ts";
 import type { AgentTree, AgentNode } from "../ui/agent-tree.ts";
+import { compactInlineText } from "../ui/presentation.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { ExocomInstall } from "../exocom/install.ts";
 import type { SessionIdentity } from "./identity.ts";
@@ -113,8 +114,19 @@ export interface HookHost {
 }
 
 export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstall): void {
+	// Only parent ids are retained, never child output. Propagate through wrappers only when they
+	// actually relay a surrender marker; the outer model-visible result owns the note and card.
+	const pendingSurrenderRelays = new Set<string>();
+	const rememberSurrenderRelay = (id: string): void => {
+		if (pendingSurrenderRelays.size >= 256) {
+			const oldest = pendingSurrenderRelays.values().next().value;
+			if (oldest !== undefined) pendingSurrenderRelays.delete(oldest);
+		}
+		pendingSurrenderRelays.add(id);
+	};
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
+		pendingSurrenderRelays.clear();
 		h.lastCtx = ctx;
 		h.delegationNudge.reset(); // a fresh session starts with a clean by-hand run
 		h.childUsage.reset();
@@ -174,29 +186,48 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		const sessionId = sessionManager?.getSessionId?.();
 		if (sessionId) {
 			const eventBus = (pi as unknown as { events?: { emit?: (name: string, event: TelemetryEvent) => void } }).events;
-			h.telemetry = new TelemetryProducer({
-				agentDir: h.userAgentDir(),
-				cwd: ctx.cwd,
-				sessionId,
-				emit: (event) => eventBus?.emit?.(TELEMETRY_EVENT_NAME, event),
-				heartbeat: () => exocom.currentTelemetryInstance(h.lastCtx ?? ctx),
-				...(process.env.PI_PERSONA_DEBUG
-					? { onError: (error: unknown) => { process.stderr.write(`[pi-persona] telemetry: ${error instanceof Error ? error.message : String(error)}\n`); } }
-					: {}),
-			});
-			h.telemetry.start(exocom.currentTelemetryInstance(ctx));
-			// Re-seeded with the replay, so the dedupe below always mirrors what THIS producer last
-			// published — a session start that follows no teardown carries no stale projection.
-			h.lastAgentProjection.clear();
-			for (const node of h.agentTree.snapshot()) {
-				h.lastAgentProjection.set(node.id, JSON.stringify(h.telemetryAgent(node)));
-				h.telemetry.publishAgentAdded(h.telemetryAgent(node));
+			try {
+				h.telemetry = new TelemetryProducer({
+					agentDir: h.userAgentDir(),
+					cwd: ctx.cwd,
+					sessionId,
+					emit: (event) => eventBus?.emit?.(TELEMETRY_EVENT_NAME, event),
+					heartbeat: () => exocom.currentTelemetryInstance(h.lastCtx ?? ctx),
+					onError: (error: unknown) => {
+						// Retention and writer failures must be observable during normal operation too.
+						// A broken UI/logger must never turn best-effort telemetry into a session failure.
+						try {
+							const message = `pi-persona: telemetry: ${compactInlineText(error instanceof Error ? error.message : String(error), { maxChars: 400 })}`;
+							const current = h.lastCtx ?? ctx;
+							if (current.hasUI) current.ui.notify(message, "warning");
+							else process.stderr.write(`${message}\n`);
+						} catch { /* diagnostics are non-fatal */ }
+					},
+				});
+				h.telemetry.start(exocom.currentTelemetryInstance(ctx));
+			} catch (error) {
+				h.telemetry = undefined;
+				const message = "pi-persona: telemetry unavailable (safe session admission failed)";
+				try {
+					if (ctx.hasUI) ctx.ui.notify(message, "warning");
+					else process.stderr.write(`${message}\n`);
+				} catch { /* admission diagnostics are non-fatal too */ }
 			}
-			exocom.publishTelemetryPeers();
+			if (h.telemetry) {
+				// Re-seeded with the replay, so the dedupe below always mirrors what THIS producer last
+				// published — a session start that follows no teardown carries no stale projection.
+				h.lastAgentProjection.clear();
+				for (const node of h.agentTree.snapshot()) {
+					h.lastAgentProjection.set(node.id, JSON.stringify(h.telemetryAgent(node)));
+					h.telemetry.publishAgentAdded(h.telemetryAgent(node));
+				}
+				exocom.publishTelemetryPeers();
+			}
 		}
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		pendingSurrenderRelays.clear();
 		h.lastCtx = ctx;
 		h.disposed = true; // gate any late async-run onComplete from touching the next session's instance
 		h.deferredOrchestrations.length = 0;
@@ -246,6 +277,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	// idle window first; its replay starts the next run and the remaining FIFO entries follow one per
 	// settlement. With no deferred input, flush ordinary wakes immediately.
 	pi.on("agent_settled", async () => {
+		pendingSurrenderRelays.clear();
 		if (h.lastCtx) h.telemetry?.publish("instance.updated", { ...exocom.currentTelemetryInstance(h.lastCtx), status: "idle" });
 		// Pi's `prepareToolCall` returns {kind:"immediate"} when the abort signal is already set
 		// after beforeToolCall — skipping afterToolCall, and so our tool_result hook. Those calls
@@ -625,16 +657,31 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		if (!h.config.nudge) return errorPatch;
 		// Only a supervisor that CAN delegate is nudged to — a persona without the tool can't act on it.
 		if (!h.controller.capabilities?.tools.has("delegate")) return errorPatch;
+		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
+		const relayed = pendingSurrenderRelays.delete(event.toolCallId);
+		const surrender = relayed ? h.persistenceNudge.scan(text) : h.persistenceNudge.observe(event.toolName, text);
+		// A NESTED call (a codemode script's `ctx.executeTool`) is a real execution — the gate, the
+		// telemetry above and the error patch all already ran — but its content is not a model-facing
+		// tool result. The caller chooses what to print or discard; only that outer output is charged
+		// to the context-burn run. Appending a note here would modify programmatic data and could
+		// create an invisible reminder. `parentToolCallId` is the host's explicit marker; `<parent>/<n>`
+		// id shape is never inferred from the id string.
+		if (typeof event.parentToolCallId === "string" && event.parentToolCallId.length > 0) {
+			if (surrender) rememberSurrenderRelay(event.parentToolCallId);
+			// A hand-off that actually landed ends the run even when a script issued it, so the reset is
+			// NOT dropped here. A FAILED one does not reset, and its repair note would be invisible:
+			// the next model-visible result is what reports the streak.
+			if (!errorPatch && event.isError !== true && HANDOFF_TOOL_NAMES.has(event.toolName)) h.delegationNudge.reset();
+			return errorPatch;
+		}
 		const notes: string[] = [];
 		// Grinding-by-hand reminder: a RUN of substantive hands-on commands on the supervisor's own
 		// tools (delegate/council reset the run). `size` classifies substantive vs glue + fat dump.
-		const text = event.content.reduce((s, c) => (c.type === "text" ? s + c.text : s), "");
 		const size = text.length;
 		const sweepNote = h.delegationNudge.observe(event.toolName, size, !errorPatch && event.isError !== true, text);
 		if (sweepNote) notes.push(sweepNote);
 		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
 		// results only; because delegate/council reset the run the two never fire on one event).
-		const surrender = h.persistenceNudge.observe(event.toolName, text);
 		if (surrender) notes.push(surrender);
 		if (notes.length === 0) return errorPatch;
 		const joined = notes.join("\n\n");

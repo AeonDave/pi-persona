@@ -51,7 +51,7 @@ export const pipeline: Strategy = {
 
 		const results: AgentResult[] = [];
 		let upstream = "";
-		for (const member of team) {
+		for (const [index, member] of team.entries()) {
 			// An abort settles a step as ok:false/'abort' instead of throwing, and one that lands
 			// between steps marks nothing at all — either way the chain must stop here rather than
 			// walk the rest of the roster.
@@ -59,7 +59,7 @@ export const pipeline: Strategy = {
 			const task = upstream
 				? `${input.task}\n\n--- previous step's output (build on it) ---\n${fenceUntrusted(upstream)}`
 				: input.task;
-			const r = await sdk.agent({ ...rosterSpec(member), task });
+			const r = await sdk.agent({ ...rosterSpec(member), task }, { reserveChildren: team.length - index - 1 });
 			results.push(r);
 			if (!r.ok) {
 				// A stop that lands WHILE this step runs settles it here, never at the loop guard

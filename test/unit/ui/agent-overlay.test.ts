@@ -18,6 +18,25 @@ function type(overlay: AgentOverlay, text: string): void {
 	for (const ch of text) overlay.handleInput(ch);
 }
 
+test("one list redraw reuses a single tree snapshot for rows, selection and waiting state", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "parent", label: "Council" });
+	tree.add({ id: "async:A", parentId: "parent", label: "Worker A", status: "running" });
+	tree.add({ id: "async:B", parentId: "parent", label: "Worker B", status: "running" });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		isWaitingForSupervisor: (id) => id === "async:A",
+	});
+	t.after(() => overlay.dispose());
+	overlay.render(80);
+	const snapshots = t.mock.method(tree, "snapshot");
+	tree.update("async:B", { detail: "building" });
+	const view = overlay.render(80).join("\n");
+	assert.equal(snapshots.mock.callCount(), 1, "a frame takes one consistent snapshot, not separate copies for each derived view");
+	assert.match(view, /Worker A.*waiting for supervisor/);
+	assert.match(view, /Worker B.*building/);
+	assert.match(view, /▸.*Worker A/, "leaf selection stays on the same worker");
+});
+
 /**
  * Count text sent through the real sanitizer/wrapper, without replacing their behavior.
  * Absolute CPU or wall-time limits vary with CI hardware; this work budget catches a
@@ -528,6 +547,15 @@ test("composeAgentRow keeps a long label + long detail + a stalled clock within 
 
 	const narrow = composeAgentRow({ node, depth: 0, selected: true, inner: 30, now: 1_000_000, stallMs: 1, theme: THEME });
 	assert.ok(visibleWidth(narrow) <= 30, `row exceeds inner=30 (${visibleWidth(narrow)}): ${JSON.stringify(narrow)}`);
+});
+
+test("F9 row shows authoritative waiting state instead of a stall badge", () => {
+	const node: AgentNode = { id: "a", label: "alpha", parentId: undefined, status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 };
+	const waiting = composeAgentRow({ node, depth: 0, selected: false, inner: 56, now: 100_000, stallMs: 90_000, waitingForSupervisor: true, theme: THEME });
+	assert.match(waiting, /waiting for supervisor/);
+	assert.doesNotMatch(waiting, /stalled/);
+	const settled = composeAgentRow({ node: { ...node, status: "done" }, depth: 0, selected: false, inner: 56, now: 100_000, stallMs: 90_000, waitingForSupervisor: true, theme: THEME });
+	assert.doesNotMatch(settled, /waiting for supervisor/);
 });
 
 test("composeAgentRow leaves an ordinary row untruncated", () => {

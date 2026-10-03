@@ -90,6 +90,47 @@ test("expandCouncilPreset leaves a preset-less spec unchanged and drops an unkno
 	assert.deepEqual(expandCouncilPreset({ preset: "ghost", strategy: "magi" }, {}), { strategy: "magi" });
 });
 
+test("expandCouncilPreset normalizes strategy before same-strategy param resolution", () => {
+	const panel = parsePersona("---\nname: panel\npersona: true\ncouncil:\n  preset: padded\n---\nPANEL", "panel.md");
+	assert.ok(panel?.council);
+	const council = expandCouncilPreset(panel.council, {
+		padded: { strategy: " magi ", params: { aggregate: "unanimity" } },
+	});
+	assert.equal(council.strategy, "magi");
+	const active = { ...panel, council };
+
+	const sameStrategy = resolveCouncilInvocation([active], active, { strategy: " magi " });
+	assert.ok(sameStrategy.ok);
+	if (sameStrategy.ok) assert.deepEqual(sameStrategy.value.params, { aggregate: "unanimity" });
+
+	const switched = resolveCouncilInvocation([active], active, { strategy: " pair ", params: { rounds: 2 } });
+	assert.ok(switched.ok);
+	if (switched.ok) assert.deepEqual(switched.value.params, { rounds: 2 });
+});
+
+test("expandCouncilPreset ignores preset members and preserves authored members and diagnostics", () => {
+	const untrusted = {
+		unsafe: {
+			strategy: "magi",
+			members: [{ agent: "scout", tools: 42 }],
+		},
+	};
+	assert.deepEqual(expandCouncilPreset({ preset: "unsafe" }, untrusted), { strategy: "magi" });
+	assert.deepEqual(expandCouncilPreset({ preset: "unsafe", members: ["authored-scout"] }, untrusted), {
+		strategy: "magi",
+		members: ["authored-scout"],
+	});
+
+	const broken = parsePersona("---\nname: broken\npersona: true\ncouncil:\n  preset: unsafe\n  members: []\n---\nBROKEN", "broken.md");
+	assert.ok(broken?.council);
+	const council = expandCouncilPreset(broken.council, untrusted);
+	assert.match(council.membersProblem ?? "", /council\.members is empty/i);
+	const active = { ...broken, council };
+	const resolved = resolveCouncilInvocation([active], active, {});
+	assert.equal(resolved.ok, false, "the authored diagnostic wins over untrusted preset members");
+	if (!resolved.ok) assert.match(resolved.error, /council\.members is empty/i);
+});
+
 test("a persona parses coaching: true (opts into the contact_supervisor comm plane)", () => {
 	const on = parsePersona("---\nname: c\npersona: true\ncoaching: true\n---\nbody", "/s");
 	assert.equal(on?.coaching, true);
@@ -235,6 +276,95 @@ test("resolveCouncilInvocation borrows a named persona's council without changin
 	});
 	assert.equal(elite.name, "elite");
 	assert.equal(elite.body, "ELITE");
+});
+
+test("switching away from profile strategy drops inherited params but keeps explicit params", () => {
+	const dev = parsePersona("---\nname: dev\npersona: true\ncouncil:\n  strategy: critic-loop\n  roster: repair\n  params: { rounds: 3 }\n---\nDEV", "dev.md");
+	assert.ok(dev);
+	const pair = resolveCouncilInvocation([dev], dev, { strategy: "pair" });
+	assert.ok(pair.ok);
+	assert.deepEqual(pair.value.params, {});
+	const explicitTypo = resolveCouncilInvocation([dev], dev, { strategy: "pair", params: { rounds: 9 } });
+	assert.ok(explicitTypo.ok);
+	assert.deepEqual(explicitTypo.value.params, { rounds: 9 });
+	const unchanged = resolveCouncilInvocation([dev], dev, { params: { rounds: 5 } });
+	assert.ok(unchanged.ok);
+	assert.deepEqual(unchanged.value.params, { rounds: 5 });
+});
+
+test("a members-only council is selected for the active persona", () => {
+	const panel = parsePersona("---\nname: panel\npersona: true\ncouncil:\n  members:\n    - scout\n---\nPANEL", "panel.md");
+	assert.ok(panel);
+	assert.deepEqual(panel.council?.members, ["scout"]);
+
+	const active = resolveCouncilInvocation([panel], panel, {});
+	assert.ok(active.ok);
+	if (!active.ok) return;
+	assert.equal(active.value.strategy, "magi", "the normal default strategy remains in effect");
+	assert.equal(active.value.roster, "", "inline members replace the named roster");
+	assert.deepEqual(active.value.members, ["scout"]);
+});
+
+test("a members-only council is a usable declaration when selected by name", () => {
+	const panel = parsePersona("---\nname: panel\npersona: true\ncouncil:\n  members:\n    - scout\n---\nPANEL", "panel.md");
+	assert.ok(panel);
+	const explicit = resolveCouncilInvocation([panel], undefined, { persona: "panel" });
+	assert.ok(explicit.ok, "a members-only profile is a usable council declaration");
+	if (!explicit.ok) return;
+	assert.deepEqual(explicit.value.members, ["scout"]);
+});
+
+test("naming the default strategy preserves a members-only council's profile params", () => {
+	const panel = parsePersona("---\nname: panel\npersona: true\ncouncil:\n  members: [scout]\n  params:\n    aggregate: unanimous\n---\nPANEL", "panel.md")!;
+	for (const request of [{ strategy: "magi" }, { persona: "panel", strategy: "magi" }]) {
+		const resolved = resolveCouncilInvocation([panel], panel, request);
+		assert.ok(resolved.ok);
+		if (resolved.ok) assert.deepEqual(resolved.value.params, { aggregate: "unanimous" });
+	}
+	const switched = resolveCouncilInvocation([panel], panel, { strategy: "fanout" });
+	assert.ok(switched.ok);
+	if (switched.ok) assert.deepEqual(switched.value.params, {}, "switching to a different strategy still drops MAGI params");
+});
+
+test("an invalid members-only council returns its diagnostic for the active persona", () => {
+	const panel = parsePersona("---\nname: panel\npersona: true\ncouncil:\n  members: []\n---\nPANEL", "panel.md");
+	assert.ok(panel);
+	const resolved = resolveCouncilInvocation([panel], panel, {});
+	assert.equal(resolved.ok, false);
+	if (!resolved.ok) assert.match(resolved.error, /council\.members is empty/i);
+});
+
+test("an invalid members-only council returns its diagnostic when selected by name", () => {
+	const panel = parsePersona("---\nname: panel\npersona: true\ncouncil:\n  members: []\n---\nPANEL", "panel.md");
+	assert.ok(panel);
+	const resolved = resolveCouncilInvocation([panel], undefined, { persona: "panel" });
+	assert.equal(resolved.ok, false);
+	if (!resolved.ok) assert.match(resolved.error, /council\.members is empty/i);
+});
+
+test("malformed persona members fail loudly instead of falling back to the named roster", () => {
+	const panel = parsePersona(
+		"---\nname: panel\npersona: true\ncouncil:\n  strategy: magi\n  roster: default-team\n  members:\n    - { agent: scout, model: 42 }\n---\nPANEL",
+		"panel.md",
+	);
+	assert.ok(panel);
+	const resolved = resolveCouncilInvocation([panel], panel, {});
+	assert.equal(resolved.ok, false);
+	if (!resolved.ok) assert.match(resolved.error, /council\.members\[0\].*model.*string/i);
+});
+
+test("valid inline members override the named roster for a council call", () => {
+	const panel = parsePersona(
+		"---\nname: panel\npersona: true\ncouncil:\n  strategy: magi\n  roster: default-team\n---\nPANEL",
+		"panel.md",
+	);
+	assert.ok(panel);
+	const resolved = resolveCouncilInvocation([panel], panel, { members: [{ agent: "scout", role: "security" }] });
+	assert.ok(resolved.ok);
+	if (resolved.ok) {
+		assert.equal(resolved.value.roster, "");
+		assert.deepEqual(resolved.value.members, [{ agent: "scout", role: "security" }]);
+	}
 });
 
 test("resolveCouncilInvocation rejects an explicit persona with no council even when overrides are supplied", () => {

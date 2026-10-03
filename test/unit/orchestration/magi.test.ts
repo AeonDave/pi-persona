@@ -132,10 +132,11 @@ test("magi requires a roster", async () => {
 	const sdk = makeSDK({ engine: votingEngine({}), roster: { team: () => [] }, limits: LIMITS });
 	await assert.rejects(() => magi.run({ task: "decide", params: {} }, sdk));
 });
-
 // --------------------------------------------------------------------------------------------
-// Model recovery — a core whose MODEL broke is re-run once on one that demonstrably works, so a
-// provider outage costs the council one member's diversity rather than its vote.
+// Model recovery — a core whose MODEL broke is recovered by the SHARED SDK on the session's own
+// model (main-only, never a peer's), so a provider outage costs the council one member's diversity
+// rather than its vote. MAGI's own job is narrower than the SDK's: carry the recovered model into
+// the reflection round, bill both attempts, and NAME the recovery in the ruling.
 
 /** An engine that fails a given agent while its model is the broken one, and succeeds otherwise. */
 function brokenModelEngine(broken: Record<string, string>, opts: { failureKind?: AgentResult["failureKind"] } = {}) {
@@ -158,24 +159,30 @@ const magiRoster = (models: Record<string, string>) => ({
 		n === "magi" ? [{ agent: "melchior", model: models.melchior! }, { agent: "balthasar", model: models.balthasar! }, { agent: "casper", model: models.casper! }] : [],
 });
 
-test("a core whose model broke is re-run on a model that worked for a peer, and its vote counts", async () => {
+test("a core whose model broke is recovered on the MAIN model — never on a healthy peer's", async () => {
+	// Peers are NOT a recovery source any more: borrowing one would silently re-shape the panel and
+	// cross another person's provider pin. The one model proven reachable is the user's own.
 	const { engine, attempts } = brokenModelEngine({ melchior: "anthropic/opus-4-6" });
 	const sdk = makeSDK({
 		engine,
 		roster: magiRoster({ melchior: "anthropic/opus-4-6", balthasar: "anthropic/sonnet-5", casper: "openai/gpt-5.6" }),
 		limits: LIMITS,
-		sessionModel: "anthropic/sonnet-5",
+		sessionModel: "z/main-model",
 	});
 	const r = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, sdk);
 
-	const retry = attempts.filter((a) => a.agent === "melchior");
-	assert.equal(retry.length, 2, `melchior runs once and is recovered once: ${JSON.stringify(retry)}`);
-	assert.equal(retry[1]?.model, "anthropic/sonnet-5", "recovered on the model a peer proved");
+	const melchior = attempts.filter((a) => a.agent === "melchior");
+	assert.equal(melchior.length, 2, `melchior runs once and is recovered once: ${JSON.stringify(melchior)}`);
+	assert.equal(melchior[1]?.model, "z/main-model", "recovered on MAIN, not on a peer's model");
+	const borrowed: (string | undefined)[] = melchior.slice(1).map((a) => a.model);
+	for (const peerModel of ["anthropic/sonnet-5", "openai/gpt-5.6"]) {
+		assert.ok(!borrowed.includes(peerModel), `no peer model is ever borrowed (${peerModel})`);
+	}
 	assert.equal(r.ok, true);
 	assert.match(r.output, /a=3/, "the recovered core's vote is in the tally");
 	// A borrowed model costs the council real diversity, so the ruling must say it happened —
 	// sdk.log has no production sink, and a silent recovery is a silently weaker poll.
-	assert.match(r.output, /1 core recovered on anthropic\/sonnet-5/, `the ruling must name the recovery: ${r.output}`);
+	assert.match(r.output, /1 core recovered on z\/main-model/, `the ruling must name the recovery: ${r.output}`);
 });
 
 test("with every model broken the cores are recovered on the session's own model", async () => {
@@ -190,15 +197,28 @@ test("with every model broken the cores are recovered on the session's own model
 	assert.deepEqual(
 		attempts.filter((a) => a.model === "anthropic/sonnet-5").map((a) => a.agent).sort(),
 		["balthasar", "casper", "melchior"],
-		"every core falls back to the session model when no peer survived",
+		"every core falls back to the session model",
 	);
 	assert.equal(r.ok, true);
+});
+
+test("without a known main model nothing is recovered — the poll degrades honestly", async () => {
+	const { engine, attempts } = brokenModelEngine({ melchior: "anthropic/opus-4-6" });
+	const sdk = makeSDK({
+		engine,
+		roster: magiRoster({ melchior: "anthropic/opus-4-6", balthasar: "anthropic/sonnet-5", casper: "openai/gpt-5.6" }),
+		limits: LIMITS,
+	});
+	const r = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, sdk);
+	assert.equal(attempts.length, 3, "no main model ⇒ no retry, ever");
+	assert.equal(r.ok, true, "the two healthy cores still rule");
+	assert.doesNotMatch(r.output, /recovered on/, "no recovery is claimed when none happened");
 });
 
 test("an aborted core is never re-run on another model", async () => {
 	// A stop that silently respawned work would be a stop that does not stop.
 	const { engine, attempts } = brokenModelEngine({ melchior: "anthropic/opus-4-6" }, { failureKind: "abort" });
-    const sdk = makeSDK({
+	const sdk = makeSDK({
 		engine,
 		roster: magiRoster({ melchior: "anthropic/opus-4-6", balthasar: "anthropic/sonnet-5", casper: "openai/gpt-5.6" }),
 		limits: LIMITS,
@@ -238,7 +258,7 @@ test("recovery survives the reflection round — the DEFAULT configuration, not 
 		engine,
 		roster: magiRoster({ melchior: "anthropic/opus-4-6", balthasar: "anthropic/sonnet-5", casper: "openai/gpt-5.6" }),
 		limits: LIMITS,
-		sessionModel: "anthropic/sonnet-5",
+		sessionModel: "z/main-model",
 	});
 	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
 
@@ -246,46 +266,63 @@ test("recovery survives the reflection round — the DEFAULT configuration, not 
 	assert.match(r.output, /a=3/, `the recovered core must vote in the final tally: ${r.output}`);
 	assert.doesNotMatch(r.output, /invalid excluded/, "a recovered core must not be re-broken and quarantined");
 	assert.ok(
-		attempts.filter((a) => a.agent === "melchior").every((a, i) => i === 0 || a.model === "anthropic/sonnet-5"),
+		attempts.filter((a) => a.agent === "melchior").every((a, i) => i === 0 || a.model === "z/main-model"),
 		`every melchior run after the first must use the rescued model: ${JSON.stringify(attempts.filter((a) => a.agent === "melchior"))}`,
 	);
 });
 
-test("recovery never spends the child budget the rounds themselves need", async () => {
-	// Recovery is an enhancement: 3 cores + 3 recoveries + 3 reflection runs is 9 children against a
-	// cap of 8, and exceeding it THROWS out of sdk.agent() — turning a poll that had a ruling into no
-	// ruling at all. It must take only what is left and leave the rest failed, honestly.
+test("recovery never starves the rounds themselves of child budget", async () => {
+	// Recovery is an enhancement. Exceeding `maxChildren` THROWS out of sdk.agent(), which would
+	// turn a poll that had a ruling into no ruling at all — so the SDK skips a retry it cannot
+	// afford, and the reflection round declines to start rather than overrunning the cap.
 	const { engine, attempts } = brokenModelEngine({ melchior: "x/one", balthasar: "y/two", casper: "z/three" });
 	const logs: string[] = [];
 	const sdk = makeSDK({
 		engine,
 		roster: magiRoster({ melchior: "x/one", balthasar: "y/two", casper: "z/three" }),
-		limits: LIMITS, // maxChildren 8: round 1 (3) + reflection (3) leaves 2 for recovery
+		limits: LIMITS, // maxChildren 8: round 1 (3) + recovery (3) leaves 2 — not a full panel of 3
 		sessionModel: "anthropic/sonnet-5",
 		log: (m) => logs.push(m),
 	});
 	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
 
 	assert.equal(r.ok, true, `the poll must still rule rather than throw: ${r.error ?? ""}`);
-	assert.equal(attempts.length <= LIMITS.maxChildren, true, `${attempts.length} children against a cap of ${LIMITS.maxChildren}`);
-	assert.match(logs.join(" | "), /no child budget left to retry it/, "a dropped recovery is stated, never silent");
+	assert.ok(attempts.length <= LIMITS.maxChildren, `${attempts.length} children against a cap of ${LIMITS.maxChildren}`);
+	assert.match(logs.join(" | "), /child budget|maxChildren/i, "the skipped round is stated, never silent");
 });
 
-test("recovery does not start when the opening round exhausted the token budget", async () => {
+test("usage bills the opening round and every recovery exactly once", async () => {
+	const { engine, attempts } = brokenModelEngine({ melchior: "x/one", balthasar: "y/two", casper: "z/three" });
+	const sdk = makeSDK({
+		engine,
+		roster: magiRoster({ melchior: "x/one", balthasar: "y/two", casper: "z/three" }),
+		limits: { ...LIMITS, maxChildren: 12 },
+		sessionModel: "anthropic/sonnet-5",
+	});
+	const r = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, sdk);
+	assert.equal(attempts.length, 6, "three cores, three recoveries");
+	assert.equal(r.usage.input, 6, "every attempt is billed once — the recovery is not free and not double-counted");
+	assert.equal(r.usage.turns, 6);
+});
+
+test("the observable token budget gates each recovery, and usage matches it exactly", async () => {
+	// The whole panel is admitted at once (concurrency 4), so the gate closes mid-round: at most ONE
+	// recovery can slip in before the spent total reaches the budget. The exact count depends on the
+	// order the legs settle in, so this pins the BOUND and the billing, not an interleaving.
 	const { engine, attempts } = brokenModelEngine({ melchior: "anthropic/opus-4-6" });
 	const logs: string[] = [];
 	const sdk = makeSDK({
 		engine,
 		roster: magiRoster({ melchior: "anthropic/opus-4-6", balthasar: "anthropic/sonnet-5", casper: "openai/gpt-5.6" }),
-		limits: { ...LIMITS, budgetTokens: 3 },
+		limits: { ...LIMITS, budgetTokens: 3, maxConcurrency: 4 },
 		sessionModel: "anthropic/sonnet-5",
 		log: (m) => logs.push(m),
 	});
 	const r = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, sdk);
 
-	assert.equal(r.ok, true, "the two healthy opening votes still produce a ruling");
-	assert.equal(attempts.length, 3, "no recovery starts after the opening round consumes the budget");
-	assert.equal(r.usage.input, 3, "usage still bills the opening round exactly once");
+	assert.equal(r.ok, true, "the healthy opening votes still produce a ruling");
+	assert.ok(attempts.length <= 4, `at most one recovery fits before the budget closes, got ${attempts.length}`);
+	assert.equal(r.usage.input, attempts.length, "every attempt billed exactly once, retries included");
 	assert.match(logs.join(" | "), /token budget/i, "the skipped recovery is stated");
 });
 
@@ -295,49 +332,23 @@ test("magi skips its default reflection when the opening round exhausted the tok
 	const sdk = makeSDK({
 		engine,
 		roster: magiRoster({ melchior: "anthropic/opus-4-6", balthasar: "anthropic/sonnet-5", casper: "openai/gpt-5.6" }),
-		limits: { ...LIMITS, budgetTokens: 3 },
+		limits: { ...LIMITS, budgetTokens: 3, maxConcurrency: 4 },
 		sessionModel: "anthropic/sonnet-5",
 		log: (m) => logs.push(m),
 	});
 	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
 
-	assert.equal(r.ok, true, "the two healthy opening votes still produce a ruling");
-	assert.equal(attempts.length, 3, "neither recovery nor reflection starts after budget exhaustion");
-	assert.equal(r.usage.input, 3, "usage bills only the opening round");
+	assert.equal(r.ok, true, "the healthy opening votes still produce a ruling");
+	assert.ok(attempts.length <= 4, `neither a second recovery nor reflection starts after budget exhaustion, got ${attempts.length}`);
+	assert.equal(r.usage.input, attempts.length);
 	assert.equal(r.structured?.reflected, false, "the result reports what actually ran");
 	assert.match(logs.join(" | "), /reflection.*token budget/i, "the skipped reflection is stated");
 });
 
-test("recovery rechecks observed token spend before starting the next retry", async () => {
-	const { engine, attempts } = brokenModelEngine({ melchior: "x/one", balthasar: "y/two", casper: "z/three" });
-	const sdk = makeSDK({
-		engine,
-		roster: magiRoster({ melchior: "x/one", balthasar: "y/two", casper: "z/three" }),
-		limits: { ...LIMITS, budgetTokens: 4 },
-		sessionModel: "anthropic/sonnet-5",
-	});
-	const r = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, sdk);
-
-	assert.equal(attempts.length, 4, "only one retry starts against the one-token observable remainder");
-	assert.equal(r.usage.input, 4, "usage includes the opening round and the one affordable retry exactly once");
-});
-
-test("with room to spare, every broken core is recovered and votes", async () => {
-	const { engine } = brokenModelEngine({ melchior: "x/one", balthasar: "y/two", casper: "z/three" });
-	const sdk = makeSDK({
-		engine,
-		roster: magiRoster({ melchior: "x/one", balthasar: "y/two", casper: "z/three" }),
-		limits: { ...LIMITS, maxChildren: 12 },
-		sessionModel: "anthropic/sonnet-5",
-	});
-	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
-	assert.equal(r.ok, true, `recovering every core must yield a ruling: ${r.error ?? ""} / ${r.output}`);
-	assert.match(r.output, /a=3/);
-});
-
-test("a core that fails its retry too re-runs on its OWN model in reflection, not a phantom override", async () => {
-	// Only a SUCCESSFUL retry earns an override; a twice-failed core keeps its roster model so its
-	// failure stays honest and attributable to the model it was actually configured with.
+test("a core that fails its recovery re-runs the reflection round on its OWN model, and is recovered again there", async () => {
+	// A rescue is bounded per ATTEMPT, not per member: the reflection round is a fresh leg, so a core
+	// that failed on both models gets a genuine second chance on the model its roster configured —
+	// and that attempt is recovered onto main too, exactly once.
 	const seen: Array<{ agent: string; model?: string }> = [];
 	const engine: StrategyEngine = {
 		run: async (s): Promise<AgentResult> => {
@@ -353,6 +364,15 @@ test("a core that fails its retry too re-runs on its OWN model in reflection, no
 		sessionModel: "anthropic/sonnet-5",
 	});
 	await magi.run({ task: "decide", roster: "magi", params: {} }, sdk);
-	const melchior = seen.filter((a) => a.agent === "melchior");
-	assert.equal(melchior.at(-1)?.model, "anthropic/opus-4-6", `reflection must use the roster model after a failed retry: ${JSON.stringify(melchior)}`);
+	const melchior = seen.filter((a) => a.agent === "melchior").map((a) => a.model);
+	assert.deepEqual(
+		melchior,
+		[
+			"anthropic/opus-4-6",
+			"anthropic/sonnet-5",
+			"anthropic/opus-4-6",
+			"anthropic/sonnet-5",
+		],
+		`each attempt (opening, recovery, reflection, reflection recovery) is on the model it asked for: ${JSON.stringify(melchior)}`,
+	);
 });

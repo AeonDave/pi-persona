@@ -8,10 +8,11 @@
 import type { RunLimits } from "../core/capabilities.ts";
 import { emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
+import { planModelRecovery } from "./model-retry.ts";
 import { mapWithConcurrency, Semaphore } from "./parallel.ts";
-import { aggregateResults } from "./reducers.ts";
+import { aggregateResults, sumUsage } from "./reducers.ts";
 import { roleHint, type RosterMember } from "./roster.ts";
-import type { AgentResult } from "./types.ts";
+import type { AgentResult, ModelRecovery } from "./types.ts";
 import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 
 export interface AgentRunSpec {
@@ -73,7 +74,10 @@ export interface AgentProgress {
 /** Inject a steering message into a running agent (in-process engine only).
  *  Returning `false` means the message was not delivered (disposed session, unknown broker
  *  handle). `void` is treated as success so in-process steers that fire-and-forget stay honest. */
-export type SteerFn = (text: string) => boolean | void;
+export type SteerFn = ((text: string) => boolean | void) & {
+	/** Live runtime view: true only while this exact child has an outstanding supervisor ask. */
+	isWaitingForSupervisor?: () => boolean;
+};
 
 /** The engine seam the SDK runs agents through (real child engine or a stub). */
 export interface StrategyEngine {
@@ -92,8 +96,13 @@ export interface Roster {
 	team(name: string): RosterMember[];
 }
 
+export interface AgentCallOptions {
+	/** Leave admission slots for mandatory work after this leg; consulted only for optional recovery. */
+	reserveChildren?: number | (() => number);
+}
+
 export interface StrategySDK {
-	agent(spec: AgentRunSpec): Promise<AgentResult>;
+	agent(spec: AgentRunSpec, options?: AgentCallOptions): Promise<AgentResult>;
 	parallel<T>(thunks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;
 	reduce: {
 		aggregate(results: AgentResult[]): AgentResult;
@@ -104,10 +113,11 @@ export interface StrategySDK {
 	};
 	roster: Roster;
 	signal: AbortSignal | undefined;
-	/** The model the user's own session runs on (`provider/id`), when known. A strategy needs it
-	 *  to recover a member whose model broke and that has no healthy peer to borrow from — see
-	 *  `model-retry.ts`. Never a default for a run: members get their roster/persona model. */
-	sessionModel: string | undefined;
+	/** The MAIN model (`provider/id`) — the user's own session model, read LIVE: a `/model` pick
+	 *  mid-run must be what a recovery lands on, not the snapshot taken when the run started. A
+	 *  leg whose own model is unreachable is re-run once on it (`model-retry.ts`); it is never a
+	 *  default for a run — members get their roster/persona model. */
+	readonly sessionModel: string | undefined;
 	log(message: string): void;
 	limits: RunLimits;
 }
@@ -120,9 +130,14 @@ export interface StrategyInput {
 
 /** A declared strategy param — name/type/default/doc, for discovery (`/doctor`) and the
  *  council tool's lenient unknown-key warning (I2: strategies are trusted project code —
- *  this schema documents and warns, it never validates or blocks a run). */
+ *  this schema documents and warns, it never validates or blocks a run). `"agent"` names another
+ *  agent (an auxiliary selector — arbiter/critic), with an optional real-agent default or roster index. */
 export interface StrategyParam {
-	type: "string" | "number" | "boolean";
+	type: "string" | "number" | "boolean" | "agent";
+	/** An omitted agent-valued selector uses this roster member before its static default. */
+	rosterIndex?: number;
+	/** A bare agent selector inherits a matching roster member's specialization (not arbiters). */
+	inheritRoster?: boolean;
 	default?: string | number | boolean;
 	doc: string;
 }
@@ -144,6 +159,9 @@ export interface SDKDeps {
 	signal?: AbortSignal;
 	/** See `StrategySDK.sessionModel`. */
 	sessionModel?: string;
+	/** The LIVE main model. Preferred over `sessionModel` wherever both are set: the user can
+	 *  change models while a run is in flight, and recovery must follow the CURRENT one. */
+	getSessionModel?: () => string | undefined;
 	log?: (message: string) => void;
 	/** Per-agent lifecycle, for live UI. The result is passed on done/failed so the
 	 *  UI can capture each agent's output/usage. `key` is a run-unique display id (the
@@ -157,6 +175,11 @@ export interface SDKDeps {
 	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
 	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
+	/** Emitted immediately BEFORE a leg is re-run on the main model after a model-caused failure,
+	 *  so live UI can say so while it happens (`key` is the same logical node as the attempt it
+	 *  replaces). Purely cosmetic: a throw here is contained and can never discard the billed
+	 *  result the recovery produced. */
+	onModelFallback?: (info: { agent: string; from?: string; to: string; key: string }) => void;
 	/** Capability gate for every `sdk.agent()` spawn (council/flow/judge arbiter included).
 	 *  Denied BEFORE the child-slot is consumed and without calling the engine. Absent ⇒ no gate. */
 	canSpawn?: (agent: string) => boolean;
@@ -213,11 +236,17 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 	// batch gate; a strategy cannot bypass maxConcurrency by choosing a different topology.
 	const maxConcurrency = Math.max(1, Number.isFinite(deps.limits.maxConcurrency) ? Math.floor(deps.limits.maxConcurrency) : 1);
 	const agentSlots = new Semaphore(maxConcurrency);
+	// Optional recovery must not spend slots already needed by queued logical legs or thunks.
+	const pendingAgents = new Set<symbol>();
+	const pendingThunks = new Set<symbol>();
 	// Run-unique UI keys: the base is the agent name, or `agent · HINT` when the member
 	// carries a role — so an ensemble of one agent under several roles shows as distinct
 	// nodes. A `#N` suffix guards the degenerate case of an identical base twice. This
 	// mirrors `rosterNodeKeys`, so the seeded "queued" nodes line up with the live ones.
 	const uiSeen = new Map<string, number>();
+	/** The MAIN model, read LIVE (`getSessionModel` wins) so a `/model` pick made while the run is
+	 *  in flight is what recovery lands on; the snapshot is used only without a live getter. */
+	const currentMain = (): string | undefined => deps.getSessionModel ? deps.getSessionModel() : deps.sessionModel;
 	const uiKeyFor = (spec: AgentRunSpec): string => {
 		const base = spec.role ? `${spec.agent} · ${roleHint(spec.role)}` : spec.agent;
 		const n = (uiSeen.get(base) ?? 0) + 1;
@@ -226,7 +255,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 	};
 
 	return {
-		agent: async (spec) => {
+		agent: async (spec, options) => {
 			if (deps.canSpawn && !deps.canSpawn(spec.agent)) {
 				return {
 					agent: spec.agent,
@@ -238,8 +267,11 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				};
 			}
 			const key = uiKeyFor(spec);
+			const pending = Symbol();
+			pendingAgents.add(pending);
 			let started = false;
 			const run = async (): Promise<AgentResult> => {
+				pendingAgents.delete(pending);
 				// These checks intentionally happen AFTER waiting for a slot. A queued leg must see
 				// the current child/token totals, not the stale snapshot from when it was enqueued.
 				if (childrenSpawned >= deps.limits.maxChildren) {
@@ -250,22 +282,29 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				}
 				childrenSpawned += 1;
 				started = true;
-				const ac = new AbortController();
-				let onRootAbort: (() => void) | undefined;
-				if (deps.signal) {
-					onRootAbort = () => ac.abort();
-					if (deps.signal.aborted) ac.abort();
-					else deps.signal.addEventListener("abort", onRootAbort, { once: true });
-				}
-				try {
-					deps.onAgentStart?.(spec.agent, () => ac.abort(), key);
-					deps.onAgentStatus?.(spec.agent, "running", undefined, key);
-					// A slot grant is not an engine start. The root may abort while the granted
-					// callback is crossing this seam; do not call the engine after that abort.
-					if (deps.signal?.aborted) {
-						const failed = abortedLeg(spec.agent);
-						deps.onAgentStatus?.(spec.agent, "failed", failed, key);
-						return failed;
+				// One logical node and abort controller across attempts: a local stop remains sticky
+				// across the recovery seam. The SAME UI key repairs the node in place.
+				let current: AbortController | undefined;
+				const detachRoot: Array<() => void> = [];
+				let announcedStart = false;
+				const attempt = async (aSpec: AgentRunSpec): Promise<AgentResult> => {
+					const ac = current ?? new AbortController();
+					current = ac;
+					if (deps.signal) {
+						const onRootAbort = () => ac.abort();
+						detachRoot.push(() => deps.signal?.removeEventListener("abort", onRootAbort));
+						if (deps.signal.aborted) ac.abort();
+						else deps.signal.addEventListener("abort", onRootAbort, { once: true });
+					}
+					if (!announcedStart) {
+						announcedStart = true;
+						deps.onAgentStart?.(aSpec.agent, () => current?.abort(), key);
+					}
+					deps.onAgentStatus?.(aSpec.agent, "running", undefined, key);
+					// A slot grant is not an engine start. Root or local cancellation in a lifecycle
+					// callback must prevent the engine invocation, not merely hand it an aborted signal.
+					if (ac.signal.aborted) {
+						return abortedLeg(aSpec.agent);
 					}
 					const onProgress = deps.onAgentProgress;
 					// The try covers the ENGINE CALL AND NOTHING ELSE. Widened over the bookkeeping below it,
@@ -276,25 +315,89 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					let result: AgentResult;
 					try {
 						result = await deps.engine.run(
-							spec,
-							onProgress ? (p) => onProgress(spec.agent, p, key) : undefined,
+							aSpec,
+							onProgress ? (p) => onProgress(aSpec.agent, p, key) : undefined,
 							ac.signal,
-							deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(spec.agent, steer, key) : undefined,
+							deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(aSpec.agent, steer, key) : undefined,
 						);
 					} catch (err) {
 						// PER-LEG failure — contained, never rethrown: one blown engine call must not discard
 						// the fan-out's completed (already billed) sibling results. The RUN-FATAL breaches
 						// above (maxChildren, token budget) are thrown BEFORE this try, so they still stop
 						// the run instead of degrading into a "failed member" the strategy fans out past.
-						const failed = legFailure(spec.agent, err, ac.signal.aborted || (deps.signal?.aborted ?? false));
-						deps.onAgentStatus?.(spec.agent, "failed", failed, key);
+						// Such a failure is `infrastructure`: the HARNESS broke, which is no evidence about
+						// the model, so it never reaches the recovery below.
+						const failed = legFailure(aSpec.agent, err, ac.signal.aborted || (deps.signal?.aborted ?? false));
 						return failed;
 					}
 					tokensSpent += result.usage.input + result.usage.output;
-					deps.onAgentStatus?.(spec.agent, result.ok ? "done" : "failed", result, key);
 					return result;
+				};
+				try {
+					const first = await attempt(spec);
+					deps.onAgentStatus?.(spec.agent, first.ok ? "done" : "failed", first, key);
+
+					// ── Main-only model recovery ──────────────────────────────────────────────
+					// A model-caused failure (`provider`/`unknown-model`) gets exactly ONE re-run on the
+					// session's own model — resolved NOW, so a `/model` switch mid-run is followed. Nothing
+					// else qualifies: a stop, a timeout, a contract violation, an agent error, or a harness
+					// rejection reproduces on any model, and a retried abort would be a stop that does not
+					// stop. Everything here is BOUNDED and non-fatal: an optional recovery that cannot be
+					// afforded is skipped with a stated reason and the ORIGINAL cause is returned, because
+					// throwing would turn a leg that merely lost its model into a run-fatal breach.
+					const main = currentMain();
+					const plan = isInfrastructureFailure(first)
+						? null
+						: planModelRecovery(first, { ...(main ? { sessionModel: main } : {}), ...(spec.model ? { requested: spec.model } : {}) });
+					if (!plan) return first;
+					// A stop never resurrects: neither the ROOT signal nor the per-leg stop the UI handed
+					// out. `current` is the controller this attempt ran under.
+					if (deps.signal?.aborted || current?.signal.aborted) return first;
+					const skip = (why: string): AgentResult => {
+						deps.log?.(`${spec.agent} stays failed — ${why}`);
+						return first;
+					};
+					const requestedReserve = typeof options?.reserveChildren === "function" ? options.reserveChildren() : options?.reserveChildren;
+					const reserve = requestedReserve !== undefined && Number.isFinite(requestedReserve) ? Math.max(0, Math.floor(requestedReserve)) : 0;
+					const queued = pendingAgents.size + pendingThunks.size;
+					if (childrenSpawned + reserve + queued >= deps.limits.maxChildren) {
+						return skip(`no child budget left to recover it (maxChildren ${deps.limits.maxChildren}, ${reserve + queued} reserved for remaining work)`);
+					}
+					if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
+						return skip(`token budget exhausted (${deps.limits.budgetTokens})`);
+					}
+					const recovery: ModelRecovery = { ...(plan.from ? { from: plan.from } : {}), to: plan.to };
+					deps.log?.(`${spec.agent} failed on ${plan.from ?? "its model"} — retrying once on the session model ${plan.to}`);
+					try {
+						deps.onModelFallback?.({ agent: spec.agent, ...recovery, key });
+					} catch {
+						// Cosmetic hook only: a broken toast must not discard a billed leg.
+					}
+					// The notification can cancel this logical leg too. Do not replace that intent with
+					// a fresh controller or spend another child slot after it has been stopped.
+					if (deps.signal?.aborted || current?.signal.aborted) {
+						const stopped = { ...abortedLeg(spec.agent), usage: first.usage };
+						deps.onAgentStatus?.(spec.agent, "failed", stopped, key);
+						return stopped;
+					}
+					// The retry is a REAL attempt: admitted and charged like any other child, but inside
+					// the slot this call already holds — never a recursive agent() (that would deadlock on
+					// maxConcurrency 1), and never raising the ceiling.
+					childrenSpawned += 1;
+					const second = await attempt({ ...spec, model: plan.to });
+					// Both attempts are billed once. The LAST attempt supplies model/cause metadata:
+					// a main timeout or abort must not be relabelled as the initial provider failure.
+					// Keep both diagnostic causes so an unavailable saved assignment is still actionable.
+					const settled: AgentResult = {
+						...second,
+						usage: sumUsage([first.usage, second.usage]),
+						modelRecovery: recovery,
+						...(!second.ok ? { error: `Initial model ${plan.from ?? "(unresolved)"} failed: ${first.error ?? first.failureKind ?? "unknown cause"}; main model ${plan.to} failed: ${second.error ?? second.failureKind ?? "unknown cause"}` } : {}),
+					};
+					deps.onAgentStatus?.(spec.agent, settled.ok ? "done" : "failed", settled, key);
+					return settled;
 				} finally {
-					if (onRootAbort) deps.signal?.removeEventListener("abort", onRootAbort);
+					for (const detach of detachRoot) detach();
 				}
 			};
 			try {
@@ -304,6 +407,8 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				// run signal removed its waiter; all other errors retain their terminal semantics.
 				if (!started && deps.signal?.aborted) return abortedLeg(spec.agent);
 				throw error;
+			} finally {
+				pendingAgents.delete(pending);
 			}
 		},
 		parallel: (thunks, opts) => {
@@ -314,12 +419,21 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 			// knows what a failed member of its own value type looks like. Clamp arbitrary thunk
 			// batches too, so the public parallel surface has the same ceiling as agent().
 			const requested = opts?.concurrency ?? maxConcurrency;
-			return mapWithConcurrency(thunks, Math.min(requested, maxConcurrency), (thunk) => thunk());
+			const queued = thunks.map((thunk) => ({ thunk, token: Symbol() }));
+			for (const { token } of queued) pendingThunks.add(token);
+			return mapWithConcurrency(queued, Math.min(requested, maxConcurrency), ({ thunk, token }) => {
+				pendingThunks.delete(token);
+				return thunk();
+			}).finally(() => {
+				for (const { token } of queued) pendingThunks.delete(token);
+			});
 		},
 		reduce: { aggregate: aggregateResults, vote: voteReduce, judge: prepareJudge },
 		roster: deps.roster,
 		signal: deps.signal,
-		sessionModel: deps.sessionModel,
+		get sessionModel() {
+			return currentMain();
+		},
 		log: deps.log ?? (() => {}),
 		limits: deps.limits,
 	};

@@ -1032,6 +1032,86 @@ test("inproc engine exposes a steer handle that injects a user message into the 
 	assert.match(JSON.stringify(spy.steered?.[0]), /redirect: focus on errors/);
 });
 
+test("inproc steer metadata tracks only this child’s blocking supervisor ask", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	let finishIdle: (() => void) | undefined;
+	let steer: import("../../../src/orchestration/sdk.ts").SteerFn | undefined;
+	let contact: NonNullable<CreateSessionOptions["customTools"]>[number] | undefined;
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", bus, supervisorHandle: "supervisor", coaching: true, allowBlocking: true,
+		createSession: async (options) => {
+			contact = options.customTools?.find((tool) => tool.name === "contact_supervisor");
+			return {
+				subscribe: () => () => {},
+				prompt: async () => {},
+				agent: { abort: () => {}, waitForIdle: () => new Promise<void>((resolve) => { finishIdle = resolve; }), steer: () => {} },
+				dispose: () => {},
+			};
+		},
+	});
+	let runSettled = false;
+	const run = engine.run({ agent: "a", task: "wait" }, undefined, undefined, (fn) => { steer = fn; }).finally(() => { runSettled = true; });
+	while (!contact || !steer || !finishIdle) await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(steer.isWaitingForSupervisor?.(), false);
+	const asking = contact.execute("ask", { kind: "decision", message: "choose" }, undefined, undefined, undefined as never);
+	assert.equal(steer.isWaitingForSupervisor?.(), true);
+	const [envelope] = bus.take("supervisor");
+	assert.ok(envelope?.expectsReply);
+	assert.equal(bus.reply(envelope!.id, "choice"), true);
+	await asking;
+	assert.equal(steer.isWaitingForSupervisor?.(), false, "reply settles the live bus predicate");
+	await contact.execute("progress", { kind: "progress", message: "still working" }, undefined, undefined, undefined as never);
+	assert.equal(steer.isWaitingForSupervisor?.(), false, "nonblocking progress is not waiting");
+	const askAbort = new AbortController();
+	const cancelledAsk = contact.execute("ask-cancel", { kind: "decision", message: "cancel me" }, askAbort.signal, undefined, undefined as never);
+	assert.equal(steer.isWaitingForSupervisor?.(), true);
+	askAbort.abort();
+	await cancelledAsk;
+	assert.equal(steer.isWaitingForSupervisor?.(), false, "cancelled ask is no longer pending");
+	const childHandle = bus.participants().find((handle) => handle !== "supervisor");
+	assert.ok(childHandle, "engine registered its actual child handle");
+	const timedOutAsk = bus.ask(childHandle!, "supervisor", "expire", { timeoutMs: 5 });
+	assert.equal(steer.isWaitingForSupervisor?.(), true);
+	await assert.rejects(timedOutAsk, /ask timeout/);
+	assert.equal(steer.isWaitingForSupervisor?.(), false, "timed-out ask is no longer pending");
+	finishIdle!();
+	await run;
+	assert.equal(runSettled, true);
+	assert.equal(steer.isWaitingForSupervisor?.(), false, "after handle cleanup the bus reports false");
+});
+
+test("inproc steer waiting state is isolated between simultaneous same-agent handles", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const controls: Array<{ contact: NonNullable<CreateSessionOptions["customTools"]>[number]; finish: () => void }> = [];
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", bus, supervisorHandle: "supervisor", coaching: true, allowBlocking: true,
+		createSession: async (options) => ({
+			subscribe: () => () => {}, prompt: async () => {},
+			agent: { abort: () => {}, waitForIdle: () => new Promise<void>((resolve) => {
+				const contact = options.customTools?.find((tool) => tool.name === "contact_supervisor");
+				if (contact) controls.push({ contact, finish: resolve });
+			}), steer: () => {} }, dispose: () => {},
+		}),
+	});
+	const steers: import("../../../src/orchestration/sdk.ts").SteerFn[] = [];
+	const runA = engine.run({ agent: "a", task: "a" }, undefined, undefined, (fn) => { steers.push(fn); });
+	const runB = engine.run({ agent: "a", task: "b" }, undefined, undefined, (fn) => { steers.push(fn); });
+	while (controls.length < 2 || steers.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.notEqual(steers[0], steers[1]);
+	const asking = controls[0]!.contact.execute("ask", { kind: "decision", message: "only child A" }, undefined, undefined, undefined as never);
+	assert.equal(steers.filter((fn) => fn.isWaitingForSupervisor?.()).length, 1, "only the asking child's exact handle is pending");
+	assert.equal(steers.some((fn) => fn.isWaitingForSupervisor?.() === false), true);
+	const envelope = bus.take("supervisor").find((item) => item.expectsReply);
+	assert.ok(envelope);
+	bus.reply(envelope!.id, "done");
+	await asking;
+	assert.equal(steers.every((fn) => fn.isWaitingForSupervisor?.() === false), true);
+	for (const control of controls) control.finish();
+	await Promise.all([runA, runB]);
+});
+
 test("inproc engine injects contact_supervisor when a bus + coaching are provided", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

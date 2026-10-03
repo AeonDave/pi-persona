@@ -94,8 +94,16 @@ export function rosterNodeKeys(members: RosterMember[]): string[] {
 	});
 }
 
-/** Coerce one raw YAML value into a roster member (string name, or `{ agent, … }` map). */
-function toMember(raw: unknown): RosterMember | undefined {
+/** Coerce one raw value into a roster member (string name, or `{ agent, … }` map).
+ *
+ *  LENIENT, and deliberately so: this is the STATIC `teams.yaml` path (authored, trusted project
+ *  data), where a member with a badly-typed field is normalised, not rejected — a bad `model`
+ *  is dropped and a numeric `tools` entry is coerced to its string, so the panel still runs.
+ *  Anything RUNTIME-supplied (a `council` call's `members`, an aux actor param) must go through
+ *  {@link parseRuntimeRosterMember} instead: there, a dropped `tools` silently WIDENS a leg to
+ *  the agent's default tool permissions, so a malformed field has to be refused, not normalised.
+ *  `undefined` means "not a member": no usable agent name, or a wrong overall shape. */
+export function parseRosterMember(raw: unknown): RosterMember | undefined {
 	if (typeof raw === "string") return raw.trim() ? raw.trim() : undefined;
 	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 		const o = raw as Record<string, unknown>;
@@ -117,12 +125,81 @@ function toMember(raw: unknown): RosterMember | undefined {
 	return undefined;
 }
 
+/** Every field a member map may carry — anything else is a typo, not a silent no-op. */
+const MEMBER_FIELDS = new Set(["agent", "role", "model", "skills", "tools", "isolation", "mcp"]);
+
+export type RuntimeMember = { ok: true; member: RosterMember } | { ok: false; error: string };
+
+/**
+ * STRICT validation of a RUNTIME-supplied member (a `council` call's `members`, an aux actor
+ * param), with a diagnostic that names the offending field.
+ *
+ * The lenient {@link parseRosterMember} is right for authored `teams.yaml`, where a dropped
+ * field only reshapes a panel the author can read back in the file. Here the input arrives from
+ * a tool call or a strategy param, and the silent-drop rules become a privilege change:
+ * `tools: ["read", 42]` normalises to a DIFFERENT allowlist (or is dropped entirely, handing the
+ * leg the agent's DEFAULT tools), `model: 42` / `mcp: "yes"` quietly discard the caller's
+ * intent, and an unknown key looks honoured. So every known field is type-checked and an
+ * unknown key is refused — BEFORE anything is spawned.
+ */
+export function parseRuntimeRosterMember(raw: unknown): RuntimeMember {
+	if (typeof raw === "string") {
+		return raw.trim() ? { ok: true, member: raw.trim() } : { ok: false, error: "an agent name (a non-empty string)" };
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return { ok: false, error: "an agent name (a string) or a { agent, … } map" };
+	}
+	const o = raw as Record<string, unknown>;
+	if (typeof o.agent !== "string" || !o.agent.trim()) {
+		return { ok: false, error: '"agent" (a non-empty string) is required' };
+	}
+	const unknownKeys = Object.keys(o).filter((k) => !MEMBER_FIELDS.has(k));
+	if (unknownKeys.length > 0) {
+		return { ok: false, error: `unknown member field(s) ${unknownKeys.join(", ")} — expected agent, role, model, skills, tools, isolation, mcp` };
+	}
+	const member: {
+		agent: string;
+		role?: string;
+		model?: string;
+		skills?: string[];
+		tools?: string[];
+		isolation?: "none" | "worktree";
+		mcp?: boolean;
+	} = { agent: o.agent.trim() };
+	// A blank string is "unset" (the lenient path's own reading); a non-string is a type error.
+	for (const key of ["role", "model"] as const) {
+		const value = o[key];
+		if (value === undefined) continue;
+		if (typeof value !== "string") return { ok: false, error: `"${key}" must be a string` };
+		if (value.trim()) member[key] = value.trim();
+	}
+	for (const key of ["skills", "tools"] as const) {
+		const value = o[key];
+		if (value === undefined) continue;
+		if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !v.trim())) {
+			return { ok: false, error: `"${key}" must be an array of non-empty strings` };
+		}
+		member[key] = value as string[];
+	}
+	if (o.isolation !== undefined) {
+		if (o.isolation !== "worktree" && o.isolation !== "none") {
+			return { ok: false, error: '"isolation" must be "worktree" or "none"' };
+		}
+		member.isolation = o.isolation;
+	}
+	if (o.mcp !== undefined) {
+		if (typeof o.mcp !== "boolean") return { ok: false, error: '"mcp" must be a boolean' };
+		member.mcp = o.mcp;
+	}
+	return { ok: true, member };
+}
+
 export function parseTeams(yaml: string): Record<string, RosterMember[]> {
 	const raw = parseYamlSubset(yaml);
 	const teams: Record<string, RosterMember[]> = {};
 	for (const [name, value] of Object.entries(raw)) {
 		const items: unknown[] = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
-		const members = items.map(toMember).filter((m): m is RosterMember => m !== undefined);
+		const members = items.map(parseRosterMember).filter((m): m is RosterMember => m !== undefined);
 		if (members.length > 0) teams[name] = members;
 	}
 	return teams;

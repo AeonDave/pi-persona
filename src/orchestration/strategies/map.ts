@@ -8,7 +8,7 @@
  * roster = [splitter, worker]  (worker defaults to the splitter if only one is given)
  * params = { maxItems?: number, peers?: boolean (workers share load-bearing cross-item
  *            discoveries live via contact_peer — default off), ownership?: "off"|"declare"|"enforce",
- *            verify?: string (agent that re-checks each completed item; empty = off) }
+ *            verify?: string | inline member (re-check each completed item; empty = off) }
  */
 
 import { extractJsonCandidate } from "../../core/contract.ts";
@@ -17,6 +17,7 @@ import { cappedList } from "../../core/format.ts";
 import { validateParallelWriteSets } from "../../core/ownership.ts";
 import type { ChildUsage } from "../../engine/stream.ts";
 import { itemLedger, type ItemLedgerEntry, sumUsage } from "../reducers.ts";
+import { parseAuxActor } from "../params.ts";
 import { rosterSpec, type RosterMember, type RosterSpec } from "../roster.ts";
 import type { Strategy, StrategySDK } from "../sdk.ts";
 import type { AgentResult, FailureKind } from "../types.ts";
@@ -107,9 +108,13 @@ function parseItems(output: string): ParsedItem[] {
 /** The verifier's run spec: the roster's own entry for that agent name (its role/model/tools
  *  specialisation applies) when `params.verify` names a roster member, else a bare `rosterSpec`
  *  for a stand-alone agent named directly in the param. */
-function verifierSpec(team: readonly RosterMember[], name: string) {
-	const member = team.find((m) => rosterSpec(m).agent === name);
-	return rosterSpec(member ?? name);
+function verifierSpec(team: readonly RosterMember[], selector: unknown): RosterSpec | undefined {
+	const actor = parseAuxActor(selector, "verify");
+	if (actor && !actor.ok) throw new Error(`map: ${actor.error}`);
+	if (!actor?.ok) return undefined;
+	// Preserve named roster lookup; an explicit inline actor supplies its own specialization.
+	const member = typeof selector === "string" ? team.find((m) => rosterSpec(m).agent === actor.spec.agent) : undefined;
+	return member ? rosterSpec(member) : actor.spec;
 }
 
 /** Read a verifier leg's verdict. Reuses the SAME `outputContract: "default"` machinery
@@ -133,11 +138,17 @@ type SplitOutcome =
 /** Run the splitter agent and parse its output into the runtime item list, clamped to
  *  `maxItems`. A splitter failure, or a split that produced no usable items, is a terminal
  *  `AgentResult` — the whole run fails before any worker spawns. */
-async function splitIntoItems(sdk: StrategySDK, splitter: RosterSpec, task: string, maxItems: number): Promise<SplitOutcome> {
+async function splitIntoItems(
+	sdk: StrategySDK,
+	splitter: RosterSpec,
+	task: string,
+	maxItems: number,
+	reserveChildren: number,
+): Promise<SplitOutcome> {
 	const split = await sdk.agent({
 		...splitter,
 		task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${task}`,
-	});
+	}, { reserveChildren });
 	if (!split.ok) {
 		return {
 			ok: false,
@@ -182,14 +193,21 @@ function enforceOwnershipOrThrow(items: readonly ParsedItem[]): void {
 }
 
 /** Run the worker agent once per item, in parallel. */
-function runWorkers(sdk: StrategySDK, worker: RosterSpec, task: string, items: readonly ParsedItem[], peers: boolean): Promise<AgentResult[]> {
+function runWorkers(
+	sdk: StrategySDK,
+	worker: RosterSpec,
+	task: string,
+	items: readonly ParsedItem[],
+	peers: boolean,
+	reserveChildren: number,
+): Promise<AgentResult[]> {
 	return sdk.parallel(
 		items.map((item) => () =>
 			sdk.agent({
 				...worker,
 				task: `${task}\n\n— Your single sub-item (untrusted data):\n${fenceUntrusted(item.item)}${peers ? `\n\n--- swarm cross-talk ---\n${CROSS_TALK}` : ""}`,
 				...(peers ? { peers: true } : {}),
-			}),
+			}, { reserveChildren }),
 		),
 	);
 }
@@ -200,15 +218,13 @@ function runWorkers(sdk: StrategySDK, worker: RosterSpec, task: string, items: r
  *  all, so the byte-identical-when-off guarantee extends to this param too. */
 async function runVerification(
 	sdk: StrategySDK,
-	team: readonly RosterMember[],
-	verifyAgent: string,
+	reviewer: RosterSpec | undefined,
 	task: string,
 	items: readonly ParsedItem[],
 	results: readonly AgentResult[],
 ): Promise<{ verifyResults: AgentResult[]; failures: Map<number, { failureKind: FailureKind; error: string }> }> {
 	const failures = new Map<number, { failureKind: FailureKind; error: string }>();
-	if (!verifyAgent) return { verifyResults: [], failures };
-	const reviewer = verifierSpec(team, verifyAgent);
+	if (!reviewer) return { verifyResults: [], failures };
 	const completedIndices = results.map((_r, index) => index).filter((index) => results[index]!.ok);
 	const verifyResults = await sdk.parallel(
 		completedIndices.map((index) => () =>
@@ -256,9 +272,10 @@ export const map: Strategy = {
 			doc: "off | declare | enforce — how the splitter's per-item writeSet is used: ignored, recorded in the item ledger, or checked for overlaps before any worker spawns",
 		},
 		verify: {
-			type: "string",
+			type: "agent",
+			inheritRoster: true,
 			default: "",
-			doc: "agent that re-checks each completed item read-only; empty = no verification pass. Costs one extra child per completed item",
+			doc: "agent name or inline member that re-checks each completed item read-only; empty = no verification pass. Costs one extra child per completed item",
 		},
 	},
 	async run(input, sdk) {
@@ -272,17 +289,22 @@ export const map: Strategy = {
 		// typo in a persona's params never blocks a run, it just skips the extra observability.
 		const ownershipParam = input.params.ownership;
 		const ownership = ownershipParam === "declare" || ownershipParam === "enforce" ? ownershipParam : "off";
-		const verifyAgent = typeof input.params.verify === "string" ? input.params.verify.trim() : "";
+		const reviewer = verifierSpec(team, input.params.verify);
 		// The splitter spends one child slot before any worker runs, so the worker cap is one
 		// BELOW maxChildren — at the cap the last worker would trip the run's pre-spawn guard
 		// and take the whole (mostly finished) fan-out down with it. When `verify` is set, the
 		// verifier wave asks for ONE MORE child per completed item on top of that, so the cap is
 		// halved instead — splitter + workers + verifiers must all fit under the same ceiling.
 		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
-		const cap = verifyAgent ? Math.max(1, Math.floor((sdk.limits.maxChildren - 1) / 2)) : workerSlots;
+		const cap = reviewer ? Math.max(1, Math.floor((sdk.limits.maxChildren - 1) / 2)) : workerSlots;
 		const maxItems = Math.min(typeof input.params.maxItems === "number" ? input.params.maxItems : cap, cap);
 
-		const split = await splitIntoItems(sdk, splitter, input.task, maxItems);
+		// A splitter retry is optional too; reserve the entire possible worker/verifier wave before
+		// admitting it. The splitter has not produced its actual item count yet, so maxItems is the
+		// conservative upper bound; the cap above already guarantees the reserved waves fit.
+		const maxWorkerItems = Math.max(0, Math.floor(maxItems));
+		const splitReserve = maxWorkerItems * (reviewer ? 2 : 1);
+		const split = await splitIntoItems(sdk, splitter, input.task, maxItems, splitReserve);
 		if (!split.ok) return split.result;
 		const { allItems, items, dropped, usage: splitUsage } = split;
 		sdk.log(`map: ${items.length} items → ${worker.agent}${peers ? " (cross-talk on)" : ""}`);
@@ -294,7 +316,7 @@ export const map: Strategy = {
 
 		if (ownership === "enforce") enforceOwnershipOrThrow(items);
 
-		const results = await runWorkers(sdk, worker, input.task, items, peers);
+		const results = await runWorkers(sdk, worker, input.task, items, peers, reviewer ? items.length : 0);
 		const agg = sdk.reduce.aggregate(results);
 		// Say what was left out. The clamp is right — a worker per item past the cap would trip the
 		// pre-spawn guard and lose the whole fan-out — but an aggregate that silently covers part of
@@ -304,7 +326,7 @@ export const map: Strategy = {
 				? `\n\n[pi-persona] ${dropped} sub-item(s) beyond the worker cap (${maxItems}) were not run — this covers ${items.length} of ${allItems.length} sub-items.`
 				: "";
 
-		const { verifyResults, failures: verifyFailures } = await runVerification(sdk, team, verifyAgent, input.task, items, results);
+		const { verifyResults, failures: verifyFailures } = await runVerification(sdk, reviewer, input.task, items, results);
 		const ledger = buildItemLedger(ownership, allItems, results, dropped, verifyFailures);
 
 		const notRun = ledger.filter((e) => e.status === "not-run").map((e) => e.item);

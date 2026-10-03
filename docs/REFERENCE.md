@@ -35,8 +35,8 @@ hard-fail.
 | Surface | Does |
 |---|---|
 | `delegate` tool | spawn one or more sub-agents; interactive calls are background-first, while `sync: true` blocks the turn |
-| `council` tool | run the selected strategy over a roster and return its result; voting strategies preserve tally and dissent |
-| `intercom` tool | observe and control internal runs with `peek`, `result`, `wait`, `steer`, and `stop`; `list`, `inbox`, `message`, `reply`, and `send` drive the coaching bus |
+| `council` tool | select any installed strategy over a named roster or temporary inline `members`; voting strategies preserve tally and dissent. Use when the topology adds value, not for routine work |
+| `intercom` tool | observe and control internal runs with `peek`, `result`, `wait`, `steer`, and `stop`; `list`, `inbox`, `message`, `reply`, and `send` drive the coaching bus. `wait` snapshots without blocking by default with UI; `sync: true` opts into a bounded blocking join (headless defaults to blocking; use `sync: false` for a snapshot); queued steering does not preempt an explicit join |
 | `timer` tool | read the fresh clock with `now`, or schedule an idle wake with `arm`, `cancel`, and `list`; alarms are one-shot and in-memory per session |
 | `monitor` tool | run a bounded job (`mode: exit`) or event-producing program (`mode: output`) and wake the supervisor; see [`MONITORS.md`](./MONITORS.md) |
 | `flow` tool and `/flow` | run a journaled DAG of strategies; `gate: true` creates an approval checkpoint |
@@ -49,7 +49,27 @@ hard-fail.
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
 The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reaches both engine
-backends, keeping a caller-provided run label available in the live tree and runtime result.
+backends, keeping a caller-provided run label available in the live tree and runtime result. Every
+settled async run also emits an immediate UI banner with that name and its terminal outcome. The
+model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
+
+### Pi 1.0 codemode
+
+Pi's native `codemode` can call callable pi-persona tools through the normal nested-tool pipeline.
+Argument validation and persona permission gates still apply to every inner call; scripts do not
+turn a denied tool into an allowed one. Native `model-only` and `hidden` tools are not callable.
+
+Use scripts for independent batches or for filtering large results before returning them to the
+model, not as a wrapper that prints every result in full. `Promise.allSettled()` preserves successful
+siblings when a call rejects; a fulfilled `bash` call still requires checking `exit_code`.
+Only printed/returned script output reaches the model. Nested results therefore do not contribute
+raw bytes or invisible reminders to pi-persona's context-burn nudges; an actual successful nested
+`delegate`/`council` still resets the hand-off streak.
+
+The outer code/result card belongs to Pi, not pi-persona's delegate renderer. Keep bulky details
+expandable (`Ctrl+O` by default; `/hotkeys` shows active bindings). `Ctrl+T` toggles thinking blocks
+separately. A smaller script output also reduces model context; merely collapsing its card does not.
+No replacement sandbox or renderer is required for this integration.
 
 `outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed
 (the only built-in is `default`). Naming one that isn't installed is rejected before any worker
@@ -59,20 +79,27 @@ nothing was spawned. Installed contracts: default, finding` (the list is capped 
 
 ### Supervising running sub-agents — the `intercom` plane
 
-The supervisor's internal communication with children has three layers:
+The supervisor's internal communication with children has three layers. Tree/F9/peek distinguish
+queued, running, waiting for supervisor, suspected stalled and terminal runs. Waiting is derived from
+a live pending ask on the exact child handle, never inferred from its last activity text:
 
 | Layer | Needs | What you get |
 |---|---|---|
-| **Observe and control** | any persona | `peek` watches async sub-agents; `wait` joins them; `steer` sends a soft correction; `stop` requests cancellation. The `f9` overlay provides the same controls (`s`, `x`). Cancelling a worker does not undo existing changes |
+| **Observe and control** | any persona | `peek` inspects async sub-agents; `wait` is nonblocking by default with UI (`sync: true` joins; headless defaults to joining, with `sync: false` for snapshots); `steer` sends a soft correction; `stop` requests cancellation. The `f9` overlay provides the same controls (`s`, `x`). Queued steering does not preempt an active join. Cancelling a worker does not undo existing changes |
 | **Retrieve** | any persona | `result { to }` returns one retained run payload; `message { messageId }` returns one retained bus message. History is bounded to 256 messages and 256,000 body characters, and retrieval never starts a worker |
 | **Message bus** | `coaching: true` | children get `contact_supervisor`; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
 | **Sibling peer comm** | strategy opt-in | `debate` and `pair` members always get one-way `contact_peer`; `map` and `synthesize` add it with `params: { peers: true }` |
 
-Delegated output is untrusted and is fenced before it reaches the supervisor. Async runs report
-failures to the supervisor, and a repeated identical failed delegation is stopped by the runtime
-ledger before another child is spawned. A run whose model's provider fails at call time (auth,
-outage, 5xx) may retry the same model id through a fallback provider; each reroute surfaces to the
-supervisor as a warning toast, `<agent>: <from> failed, retrying on <to>`.
+Delegated output is untrusted and is fenced before it reaches the supervisor. Interactive async
+work is background-first: continue independent work, and when only children remain, end the turn for
+automatic completion follow-ups rather than monitoring or joining all children. Use `wait` only when
+the next step depends on results. Async runs report failures to the supervisor, and a repeated
+identical failed delegation is stopped by the runtime ledger before another child is spawned. A run whose model's provider fails at call time (auth,
+outage, 5xx) may retry the same model id through a compatible fallback provider when its selection
+is unpinned; explicit delegate provider pins remain strict. Strategies and flows instead recover a
+model/provider failure once on the current main model, including unavailable saved or pinned choices.
+They never substitute a peer's model or search arbitrary providers. Each recovery is visible and both
+attempts consume usage/child budget; stop, timeout, contract and infrastructure failures do not retry.
 
 Any leg that does NOT run in `isolation: worktree` shares the real checkout, so its result gets a
 "what changed" block appended: `--- FILES CHANGED DURING THIS LEG (shared checkout; parallel legs
@@ -234,6 +261,28 @@ Convene the council before sign-off, then apply its merged findings yourself.
 // one-off: run this decision as a debate over the same roster — no file edit
 council({ question: "cache this or recompute?", strategy: "debate", roster: "review", params: { bestOf: 2 } })
 ```
+
+A one-off group can be composed without editing a team file. The external arbiter is also an
+agent specification, independent of the panel:
+
+```js
+council({
+  question: "Choose between these designs; prioritize correctness and operational cost.",
+  strategy: "judge",
+  members: [
+    { agent: "reviewer", role: "Evaluate correctness and failure boundaries." },
+    { agent: "reviewer", role: "Evaluate operating cost and maintainability." }
+  ],
+  params: { judge: { agent: "reviewer", role: "Choose impartially from the anonymised options." } }
+})
+```
+
+`members` overrides the named roster for this invocation only. Roles/skills do not grant tools or
+bypass capability gates. Explicit member models and saved assignments are respected; with UI,
+unassigned participants can be picked once and saved, including role-specific members and external
+arbiters. Headless runs never prompt. An unavailable choice is not overwritten: its failed attempt
+may recover once on the main model, and the switch is reported. MAGI retains its canonical core team;
+Judge retains impartial arbitration. Other personas choose whichever strategy fits the task.
 
 **A delegation policy on any persona** — fields are generic and are never keyed to a persona name.
 The runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects

@@ -5,12 +5,14 @@
  * ensemble's value is a unified deliverable — research sweeps, multi-angle reviews,
  * gather-then-write — rather than a vote (`magi`) or a pick (`judge`).
  *
- * roster = the gatherers · params = { synthesizer?: "<agent>" (default: the first roster agent),
+ * roster = the gatherers · params = { synthesizer?: "<agent>" | { agent, role?, model?, skills? }
+ *          (default: the first roster agent),
  *          peers?: boolean (gatherers share contradictions/corroborations live — default off) }
  */
 
 import { rosterSpec } from "../roster.ts";
 import { fenceUntrusted } from "../../core/fence.ts";
+import { parseAuxActor } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
@@ -27,18 +29,24 @@ const CROSS_TALK = [
 export const synthesize: Strategy = {
 	name: "synthesize",
 	params: {
-		synthesizer: { type: "string", doc: "default: the first roster agent" },
+		// The default IS roster[0] — declared as `rosterIndex`, never as an agent name: the
+		// participant collector resolves "override, else roster[rosterIndex], else `default`",
+		// so a phrase here would spawn an agent that does not exist.
+		synthesizer: { type: "agent", rosterIndex: 0, doc: "the merging agent, or an inline { agent, role?, model?, skills? } member; default: the first roster agent" },
 		peers: { type: "boolean", default: false, doc: "gatherers share contradictions/corroborations live" },
 	},
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("synthesize: a non-empty roster (the gatherers) is required");
-		const synthesizer =
-			typeof input.params.synthesizer === "string" && input.params.synthesizer.trim()
-				? input.params.synthesizer.trim()
-				: rosterSpec(team[0]!).agent;
+		// An explicit synthesizer is an author decision — a supplied-but-unusable value is a
+		// typo to diagnose, never a quiet slide back onto the default (a gatherer merging its
+		// own findings is the weaker merge the caller was avoiding).
+		const synthesizerParam = parseAuxActor(input.params.synthesizer, "synthesizer");
+		if (synthesizerParam && !synthesizerParam.ok) throw new Error(`synthesize: ${synthesizerParam.error}`);
+		const synthesizer = synthesizerParam?.ok ? synthesizerParam.spec : rosterSpec(team[0]!);
+		const synthesizerName = synthesizer.agent;
 		const peers = input.params.peers === true;
-		sdk.log(`synthesize: ${team.length} gatherers → ${synthesizer}${peers ? " (cross-talk on)" : ""}`);
+		sdk.log(`synthesize: ${team.length} gatherers → ${synthesizerName}${peers ? " (cross-talk on)" : ""}`);
 		if (peers && team.length > sdk.limits.maxConcurrency) {
 			sdk.log(
 				`synthesize: ${team.length} gatherers exceeds maxConcurrency (${sdk.limits.maxConcurrency}) — the live exchange will be batched (gatherers beyond the concurrency window join late)`,
@@ -46,12 +54,11 @@ export const synthesize: Strategy = {
 		}
 
 		const results = await sdk.parallel(
-			team.map((m) => () =>
-				sdk.agent({
+			team.map((m) => () => sdk.agent({
 					...rosterSpec(m),
 					task: peers ? `${input.task}\n\n--- gatherer cross-talk ---\n${CROSS_TALK}` : input.task,
 					...(peers ? { peers: true } : {}),
-				}),
+				}, { reserveChildren: 1 }), // leave the mandatory merge slot; SDK reserves queued gatherers
 			),
 		);
 		const usable = results.filter((r) => r.ok && r.output.trim());
@@ -70,7 +77,7 @@ export const synthesize: Strategy = {
 
 		const sections = usable.map((r) => `--- [${r.agent}] ---\n${fenceUntrusted(r.output.trim())}`).join("\n\n");
 		const final = await sdk.agent({
-			agent: synthesizer,
+			...synthesizer,
 			task:
 				`Synthesise the findings below into ONE coherent, de-duplicated answer to the task. ` +
 				`Resolve contradictions explicitly (say which finding you trusted and why) and keep every load-bearing detail.\n\n` +

@@ -87,6 +87,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   policy (OpenAI-family → OpenAI providers; Claude-family → the native Claude provider). A caller may
   explicitly opt a pinned run into cross-provider recovery. Only `failureKind === "provider"` reroutes;
   abort/timeout/contract/unknown/agent are terminal.
+  Strategy/council/flow runs disable that provider search and use SDK-level main-only recovery:
+  `provider`/`unknown-model` may retry ONCE on the current supervisor model, including a saved or
+  inline-pinned choice (explicit user-authorized exception). Never borrow a peer model, never restart
+  a stopped/timed-out/contract-failed leg, and charge each attempt to child/token limits and usage.
+  Ordinary delegate pins remain strict. Recovery must remain visible in metadata/UI and MAGI rulings.
   Engines classify the cause on the `AgentResult` (`failureKind` + resolved `modelUsed`); keep those
   set when you touch `inproc.ts`/`adapter.ts` or the fallback silently stops working.
 - **Fork-bomb guard**: children run with env `PI_PERSONA_DISABLE=1` so pi-persona self-disables inside
@@ -129,6 +134,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   fills with every leg's body, failures included), while `renderCompletion` scans only `status: "done"`
   runs. A background leg that FAILED while emitting `[BLOCKED]` therefore gets the failure block but no
   persistence note — deliberate (see the `renderCompletion` doc comment), not a bug to "fix" silently.
+  Nested reports retain bounded parent-call provenance; only an outer result that relays the surrender
+  marker gets the note/card. Nested programmatic data is never patched with a reminder, and discarded
+  reports never generate an invisible one. Relay state is cleared at turn/session settlement.
   `config.nudge` (`PI_PERSONA_NUDGE=off`) silences all of it: the `tool_result` hook (the by-hand
   reminder and the sync-result persistence one) and both `renderCompletion` call sites, which take
   their `scan` through the same gate — so a background/`intercom wait` report carries no note either.
@@ -199,6 +207,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   persistence; `src/extension/identity.ts` registers `agent_name` and the pre-name context bootstrap.
   Exocom uses that same state. A delegate's optional `AgentRunSpec.name` is leader-assigned
   display identity, propagated to both engines without changing routing ids.
+  Async launch/control cards use that alias, with persisted tool-result snapshots for history.
+  Keep run IDs for routing/diagnostics, not primary display identity; disambiguate duplicate aliases.
+  Steering cards preview the accepted message and expose all of it with Pi's expand-key binding.
   Runtime metadata guidance belongs in the stable supervisor system prompt, not a new user-like
   acknowledgement message. Keep initial setup/actionable asks working, preserve user-visible history,
   and never re-inject a chosen identity. Progress `tokens` is cumulative input/output usage, not live
