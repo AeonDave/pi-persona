@@ -53,6 +53,7 @@ import { readAll, registryEntryFixture, sessionKey, writeEntry } from "../../src
 import { allocateJoinCode, resolveJoinCode } from "../../src/exocom/codes.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults, type SpineLegacyIO } from "../../src/core/seed.ts";
+import { failureDetails } from "../../src/extension/shared.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
 // Hermetic: point the "user" agent dir at an empty temp dir. pi-persona no longer auto-loads the
@@ -352,6 +353,57 @@ test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable pe
 	assert.equal(jsonSchemaAcceptsString(properties.tasks), true, "a stringified tasks payload must not hard-fail schema validation");
 });
 
+test("legacy delegate and steer cards omit redundant boilerplate but preserve expanded/model content", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const delegate = m.tool("delegate") as { renderCall: AnyFn; renderResult: AnyFn };
+	const intercom = m.tool("intercom") as { renderResult: AnyFn };
+	const call = renderComponent(delegate.renderCall({ agent: "researcher", name: "Lark", model: "provider/model", task: "PRIVATE TASK INSTRUCTIONS", async: true }, traceTheme));
+	assert.match(call, /Lark/);
+	assert.match(call, /researcher/);
+	assert.match(call, /model/);
+	assert.match(call, /async/i);
+	assert.doesNotMatch(call, /PRIVATE TASK/);
+	const unsafeModelCall = renderComponent(delegate.renderCall({ agent: "researcher", model: "provider/model\u001b[2J\nspoof", task: "hidden" }, traceTheme));
+	assert.doesNotMatch(unsafeModelCall, /\u001b|\n/, "model labels must remain sanitized single-line metadata");
+	const syncCall = renderComponent(delegate.renderCall({ agent: "reviewer", task: "SYNC TASK SECRET", sync: true }, traceTheme));
+	assert.match(syncCall, /reviewer/);
+	assert.match(syncCall, /sync/i);
+	assert.doesNotMatch(syncCall, /SYNC TASK/);
+	const stringifiedTasks = renderComponent(delegate.renderCall({ tasks: JSON.stringify([{ agent: "a", task: "SECRET" }, { agent: "b", task: "SECRET" }]) }, traceTheme));
+	assert.match(stringifiedTasks, /parallel \(2\)/);
+	assert.doesNotMatch(stringifiedTasks, /SECRET/);
+
+	const original = "Launched async run run-abc (researcher) — runs in the background; you'll be notified on completion. /peek run-abc to watch.";
+	const result = { content: [{ type: "text", text: original }], details: { runId: "run-abc" }, isError: false };
+	const collapsed = renderComponent(delegate.renderResult(result, { expanded: false }, traceTheme));
+	assert.match(collapsed, /run-abc/);
+	assert.doesNotMatch(collapsed, /background|notified|peek|keep working/i);
+	assert.equal(renderComponent(delegate.renderResult(result, { expanded: true }, traceTheme), 500).trimEnd(), original);
+	assert.deepEqual(result.content[0], { type: "text", text: original }, "rendering must not change model-facing content");
+	const batchBody = "Launched 4 async runs in the background (r1, r2, r3, r4) — keep working; each notifies on completion. /peek to watch. 2 task(s) beyond the max-children limit were dropped.";
+	const batch = { content: [{ type: "text", text: batchBody }], details: { runIds: ["r1", "r2", "r3", "r4"], dropped: 2 }, isError: false };
+	const batchCard = renderComponent(delegate.renderResult(batch, { expanded: false }, traceTheme));
+	assert.match(batchCard, /r1, r2, r3, \+1 more/);
+	assert.match(batchCard, /2 tasks dropped/);
+	assert.doesNotMatch(batchCard, /background|notifies|peek|keep working/i);
+	assert.equal(renderComponent(delegate.renderResult(batch, { expanded: true }, traceTheme), 500).trimEnd(), batchBody);
+	const failureBody = `provider authentication failed: ${"x".repeat(2_000)}`;
+	const failure = { content: [{ type: "text", text: failureBody }], details: { runId: "run-fail" }, isError: true };
+	const failureCard = renderComponent(delegate.renderResult(failure, { expanded: false }, traceTheme));
+	assert.match(failureCard, /failed/i);
+	assert.match(failureCard, /provider authentication failed/);
+	assert.ok(failureCard.length < 500, "collapsed failures remain bounded");
+
+	const steerText = "Steering sent to run-abc (soft request; use action \"stop\" to request cancellation).";
+	const steer = { content: [{ type: "text", text: steerText }], details: { action: "steer", ok: true }, isError: false };
+	const steerCard = renderComponent(intercom.renderResult(steer, { expanded: false }, traceTheme));
+	assert.match(steerCard, /steering queued/i);
+	assert.doesNotMatch(steerCard, /soft request|stop|cancellation/i);
+	assert.equal(renderComponent(intercom.renderResult(steer, { expanded: true }, traceTheme), 500).trimEnd(), steerText);
+	assert.deepEqual(steer.content[0], { type: "text", text: steerText }, "steer model-facing content is unchanged");
+});
+
 test("delegate renderCall counts stringified tasks as legs, not characters", () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
@@ -438,6 +490,58 @@ test("telemetry closes a tool exactly once at the extension hook boundary", asyn
 	assert.equal(toolEvents.filter((event) => event.type === "tool.finished").length, 1);
 	assert.equal((toolEvents.find((event) => event.type === "tool.finished")?.payload as Record<string, unknown>).status, "failed");
 	assert.doesNotMatch(JSON.stringify(events), /private secret|task/);
+});
+
+test("telemetry diagnostics remain visible and non-fatal with debug disabled", async () => {
+	const previous = process.env.PI_PERSONA_DEBUG;
+	delete process.env.PI_PERSONA_DEBUG;
+	const m = makeMockPi();
+	(m.pi as unknown as { events: { emit: () => void } }).events = { emit: () => { throw new Error("diagnostic-sentinel\u001b[2J"); } };
+	piPersona(m.pi);
+	const cwd = tempDir("pi-persona-telemetry-diagnostics-");
+	const { ctx: base, notes } = makeCtx(cwd);
+	const ctx = { ...base, hasUI: true, sessionManager: { getSessionId: () => "telemetry-diagnostics-session" } };
+	try {
+		await m.fire("session_start", undefined, ctx);
+		assert.ok(notes.some((note) => /telemetry.*diagnostic-sentinel/.test(note)), "the producer's error sink is present in normal operation");
+		assert.ok(notes.every((note) => !note.includes("\u001b")), "error diagnostics cannot emit terminal controls");
+		ctx.ui.notify = () => { throw new Error("UI unavailable"); };
+		await m.fire("agent_settled");
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		if (previous === undefined) delete process.env.PI_PERSONA_DEBUG;
+		else process.env.PI_PERSONA_DEBUG = previous;
+	}
+	assert.ok(readTelemetryEvents(cwd).some((event) => event.type === "instance.started"), "diagnostic failures preserve log writes");
+});
+
+test("telemetry admission failure stays non-fatal even when its warning renderer fails", async () => {
+	for (const brokenNotifier of [false, true]) {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const cwd = tempDir("pi-persona-telemetry-admission-");
+		const root = path.join(process.env.PI_AGENT_DIR!, "telemetry", "v2", workspaceHash(cwd), "pi-persona");
+		fs.mkdirSync(path.dirname(root), { recursive: true });
+		fs.writeFileSync(root, "existing-file\n"); // Deterministic unsafe namespace on every OS.
+		const { ctx: base, notes } = makeCtx(cwd);
+		const ctx = { ...base, hasUI: true, sessionManager: { getSessionId: () => "telemetry-admission-session" } };
+		let warningAttempts = 0;
+		const notify = ctx.ui.notify;
+		ctx.ui.notify = (...args) => {
+			warningAttempts += 1;
+			if (brokenNotifier) throw new Error("warning renderer unavailable");
+			notify(...args);
+		};
+		try {
+			await m.fire("session_start", undefined, ctx);
+			assert.equal(warningAttempts, 1, "failed admission attempts an operator-visible warning");
+			if (!brokenNotifier) assert.ok(notes.includes("pi-persona: telemetry unavailable (safe session admission failed)"));
+			await m.fire("agent_settled");
+		} finally {
+			await m.fire("session_shutdown", {}, ctx);
+		}
+		assert.equal(fs.readFileSync(root, "utf8"), "existing-file\n", "admission preserves the conflicting artifact");
+	}
 });
 
 /** Every event this session appended, in file order. The producer keys its file by session, so a
@@ -751,13 +855,14 @@ test("natural async failures retain their error toast, completion, and ledger ac
 	assert.equal(agentNodeStatusForDelegate({ running: true, ok: false }), "running");
 });
 
-test("successful async completion uses the aggregate delivery without a duplicate per-run toast", () => {
+test("successful async completion immediately announces the worker name while retaining one semantic completion", () => {
 	const notices: Array<{ message: string; level: "info" | "error" }> = [];
 	const completions: string[] = [];
 	announceAsyncRunSettlement(
 		{
 			id: "run-ok",
 			agent: "scout",
+			label: "Cedarwhistle-testbarrier",
 			task: "inspect",
 			status: "done",
 			progress: { output: "evidence", turns: 1, tokens: 20 },
@@ -765,8 +870,22 @@ test("successful async completion uses the aggregate delivery without a duplicat
 		(message, level) => notices.push({ message, level }),
 		(run) => completions.push(run.id),
 	);
-	assert.deepEqual(notices, [], "the aggregate completion card is the single success surface");
-	assert.deepEqual(completions, ["run-ok"]);
+	assert.deepEqual(notices, [{ message: "async run run-ok (Cedarwhistle-testbarrier) completed", level: "info" }]);
+	assert.deepEqual(completions, ["run-ok"], "the human banner does not duplicate the model-facing completion");
+});
+
+test("async settlement sanitizes the display name and still queues completion if the UI banner fails", () => {
+	const notices: string[] = [];
+	const completions: string[] = [];
+	announceAsyncRunSettlement({
+		id: "run-named", agent: "operator", label: "\u001b[31mMintorbit\u001b[0m\nreview", task: "do not display this task",
+		status: "done", progress: { output: "do not display the body", turns: 1, tokens: 0 },
+	}, (message) => {
+		notices.push(message);
+		throw new Error("UI unavailable");
+	}, (run) => completions.push(run.id));
+	assert.deepEqual(notices, ["async run run-named (Mintorbit review) completed"]);
+	assert.deepEqual(completions, ["run-named"], "cosmetic UI failure cannot swallow a terminal report");
 });
 
 test("intercom rejects an explicit unknown wait id and gives current steering guidance", async () => {
@@ -2707,9 +2826,10 @@ test("council: an unknown param key warns via ui.notify but does not block the r
 	const { ctx, notes } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	const council = m.tool("council") as { execute: AnyFn };
-	// An unknown roster makes `magi` fail fast (no team ⇒ throw) INSIDE its run() — reaching
-	// that strategy-specific error (rather than never running at all) proves the unknown param
-	// only warned; it did not strip/mutate `mergedParams` or block the run before it started.
+	// An unknown roster makes the run fail fast — now with the member-resolution diagnostic, which
+	// names the known teams and is raised BEFORE any engine call. Reaching THAT error (rather than
+	// never dispatching at all) proves the unknown param only warned; it did not strip/mutate
+	// `mergedParams` or block the run before it started.
 	const result = await council.execute(
 		"t1",
 		{ question: "test", strategy: "magi", roster: "no-such-roster-xyz", params: { bogus: true } },
@@ -2718,7 +2838,7 @@ test("council: an unknown param key warns via ui.notify but does not block the r
 		ctx,
 	);
 	assert.match(notes.join("\n"), /ignoring unknown param\(s\) \[bogus\] for "magi" — known: aggregate, reflect/);
-	assert.match(String(result.content?.[0]?.text ?? ""), /a roster of voting personas is required/);
+	assert.match(String(result.content?.[0]?.text ?? ""), /unknown roster "no-such-roster-xyz"/);
 });
 
 test("council exposes an explicit persona-profile selector and rejects unknown profiles before dispatch", async () => {
@@ -2755,6 +2875,18 @@ test("council: param-less fanout warns for ignored params and keeps its resolved
 	assert.match(notes.join("\n"), /ignoring unknown param\(s\) \[maxItems\] for "fanout" — known: \(none\)/);
 	assert.equal(result.details?.strategy, "fanout");
 	assert.equal(formatCouncilCallLabel("fanout", "magi"), "council fanout · magi");
+});
+
+test("council strategy switch drops profile params but still warns on explicitly supplied typos", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx, notes } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const council = m.tool("council") as { execute: AnyFn };
+	await council.execute("switch-no-param", { question: "pair check", strategy: "pair", roster: "missing-roster-for-switch" }, undefined, undefined, ctx);
+	assert.doesNotMatch(notes.join("\n"), /unknown param.*rounds.*pair/);
+	await council.execute("switch-explicit-typo", { question: "pair check", strategy: "pair", roster: "missing-roster-for-switch", params: { rounds: 3 } }, undefined, undefined, ctx);
+	assert.match(notes.join("\n"), /ignoring unknown param\(s\) \[rounds\] for "pair"/);
 });
 
 test("council exposes critic-loop exhaustion as an error with the unresolved review", async () => {
@@ -3395,6 +3527,41 @@ test("the published \"N agents\" status is the in-flight count, not the has-a-pa
 		"…and once the 3-member roster is seeded the root stops counting: only its leaves are agents",
 	);
 	assert.equal(statuses.at(-1), undefined, "the status clears when the tree empties");
+});
+
+test("intercom peek receives supervisor-wait state from the live async steer registry", async () => {
+	let waiting = true;
+	let release!: () => void;
+	let entered!: () => void;
+	const engineEntered = new Promise<void>((resolve) => { entered = resolve; });
+	const engineRelease = new Promise<void>((resolve) => { release = resolve; });
+	const stub: StrategyEngine = {
+		run: async (spec, _onProgress, _signal, onSteerable) => {
+			onSteerable?.(Object.assign(() => true, { isWaitingForSupervisor: () => waiting }));
+			entered();
+			await engineRelease;
+			return { agent: spec.agent, output: "finished", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	try {
+		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("waiting-leg", { agent: "scout", task: "await reply", async: true }, undefined, undefined, ctx);
+		const id = launched.details?.runId;
+		assert.equal(typeof id, "string");
+		await engineEntered;
+		const intercom = m.tool("intercom") as { execute: AnyFn };
+		const peek = await intercom.execute("peek-waiting", { action: "peek", to: id }, undefined, undefined, ctx);
+		assert.match(peek.content[0].text, /waiting for supervisor/);
+		waiting = false;
+		const replied = await intercom.execute("peek-replied", { action: "peek", to: id }, undefined, undefined, ctx);
+		assert.doesNotMatch(replied.content[0].text, /waiting for supervisor/);
+	} finally {
+		release();
+		await m.fire("session_shutdown", {}, ctx);
+	}
 });
 
 test("the agent widget shows a running leg's elapsed time and stopAgent acknowledges immediately", async () => {
@@ -4063,6 +4230,187 @@ test("PI_PERSONA_NUDGE=off silences the tool_result hook — both the sweep and 
 	} finally {
 		if (previous === undefined) delete process.env.PI_PERSONA_NUDGE;
 		else process.env.PI_PERSONA_NUDGE = previous;
+	}
+});
+
+// ── native codemode nested calls: only the OUTER result is model-visible ──────────────────
+// A codemode script's `ctx.executeTool` calls go through the same `tool_call`/`tool_result`
+// pipeline (so gates, error patches and telemetry must still run), but Pi records them on the
+// CALLING call's result: their content never reaches the model. Burning the by-hand streak on
+// them would count bytes nobody pays for and append reminders into invisible data.
+
+interface NestedResultShape {
+	content?: Array<{ type: string; text?: string }>;
+	isError?: boolean;
+	details?: Record<string, unknown>;
+	structuredContent?: unknown;
+}
+
+const NESTED_PARENT = "cmdcod-1";
+
+test("nested blocked hand-offs nudge only an outer result that relays the marker", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const before = m.entries().length;
+	const nested = (parent: string) => m.fire("tool_result", {
+		toolCallId: `${parent}/1`, parentToolCallId: parent, toolName: "delegate",
+		content: [{ type: "text", text: "[BLOCKED] missing access" }],
+	}, ctx);
+	const outer = (id: string, text: string): NestedResultShape | undefined => m.fire("tool_result", {
+		toolCallId: id, toolName: "codemode", content: [{ type: "text", text }],
+	}, ctx) as NestedResultShape | undefined;
+	assert.equal(nested("suppressed"), undefined);
+	assert.equal(outer("suppressed", "The script suppressed the report."), undefined);
+	assert.equal(m.entries().length, before, "discarded reports never mint an invisible card");
+	assert.equal(outer("unrelated", "[BLOCKED] not a delegated report"), undefined);
+	assert.equal(nested("relayed"), undefined);
+	const patched = outer("relayed", "Report: [BLOCKED] missing access");
+	assert.match(patched?.content?.map((c) => c.text ?? "").join("\n") ?? "", /delegated result needs verification/);
+	assert.equal(m.entries().length, before + 1, "only the visible relay mints the card");
+	assert.equal(outer("relayed", "[BLOCKED] no longer a pending relay"), undefined, "provenance is consumed once");
+});
+
+test("nested persistence provenance follows wrappers and is cleared at settlement", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const fire = (toolCallId: string, parentToolCallId?: string): NestedResultShape | undefined => m.fire("tool_result", {
+		toolCallId, ...(parentToolCallId ? { parentToolCallId } : {}),
+		toolName: toolCallId.endsWith("/leg") ? "council" : "codemode",
+		content: [{ type: "text", text: "FLAG: UNKNOWN" }],
+	}, ctx) as NestedResultShape | undefined;
+	assert.equal(fire("outer/wrapper/leg", "outer/wrapper"), undefined);
+	assert.equal(fire("outer/wrapper", "outer"), undefined);
+	assert.match(fire("outer")?.content?.map((c) => c.text ?? "").join("\n") ?? "", /delegated result needs verification/);
+	assert.equal(fire("stale/leg", "stale"), undefined);
+	await m.fire("agent_settled");
+	assert.equal(fire("stale"), undefined, "an abandoned nested report cannot contaminate a later turn");
+});
+
+test("nested tool results burn nothing and change nothing — the outer printed content accounts once", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const entriesBefore = m.entries().length;
+	// Ten fat nested reads, exactly what a codemode sweep looks like to this hook.
+	for (let i = 0; i < 10; i++) {
+		const patch = m.fire("tool_result", {
+			toolCallId: `${NESTED_PARENT}/${i + 1}`,
+			parentToolCallId: NESTED_PARENT,
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(20_000) }],
+		}, ctx) as NestedResultShape | undefined;
+		assert.equal(patch, undefined, `nested result ${i} must not be patched — nothing of it reaches the model`);
+	}
+	assert.equal(m.entries().length, entriesBefore, "no TUI card is minted from a nested result");
+
+	// The outer codemode call is what the model actually reads. Five substantive outer results
+	// (2000 chars each) must trip the sweep on the FIFTH — exactly once each, with none of the
+	// nested bytes folded into the burn.
+	const outer = (): NestedResultShape | undefined =>
+		m.fire("tool_result", { toolCallId: `${NESTED_PARENT}`, toolName: "codemode", content: [{ type: "text", text: "y".repeat(2000) }] }, ctx) as NestedResultShape | undefined;
+	for (let i = 0; i < 4; i++) assert.equal(outer(), undefined, `outer step ${i + 1} is an ordinary step`);
+	const swept = outer();
+	assert.match(swept?.content?.map((c) => c.text ?? "").join("\n") ?? "", /delegation checkpoint/);
+	assert.equal(m.entries().length, entriesBefore + 1, "the crossing emits exactly one card");
+});
+
+test("a real nested hand-off ends the by-hand run; a failed one neither resets nor notes invisibly", async () => {
+	const started = async (): Promise<{ m: ReturnType<typeof makeMockPi>; ctx: ReturnType<typeof makeCtx>["ctx"]; heavy: { toolName: string; content: Array<{ type: string; text: string }> } }> => {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx } = makeCtx(os.tmpdir());
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "dev", ctx);
+		// Size 2000 per step so 5 × 2000 = 10k burn exceeds the 8k minSweepBurnChars floor.
+		return { m, ctx, heavy: { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] } };
+	};
+	{
+		const { m, ctx, heavy } = await started();
+		for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+		// The script actually dispatched a leg and it landed: accepted work, so the run is over even
+		// though the script never printed it.
+		assert.equal(
+			m.fire("tool_result", { toolCallId: `${NESTED_PARENT}/1`, parentToolCallId: NESTED_PARENT, toolName: "delegate", content: [{ type: "text", text: "leg report" }] }, ctx),
+			undefined,
+			"a successful nested hand-off emits no note of its own",
+		);
+		for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined, "the streak restarted from the nested hand-off");
+		assert.ok(m.fire("tool_result", heavy, ctx), "…and reaches the five-step threshold exactly five steps later");
+	}
+	// A hand-off that failed before doing anything must not silently end the run, and its repair
+	// note would be invisible anyway — so the next direct step is what carries the streak.
+	{
+		const { m, ctx, heavy } = await started();
+		const entriesBefore = m.entries().length;
+		for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+		assert.equal(
+			m.fire("tool_result", { toolCallId: `${NESTED_PARENT}/2`, parentToolCallId: NESTED_PARENT, toolName: "delegate", content: [{ type: "text", text: "unknown agent" }], isError: true }, ctx),
+			undefined,
+			"a failed nested hand-off never appends a repair note to data the model cannot see",
+		);
+		assert.equal(m.entries().length, entriesBefore, "…nor a TUI card");
+		assert.ok(m.fire("tool_result", heavy, ctx), "the failed nested hand-off did not reset the run");
+	}
+});
+
+test("nested calls are identified by explicit parentToolCallId, never by slash-shaped id syntax", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	// A slash in the id is not evidence: the model may name anything, and Pi only sets
+	// `parentToolCallId` on a genuinely nested call. These count as model-visible outer results.
+	for (let i = 0; i < 4; i++) {
+		assert.equal(
+			m.fire("tool_result", { toolCallId: `user/fake-${i}`, toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] }, ctx),
+			undefined,
+		);
+	}
+	assert.ok(
+		m.fire("tool_result", { toolCallId: "user/fake-4", toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] }, ctx),
+		"an id that merely looks nested is still model-visible output",
+	);
+});
+
+test("a nested call keeps the full pipeline: permission gate, error patch and structuredContent", async () => {
+	const cwd = tempDir("pi-persona-nested-gate-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "observer-only.md"), "---\nname: observer-only\npersona: true\ntools:\n  deny: [bash]\n---\nObserve only.\n");
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "delegate", "codemode"]);
+	piPersona(m.pi);
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "observer-only", ctx);
+	try {
+		const gate = m.fire("tool_call", { toolCallId: `${NESTED_PARENT}/1`, parentToolCallId: NESTED_PARENT, toolName: "bash", input: { command: "echo hi" } }, ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(gate?.block, true, "the persona's bash deny applies to a script-issued nested call too");
+
+		// A tool that reports its own failure through details keeps the error patch on a nested
+		// result — the script (and the operator's TUI) still need to see the failure.
+		const patch = m.fire("tool_result", {
+			toolCallId: `${NESTED_PARENT}/2`,
+			parentToolCallId: NESTED_PARENT,
+			toolName: "intercom",
+			input: { action: "send", message: "hi" },
+			content: [{ type: "text", text: "queued" }],
+			details: { ...failureDetails({ ok: false, reason: "no route" }) },
+			structuredContent: { ok: false },
+		}, ctx) as NestedResultShape | undefined;
+		assert.equal(patch?.isError, true);
+		assert.deepEqual(patch?.details, { ok: false, reason: "no route" });
+		assert.equal(patch?.content, undefined, "the error patch is not dressed up with a nudge");
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
 	}
 });
 

@@ -148,7 +148,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.asyncDefault
-		? "they run in the background and each result returns to you automatically as a follow-up — don't watch or poll a healthy leg; you're woken if one stalls or messages you, plus an occasional check-in to catch drift"
+		? "they run in the background and each result returns to you automatically as a follow-up — do useful independent work while children run; when only children remain, end your turn and let completion wake you. Do not monitor, poll, or automatically wait for all children (don't watch or poll a healthy leg). Join intentionally only when a result is needed before your next step; you're also woken if a child stalls or messages you, plus an occasional check-in to catch drift"
 		: "the call returns when they finish";
 	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
 	if (input.requireBrief) {

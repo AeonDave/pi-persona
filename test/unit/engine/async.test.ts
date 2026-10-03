@@ -309,6 +309,20 @@ test("PeekWatcher discriminates per-leg in a mixed batch (only the stalled one)"
 	assert.deepEqual(w.poll([fresh, stalled], 100_000, 45_000).map((r) => r.id), ["run-2"], "the healthy leg is never named in the alert");
 });
 
+test("live supervisor asks suppress peek stall alerts and become eligible again immediately after settlement", () => {
+	const watcher = new PeekWatcher();
+	const run = runningRun(0, { id: "waiting-run" });
+	assert.deepEqual(watcher.poll([run], 100_000, 90_000, new Set(["waiting-run"])), []);
+	assert.deepEqual(watcher.poll([run], 100_001, 90_000), [run], "once the authoritative ask settles, existing silence is a real stall");
+});
+
+test("peek digest labels a live ask instead of claiming it is stalled", () => {
+	const run = runningRun(0, { id: "waiting-run" });
+	const digest = buildPeekDigest([run], { now: 100_000, stallMs: 90_000, waitingForSupervisor: new Set(["waiting-run"]) });
+	assert.match(digest, /waiting for supervisor/);
+	assert.doesNotMatch(digest, /possibly stuck/);
+});
+
 test("buildPeekAlert renders only stalled legs, patience-first, and never the full heartbeat digest", () => {
 	assert.equal(buildPeekAlert([], { now: 1_000 }), "", "no stalled legs ⇒ no wake");
 	const out = buildPeekAlert([runningRun(1_000, { progress: { output: "", turns: 5, tokens: 1200 } })], { now: 1_000 + 92_000 });

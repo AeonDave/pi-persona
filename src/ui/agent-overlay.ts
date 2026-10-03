@@ -23,7 +23,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentNode, type AgentTree, type FlatRow, flattenTree, GLYPH, runningAnnotation } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, flattenTree, GLYPH, runningAnnotation } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
@@ -54,6 +54,7 @@ export interface AgentRowInput {
 	inner: number;
 	now: number;
 	stallMs: number;
+	waitingForSupervisor?: boolean;
 	theme: Theme;
 }
 
@@ -68,7 +69,7 @@ export interface AgentRowInput {
 export function composeAgentRow(input: AgentRowInput): string {
 	const { node, depth, selected, inner, now, stallMs, theme: t } = input;
 	const indent = "  ".repeat(depth);
-	const clock = runningAnnotation(node, now, stallMs);
+	const clock = runningAnnotation(node, now, stallMs, input.waitingForSupervisor);
 	// Reserve the clock's exact width plus its widest separator (" · ") up front — this portion
 	// of the row is never truncated.
 	const clockCols = clock ? visibleWidth(clock) + visibleWidth(" · ") : 0;
@@ -98,6 +99,8 @@ export interface AgentOverlayActions {
 	onSteer?: (nodeId: string, text: string) => boolean;
 	canSteer?: (nodeId: string) => boolean;
 	canStop?: (nodeId: string) => boolean;
+	/** Live predicate for the exact engine handle behind a row. */
+	isWaitingForSupervisor?: (nodeId: string) => boolean;
 	/** Stall threshold for the ⚠ badge; 0/omitted ⇒ no badge. */
 	stallMs?: number;
 	/** Clock; tests inject a fixed one. */
@@ -202,8 +205,11 @@ export class AgentOverlay extends Container {
 		return Math.max(6, termRows() - 10);
 	}
 
-	private leafRows(): FlatRow[] {
-		const snap = this.tree.snapshot();
+	private waitingNodeIds(nodes: readonly AgentNode[] = this.tree.snapshot()): Set<string> {
+		return deriveWaitingNodeIds(nodes, (id) => this.actions.isWaitingForSupervisor?.(id) === true);
+	}
+
+	private leafRows(snap: AgentNode[] = this.tree.snapshot()): FlatRow[] {
 		const parents = new Set(snap.map((n) => n.parentId).filter((p): p is string => p !== undefined));
 		return flattenTree(snap).filter((r) => !parents.has(r.node.id));
 	}
@@ -256,8 +262,9 @@ export class AgentOverlay extends Container {
 
 	private renderList(): void {
 		const t = this.theme;
-		const rows = flattenTree(this.tree.snapshot());
-		const selected = this.selectedLeaf(this.leafRows())?.node;
+		const nodes = this.tree.snapshot();
+		const rows = flattenTree(nodes);
+		const selected = this.selectedLeaf(this.leafRows(nodes))?.node;
 		this.addChild(new Text(t.fg("accent", t.bold("Agents")), 1, 0));
 		this.addChild(new Spacer(1));
 		if (rows.length === 0) {
@@ -265,6 +272,7 @@ export class AgentOverlay extends Container {
 		} else {
 			// Scroll window over the rows (a big fan-out must not overflow the screen);
 			// the window follows the selection, ▲/▼ markers show what's off-screen.
+			const waitingIds = this.waitingNodeIds(nodes);
 			const vp = this.listViewport();
 			const selIdx = Math.max(0, rows.findIndex((r) => r.node.id === selected?.id));
 			this.listScroll = visibleWindow(selIdx, vp, rows.length, this.listScroll);
@@ -278,6 +286,7 @@ export class AgentOverlay extends Container {
 					inner: this.inner(),
 					now: this.now(),
 					stallMs: this.actions.stallMs ?? 0,
+					waitingForSupervisor: waitingIds.has(row.node.id),
 					theme: t,
 				});
 				this.addChild(new Text(composed, 1, 0));

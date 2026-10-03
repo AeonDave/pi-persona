@@ -102,7 +102,14 @@ export const councilRounds: Strategy = {
 					? input.task
 				: `${input.task}\n\n--- round ${round - 1} debate ---\n${fenceUntrusted(debate)}\n\nReconsider in light of the above and cast your vote again.`;
 			const candidates = await sdk.parallel(
-				team.map((m) => () => sdk.agent({ ...rosterSpec(m), task, outputContract: "default" })),
+				team.map((m) => () =>
+					sdk.agent(
+						{ ...rosterSpec(m), task, outputContract: "default" },
+						// Later rosters are not in the current parallel queue yet. Keep their worst-case
+						// child budget intact while allowing recovery when a true spare slot remains.
+						{ reserveChildren: (maxRounds - round) * team.length },
+					),
+				),
 			);
 			usages.push(...candidates.map((c) => c.usage));
 			// An abort settles every member as ok:false/'abort' instead of throwing, so a stop that

@@ -1,6 +1,7 @@
-import { appendFile, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { appendFile, lstat, mkdir, opendir, readFile, readdir, realpath, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import {
 	TELEMETRY_PRODUCER_ID,
@@ -27,6 +28,7 @@ export interface TelemetryProducerOptions {
 	heartbeat?: () => Partial<InstanceDescriptor>;
 	onError?: (error: unknown) => void;
 	maxFileBytes?: number;
+	retentionMs?: number;
 }
 
 /** Richer caller input. Prompt/activity/output fields are accepted only so the sink can drop them. */
@@ -37,6 +39,15 @@ const STRING_LIMIT = 512;
 const ARRAY_LIMIT = 256;
 const MAX_DEPTH = 8;
 const DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024;
+export const DEFAULT_TELEMETRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export class TelemetryAdmissionError extends Error {
+	constructor(message: string) { super(message); this.name = "TelemetryAdmissionError"; }
+}
+
+const markerName = (kind: "writer" | "prune") => `${kind}-${process.pid}-${randomUUID()}`;
+const markerPattern = /^(writer|prune)-(\d+)-([0-9a-f-]{36})$/;
+const workspacePattern = /^[0-9a-f]{24}$/;
 
 const TERMINAL_AGENT_STATUSES = new Set(["done", "failed", "stopped"]);
 
@@ -279,9 +290,194 @@ function sanitizeAgentPatch(value: Partial<TelemetryAgentInput>): Partial<AgentD
 	};
 }
 
+function validProducerId(value: string): boolean {
+	return value !== "." && value !== ".." && /^[A-Za-z0-9._-]{1,96}$/.test(value);
+}
+
 function producerSegment(value: string | undefined, fallback: string): string {
 	const safe = value?.trim().replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 96);
-	return safe || fallback;
+	return safe && validProducerId(safe) ? safe : fallback;
+}
+
+function pidState(pid: number): "alive" | "dead" | "unknown" {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
+	if (pid === process.pid) return "alive";
+	try { process.kill(pid, 0); return "alive"; }
+	catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown"; }
+}
+
+function isMissing(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+/** The supplied agent directory is trusted; linked descendants of its canonical root are not. */
+function namespaceParts(root: string, path: string): string[] {
+	const parts: string[] = [];
+	for (let current = path; current !== root; current = dirname(current)) {
+		if (dirname(current) === current) throw new TelemetryAdmissionError("Unsafe telemetry namespace");
+		parts.unshift(current);
+	}
+	return parts;
+}
+
+function ensureDirectoriesSync(root: string, path: string, created: string[]): void {
+	for (const part of namespaceParts(root, path)) {
+		try { mkdirSync(part, { mode: 0o700 }); created.push(part); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+		if (!lstatSync(part).isDirectory()) throw new TelemetryAdmissionError("Unsafe linked telemetry directory");
+	}
+}
+
+/** Roll back only directories created by this admission attempt, from leaf to root. */
+function removeCreatedDirectoriesSync(created: readonly string[], onError?: (error: unknown) => void): void {
+	for (let index = created.length - 1; index >= 0; index -= 1) {
+		try { rmdirSync(created[index]!); }
+		catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") reportRetentionError(onError, error);
+		}
+	}
+}
+
+async function safeDirectories(root: string, path: string): Promise<boolean> {
+	for (const part of namespaceParts(root, path)) {
+		try { if (!(await lstat(part)).isDirectory()) return false; }
+		catch (error) { if (isMissing(error)) return false; throw error; }
+	}
+	return true;
+}
+
+function assertSafeArtifactSync(file: string): void {
+	try {
+		const info = lstatSync(file);
+		if (!info.isFile() || info.nlink !== 1) throw new TelemetryAdmissionError("Unsafe linked telemetry artifact");
+	} catch (error) { if (!isMissing(error)) throw error; }
+}
+
+function assertNoPruneClaimsSync(dir: string): void {
+	for (const name of readdirSync(dir)) {
+		const match = markerPattern.exec(name);
+		if (!match) throw new TelemetryAdmissionError("Unknown telemetry lease marker");
+		const marker = join(dir, name);
+		let info;
+		try { info = lstatSync(marker); } catch (error) { if (isMissing(error)) continue; throw error; }
+		if (!info.isFile() || info.nlink !== 1 || info.size !== 0) throw new TelemetryAdmissionError("Unsafe telemetry lease marker");
+		if (match[1] === "prune") {
+			if (pidState(Number(match[2])) !== "dead") throw new TelemetryAdmissionError("Active telemetry prune claim");
+			try { unlinkSync(marker); } catch (error) { if (!isMissing(error)) throw error; }
+		}
+	}
+}
+
+type RetentionErrorSink = ((error: unknown) => void) | undefined;
+function reportRetentionError(sink: RetentionErrorSink, error: unknown): void {
+	try { sink?.(error); } catch { /* diagnostics must not break the host session */ }
+}
+
+const retentionJobs = new Map<string, Promise<void>>();
+function scheduleTelemetryRetention(agentDir: string, producerId: string, retentionMs: number, onError: RetentionErrorSink): Promise<void> {
+	const key = `${resolve(agentDir)}\0${producerId}`;
+	const existing = retentionJobs.get(key);
+	if (existing) return existing;
+	const job = flushTelemetryRetention(agentDir, producerId, retentionMs, Date.now(), onError)
+		.catch((error) => reportRetentionError(onError, error))
+		.finally(() => retentionJobs.delete(key));
+	retentionJobs.set(key, job);
+	return job;
+}
+
+async function removeEmptyDir(dir: string): Promise<void> {
+	try { await rmdir(dir); }
+	catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error;
+	}
+}
+
+const artifactPattern = /^([0-9a-f]{16})\.jsonl(?:\.previous|\.trim-\d+-\d+)?$/;
+const leaseDirPattern = /^([0-9a-f]{16})\.jsonl\.leases$/;
+
+async function oldArtifacts(dir: string, session: string, cutoff: number): Promise<string[] | undefined> {
+	const group = (await readdir(dir)).filter((name) => artifactPattern.exec(name)?.[1] === session);
+	for (const name of group) {
+		let info;
+		try { info = await lstat(join(dir, name)); }
+		catch (error) { if (isMissing(error)) return undefined; throw error; }
+		if (!info.isFile() || info.nlink !== 1 || info.mtimeMs >= cutoff) return undefined;
+	}
+	return group;
+}
+
+async function hasProtectedWriter(leaseDir: string, ownClaim: string): Promise<boolean> {
+	for (const name of await readdir(leaseDir)) {
+		if (name === basename(ownClaim)) continue;
+		const match = markerPattern.exec(name);
+		if (!match) return true;
+		const path = join(leaseDir, name);
+		let info;
+		try { info = await lstat(path); } catch (error) { if (isMissing(error)) continue; throw error; }
+		if (!info.isFile() || info.nlink !== 1 || info.size !== 0) return true;
+		const state = pidState(Number(match[2]));
+		if (state === "unknown" || (match[1] === "writer" && state === "alive")) return true;
+		if (state === "dead") {
+			try { await unlink(path); } catch (error) { if (!isMissing(error)) throw error; }
+		}
+	}
+	return false;
+}
+
+/** Cooperative same-host retention; unknown/linked objects and live writer leases are retained.
+ * Pre-protocol processes are protected only by recent writes, not by these leases. */
+export async function flushTelemetryRetention(
+	agentDir: string, producerId: string, retentionMs: number, now = Date.now(), onError?: (error: unknown) => void,
+): Promise<void> {
+	if (!validProducerId(producerId)) throw new RangeError("Unsafe telemetry producerId");
+	if (!Number.isSafeInteger(retentionMs) || retentionMs < 0) throw new RangeError("retentionMs must be a safe integer >= 0");
+	if (retentionMs === 0) return;
+	let base: string;
+	try { base = await realpath(agentDir); } catch (error) { if (isMissing(error)) return; throw error; }
+	const root = join(base, "telemetry", "v2");
+	if (!(await safeDirectories(base, root))) return;
+	for await (const entry of await opendir(root)) {
+		if (!workspacePattern.test(entry.name) || !entry.isDirectory()) continue;
+		const workspaceDir = join(root, entry.name);
+		const producerDir = join(workspaceDir, producerId);
+		try {
+			if (!(await safeDirectories(base, producerDir))) continue;
+			const sessions = new Set((await readdir(producerDir)).flatMap((name) => {
+				const session = artifactPattern.exec(name)?.[1] ?? leaseDirPattern.exec(name)?.[1];
+				return session ? [session] : [];
+			}));
+			for (const session of sessions) {
+				const leaseDir = join(producerDir, `${session}.jsonl.leases`);
+				let claim: string | undefined;
+				try {
+					if (await oldArtifacts(producerDir, session, now - retentionMs) === undefined) continue;
+					try { await mkdir(leaseDir, { mode: 0o700 }); }
+					catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+					if (!(await safeDirectories(base, leaseDir))) continue;
+					claim = join(leaseDir, markerName("prune"));
+					await writeFile(claim, "", { flag: "wx", mode: 0o600 });
+					if (await hasProtectedWriter(leaseDir, claim)) continue;
+					// Re-enumerate AFTER the claim: a fresh backup/scratch retains the whole group.
+					const group = await oldArtifacts(producerDir, session, now - retentionMs);
+					if (!group || !(await safeDirectories(base, producerDir))) continue;
+					for (const name of group) {
+						try { await unlink(join(producerDir, name)); }
+						catch (error) { if (!isMissing(error)) throw error; }
+					}
+				} catch (error) { if (!isMissing(error)) reportRetentionError(onError, error); }
+				finally {
+					if (claim) {
+						try { await unlink(claim); } catch (error) { if (!isMissing(error)) reportRetentionError(onError, error); }
+						try { await removeEmptyDir(leaseDir); } catch (error) { reportRetentionError(onError, error); }
+					}
+				}
+			}
+			await removeEmptyDir(producerDir);
+			await removeEmptyDir(workspaceDir);
+		} catch (error) { if (!isMissing(error)) reportRetentionError(onError, error); }
+	}
 }
 
 export class TelemetryProducer {
@@ -293,6 +489,8 @@ export class TelemetryProducer {
 	private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 	private instance: InstanceDescriptor | undefined;
 	private stopped = false;
+	private leasePath: string;
+	private retentionSweep: Promise<void> = Promise.resolve();
 	readonly producerId: string;
 	readonly producerVersion: string;
 
@@ -301,11 +499,35 @@ export class TelemetryProducer {
 		this.producerId = producerSegment(options.producerId, TELEMETRY_PRODUCER_ID);
 		this.producerVersion = producerSegment(options.producerVersion, TELEMETRY_PRODUCER_VERSION);
 		if (options.maxFileBytes !== undefined && (!Number.isSafeInteger(options.maxFileBytes) || options.maxFileBytes < 512)) throw new RangeError("maxFileBytes must be at least 512");
+		const retentionMs = options.retentionMs ?? DEFAULT_TELEMETRY_RETENTION_MS;
+		if (!Number.isSafeInteger(retentionMs) || retentionMs < 0) throw new RangeError("retentionMs must be a safe integer >= 0");
 		this.workspaceId = telemetryWorkspaceId(options.cwd);
-		const dir = join(options.agentDir, "telemetry", "v2", this.workspaceId, this.producerId);
-		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		mkdirSync(options.agentDir, { recursive: true, mode: 0o700 });
+		const base = realpathSync(options.agentDir);
+		const dir = join(base, "telemetry", "v2", this.workspaceId, this.producerId);
 		const fileKey = telemetrySessionFileKey(options.sessionId);
 		this.filePath = join(dir, `${fileKey}.jsonl`);
+		const leaseDir = `${this.filePath}.leases`;
+		this.leasePath = join(leaseDir, markerName("writer"));
+		const createdDirectories: string[] = [];
+		let leaseCreated = false;
+		try {
+			ensureDirectoriesSync(base, dir, createdDirectories);
+			ensureDirectoriesSync(base, leaseDir, createdDirectories);
+			const fd = openSync(this.leasePath, "wx", 0o600);
+			leaseCreated = true;
+			closeSync(fd);
+			assertNoPruneClaimsSync(leaseDir);
+			for (const name of readdirSync(dir)) {
+				if (artifactPattern.exec(name)?.[1] === fileKey) assertSafeArtifactSync(join(dir, name));
+			}
+		} catch (error) {
+			if (leaseCreated) {
+				try { unlinkSync(this.leasePath); } catch { /* remove only our unique marker */ }
+			}
+			removeCreatedDirectoriesSync(createdDirectories, options.onError);
+			throw new TelemetryAdmissionError(`Cannot acquire telemetry writer lease: ${error instanceof Error ? error.message : String(error)}`);
+		}
 		const backup = `${this.filePath}.previous`;
 		if (!existsSync(this.filePath) && existsSync(backup)) {
 			try { renameSync(backup, this.filePath); } catch { /* a concurrent activation will retry on its own */ }
@@ -313,7 +535,7 @@ export class TelemetryProducer {
 			try { unlinkSync(backup); } catch { /* best effort */ }
 		}
 		try {
-			for (const name of readdirSync(dir)) if (name.startsWith(`${fileKey}.jsonl.trim-`)) unlinkSync(join(dir, name));
+			for (const name of readdirSync(dir)) if (artifactPattern.exec(name)?.[1] === fileKey && name.includes(".trim-")) unlinkSync(join(dir, name));
 		} catch { /* best effort cleanup of interrupted compaction scratch files */ }
 		const { seq, needsNewline } = lastSequence(this.filePath);
 		this.seq = seq;
@@ -323,6 +545,7 @@ export class TelemetryProducer {
 		if (needsNewline) {
 			try { appendFileSync(this.filePath, "\n", { encoding: "utf8", mode: 0o600 }); } catch { /* the write chain reports a real append failure */ }
 		}
+		if (retentionMs > 0) this.retentionSweep = scheduleTelemetryRetention(base, this.producerId, retentionMs, options.onError);
 	}
 
 	start(instance: InstanceDescriptor): void {
@@ -379,12 +602,22 @@ export class TelemetryProducer {
 		await this.writeChain;
 	}
 
+	async flushRetention(): Promise<void> { await this.retentionSweep; }
+
 	async stop(reason?: string): Promise<void> {
 		if (this.stopped) return;
 		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 		this.heartbeatTimer = undefined;
 		this.publish("instance.stopped", { reason: reason ? boundedText(reason, 120) : "shutdown" });
 		this.stopped = true;
-		await this.flush();
+		try {
+			await this.flush();
+			// Retention is shared background maintenance, not part of this writer's lifetime.
+			// Keep the lease through terminal writes, but do not delay host shutdown/reload
+			// on a sweep of unrelated sessions. flushRetention() remains an explicit join.
+		} finally {
+			try { await unlink(this.leasePath); } catch (error) { if (!isMissing(error)) reportRetentionError(this.options.onError, error); }
+			try { await removeEmptyDir(dirname(this.leasePath)); } catch (error) { reportRetentionError(this.options.onError, error); }
+		}
 	}
 }

@@ -26,7 +26,7 @@
  */
 
 /** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
-const HANDOFF_TOOLS = new Set(["delegate", "council"]);
+export const HANDOFF_TOOL_NAMES: ReadonlySet<string> = new Set(["delegate", "council"]);
 /** Supervision glue: collecting a delegated result (`intercom wait`/`result`) or arming a
  *  `timer` is neither hands-on work nor a hand-off. Their payloads are large by nature, so
  *  counting them would punish the exact behavior the nudge exists to encourage. They neither
@@ -138,7 +138,7 @@ export class DelegationNudge {
 	 */
 	observe(toolName: string, size: number, handoffSucceeded = true, failureText?: string): string | undefined {
 		if (GLUE_TOOLS.has(toolName)) return undefined;
-		if (HANDOFF_TOOLS.has(toolName)) {
+		if (HANDOFF_TOOL_NAMES.has(toolName)) {
 			if (!handoffSucceeded) {
 				const normalizedSize = Math.max(0, Math.floor(size));
 				const identity = failureText === undefined ? `size:${normalizedSize}` : fingerprintFailure(failureText);
@@ -204,7 +204,6 @@ export class DelegationNudge {
  */
 
 /** Tools whose result is a delegated child's report (where a surrender can surface). */
-const REPORT_TOOLS = new Set(["delegate", "council"]);
 
 /** Explicit surrender/blocked markers the operator + CTF protocols emit (operator.md). */
 const SURRENDER_MARKERS: readonly RegExp[] = [/\[BLOCKED\b/i, /\bFLAG:\s*UNKNOWN\b/i];
@@ -222,7 +221,7 @@ export class PersistenceNudge {
 	 * The SYNC path (a `delegate`/`council` tool_result the supervisor sees inline).
 	 */
 	observe(toolName: string, text: string): string | undefined {
-		if (!REPORT_TOOLS.has(toolName)) return undefined;
+		if (!HANDOFF_TOOL_NAMES.has(toolName)) return undefined;
 		return this.scan(text);
 	}
 

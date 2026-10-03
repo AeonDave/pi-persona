@@ -10,6 +10,7 @@
 import { asBoolean, asPermission, asStringArray, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
 import type { Permission } from "../core/permissions.ts";
 import { asSystemPromptMode, type SystemPromptMode } from "../core/types.ts";
+import { parseRuntimeRosterMember, type RosterMember } from "../orchestration/roster.ts";
 
 export type OrchestrationMode = "solo" | "parallel" | "pipeline" | "strategy" | "flow";
 const ORCHESTRATION_MODES: readonly OrchestrationMode[] = ["solo", "parallel", "pipeline", "strategy", "flow"];
@@ -20,6 +21,9 @@ export interface OrchestrationGrammar {
 	strategy?: string;
 	flow?: string;
 	roster?: string;
+	/** Ephemeral members for THIS run — validated inline specialisations that win `roster`
+	 *  (see `resolveOrchestrationMembers`). Never written back to a team or persona file. */
+	members?: RosterMember[];
 	/** Strategy parameters (e.g. rounds, aggregate, critic). */
 	params?: Record<string, unknown>;
 }
@@ -41,6 +45,13 @@ export interface CouncilSpec {
 export interface CouncilDraft {
 	strategy?: string;
 	roster?: string;
+	/** Ephemeral members declared inline (bare agent names or `{ agent, … }` maps), validated
+	 *  at parse. They win `roster` for the calls this persona convenes. */
+	members?: RosterMember[];
+	/** Set when a `members:` block was AUTHORED but unusable (not a list, empty, or an entry
+	 *  that is not a member). Kept as a diagnostic so the call fails loudly instead of
+	 *  quietly convening some other roster. */
+	membersProblem?: string;
 	params?: Record<string, unknown>;
 	/** A named preset (presets/<name>.preset.json) providing defaults; authored fields override. */
 	preset?: string;
@@ -165,21 +176,49 @@ function parseDelegationPolicy(value: unknown): DelegationPolicy | undefined {
 	return Object.keys(policy).length > 0 ? policy : undefined;
 }
 
-/** Parse a persona's `council:` block (strategy + roster + params, or just a `preset`). */
+/** Parse a persona's `council:` block (strategy + roster + members + params, or just a `preset`). */
 function parseCouncil(value: unknown): CouncilDraft | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const o = value as Record<string, unknown>;
 	const strategy = typeof o.strategy === "string" && o.strategy.trim() ? o.strategy.trim() : "";
 	const preset = typeof o.preset === "string" && o.preset.trim() ? o.preset.trim() : "";
-	if (!strategy && !preset) return undefined; // a council needs at least a strategy or a preset
+	// Validate `members:` BEFORE the a-council-needs-a-strategy gate: a members-only block
+	// with a broken list is a broken declaration, and returning undefined here would drop the
+	// diagnostic and let the call quietly convene the MAGI fallback instead.
+	const parsedMembers = Object.hasOwn(o, "members") ? parseMembersBlock(o.members) : undefined;
+	if (!strategy && !preset && !parsedMembers) return undefined;
 	const spec: CouncilDraft = {};
 	if (strategy) spec.strategy = strategy;
 	if (preset) spec.preset = preset;
 	if (typeof o.roster === "string" && o.roster.trim()) spec.roster = o.roster.trim();
+	if (parsedMembers) {
+		if (parsedMembers.ok) spec.members = parsedMembers.members;
+		else spec.membersProblem = parsedMembers.error;
+	}
 	if (o.params && typeof o.params === "object" && !Array.isArray(o.params)) {
 		spec.params = o.params as Record<string, unknown>;
 	}
 	return spec;
+}
+
+/**
+ * Validate an authored `members:` block into roster members. A block that was explicitly
+ * supplied but is not a usable list is an ERROR, never a silent absence: dropping it would
+ * fall back to the persona's named team (or MAGI) and present an unrelated ensemble as the
+ * one the author asked for. Members are validated with the STRICT runtime parser, so a
+ * malformed specialisation field (`tools: ["read", 42]`, `model: 42`) is a diagnostic rather
+ * than a silently dropped field that widens or narrows what the leg may do.
+ */
+export function parseMembersBlock(value: unknown): { ok: true; members: RosterMember[] } | { ok: false; error: string } {
+	if (!Array.isArray(value)) return { ok: false, error: "council.members must be a list of agent names or { agent, … } members" };
+	if (value.length === 0) return { ok: false, error: "council.members is empty — declare at least one member or drop the key" };
+	const members: RosterMember[] = [];
+	for (const [i, raw] of value.entries()) {
+		const parsed = parseRuntimeRosterMember(raw);
+		if (!parsed.ok) return { ok: false, error: `council.members[${i}]: ${parsed.error}` };
+		members.push(parsed.member);
+	}
+	return { ok: true, members };
 }
 
 /** Expand a council `preset` (presets/<name>.preset.json) into concrete fields: the preset
@@ -190,8 +229,14 @@ export function expandCouncilPreset(draft: CouncilDraft, presets: Record<string,
 	const base = presets[draft.preset];
 	const { preset: _consumed, ...authored } = draft;
 	if (!base) return authored;
-	const merged: CouncilDraft = { ...base, ...authored };
-	if (base.params || authored.params) merged.params = { ...base.params, ...authored.params };
+	// Presets only declare strategy, roster, and params. Copy that allowlist instead of
+	// spreading a runtime object, so an extra `members` key cannot bypass parseMembersBlock.
+	const defaults: CouncilDraft = {};
+	if (typeof base.strategy === "string" && base.strategy.trim()) defaults.strategy = base.strategy.trim();
+	if (typeof base.roster === "string" && base.roster.trim()) defaults.roster = base.roster.trim();
+	if (base.params && typeof base.params === "object" && !Array.isArray(base.params)) defaults.params = base.params;
+	const merged: CouncilDraft = { ...defaults, ...authored };
+	if (defaults.params || authored.params) merged.params = { ...defaults.params, ...authored.params };
 	return merged;
 }
 
@@ -203,12 +248,19 @@ export interface CouncilInvocation {
 	persona?: string | undefined;
 	strategy?: string | undefined;
 	roster?: string | undefined;
+	/** Raw `members:` from the call — validated HERE so an unusable block is a diagnostic
+	 *  rather than a silent fall back to the named team (a tool schema cannot validate it). */
+	members?: unknown;
 	params?: Record<string, unknown> | undefined;
 }
 
 export interface ResolvedCouncilInvocation {
 	strategy: string;
+	/** The named team. EMPTY when inline `members` are in effect — there is no named team for
+	 *  an ephemeral call, and a misleading team name would mislabel the card and the tree. */
 	roster: string;
+	/** The ephemeral members actually in effect (validated), when any. */
+	members?: RosterMember[];
 	params: Record<string, unknown>;
 	/** Persona whose council declaration supplied the defaults, when any. */
 	persona?: string;
@@ -217,6 +269,10 @@ export interface ResolvedCouncilInvocation {
 export type CouncilInvocationResolution =
 	| { ok: true; value: ResolvedCouncilInvocation }
 	| { ok: false; error: string };
+
+function hasCouncilDeclaration(council: CouncilDraft | undefined): boolean {
+	return Boolean(council?.strategy || council?.members || council?.membersProblem);
+}
 
 /** Resolve a council call without mutating the active persona.
  *
@@ -236,7 +292,7 @@ export function resolveCouncilInvocation(
 		sourcePersona = personas.find((persona) => persona.isPersona && persona.name === requestedName);
 		if (!sourcePersona) {
 			const available = personas
-				.filter((persona) => persona.isPersona && Boolean(persona.council?.strategy))
+				.filter((persona) => persona.isPersona && hasCouncilDeclaration(persona.council))
 				.map((persona) => persona.name)
 				.sort();
 			return {
@@ -244,30 +300,46 @@ export function resolveCouncilInvocation(
 				error: `no persona named "${requestedName}". Council personas: ${available.join(", ") || "(none)"}`,
 			};
 		}
-		if (!sourcePersona.council?.strategy) {
+		if (!hasCouncilDeclaration(sourcePersona.council)) {
 			return {
 				ok: false,
 				error: `persona "${requestedName}" declares no usable council`,
 			};
 		}
-	} else if (activePersona?.council?.strategy) {
+	} else if (hasCouncilDeclaration(activePersona?.council)) {
 		sourcePersona = activePersona;
 	}
 
 	const base = sourcePersona?.council;
+	if (base?.membersProblem) {
+		return { ok: false, error: `${requestedName ? `persona "${requestedName}"` : `the active persona "${activePersona?.name ?? "?"}"`}: ${base.membersProblem}` };
+	}
 	const strategy = request.strategy?.trim() || base?.strategy || "magi";
-	const roster =
-		request.roster?.trim() ||
-		base?.roster ||
-		sourcePersona?.orchestration?.roster ||
-		(!requestedName ? activePersona?.orchestration?.roster : undefined) ||
-		"magi";
+	// Ephemeral members win the named team, for this call only: nothing is written back to
+	// teams.yaml, the persona file, or any model/prompt/capability the profile would imply.
+	let members = base?.members;
+	if (request.members !== undefined) {
+		const parsed = parseMembersBlock(request.members);
+		if (!parsed.ok) return { ok: false, error: parsed.error };
+		members = parsed.members;
+	}
+	const roster = members
+		? ""
+		: request.roster?.trim() ||
+			base?.roster ||
+			sourcePersona?.orchestration?.roster ||
+			(!requestedName ? activePersona?.orchestration?.roster : undefined) ||
+			"magi";
+	// Profile params belong to the profile's strategy. A per-call strategy switch starts
+	// with that strategy's own defaults; only explicitly supplied params cross the switch.
+	const inheritedParams = strategy !== (base?.strategy || "magi") ? {} : base?.params ?? {};
 	const value: ResolvedCouncilInvocation = {
 		strategy,
 		roster,
-		params: { ...(base?.params ?? {}), ...(request.params ?? {}) },
+		params: { ...inheritedParams, ...(request.params ?? {}) },
 	};
 	if (sourcePersona) value.persona = sourcePersona.name;
+	if (members) value.members = members;
 	return { ok: true, value };
 }
 

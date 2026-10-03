@@ -54,6 +54,10 @@ rejected with the run id to wait on, so a later call cannot slip past the in-bat
 - **L3 — flow file.** `flows/<name>.flow.json` composes strategies into a resumable DAG.
 
 You climb only when you want determinism, structure, or reuse. Nothing forces the higher tiers.
+The `council` tool is a gateway to all installed strategies, not a universal instruction to vote on
+routine work. Choose a strategy when its topology adds value; MAGI and Judge retain their specialized
+persona focus. A caller can supply ephemeral `members` with inline roles/models/skills instead of a
+named team, without persisting a team or switching personas.
 
 ## Binding invariants (I1–I7)
 
@@ -282,6 +286,19 @@ prevents an explicitly selected OpenAI or native Claude leg from silently moving
 provider. (`"verification"` is a further terminal value that never appears on an `AgentResult` — see
 `map`'s `verify` param in [`docs/STRATEGIES.md`](./STRATEGIES.md).)
 
+Strategy/council/flow runs use a different, explicitly authorized recovery policy: the selected model
+is tried first without arbitrary provider reroutes, then `makeSDK` may retry a `provider` or
+`unknown-model` failure ONCE on the supervisor's current model. This main-only exception also applies
+to saved and inline-pinned assignments; ordinary delegate provider pins remain strict. Missing main
+models, repeated same-model attempts, stop/timeout/contract/agent/infrastructure failures, and exhausted
+child/token budgets do not recover. Both attempts are accounted, and a warning plus result metadata
+identify the switch. A per-role model assignment can supplement the legacy per-agent assignment;
+preflight model selection includes external arbiters and other declared agent-valued parameters.
+Live tree and telemetry labels use those participant identities for auxiliary actors too, with
+inline model pins taking precedence. If distinct full roles share a short display hint, that hint
+cannot identify one model safely: the display omits it rather than borrowing another role's choice.
+Routing still resolves the full role key, not the display hint.
+
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 
 **A sub-agent does NOT share the supervisor's MCP session, and an in-process sub-agent gets NO MCP at
@@ -403,7 +420,9 @@ never simultaneously a telemetry event, a routed message, and a UI source of tru
 - **ProgressView** — a derived, read-only UI view computed *from* EngineEvents. Never authored, never
   a source of truth. The `f9` agent tree and `peek` digest are ProgressViews.
 
-Steering is always a Bus action; the peek digest is always a read-only ProgressView.
+Steering is a supervisor-to-child control action, distinct from semantic Bus messages; requesting
+steering does not establish that an active blocking join has been interrupted. The peek digest is
+always a read-only ProgressView.
 
 External telemetry is not a fourth communication plane: it is a generic observer/export contract that
 future plugins may consume or produce, not an exclusive pi-persona protocol. It observes projected
@@ -459,6 +478,12 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   failed legs first, a failed council/flow card leads with the cause in its title, and an
   `intercom wait` card leads with the `N settled — X done, Y failed` tally (per-leg causes sit in the
   body, below the preview cut, so `wait`'s own success doesn't get a `failed` prefix);
+- async launch cards and targeted Intercom call headers use the worker's canonical alias/model,
+  matching the tree rather than promoting its routing ID to display identity. Launch/control receipts
+  persist identity snapshots for history rendering; aliases never become routing keys. Colliding
+  aliases carry a secondary ID, and legacy receipts without a recoverable name retain their ID fallback.
+  Accepted steering receipts retain the exact sent message: collapsed cards preview it, expansion
+  shows all sanitized text and the diagnostic ID. A queued receipt does not prove the worker acted;
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
   preview until expanded; terminal escape/control sequences are removed from the visible projection;
 - the sticky agent and exocom widgets have fixed row budgets — F9/`/agents` and paginated
@@ -606,15 +631,29 @@ a local process able to modify that directory is already inside the trust bounda
 
 - **sync** — the supervisor actively blocks on the delegate/strategy call (results still stream); no
   idle/peek/steer.
-- **async** — the supervisor returns control and goes **idle, spending no tokens**, until woken by an
-  **event** (a child's `contact_supervisor`: a `decision`/`interview` blocks for a reply, `progress` is
-  one-way) or the **peek watchdog**, which fires while async children run but stays SILENT unless there
-  is something to act on — a healthy background run never interrupts. It surfaces on two independent
+- **async** — interactive delegation is background-first; headless execution remains synchronous
+  by default. The prompt/runtime guidance is to continue independent work and, when only background
+  children remain, end the turn for automatic completion follow-ups rather than monitor or join the
+  whole batch. `intercom wait` collects a snapshot without blocking by default in interactive/RPC
+  sessions; settled results are reported and running children continue. Use `sync: true` for an
+  intentional bounded join. Headless sessions preserve the blocking default; `sync: false` requests a
+  snapshot. A snapshot does not wait, start timers/input hooks, or cancel children. Queued steering
+  does not release an explicitly active join. Input-triggered join interruption is
+  deliberately not implemented: a real Pi 1.0 SDK characterization shows steering can remain dormant
+  if delayed input hooks outlast the active run; no supported post-admission ordering guarantee
+  has been established. The supervisor otherwise returns control and
+  goes idle until a wake; the **peek watchdog** fires while async children run but stays SILENT unless
+  there is something to act on — a healthy background run should not interrupt. It surfaces on two independent
   signals: a **fast** wakeup (`PI_PERSONA_PEEK_MS`, ~30s, `0` disables) when a child NEWLY crosses the
   `STALL_FLAG_MS` (90s) stall window (a focused *possibly stuck* alert, framed patience-first — ask the
   leg, don't probe its environment) or messages the supervisor; and a **slow routine check-in**
   (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) delivering the compact ProgressView digest — never
-  full transcripts — so the supervisor can catch a leg going off-track early. Both let an idle
+  full transcripts — so the supervisor can catch a leg going off-track early. Live supervisor asks
+  are derived from the exact engine handle's optional `isWaitingForSupervisor` predicate: tree/F9/peek
+  show waiting, and the watchdog suppresses false stalls until the ask settles. Parent clocks advance
+  with child engine events (liveness, not proof of useful work); parents are waiting only when every
+  live descendant branch is waiting.
+  Both let an idle
   supervisor steer/stop a wedged or drifting child even with NO completion fired; the enforcing
   backstop is the engines' hard wall-clock cap (above). The full digest is also on demand via `/peek`.
   Progress tokens are labelled **cumulative input/output**, not context occupancy; cache-read/write
@@ -649,6 +688,10 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
     only `status === "done"` runs by design — a failed background/`wait` leg already gets a failure
     block, so a `[BLOCKED]` marker there doesn't also get the persistence note. Same marker, same leg,
     different counterweight depending on how it was collected.
+    Nested calls leave their programmatic result untouched. A bounded set of parent call ids carries
+    report provenance through wrappers only while their output relays a surrender marker; the outer
+    model-visible result alone gets the note/card. Suppressed reports produce neither, and turn/session
+    settlement clears abandoned relay state.
   - **The off switch covers every path.** `PI_PERSONA_NUDGE=off` silences DelegationNudge entirely and
     PersistenceNudge on every collection path (sync result, background notifier, `intercom wait`).
 

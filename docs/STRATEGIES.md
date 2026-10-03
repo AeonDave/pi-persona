@@ -27,7 +27,8 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 | series & loops | Plain `await` / `for` — a strategy is TypeScript, so `pipeline` and `critic-loop` are just native control flow. |
 
 Run limits (`RUN_LIMITS`) are enforced inside `makeSDK` regardless of how a strategy calls `agent()`:
-`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window). Nesting depth is not a
+`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window). Model recovery attempts
+consume child slots and usage too; they are not free legs hidden outside these limits. Nesting depth is not a
 numeric knob on this list — it is structurally 1: a spawned child's whole pi-persona extension
 disables itself under `PI_PERSONA_DISABLE=1`, so it has no `delegate`/`council`/`orchestrate`/`flow`
 tool to call however a strategy or persona tries to nest it (the in-process engine additionally
@@ -38,6 +39,13 @@ worker the idle window never catches. Without that cap, an actively streaming ch
 indefinitely; the idle watchdog catches silence. Safety comes from these runtime limits plus the
 structural depth-1 guarantee, not from sandboxing the strategy (see the I2 invariant in
 [ARCHITECTURE.md](ARCHITECTURE.md)).
+
+Optional main-model recovery leaves admission room for queued logical legs and parallel thunks.
+`agent(spec, { reserveChildren })` additionally reserves slots for a mandatory later phase;
+`judge`, `compete`, and `synthesize` protect their final arbiter/merge this way. `map` reserves the
+worker/verifier waves at splitting and the remaining verifier wave during workers; `pipeline`,
+`critic-loop`, and `council-rounds` reserve their remaining required steps/rounds. Recovery must not
+turn a usable partial panel into a run-fatal child-budget overflow.
 
 Every `agent()` call in one SDK instance shares a concurrency semaphore, including direct
 `Promise.all` calls and overlapping `parallel()` batches. A requested batch concurrency may lower
@@ -54,6 +62,13 @@ three lens roles (SECURITY · PERFORMANCE · TESTS), not three files. Every stra
 through `rosterSpec` to honour the specialisation — **`critic-loop` is the one to watch**: it resolves
 `generator`/`critic` to full specs so a role-carrying roster works, while still accepting a bare-name
 `params.generator`/`critic` override.
+
+The `council` tool also accepts temporary `members`, with the same member shape. These override the
+named roster for that invocation only: no team or persona file is created or changed. An empty or
+invalid list is an error, not a request to silently fall back to MAGI. External actors such as
+`params.judge`, `params.synthesizer`, `params.generator`, `params.critic`, and `map`'s `params.verify`
+accept a bare agent name
+or an inline member specification, so the arbiter can have its own role and model too.
 
 Same-agent members are disambiguated in the live `f9` tree by a role hint (`reviewer · SECURITY`) via
 `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`). If you touch either, keep
@@ -134,22 +149,18 @@ council. They are enforced structurally, not by convention.
   failures stay excluded) — so `magi`/`council-rounds`/`debate` degrade to the strongest single
   response rather than returning `ok: false`. The "N invalid excluded" footer counts only
   genuinely-dropped candidates, not the surfaced prose.
-- **A broken MODEL costs a member, not its vote.** A core that fails because its model broke —
-  `failureKind: "provider"` (the provider rejected or is down) or `"unknown-model"` (the ref does not
-  resolve) — is re-run ONCE on a model this same run proved works: a healthy peer's, preferring the
-  session's own when a peer used it, and falling back to the session model when the failing core is
-  the first or the only one left (`orchestration/model-retry.ts`, applied by `magi`). Every other
-  failure passes straight through: an `abort`, `timeout`, `contract` or agent error reproduces on any
-  model, and a retried abort would be a stop that does not stop. This is a roster-level complement to
-  `engine/fallback.ts`, which reroutes the SAME model id across providers and knows nothing about the
-  other members; the engine exhausts provider routes first, and only a still-broken run reaches here.
-  It is deliberately a recovery and never a preference — a council's value is UNCORRELATED errors from
-  distinct reasoners, so each recovery is named in the ruling's footer (`· 1 core recovered on
-  <model>`) and usage bills every attempt. It is also bounded by the run's own `maxChildren` and
-  observed token spend: recovery attempts run serially so each completion can close the token gate
-  before another billed leg starts, and reflection starts only when the remaining observable budget
-  can fund the whole panel. A retry or reflection it cannot afford is stated rather than silently
-  skipped.
+- **A broken MODEL recovers only on the main model.** All strategies use the same SDK rule:
+  `failureKind: "provider"` or `"unknown-model"` permits ONE recovery attempt on the supervisor's
+  current model. This is explicitly authorized even when the initial member model was pinned or
+  saved earlier. It never borrows a peer's model or searches arbitrary providers, and skips recovery
+  when the main model is absent, already failed on that leg, or cannot fit the remaining child/token
+  budget. Other failures (`abort`, `timeout`, `contract`, agent/infrastructure errors) are terminal;
+  a stopped child never restarts. Strategy/flow engine construction disables the ordinary provider
+  reroute decorator so this is the first and only model switch. Every attempt contributes its usage
+  and child count; recovery is reported through `modelRecovery` and a visible warning. MAGI discloses
+  recovered cores in its ruling and keeps the recovered model during reflection rather than sending
+  a core back to its broken assignment. Recovery is a degraded-mode safeguard, not a preference:
+  sharing the main model can reduce reasoner diversity.
 - **The contract instructs as well as validates.** An engine that receives `outputContract` appends
   the format block (`contractInstructions`, derived from the same pinned def it validates against)
   to the member's task — a bare generic agent votes as reliably as one whose `.md` spells the JSON
@@ -167,8 +178,11 @@ nothing. Vote keys are normalised (`json-first`, `JSON_First`, `json first` → 
 ## Param schema (declaration · validation · discovery)
 
 Each strategy declares its params as `params?: Record<string, StrategyParam>` where `StrategyParam =
-{ type: "string" | "number" | "boolean"; default?; doc }`. `knownParams(name)` (`strategy.ts`) exposes
-them. Two consumers:
+{ type: "string" | "number" | "boolean" | "agent"; default?; rosterIndex?; inheritRoster?; doc }`.
+Agent-valued defaults name real agents; `rosterIndex` identifies an omitted selector's roster default,
+and `inheritRoster` preserves a named selector's roster specialization where that strategy uses it.
+Picker preflight reads these declarations instead of guessing participants from prose. `knownParams(name)`
+(`strategy.ts`) exposes them. Two consumers:
 
 - The **`council` tool** warns (via `ui.notify`, never hard-fails — I2 lenient) when a call passes a
   key the active strategy doesn't declare, e.g. `ignoring unknown param "reflct" for magi (known:
@@ -191,12 +205,17 @@ per-call:
    installed persona's already-expanded `council:` block. The caller remains active and retains its
    prompt, model, tools, and capability gates; only strategy/roster/params are borrowed. An unknown
    persona or one without a usable council is a hard error, never a silent MAGI fallback.
-3. **Supervisor override (dynamic)** — the `council` tool accepts a per-call `strategy`, `roster`, and
-   `params`; the params **merge OVER** the selected (or active) persona's (`extension.ts`), so the LLM can pick
-   `{ aggregate: "unanimity" }` for one invocation, or switch strategy entirely
-   (`council({ strategy: "debate", … })`), without editing the persona.
+3. **Supervisor override (dynamic)** — the `council` tool accepts a per-call `strategy`, named
+   `roster`, temporary `members`, and `params`. Params merge over the selected (or active) profile when the strategy stays the same.
+   Switching strategy starts from that strategy's own defaults; only explicitly supplied per-call
+   params carry across the switch. For example, `{ aggregate: "unanimity" }` overrides the active
+   strategy for one invocation, while `council({ strategy: "debate", … })` does not inherit unrelated
+   profile params. Explicit unknown keys still produce a warning (leniently ignored), never a hard
+   failure.
 4. **Preset (reusable bundle)** — `council: { preset: <name> }` expands `presets/<name>.preset.json`
    into `{ strategy, roster, params }`; authored fields win, params merge (`expandCouncilPreset`).
+   Strategy/roster names are trimmed, and only those three preset fields are copied. Inline `members`
+   belong in the persona's validated council declaration or the tool call, not in preset JSON.
 
 The mandatory `orchestration:` path fires pre-turn on the raw user text, so it takes no dynamic
 per-call params (author params are threaded intact) — that is the difference between the two modes:

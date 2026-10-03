@@ -3,10 +3,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentConfig } from "../agents/agent.ts";
 import { Type } from "typebox";
 import { fenceUntrusted } from "../core/fence.ts";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Container, Spacer } from "@earendil-works/pi-tui";
 import { configuredModels } from "../extension/engine.ts";
-import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
+import { compactInlineText, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
@@ -24,11 +24,124 @@ import type { AgentResult } from "../orchestration/types.ts";
 import { agentNodeStatusForDelegate, sanitizeLabel } from "../extension/shared.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import type { AgentTree } from "../ui/agent-tree.ts";
-import type { AsyncRunTracker } from "../engine/async.ts";
+import { runDisplayName, type AsyncRunTracker } from "../engine/async.ts";
 import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "../engine/stream.ts";
 import { progressPatch } from "../ui/agent-tree.ts";
 import type { AddNodeInput } from "../ui/agent-tree.ts";
 import type { RunLimits } from "../core/capabilities.ts";
+
+interface DelegateLaunchSnapshot {
+	id: string;
+	label: string;
+	agent: string;
+	model?: string;
+}
+
+interface DelegateLaunchRow {
+	id: string;
+	fullName: string;
+	displayName: string;
+	clipped: boolean;
+	hasAlias: boolean;
+}
+
+const COLLAPSED_LAUNCH_ROWS = 3;
+
+/** Prefer session-persisted identity, then recover old launch cards from the live tracker. */
+function launchRows(
+	details: { runId?: unknown; runIds?: unknown; runs?: unknown },
+	tracker: AsyncRunTracker,
+	allowTracker: boolean,
+): DelegateLaunchRow[] {
+	const persisted = new Map<string, DelegateLaunchSnapshot>();
+	if (Array.isArray(details.runs)) {
+		for (const item of details.runs) {
+			if (!item || typeof item !== "object") continue;
+			const run = item as Record<string, unknown>;
+			if (typeof run.id !== "string" || typeof run.label !== "string" || typeof run.agent !== "string") continue;
+			persisted.set(run.id, {
+				id: run.id,
+				label: run.label,
+				agent: run.agent,
+				...(typeof run.model === "string" ? { model: run.model } : {}),
+			});
+		}
+	}
+	const storedIds = Array.isArray(details.runIds)
+		? details.runIds.filter((id): id is string => typeof id === "string")
+		: typeof details.runId === "string" ? [details.runId] : [];
+	const ids = [...storedIds];
+	const seenIds = new Set(ids);
+	for (const id of persisted.keys()) {
+		if (seenIds.has(id)) continue;
+		seenIds.add(id);
+		ids.push(id);
+	}
+	const entries = ids.map((id): { run: DelegateLaunchSnapshot; hasAlias: boolean } => {
+		const saved = persisted.get(id);
+		if (saved) return { run: saved, hasAlias: true };
+		const tracked = allowTracker ? tracker.peek(id) : undefined;
+		if (tracked) {
+			return {
+				run: {
+					id,
+					label: tracked.label ?? tracked.agent,
+					agent: tracked.agent,
+					...(tracked.model ? { model: tracked.model } : {}),
+				},
+				hasAlias: true,
+			};
+		}
+		// Older history may outlive both its launch snapshot and tracker entry. Retain the
+		// routing id as an explicitly diagnostic fallback so the batch count stays complete.
+		return { run: { id, label: id, agent: id }, hasAlias: false };
+	});
+	const named = entries.map(({ run, hasAlias }) => ({
+		id: compactInlineText(run.id, { maxChars: 64 }) || "run",
+		fullName: runDisplayName(run),
+		hasAlias,
+	}));
+	const counts = new Map<string, number>();
+	for (const row of named) counts.set(row.fullName, (counts.get(row.fullName) ?? 0) + 1);
+	return named.map((row) => {
+		const displayName = counts.get(row.fullName)! > 1
+			? `${compactInlineText(row.fullName, { maxChars: 56 })} [${compactInlineText(row.id, { maxChars: 16 })}]`
+			: row.fullName;
+		return {
+			...row,
+			displayName,
+			clipped: compactInlineText(displayName, { maxChars: 80 }) !== displayName,
+		};
+	});
+}
+
+function collapsedLaunchSummary(rows: readonly DelegateLaunchRow[], dropped: number | undefined): string {
+	const prefix = "delegate launched ";
+	const dropNote = dropped && dropped > 0 ? ` · ${dropped} task${dropped === 1 ? "" : "s"} dropped` : "";
+	const maxVisible = Math.min(rows.length, COLLAPSED_LAUNCH_ROWS);
+	for (let count = maxVisible; count >= 1; count--) {
+		const names = rows.slice(0, count).map((row) => row.displayName);
+		const omitted = rows.length - names.length;
+		const suffix = omitted > 0 ? `, +${omitted} more` : "";
+		const body = `${prefix}${names.join(", ")}${suffix}${dropNote}`;
+		const needsHint = omitted > 0 || rows.slice(0, count).some((row) => row.clipped) || body.length > MAX_COLLAPSED_CARD_COLUMNS || visibleWidth(body) > MAX_COLLAPSED_CARD_COLUMNS;
+		const candidate = `${body}${needsHint ? ` · ${expandDetailHint()}` : ""}`;
+		if (candidate.length <= MAX_COLLAPSED_CARD_COLUMNS && visibleWidth(candidate) <= MAX_COLLAPSED_CARD_COLUMNS) return candidate;
+	}
+	const omitted = rows.length - 1;
+	const suffix = omitted > 0 ? `, +${omitted} more` : "";
+	const hint = ` · ${expandDetailHint()}`;
+	const fixed = `${prefix}${suffix}${dropNote}${hint}`;
+	const aliasLimit = Math.max(16, Math.min(MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(fixed), MAX_COLLAPSED_CARD_COLUMNS - fixed.length));
+	const first = compactInlineText(rows[0]!.displayName, { maxChars: aliasLimit });
+	return compactInlineText(`${prefix}${first}${suffix}${dropNote}${hint}`, { maxChars: MAX_COLLAPSED_CARD_COLUMNS });
+}
+
+function expandedLaunchDetails(text: string, rows: readonly DelegateLaunchRow[]): string {
+	if (rows.length === 0 || !rows.some((row) => row.hasAlias)) return text;
+	const diagnostics = rows.map((row) => `- ${row.fullName} [${row.id}]`).join("\n");
+	return `${text}\n\nLaunched workers:\n${diagnostics}`;
+}
 
 export interface DelegateToolDeps {
 	get lastCtx(): ExtensionContext | undefined;
@@ -290,9 +403,10 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"Pass agent and task for one worker, or a tasks array for parallel workers. Follow the active persona's delegation policy for required fields.",
 			"When requireBrief is active, EVERY worker needs brief: { objective, scopeRoe, position, constraints, requiredArtifacts, stopConditions } with nonempty values, including read-only scouts. In parallel mode put it in each tasks[].brief; task prose and a top-level brief do not substitute. Read the current per-turn delegation brief for a complete example.",
 			"A persona may also require a structured output contract or disjoint writeSet ownership for parallel writers. Incomplete calls are rejected before any worker starts; fill the missing fields across the batch before retrying.",
-			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once, stay free,",
-			"and each result returns to you automatically as a follow-up — do NOT poll (`intercom wait` only when",
-			"you need a result before your very next step; `sync: true` to block instead; headless runs default to sync).",
+			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once and stay free.",
+			"Work independently while children run; when only children remain, end your turn and let their automatic completion follow-ups wake you.",
+			"Do not monitor, poll, or automatically wait for all children. Use `intercom wait` only when a result is needed before your next step; `sync: true` intentionally blocks instead; headless runs default to sync.",
+			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
 			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
@@ -449,13 +563,17 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				const batchSlots = effectiveConcurrency < tasks.length ? new Semaphore(effectiveConcurrency) : undefined;
 				const nameOffset = asyncNameSequence;
 				asyncNameSequence += tasks.length;
-				const ids = tasks.map((t, i) => {
+				const runs = tasks.map((t, i): DelegateLaunchSnapshot => {
 					// Routed through specOf() (not a hand-rolled field list) so this, the interactive
 					// DEFAULT delegate path, never drifts from the sync path's mapping — NP2's per-leg
 					// `timeoutMs` (and any future knob) lands here for free instead of needing a second copy.
 					const spec = specOf(t, nameOffset + i);
-					return launchAsyncRun(t.agent, t.task, spec, nameFor(t, nameOffset + i), batchSlots);
+					const label = nameFor(t, nameOffset + i);
+					const id = launchAsyncRun(t.agent, t.task, spec, label, batchSlots);
+					const model = shortModel(spec.model);
+					return { id, label, agent: t.agent, ...(model ? { model } : {}) };
 				});
+				const ids = runs.map((run) => run.id);
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${d.RUN_LIMITS.maxChildren}) were dropped.` : "";
 				return {
 					content: [
@@ -464,7 +582,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							text: `Launched ${ids.length} async runs in the background (${ids.join(", ")}) — keep working; each notifies on completion. /peek to watch.${droppedNote}`,
 						},
 					],
-					details: { runIds: ids },
+					details: { runIds: ids, runs, ...(dropped > 0 ? { dropped } : {}) },
 					isError: false,
 				};
 			}
@@ -476,7 +594,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				// survive exactly as they do in fan-out and sync mode.
 				const single = { ...params, agent, task };
 				const runSpec = specOf(single, nameIndex);
-				const id = launchAsyncRun(agent, task, runSpec, nameFor(single, nameIndex));
+				const label = nameFor(single, nameIndex);
+				const id = launchAsyncRun(agent, task, runSpec, label);
+				const model = shortModel(runSpec.model);
 				return {
 					content: [
 						{
@@ -484,7 +604,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							text: `Launched async run ${id} (${agent}) — runs in the background; you'll be notified on completion. /peek ${id} to watch.`,
 						},
 					],
-					details: { runId: id },
+					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}) }] },
 					isError: false,
 				};
 			}
@@ -561,27 +681,25 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const coerced = coerceDelegateParams(args);
 			const view = coerced.ok ? coerced.params : undefined;
+			const mode = wantsAsyncRun(view ?? args, true) ? theme.fg("warning", " async") : theme.fg("dim", " sync");
 			if (view?.tasks && view.tasks.length > 0) {
 				// Names live in the tree / final card — keep the call line itself minimal.
-				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})`)}`, 0, 0);
+				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})`)}${mode}`, 0, 0);
 			}
 			if (typeof args.tasks === "string" && args.tasks.trim()) {
-				return new Text(`${title}${theme.fg("accent", "parallel")}`, 0, 0);
+				return new Text(`${title}${theme.fg("accent", "parallel")}${mode}`, 0, 0);
 			}
-			const agent = compactInlineText(view?.agent ?? args.agent ?? "?", { maxChars: 80 }) || "?";
-			const preview = compactInlineText(view?.task ?? args.task ?? "", { maxChars: 60 });
-			// renderCall only fires in an interactive UI, where delegate runs in the BACKGROUND by
-			// default — pass hasUI:true to the same wantsAsyncRun the execute path uses, so the common
-			// (defaulted) background run still shows the tag; `sync: true` drops it.
-			const asyncTag = wantsAsyncRun(view ?? args, true) ? theme.fg("warning", " async") : "";
-			return new Text(`${title}${theme.fg("accent", agent)}${asyncTag}${theme.fg("dim", ` ${preview}`)}`, 0, 0);
+			const identity = [view?.name ?? args.name, view?.agent ?? args.agent ?? "?"].filter(Boolean).join(" · ");
+			const modelValue = view?.model ?? args.model;
+			const model = typeof modelValue === "string" && modelValue.trim() ? theme.fg("dim", ` · ${compactInlineText(shortModel(modelValue), { maxChars: 48 })}`) : "";
+			return new Text(`${title}${theme.fg("accent", compactInlineText(identity, { maxChars: 96 }) || "?")}${model}${mode}`, 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			// Safe: the delegate `execute` above always stores `{ views: DelegateView[] }` (sync,
 			// single/parallel) or `{ runId | runIds }` (async) in `details`; the double cast just narrows
 			// Pi's opaque `details` type to that known shape for rendering.
-			const details = result.details as unknown as { views?: DelegateView[]; runId?: string; runIds?: string[] } | undefined;
+			const details = result.details as unknown as { views?: DelegateView[]; runId?: string; runIds?: string[]; runs?: unknown; dropped?: number } | undefined;
 			const views = details?.views ?? [];
 			if (views.length === 0) {
 				const first = result.content[0];
@@ -590,8 +708,28 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					: details?.runId
 						? `async run ${details.runId}`
 						: "(no output)";
-				const text = first?.type === "text" ? first.text : fallback;
-				return new Text(sanitizeTerminalText(text), 0, 0);
+				const text = sanitizeTerminalText(first?.type === "text" ? first.text : fallback);
+				const allowTracker = context === undefined || context.isPartial === true;
+				const rows = details ? launchRows(details, d.tracker, allowTracker) : [];
+				if (expanded) return new Text(expandedLaunchDetails(text, rows), 0, 0);
+				if (details?.runId || details?.runIds?.length) {
+					if (rows.length > 0 && !result.isError) {
+						return new Text(theme.fg("accent", collapsedLaunchSummary(rows, details.dropped)), 0, 0);
+					}
+					if (result.isError) {
+						const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
+						return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+					}
+					const ids = details.runIds?.length ? details.runIds.slice(0, 3) : [details.runId as string];
+					const omitted = (details.runIds?.length ?? 0) - ids.length;
+					const dropped = details.dropped ? ` · ${details.dropped} task${details.dropped === 1 ? "" : "s"} dropped (max children)` : "";
+					return new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", `launched ${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
+				}
+				if (result.isError) {
+					const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
+					return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+				}
+				return new Text(theme.fg("toolOutput", compactVisibleText(text, { maxLines: 4, maxLineChars: 100 }).text), 0, 0);
 			}
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const running = views.filter((v) => v.running).length;

@@ -9,6 +9,7 @@ import type { RunLimits } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { isThinkingLevel } from "../core/types.ts";
 import { personaModels, type PersonaConfigStore } from "../persona/config-store.ts";
+import { participantKey } from "../persona/model-participants.ts";
 import type { PersonaController, PersonaHost } from "../persona/controller.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "../engine/adapter.ts";
 import { captureStatus, diffStatus, findGitRoot, renderChangeReport } from "../engine/change-report.ts";
@@ -50,7 +51,17 @@ export interface BuildEngineDeps {
 	gitExec?: GitExec;
 }
 
-export type BuildEngine = (signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, engOpts?: { async?: boolean }) => StrategyEngine;
+export type BuildEngine = (
+	signal?: AbortSignal,
+	onProgress?: (s: ProgressSnapshot) => void,
+	engOpts?: {
+		async?: boolean;
+		/** Wrap the engine in `withModelFallback` (default true). Strategy/flow builds pass
+		 *  `false`: there the SDK's own main-model recovery is the ONE reroute, so an arbitrary
+		 *  provider must not be substituted underneath a member the user pinned. */
+		providerFallback?: boolean;
+	},
+) => StrategyEngine;
 
 export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 	return (signal, onProgress, engOpts) => {
@@ -63,9 +74,18 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
 			const contracts = (n: string): ContractDef | undefined => contractDefs[n] ?? (n === "default" ? DEFAULT_CONTRACT : undefined);
 			const contractNames = (): string[] => installedContractNames(contractDefs);
-			const modelFor = (agent: string): string | undefined => {
-				const persona = controller.activePersona?.name;
-				return persona ? personaModels(personaConfigs, persona)[agent] : undefined;
+			// A per-persona model assignment. The lookup key MUST match the one the picker saved
+			// (`persona/model-participants.ts`): a role member's own key first, then the bare agent
+			// key, so assignments saved before roles existed keep applying.
+			const persona = controller.activePersona?.name;
+			const savedModels = persona ? personaModels(personaConfigs, persona) : undefined;
+			const modelFor = (agent: string, role?: string): string | undefined => {
+				const trimmed = role?.trim();
+				if (trimmed) {
+					const own = savedModels?.[participantKey(agent, trimmed)];
+					if (own) return own;
+				}
+				return savedModels?.[agent];
 			};
 			// The main model thinks adaptively (it picks effort by difficulty); a spawned child
 			// can't inherit "adaptive" if its model doesn't support it, so give children an
@@ -184,6 +204,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			// switch on error". No ctx (no registry) ⇒ pass through. Each attempt still runs through
 			// worktree isolation + steering below.
 			const wrapFallback = (eng: StrategyEngine): StrategyEngine => {
+				if (engOpts?.providerFallback === false) return eng; // the SDK owns recovery there
 				if (!lastCtx) return eng;
 				const prefer = lastCtx.model?.provider;
 				return withModelFallback(eng, {

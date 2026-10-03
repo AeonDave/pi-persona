@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { AgentTree, type AgentNode, flattenTree, isQueuedMarker, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, deriveWaitingNodeIds, flattenTree, isQueuedMarker, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -227,6 +227,41 @@ test("renderAgentTree appends the running annotation after the detail, only when
 test("renderAgentTreeSummary passes the clock through", () => {
 	const nodes: AgentNode[] = [{ id: "a", label: "alpha", parentId: undefined, status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 }];
 	assert.deepEqual(renderAgentTreeSummary(nodes, 8, { now: 5_000, stallMs: 90_000 }), ["⏳ alpha  5s"]);
+});
+
+test("waiting-for-supervisor rows are not falsely stalled; parents wait only when every live child does", () => {
+	const nodes: AgentNode[] = [
+		{ id: "root", label: "root", parentId: undefined, status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "a", label: "a", parentId: "root", status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "b", label: "b", parentId: "root", status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+	];
+	const waiting = deriveWaitingNodeIds(nodes, (id) => id === "a");
+	assert.equal(runningAnnotation(nodes[1]!, 100_000, 90_000, waiting.has("a")), "waiting for supervisor");
+	assert.equal(waiting.has("root"), false, "one non-waiting child keeps the parent active/possibly stalled");
+	const allWaiting = deriveWaitingNodeIds(nodes, (id) => id === "a" || id === "b");
+	assert.equal(allWaiting.has("root"), true);
+	assert.equal(runningAnnotation(nodes[0]!, 100_000, 90_000, allWaiting.has("root")), "waiting for supervisor");
+	assert.match(runningAnnotation(nodes[1]!, 100_000, 90_000) ?? "", /stalled/);
+});
+
+test("queued descendants do not keep a waiting parent active", () => {
+	const nodes: AgentNode[] = [
+		{ id: "root", label: "root", parentId: undefined, status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "parent", label: "parent", parentId: "root", status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "waiting", label: "waiting", parentId: "parent", status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "queued", label: "queued", parentId: "parent", status: "running", detail: "queued", startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "queued-child", label: "queued child", parentId: "queued", status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+	];
+	const waiting = deriveWaitingNodeIds(nodes, (id) => id === "waiting" || id === "queued-child");
+	assert.equal(waiting.has("root"), true, "queued subtrees are neutral while every live descendant waits");
+	assert.equal(waiting.has("parent"), true, "nested parents aggregate live descendants through queued subtrees");
+	assert.equal(waiting.has("queued"), false, "queued nodes have no live waiting handle");
+
+	const allQueued: AgentNode[] = [
+		{ id: "all-queued-parent", label: "parent", parentId: undefined, status: "running", detail: undefined, startedAt: 0, lastAdvanceAt: 0 },
+		{ id: "only-queued", label: "queued", parentId: "all-queued-parent", status: "running", detail: "queued", startedAt: 0, lastAdvanceAt: 0 },
+	];
+	assert.equal(deriveWaitingNodeIds(allQueued, () => false).has("all-queued-parent"), false, "all-queued descendants do not imply a waiting parent");
 });
 
 test("progressPatch bumps lastAdvanceAt and prefers activity over a token count", () => {

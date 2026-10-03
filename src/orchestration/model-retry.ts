@@ -1,26 +1,20 @@
 /**
- * Peer-model retry policy — when one council member fails for a MODEL reason, which model
- * should it be re-run on?
+ * Main-only model retry policy — when a leg fails for a MODEL reason, which model should it be
+ * re-run on? Exactly one: the session's own (main) model.
  *
- * This is the roster-level complement to `engine/fallback.ts`. That decorator reroutes the SAME
- * model id to a family-compatible provider (anthropic/x → bedrock/x) and knows nothing about the
- * other members; this decides to hand a broken core a DIFFERENT model that a sibling just proved
- * works in this very session. The two compose: the engine exhausts provider routes first, and only
- * a run that still comes back `provider`/`unknown-model` reaches here.
+ * That single candidate is a deliberate, user-authorised exception to the strict provider-pin rule
+ * (`engine/fallback.ts` never crosses a pinned provider, and a strategy never picks another
+ * provider's model): a previously chosen, persisted, or inline-pinned model can simply be
+ * UNREACHABLE — retired ref, dead auth, vanished route — and the model the user is running right
+ * now is the only one with live evidence behind it. Earlier this policy also preferred a healthy
+ * PEER's model; that is gone. Borrowing one silently re-shaped the panel (breaking a council's
+ * uncorrelated-error bias guard for `magi`/`judge`) and crossed somebody else's provider pin, so
+ * recovery is now main-only and disclosed. The SDK applies it; this module is the pure policy.
  *
- * The order of preference is evidence, strongest first:
- *   1. the session's own model, when a peer proved it — the user is running on it, so it is the
- *      most likely to be authed, in budget, and available;
- *   2. otherwise the first healthy peer's model in roster order (deterministic, not iteration order);
- *   3. otherwise the session model unproven — the case where the failing core is the first or the
- *      only one left, so no peer evidence exists at all.
- *
- * A council's whole value is UNCORRELATED errors from distinct reasoners, so this deliberately
- * never runs as a preference: it is what keeps a broken core from silently dropping out of the
- * vote, and callers are expected to surface it. Pure — no engine, no I/O, no clock.
+ * Pure — no engine, no I/O, no clock.
  */
 
-import type { AgentResult, FailureKind } from "./types.ts";
+import type { AgentResult, FailureKind, ModelRecovery } from "./types.ts";
 
 /** The only failures a DIFFERENT model can fix. `provider` is the provider rejecting or breaking
  *  (auth, outage, 5xx, model-not-supported); `unknown-model` is a ref that does not resolve at all.
@@ -31,55 +25,32 @@ export const RETRYABLE_MODEL_FAILURES = ["provider", "unknown-model"] as const s
 
 const retryable = new Set<string>(RETRYABLE_MODEL_FAILURES);
 
-export interface ModelRetry {
-	/** Position in the round's results, so the caller can re-run exactly this member. */
-	index: number;
-	agent: string;
-	/** The model that just failed, when the engine resolved one. */
-	from?: string;
-	/** The model to re-run on — never the one that just failed. */
-	model: string;
-	/** Which evidence chose it, for an honest breadcrumb in the log and the tree. */
-	reason: "peer" | "session";
+/** A planned single recovery. `reason` is always `"session"`: there is no other source. */
+export interface ModelRetry extends ModelRecovery {
+	reason: "session";
 }
 
 export interface ModelRetryDeps {
-	/** The model the user's own session runs on (`provider/id`), when known. */
+	/** The model's `provider/id` — the run's MAIN model. */
 	sessionModel?: string;
+	/** The model this leg ASKED for (`spec.model`), which the engine may never have resolved. */
+	requested?: string;
 }
 
 /**
- * Plan at most one retry per failed member. Returns an empty list when nothing is worth
- * re-running — no model-caused failure, or no model available that differs from the one that
- * already failed.
+ * Plan at most one recovery for one failed leg, or `null` when nothing is worth re-running:
+ * the leg succeeded, the failure was not model-caused, no main model is known, or the main model is
+ * the one that just failed (resolved OR requested) — re-running there is a second bill for an
+ * identical outcome.
  */
-export function planModelRetries(results: readonly AgentResult[], deps: ModelRetryDeps): ModelRetry[] {
-	const healthy = results.filter((r) => r.ok && r.modelUsed).map((r) => r.modelUsed as string);
-	const session = deps.sessionModel?.trim() || undefined;
-	// A peer's model is evidence; the session model is evidence too when a peer used it, and a
-	// reasonable guess when nothing survived to prove anything.
-	const candidates = session && healthy.includes(session)
-		? [session, ...healthy.filter((model) => model !== session)]
-		: healthy.length > 0
-			? healthy
-			: session
-				? [session]
-				: [];
-
-	const plan: ModelRetry[] = [];
-	results.forEach((result, index) => {
-		if (result.ok || !result.failureKind || !retryable.has(result.failureKind)) return;
-		// Re-running on the model that just failed cannot produce a different outcome. Keep walking:
-		// a later healthy peer may still provide a distinct model worth trying.
-		const candidate = candidates.find((model) => model !== result.modelUsed);
-		if (!candidate) return;
-		plan.push({
-			index,
-			agent: result.agent,
-			...(result.modelUsed ? { from: result.modelUsed } : {}),
-			model: candidate,
-			reason: healthy.includes(candidate) ? "peer" : "session",
-		});
-	});
-	return plan;
+export function planModelRecovery(result: AgentResult, deps: ModelRetryDeps): ModelRetry | null {
+	if (result.ok || !result.failureKind || !retryable.has(result.failureKind)) return null;
+	const main = deps.sessionModel?.trim();
+	if (!main) return null;
+	if (main === result.modelUsed || main === deps.requested) return null;
+	return {
+		...(result.modelUsed ? { from: result.modelUsed } : {}),
+		to: main,
+		reason: "session",
+	};
 }

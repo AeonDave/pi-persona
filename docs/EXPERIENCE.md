@@ -40,20 +40,34 @@ ask for a monitor. Pi runs a small event-producing program and brings the result
 supervisor is free. Keep the session open, and cancel a watch when its purpose ends. See
 [time and event wakes](MONITORS.md) for examples and limits.
 
-- **F9** opens the agent tree. Every running row shows its elapsed time and switches to `⚠ stalled
-  <duration>` once it has gone 90 seconds without progress — the same threshold behind the
-  supervisor's stall alert. Enter opens a selectable worker's output; `s` sends a course correction;
+- **F9** opens the agent tree. Queued rows have not started their clocks. Live supervisor asks show
+  `waiting for supervisor`, not a stall; running rows otherwise show elapsed time and switch to
+  `⚠ stalled <duration>` after 90 seconds without progress — a suspicion, not proof of a deadlock.
+  Council parent clocks refresh on child engine events; that indicates liveness, not useful work.
+  A parent is waiting only when all its live descendant branches are waiting. Enter opens a selectable worker's output; `s` sends a course correction;
   `x` requests cancellation and appears only when the run can actually be stopped, marking the row
   `stopping…` at once; a stop that can't be applied says so instead of doing nothing. Escape goes
   back or closes the panel.
 - **`/peek`** gives a compact progress view. A quiet worker is a reason to inspect its last
   progress and current activity, not to launch a duplicate immediately.
 - **Background results arrive automatically.** A supervisor can continue independent work while
-  they run. `intercom wait` joins results when the next step depends on them.
+  they run. When only background workers remain, end the turn and let completion follow-ups return
+  their results; do not monitor or poll healthy workers or automatically join the whole batch.
+  `intercom wait` snapshots immediately by default in interactive/RPC sessions; use `sync: true` for
+  an intentional bounded join when the next step depends on those results. Headless waits remain
+  blocking by default; pass `sync: false` for a snapshot.
 - **Answer a waiting worker before joining it.** A coaching worker may need a decision from its
   supervisor before it can finish. An unanswered question is actionable work.
 - **Steering is a request.** Check the subsequent output to see whether the worker incorporated
-  it. Check the terminal result after requesting cancellation; changes already made are not undone.
+  it. Steering does not interrupt an explicitly blocking `intercom wait`; queued input is applied
+  after the current tool batch returns. End the supervisor turn rather than join merely to idle. Check the terminal result after requesting
+  cancellation; changes already made are not undone.
+
+Launch cards and targeted Intercom calls show the same worker alias as the live tree. A steering
+receipt previews the message that was actually queued; expand it (`Ctrl+O` by default, or your
+configured key) to read the full message and diagnostic run ID. Aliases are display names, not
+addresses: tools still route by run ID, and duplicate aliases show a secondary ID to distinguish them.
+Saved launch/control receipts keep their display names even after the runtime tracker is gone.
 
 A truncated message includes a message id. The supervisor can retrieve its retained body with
 `intercom { action: "message", messageId: "m1" }`. A worker's final report has a run id instead:

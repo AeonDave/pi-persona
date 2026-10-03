@@ -6,6 +6,80 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Compatibility
+
+- Update the development cohort to Pi 1.0's four coordinated host-package pins and audit compatible
+  API use. This does not raise the supported floor: pi-persona still supports Pi ≥ 0.83. The current
+  Pi host packages require Node.js ≥ 22.19; this is a host runtime requirement, not a pi-persona
+  floor change. No release has been made; package version remains 1.15.2.
+- An authored `council.members` field is now validated. Older malformed fields that were ignored
+  must be corrected or removed; council calls fail with the field diagnostic instead of selecting
+  an unrelated fallback panel.
+
+### Fixed
+
+- Reserve mandatory downstream child slots before optional model recovery in `map`, `pipeline`,
+  `critic-loop`, and `council-rounds`. Provider outages no longer spend the slots needed by later
+  workers, verifiers, steps, or rounds and turn completed work into a run-fatal admission error.
+- Pass live supervisor-ask state to the `intercom peek` tool, including untargeted peeks; a child
+  waiting for its supervisor is not reported as stuck. Collapsed steer receipts identify the run.
+- Honor members-only council profiles for active and explicitly selected personas, including their
+  params when MAGI is selected explicitly as the same default strategy. Evaluate each configured
+  agent-model lookup once.
+- Carry persistence checkpoints through nested codemode reports when their `[BLOCKED]`/`FLAG:
+  UNKNOWN` marker is relayed to the model. Suppressed nested output stays unchanged; only the outer
+  visible result receives the checkpoint and its expandable card.
+- Surface telemetry cleanup/write diagnostics without requiring debug mode; diagnostics remain
+  non-fatal. Failed admission removes only the empty directories created by that attempt.
+- Release a telemetry writer lease after its terminal writes finish without waiting for the shared
+  retention sweep over unrelated sessions; explicit maintenance joins remain available.
+- Harden the exported council-preset expansion boundary with normalized strategy names and the
+  same strategy/roster/params allowlist as the JSON loader; validated authored members remain intact.
+- Resolve live tree and telemetry model labels for auxiliary actors through the same role-specific
+  participants as the picker, including inline model pins and repeated SDK keys. Ambiguous short
+  role hints omit an uncertain model rather than attributing a different participant's choice.
+
+### Changed
+
+- Make general council guidance proportionate while preserving MAGI and Judge's specialized focus;
+  all eleven strategies remain available through the same tool. Add ephemeral inline council members
+  and specialized external actors without creating persona/team files.
+- Include role-specific members and external arbiters in model selection; respect configured models
+  and remember prompts per participant rather than suppressing later teams for the whole persona.
+- Recover model/provider failures across strategies and flows once on the supervisor's current model,
+  including unavailable saved or pinned choices. Remove MAGI's peer-model substitution; report the
+  switch, account both attempts, and preserve child/token limits and cancellation.
+- Use worker aliases in async launch cards and targeted Intercom call headers, matching the live tree.
+  Persist display identity in tool results so history remains readable after reload or tracker eviction;
+  routing still uses run IDs, with a secondary ID shown when aliases collide.
+- Show the accepted steering message as a compact preview, with Pi's expand-key hint for the full
+  message and diagnostic run ID. Replace repetitive soft-request/cancellation boilerplate with a
+  concise queued receipt; steering remains a request, not proof of execution or cancellation.
+- Make context-burn checkpoints aware of Pi's nested-tool metadata: raw inner results do not
+  consume the model-visible output budget or receive invisible reminders. Permission gates,
+  telemetry and genuine successful hand-off resets still apply inside codemode.
+- Show an immediate async completion banner with the worker's display name, including successful
+  runs. The semantic report still arrives once through the idle-gated completion path, and a failed
+  UI notification cannot swallow it.
+- Replace the child watchdog test's load-sensitive kill-latency assertion with an observed blocked →
+  released → idle-timeout barrier; preserve the two intentional Windows-only skips.
+- Clarify that automatic background completion follow-ups and end-turn guidance are the intended
+  async default: continue independent work, and do not monitor or join all workers when they are the
+  only remaining work. `intercom wait` now snapshots without blocking by default in interactive/RPC
+  sessions; `sync: true` opts into its bounded join, while headless remains blocking by default and
+  `sync: false` opts out. Snapshots collect only already-settled reports, leaving running work active.
+  Queued steering does not preempt an explicitly blocking join. A real Pi 1.0 SDK test with a local faux provider characterizes steering becoming
+  dormant when delayed input hooks outlast the active run. No unsafe input-triggered join abort ships.
+- A council call that switches strategy no longer inherits unrelated profile params; params continue
+  to merge when the selected strategy is unchanged, and unknown explicit keys still warn.
+- Show live supervisor asks as `waiting for supervisor`, rather than stalled, in the tree, F9 and
+  peek; refresh council parent clocks on child progress. A waiting worker becomes eligible for
+  stall detection again when its ask settles. Steering an already-settled run points to its result.
+- Add age-based telemetry cleanup with a 30-day default; see
+  [`docs/TELEMETRY.md`](docs/TELEMETRY.md) for the retention contract.
+- Reuse one tree snapshot per F9 list redraw for rows, selection and waiting state; remove an
+  unreachable delegate-title branch and distinguish event liveness from proof of useful progress.
+
 ## [1.15.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.15.2) - 2026-09-28
 
 ### Distribution

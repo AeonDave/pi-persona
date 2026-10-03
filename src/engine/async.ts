@@ -320,7 +320,7 @@ export function dedupeRunsById(runs: AsyncRun[]): AsyncRun[] {
 
 /** One identity everywhere a tracked run is rendered: the launcher's codename when present,
  *  otherwise the agent type, with the already-shortened model appended once. */
-function runDisplayName(run: AsyncRun): string {
+export function runDisplayName(run: Pick<AsyncRun, "agent" | "label" | "model">): string {
 	const model = run.model === undefined ? undefined : sanitizeDisplayLabel(run.model, "model", 24);
 	if (model === undefined) return sanitizeDisplayLabel(run.label ?? run.agent);
 	const suffix = ` · ${model}`;
@@ -445,7 +445,7 @@ export function clipRunOutput(text: string, id: string, maxChars: number, label 
 	return `${text.slice(0, headChars)}${marker}${tailChars > 0 ? text.slice(-tailChars) : ""}`;
 }
 
-export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number }): string {
+export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number; waitingForSupervisor?: ReadonlySet<string> }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
 	const now = opts?.now;
@@ -460,7 +460,8 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		const head = `[${r.id}] ${name} — ${r.status}`;
 		if (r.status === "running") {
 			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
-			if (now !== undefined && stallMs !== undefined && stallMs > 0 && r.lastAdvanceAt !== undefined) {
+			if (opts?.waitingForSupervisor?.has(r.id)) line += " · waiting for supervisor";
+			else if (now !== undefined && stallMs !== undefined && stallMs > 0 && r.lastAdvanceAt !== undefined) {
 				const stalledFor = now - r.lastAdvanceAt;
 				if (stalledFor >= stallMs) line += ` ⚠ possibly stuck (no progress for ${Math.round(stalledFor / 1000)}s)`;
 			}
@@ -493,12 +494,17 @@ export class PeekWatcher {
 	private readonly reportedAt = new Map<string, number>();
 
 	/** The running legs that have NEWLY crossed the stall window since we last reported them. */
-	poll(runs: AsyncRun[], now: number, stallMs: number): AsyncRun[] {
+	poll(runs: AsyncRun[], now: number, stallMs: number, waitingForSupervisor: ReadonlySet<string> = new Set()): AsyncRun[] {
 		const live = new Set<string>();
 		const newlyStuck: AsyncRun[] = [];
 		for (const r of runs) {
-			if (r.status !== "running" || r.lastAdvanceAt === undefined) continue;
+			if (r.status !== "running") continue;
 			live.add(r.id);
+			if (waitingForSupervisor.has(r.id)) {
+				this.reportedAt.delete(r.id); // a live ask is not a stall; re-evaluate immediately when it settles
+				continue;
+			}
+			if (r.lastAdvanceAt === undefined) continue;
 			const prev = this.reportedAt.get(r.id);
 			if (prev !== undefined && r.lastAdvanceAt > prev) this.reportedAt.delete(r.id); // advanced ⇒ re-arm
 			if (stallMs > 0 && now - r.lastAdvanceAt >= stallMs && !this.reportedAt.has(r.id)) {
@@ -548,7 +554,7 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
  * fast {@link buildPeekAlert} stall signal: it catches a leg going the WRONG way (not stalled, just
  * wrong) before it burns the budget, without waking the supervisor every tick.
  */
-export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number }): string {
+export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number; waitingForSupervisor?: ReadonlySet<string> }): string {
 	return (
 		`${buildPeekDigest(runs, opts)}\n\n` +
 		"Routine check-in — internal status update, not a new task: don't reply just to acknowledge unchanged progress. Continue your current " +

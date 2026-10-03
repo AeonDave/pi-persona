@@ -30,7 +30,7 @@ import { assignedIdentityPrompt } from "../core/naming.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import { type AgentRunSpec, isPositiveFiniteMs, type StrategyEngine } from "../orchestration/sdk.ts";
+import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
@@ -94,8 +94,10 @@ export interface InProcessDeps {
 	cwd: string;
 	/** Pi's global agent dir (~/.pi/agent); defaults to cwd if omitted (tests). */
 	agentDir?: string;
-	/** Per-agent model override (e.g. a persona's configured ensemble models). */
-	modelFor?: (agent: string) => string | undefined;
+	/** Per-agent model override (e.g. a persona's configured ensemble models). `role` is the
+	 *  on-the-fly role this run carries, when it has one, so a member's own assignment key
+	 *  (`agent#hash`) resolves ahead of the bare agent's. */
+	modelFor?: (agent: string, role?: string) => string | undefined;
 	/** The session/loader model — the last-resort fallback when an agent declares none
 	 *  (the child engine gets this for free from `pi -p`'s default; inproc must pass it). */
 	defaultModel?: string;
@@ -319,10 +321,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const requestedDef = requestedContract ? pinnedDef(requestedContract) : undefined;
 			if (requestedContract && !requestedDef) return unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []);
 
-			const ref = spec.model ?? deps.modelFor?.(spec.agent) ?? cfg.model ?? deps.defaultModel;
+			const picked = spec.model ? undefined : deps.modelFor?.(spec.agent, spec.role);
+			const ref = spec.model ?? picked ?? cfg.model ?? deps.defaultModel;
 			const model = resolveModel(deps.modelRegistry, ref);
 			if (!model) {
-				const src = spec.model ? "spec" : deps.modelFor?.(spec.agent) ? "agent picker" : cfg.model ? "agent config" : "default";
+				const src = spec.model ? "spec" : picked ? "agent picker" : cfg.model ? "agent config" : "default";
 				// Make the failure self-correcting: name a few real registry refs (nearest
 				// matches first) so the supervisor's retry can pick a valid model at once.
 				const all = deps.modelRegistry.getAll().map((m) => `${m.provider}/${m.id}`);
@@ -681,7 +684,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 				// Steering: the in-process engine can inject a user message into the running
 				// agent — the v0.4 payoff the one-shot child engine can't do.
-				onSteerable?.((text) => {
+				const waitingHandle = childHandle;
+				const waitingBus = deps.bus;
+				const steer: SteerFn = Object.assign((text: string): boolean => {
 					if (!steerable) return false;
 					const trimmed = text.trim();
 					if (!trimmed) return false;
@@ -691,7 +696,10 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					} catch {
 						return false;
 					}
+				}, {
+					isWaitingForSupervisor: () => waitingHandle !== undefined && waitingBus?.hasPendingAskFrom(waitingHandle) === true,
 				});
+				onSteerable?.(steer);
 
 				// Delivery bridge: bus messages addressed to this child are steered into its live
 				// session as fenced, attributed user turns — attribution stays OUTSIDE the fence so

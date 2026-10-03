@@ -375,19 +375,48 @@ test("runChildAgent does not idle-kill a child the bus reports as blocked on a s
 	assert.ok(Date.now() - started >= 350, "the child lived past the idle window");
 });
 
-test("runChildAgent idle-kills once isBlocked flips back to false", { timeout: 3000 }, async () => {
-	const started = Date.now();
+test("runChildAgent idle-kills once isBlocked flips back to false", { timeout: 3000 }, async (t) => {
+	// Observed-state barrier, NOT a sleep: the release is triggered by the engine's own
+	// isBlocked consultation. A fixed release timer races the idle checks under load (the
+	// 200ms timer could land after the 200ms check, re-arming it again and again), which is
+	// what made the old elapsed < 500ms window flaky. Here the run itself proves the ask was
+	// outstanding at a real watchdog check; only then does the test settle the ask.
 	let blocked = true;
-	setTimeout(() => { blocked = false; }, 200); // the ask settles; the next idle check must see real silence
-	const r = await runChildAgent({ task: "wait [sleep]" }, undefined, {
+	const checks: boolean[] = [];
+	let sawBlocked: () => void = () => {};
+	const blockedObserved = new Promise<void>((res) => { sawBlocked = res; });
+	const isBlocked = () => {
+		const outstanding = blocked;
+		checks.push(outstanding);
+		if (outstanding) sawBlocked();
+		return outstanding;
+	};
+
+	// The test signal also cleans up the child if the barrier or an assertion fails.
+	const run = runChildAgent({ task: "wait [sleep]" }, t.signal, {
 		resolveInvocation: resolveFake,
 		killGraceMs: 100,
 		timeoutMs: 100,
-		isBlocked: () => blocked,
+		isBlocked,
 	});
+	// Race the barrier against the run so a child that settles early (or never consults the
+	// bus) fails with a real assertion instead of hanging until the test timeout. No dangling
+	// timers are left behind: `run` is always awaited below.
+	const first = await Promise.race([
+		blockedObserved.then(() => "watchdog-saw-blocked" as const),
+		run.then(() => "settled-early" as const),
+	]);
+	assert.equal(first, "watchdog-saw-blocked", "the idle watchdog re-armed because the bus still reported a pending ask");
+	assert.equal(blocked, true, "the release happens AFTER that observation, never before it");
+
+	blocked = false; // the supervisor answers the ask; the next idle check must see real silence
+	const r = await run;
+
 	assert.equal(r.timedOut, true, "the idle watchdog fires once the bus no longer reports a pending ask");
-	const elapsed = Date.now() - started;
-	assert.ok(elapsed >= 200 && elapsed < 500, `expected the kill shortly after the ask settled at 200ms, got ${elapsed}ms`);
+	assert.equal(r.aborted, false, "the kill came from the idle deadline, not a caller abort");
+	assert.ok(checks.length >= 2, `the watchdog consulted the bus more than once, got ${checks.length}`);
+	assert.ok(checks.includes(true), "the watchdog consulted the bus while the ask was outstanding");
+	assert.equal(checks[checks.length - 1], false, "the killing check saw the ask settled");
 });
 
 test("the hard cap fires for a blocked leg regardless of isBlocked", { timeout: 3000 }, async () => {

@@ -65,6 +65,8 @@ export interface RenderOptions {
 	now?: number;
 	/** Quiet time after which a running row shows the stall badge; 0/omitted ⇒ never. */
 	stallMs?: number;
+	/** Live ids whose exact engine handle currently has a pending supervisor ask. */
+	waitingForSupervisor?: ReadonlySet<string>;
 }
 
 /** Whether `detail` is the literal "queued" marker a seeded-but-not-yet-live leg carries — shared
@@ -78,12 +80,41 @@ export function isQueuedMarker(detail: string | undefined): boolean {
  *  for `stallMs`. Undefined for settled nodes, nodes without clock data, or a node still carrying
  *  the "queued" marker — it was seeded ahead of the concurrency gate and has not started running
  *  yet, so its clock (stamped at seed time) has nothing true to report. Pure. */
-export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail">, now: number, stallMs: number): string | undefined {
+export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail">, now: number, stallMs: number, waitingForSupervisor = false): string | undefined {
 	if (node.status !== "running" || node.startedAt === undefined) return undefined;
 	if (isQueuedMarker(node.detail)) return undefined;
+	if (waitingForSupervisor) return "waiting for supervisor";
 	const quietSince = node.lastAdvanceAt ?? node.startedAt;
 	if (stallMs > 0 && now - quietSince >= stallMs) return `⚠ stalled ${formatDuration(now - quietSince)}`;
 	return formatDuration(now - node.startedAt);
+}
+
+/** Derive waiting rows from exact live-handle predicates. A running parent is waiting only when
+ * every live leaf below it is waiting; a progressing or stalled sibling keeps the parent honest. */
+export function deriveWaitingNodeIds(nodes: readonly AgentNode[], isWaiting: (id: string) => boolean): Set<string> {
+	const children = new Map<string, AgentNode[]>();
+	for (const node of nodes) {
+		if (node.parentId === undefined) continue;
+		const list = children.get(node.parentId) ?? [];
+		list.push(node);
+		children.set(node.parentId, list);
+	}
+	const waitingLeaves = new Map<string, { hasLive: boolean; allWaiting: boolean }>();
+	const visit = (node: AgentNode): { hasLive: boolean; allWaiting: boolean } => {
+		if (node.status === "running" && isQueuedMarker(node.detail)) return { hasLive: false, allWaiting: false };
+		const descendants = (children.get(node.id) ?? []).map(visit).filter((state) => state.hasLive);
+		if (node.status !== "running") return { hasLive: descendants.length > 0, allWaiting: descendants.every((state) => state.allWaiting) };
+		if (descendants.length === 0) {
+			const waiting = isWaiting(node.id);
+			if (waiting) waitingLeaves.set(node.id, { hasLive: true, allWaiting: true });
+			return { hasLive: true, allWaiting: waiting };
+		}
+		const allWaiting = descendants.every((state) => state.allWaiting);
+		if (allWaiting) waitingLeaves.set(node.id, { hasLive: true, allWaiting: true });
+		return { hasLive: true, allWaiting };
+	};
+	for (const node of nodes) if (node.parentId === undefined) visit(node);
+	return new Set(waitingLeaves.keys());
 }
 
 /** The tree patch for one progress snapshot: every snapshot is an advance; activity wins over
@@ -121,7 +152,7 @@ export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): s
 			const branch = isRoot ? "" : isLast ? "└─ " : "├─ ";
 			const label = safeInline(node.label) || safeInline(node.id) || "agent";
 			const detailText = node.detail ? safeInline(node.detail) : "";
-			const clock = opts.now !== undefined ? runningAnnotation(node, opts.now, opts.stallMs ?? 0) : undefined;
+			const clock = opts.now !== undefined ? runningAnnotation(node, opts.now, opts.stallMs ?? 0, opts.waitingForSupervisor?.has(node.id) ?? false) : undefined;
 			const tail = [detailText, clock].filter((s): s is string => Boolean(s)).join(" · ");
 			const detail = tail ? `  ${tail}` : "";
 			lines.push(`${prefix}${branch}${GLYPH[node.status]} ${label}${detail}`);
@@ -246,6 +277,12 @@ export class AgentTree {
 	update(id: string, patch: AgentNodePatch): void {
 		const node = this.nodes.find((n) => n.id === id);
 		if (!node) return;
+		// Parent progress clocks are refreshed on every child tick. They never emit a change;
+		// avoid cloning/comparing the whole node for that common clock-only path.
+		if (Object.keys(patch).every((key) => CLOCK_KEYS.has(key as keyof AgentNode))) {
+			applyPatch(node, patch);
+			return;
+		}
 		const before = { ...node };
 		applyPatch(node, patch);
 		if (!sameNode(before, node)) this.emit({ type: "updated", node: { ...node } });

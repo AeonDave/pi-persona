@@ -88,15 +88,15 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.87.1",
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "@types/node": "^22.20.4",
     "fast-check": "^4.10.2",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2",
-    "typebox": "1.3.34"
+    "typebox": "1.3.34",
+    "typescript": "^7.0.2"
   },
   "pi": {
     "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.15.2/assets/banner.png",

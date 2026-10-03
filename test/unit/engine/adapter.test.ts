@@ -223,6 +223,37 @@ test("child adapter keeps the cause of death when a contract-bearing leg dies be
 	assert.doesNotMatch(r.error ?? "", /contract default failed/);
 });
 
+test("child adapter steer metadata mirrors broker pending-ask state for its registered handle", { timeout: 3000 }, async () => {
+	let pending = false;
+	let registeredHandle = "";
+	const broker = {
+		endpoint: "fake-endpoint",
+		register: ({ handle }: { handle: string }) => { registeredHandle = handle; },
+		unregister: (handle: string) => { if (handle === registeredHandle) registeredHandle = ""; },
+		steerFrame: () => true,
+		hasPendingAskFrom: (handle: string) => handle === registeredHandle && pending,
+	};
+	const ac = new AbortController();
+	const engine = makeEngine({
+		resolveAgent,
+		contracts,
+		broker,
+		signal: ac.signal,
+		childOptions: { resolveInvocation: resolveFake, timeoutMs: 100, killGraceMs: 100 },
+	});
+	let waiting: (() => boolean) | undefined;
+	const run = engine.run({ agent: "a", task: "wait [sleep]" }, undefined, undefined, (steer) => {
+		waiting = steer.isWaitingForSupervisor;
+	});
+	assert.equal(waiting?.(), false);
+	pending = true;
+	assert.equal(waiting?.(), true);
+	ac.abort();
+	const result = await run;
+	assert.equal(result.failureKind, "abort");
+	assert.equal(waiting?.(), false, "unregistered/settled leg reports false");
+});
+
 test("child adapter re-arms the idle watchdog while the broker reports a pending ask from this leg", { timeout: 3000 }, async () => {
 	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => true };
 	const ac = new AbortController();

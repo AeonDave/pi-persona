@@ -15,6 +15,18 @@ export type { ChildUsage };
  *  `params.verify` reviewer rejected that item's work after the fact. */
 export type FailureKind = "provider" | "abort" | "timeout" | "contract" | "unknown-agent" | "unknown-model" | "agent" | "verification";
 
+/**
+ * This leg did NOT answer on the model it asked for: the SDK re-ran it once on the session's own
+ * (main) model after a `provider`/`unknown-model` failure. Carried on the logical result so no
+ * consumer — a strategy's ruling, the UI, the operator — can claim the initial model produced it.
+ */
+export interface ModelRecovery {
+	/** The model that failed, when the engine resolved one. */
+	from?: string;
+	/** The main model the recovery ran on. */
+	to: string;
+}
+
 /** The result of running one agent through the engine, as strategies see it. */
 export interface AgentResult {
 	agent: string;
@@ -28,4 +40,7 @@ export interface AgentResult {
 	modelUsed?: string;
 	/** Why it failed (set only when `ok` is false) — drives the model-fallback decision. */
 	failureKind?: FailureKind;
+	/** Set when this result comes from a recovered retry (see {@link ModelRecovery}). Its `usage`
+	 *  already includes BOTH attempts, each counted once. */
+	modelRecovery?: ModelRecovery;
 }

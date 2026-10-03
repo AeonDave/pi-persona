@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { fenceUntrusted } from "../core/fence.ts";
 import { expandDetailHint, failureDetails, formatCouncilCallLabel } from "../extension/shared.ts";
 import { knownParams, strategyNames } from "../orchestration/strategy.ts";
+import { memberBaseLabel, type RosterMember } from "../orchestration/roster.ts";
 import { formatCouncilResult, humanizeAggregateResult } from "../orchestration/render.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -34,6 +35,13 @@ export interface CouncilToolDeps {
 	publishPersonaCost(): void;
 }
 
+/** What the card names as the panel: the team, or the ad-hoc members themselves — an
+ *  ephemeral call has no team name, so the resolver leaves `roster` empty for it. */
+function panelLabel(value: { roster: string; members?: RosterMember[] | undefined }): string {
+	if (!value.members || value.members.length === 0) return value.roster;
+	return value.members.map((m) => memberBaseLabel(m)).join(", ");
+}
+
 export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void {
 	// ── council tool (deliberate → vote → ruling; the executor then applies it) ───
 	const CouncilParams = Type.Object({
@@ -48,6 +56,12 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 			Type.String({ description: 'Per-call strategy override (default: the selected or active council profile\'s strategy, or built-in "magi")' }),
 		),
 		roster: Type.Optional(Type.String({ description: 'Per-call roster override (default: the selected or active profile\'s roster, then its orchestration roster, or built-in "magi")' })),
+		members: Type.Optional(
+			Type.Array(Type.Unknown(), {
+				description:
+					'Ephemeral panel members for THIS call — each an installed agent name ("scout") or an inline { agent, role?, model?, skills? } specialisation. They win `roster` and the profile\'s own members for this call only: no team file, persona file, or inherited model/tool is touched. Omit to use the named roster.',
+			}),
+		),
 		params: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), {
 				description:
@@ -61,9 +75,15 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 		description: [
 			"Convene a council of specialists with controlled, complementary biases to deliberate a",
 			"decision — returns the selected strategy's result, preserving vote tally and dissent when produced.",
-			"Use it before any significant choice; then EXECUTE the ruling yourself and re-convene when",
-			"execution surfaces a new decision. Patterns: adversarial vote (magi, council-rounds), best-of-N",
-			"with an impartial arbiter (judge, compete), batch map, merged synthesis (synthesize).",
+			"Scale it to the decision: convene for a genuine fork, a contested or high-stakes call, or a",
+			"pick between rival answers — NOT before every decision, and a routine task does not",
+			"deserve a whole panel. Then EXECUTE the ruling yourself and re-convene only when execution",
+			"surfaces a NEW decision. Do NOT use it to get work done: `delegate` (and your own tools)",
+			"produce the work; the council decides, the executor acts.",
+			"Patterns: adversarial vote with dissent (magi, council-rounds); a reasoned pick between rival",
+			"COMPLETE answers by an impartial arbiter (judge); adversarial critique then revise",
+			"(critic-loop); head-to-head argument (debate); many findings merged into ONE deliverable",
+			"(synthesize, map); rival implementations judged blind (compete); a single pair (pair).",
 			'Use `persona: "magi"` to invoke an installed persona\'s declared council without switching away',
 			"from the active caller; its prompt, model, tools, and permissions are never inherited.",
 			`Strategies: ${strategyNames()
@@ -73,7 +93,8 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					return keys.length > 0 ? `${n}(${keys.join(", ")})` : n;
 				})
 				.join(" · ")}.`,
-			'Pass `params` to vary the persona\'s default council for one call — e.g. { "reflect": false }.',
+			"Pass `members` to seat an ad-hoc panel for one call, or `params` to vary the profile's default",
+			'council — e.g. { "reflect": false }.',
 		].join(" "),
 		parameters: CouncilParams,
 		async execute(_id, params, signal, _onUpdate, ctx) {
@@ -82,6 +103,7 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				persona: params.persona,
 				strategy: params.strategy,
 				roster: params.roster,
+				members: params.members,
 				params: params.params as Record<string, unknown> | undefined,
 			});
 			if (!resolved.ok) {
@@ -91,7 +113,8 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					isError: true,
 				};
 			}
-			const { strategy, roster, params: mergedParams, persona } = resolved.value;
+			const { strategy, roster, members, params: mergedParams, persona } = resolved.value;
+			const panel = panelLabel({ roster, members });
 			try {
 				// Fully persona-driven: a persona's `council:` block picks the strategy, roster,
 				// and params — a new ensemble (more members, supermajority, multi-round) needs no
@@ -111,6 +134,9 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					}
 				}
 				const orch: OrchestrationGrammar = { mode: "strategy", strategy, roster, params: mergedParams };
+				// Ephemeral members ride the SAME grammar path as a named team (see
+				// `resolveOrchestrationMembers`) — nothing about the profile is inherited.
+				if (members) orch.members = members;
 				const result = await d.runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
 				const s = (result?.structured ?? {}) as {
 					headline?: string;
@@ -133,7 +159,7 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					items: s.items,
 					body: uiBody,
 					strategy,
-					roster,
+					roster: panel,
 					persona,
 					...(result?.error ? { error: result.error } : {}),
 					...(result?.failureKind ? { failureKind: result.failureKind } : {}),
@@ -151,7 +177,7 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text", text: `council failed: ${message}` }], details: failureDetails({ error: message, strategy, roster }), isError: true };
+				return { content: [{ type: "text", text: `council failed: ${message}` }], details: failureDetails({ error: message, strategy, roster: panel }), isError: true };
 			}
 		},
 		renderCall(args, theme) {
@@ -159,10 +185,12 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				persona: args.persona,
 				strategy: args.strategy,
 				roster: args.roster,
+				members: args.members,
 				params: args.params as Record<string, unknown> | undefined,
 			});
 			const strategy = resolved.ok ? resolved.value.strategy : (args.strategy ?? "?");
-			const roster = resolved.ok ? resolved.value.roster : (args.roster ?? args.persona ?? "?");
+			// With inline members there is no named team to name — label the panel itself.
+			const roster = resolved.ok ? panelLabel(resolved.value) : (args.roster ?? args.persona ?? "?");
 			return new Text(theme.fg("toolTitle", theme.bold(formatCouncilCallLabel(strategy, roster))), 0, 0);
 		},
 		renderResult(result, { expanded }, theme) {
