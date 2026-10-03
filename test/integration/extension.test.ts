@@ -700,6 +700,98 @@ test("a tool argument that merely contains \"waiting\" never reports a running l
 	assert.ok(!statuses.includes("waiting"), `a leg running grep {pattern:"waiting"} is running, not waiting: ${JSON.stringify(statuses)}`);
 });
 
+test("telemetry follows live supervisor asks and only leaves waiting after the last ask settles", async () => {
+	const workerHandle = "telemetry-waiting-worker";
+	const workerBus: { current?: InProcessBus } = {};
+	let release!: () => void;
+	let entered!: () => void;
+	const releaseGate = new Promise<void>((resolve) => { release = resolve; });
+	const engineEntered = new Promise<void>((resolve) => { entered = resolve; });
+	const m = makeMockPi();
+	piPersona(m.pi, {
+		engineFactories: {
+			makeEngine: () => { throw new Error("the in-process regression must not build a child engine"); },
+			makeInProcessEngine: (deps) => {
+				assert.ok(deps.bus, "async in-process runs share the extension bus");
+				workerBus.current = deps.bus;
+				return {
+					run: async (spec, _onProgress, _signal, onSteerable) => {
+						const bus = deps.bus!;
+						bus.register(workerHandle);
+						onSteerable?.(Object.assign(() => true, { isWaitingForSupervisor: () => bus.hasPendingAskFrom(workerHandle) }));
+						entered();
+						await releaseGate;
+						bus.unregister(workerHandle);
+						return { agent: spec.agent, output: "finished", usage: emptyUsage(), ok: true };
+					},
+				};
+			},
+		},
+	});
+	const cwd = tempDir("pi-persona-telemetry-live-waiting-");
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-live-waiting-session" } };
+	let runId: string | undefined;
+	const nodeStatuses = (): unknown[] => {
+		try {
+			return readTelemetryEvents(cwd)
+				.filter((event) => (event.type === "agent.added" || event.type === "agent.updated") && event.payload.id === `async:${runId}`)
+				.map(agentEventStatus);
+		} catch {
+			return [];
+		}
+	};
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("telemetry-waiting", { agent: "scout", task: "wait for supervisor", async: true }, undefined, undefined, ctx);
+		runId = launched.details?.runId as string | undefined;
+		assert.ok(runId, "the async leg gets a run id");
+		await engineEntered;
+		await waitUntil(() => nodeStatuses().includes("running"), "the async worker's running telemetry projection");
+
+		const bus = workerBus.current;
+		assert.ok(bus, "the injected engine exposes the extension's real bus to this test");
+		const ask = (text: string, timeoutMs = 2_000, signal?: AbortSignal): Promise<string> =>
+			bus.ask(workerHandle, "supervisor", text, { timeoutMs, ...(signal ? { signal } : {}) });
+		const firstAsk = ask("first blocking question").catch(() => "settled");
+		await waitUntil(() => nodeStatuses().at(-1) === "waiting", "waiting telemetry for the first pending ask");
+		const firstEnvelope = bus.pending("supervisor").find((env) => env.from === workerHandle && env.expectsReply);
+		assert.ok(firstEnvelope, "the ask envelope is retained in the supervisor inbox");
+
+		const secondAsk = ask("second blocking question").catch(() => "settled");
+		await waitUntil(() => bus.hasPendingAskFrom(workerHandle) && bus.pending("supervisor").filter((env) => env.from === workerHandle && env.expectsReply).length === 2, "the overlapping pending ask");
+		assert.equal(nodeStatuses().filter((status) => status === "waiting").length, 1, "a second outstanding ask does not publish a duplicate waiting edge");
+		assert.equal(bus.reply(firstEnvelope.id, "first answer"), true);
+		await firstAsk;
+		assert.equal(nodeStatuses().at(-1), "waiting", "settling one ask keeps the leg waiting while another remains pending");
+		const secondEnvelope = bus.pending("supervisor").find((env) => env.from === workerHandle && env.expectsReply);
+		assert.ok(secondEnvelope, "the second ask remains live after the first is answered");
+		assert.equal(bus.reply(secondEnvelope.id, "second answer"), true);
+		await secondAsk;
+		await waitUntil(() => nodeStatuses().at(-1) === "running", "running telemetry after all reply asks settle");
+
+		const timeoutAsk = ask("timeout question", 20).catch(() => "timed out");
+		await waitUntil(() => nodeStatuses().at(-1) === "waiting", "waiting telemetry for timeout ask");
+		await timeoutAsk;
+		await waitUntil(() => nodeStatuses().at(-1) === "running", "running telemetry after timeout settlement");
+
+		const controller = new AbortController();
+		const abortedAsk = ask("abort question", 2_000, controller.signal).catch(() => "aborted");
+		await waitUntil(() => nodeStatuses().at(-1) === "waiting", "waiting telemetry for abort ask");
+		controller.abort();
+		await abortedAsk;
+		await waitUntil(() => nodeStatuses().at(-1) === "running", "running telemetry after abort settlement");
+
+		release();
+		await waitUntil(() => nodeStatuses().includes("done"), "the terminal done projection");
+		assert.deepEqual(nodeStatuses(), ["queued", "running", "waiting", "running", "waiting", "running", "waiting", "running", "done"]);
+	} finally {
+		release();
+		workerBus.current?.unregister(workerHandle);
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
 test("supervisor tool calls Pi resolves as \"immediate\" are closed at the turn boundary", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);

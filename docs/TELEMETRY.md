@@ -1,5 +1,11 @@
 # Telemetry wire contract
 
+Agent `waiting` is an explicit projection of a pending supervisor ask, read through the live
+engine steer handle. Ask delivery and settlement (reply, timeout or cancellation) refresh the
+projection; overlapping asks keep it waiting until the last one settles. Queued and terminal
+statuses retain precedence. The producer deduplicates unchanged projections and never infers
+waiting from tool arguments, output text or a quiet clock.
+
 Telemetry is a vendor-neutral v2 envelope. `producerId` and `producerVersion` identify the emitting plugin; `version` identifies the wire schema. `seq` is monotonic only within `(producerId, sessionId)`, and `id` is deduplicated within that same scope.
 
 The pi-persona producer writes semantic projections under `telemetry/v2/<workspace>/<producerId>/`. `<workspace>` always identifies the Pi process's actual cwd; joining another Exocom scope does not rewrite telemetry identity. It never persists task/prompt text, tool arguments/activity, model output, paths, secrets, or message bodies. Known pi-persona event payloads are allowlisted; an unreviewed producer event retains only its envelope/type (payload `{}`) at the producer and consumer boundary. Future producers must add a reviewed allowlist/schema before publishing data intended for a consumer.

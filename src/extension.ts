@@ -535,6 +535,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// left hanging when Pi resolves a call as "immediate" and never reaches a result.
 	type PendingIntercomTelemetry = { kind: string; to: string; size: number; replyTo?: string };
 	const telemetryIntercomPending = new Map<string, PendingIntercomTelemetry>();
+	// node id → steer that one agent (in-process engine only): inject a live user message.
+	const steerRegistry = new Map<string, SteerFn>();
 	function telemetryKind(node: AgentNode): TelemetryAgentKind {
 		if (node.kind) return node.kind;
 		if (node.id.startsWith("flow:")) return "flow";
@@ -547,9 +549,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// "queued" is a marker WE set (the seeded roster / a launched async run), so it is a real
 		// state. Nothing ever sets `detail` to a waiting state — it is a usage string, an error, or
 		// `toolActivity(name, args)`, which splices the tool's own argument text — so a substring
-		// test for "waiting" could only ever fire on a leg that is running normally.
+		// test for "waiting" could only ever fire on a leg that is running normally. A live in-process
+		// steer handle has the authoritative bus predicate for a supervisor ask.
 		if (isQueuedMarker(node.detail)) return "queued";
-		return "running";
+		return steerRegistry.get(node.id)?.isWaitingForSupervisor?.() === true ? "waiting" : "running";
 	}
 	function telemetryAgent(node: AgentNode): TelemetryAgentInput {
 		return {
@@ -585,6 +588,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// unfiltered publish appends one byte-identical duplicate per chunk: a 5k-chunk leg writes
 	// ~1.5MB of them and evicts genuine history from the producer's file budget.
 	const lastAgentProjection = new Map<string, string>();
+	function publishAgentProjection(node: AgentNode): void {
+		const producer = telemetry;
+		if (!producer) return;
+		const agent = telemetryAgent(node);
+		const projection = JSON.stringify(agent);
+		if (lastAgentProjection.get(node.id) === projection) return;
+		lastAgentProjection.set(node.id, projection);
+		producer.publishAgentUpdated(node.id, agent);
+	}
+	function refreshSteeredAgentTelemetry(): void {
+		if (!telemetry || steerRegistry.size === 0) return;
+		const steeredIds = new Set(steerRegistry.keys());
+		for (const node of agentTree.snapshot()) {
+			if (steeredIds.has(node.id)) publishAgentProjection(node);
+		}
+	}
 	function publishAgentTreeChange(change: AgentTreeChange): void {
 		const producer = telemetry;
 		if (!producer) return;
@@ -594,10 +613,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return;
 		}
 		if (change.type === "updated") {
-			const projection = JSON.stringify(telemetryAgent(change.node));
-			if (lastAgentProjection.get(change.node.id) === projection) return;
-			lastAgentProjection.set(change.node.id, projection);
-			producer.publishAgentUpdated(change.node.id, telemetryAgent(change.node));
+			publishAgentProjection(change.node);
 			return;
 		}
 		if (change.type === "removed") {
@@ -644,8 +660,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return true;
 	}
 
-	// node id → steer that one agent (in-process engine only): inject a live user message.
-	const steerRegistry = new Map<string, SteerFn>();
 	function waitingTreeIds(nodes: readonly AgentNode[] = agentTree.snapshot()): Set<string> {
 		return deriveWaitingNodeIds(nodes, (id) => steerRegistry.get(id)?.isWaitingForSupervisor?.() === true);
 	}
@@ -1063,6 +1077,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	bus.onAskSettled(({ id }) => {
 		intercomNotifier.discard((ask) => ask.askId === id);
 		telemetryAskSenders.delete(id);
+		if (!disposed) refreshSteeredAgentTelemetry();
 	});
 	// Supervisor-armable alarms: when a timer expires it WAKES the session by routing the fire
 	// through the same idle-delivery path (an idle delivery starts a fresh turn, so the supervisor
@@ -1144,6 +1159,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			expectsReply: env.expectsReply,
 			size: Buffer.byteLength(env.text, "utf8"),
 		});
+		if (!disposed && env.expectsReply) refreshSteeredAgentTelemetry();
 		if (disposed || env.to !== SUPERVISOR || !env.expectsReply) return;
 		// Only an ask can be replied to, so only an ask needs its sender remembered. Oldest first
 		// out: a long session must not grow this without bound.
