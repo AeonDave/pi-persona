@@ -198,6 +198,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 
 ## Testing
 
+- Offline SDK harnesses must await `session_shutdown` before SDK `dispose()` and temporary-profile
+  deletion. `dispose()` disconnects SDK listeners; it does not join extension-owned writers.
 - TDD: write the failing test first for `core/*` and any behavior change; watch it fail, then fix.
 - Done = `npm run typecheck` clean **and** full suite green. The suite has **two** intentional skips,
   both Windows-only — the runner reports `skipped 2` on Windows and `skipped 0` elsewhere (see

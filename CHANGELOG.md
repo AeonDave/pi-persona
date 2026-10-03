@@ -6,6 +6,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Fixed
+
+- Publish the real pending-supervisor-ask state as `agent.updated` telemetry for Flow. Refresh it on
+  ask delivery and reply/timeout/cancellation settlement, without duplicate events or text-based
+  guesses; queued and terminal state remain authoritative.
+- Make the native offline codemode harness await extension shutdown before deleting its temporary
+  profile; SDK `dispose()` alone does not flush the extension's telemetry writer.
+
 ## [1.16.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.0) - 2026-10-03
 
 ### Compatibility

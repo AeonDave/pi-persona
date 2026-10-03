@@ -39,6 +39,7 @@ import {
 	type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
+import { TELEMETRY_EVENT_NAME } from "../../src/telemetry/contract.ts";
 
 /** The nudge's own marker, as rendered by the production renderer (`core/nudge.ts`). */
 const CHECKPOINT = "delegation checkpoint";
@@ -126,6 +127,7 @@ interface Harness {
 	notifications: string[];
 	results: CapturedResult[];
 	nudges: string[];
+	telemetryTypes: string[];
 }
 
 /**
@@ -138,9 +140,14 @@ async function harness(options: { persona: string; tools: string[]; cwd: string;
 	const notifications: string[] = [];
 	const results: CapturedResult[] = [];
 	const nudges: string[] = [];
+	const telemetryTypes: string[] = [];
 	let modelVisible = 0;
+	let disposal: Promise<void> | undefined;
 
 	const observer: ExtensionFactory = (pi) => {
+		pi.events.on(TELEMETRY_EVENT_NAME, (event: unknown) => {
+			if (event && typeof event === "object" && "type" in event && typeof event.type === "string") telemetryTypes.push(event.type);
+		});
 		pi.on("tool_result", (event: ToolResultEvent) => {
 			const text = event.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 			const nested = typeof event.parentToolCallId === "string" && event.parentToolCallId.length > 0;
@@ -212,10 +219,17 @@ async function harness(options: { persona: string; tools: string[]; cwd: string;
 		notifications,
 		results,
 		nudges,
-		dispose: async () => {
-			await session.abort();
-			session.dispose();
-		},
+		telemetryTypes,
+		dispose: () => disposal ??= (async () => {
+			try {
+				await session.abort();
+				// SDK dispose disconnects listeners; it does not emit the host lifecycle. Join the
+				// extension's terminal writes and lease cleanup before removing its temporary profile.
+				await session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
+			} finally {
+				session.dispose();
+			}
+		})(),
 	};
 }
 
@@ -235,6 +249,26 @@ async function exists(path: string): Promise<boolean> {
 		return false;
 	}
 }
+
+test("native codemode harness joins extension shutdown before deleting its temporary profile", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-persona-codemode-shutdown-"));
+	const { cwd, agentDir } = await scaffold(root);
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = agentDir;
+	let h: Harness | undefined;
+	try {
+		await writeFile(join(cwd, ".pi", "agents", "native-probe.md"), "---\nname: native-probe\nlabel: Native Probe\npersona: true\n---\nNative codemode probe supervisor.\n");
+		h = await harness({ persona: "native-probe", tools: ["read", "codemode", "delegate"], cwd, agentDir });
+		assert.ok(h.telemetryTypes.includes("instance.started"), "the real telemetry writer is active in this profile");
+		await h.dispose();
+		assert.equal(h.telemetryTypes.filter((type) => type === "instance.stopped").length, 1, "dispose awaits the extension lifecycle, not only the SDK listeners");
+	} finally {
+		await h?.dispose();
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("native codemode: a nested read past singleHeavyChars never nudges, and only the outer printed output drives the nudge", { timeout: 90_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-persona-codemode-native-"));
