@@ -104,5 +104,6 @@
     "extensions": [
       "./src/extension.ts"
     ]
-  }
+  },
+  "author": "AeonDave"
 }
