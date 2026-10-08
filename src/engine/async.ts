@@ -547,19 +547,9 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
 	].join("\n");
 }
 
-/**
- * The routine check-in: the full progress view ({@link buildPeekDigest}) plus a one-line framing that
- * this is an occasional glance, not a poll — step in only if a leg is off-track or wedged, otherwise
- * carry on. It fires on the slow check-in cadence (config.checkInEveryMs) and is the counterpart to the
- * fast {@link buildPeekAlert} stall signal: it catches a leg going the WRONG way (not stalled, just
- * wrong) before it burns the budget, without waking the supervisor every tick.
- */
+/** The operator-only periodic status card. It carries the progress digest without model instructions. */
 export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number; waitingForSupervisor?: ReadonlySet<string> }): string {
-	return (
-		`${buildPeekDigest(runs, opts)}\n\n` +
-		"Routine check-in — internal status update, not a new task: don't reply just to acknowledge unchanged progress. Continue your current " +
-		"work and step in only if a leg is off-track (wrong target, rabbit hole) or wedged. Each result returns to you on its own."
-	);
+	return `Async activity · routine check-in\n\n${buildPeekDigest(runs, opts)}`;
 }
 
 /**

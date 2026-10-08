@@ -39,9 +39,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.16.1` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.16.2` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.16.1` |
+| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.16.2` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with
@@ -74,6 +74,10 @@ the outcome. This is one possible workflow, not a fixed pipeline; dependent step
 
 Interactive delegation runs in the background by default. Results return automatically when the
 supervisor is free; you can inspect or redirect a worker at any point.
+
+Periodic async status appears as a durable, expandable operator-only card (five minutes by default); it
+does not start a model turn or enter model context. Completions, blocking asks, unread worker messages,
+and newly stalled workers still use their actionable notification paths.
 
 Launch and control cards show the worker's name. Steering receipts preview the message sent;
 expand with `Ctrl+O` (the default binding) to read it in full. A queued message is not proof that

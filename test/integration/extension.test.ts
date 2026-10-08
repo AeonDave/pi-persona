@@ -4222,6 +4222,235 @@ test("a delegation checkpoint stays in model context and gets a durable visible 
 	assert.match(expanded, /Keep local: session-bound work/);
 });
 
+test("routine async check-ins append expandable operator entries without starting model turns", async () => {
+	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
+	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
+	process.env.PI_PERSONA_CHECKIN_MS = "300000";
+	process.env.PI_PERSONA_PEEK_MS = "0";
+	let now = 1_000_000;
+	const clock = mock.method(Date, "now", () => now);
+	const intervals: Array<{ ms: number; tick: () => void }> = [];
+	const fakeInterval = { unref: () => {} };
+	const intervalMock = mock.method(globalThis, "setInterval", (callback: AnyFn, ms = 0) => {
+		intervals.push({ ms, tick: () => callback() });
+		return fakeInterval as unknown as ReturnType<typeof setInterval>;
+	});
+	const clearIntervalMock = mock.method(globalThis, "clearInterval", (_timer: unknown) => {});
+	let releaseRun!: () => void;
+	let resolveRunFinished!: () => void;
+	let runStarted = false;
+	const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
+	const runFinished = new Promise<void>((resolve) => { resolveRunFinished = resolve; });
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			runStarted = true;
+			await runGate;
+			resolveRunFinished();
+			return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	const ctx = makeCtx(tempDir("pi-persona-checkin-entry-")).ctx;
+	let sessionStarted = false;
+	try {
+		await m.fire("session_start", undefined, ctx);
+		sessionStarted = true;
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		await delegate.execute("checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
+		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
+		assert.equal(runStarted, true, "the asynchronous test leg remains live across check-in ticks");
+		const tick = intervals.find((interval) => interval.ms === 300_000)?.tick;
+		assert.ok(tick, "the normal five-minute routine cadence is armed");
+
+		now += 300_000;
+		tick();
+		now += 300_000;
+		tick();
+
+		const checkIns = m.entries().filter((entry) => entry.customType === "pi-persona-status");
+		assert.equal(m.sentMessages().length, 0, "routine status does not enter the model conversation or trigger a turn");
+		assert.equal(checkIns.length, 2, "every due cadence remains visible and durable, including a repeated snapshot");
+		const content = (checkIns[0]?.data as { content?: string } | undefined)?.content ?? "";
+		assert.match(content, /quiet-scout/, "the human-selected run alias is preserved");
+		assert.match(content, /cumulative input \+ output tokens/i, "the digest labels cumulative usage clearly");
+		assert.doesNotMatch(content, /don't reply|continue your current|step in only/i, "the visible entry carries no instructions for a model");
+
+		const renderer = m.entryRenderer("pi-persona-status");
+		assert.ok(renderer, "routine status entries have a native expandable entry renderer");
+		const collapsed = renderComponent(renderer(checkIns[0], { expanded: false }, traceTheme));
+		assert.match(collapsed, /async status/i);
+		assert.match(collapsed, /quiet-scout/);
+		assert.match(collapsed, /cumulative input \+ output tokens/i);
+		assert.match(collapsed, /expand/i);
+		const expanded = renderComponent(renderer(checkIns[0], { expanded: true }, traceTheme));
+		assert.match(expanded, /cumulative input \+ output tokens/i);
+		assert.match(expanded, /Cumulative tokens show total input \+ output so far/i);
+	} finally {
+		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
+		releaseRun();
+		if (runStarted) await runFinished;
+		clock.mock.restore();
+		intervalMock.mock.restore();
+		clearIntervalMock.mock.restore();
+		if (previousCheckInMs === undefined) delete process.env.PI_PERSONA_CHECKIN_MS;
+		else process.env.PI_PERSONA_CHECKIN_MS = previousCheckInMs;
+		if (previousPeekMs === undefined) delete process.env.PI_PERSONA_PEEK_MS;
+		else process.env.PI_PERSONA_PEEK_MS = previousPeekMs;
+	}
+});
+
+test("routine async status stays visible while the supervisor is busy with pending input", async () => {
+	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
+	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
+	process.env.PI_PERSONA_CHECKIN_MS = "300000";
+	process.env.PI_PERSONA_PEEK_MS = "0";
+	let now = 1_000_000;
+	const clock = mock.method(Date, "now", () => now);
+	const intervals: Array<{ ms: number; tick: () => void }> = [];
+	const fakeInterval = { unref: () => {} };
+	const intervalMock = mock.method(globalThis, "setInterval", (callback: AnyFn, ms = 0) => {
+		intervals.push({ ms, tick: () => callback() });
+		return fakeInterval as unknown as ReturnType<typeof setInterval>;
+	});
+	const clearIntervalMock = mock.method(globalThis, "clearInterval", (_timer: unknown) => {});
+	let releaseRun!: () => void;
+	let resolveRunFinished!: () => void;
+	let runStarted = false;
+	const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
+	const runFinished = new Promise<void>((resolve) => { resolveRunFinished = resolve; });
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			runStarted = true;
+			await runGate;
+			resolveRunFinished();
+			return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	const base = makeCtx(tempDir("pi-persona-checkin-busy-")).ctx;
+	const ctx = { ...base, isIdle: () => false, hasPendingMessages: () => true };
+	let sessionStarted = false;
+	try {
+		await m.fire("session_start", undefined, ctx);
+		sessionStarted = true;
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		await delegate.execute("busy-checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
+		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
+		assert.equal(runStarted, true, "the asynchronous leg remains live during supervisor input");
+		const tick = intervals.find((interval) => interval.ms === 300_000)?.tick;
+		assert.ok(tick, "the normal five-minute status cadence is armed");
+
+		now += 300_000;
+		tick();
+		assert.equal(m.entries().filter((entry) => entry.customType === "pi-persona-status").length, 1,
+			"operator status is appended even when the supervisor is busy and a human message is queued");
+		assert.equal(m.sentMessages().length, 0, "operator status still does not create or queue a model turn");
+	} finally {
+		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
+		releaseRun();
+		if (runStarted) await runFinished;
+		clock.mock.restore();
+		intervalMock.mock.restore();
+		clearIntervalMock.mock.restore();
+		if (previousCheckInMs === undefined) delete process.env.PI_PERSONA_CHECKIN_MS;
+		else process.env.PI_PERSONA_CHECKIN_MS = previousCheckInMs;
+		if (previousPeekMs === undefined) delete process.env.PI_PERSONA_PEEK_MS;
+		else process.env.PI_PERSONA_PEEK_MS = previousPeekMs;
+	}
+});
+
+test("a failed routine status append does not suppress a newly-stalled wake, even when warning sinks throw", async () => {
+	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
+	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
+	process.env.PI_PERSONA_CHECKIN_MS = "300000";
+	process.env.PI_PERSONA_PEEK_MS = "30000";
+	let now = 1_000_000;
+	const clock = mock.method(Date, "now", () => now);
+	const intervals: Array<{ ms: number; tick: () => void }> = [];
+	const fakeInterval = { unref: () => {} };
+	const intervalMock = mock.method(globalThis, "setInterval", (callback: AnyFn, ms = 0) => {
+		intervals.push({ ms, tick: () => callback() });
+		return fakeInterval as unknown as ReturnType<typeof setInterval>;
+	});
+	const clearIntervalMock = mock.method(globalThis, "clearInterval", (_timer: unknown) => {});
+	let releaseRun!: () => void;
+	let runStarted = 0;
+	const runFinished: Promise<void>[] = [];
+	const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			runStarted++;
+			let resolveRunFinished!: () => void;
+			runFinished.push(new Promise<void>((resolve) => { resolveRunFinished = resolve; }));
+			await runGate;
+			resolveRunFinished();
+			return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	const piApi = m.pi as unknown as { appendEntry: (customType: string, data: unknown) => void };
+	const appendEntry = piApi.appendEntry.bind(m.pi);
+	piApi.appendEntry = (customType, data) => {
+		if (customType === "pi-persona-status") throw new Error("status persistence unavailable");
+		appendEntry(customType, data);
+	};
+	const { ctx: base, notes } = makeCtx(tempDir("pi-persona-checkin-append-failure-"));
+	let throwWarning = false;
+	const ctx = {
+		...base,
+		hasUI: true,
+		ui: {
+			...base.ui,
+			notify: (message: string) => {
+				if (throwWarning) throw new Error("UI warning sink unavailable");
+				notes.push(message);
+			},
+		},
+	};
+	let stderrMock: ReturnType<typeof mock.method<typeof process.stderr, "write">> | undefined;
+	let sessionStarted = false;
+	try {
+		await m.fire("session_start", undefined, ctx);
+		sessionStarted = true;
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		await delegate.execute("stalled-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
+		for (let i = 0; i < 10 && runStarted === 0; i++) await Promise.resolve();
+		assert.equal(runStarted, 1, "the asynchronous test leg remains live across watchdog ticks");
+		const tick = intervals.find((interval) => interval.ms === 30_000)?.tick;
+		assert.ok(tick, "the fast stall/message wakeup cadence remains armed");
+
+		now += 300_000; // both the routine card and the newly-stalled alert are due
+		assert.doesNotThrow(tick, "failure to append operator status cannot abort the actionable wake");
+		assert.equal(m.sentMessages().length, 1, "the newly-stalled follow-up still reaches the supervisor");
+		assert.match(String((m.sentMessages()[0]?.message as { content?: string } | undefined)?.content ?? ""), /may be stalled/i);
+		assert.ok(notes.some((note) => /could not append async status/i.test(note)), "the operator is warned that status persistence failed");
+
+		throwWarning = true;
+		stderrMock = mock.method(process.stderr, "write", (() => { throw new Error("stderr warning sink unavailable"); }) as typeof process.stderr.write);
+		await delegate.execute("second-stalled-run", { agent: "scout", name: "quiet-scout-2", task: "continue working", async: true }, undefined, undefined, ctx);
+		for (let i = 0; i < 10 && runStarted < 2; i++) await Promise.resolve();
+		assert.equal(runStarted, 2, "a second leg starts while the first remains live");
+		now += 300_000; // another check-in and a new stall signal are due
+		assert.doesNotThrow(tick, "throwing UI and stderr diagnostics still cannot abort an actionable wake");
+		assert.equal(m.sentMessages().length, 2, "the second newly-stalled follow-up also reaches the supervisor");
+	} finally {
+		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
+		releaseRun();
+		await Promise.all(runFinished);
+		stderrMock?.mock.restore();
+		clock.mock.restore();
+		intervalMock.mock.restore();
+		clearIntervalMock.mock.restore();
+		if (previousCheckInMs === undefined) delete process.env.PI_PERSONA_CHECKIN_MS;
+		else process.env.PI_PERSONA_CHECKIN_MS = previousCheckInMs;
+		if (previousPeekMs === undefined) delete process.env.PI_PERSONA_PEEK_MS;
+		else process.env.PI_PERSONA_PEEK_MS = previousPeekMs;
+	}
+});
+
 test("failed-hand-off and persistence checkpoints each append exactly one visible card", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);

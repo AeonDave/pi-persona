@@ -29,10 +29,10 @@ export interface PiPersonaConfig {
 	 *  healthy run never interrupts. On by default (30000); PI_PERSONA_PEEK_MS=0 opts out (the routine
 	 *  check-in below is independent). */
 	peekEveryMs: number;
-	/** Routine check-in interval (ms): how often, while async children run, the idle supervisor gets
-	 *  a compact progress digest so it can catch a leg going off-track (not stalled — just wrong) and
-	 *  step in early. Deliberately slow so it is an occasional glance, not a poll, and independent of
-	 *  the fast stall/message wakeup. 300000 (5 min) by default; PI_PERSONA_CHECKIN_MS=0 opts out. */
+	/** Routine check-in interval (ms): how often, while async children run, the operator gets a durable,
+	 *  expandable compact progress entry. It is status-only and does not start a model turn. Deliberately
+	 *  slow and independent of the fast stall/message wakeup. 300000 (5 min) by default;
+	 *  PI_PERSONA_CHECKIN_MS=0 opts out. */
 	checkInEveryMs: number;
 	/** Per-agent hard wall-clock cap (ms): an OPT-IN lifetime ceiling. When set (>0) it settles even
 	 *  a busy-but-non-converging child the idle watchdog (reset on every event) never catches.

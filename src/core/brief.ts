@@ -19,7 +19,7 @@ import { inventedExocomNameHint, inventedLegNameHint } from "./naming.ts";
 
 /** Stable protocol guidance, not a user-like reminder or the optional behavioral spine. */
 export const RUNTIME_CONTEXT_GUIDANCE =
-	"[pi-persona] Runtime context: identity metadata, skill-prefetch catalogs, clock snapshots and routine check-ins " +
+	"[pi-persona] Runtime context: identity metadata, skill-prefetch catalogs and clock snapshots " +
 	"are background context, not new user requests. Perform required setup once. Do not repeat identity confirmations " +
 	"or narrate unchanged setup/skill bookkeeping after each tool result. Apply relevant skill instructions; availability " +
 	"alone is not evidence that a skill was loaded or used. Report material changes, blockers and decisions. Explain " +
@@ -148,7 +148,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.asyncDefault
-		? "they run in the background and each result returns to you automatically as a follow-up — do useful independent work while children run; when only children remain, end your turn and let completion wake you. Do not monitor, poll, or automatically wait for all children (don't watch or poll a healthy leg). Join intentionally only when a result is needed before your next step; you're also woken if a child stalls or messages you, plus an occasional check-in to catch drift"
+		? "they run in the background and each result returns to you automatically as a follow-up — do useful independent work while children run; when only children remain, end your turn and let completion wake you. Do not monitor, poll, or automatically wait for all children (don't watch or poll a healthy leg). Join intentionally only when a result is needed before your next step; you're woken if a child newly stalls or messages you. Periodic status cards are for the operator and do not interrupt your work"
 		: "the call returns when they finish";
 	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
 	if (input.requireBrief) {

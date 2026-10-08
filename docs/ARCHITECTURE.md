@@ -644,19 +644,19 @@ a local process able to modify that directory is already inside the trust bounda
   if delayed input hooks outlast the active run; no supported post-admission ordering guarantee
   has been established. The supervisor otherwise returns control and
   goes idle until a wake; the **peek watchdog** fires while async children run but stays SILENT unless
-  there is something to act on — a healthy background run should not interrupt. It surfaces on two independent
-  signals: a **fast** wakeup (`PI_PERSONA_PEEK_MS`, ~30s, `0` disables) when a child NEWLY crosses the
-  `STALL_FLAG_MS` (90s) stall window (a focused *possibly stuck* alert, framed patience-first — ask the
-  leg, don't probe its environment) or messages the supervisor; and a **slow routine check-in**
-  (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) delivering the compact ProgressView digest — never
-  full transcripts — so the supervisor can catch a leg going off-track early. Live supervisor asks
+  there is something to act on — a healthy background run should not interrupt. It can start a model turn
+  only for actionable events: a **fast** wakeup (`PI_PERSONA_PEEK_MS`, ~30s, `0` disables) when a child NEWLY
+  crosses the `STALL_FLAG_MS` (90s) stall window (a focused *possibly stuck* alert, framed patience-first —
+  ask the leg, don't probe its environment); messages to the supervisor also wake it. The **slow routine status card**
+  (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) is a durable, expandable operator-only session entry
+  with the compact ProgressView digest — never full transcripts — and does not start a model turn. Live supervisor asks
   are derived from the exact engine handle's optional `isWaitingForSupervisor` predicate: tree/F9/peek
   show waiting, and the watchdog suppresses false stalls until the ask settles. Parent clocks advance
   with child engine events (liveness, not proof of useful work); parents are waiting only when every
   live descendant branch is waiting.
-  Both let an idle
-  supervisor steer/stop a wedged or drifting child even with NO completion fired; the enforcing
-  backstop is the engines' hard wall-clock cap (above). The full digest is also on demand via `/peek`.
+  Stall alerts and live messages let an idle supervisor steer/stop a wedged child even with NO completion
+  fired; the enforcing backstop is the engines' hard wall-clock cap (above). The full digest is also on demand
+  via `/peek`.
   Progress tokens are labelled **cumulative input/output**, not context occupancy; cache-read/write
   accounting is separate. Do not infer a full context window from that counter. File age or line-count
   changes alone likewise do not establish a stall, a passing test or completed work.

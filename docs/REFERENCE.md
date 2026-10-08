@@ -147,8 +147,9 @@ session entry remain authoritative. `agent_name` is unavailable while Exocom is 
 also rejects empty, unsafe, generic, or reserved persona/agent names.
 
 Naming needs one tool action, not a recurring prose confirmation. A stable system-level runtime rule
-also distinguishes skill-prefetch and routine check-ins from new user requests; it neither hides
-updates nor rewrites conversation history. After updating extension code, use Pi's `/reload` once
+distinguishes skill-prefetch bookkeeping from new user requests; it neither hides updates nor rewrites
+conversation history. Periodic async status is a durable operator-only entry, not a model wake or
+context message. After updating extension code, use Pi's `/reload` once
 delegated work has settled (or restart/resume); `/persona reload` reloads definitions only.
 
 With Exocom active, the corresponding tool is `exocom_name`. The first incoming peer wake can be the
@@ -446,7 +447,7 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_SEED` | off | `on` auto-installs bundled personas on first run |
 | `PI_PERSONA_BROKER` | on | `off` disables the cross-process comm plane for child, worktree, and MCP legs |
 | `PI_PERSONA_PEEK_MS` | 30000 | fast async stall/message wakeup tick; `0` disables it |
-| `PI_PERSONA_CHECKIN_MS` | 300000 | routine direction check-in while async children run; `0` disables it |
+| `PI_PERSONA_CHECKIN_MS` | 300000 | durable expandable operator status entry while async children run; does not start a model turn; `0` disables it |
 | `PI_PERSONA_AGENT_MAX_MS` | off | opt-in per-agent hard wall-clock cap; unset leaves healthy work running |
 | `PI_PERSONA_AGENT_STARTUP_MS` | 300000 | startup deadline for a child that makes no progress; `0` disables it. Like the idle window, a leg waiting on a supervisor reply is not idle: the watchdog re-arms while its ask is pending, instead of killing on a blind ceiling |
 | `PI_PERSONA_NUDGE` | on | `off` silences delegation and persistence nudges; synchronous checkpoints stay in model-visible tool results and are mirrored to durable, expandable TUI-only cards |

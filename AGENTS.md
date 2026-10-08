@@ -115,6 +115,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   never double-reported; snapshots leave running children active. In interactive sessions `delegate`
   is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to sync so the
   single turn carries the result). An explicit `async` flag takes precedence over `sync` and the default.
+  Periodic async status is a durable, expandable operator-only entry, never a model wake or context
+  message; completions, asks, unread bus messages, and newly-stalled alerts keep their actionable paths.
   Message ids and run ids are separate: `intercom message { messageId }` retrieves retained bus
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
   drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears

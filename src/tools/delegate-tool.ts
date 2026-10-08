@@ -391,7 +391,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			...(runSpec.model ? { model: runSpec.model } : {}),
 			detail: "queued",
 		});
-		d.startPeek(); // arm the timed supervisor wakeup while this run is in flight (no-op if PI_PERSONA_PEEK_MS=0)
+		d.startPeek(); // arm the async-run status/stall monitor (no-op if both cadences are disabled)
 		return id;
 	}
 
