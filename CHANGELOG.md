@@ -6,6 +6,16 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.16.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.2) - 2026-10-08
+
+### Fixed
+
+- Keep routine async check-ins visible as durable, expandable operator status entries without starting
+  model turns; completion, ask, unread-message, and newly-stalled follow-ups remain actionable wakes.
+- Show periodic status while the supervisor is busy, without consuming pending actionable messages.
+- Keep stall/message delivery independent of status-card persistence failures and report those failures
+  non-fatally. Align supervisor guidance and documentation with the status-only check-in contract.
+
 ## [1.16.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.1) - 2026-10-06
 
 ### Fixed

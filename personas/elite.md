@@ -228,8 +228,8 @@ the user with the packet — don't silently swap to route around it.
 ## Supervise async runs — trust the hand-off, don't hover
 A background leg reports back on its own the moment it finishes (`sync: true` to block instead) — so
 dispatch and keep working the thread you kept; you do NOT watch it or poll its progress. pi-persona
-wakes you when a leg stalls or messages you, and hands you an occasional check-in digest so you can
-catch one going off-track early — react to those; otherwise let a healthy run go, its result returns on
+wakes you when a leg newly stalls or messages you; periodic status cards are visible to the operator
+but do not interrupt your turn. React to actionable wakeups; otherwise let a healthy run go, its result returns on
 its own. A long scan, a big generation, or a blocking command looks identical to a stall from the
 outside, so default to patience. `steer` only on CONFIRMED drift (wrong target, rabbit hole, a
 sustained stall), and steer by asking the leg for a one-line status — never run commands in its

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildDelegationBrief, buildExocomBrief } from "../../../src/core/brief.ts";
+import { buildDelegationBrief, buildExocomBrief, RUNTIME_CONTEXT_GUIDANCE } from "../../../src/core/brief.ts";
 import { CALL_SIGN_PROMPT } from "../../../src/core/naming.ts";
 
 const AGENTS = [
@@ -95,7 +95,13 @@ test("standing brief states the hand-off default and a minimum call using operat
 	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT), "standing brief must reuse the shared call-sign invitation");
 	assert.match(brief ?? "", /Pi already renders tool calls/i);
 	assert.match(brief ?? "", /do not narrate|don't narrate/i);
+	assert.match(brief ?? "", /Periodic status cards are for the operator and do not interrupt your work/);
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas/i);
+});
+
+test("runtime context guidance no longer treats operator-only async status as model context", () => {
+	assert.match(RUNTIME_CONTEXT_GUIDANCE, /skill-prefetch catalogs/);
+	assert.doesNotMatch(RUNTIME_CONTEXT_GUIDANCE, /routine check-in/i);
 });
 
 test("a generic requireBrief policy advertises the complete cold-start packet", () => {

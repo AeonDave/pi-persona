@@ -340,16 +340,15 @@ test("buildPeekAlert renders only stalled legs, patience-first, and never the fu
 	assert.match(two, /run-3/);
 });
 
-test("buildCheckIn frames the full digest as an occasional glance and keeps the stall markers", () => {
-	// A leg stalled past the window must still read 'possibly stuck' in the routine check-in — this dies
-	// if buildCheckIn stops forwarding {now, stallMs} into the digest (the off-track glance would go blind).
+test("buildCheckIn labels routine async status and contains no instructions for the model", () => {
+	// A leg stalled past the window must still read 'possibly stuck' in the routine status card — this dies
+	// if buildCheckIn stops forwarding {now, stallMs} into the digest (the operator would lose the marker).
 	const out = buildCheckIn([runningRun(0, { progress: { output: "x", turns: 3, tokens: 500 } })], { now: 90_000, stallMs: 90_000 });
+	assert.match(out, /^Async activity · routine check-in/);
 	assert.match(out, /Async runs:/, "carries the full progress digest");
 	assert.match(out, /possibly stuck/, "forwards the stall window so a wedge shows on the glance");
-	assert.match(out, /Routine check-in/);
-	assert.match(out, /off-track/);
-	assert.match(out, /internal status update, not a new task/i);
-	assert.match(out, /don't reply just to acknowledge unchanged progress/i);
+	assert.match(out, /cumulative input \+ output tokens/i);
+	assert.doesNotMatch(out, /don't reply|continue your current|step in only/i, "status text is for the operator entry, not the model");
 });
 
 test("launch passes the run id to the thunk (so the launcher can key a steer handle by it)", async () => {

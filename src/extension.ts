@@ -181,6 +181,10 @@ interface NudgeEntry {
 	content: string;
 }
 
+interface CheckInEntry {
+	content: string;
+}
+
 /**
  * Keep the immediate operator-facing settlement toast and the semantic completion delivery on one
  * path. A supervisor-requested abort is terminal, but it is not an execution error: the tracker
@@ -335,8 +339,24 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const hint = hasMore ? `\n${theme.fg("dim", expandDetailHint())}` : "";
 		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 	});
+	pi.registerEntryRenderer("pi-persona-status", (entry, { expanded }, theme) => {
+		const data = entry.data as CheckInEntry;
+		const full = sanitizeTerminalText(data.content || "Async activity · routine check-in");
+		const title = theme.fg("accent", theme.bold("pi-persona · async status"));
+		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
+		// The entry title already labels this as async status. Spend the compact preview on the
+		// aggregate and first run row so the operator sees the selected alias and usage label.
+		const digestLines = full.split("\n").slice(1).filter((line) => line.trim().length > 0);
+		const preview = compactVisibleText(digestLines.slice(0, 2).join("\n") || full, { maxLines: 2, maxLineChars: 140 });
+		const hasMore = preview.truncated || digestLines.length > 2;
+		const hint = hasMore ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+	});
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
+	};
+	const appendCheckInEntry = (content: string): void => {
+		pi.appendEntry("pi-persona-status", { content } satisfies CheckInEntry);
 	};
 	const appendCommandResult = (
 		label: string,
@@ -1176,15 +1196,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		});
 	});
 
-	// Peek watchdog (the timed supervisor wakeup, on by default — PI_PERSONA_PEEK_MS=0 opts out): while
-	// async children run, a tick checks their progress but stays SILENT unless there is something to act
-	// on, so a healthy background run never interrupts the supervisor. It wakes on two signals: a leg
-	// that NEWLY looks stalled or an unread message (fast, PI_PERSONA_PEEK_MS granularity), and a routine
-	// direction check-in (slow, PI_PERSONA_CHECKIN_MS) to catch a leg going off-track. Bounded: unref'd,
-	// self-stops when no runs remain.
+	// Async-run watchdog: the fast PI_PERSONA_PEEK_MS cadence wakes the supervisor only for a newly-stalled
+	// leg or unread message. The slower PI_PERSONA_CHECKIN_MS cadence appends a durable operator-only status
+	// card; it does not start a model turn. Bounded: unref'd, self-stops when no runs remain.
 	let peekTimer: ReturnType<typeof setInterval> | undefined;
-	// When the supervisor was last woken about a run (a stall alert, a message, or a routine check-in).
-	// Gates the slow check-in cadence so it counts from the last time we actually surfaced something.
+	// Last time progress status was surfaced (a new stall alert or routine card), for the slow cadence.
 	let lastPeekAt = 0;
 	function stopPeek(): void {
 		if (peekTimer) {
@@ -1193,9 +1209,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	}
 	function startPeek(): void {
-		// The two signals opt out independently: the fast stall/message wakeup follows PI_PERSONA_PEEK_MS,
-		// the routine check-in follows PI_PERSONA_CHECKIN_MS. The carrier timer runs while EITHER is on and
-		// ticks at the faster of the two (a disabled one is Infinity, so it never drives).
+		// Fast wakeups and routine cards opt out independently. The carrier timer runs while EITHER is on
+		// and ticks at the faster of the two (a disabled one is Infinity, so it never drives).
 		const fastMs = config.peekEveryMs > 0 ? config.peekEveryMs : Number.POSITIVE_INFINITY;
 		const checkMs = config.checkInEveryMs > 0 ? config.checkInEveryMs : Number.POSITIVE_INFINITY;
 		const tickMs = Math.min(fastMs, checkMs);
@@ -1207,31 +1222,42 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				stopPeek();
 				return;
 			}
-			// Only peek a free, unqueued supervisor: an idle delivery triggers a clean turn, while a
-			// busy one would pile up as a sticky follow-up. Skipping is safe — the next tick re-surfaces.
-			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true) || lastCtx?.hasPendingMessages?.() === true) return;
-			// The peek is NOT a poll. Two signals, two cadences: (1) the FAST wakeup (PI_PERSONA_PEEK_MS) —
-			// a leg that NEWLY crossed the stall window, or an unread sub-agent message — the "is it dead or
-			// wedged" check; (2) the SLOW routine check-in (PI_PERSONA_CHECKIN_MS) — a progress digest that
-			// catches a leg going off-track (not stalled, just wrong) early. A healthy, quiet run between
-			// check-ins produces no wakeup. Completions always arrive on their own (completionNotifier), and
-			// the full status view stays on demand via `/peek`.
 			const now = Date.now();
+			const dueCheckIn = config.checkInEveryMs > 0 && now - lastPeekAt >= config.checkInEveryMs;
+			// Routine status is durable operator history, not a model notification: append it on cadence even
+			// while a turn is busy or human input is queued. This keeps visibility independent of wake eligibility.
+			if (dueCheckIn) {
+				lastPeekAt = now;
+				try {
+					appendCheckInEntry(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingAsyncRunIds() }));
+				} catch (error) {
+					const detail = compactInlineText(error instanceof Error ? error.message : String(error), { maxChars: 120 });
+					const warning = `pi-persona: could not append async status entry${detail ? ` (${detail})` : ""}`;
+					let shown = false;
+					if (lastCtx?.hasUI) {
+						try { lastCtx.ui.notify(warning, "warning"); shown = true; } catch { /* session may be tearing down */ }
+					}
+					if (!shown || process.env.PI_PERSONA_DEBUG) {
+						try { process.stderr.write(`[pi-persona] ${warning}\n`); } catch { /* diagnostics must not block an actionable wake */ }
+					}
+				}
+			}
+			// Poll actionable model wakes only for a free supervisor. A busy/queued session keeps messages
+			// unread and leaves stall state untouched for the next tick, rather than stacking sticky follow-ups.
+			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true) || lastCtx?.hasPendingMessages?.() === true) return;
+			// The watchdog is not a model polling loop: the FAST path wakes on newly-stalled legs or unread
+			// progress messages. Completions arrive separately through completionNotifier; `/peek` remains on demand.
 			const fast = config.peekEveryMs > 0;
 			const waitingRuns = waitingAsyncRunIds();
 			const stuck = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS, waitingRuns) : [];
 			// Drain only progress messages; blocking asks (expectsReply) are surfaced by the intercom
 			// notifier and left for the `intercom inbox` tool — so peek never double-shows them.
 			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
-			const dueCheckIn = config.checkInEveryMs > 0 && now - lastPeekAt >= config.checkInEveryMs;
-			if (stuck.length === 0 && unread.length === 0 && !dueCheckIn) return; // healthy + quiet ⇒ stay silent
+			if (stuck.length === 0 && unread.length === 0) return; // healthy + quiet ⇒ stay silent
 			const parts: string[] = [];
 			if (stuck.length > 0) parts.push(buildPeekAlert(stuck, { now }));
-			else if (dueCheckIn) parts.push(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingRuns }));
 			if (unread.length > 0) parts.push(`📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}`);
-			// Reset the check-in cadence only on a PROGRESS surfacing (a stall alert or a check-in), NOT on a
-			// message-only wake — else a chatty child would postpone the routine off-track glance forever.
-			if (stuck.length > 0 || dueCheckIn) lastPeekAt = now;
+			if (stuck.length > 0) lastPeekAt = now; // message-only wakes do not postpone the routine status cadence
 			try {
 				sendPersonaFollowUp(pi, `[pi-persona] ${parts.join("\n\n")}`);
 			} catch {
