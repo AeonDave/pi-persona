@@ -137,6 +137,80 @@ test("child adapter carries an agent tools deny block to the spawned pi process"
 	assert.ok(seen.includes("--exclude-tools") && seen.includes("edit"));
 });
 
+test("child adapter rejects a modifier-shaped per-agent tool allowlist before invocation or spawn", async () => {
+	let invoked = false;
+	const restricted = (name: string): AgentConfig | undefined =>
+		name === "research"
+			? { name, model: "stub/m", tools: ["-bash"], systemPrompt: "research", source: "x" }
+			: undefined;
+	const result = await makeEngine({
+		resolveAgent: restricted,
+		childOptions: {
+			resolveInvocation: (args) => {
+				invoked = true;
+				return resolveFake(args);
+			},
+		},
+	}).run({ agent: "research", task: "inspect" });
+
+	assert.equal(result.ok, false);
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /unsupported tool modifier.*-bash/);
+	assert.match(result.error ?? "", /excludeTools/);
+	assert.equal(invoked, false, "invalid selectors must fail before child invocation or spawn");
+});
+
+test("child adapter validates spec.tools override before invocation and keeps normal allowlists", async () => {
+	let invoked = false;
+	const engine = makeEngine({
+		resolveAgent: (name) => name === "research"
+			? { name, model: "stub/m", tools: ["read"], systemPrompt: "research", source: "x" }
+			: undefined,
+		childOptions: {
+			resolveInvocation: (args) => {
+				invoked = true;
+				return resolveFake(args);
+			},
+		},
+	});
+	const invalid = await engine.run({ agent: "research", task: "inspect", tools: [" +bash "] });
+	assert.equal(invalid.ok, false);
+	assert.equal(invalid.failureKind, "contract");
+	assert.match(invalid.error ?? "", /unsupported tool modifier.*\+bash/);
+	assert.equal(invoked, false, "a dynamic override must be checked before invoking Pi");
+
+	const seen: string[] = [];
+	const validEngine = makeEngine({
+		resolveAgent: (name) => name === "research"
+			? { name, model: "stub/m", systemPrompt: "research", source: "x" }
+			: undefined,
+		childOptions: {
+			resolveInvocation: (args) => {
+				seen.push(...args);
+				return resolveFake(args);
+			},
+		},
+	});
+	const glob = await validEngine.run({ agent: "research", task: "inspect", tools: ["read*", "grep*"] });
+	assert.equal(glob.ok, true, "ordinary Pi-persona allowlist patterns remain valid");
+	const toolsFlag = seen.indexOf("--tools");
+	assert.ok(toolsFlag >= 0);
+	assert.equal(seen[toolsFlag + 1], "read*,grep*");
+	const emptySeen: string[] = [];
+	const emptyEngine = makeEngine({
+		resolveAgent,
+		childOptions: {
+			resolveInvocation: (args) => {
+				emptySeen.push(...args);
+				return resolveFake(args);
+			},
+		},
+	});
+	const empty = await emptyEngine.run({ agent: "a", task: "inspect", tools: [] });
+	assert.equal(empty.ok, true, "an explicit empty allowlist remains valid");
+	assert.ok(emptySeen.includes("--no-tools"));
+});
+
 test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
 	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, timeoutMs: 5_000, killGraceMs: 50 } });

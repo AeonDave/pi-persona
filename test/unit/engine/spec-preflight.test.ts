@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { installedHint, unknownAgentFailure, unknownContractFailure } from "../../../src/engine/spec-preflight.ts";
+import { installedHint, toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "../../../src/engine/spec-preflight.ts";
 
 test("installedHint is empty when nothing is installed", () => {
 	assert.equal(installedHint("agents", []), "");
@@ -31,4 +31,18 @@ test("unknownContractFailure names the installed contracts so the caller can sel
 	assert.equal(r.failureKind, "contract");
 	assert.equal(r.agent, "operator");
 	assert.equal(r.error, '[operator] output contract "Report con stacktrace" not found — installed contracts: default, finding');
+});
+
+test("toolModifierFailure rejects Pi +/− selectors but preserves normal allowlists and empty grants", () => {
+	assert.equal(toolModifierFailure("operator", undefined), undefined);
+	assert.equal(toolModifierFailure("operator", []), undefined);
+	assert.equal(toolModifierFailure("operator", ["read", "mcp_*", "grep*"]), undefined);
+
+	for (const selector of ["-bash", "+edit", "  -bash "]) {
+		const result = toolModifierFailure("operator", ["read", selector]);
+		assert.equal(result?.ok, false);
+		assert.equal(result?.failureKind, "contract");
+		assert.match(result?.error ?? "", /unsupported tool modifier/);
+		assert.match(result?.error ?? "", /excludeTools/);
+	}
 });

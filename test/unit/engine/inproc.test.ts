@@ -174,6 +174,65 @@ test("inproc engine enforces an agent's denied tools alongside its allowlist", a
 	assert.deepEqual(spy.opts?.excludeTools, ["edit"]);
 });
 
+test("inproc engine rejects a modifier-shaped per-agent tool allowlist before creating a session", async () => {
+	let created = false;
+	const engine = makeInProcessEngine({
+		resolveAgent: (name) => name === "restricted"
+			? { name, model: "stub/m", tools: ["-bash"], systemPrompt: "bounded", source: "x" }
+			: undefined,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => {
+			created = true;
+			return fakeSession([msgEnd("unexpected")]);
+		},
+	});
+
+	const result = await engine.run({ agent: "restricted", task: "inspect" });
+	assert.equal(result.ok, false);
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /unsupported tool modifier.*-bash/);
+	assert.match(result.error ?? "", /excludeTools/);
+	assert.equal(created, false, "invalid tool selectors must fail before session construction");
+});
+
+test("inproc engine validates spec.tools override and allows normal globs/empty lists", async () => {
+	let created = false;
+	const engine = makeInProcessEngine({
+		resolveAgent: (name) => name === "restricted"
+			? { name, model: "stub/m", tools: ["read"], systemPrompt: "bounded", source: "x" }
+			: undefined,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => {
+			created = true;
+			return fakeSession([msgEnd("unexpected")]);
+		},
+	});
+
+	const invalid = await engine.run({ agent: "restricted", task: "inspect", tools: [" +bash "] });
+	assert.equal(invalid.ok, false);
+	assert.equal(invalid.failureKind, "contract");
+	assert.match(invalid.error ?? "", /unsupported tool modifier.*\+bash/);
+	assert.equal(created, false, "the dynamic override is checked before session construction");
+
+	const validSpy: Spy = {};
+	const validEngine = makeInProcessEngine({
+		resolveAgent: (name) => name === "restricted"
+			? { name, model: "stub/m", systemPrompt: "bounded", source: "x" }
+			: undefined,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("ok")], validSpy),
+	});
+	const glob = await validEngine.run({ agent: "restricted", task: "inspect", tools: ["read*", "grep*"] });
+	assert.equal(glob.ok, true, "ordinary Pi-persona allowlist patterns remain valid");
+	assert.deepEqual(validSpy.opts?.tools, ["read*", "grep*"]);
+	const empty = await validEngine.run({ agent: "restricted", task: "inspect", tools: [] });
+	assert.equal(empty.ok, true, "an explicit empty allowlist remains valid");
+	assert.deepEqual(validSpy.opts?.tools, []);
+});
+
 test("inproc engine preserves an agent's explicit empty tool allowlist", async () => {
 	const spy: Spy = {};
 	const engine = makeInProcessEngine({

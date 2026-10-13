@@ -6,6 +6,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.16.3](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.3) - 2026-10-13
+
+### Fixed
+
+- Reject Pi `+name`/`-name` tool modifiers in agent and per-run allowlists before either engine
+  starts. Those selectors are literal allowlist entries in pi-persona; Pi 1.2 instead applies them
+  to its default tools. Use `deny` or `excludeTools` for denials.
+
 ## [1.16.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.2) - 2026-10-08
 
 ### Fixed

@@ -18,7 +18,7 @@ import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./chi
 import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
-import { unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
+import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
 import type { ToolEvent } from "./stream.ts";
 
 /** The engine-side face of the cross-process broker (spec B3/B4/B7) — a child-engine
@@ -113,6 +113,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
+			const tools = spec.tools ?? cfg.tools;
+			const invalidTools = toolModifierFailure(spec.agent, tools);
+			if (invalidTools) return invalidTools;
 
 			// Resolved (and pinned) up front: the SAME def both instructs the member and
 			// validates its output — an instruction/validation drift is impossible. A named
@@ -132,7 +135,6 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// a child without it defaults to "adaptive", which some models reject.
 			if (model && deps.childThinking && !model.includes(":")) model = `${model}:${deps.childThinking}`;
 			if (model) childSpec.model = model;
-			const tools = spec.tools ?? cfg.tools;
 			if (tools !== undefined) childSpec.tools = tools;
 			if (cfg.excludeTools && cfg.excludeTools.length > 0) childSpec.excludeTools = cfg.excludeTools;
 			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
