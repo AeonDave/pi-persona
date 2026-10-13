@@ -189,9 +189,11 @@ files are seed sources. A fresh install has no installed personas until `/person
 | Preset | `presets/*.preset.json` | reusable council strategy, roster, and parameter bundle |
 
 `tools` accepts an allowlist such as `[read, grep]`, an `allow`/`deny` object, or `[]` for no tools.
-Omit it to inherit the session tool set. `model`, `isolation: worktree`, `mcp: true`, and `purpose`
-are optional agent metadata. The body is the agent prompt. Inline roster members specialise one
-agent with a role, model, or skills without requiring another agent file.
+Entries are plain tool names or `*` patterns; Pi's `+name`/`-name` default-tool modifier
+syntax is not an allowlist and is rejected. Use the `deny` field to remove tools. Omit `tools` to
+inherit the session tool set. `model`, `isolation: worktree`,
+`mcp: true`, and `purpose` are optional agent metadata. The body is the agent prompt. Inline roster
+members specialise one agent with a role, model, or skills without requiring another agent file.
 
 ### Multi-agent quick start
 

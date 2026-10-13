@@ -35,7 +35,7 @@ import type { AgentResult } from "../orchestration/types.ts";
 import { looksLikeProviderError } from "./errors.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
-import { unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
+import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
 
 /** The minimal slice of Pi's AgentSession the engine drives — also the test seam. */
@@ -315,6 +315,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
+			const tools = spec.tools ?? cfg.tools;
+			const invalidTools = toolModifierFailure(spec.agent, tools);
+			if (invalidTools) return invalidTools;
 			// A requested contract is a runtime guard, not merely prompt decoration. Resolve it
 			// before model/session construction so a missing name can never run unconstrained.
 			const requestedContract = spec.outputContract?.trim();
@@ -346,7 +349,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const rm = model as { provider?: string; id?: string };
 			const resolvedRef = rm.provider && rm.id ? `${rm.provider}/${rm.id}` : ref;
 			const thinkingLevel = isThinkingLevel(deps.childThinking) ? deps.childThinking : undefined;
-			const tools = spec.tools ?? cfg.tools;
 			const excludeTools = cfg.excludeTools;
 
 			// Diagnostic tag: which agent + which model ref + whether it was dynamically

@@ -31,3 +31,16 @@ export function unknownAgentFailure(agent: string, installed: string[]): AgentRe
 export function unknownContractFailure(agent: string, requested: string, installed: string[]): AgentResult {
 	return failure(agent, `[${agent}] output contract "${requested}" not found${installedHint("contracts", installed)}`, "contract");
 }
+
+/** Pi's SDK treats leading `+`/`-` entries in `tools` as default-tool modifiers, not as
+ *  literal allowlist entries. AgentRunSpec.tools and agent frontmatter use this field as an
+ *  allowlist, so reject that syntax before either engine reaches Pi. Use excludeTools for denies. */
+export function toolModifierFailure(agent: string, tools: readonly string[] | undefined): AgentResult | undefined {
+	const modifier = tools?.find((selector) => /^[+-]/.test(selector.trim()));
+	if (modifier === undefined) return undefined;
+	return failure(
+		agent,
+		`[${agent}] unsupported tool modifier "${modifier.trim()}" in tools allowlist; use plain tool names/patterns or excludeTools for denials`,
+		"contract",
+	);
+}
