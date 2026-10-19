@@ -108,7 +108,7 @@ import {
 	pendingParticipants,
 	type ModelParticipant,
 } from "./persona/model-participants.ts";
-import { expandCouncilPreset, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
+import { expandCouncilPreset, resolveCouncilInvocation, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
 import { bundledSpinePath, bundledWorkerSpinePath, readSpineFile, resolveSpine, type SpineSources } from "./persona/spine.ts";
 import { readLastPersona, writeLastPersona } from "./persona/state.ts";
 import { type AgentKind as TelemetryAgentKind, type AgentStatus as TelemetryAgentStatus } from "./telemetry/contract.ts";
@@ -549,7 +549,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// rather than to a "subagent" literal that names nobody. Bounded; cleared on teardown.
 	const telemetryAskSenders = new Map<string, string>();
 	const MAX_TRACKED_ASK_SENDERS = 256;
-	type PendingExocomTelemetry = { id: string; sessionId: string; target: string; size: number };
+	type PendingExocomTelemetry = { id: string; sessionId: string; target: string; size: number; replyTo?: string };
 	const telemetryExocomPending = new Map<string, PendingExocomTelemetry[]>();
 	// …and the same for intercom: both channels open at tool_call and close at tool_result, so both are
 	// left hanging when Pi resolves a call as "immediate" and never reaches a result.
@@ -1013,9 +1013,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			try {
 				const all = lastCtx?.modelRegistry.getAll() ?? [];
 				const m = all.find((x) => x.provider === handle.provider && x.id === handle.id);
-				if (m) await pi.setModel(m);
+				return m ? await pi.setModel(m) : false;
 			} catch {
-				/* keep current */
+				return false; // keep current, but let the controller report that the switch failed
 			}
 		},
 		setStatus: (text) => {
@@ -1383,16 +1383,56 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	 * authenticated model to choose between.
 	 */
 	async function ensurePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[]): Promise<void> {
-		const persona = controller.activePersona?.name;
-		if (!persona || !ctx.hasUI) return;
-		const missing = pendingParticipants(participants, { prompted: promptedFor(persona, participants) });
+		const scope = modelSelectionScope(ctx);
+		if (!scope || !ctx.hasUI) return;
+		const missing = pendingParticipants(participants, { prompted: promptedFor(scope.persona, participants) });
 		if (missing.length === 0) return;
 		const available = configuredModels(ctx);
-		if (available.length < 2) return; // can't diversify with a single configured model
+		if (available.length < 2) return; // automatic setup cannot diversify a single model
+		const chosen = await choosePersonaModels(ctx, missing, available, scope);
+		if (chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
+	}
+
+	type ModelSelectionScope = { persona: string; isCurrent(): boolean };
+	function modelSelectionScope(ctx: ExtensionContext): ModelSelectionScope | undefined {
+		const active = controller.activePersona;
+		if (!active) return undefined;
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		return { persona: active.name, isCurrent: () => !disposed && controller.activePersona === active &&
+			(sessionId === undefined || lastCtx?.sessionManager?.getSessionId?.() === sessionId) };
+	}
+
+	/** An explicit user edit is allowed to replace defaults, unlike automatic first-run setup. */
+	async function editPersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], scope: ModelSelectionScope): Promise<void> {
+		const editable = participants.filter((p) => p.source !== "inline");
+		if (editable.length === 0) {
+			ctx.ui.notify("persona models: no editable council participants (inline model pins are unchanged).", "info");
+			return;
+		}
+		// Trust fresh availability here, not the discovery union with provisional catalog entries.
+		const available = ctx.modelRegistry.getAvailable();
+		if (available.length === 0) {
+			ctx.ui.notify("persona models: no available models. Use /login, then retry /persona models.", "warning");
+			return;
+		}
+		const chosen = await choosePersonaModels(ctx, editable, available, scope);
+		if (!chosen) return;
+		if (Object.keys(chosen).length === 0) {
+			ctx.ui.notify("persona models: no model assignments changed; previous choices kept.", "info");
+			return;
+		}
+		if (savePersonaModels(ctx, scope.persona, chosen)) {
+			ctx.ui.notify(`persona models: updated ${Object.keys(chosen).length} model assignment(s) for "${scope.persona}"; applies to future runs.`, "info");
+		}
+	}
+
+	/** UI adapter shared by setup and editing; callers own eligibility and availability policy. */
+	async function choosePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], available: Array<{ provider: string; id: string }>, scope: ModelSelectionScope): Promise<Record<string, string> | undefined> {
+		const { persona } = scope;
 		const options = orderModelRefs(available.map((m) => `${m.provider}/${m.id}`), ctx.model?.provider);
 		const chosen: Record<string, string> = {};
 		try {
-			for (const p of missing) {
+			for (const p of participants) {
 				// Recorded BEFORE the prompt: a dismissal (or a picker that dies) must not be retried
 				// for this session, exactly like an answer is not asked twice.
 				promptedParticipants.add(`${persona}\0${p.key}`);
@@ -1403,7 +1443,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const role = p.param ? ` · ${p.param}` : "";
 				// A participant label carries a role prompt (free prose from a team file or a
 				// caller) — sanitised here so a title can never repaint the TUI or forge a row.
-				const title = compactInlineText(`Model for "${p.label}"${purpose ? ` (${purpose})` : ""}${role}  ·  ${persona}`, { maxChars: 120 });
+				const current = p.assigned && p.model ? ` · current: ${p.model}` : "";
+				const title = compactInlineText(`Model for "${p.label}"${purpose ? ` (${purpose})` : ""}${role}  ·  ${persona}${current}`, { maxChars: 200 });
 				// In the TUI: a searchable picker (type to filter) whose viewport follows the
 				// selection — the built-in select can't scroll a hundreds-long provider list
 				// usefully. Outside the TUI (RPC), fall back to the built-in select.
@@ -1415,12 +1456,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 								{ overlay: true },
 							)
 						: await ctx.ui.select(title, options);
-				if (pick) chosen[p.key] = pick;
+				if (!scope.isCurrent()) {
+					ctx.ui.notify("persona models: persona or session changed; no assignments changed.", "warning");
+					return;
+				}
+				if (pick && options.includes(pick)) chosen[p.key] = pick;
 			}
 		} catch {
 			/* dismissed / no UI → fall back to the default model */
 		}
-		if (Object.keys(chosen).length === 0) return;
+		if (!scope.isCurrent()) {
+			ctx.ui.notify("persona models: persona or session changed; no assignments changed.", "warning");
+			return;
+		}
+		return chosen;
+	}
+
+	function savePersonaModels(ctx: ExtensionContext, persona: string, chosen: Record<string, string>): boolean {
 		// The picks are live for this session either way (the in-memory store is updated first), so
 		// a save failure costs only PERSISTENCE — but silently swallowing it would re-prompt on every
 		// future session with no hint that the assignment never landed.
@@ -1432,7 +1484,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				`pi-persona: could not save the model assignment for "${persona}" (${err instanceof Error ? err.message : String(err)}) — it applies to this session only.`,
 				"error",
 			);
+			return false;
 		}
+		return true;
 	}
 
 	/** A core's declared verticalization ("Propulsore", "Critico") — the lens it argues from, so a
@@ -2139,10 +2193,52 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	// ── /persona ─────────────────────────────────────────────────────────────────
 	pi.registerCommand("persona", {
-		description: "Switch the active supervisor persona: /persona [name|off|list|reload|seed|restore]",
+		description: "Switch persona or edit council models: /persona [name|off|list|reload|seed|restore|models [council-persona]]",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			const arg = args.trim();
+			if (arg === "models" || arg.startsWith("models ")) {
+				const caller = controller.activePersona;
+				const scope = modelSelectionScope(ctx);
+				if (!caller || !scope) {
+					ctx.ui.notify("persona models: activate a persona first with /persona <name>.", "warning");
+					return;
+				}
+				if (!ctx.hasUI) {
+					ctx.ui.notify("persona models: an interactive TUI or RPC UI is required to select council models; no assignments changed.", "warning");
+					return;
+				}
+				const profile = arg.slice("models".length).trim();
+				const resolved = resolveCouncilInvocation(personas, caller, profile ? { persona: profile } : {});
+				if (!resolved.ok) {
+					ctx.ui.notify(`persona models: ${resolved.error}`, "error");
+					return;
+				}
+				try {
+					const { strategy, roster, members, params } = resolved.value;
+					const panel = resolveOrchestrationMembers({ roster, ...(members ? { members } : {}) }, teams);
+					const deadline = AbortSignal.timeout(20_000);
+					const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
+					const result = await ctx.modelRegistry.refresh?.({ signal });
+					if (!scope.isCurrent()) {
+						ctx.ui.notify("persona models: persona or session changed; no assignments changed.", "warning");
+						return;
+					}
+					if (signal.aborted || result?.aborted) {
+						ctx.ui.notify("persona models: refresh cancelled or timed out; previous assignments kept.", "warning");
+						return;
+					}
+					if (result?.errors.size) {
+						const providers = compactInlineText([...result.errors.keys()].join(", "), { maxChars: 160 });
+						ctx.ui.notify(`persona models: refresh incomplete for ${providers}; previous assignments kept. Check provider configuration and retry.`, "warning");
+						return;
+					}
+					await editPersonaModels(ctx, runParticipants(ctx, { strategy, members: panel, params }), scope);
+				} catch (err) {
+					ctx.ui.notify(`persona models: refresh failed (${err instanceof Error ? err.message : String(err)}); previous assignments kept.`, "error");
+				}
+				return;
+			}
 			if (arg === "off" || arg === "none") {
 				await controller.deactivate();
 				persist(undefined);

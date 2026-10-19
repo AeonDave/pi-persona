@@ -8,6 +8,7 @@ test("recognizes provider-side rejections/outages", () => {
 		"Error: 429 rate limit exceeded",
 		"Request failed: 503 Service Unavailable",
 		"invalid_api_key provided",
+		"No API key found for openai-codex",
 		"401 Unauthorized",
 		"The model is overloaded, please try again later",
 		"model_not_supported: claude-x",
@@ -24,6 +25,8 @@ test("does not brand agent-side failures as provider errors (a wrong reroute bur
 	for (const text of [
 		"agent aborted",
 		"agent timed out — no output for 300000ms",
+		"No API key found",
+		"missing API key in agent configuration",
 		"tool execution failed: permission denied",
 		"contract default failed: missing required field: result",
 		"unknown agent (not found in registry)",

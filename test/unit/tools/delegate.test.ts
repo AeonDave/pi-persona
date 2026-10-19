@@ -162,6 +162,21 @@ test("runDelegate single mode runs one named agent and returns its output", asyn
 	assert.match(r.text, /out:explore/);
 });
 
+test("runDelegate single mode emits the terminal view after a successful run", async () => {
+	const progress: DelegateView[][] = [];
+	const engine = engineThat((s) => ({ agent: s.agent, output: "FAUX_HOST_MODEL_OK", usage: usage(), ok: true }));
+	await runDelegate(
+		{ agent: "worker", task: "inspect", name: "Flow-identity-worker" },
+		engine,
+		undefined,
+		(views) => progress.push(views),
+	);
+	assert.deepEqual(progress.map((views) => views[0]?.running), [true, false]);
+	assert.equal(progress[1]?.[0]?.ok, true);
+	assert.equal(progress[1]?.[0]?.label, "Flow-identity-worker");
+	assert.equal(progress[1]?.[0]?.output, "FAUX_HOST_MODEL_OK");
+});
+
 test("runDelegate parallel mode runs all tasks (bounded) and aggregates", async () => {
 	const seen: string[] = [];
 	const engine = engineThat((s) => {

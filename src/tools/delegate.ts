@@ -654,7 +654,9 @@ export async function runDelegate(
 			(steer) => onLegSteerable?.(0, steer),
 		);
 		const text = r.ok ? r.output || "(no output)" : `Agent "${params.agent}" failed: ${r.error ?? "(no detail)"}`;
-		return { text, results: [r], views: [viewOf(params.agent, label, r)], ok: r.ok };
+		const terminalView = viewOf(params.agent, label, r);
+		onProgress?.([{ ...terminalView }]);
+		return { text, results: [r], views: [terminalView], ok: r.ok };
 	}
 
 	return { text: "delegate: provide either { agent, task } or { tasks: [{ agent, task }, ...] }", results: [], views: [], ok: false };

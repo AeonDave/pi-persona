@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { ExocomPeerRejection } from "../../../src/exocom/plane.ts";
-import { registerExocomTools } from "../../../src/tools/exocom.ts";
+import { MAX_BROADCAST_DETAIL_ITEMS, registerExocomTools } from "../../../src/tools/exocom.ts";
 
 initTheme("dark");
 
@@ -136,11 +136,62 @@ test("exocom_send target:'*' broadcasts to every peer, best-effort (one failure 
 	const r = await m.tools.get("exocom_send").execute("c", { target: "*", message: "hi all" }, undefined, undefined, {});
 	assert.deepEqual(sent.sort(), ["dev@0123456789abcdef01234567", "elite@89abcdef0123456789abcdef"], "send was attempted for every peer");
 	assert.deepEqual((r.details as any).msg_ids, ["to-dev@0123456789abcdef01234567"]);
+	assert.deepEqual((r.details as any).sent, [{ target: "dev@0123456789abcdef01234567", msg_id: "to-dev@0123456789abcdef01234567" }]);
+	assert.equal((r.details as any).omittedMsgIds, 0);
 	assert.equal((r.details as any).failed.length, 1);
 	assert.equal((r.details as any).failed[0].target, "elite@89abcdef0123456789abcdef");
 	assert.match(r.content[0].text, /2 peers/);
 	assert.match(r.content[0].text, /queued 1\/2 peers/);
 	assert.doesNotMatch(r.content[0].text, /do not poll exocom_list/);
+});
+
+test("exocom_send bounds target-correlated broadcast receipts and retains the omission count", async () => {
+	const m = mockPi();
+	const peers = Array.from({ length: MAX_BROADCAST_DETAIL_ITEMS + 1 }, (_, index) => ({
+		name: `peer-${index}`,
+		persona: "dev",
+		model: "m",
+		context_pct: 0,
+		purpose: "",
+		displayName: `peer-${index}`,
+		target: `peer-${index}@${String(index).padStart(24, "0")}`,
+	}));
+	registerExocomTools(m.pi, () => stubPlane({
+		listPeers: () => peers,
+		send: async (target: string) => ({ msg_id: `wire-${target}` }),
+	}) as never);
+	const result = await m.tools.get("exocom_send").execute("c", { target: "*", message: "hello peers" }, undefined, undefined, {});
+	const details = result.details as any;
+	assert.equal(details.sent.length, MAX_BROADCAST_DETAIL_ITEMS);
+	assert.equal(details.sent[0].target, peers[0]!.target);
+	assert.equal(details.sent[0].msg_id, `wire-${peers[0]!.target}`);
+	assert.equal(details.msg_ids.length, MAX_BROADCAST_DETAIL_ITEMS, "the existing id sample remains available");
+	assert.equal(details.omittedMsgIds, 1, "the existing exact omission count also bounds target receipts");
+});
+
+test("exocom_send omits invalid broadcast receipts instead of truncating exact correlation fields", async () => {
+	const m = mockPi();
+	const validTarget = "peer-ok@0123456789abcdef01234567";
+	const longTarget = `peer-${"x".repeat(100)}@0123456789abcdef01234567`;
+	const badMarkupTarget = "peer<unsafe>@0123456789abcdef01234567";
+	const peers = [validTarget, longTarget, badMarkupTarget].map((target, index) => ({
+		name: `peer-${index}`,
+		persona: "dev",
+		model: "m",
+		context_pct: 0,
+		purpose: "",
+		displayName: `peer-${index}`,
+		target,
+	}));
+	registerExocomTools(m.pi, () => stubPlane({
+		listPeers: () => peers,
+		send: async (target: string) => ({ msg_id: target === validTarget ? "wire-ok" : "w".repeat(129) }),
+	}) as never);
+	const result = await m.tools.get("exocom_send").execute("c", { target: "*", message: "hello peers" }, undefined, undefined, {});
+	const details = result.details as any;
+	assert.deepEqual(details.sent, [{ target: validTarget, msg_id: "wire-ok" }], "overlong or unsafe fields are omitted, never normalized into a different route");
+	assert.equal(details.omittedMsgIds, 2, "invalid receipts are included in the omission count");
+	assert.ok(details.msg_ids.every((id: string) => id.length <= 128), "the legacy ID sample remains bounded");
 });
 
 test("exocom_send broadcast uses singular grammar for one peer", async () => {

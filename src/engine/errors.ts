@@ -19,6 +19,7 @@ const PROVIDER_PATTERNS: readonly RegExp[] = [
 	/\brate.?limit|\b429\b|too many requests/i,
 	/\bquota\b|billing|insufficient.?credits/i,
 	/\b401\b|\b403\b|unauthorized|invalid[\s_-]?api[\s_-]?key/i,
+	/\bno api key found for [a-z0-9][a-z0-9._-]*\b/i,
 	/\b5\d\d\b|internal server error|bad gateway|service unavailable|gateway timeout|overloaded|capacity/i,
 	/model.{0,24}(not.{0,8}(supported|found|exist)|does not exist)|unsupported.{0,12}model/i,
 	/\beconnreset\b|\betimedout\b|\beconnrefused\b|socket hang up|fetch failed/i,

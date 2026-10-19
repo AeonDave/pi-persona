@@ -112,6 +112,7 @@ interface Harness {
 	ctx: unknown;
 	notes: string[];
 	savedModels: () => Record<string, string>;
+	savedConfig: () => Record<string, { models: Record<string, string> }>;
 }
 
 /** Boot one extension against a seeded temp agent dir, with a fake engine that records every leg. */
@@ -121,9 +122,13 @@ async function boot(opts: {
 	persona: string;
 	select?: AnyFn;
 	engines?: EngineFactories;
+	initialModels?: Record<string, string>;
 }): Promise<Harness> {
 	const fresh = tempDir("pi-persona-participant-userdir-");
 	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
+	if (opts.initialModels) fs.writeFileSync(path.join(fresh, "persona", "config.json"), JSON.stringify({
+		"judge-host": { models: opts.initialModels }, other: { models: { operator: "beta/two" } },
+	}));
 	process.env.PI_AGENT_DIR = fresh;
 	const m = makeMockPi();
 	const runs: AgentRunSpec[] = [];
@@ -154,6 +159,7 @@ async function boot(opts: {
 			const file = path.join(fresh, "persona", "config.json");
 			return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8"))["judge-host"]?.models ?? {} : {};
 		},
+		savedConfig: () => JSON.parse(fs.readFileSync(path.join(fresh, "persona", "config.json"), "utf8")),
 	};
 }
 
@@ -166,6 +172,131 @@ function fakeEngine(runs: AgentRunSpec[]): StrategyEngine {
 		},
 	};
 }
+
+// Explicit user refresh is separate from the automatic, never-nag picker.
+test("/persona models magi refreshes saved cores for the active caller without switching personas", async () => {
+	const h = await boot({ cwd: projectWith("magi: [melchior, balthasar, casper]\n"), persona: personaOf("Host."),
+		initialModels: { melchior: "retired/model", balthasar: "alpha/one", casper: "beta/two", operator: "alpha/one" },
+		select: () => "beta/two",
+	});
+	let refreshed = 0;
+	Object.assign((h.ctx as { modelRegistry: object }).modelRegistry, { refresh: async () => { refreshed++; } });
+	await h.m.cmd("persona", "models magi", h.ctx);
+	assert.equal(refreshed, 1, "the explicit refresh updates the host catalog/availability first");
+	assert.equal(h.titles.length, 3, JSON.stringify(h.notes));
+	assert.deepEqual(h.savedModels(), { melchior: "beta/two", balthasar: "beta/two", casper: "beta/two", operator: "alpha/one" });
+	assert.deepEqual(h.savedConfig().other, { models: { operator: "beta/two" } });
+	assert.ok(h.notes.some(note => /3.*model assignment.*judge-host/.test(note)), JSON.stringify(h.notes));
+	assert.ok(!h.notes.some(note => /persona: MAGI active/.test(note)), "borrowing a profile must not activate it");
+	assert.deepEqual(h.runs, [], "changing configuration must not invoke any worker or model");
+});
+
+test("explicit refresh keeps dismissed choices and skips immutable inline models", async () => {
+	const profile = "---\nname: judge-host\npersona: true\ncouncil:\n  strategy: fanout\n  members:\n    - { agent: reviewer, role: SECURITY, model: alpha/one }\n    - { agent: reviewer, role: DESIGN }\n    - operator\n---\nHost.";
+	const roleKey = participantKey("reviewer", "DESIGN");
+	const h = await boot({ cwd: projectWith("unused: []\n"), persona: profile,
+		initialModels: { [roleKey]: "alpha/one", operator: "beta/two", untouched: "alpha/one" },
+		select: (title: string) => title.includes("DESIGN") ? undefined : "alpha/one",
+	});
+	await h.m.cmd("persona", "models", h.ctx);
+	assert.equal(h.titles.length, 2, JSON.stringify(h.notes));
+	assert.ok(h.titles.every(title => !title.includes("SECURITY")));
+	assert.deepEqual(h.savedModels(), { [roleKey]: "alpha/one", operator: "alpha/one", untouched: "alpha/one" });
+	assert.equal(h.runs.length, 0);
+});
+
+test("explicit refresh can replace an agent default with the sole authenticated model", async () => {
+	const h = await boot({ cwd: projectWith("panel: [pinned]\n", { pinned: "---\nname: pinned\nmodel: retired/model\n---\nWorker." }),
+		persona: "---\nname: judge-host\npersona: true\ncouncil:\n  strategy: fanout\n  roster: panel\n---\nHost.",
+	});
+	Object.assign((h.ctx as { modelRegistry: object }).modelRegistry, { getAll: () => [MODELS[0]], getAvailable: () => [MODELS[0]] });
+	await h.m.cmd("persona", "models", h.ctx);
+	assert.deepEqual(h.savedModels(), { pinned: "alpha/one" }, JSON.stringify(h.notes));
+});
+
+test("refresh is non-destructive when cancelled, headless, unknown profile or catalog refresh fails", async () => {
+	for (const scenario of ["cancel", "headless", "unknown", "catalog-error"] as const) {
+		const h = await boot({ cwd: projectWith("magi: [melchior, balthasar, casper]\n"), persona: personaOf("Host."),
+			initialModels: { melchior: "retired/model" }, hasUI: scenario !== "headless", select: () => undefined,
+		});
+		if (scenario === "catalog-error") Object.assign((h.ctx as { modelRegistry: object }).modelRegistry, { refresh: async () => { throw new Error("fixture catalog failure"); } });
+		await h.m.cmd("persona", scenario === "unknown" ? "models missing-profile" : "models magi", h.ctx);
+		assert.deepEqual(h.savedModels(), { melchior: "retired/model" }, scenario);
+		assert.equal(h.runs.length, 0);
+		const diagnostic = { cancel: /no model assignments changed/, headless: /interactive.*required/,
+			unknown: /no persona named "missing-profile"/, "catalog-error": /refresh failed.*fixture catalog failure/ }[scenario];
+		assert.ok(h.notes.some(note => diagnostic.test(note)), `${scenario}: ${JSON.stringify(h.notes)}`);
+		if (scenario !== "cancel") assert.equal(h.titles.length, 0, scenario);
+	}
+});
+
+test("refresh uses post-refresh available models, not an unauthenticated session-provider catalog", async () => {
+	let choices: string[] = [];
+	const h = await boot({ cwd: projectWith("magi: [melchior]\n"), persona: personaOf("Host."),
+		select: (_title: string, options: string[]) => { choices = options; return options[0]; },
+	});
+	const registry = (h.ctx as { modelRegistry: object }).modelRegistry;
+	Object.assign(registry, { getAvailable: () => [], refresh: async () => {
+		Object.assign(registry, { getAvailable: () => [MODELS[1]] });
+		return { aborted: false, errors: new Map() };
+	} });
+	await h.m.cmd("persona", "models magi", h.ctx);
+	assert.deepEqual(choices, ["beta/two"], "alpha remains in getAll and is the session provider, but has no auth");
+	assert.deepEqual(h.savedModels(), { melchior: "beta/two" });
+});
+
+test("returned refresh errors or cancellation do not overwrite models", async () => {
+	for (const result of [{ aborted: true, errors: new Map() }, { aborted: false, errors: new Map([["beta", new Error("unavailable")]]) }]) {
+		const h = await boot({ cwd: projectWith("magi: [melchior]\n"), persona: personaOf("Host."), initialModels: { melchior: "retired/model" } });
+		Object.assign((h.ctx as { modelRegistry: object }).modelRegistry, { refresh: async () => result });
+		await h.m.cmd("persona", "models magi", h.ctx);
+		assert.deepEqual(h.savedModels(), { melchior: "retired/model" });
+		assert.deepEqual(h.titles, []);
+		assert.ok(h.notes.some(note => /refresh (cancelled|incomplete)/.test(note)), JSON.stringify(h.notes));
+	}
+});
+
+test("a caller change during refresh or selection cancels the edit rather than saving to another persona", async () => {
+	for (const phase of ["catalog", "picker"]) {
+		let h: Harness;
+		h = await boot({ cwd: projectWith("magi: [melchior]\n"), persona: personaOf("Host."), initialModels: { melchior: "retired/model" },
+			select: async () => { await h.m.cmd("persona", "magi", h.ctx); return "beta/two"; },
+		});
+		if (phase === "catalog") Object.assign((h.ctx as { modelRegistry: object }).modelRegistry, { refresh: async () => {
+			await h.m.cmd("persona", "magi", h.ctx);
+			return { aborted: false, errors: new Map() };
+		} });
+		await h.m.cmd("persona", "models magi", h.ctx);
+		assert.deepEqual(h.savedModels(), { melchior: "retired/model" }, phase);
+		assert.equal(h.savedConfig().magi, undefined, phase);
+		assert.ok(h.notes.some(note => /persona.*changed.*no assignments changed/.test(note)), JSON.stringify(h.notes));
+	}
+});
+
+test("refresh without an active persona or without available models preserves configuration", async () => {
+	for (const scenario of ["inactive", "no-models"] as const) {
+		const h = await boot({ cwd: projectWith("magi: [melchior]\n"), persona: personaOf("Host."), initialModels: { melchior: "retired/model" } });
+		if (scenario === "inactive") await h.m.cmd("persona", "off", h.ctx);
+		else Object.assign((h.ctx as { modelRegistry: object }).modelRegistry, { getAvailable: () => [] });
+		await h.m.cmd("persona", "models magi", h.ctx);
+		assert.deepEqual(h.savedModels(), { melchior: "retired/model" });
+		assert.deepEqual(h.titles, []);
+		const expected = scenario === "inactive" ? /activate a persona first/ : /no available models.*\/login/;
+		assert.ok(h.notes.some(note => expected.test(note)), JSON.stringify(h.notes));
+	}
+});
+
+test("a session change during selection discards accepted rows instead of applying them to the replacement session", async () => {
+	let sessionId = "first";
+	const h = await boot({ cwd: projectWith("magi: [melchior, casper]\n"), persona: personaOf("Host."), initialModels: { melchior: "retired/model" },
+		select: (title: string) => { if (title.includes("casper")) sessionId = "replacement"; return "beta/two"; },
+	});
+	Object.assign(h.ctx as object, { sessionManager: { getSessionId: () => sessionId } });
+	await h.m.cmd("persona", "models magi", h.ctx);
+	assert.equal(h.titles.length, 2);
+	assert.deepEqual(h.savedModels(), { melchior: "retired/model" });
+	assert.ok(h.notes.some(note => /session changed.*no assignments changed/.test(note)), JSON.stringify(h.notes));
+});
 
 // ── auxiliary actors ──────────────────────────────────────────────────────────────────────
 

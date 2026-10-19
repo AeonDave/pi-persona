@@ -61,7 +61,7 @@ export interface HookHost {
 	get telemetry(): TelemetryProducer | undefined;
 	set telemetry(value: TelemetryProducer | undefined);
 	readonly telemetryToolStartedAt: Map<string, { startedAt: number; name: string }>;
-	readonly telemetryExocomPending: Map<string, Array<{ id: string; sessionId: string; target: string; size: number }>>;
+	readonly telemetryExocomPending: Map<string, Array<{ id: string; sessionId: string; target: string; size: number; replyTo?: string }>>;
 	readonly telemetryIntercomPending: Map<string, { kind: string; to: string; size: number; replyTo?: string }>;
 	readonly lastAgentProjection: Map<string, string>;
 	readonly telemetryAskSenders: Map<string, string>;
@@ -306,6 +306,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				status: "failed",
 				expectsReply: false,
 				size: message.size,
+				...(message.replyTo ? { replyTo: message.replyTo } : {}),
 			});
 		}
 		h.telemetryExocomPending.clear();
@@ -557,6 +558,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		if (event.toolName === "exocom_send") {
 			const text = typeof input.message === "string" ? input.message : "";
 			const target = typeof input.target === "string" ? input.target : "";
+			const replyTo = typeof input.in_reply_to === "string" && input.in_reply_to.length > 0 ? input.in_reply_to : undefined;
 			let peers: DisplayPeer[] = [];
 			try { peers = exocom.plane?.listPeers() ?? []; } catch { /* h.telemetry cannot break the tool */ }
 			const sessions = canonicalExocomTelemetryTargets(peers, target);
@@ -566,6 +568,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				sessionId,
 				target: target === "*" ? (peers.find((peer) => peer.session_id === sessionId)?.target ?? sessionId) : target,
 				size,
+				...(replyTo ? { replyTo } : {}),
 			}));
 			if (pending.length > 0) h.telemetryExocomPending.set(event.toolCallId, pending);
 			for (const message of pending) h.telemetry?.publish("message.sent", {
@@ -577,6 +580,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				status: "queued",
 				expectsReply: false,
 				size: message.size,
+				...(message.replyTo ? { replyTo: message.replyTo } : {}),
 			});
 		}
 		return undefined;
@@ -606,8 +610,24 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			const pending = h.telemetryExocomPending.get(event.toolCallId) ?? [];
 			h.telemetryExocomPending.delete(event.toolCallId);
 			const details = event.details && typeof event.details === "object" && !Array.isArray(event.details)
-				? event.details as { failed?: Array<{ target?: unknown }>; failedCount?: unknown; omittedFailures?: unknown }
+				? event.details as {
+					target?: unknown;
+					msg_id?: unknown;
+					sent?: unknown;
+					failed?: Array<{ target?: unknown }>;
+					failedCount?: unknown;
+					omittedFailures?: unknown;
+				}
 				: undefined;
+			const receipts = Array.isArray(details?.sent)
+				? details.sent.flatMap((receipt) => {
+					if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return [];
+					const item = receipt as { target?: unknown; msg_id?: unknown };
+					return typeof item.target === "string" && typeof item.msg_id === "string" && item.msg_id.length > 0
+						? [{ target: item.target, msgId: item.msg_id }]
+						: [];
+				})
+				: [];
 			const sampledFailures = details?.failed ?? [];
 			const failedTargets = new Set(sampledFailures.flatMap((failure) => typeof failure.target === "string" ? [failure.target] : []));
 			// A broadcast samples its failures (`MAX_BROADCAST_DETAIL_ITEMS` in tools/exocom.ts) and
@@ -618,16 +638,31 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				typeof details?.omittedFailures === "number" ? details.omittedFailures : 0,
 				declaredFailures - sampledFailures.length,
 			);
-			for (const message of pending) h.telemetry?.publish("message.sent", {
-				id: message.id,
-				channel: "exocom",
-				from: exocom.telemetrySessionId(ctx),
-				to: message.sessionId,
-				kind: "message",
-				status: event.isError || failedTargets.has(message.target) ? "failed" : omittedFailures > 0 ? "unknown" : "delivered",
-				expectsReply: false,
-				size: message.size,
-			});
+			for (const message of pending) {
+				const matchingReceipts = !event.isError && details?.target === "*"
+					? receipts.filter((receipt) => receipt.target === message.target)
+					: [];
+				const failed = event.isError || failedTargets.has(message.target);
+				const wireId = failed ? undefined
+					: details?.target === message.target && typeof details.msg_id === "string" && details.msg_id.length > 0
+						? details.msg_id
+						: matchingReceipts.length === 1 ? matchingReceipts[0]!.msgId : undefined;
+				h.telemetry?.publish("message.sent", {
+					id: message.id,
+					channel: "exocom",
+					from: exocom.telemetrySessionId(ctx),
+					to: message.sessionId,
+					kind: "message",
+					// A matching successful ACK receipt settles this recipient even when the bounded
+					// broadcast failure sample omitted failures for other peers. Without a receipt, an
+					// incomplete failure sample cannot prove this particular row was delivered.
+					status: failed ? "failed" : omittedFailures > 0 && wireId === undefined ? "unknown" : "delivered",
+					expectsReply: false,
+					size: message.size,
+					...(message.replyTo ? { replyTo: message.replyTo } : {}),
+					...(wireId ? { wireId } : {}),
+				});
+			}
 		}
 		if (event.toolName === "intercom") {
 			const action = typeof telemetryInput.action === "string" ? telemetryInput.action : "";

@@ -300,6 +300,19 @@ inline model pins taking precedence. If distinct full roles share a short displa
 keeps the hint (with `#N` suffixes for repeated node keys) but omits the uncertain model label rather
 than borrowing another role's choice. Routing still resolves the full role key, not the display hint.
 
+**Model assignment repair is configuration, not execution recovery.** `/persona models [profile]`
+is an explicit user edit in the Pi adapter: it reuses `resolveCouncilInvocation`,
+`collectModelParticipants` and the existing locked config writer, without adding another roster,
+model store or provider-routing policy. The active caller owns saved assignments even when borrowing
+another council profile. Automatic discovery stays never-nag; explicit editing may replace saved or
+agent defaults, but not inline pins. Host catalog refresh has a 20-second cooperative deadline;
+reported cancellation/errors or a caller/session change leave assignments untouched. Selection uses
+the refreshed host availability snapshot rather than treating all catalog entries as authenticated.
+Cancelled rows preserve their old choices; accepted choices merge without clearing other personas.
+Running engines retain their captured assignments. Missing credentials are classified at the engine
+adapter boundary; only the SDK decides whether a main-model recovery is admissible. This separation
+avoids a global reset or automatic repinning that could silently change billing and panel diversity.
+
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 
 **A sub-agent does NOT share the supervisor's MCP session, and an in-process sub-agent gets NO MCP at

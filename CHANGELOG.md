@@ -6,6 +6,32 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.17.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.0) - 2026-10-19
+
+### Added
+
+- `/persona models [council-persona]` refreshes the host catalog and reopens model selection for
+  the active caller's council participants, preserving cancelled choices, unrelated assignments,
+  and explicit inline model pins. No supervisor switch or model request is required.
+- A hermetic installed-host Pi 1.3.0 qualification script covers real command dispatch, assignment
+  persistence, custom-message starts and missing-auth council recovery without network requests.
+
+### Fixed
+
+- Publish terminal progress for single delegates before removing their tree node, preserving `done`
+  status in Flow and other telemetry consumers.
+- Preserve Exocom reply references and optional target-correlated transport IDs while keeping each
+  queued/terminal telemetry row stable; retain bounded broadcast delivery receipts.
+- Report an exact acknowledged broadcast receipt as delivered even when failures for other peers
+  exceed the retained sample; recipients without exact evidence remain conservatively unknown.
+- Classify Pi's `No API key found for <provider>` diagnostic as a provider failure in both engines,
+  allowing the existing single main-model recovery for councils/strategies/flows. Ordinary delegate
+  provider pins remain strict; aborts, timeouts, contract and agent failures remain terminal.
+- Report a refused persona model switch instead of silently recording an override when Pi rejects
+  it for missing authentication; keep the actual session model and restoration state intact.
+- Remove a timing race from the supervisor-ask telemetry test: verify the persisted timeout
+  transition history rather than polling a transient 20 ms state through asynchronous disk writes.
+
 ## [1.16.3](https://github.com/AeonDave/pi-persona/releases/tag/v1.16.3) - 2026-10-13
 
 ### Fixed

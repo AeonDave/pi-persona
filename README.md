@@ -39,9 +39,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.16.3` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.0` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.16.3` |
+| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.17.0` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with
@@ -91,6 +91,7 @@ the worker has acted on it.
 | `/peek` | Show a compact progress summary |
 | `/persona list` | List installed personas |
 | `/persona off` | Turn off the active persona |
+| `/persona models [council-persona]` | Refresh the catalog and reselect council models for the active persona |
 | `/models <query>` | Find an available model |
 | `/doctor` | Check configuration and available capabilities |
 
@@ -151,6 +152,8 @@ Strategies are not restricted to the similarly named persona: `council` can sele
 custom role-based groups without team files. Model selection includes external arbiters. In councils
 and flows, a provider failure or unavailable model can recover once on the supervisor's model, with
 the switch visible and both attempts accounted; ordinary delegates keep explicit provider pins strict.
+To replace old council assignments without changing supervisors, run `/persona models magi`
+(or `/persona models` for the active council). Cancel a choice to keep its previous value.
 See [the reference](docs/REFERENCE.md) for an inline council example and recovery limits.
 
 ## Make it yours
@@ -187,6 +190,8 @@ npm test
 ```
 
 Pi loads the TypeScript extension directly; there is no build step.
+To qualify a separately installed Pi 1.3.0 host without cloud calls or your profile, run
+`node --import tsx scripts/qualify-host.mjs <absolute-path-to-pi-coding-agent-package>`.
 The [CI workflow](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) runs strict
 typechecking, dependency auditing and the test suite on Linux and Windows. The OpenSSF badge links to the project's
 scored supply-chain checks; it is not a certification that the code is free of vulnerabilities.
