@@ -36,6 +36,11 @@ export const MAX_BROADCAST_DETAIL_ITEMS = 64;
 const MODEL_BROADCAST_ID_SAMPLE = 12;
 const MODEL_BROADCAST_FAILURE_SAMPLE = 8;
 
+/** Keep a correlation token only when it is already safe and bounded; never truncate a route token. */
+function isExactBoundedMetadataText(value: unknown, max: number): value is string {
+	return typeof value === "string" && value.length > 0 && normalizeMetadataText(value, max, "") === value;
+}
+
 const ExocomListParams = Type.Object({
 	offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000, description: "Zero-based page offset into the live peer list." })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_MODEL_PEER_ROWS, description: `Maximum peers to show (default ${MAX_MODEL_PEER_ROWS}).` })),
@@ -68,6 +73,8 @@ type ExocomSendDetails =
 		queuedCount: number;
 		failedCount: number;
 		msg_ids: string[];
+		/** Bounded transport receipts, retaining the exact route token needed to correlate each peer. */
+		sent: Array<{ target: string; msg_id: string }>;
 		failed: Array<{ target: string; error: string }>;
 		omittedMsgIds: number;
 		omittedFailures: number;
@@ -386,6 +393,11 @@ export function registerExocomTools(
 					`${normalizeMetadataText(item.target, 80, "peer")}: ${rejectedTargets.has(item.target) ? "rejected by the peer; reason quoted below" : normalizeMetadataText(item.error, 160, "send failed")}`,
 				);
 				const omittedFailures = failed.length - shownFailures.length;
+				const shownReceipts = sent.flatMap((item) =>
+					isExactBoundedMetadataText(item.target, 80) && isExactBoundedMetadataText(item.msg_id, 128)
+						? [{ target: item.target, msg_id: item.msg_id }]
+						: [],
+				).slice(0, MAX_BROADCAST_DETAIL_ITEMS);
 				const action = omittedIds > 0 || omittedFailures > 0
 					? `; ${[
 						shownIds.length > 0 ? `msg_ids: ${shownIds.join(", ")}${omittedIds > 0 ? `; +${omittedIds} more msg_ids omitted` : ""}` : "",
@@ -402,11 +414,12 @@ export function registerExocomTools(
 						queuedCount: sent.length,
 						failedCount: failed.length,
 						msg_ids: sent.slice(0, MAX_BROADCAST_DETAIL_ITEMS).map((item) => normalizeMetadataText(item.msg_id, 128, "msg")),
+						sent: shownReceipts,
 						failed: failed.slice(0, MAX_BROADCAST_DETAIL_ITEMS).map((failure) => ({
 							target: normalizeMetadataText(failure.target, 80, "peer"),
 							error: normalizeMetadataText(failure.error, 240, "send failed"),
 						})),
-						omittedMsgIds: Math.max(0, sent.length - MAX_BROADCAST_DETAIL_ITEMS),
+						omittedMsgIds: Math.max(0, sent.length - shownReceipts.length),
 						omittedFailures: Math.max(0, failed.length - MAX_BROADCAST_DETAIL_ITEMS),
 					},
 				};

@@ -423,6 +423,26 @@ test("inproc engine reports an unknown agent and an unresolvable model", async (
 	assert.match(r.error ?? "", /from spec/);
 });
 
+test("inproc engine classifies Pi's thrown missing-provider-key diagnostic as provider", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: async () => {
+			const session = fakeSession([]);
+			session.prompt = async () => {
+				throw new Error("No API key found for openai-codex");
+			};
+			return session;
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "probe", model: "openai-codex/gpt-5.6-luna" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "provider");
+	assert.match(r.error ?? "", /No API key found for openai-codex/);
+});
+
 test("inproc engine's unknown-agent error names the installed agents when listAgents is wired", async () => {
 	const engine = makeInProcessEngine({
 		resolveAgent,

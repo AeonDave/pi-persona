@@ -30,7 +30,7 @@ export interface PersonaHost {
 	setThinkingLevel(level: ThinkingLevel): void;
 	getModel(): ModelHandle | undefined;
 	findModel(ref: string): ModelHandle | undefined;
-	setModel(model: ModelHandle): void | Promise<void>;
+	setModel(model: ModelHandle): void | boolean | Promise<void | boolean>;
 	setStatus(text: string | undefined): void;
 	/** Optional: a declared-but-unavailable model/thinking would otherwise fail silently. */
 	warn?(message: string): void;
@@ -108,11 +108,24 @@ export class PersonaController {
 		if (persona.model) {
 			const model = this.host.findModel(persona.model);
 			if (model) {
-				if (!this.modelOverridden) {
+				const firstOverride = !this.modelOverridden;
+				if (firstOverride) {
 					this.baselineModel = this.host.getModel();
 					this.modelOverridden = true;
 				}
-				await this.host.setModel(model);
+				const applied = await this.host.setModel(model);
+				if (applied === false) {
+					// Pi's setModel returns false when the provider has no configured auth. Do not
+					// leave a phantom override behind: a later persona or deactivation must not
+					// restore a baseline for a model that never became active.
+					if (firstOverride) {
+						this.modelOverridden = false;
+						this.baselineModel = undefined;
+					}
+					this.host.warn?.(
+						`persona "${persona.name}" declared model "${persona.model}" but provider authentication is not configured; keeping the current model`,
+					);
+				}
 			} else {
 				this.host.warn?.(
 					`persona "${persona.name}" declared model "${persona.model}" which is not configured; keeping the current model`,

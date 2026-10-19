@@ -271,6 +271,22 @@ test("child adapter classifies a PRE-STREAM provider death as provider (fallback
 	assert.equal(r.failureKind, "provider", "stderr evidence of a provider rejection reroutes");
 });
 
+test("child adapter classifies Pi's missing-provider-key diagnostic as provider", async () => {
+	const diagnostic = "No API key found for openai-codex";
+	const script = `process.stderr.write(${JSON.stringify(diagnostic + "\n")}); process.exit(1);`;
+	const engine = makeEngine({
+		resolveAgent,
+		contracts,
+		childOptions: {
+			resolveInvocation: (args) => ({ command: process.execPath, args: ["-e", script, "--", ...args] }),
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "probe", model: "openai-codex/gpt-5.6-luna" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "provider");
+	assert.match(r.error ?? "", /No API key found for openai-codex/);
+});
+
 test("child adapter keeps a pre-stream non-provider death as agent (terminal)", async () => {
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });
 	const r = await engine.run({ agent: "a", task: "boom [fail]" });

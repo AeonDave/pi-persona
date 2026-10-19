@@ -4,7 +4,7 @@ export const TELEMETRY_EVENT_NAME = "pi:telemetry" as const;
 export const LEGACY_TELEMETRY_EVENT_NAME = "pi-persona:telemetry" as const;
 export const LEGACY_TELEMETRY_VERSION = 1 as const;
 export const TELEMETRY_PRODUCER_ID = "pi-persona" as const;
-export const TELEMETRY_PRODUCER_VERSION = "1.16.3" as const;
+export const TELEMETRY_PRODUCER_VERSION = "1.17.0" as const;
 
 export type InstanceStatus = "active" | "idle" | "stopped" | "stale" | (string & {});
 export type AgentKind = "subagent" | "delegate" | "council" | "flow" | "phase" | (string & {});
@@ -54,6 +54,8 @@ export interface MessageDescriptor {
 	expectsReply: boolean;
 	size: number;
 	replyTo?: string;
+	/** Transport-native identity, distinct from `id`, which remains the stable telemetry-row key. */
+	wireId?: string;
 }
 
 export interface PeerDescriptor {
@@ -145,9 +147,9 @@ const KNOWN_FIELDS: Record<string, readonly string[]> = {
 	"instance.stopped": ["reason"], "agent.added": ["id", "label", "kind", "status", "parentId", "agent", "persona", "model"],
 	"agent.updated": ["id", "patch"], "agent.removed": ["id", "status"], "agent.cleared": [],
 	"tool.started": ["callId", "agentId", "name", "status"], "tool.finished": ["callId", "agentId", "name", "status", "durationMs"],
-	"message.sent": ["id", "channel", "from", "to", "kind", "status", "expectsReply", "size", "replyTo"],
-	"message.received": ["id", "channel", "from", "to", "kind", "status", "expectsReply", "size", "replyTo"],
-	"message.replied": ["id", "channel", "from", "to", "kind", "status", "expectsReply", "size", "replyTo"],
+	"message.sent": ["id", "channel", "from", "to", "kind", "status", "expectsReply", "size", "replyTo", "wireId"],
+	"message.received": ["id", "channel", "from", "to", "kind", "status", "expectsReply", "size", "replyTo", "wireId"],
+	"message.replied": ["id", "channel", "from", "to", "kind", "status", "expectsReply", "size", "replyTo", "wireId"],
 	"peers.snapshot": ["peers"],
 };
 
@@ -198,7 +200,7 @@ function validKnownPayload(type: string, payload: Record<string, unknown>): bool
 	if (type === "agent.removed") return stringField(payload, "id") && (payload.status === undefined || ["done", "failed", "stopped"].includes(payload.status as string));
 	if (type === "tool.started") return stringField(payload, "callId") && stringField(payload, "agentId") && stringField(payload, "name") && stringField(payload, "status") && !TERMINAL_TOOL_STATUS.includes(payload.status as string);
 	if (type === "tool.finished") return stringField(payload, "callId") && stringField(payload, "agentId") && stringField(payload, "name") && ["done", "failed"].includes(payload.status as string) && numberField(payload, "durationMs", { min: 0 });
-	if (type === "message.sent" || type === "message.received" || type === "message.replied") return stringField(payload, "id") && stringField(payload, "channel") && stringField(payload, "from") && stringField(payload, "to") && stringField(payload, "kind") && stringField(payload, "status") && typeof payload.expectsReply === "boolean" && numberField(payload, "size", { integer: true, min: 0 }) && (payload.replyTo === undefined || stringField(payload, "replyTo"));
+	if (type === "message.sent" || type === "message.received" || type === "message.replied") return stringField(payload, "id") && stringField(payload, "channel") && stringField(payload, "from") && stringField(payload, "to") && stringField(payload, "kind") && stringField(payload, "status") && typeof payload.expectsReply === "boolean" && numberField(payload, "size", { integer: true, min: 0 }) && (payload.replyTo === undefined || stringField(payload, "replyTo")) && (payload.wireId === undefined || stringField(payload, "wireId"));
 	if (type === "peers.snapshot") return Array.isArray(payload.peers) && payload.peers.every((peer) => { const p = objectPayload(peer); return p !== undefined && stringField(p, "sessionId") && stringField(p, "displayName") && stringField(p, "persona", false) && stringField(p, "model", false) && numberField(p, "contextPercent", { min: 0, max: 100 }) && typeof p.status === "string" && numberField(p, "sent", { integer: true, min: 0 }) && numberField(p, "received", { integer: true, min: 0 }); });
 	return true;
 }

@@ -770,10 +770,16 @@ test("telemetry follows live supervisor asks and only leaves waiting after the l
 		await secondAsk;
 		await waitUntil(() => nodeStatuses().at(-1) === "running", "running telemetry after all reply asks settle");
 
-		const timeoutAsk = ask("timeout question", 20).catch(() => "timed out");
-		await waitUntil(() => nodeStatuses().at(-1) === "waiting", "waiting telemetry for timeout ask");
-		await timeoutAsk;
-		await waitUntil(() => nodeStatuses().at(-1) === "running", "running telemetry after timeout settlement");
+		const timeoutStatusOffset = nodeStatuses().length;
+		const timeoutAsk = ask("timeout question", 20).then(
+			(answer) => ({ status: "replied", answer }),
+			(error: unknown) => ({ status: "rejected", reason: error instanceof Error ? error.message : String(error) }),
+		);
+		assert.deepEqual(await timeoutAsk, { status: "rejected", reason: "ask timeout after 20ms" }, "the ask settled by its actual timeout, not a reply");
+		await waitUntil(
+			() => JSON.stringify(nodeStatuses().slice(timeoutStatusOffset)) === JSON.stringify(["waiting", "running"]),
+			"the persisted waiting → running telemetry edges after timeout settlement",
+		);
 
 		const controller = new AbortController();
 		const abortedAsk = ask("abort question", 2_000, controller.signal).catch(() => "aborted");
@@ -6726,6 +6732,172 @@ test("a broadcast whose failure list was truncated never reports an unmatched pe
 			"delivered",
 			"a recipient the truncated sample cannot speak for must never be claimed as delivered",
 		);
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("exocom telemetry keeps its row id and carries wire/reply correlation on completion", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const peerSession = "xwire-peer";
+	const peerName = "wire-peer";
+	const target = `${peerName}@${createHash("sha256").update(peerSession).digest("hex").slice(0, 24)}`;
+	const { ctx } = makeExocomCtx(cwd, "xwire-sender");
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: peerSession,
+			name: peerName,
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, peerSession, process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+
+		const call = {
+			toolCallId: "exocom-reply-call",
+			toolName: "exocom_send",
+			input: { target, message: "reply", in_reply_to: "wire-in-1" },
+		};
+		m.fire("tool_call", call, ctx);
+		m.fire("tool_result", {
+			...call,
+			content: [],
+			isError: false,
+			details: { msg_id: "wire-out-1", target },
+		}, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const sends = readTelemetryEvents(cwd).filter((event) => event.type === "message.sent" && event.payload.to === peerSession);
+		assert.equal(sends.length, 2, "queued and terminal telemetry share one logical message lifecycle");
+		assert.equal(sends[0]?.payload.status, "queued");
+		assert.equal(sends[1]?.payload.status, "delivered");
+		assert.equal(sends[1]?.payload.id, sends[0]?.payload.id, "completion must not create a second card identity");
+		assert.equal(sends[0]?.payload.replyTo, "wire-in-1");
+		assert.equal(sends[1]?.payload.replyTo, "wire-in-1");
+		assert.equal(sends[1]?.payload.wireId, "wire-out-1", "the actual plane id links incoming replies to this stable row");
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("broadcast telemetry maps wire ids only by exact target receipt", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const peers = Array.from({ length: MAX_BROADCAST_DETAIL_ITEMS + 2 }, (_, index) => ({
+		session_id: `xwire-broadcast-${index}`,
+		name: `wire-${index}`,
+	}));
+	const targetOf = (peer: typeof peers[number]) => `${peer.name}@${createHash("sha256").update(peer.session_id).digest("hex").slice(0, 24)}`;
+	const targets = peers.map(targetOf);
+	const { ctx } = makeExocomCtx(cwd, "xwire-broadcast-sender");
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		for (const peer of peers) {
+			writeEntry(agentDir, hash, registryEntryFixture({
+				session_id: peer.session_id,
+				name: peer.name,
+				pid: process.pid,
+				endpoint: endpointFor(agentDir, hash, peer.session_id, process.platform),
+				cwd,
+				heartbeat_at: new Date().toISOString(),
+			}));
+		}
+
+		const call = { toolCallId: "exocom-broadcast-call", toolName: "exocom_send", input: { target: "*", message: "hello" } };
+		m.fire("tool_call", call, ctx);
+		const failedPeers = peers.filter((_, index) => index !== 1);
+		const sampledFailures = failedPeers.slice(0, MAX_BROADCAST_DETAIL_ITEMS);
+		const unsampledFailure = failedPeers[MAX_BROADCAST_DETAIL_ITEMS]!;
+		m.fire("tool_result", {
+			...call,
+			content: [],
+			isError: false,
+			details: {
+				target: "*",
+				peerCount: peers.length,
+				queuedCount: 1,
+				failedCount: failedPeers.length,
+				msg_ids: ["wire-1", "wire-unmatched"],
+				sent: [
+					{ target: targets[0], msg_id: "wire-failed-a" },
+					{ target: targets[1], msg_id: "wire-1" },
+					{ target: "new-peer@ffffffffffffffffffffffff", msg_id: "wire-unmatched" },
+				],
+				failed: sampledFailures.map((peer) => ({ target: targetOf(peer), error: "unreachable" })),
+				omittedMsgIds: 0,
+				omittedFailures: failedPeers.length - sampledFailures.length,
+			},
+		}, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const events = readTelemetryEvents(cwd).filter((event) => event.type === "message.sent");
+		const terminal = new Map(events.filter((event) => event.payload.status !== "queued").map((event) => [event.payload.to, event.payload]));
+		assert.equal(terminal.get(peers[0]!.session_id)?.status, "failed");
+		assert.equal(terminal.get(peers[0]!.session_id)?.wireId, undefined, "a failed target gets no wire id, even if a receipt claims one");
+		assert.equal(terminal.get(peers[1]!.session_id)?.status, "delivered", "an exact successful receipt proves this recipient was delivered even when other failures were omitted");
+		assert.equal(terminal.get(peers[1]!.session_id)?.wireId, "wire-1", "the exact target receipt enriches only its recipient row");
+		assert.equal(terminal.get(unsampledFailure.session_id)?.status, "unknown", "an omitted failure mapping remains unknown");
+		assert.equal(terminal.get(unsampledFailure.session_id)?.wireId, undefined);
+	} finally {
+		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = prev;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("an errored exocom send never publishes a wire id from its details", async () => {
+	const prev = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const peerSession = "xwire-error-peer";
+	const peerName = "wire-error-peer";
+	const target = `${peerName}@${createHash("sha256").update(peerSession).digest("hex").slice(0, 24)}`;
+	const { ctx } = makeExocomCtx(cwd, "xwire-error-sender");
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		writeEntry(agentDir, hash, registryEntryFixture({
+			session_id: peerSession,
+			name: peerName,
+			pid: process.pid,
+			endpoint: endpointFor(agentDir, hash, peerSession, process.platform),
+			cwd,
+			heartbeat_at: new Date().toISOString(),
+		}));
+
+		const call = { toolCallId: "exocom-error-call", toolName: "exocom_send", input: { target, message: "hello" } };
+		m.fire("tool_call", call, ctx);
+		m.fire("tool_result", {
+			...call,
+			content: [],
+			isError: true,
+			details: { msg_id: "wire-must-not-escape", target },
+		}, ctx);
+		await m.fire("session_shutdown", undefined, ctx);
+
+		const terminal = readTelemetryEvents(cwd).filter((event) => event.type === "message.sent" && event.payload.to === peerSession && event.payload.status !== "queued");
+		assert.equal(terminal.length, 1);
+		assert.equal(terminal[0]?.payload.status, "failed");
+		assert.equal(terminal[0]?.payload.wireId, undefined, "tool-level failure invalidates otherwise matching receipt details");
 	} finally {
 		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;
 		else process.env.PI_PERSONA_EXOCOM = prev;

@@ -18,6 +18,8 @@ class MockHost implements PersonaHost {
 	model: ModelHandle | undefined = { provider: "base", id: "b" };
 	status: string | undefined;
 	models: Record<string, ModelHandle> = { "prov/x": { provider: "prov", id: "x" } };
+	setModelCalls: ModelHandle[] = [];
+	rejectModel = false;
 
 	agents = ["scout", "ghost", "builder"];
 
@@ -42,7 +44,9 @@ class MockHost implements PersonaHost {
 	findModel(ref: string): ModelHandle | undefined {
 		return this.models[ref];
 	}
-	setModel(model: ModelHandle): void {
+	setModel(model: ModelHandle): void | boolean | Promise<void | boolean> {
+		this.setModelCalls.push(model);
+		if (this.rejectModel) return Promise.resolve(false);
 		this.model = model;
 	}
 	setStatus(text: string | undefined): void {
@@ -117,6 +121,39 @@ test("a declared-but-unavailable model warns through the host when warn is provi
 	await c.activate(p("name: m\npersona: true\nmodel: ghost/none"));
 	assert.match(warnings.join("\n"), /ghost\/none/);
 	assert.equal(host.model?.id, "b");
+});
+
+test("a model rejected by the host warns and is not recorded or restored as an override", async () => {
+	const warnings: string[] = [];
+	const host = new MockHost();
+	host.rejectModel = true;
+	host.warn = (message) => warnings.push(message);
+	const c = new PersonaController(host, true);
+
+	await c.activate(p("name: m\npersona: true\nmodel: prov/x"));
+	assert.deepEqual(host.model, { provider: "base", id: "b" });
+	assert.match(warnings.join("\n"), /prov\/x/);
+	assert.match(warnings.join("\n"), /authentication/);
+
+	await c.deactivate();
+	assert.deepEqual(host.model, { provider: "base", id: "b" });
+	assert.deepEqual(host.setModelCalls, [{ provider: "prov", id: "x" }], "a rejected selection must not trigger a baseline restore");
+});
+
+test("a rejected model does not pin a stale baseline before a later successful override", async () => {
+	const host = new MockHost();
+	host.rejectModel = true;
+	const c = new PersonaController(host, true);
+	await c.activate(p("name: rejected\npersona: true\nmodel: prov/x"));
+
+	// The operator changes the session model after the rejected persona model.
+	host.model = { provider: "user", id: "current" };
+	host.models["prov/y"] = { provider: "prov", id: "y" };
+	host.rejectModel = false;
+	await c.activate(p("name: accepted\npersona: true\nmodel: prov/y"));
+	await c.deactivate();
+
+	assert.deepEqual(host.model, { provider: "user", id: "current" });
 });
 
 test("gate and composePrompt route through the active persona", async () => {

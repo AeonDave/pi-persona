@@ -303,10 +303,28 @@ With an active persona, UI, and at least two configured models, unassigned parti
 picked and saved for the active persona, even when borrowing another persona's council profile.
 Dismissing a picker suppresses another prompt for that participant during the session, not for
 later teams with different participants. Headless runs never prompt.
+
+Run `/persona models` to explicitly reselect the active council's models, or `/persona models magi`
+to edit the MAGI panel while keeping another supervisor active. The optional name selects an
+installed council persona, not a strategy or team. The command refreshes the host catalog first,
+then offers each editable participant, including previously dismissed choices and saved or agent
+defaults. One available model is enough for this explicit edit. Choices are saved under the **active
+caller's** persona, just as for `council({ persona: "magi" })`; it never activates the borrowed
+profile. Cancelled choices, unrelated assignments and other personas remain unchanged. Inline
+`members[].model` pins still win and are not editable here. TUI/RPC UI is required; no model call
+is made. Changes apply to future runs, not workers already running. `/persona magi` still switches
+the supervisor; `/persona reload` reloads definitions without resetting saved models.
+Refresh is bounded to 20 seconds cooperatively; provider errors, cancellation, or a persona/session
+change cancel the edit without replacing assignments. The list uses the host's refreshed availability,
+not every model in its catalog.
+
 An unavailable choice is not overwritten: a provider or unknown-model failure may recover once
 on the main model, with the switch reported and both attempts accounted. This does not relax
 ordinary delegate provider pins. The MAGI persona retains its canonical core team; the Judge
 persona retains impartial arbitration. Other personas choose whichever strategy fits the task.
+The exact Pi diagnostic `No API key found for <provider>` counts as a provider failure in both
+engines, so it can use this same bounded recovery. If the main model is the failing model too,
+recovery cannot help: use `/login` or change `/model`, then reselect with `/persona models`.
 
 **A delegation policy on any persona** — fields are generic and are never keyed to a persona name.
 The runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects
