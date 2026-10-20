@@ -16,7 +16,7 @@
  *          > the session model (the default, NOT an assignment — it must not suppress the picker).
  *
  * The persisted assignment KEY is `agent` for a bare member — the historical shape, so every
- * existing `config.json` keeps applying — and `agent#<hash-of-agent+role>` for a member carrying a
+ * migrated model assignments keep applying — and `agent#<hash-of-agent+role>` for a member carrying a
  * role. The hash keeps the full role as the identity without persisting the role PROMPT (which is
  * an instruction, not a key, and would leak strategy prose into the user's config file). The human
  * label stays separate, so the picker and the tree can still say `reviewer · SECURITY`.

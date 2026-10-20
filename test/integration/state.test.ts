@@ -1,26 +1,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as os from "node:os";
-import * as path from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { tempDir } from "../setup/temp-dir.ts";
-import { readLastPersona, writeLastPersona } from "../../src/persona/state.ts";
+import { patchPersonaSettings, readPersonaSettings } from "../../src/persona/settings-store.ts";
 
-const tmpFile = (...parts: string[]) => path.join(tempDir("pi-persona-state-"), ...parts);
-
-test("writeLastPersona → readLastPersona round-trips a name (creating parent dirs)", () => {
-	const f = tmpFile("persona", "state.json");
-	writeLastPersona(f, "magi");
-	assert.equal(readLastPersona(f), "magi");
+test("remembered selection shares one settings file with preferences and models", () => {
+	const file = join(tempDir("pi-persona-state-"), "persona", "settings.json");
+	patchPersonaSettings(file, { preferences: { nudge: false }, models: { magi: { melchior: "prov/a" } } });
+	patchPersonaSettings(file, { lastPersona: "magi" });
+	const saved = readPersonaSettings(file);
+	assert.equal(saved.lastPersona, "magi");
+	assert.equal(saved.preferences.nudge, false);
+	assert.equal(saved.personas.magi?.models?.melchior, "prov/a");
+	patchPersonaSettings(file, { lastPersona: null });
+	assert.equal(readPersonaSettings(file).lastPersona, null);
+	assert.equal(readPersonaSettings(file).personas.magi?.models?.melchior, "prov/a");
 });
 
-test("writeLastPersona(undefined) clears the remembered persona", () => {
-	const f = tmpFile("state.json");
-	writeLastPersona(f, "magi");
-	writeLastPersona(f, undefined);
-	assert.equal(readLastPersona(f), undefined);
-});
-
-test("readLastPersona returns undefined for a missing or corrupt file", () => {
-	assert.equal(readLastPersona(path.join(os.tmpdir(), "pi-persona-nope-xyz", "state.json")), undefined);
+test("missing settings use no remembered selection; corrupt settings cannot be overwritten", () => {
+	const file = join(tempDir("pi-persona-state-"), "settings.json");
+	assert.equal(readPersonaSettings(file).lastPersona, null);
+	writeFileSync(file, "{truncated", "utf8");
+	assert.throws(() => readPersonaSettings(file), /invalid JSON/);
+	assert.throws(() => patchPersonaSettings(file, { lastPersona: "magi" }), /invalid JSON/);
+	assert.equal(readFileSync(file, "utf8"), "{truncated");
 });

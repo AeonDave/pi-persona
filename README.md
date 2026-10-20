@@ -39,9 +39,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.0` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.1` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.17.0` |
+| Git alternative | `pi install git:github.com/AeonDave/pi-persona@v1.17.1` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with
@@ -92,8 +92,13 @@ the worker has acted on it.
 | `/persona list` | List installed personas |
 | `/persona off` | Turn off the active persona |
 | `/persona models [council-persona]` | Refresh the catalog and reselect council models for the active persona |
+| `/persona-settings` | Open pi-persona's settings in the TUI or RPC UI |
+| `/persona-settings show` | Show a read-only settings report, including in headless sessions |
 | `/models <query>` | Find an available model |
 | `/doctor` | Check configuration and available capabilities |
+
+The settings panel also includes Mind and Flow when those updated companions are loaded; all three
+use one `persona/settings.json`. Skill Optimizer keeps its separate configuration.
 
 For time-based work, ask “remind me in ten minutes.” For an event, ask “let me know when this build
 finishes.” Keep Pi open while timers and monitors are running; they are not restored after a restart.
@@ -165,6 +170,12 @@ overrides in `.pi/agents/`. Run `/persona reload` after editing.
 only when you intend to discard customizations to those files.
 
 For optional long-term memory, add [pi-persona-mind](https://github.com/AeonDave/pi-persona-mind).
+
+`/persona-settings` is separate from Pi's `/settings`: it edits pi-persona preferences and saved
+persona model assignments, not native Pi or compaction settings. In the TUI, `/` filters settings,
+`r` resets the selected saved override, and `m` opens model assignment editing. Scalar preference
+changes apply after restarting Pi or Pi's native `/reload`, not `/new`; `/persona reload` only
+refreshes persona definitions. Model changes apply to future runs. See [configuration and settings](docs/REFERENCE.md#configuration-and-data).
 
 ## Documentation
 

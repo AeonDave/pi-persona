@@ -15,7 +15,7 @@ export interface PiPersonaConfig {
 	persist: boolean;
 	delegateDefaultAllow: boolean;
 	seed: boolean;
-	/** Explicit override for the persisted-state file (else a global default). */
+	/** Legacy selection-file import path; ongoing persistence uses persona/settings.json. */
 	stateFile?: string;
 	/** Thinking level forced on delegated children (else the supervisor's level).
 	 *  Spawned children must carry an *explicit* level or they fall into the model's

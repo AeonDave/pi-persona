@@ -242,7 +242,7 @@ export async function runChildAgent(
 			const onLine = (line: string) => {
 				if (!line.trim()) return;
 				try {
-					const toolEvent = applyEvent(state, JSON.parse(line));
+					const toolEvent = applyEvent(state, JSON.parse(line), Date.now());
 					// Ordinary stream progress stays coalesced to one snapshot per stdout chunk below.
 					// Tool lifecycle transitions are the exception: several can share one chunk and each
 					// authoritative transition must cross the progress seam exactly once.

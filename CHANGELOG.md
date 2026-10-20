@@ -6,6 +6,36 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.17.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.1) - 2026-10-20
+
+### Added
+
+- Add `/persona-settings`, a dedicated TUI/RPC editor for pi-persona preferences, persona model
+  assignments, and diagnostics, plus `/persona-settings show` for a read-only headless report. The
+  full-page TUI supports filtering, resetting a saved override, and opening model settings.
+- Persist preferences, per-persona model assignments, and the remembered persona in one versioned
+  `<agentDir>/persona/settings.json`. On first migration, the retired model and state files are
+  imported and unchanged originals are archived as `.migrated` when safe; failed or unsafe
+  migration keeps the source files and reports a warning.
+- Let users select a model-settings owner and profile explicitly without activating it. Model
+  assignments affect future runs; inline pins remain read-only, and resetting removes only the
+  saved override. Public environment overrides retain startup precedence; scalar preference changes
+  wait for a Pi restart or native `/reload` (not `/new`) and are never auto-reloaded.
+- Keep persona-selection revisions separate from unrelated settings saves so companion memory scopes
+  can follow explicit re-selections without mistaking model edits for persona switches.
+- Include the loaded Mind/Flow companions in the same panel and preferences file, using optional
+  public-bus discovery rather than hard plugin dependencies. Keep Skill Optimizer separate and
+  preserve per-run `--no-flow` and the existing shared service's lifetime.
+
+### Fixed
+
+- Count streamed textual tool output as child liveness without adding tool output to the assistant
+  transcript. Queued delegates start their stall window only after concurrency admission.
+- Keep interactive stall episodes operator-only and expandable. Headless runs receive at most one
+  successfully delivered stall wake per run lifetime; real progress still re-arms operator episodes.
+- Reject malformed UTF-8 settings and migration inputs rather than silently replacing bytes during
+  a save. Preserve invalid originals and keep concurrent preference/model edits in one safe store.
+
 ## [1.17.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.0) - 2026-10-19
 
 ### Added

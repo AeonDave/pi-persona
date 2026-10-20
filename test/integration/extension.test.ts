@@ -307,7 +307,7 @@ test("piPersona registers the delegate tool, f8/f9 shortcuts, and agents/doctor/
 	assert.ok(m.toolNames().includes("council"));
 	assert.ok(m.toolNames().includes("intercom"));
 	assert.ok(m.toolNames().includes("models"));
-	assert.deepEqual(m.commandNames().sort(), ["agents", "doctor", "exocom", "flow", "models", "orchestrate", "peek", "persona"]);
+	assert.deepEqual(m.commandNames().sort(), ["agents", "doctor", "exocom", "flow", "models", "orchestrate", "peek", "persona", "persona-settings"]);
 	assert.equal(m.shortcutCount(), 2); // f8 (cycle persona) + f9 (agent overlay)
 });
 
@@ -2864,15 +2864,18 @@ test("the f8 shortcut cycles into a persona", async () => {
 });
 
 test("persistence: /persona writes the selection and a fresh session restores it", async () => {
-	const stateFile = path.join(tempDir("pi-persona-persist-"), "state.json");
-	process.env.PI_PERSONA_STATE_FILE = stateFile;
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	const agentDir = tempDir("pi-persona-persist-");
+	seedDefaults(REPO_ROOT, path.join(agentDir, "persona"), true);
+	process.env.PI_AGENT_DIR = agentDir;
 	process.env.PI_PERSONA_PERSIST = "on";
 	try {
 		const m1 = makeMockPi();
 		piPersona(m1.pi);
 		const c1 = makeCtx(os.tmpdir());
 		await m1.fire("session_start", undefined, c1.ctx);
-		await m1.cmd("persona", "magi", c1.ctx); // user gesture → writes state
+		await m1.cmd("persona", "magi", c1.ctx); // user gesture → canonical settings
+		assert.equal(JSON.parse(fs.readFileSync(path.join(agentDir, "persona", "settings.json"), "utf8")).lastPersona, "magi");
 
 		const m2 = makeMockPi();
 		piPersona(m2.pi);
@@ -2882,7 +2885,8 @@ test("persistence: /persona writes the selection and a fresh session restores it
 		assert.notEqual(injected, undefined, "the remembered persona is restored");
 		assert.match(injected.systemPrompt, /MAGI/);
 	} finally {
-		delete process.env.PI_PERSONA_STATE_FILE;
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
 		process.env.PI_PERSONA_PERSIST = "off";
 	}
 });
@@ -4306,11 +4310,11 @@ test("routine async check-ins append expandable operator entries without startin
 	}
 });
 
-test("routine async status stays visible while the supervisor is busy with pending input", async () => {
+test("interactive first stall appends a warning entry without a model wake", async () => {
 	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
 	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
 	process.env.PI_PERSONA_CHECKIN_MS = "300000";
-	process.env.PI_PERSONA_PEEK_MS = "0";
+	process.env.PI_PERSONA_PEEK_MS = "30000";
 	let now = 1_000_000;
 	const clock = mock.method(Date, "now", () => now);
 	const intervals: Array<{ ms: number; tick: () => void }> = [];
@@ -4336,7 +4340,7 @@ test("routine async status stays visible while the supervisor is busy with pendi
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
 	const base = makeCtx(tempDir("pi-persona-checkin-busy-")).ctx;
-	const ctx = { ...base, isIdle: () => false, hasPendingMessages: () => true };
+	const ctx = { ...base, hasUI: true, isIdle: () => true, hasPendingMessages: () => false };
 	let sessionStarted = false;
 	try {
 		await m.fire("session_start", undefined, ctx);
@@ -4345,14 +4349,19 @@ test("routine async status stays visible while the supervisor is busy with pendi
 		await delegate.execute("busy-checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
 		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
 		assert.equal(runStarted, true, "the asynchronous leg remains live during supervisor input");
-		const tick = intervals.find((interval) => interval.ms === 300_000)?.tick;
-		assert.ok(tick, "the normal five-minute status cadence is armed");
+		const tick = intervals.find((interval) => interval.ms === 30_000)?.tick;
+		assert.ok(tick, "the fast stall cadence is armed");
 
 		now += 300_000;
 		tick();
-		assert.equal(m.entries().filter((entry) => entry.customType === "pi-persona-status").length, 1,
-			"operator status is appended even when the supervisor is busy and a human message is queued");
-		assert.equal(m.sentMessages().length, 0, "operator status still does not create or queue a model turn");
+		const statuses = m.entries().filter((entry) => entry.customType === "pi-persona-status");
+		assert.equal(statuses.length, 2, "the stall episode and due routine status are durable operator entries");
+		assert.equal((statuses[0]?.data as { kind?: string }).kind, "stall");
+		assert.match(String((statuses[0]?.data as { content?: string }).content ?? ""), /possible stall/);
+		const renderer = m.entryRenderer("pi-persona-status");
+		assert.ok(renderer);
+		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /possible stall/i, "stall entries use warning-specific UI chrome");
+		assert.equal(m.sentMessages().length, 0, "interactive stall detection never creates a model wake");
 	} finally {
 		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
 		releaseRun();
@@ -4367,7 +4376,7 @@ test("routine async status stays visible while the supervisor is busy with pendi
 	}
 });
 
-test("a failed routine status append does not suppress a newly-stalled wake, even when warning sinks throw", async () => {
+test("headless first stall wakes once per run lifetime", async () => {
 	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
 	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
 	process.env.PI_PERSONA_CHECKIN_MS = "300000";
@@ -4407,7 +4416,7 @@ test("a failed routine status append does not suppress a newly-stalled wake, eve
 	let throwWarning = false;
 	const ctx = {
 		...base,
-		hasUI: true,
+		hasUI: false,
 		ui: {
 			...base.ui,
 			notify: (message: string) => {
@@ -4430,9 +4439,8 @@ test("a failed routine status append does not suppress a newly-stalled wake, eve
 
 		now += 300_000; // both the routine card and the newly-stalled alert are due
 		assert.doesNotThrow(tick, "failure to append operator status cannot abort the actionable wake");
-		assert.equal(m.sentMessages().length, 1, "the newly-stalled follow-up still reaches the supervisor");
+		assert.equal(m.sentMessages().length, 1, "a headless first-stall candidate wakes the supervisor");
 		assert.match(String((m.sentMessages()[0]?.message as { content?: string } | undefined)?.content ?? ""), /may be stalled/i);
-		assert.ok(notes.some((note) => /could not append async status/i.test(note)), "the operator is warned that status persistence failed");
 
 		throwWarning = true;
 		stderrMock = mock.method(process.stderr, "write", (() => { throw new Error("stderr warning sink unavailable"); }) as typeof process.stderr.write);
@@ -4440,8 +4448,11 @@ test("a failed routine status append does not suppress a newly-stalled wake, eve
 		for (let i = 0; i < 10 && runStarted < 2; i++) await Promise.resolve();
 		assert.equal(runStarted, 2, "a second leg starts while the first remains live");
 		now += 300_000; // another check-in and a new stall signal are due
-		assert.doesNotThrow(tick, "throwing UI and stderr diagnostics still cannot abort an actionable wake");
-		assert.equal(m.sentMessages().length, 2, "the second newly-stalled follow-up also reaches the supervisor");
+		assert.doesNotThrow(tick, "a second run's first stall remains actionable");
+		assert.equal(m.sentMessages().length, 2, "each distinct run gets one first-stall wake");
+		now += 300_000;
+		tick();
+		assert.equal(m.sentMessages().length, 2, "further stall ticks cannot spend either run's lifetime wake budget");
 	} finally {
 		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
 		releaseRun();
@@ -4783,9 +4794,9 @@ test("/orchestrate reports a misconfigured persona grammar instead of throwing o
 test("a per-persona model assignment that cannot be persisted is reported to the user", async () => {
 	const fresh = tempDir("pi-persona-cfgfail-");
 	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
-	// The store's own save path is atomic (temp file + rename); a DIRECTORY where config.json
+	// The store's own save path is atomic (temp file + rename); a DIRECTORY where settings.json
 	// belongs is the cross-OS way to make that rename fail the way a locked/full volume would.
-	fs.mkdirSync(path.join(fresh, "persona", "config.json"), { recursive: true });
+	fs.mkdirSync(path.join(fresh, "persona", "settings.json"), { recursive: true });
 	const prev = process.env.PI_AGENT_DIR;
 	process.env.PI_AGENT_DIR = fresh;
 	try {
@@ -4848,7 +4859,7 @@ test("a model picker that dies partway keeps — and persists — the picks the 
 		assert.equal(asked, 2, "the loop stopped at the failing prompt");
 		// The persona is marked as prompted for the whole session, so a discarded answer would never
 		// be asked for again — banking the one the user DID give is the only way it survives.
-		const saved = JSON.parse(fs.readFileSync(path.join(fresh, "persona", "config.json"), "utf8"));
+		const saved = JSON.parse(fs.readFileSync(path.join(fresh, "persona", "settings.json"), "utf8")).personas;
 		assert.deepEqual(Object.keys(saved.magi?.models ?? {}), ["melchior"], "the answered pick is persisted on its own");
 		assert.equal(saved.magi.models.melchior, "alpha/one");
 	} finally {

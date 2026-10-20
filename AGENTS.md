@@ -10,6 +10,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 
 - Typecheck (must stay clean): `npm run typecheck`  (`tsc --noEmit`, strict)
 - All tests: `npm test` · unit only: `npm run test:unit`
+- Settings SDK smoke (isolated profile, no provider/network requests):
+  `node --import tsx scripts/settings-smoke.mjs [absolute-pi-package-entry]`.
+  Omitting the argument uses the development SDK; pass an installed host entry to qualify that version.
 - One file: `node --import tsx --import ./test/setup/hermetic-env.ts --test test/unit/core/frontmatter.test.ts`
   - The second `--import` is the hermeticity choke point: it strips the whole `PI_PERSONA_*`
     namespace and pins `PI_AGENT_DIR` at a throwaway dir before any test module loads, so a
@@ -115,8 +118,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   never double-reported; snapshots leave running children active. In interactive sessions `delegate`
   is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to sync so the
   single turn carries the result). An explicit `async` flag takes precedence over `sync` and the default.
-  Periodic async status is a durable, expandable operator-only entry, never a model wake or context
-  message; completions, asks, unread bus messages, and newly-stalled alerts keep their actionable paths.
+  Periodic async status and each newly detected stall episode are durable, expandable operator-only
+  entries. Interactive stalls never wake the model; headless sessions get at most one stall wake per run
+  lifetime. Completions, asks, and unread bus messages keep their existing actionable paths.
   Message ids and run ids are separate: `intercom message { messageId }` retrieves retained bus
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
   drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears
@@ -233,7 +237,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (cross-process relay, on by default: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`; `PI_PERSONA_BROKER=off` restores pre-broker spawn). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
-- `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`.
+- `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts` (pure model helpers), `settings-store.ts` (sole persistent settings owner).
 - `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`. `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
@@ -248,6 +252,21 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 - `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic claim; run via `npm run smoke:exocom`). `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
+
+Settings use `/persona-settings`, a full-page registry-driven UI independent of Pi's `/settings`.
+The only active preferences file is `<agentDir>/persona/settings.json` (version, sparse preferences,
+per-persona model assignments, last selection). `src/core/settings.ts` owns row metadata and validation;
+add/remove public preferences there rather than special-casing UI fields. Route every write through
+`patchPersonaSettings`; exact null patches remove overrides without erasing concurrent edits.
+The retired `config.json` and `state.json` are migration inputs only, archived as `.migrated` after
+the canonical file commits. Malformed files remain untouched; never add a truncating fallback writer.
+Scalar preferences apply after a Pi restart or native `/reload`, not `/new` (never auto-reload live workers).
+Model edits apply to future runs through the existing participant resolver. `/persona reload` only
+refreshes resources, not startup preferences. Native Pi settings and compaction are not owned here.
+Mind/Flow contribute supported current values through `pi-persona:settings:collect:v1` (`{ add(id, values) }`);
+their five preferences share the same registry/file. Do not hard-import a companion or start services
+while collecting settings. Flow port/idle changes are for the next shared-service start, never a restart
+of a service other Pi sessions are using. Skill Optimizer remains independent.
 
 1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test.
 2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `delegation:` / `coaching: true`; runtime behavior is field-driven, never keyed to a persona name.

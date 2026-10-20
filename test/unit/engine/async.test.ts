@@ -268,6 +268,137 @@ const runningRun = (lastAdvanceAt: number, over: Partial<AsyncRun> = {}): AsyncR
 	...over,
 });
 
+test("tool output advances the stall clock without output growth", async () => {
+	let clock = 100;
+	const tracker = new AsyncRunTracker({ now: () => clock });
+	let onProgress!: (s: ProgressSnapshot) => void;
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const id = tracker.launch({ agent: "a", task: "t" }, async (progress) => {
+		onProgress = progress;
+		await gate;
+		return { agent: "a", output: "done", usage: usage(), ok: true };
+	});
+	clock = 200;
+	onProgress({ output: "", turns: 0, tokens: 0, toolOutputAt: 1 });
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, 200);
+	release();
+	await tick();
+});
+
+test("replaying a tool output snapshot does not reset the stall clock", async () => {
+	let clock = 100;
+	const tracker = new AsyncRunTracker({ now: () => clock });
+	let onProgress!: (s: ProgressSnapshot) => void;
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const id = tracker.launch({ agent: "a", task: "t" }, async (progress) => {
+		onProgress = progress;
+		await gate;
+		return { agent: "a", output: "done", usage: usage(), ok: true };
+	});
+	const snap: ProgressSnapshot = { output: "", turns: 0, tokens: 0, toolOutputAt: 1 };
+	clock = 200;
+	onProgress(snap);
+	clock = 300;
+	onProgress(snap);
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, 200);
+	release();
+	await tick();
+});
+
+test("streamed tool output prevents a false stall and silence subsequently alerts", async () => {
+	let clock = 0;
+	const tracker = new AsyncRunTracker({ now: () => clock });
+	let onProgress!: (s: ProgressSnapshot) => void;
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const id = tracker.launch({ agent: "a", task: "t" }, async (progress) => {
+		onProgress = progress;
+		await gate;
+		return { agent: "a", output: "done", usage: usage(), ok: true };
+	});
+	const watcher = new PeekWatcher();
+	clock = 90_000;
+	onProgress({ output: "", turns: 0, tokens: 0, toolOutputAt: 1 });
+	assert.deepEqual(watcher.poll([tracker.peek(id)!], clock, 90_000), []);
+	clock = 180_000;
+	assert.equal(watcher.poll([tracker.peek(id)!], clock, 90_000).length, 1);
+	release();
+	await tick();
+});
+
+test("queued runs never acquire a stall age before admission", () => {
+	const tracker = new AsyncRunTracker({ now: () => 100 });
+	const id = tracker.launch({ agent: "a", task: "t", queued: true }, () => new Promise<AgentResult>(() => {}));
+	const run = tracker.peek(id)!;
+	assert.equal(run.queued, true);
+	assert.equal(run.lastAdvanceAt, undefined);
+	assert.deepEqual(new PeekWatcher().poll([run], 1_000_000, 1), []);
+	assert.match(buildPeekDigest([run], { now: 1_000_000, stallMs: 1 }), /queued \(waiting for concurrency slot\)/);
+});
+
+test("admission starts a fresh stall window after a long queue wait", () => {
+	let clock = 100;
+	const tracker = new AsyncRunTracker({ now: () => clock });
+	const id = tracker.launch({ agent: "a", task: "t", queued: true }, () => new Promise<AgentResult>(() => {}));
+	clock = 900_000;
+	assert.equal(tracker.markAdmitted(id), true);
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, 900_000);
+	assert.equal(tracker.peek(id)?.queued, undefined);
+});
+
+test("markAdmitted is idempotent and cannot revive terminal runs", async () => {
+	const tracker = new AsyncRunTracker();
+	assert.equal(tracker.markAdmitted("missing"), false);
+	const settled = tracker.launch({ agent: "a", task: "t", queued: true }, async () => ({ agent: "a", output: "done", usage: usage(), ok: true }));
+	await tick();
+	assert.equal(tracker.markAdmitted(settled), false);
+	const active = tracker.launch({ agent: "b", task: "t", queued: true }, () => new Promise<AgentResult>(() => {}));
+	assert.equal(tracker.markAdmitted(active), true);
+	assert.equal(tracker.markAdmitted(active), false);
+});
+
+test("queued progress does not fabricate admission", () => {
+	const tracker = new AsyncRunTracker({ now: () => 100 });
+	const id = tracker.launch({ agent: "a", task: "t", queued: true }, (onProgress) => {
+		onProgress({ output: "some output", turns: 1, tokens: 1 });
+		return new Promise<AgentResult>(() => {});
+	});
+	assert.equal(tracker.peek(id)?.lastAdvanceAt, undefined);
+	assert.equal(tracker.peek(id)?.queued, true);
+});
+
+test("queued runs remain in running writers and pending joins", async () => {
+	const tracker = new AsyncRunTracker();
+	let release!: (result: AgentResult) => void;
+	const id = tracker.launch({ agent: "operator", task: "edit", mutates: true, queued: true }, () => new Promise<AgentResult>((resolve) => { release = resolve; }));
+	assert.deepEqual(tracker.running().map((run) => run.id), [id]);
+	assert.deepEqual(tracker.writers().map((run) => run.id), [id]);
+	const joined = tracker.waitFor([id], 5_000);
+	release({ agent: "operator", output: "done", usage: usage(), ok: true });
+	assert.equal((await joined)[0]?.status, "done");
+});
+
+test("operator stall episodes rearm but the model wake budget does not", () => {
+	const watcher = new PeekWatcher();
+	const first = runningRun(0);
+	assert.deepEqual(watcher.poll([first], 90_000, 90_000), [first]);
+	assert.deepEqual(watcher.firstWakeCandidates([first]).map((run) => run.id), [first.id]);
+	watcher.acknowledgeModelWake([first.id]);
+	assert.deepEqual(watcher.firstWakeCandidates([first]), []);
+	watcher.poll([runningRun(100_000)], 100_000, 90_000);
+	assert.deepEqual(watcher.poll([runningRun(100_000)], 190_000, 90_000).map((run) => run.id), [first.id]);
+	assert.deepEqual(watcher.firstWakeCandidates([runningRun(100_000)]), [], "a new operator episode does not replenish the lifetime wake budget");
+});
+
+test("busy-time operator detection does not consume a first model wake", () => {
+	const watcher = new PeekWatcher();
+	const run = runningRun(0);
+	assert.deepEqual(watcher.poll([run], 90_000, 90_000), [run]);
+	assert.deepEqual(watcher.firstWakeCandidates([run]).map((candidate) => candidate.id), [run.id]);
+});
+
 test("PeekWatcher surfaces a stalled leg only once, and re-arms after it recovers", () => {
 	const w = new PeekWatcher();
 	// advanced 10s ago, 45s window → healthy, nothing to surface

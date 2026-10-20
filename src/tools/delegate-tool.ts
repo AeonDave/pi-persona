@@ -325,15 +325,16 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		// The writer classification travels WITH the run (d.tracker metadata), not in a side Set keyed by
 		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
 		// registration after launch() returns would re-insert an already-dead run and leak it.
-		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec) }, (onProgress, runId) => {
+		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), queued: true }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
 			// A real, HARD stop for the async run (a steer is only a soft request the child may
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
 			const ac = new AbortController();
 			d.stopRegistry.set(nodeId, () => ac.abort());
 			const execute = () =>
-				asyncSlots.with(() =>
-					d.buildEngine(
+				asyncSlots.with(() => {
+					d.tracker.markAdmitted(runId);
+					return d.buildEngine(
 						undefined,
 						(snap) => {
 							onProgress(snap);
@@ -350,9 +351,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						// the queue-time seed, so the elapsed reading and stall badge are both honest.
 						const now = Date.now();
 						d.agentTree.update(nodeId, { detail: "", startedAt: now, lastAdvanceAt: now });
-					}),
-					ac.signal,
-				);
+					});
+				}, ac.signal);
 			// A per-call semaphore composes with the process-wide ceiling. Acquire it first so a
 			// queued member of a serial batch never occupies a global slot while waiting for its
 			// predecessor. This makes `concurrency: 1` mean the same thing in sync and async mode.

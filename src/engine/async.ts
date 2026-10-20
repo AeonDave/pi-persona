@@ -50,6 +50,8 @@ export interface AsyncRun {
 	 *  rose) — NOT merely the last event. A worker looping without headway keeps emitting but
 	 *  never bumps this, so `now - lastAdvanceAt` is what tells "working" from "stuck". */
 	lastAdvanceAt?: number;
+	/** Waiting for semaphore admission; queued time is not agent execution time. */
+	queued?: boolean;
 	/** Internal bookkeeping: true once the completion listeners have fired for this entry. Guards a
 	 *  force-settle racing the run thunk's natural resolution so listeners fire exactly once. Lives on
 	 *  the entry (not a side Set) so it survives pruning and the `launch` closure still sees it. */
@@ -93,7 +95,7 @@ export class AsyncRunTracker {
 		this.maxRetained = opts?.maxRetained ?? 25;
 	}
 
-	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean }, run: RunThunk): string {
+	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; queued?: boolean }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
 		const startedAt = this.now(); // one clock read, so the launch and stall stamps cannot disagree
@@ -104,7 +106,7 @@ export class AsyncRunTracker {
 			status: "running",
 			progress: { output: "", turns: 0, tokens: 0 },
 			startedAt,
-			lastAdvanceAt: startedAt,
+			...(meta.queued ? { queued: true } : { lastAdvanceAt: startedAt }),
 		};
 		if (meta.mutates) entry.mutates = true;
 		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
@@ -122,10 +124,12 @@ export class AsyncRunTracker {
 		try {
 			Promise.resolve(
 				run((s) => {
-					// Only a REAL advance (more output, or a higher turn/token count) resets the stall
-					// clock — a repeated identical snapshot from a spinning worker must not mask a stall.
+					// Newly emitted textual tool output is a progress advance. Use the injected clock,
+					// never the stream's event timestamp, for stall-age accounting.
 					const prev = entry.progress;
-					if (s.output.length > prev.output.length || s.tokens > prev.tokens || s.turns > prev.turns) {
+					const toolOutputAdvanced = s.toolOutputAt !== undefined && Number.isFinite(s.toolOutputAt)
+						&& s.toolOutputAt >= 0 && s.toolOutputAt !== prev.toolOutputAt;
+					if (!entry.queued && (s.output.length > prev.output.length || s.tokens > prev.tokens || s.turns > prev.turns || toolOutputAdvanced)) {
 						entry.lastAdvanceAt = this.now();
 					}
 					entry.progress = s;
@@ -177,6 +181,15 @@ export class AsyncRunTracker {
 				}
 			}
 		}
+	}
+
+	/** Start the stall window when a queued run actually acquires its concurrency slot. */
+	markAdmitted(id: string): boolean {
+		const entry = this.runs.get(id);
+		if (!entry || entry.status !== "running" || entry.settled || entry.queued !== true) return false;
+		delete entry.queued;
+		entry.lastAdvanceAt = this.now();
+		return true;
 	}
 
 	/**
@@ -445,6 +458,12 @@ export function clipRunOutput(text: string, id: string, maxChars: number, label 
 	return `${text.slice(0, headChars)}${marker}${tailChars > 0 ? text.slice(-tailChars) : ""}`;
 }
 
+export function isAsyncRunStalled(run: AsyncRun, now: number, stallMs: number): boolean {
+	return run.status === "running" && run.queued !== true && stallMs > 0
+		&& run.lastAdvanceAt !== undefined && Number.isFinite(run.lastAdvanceAt) && run.lastAdvanceAt >= 0
+		&& now - run.lastAdvanceAt >= stallMs;
+}
+
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number; waitingForSupervisor?: ReadonlySet<string> }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
@@ -460,10 +479,11 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		const head = `[${r.id}] ${name} — ${r.status}`;
 		if (r.status === "running") {
 			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
-			if (opts?.waitingForSupervisor?.has(r.id)) line += " · waiting for supervisor";
-			else if (now !== undefined && stallMs !== undefined && stallMs > 0 && r.lastAdvanceAt !== undefined) {
-				const stalledFor = now - r.lastAdvanceAt;
-				if (stalledFor >= stallMs) line += ` ⚠ possibly stuck (no progress for ${Math.round(stalledFor / 1000)}s)`;
+			if (r.queued) line += " · queued (waiting for concurrency slot)";
+			else if (opts?.waitingForSupervisor?.has(r.id)) line += " · waiting for supervisor";
+			else if (now !== undefined && stallMs !== undefined && isAsyncRunStalled(r, now, stallMs)) {
+				const stalledFor = now - r.lastAdvanceAt!;
+				line += ` ⚠ possibly stuck (no progress for ${Math.round(stalledFor / 1000)}s)`;
 			}
 			return line;
 		}
@@ -490,8 +510,22 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
  * forgotten. Pure w.r.t. the injected `now`, so it is unit-tested without a real clock.
  */
 export class PeekWatcher {
-	/** runId → the `lastAdvanceAt` value at which we reported it stalled (a later advance re-arms). */
+	/** runId → the `lastAdvanceAt` value at which the operator episode was reported. */
 	private readonly reportedAt = new Map<string, number>();
+	/** Runs whose one lifetime model stall wake was successfully delivered. */
+	private readonly modelWoken = new Set<string>();
+
+	firstWakeCandidates(runs: AsyncRun[]): AsyncRun[] {
+		return runs.filter((run) => !this.modelWoken.has(run.id));
+	}
+
+	acknowledgeModelWake(runIds: readonly string[]): void {
+		for (const id of runIds) this.modelWoken.add(id);
+	}
+
+	retryReports(runs: readonly AsyncRun[]): void {
+		for (const run of runs) this.reportedAt.delete(run.id);
+	}
 
 	/** The running legs that have NEWLY crossed the stall window since we last reported them. */
 	poll(runs: AsyncRun[], now: number, stallMs: number, waitingForSupervisor: ReadonlySet<string> = new Set()): AsyncRun[] {
@@ -500,6 +534,10 @@ export class PeekWatcher {
 		for (const r of runs) {
 			if (r.status !== "running") continue;
 			live.add(r.id);
+			if (r.queued) {
+				this.reportedAt.delete(r.id);
+				continue;
+			}
 			if (waitingForSupervisor.has(r.id)) {
 				this.reportedAt.delete(r.id); // a live ask is not a stall; re-evaluate immediately when it settles
 				continue;
@@ -507,7 +545,7 @@ export class PeekWatcher {
 			if (r.lastAdvanceAt === undefined) continue;
 			const prev = this.reportedAt.get(r.id);
 			if (prev !== undefined && r.lastAdvanceAt > prev) this.reportedAt.delete(r.id); // advanced ⇒ re-arm
-			if (stallMs > 0 && now - r.lastAdvanceAt >= stallMs && !this.reportedAt.has(r.id)) {
+			if (isAsyncRunStalled(r, now, stallMs) && !this.reportedAt.has(r.id)) {
 				this.reportedAt.set(r.id, r.lastAdvanceAt);
 				newlyStuck.push(r);
 			}
@@ -519,6 +557,7 @@ export class PeekWatcher {
 	/** Forget all tracked state (session start / reload hygiene). */
 	reset(): void {
 		this.reportedAt.clear();
+		this.modelWoken.clear();
 	}
 }
 
@@ -548,8 +587,9 @@ export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string
 }
 
 /** The operator-only periodic status card. It carries the progress digest without model instructions. */
-export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number; waitingForSupervisor?: ReadonlySet<string> }): string {
-	return `Async activity · routine check-in\n\n${buildPeekDigest(runs, opts)}`;
+export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number; waitingForSupervisor?: ReadonlySet<string>; reason?: "routine" | "stall" }): string {
+	const reason = opts.reason ?? "routine";
+	return `Async activity · ${reason === "stall" ? "possible stall" : "routine check-in"}\n\n${buildPeekDigest(runs, opts)}`;
 }
 
 /**
