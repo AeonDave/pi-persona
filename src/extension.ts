@@ -21,6 +21,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
 import { resolveConfig } from "./core/config.ts";
+import { resolvePersonaConfig } from "./core/settings.ts";
 import { type ContractDef, installedContractNames } from "./core/contract.ts";
 import { type DataRootMigrationResult, migrateLegacyDataRoot } from "./core/data-root.ts";
 import {
@@ -77,6 +78,9 @@ export {
 } from "./extension/shared.ts";
 import { installExocom } from "./exocom/install.ts";
 import { installIdentity } from "./extension/identity.ts";
+import { registerPersonaSettings } from "./extension/persona-settings.ts";
+import { openPersonaModelSettings } from "./extension/persona-model-settings.ts";
+import { collectCompanionSettings } from "./extension/companion-settings.ts";
 import { parseExocomArgv } from "./exocom/activation.ts";
 import { formatLedgerStatus } from "./exocom/status.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
@@ -87,7 +91,7 @@ import { createMonitorSession, type MonitorSession } from "./monitor/session.ts"
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, isAsyncRunStalled, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
@@ -110,15 +114,13 @@ import {
 } from "./persona/model-participants.ts";
 import { expandCouncilPreset, resolveCouncilInvocation, type OrchestrationGrammar, type Persona } from "./persona/persona.ts";
 import { bundledSpinePath, bundledWorkerSpinePath, readSpineFile, resolveSpine, type SpineSources } from "./persona/spine.ts";
-import { readLastPersona, writeLastPersona } from "./persona/state.ts";
+import { migratePersonaSettings, patchPersonaSettings, readPersonaSettings, type PersonaSettings } from "./persona/settings-store.ts";
 import { type AgentKind as TelemetryAgentKind, type AgentStatus as TelemetryAgentStatus } from "./telemetry/contract.ts";
 import { TelemetryProducer, type TelemetryAgentInput } from "./telemetry/producer.ts";
 import {
 	type PersonaConfigStore,
 	personaModels,
-	readPersonaConfigs,
 	withPersonaModels,
-	writePersonaConfigs,
 } from "./persona/config-store.ts";
 import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
@@ -183,6 +185,7 @@ interface NudgeEntry {
 
 interface CheckInEntry {
 	content: string;
+	kind?: "routine" | "stall";
 }
 
 /**
@@ -279,7 +282,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return;
 	}
 
-	const config = resolveConfig(process.env);
+	let config = resolveConfig(process.env);
 	if (config.disabled) return;
 	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
 	const registerFollowUpRenderer = (customType: "pi-persona" | "exocom_received", label: string): void => {
@@ -342,7 +345,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	pi.registerEntryRenderer("pi-persona-status", (entry, { expanded }, theme) => {
 		const data = entry.data as CheckInEntry;
 		const full = sanitizeTerminalText(data.content || "Async activity · routine check-in");
-		const title = theme.fg("accent", theme.bold("pi-persona · async status"));
+		const title = theme.fg(data.kind === "stall" ? "warning" : "accent", theme.bold(data.kind === "stall" ? "pi-persona · possible stall" : "pi-persona · async status"));
 		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
 		// The entry title already labels this as async status. Spend the compact preview on the
 		// aggregate and first run row so the operator sees the selected alias and usage label.
@@ -355,8 +358,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
 	};
-	const appendCheckInEntry = (content: string): void => {
-		pi.appendEntry("pi-persona-status", { content } satisfies CheckInEntry);
+	const appendCheckInEntry = (content: string, kind: "routine" | "stall" = "routine"): void => {
+		pi.appendEntry("pi-persona-status", { content, kind } satisfies CheckInEntry);
 	};
 	const appendCommandResult = (
 		label: string,
@@ -390,7 +393,37 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return { moved: [], kept: [], warnings: [`data root migration failed: ${message}`] };
 		}
 	})();
+	// One persistent settings owner. The root migration must run before importing the two
+	// retired stores; fork-guarded children returned before any filesystem access above.
+	const settingsFile = join(personaDataDir(), "settings.json");
+	let savedSettings: PersonaSettings = { version: 1, preferences: {}, personas: {}, lastPersona: null };
+	const settingsWarnings: string[] = [];
+	const reportedSettingsWarnings = new Set<string>();
+	try {
+		const result = migratePersonaSettings(settingsFile, {
+			legacyConfigFile: join(personaDataDir(), "config.json"),
+			legacyStateFile: config.stateFile ?? join(personaDataDir(), "state.json"),
+		});
+		savedSettings = result.settings;
+		settingsWarnings.push(...result.warnings);
+	} catch (error) {
+		settingsWarnings.push(`could not load settings: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	config = resolvePersonaConfig(savedSettings.preferences, process.env);
+	function reportSettingsWarning(ctx: ExtensionContext | undefined, message: string): void {
+		if (reportedSettingsWarnings.has(message)) return;
+		reportedSettingsWarnings.add(message);
+		const text = `pi-persona settings: ${compactInlineText(message, { maxChars: 500 })}`;
+		try {
+			if (ctx?.hasUI) ctx.ui.notify(text, "warning");
+			else process.stderr.write(`${text}\n`);
+		} catch {
+			// A failed UI must not turn recoverable configuration trouble into activation failure.
+			try { process.stderr.write(`${text}\n`); } catch { /* Non-fatal diagnostic. */ }
+		}
+	}
 	const reportDataRootMigration = (ctx: ExtensionContext): void => {
+		for (const warning of settingsWarnings) reportSettingsWarning(ctx, warning);
 		if (dataRootMigration.moved.length > 0) {
 			const message = `pi-persona: moved ${dataRootMigration.moved.length} file(s) from the legacy pi-persona storage root into ${personaDataDir()}`;
 			if (ctx.hasUI) ctx.ui.notify(message, "info");
@@ -849,21 +882,36 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let seedSourceCollisions: string[] = [];
 
 	// Remembered selection lives in the persona data folder; only user gestures write it.
-	const stateFile = config.stateFile ?? join(personaDataDir(), "state.json");
 	const readRememberedPersona = (): string | undefined => {
 		if (!config.persist) return undefined;
-		return readLastPersona(stateFile);
+		try {
+			savedSettings = readPersonaSettings(settingsFile);
+			return savedSettings.lastPersona ?? undefined;
+		} catch (error) {
+			reportSettingsWarning(lastCtx, `could not read remembered persona: ${error instanceof Error ? error.message : String(error)}`);
+			return undefined;
+		}
 	};
 	const persist = (name: string | undefined): void => {
-		if (config.persist) writeLastPersona(stateFile, name);
+		if (!config.persist) return;
+		try {
+			savedSettings = patchPersonaSettings(settingsFile, { lastPersona: name ?? null });
+		} catch (error) {
+			reportSettingsWarning(lastCtx, `could not save remembered persona: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	};
 
-	// Per-persona config (model assignments today, open-ended), indexed by persona name.
-	const configFile = join(personaDataDir(), "config.json");
+	// Model preferences share the canonical file with extension preferences and selection.
 	const readConfigStore = (): PersonaConfigStore => {
-		return readPersonaConfigs(configFile);
+		try {
+			savedSettings = readPersonaSettings(settingsFile);
+			return savedSettings.personas;
+		} catch (error) {
+			reportSettingsWarning(lastCtx, `could not read model settings: ${error instanceof Error ? error.message : String(error)}`);
+			return savedSettings.personas;
+		}
 	};
-	let personaConfigs: PersonaConfigStore = {};
+	let personaConfigs: PersonaConfigStore = savedSettings.personas;
 	// A participant is asked for a model at most ONCE per session — dismissal included, so a
 	// closed picker never becomes a nag. Keyed by persona + assignment key, NOT by persona: a new
 	// roster (or a new strategy's arbiter) is a genuinely new participant and may ask the first time
@@ -1223,13 +1271,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return;
 			}
 			const now = Date.now();
-			const dueCheckIn = config.checkInEveryMs > 0 && now - lastPeekAt >= config.checkInEveryMs;
-			// Routine status is durable operator history, not a model notification: append it on cadence even
-			// while a turn is busy or human input is queued. This keeps visibility independent of wake eligibility.
-			if (dueCheckIn) {
-				lastPeekAt = now;
+			const waitingRuns = waitingAsyncRunIds();
+			const fast = config.peekEveryMs > 0;
+			const stuck = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS, waitingRuns) : [];
+			const appendStatus = (content: string, kind: "routine" | "stall"): void => {
 				try {
-					appendCheckInEntry(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingAsyncRunIds() }));
+					appendCheckInEntry(content, kind);
 				} catch (error) {
 					const detail = compactInlineText(error instanceof Error ? error.message : String(error), { maxChars: 120 });
 					const warning = `pi-persona: could not append async status entry${detail ? ` (${detail})` : ""}`;
@@ -1241,27 +1288,30 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						try { process.stderr.write(`[pi-persona] ${warning}\n`); } catch { /* diagnostics must not block an actionable wake */ }
 					}
 				}
+			};
+			// Every new stall episode is durable operator history, including while the model is busy.
+			if (stuck.length > 0) appendStatus(buildCheckIn(stuck, { now, stallMs: STALL_FLAG_MS, reason: "stall", waitingForSupervisor: waitingRuns }), "stall");
+			const dueCheckIn = config.checkInEveryMs > 0 && now - lastPeekAt >= config.checkInEveryMs;
+			if (dueCheckIn) {
+				lastPeekAt = now;
+				appendStatus(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingRuns }), "routine");
 			}
-			// Poll actionable model wakes only for a free supervisor. A busy/queued session keeps messages
-			// unread and leaves stall state untouched for the next tick, rather than stacking sticky follow-ups.
+			// Interactive stalls are operator-only. Headless sessions may consume one model wake per
+			// run lifetime; unread non-ask messages retain their existing actionable route.
 			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true) || lastCtx?.hasPendingMessages?.() === true) return;
-			// The watchdog is not a model polling loop: the FAST path wakes on newly-stalled legs or unread
-			// progress messages. Completions arrive separately through completionNotifier; `/peek` remains on demand.
-			const fast = config.peekEveryMs > 0;
-			const waitingRuns = waitingAsyncRunIds();
-			const stuck = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS, waitingRuns) : [];
-			// Drain only progress messages; blocking asks (expectsReply) are surfaced by the intercom
-			// notifier and left for the `intercom inbox` tool — so peek never double-shows them.
 			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
-			if (stuck.length === 0 && unread.length === 0) return; // healthy + quiet ⇒ stay silent
+			const wakeCandidates = fast && lastCtx?.hasUI === false
+				? peekWatcher.firstWakeCandidates(runs.filter((run) => isAsyncRunStalled(run, now, STALL_FLAG_MS)))
+				: [];
+			if (wakeCandidates.length === 0 && unread.length === 0) return;
 			const parts: string[] = [];
-			if (stuck.length > 0) parts.push(buildPeekAlert(stuck, { now }));
+			if (wakeCandidates.length > 0) parts.push(buildPeekAlert(wakeCandidates, { now }));
 			if (unread.length > 0) parts.push(`📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}`);
-			if (stuck.length > 0) lastPeekAt = now; // message-only wakes do not postpone the routine status cadence
 			try {
 				sendPersonaFollowUp(pi, `[pi-persona] ${parts.join("\n\n")}`);
+				peekWatcher.acknowledgeModelWake(wakeCandidates.map((run) => run.id));
 			} catch {
-				/* ignore */
+				peekWatcher.retryReports(wakeCandidates);
 			}
 		}, tickMs);
 		peekTimer.unref?.();
@@ -1360,8 +1410,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	 * Every participant a run really spawns — roster members (inline ones included) plus the
 	 * auxiliary actors its strategy declares — with the model each one resolves to.
 	 */
-	function runParticipants(ctx: ExtensionContext, opts: { strategy: string; params?: Record<string, unknown>; members: RosterMember[] }): ModelParticipant[] {
-		const persona = controller.activePersona?.name;
+	function runParticipants(ctx: ExtensionContext, opts: { strategy: string; params?: Record<string, unknown>; members: RosterMember[] }, persona = controller.activePersona?.name): ModelParticipant[] {
 		return collectModelParticipants({
 			members: opts.members,
 			strategy: opts.strategy,
@@ -1478,7 +1527,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// future session with no hint that the assignment never landed.
 		personaConfigs = withPersonaModels(personaConfigs, persona, chosen);
 		try {
-			writePersonaConfigs(configFile, personaConfigs);
+			savedSettings = patchPersonaSettings(settingsFile, { models: { [persona]: chosen } });
+			personaConfigs = savedSettings.personas;
 		} catch (err) {
 			ctx.ui.notify(
 				`pi-persona: could not save the model assignment for "${persona}" (${err instanceof Error ? err.message : String(err)}) — it applies to this session only.`,
@@ -1915,6 +1965,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	function doctorReport(): string {
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
+		lines.push(`settings: ${settingsFile} (/persona-settings; preferences: next session or Pi /reload)`);
 		lines.push(`engine backend: ${config.engine === "child" ? "child-process" : "in-process"}`);
 		const piVersion = installedPiVersion();
 		lines.push(`pi: ${piVersion ?? "unknown"} (requires ≥ ${MIN_PI_VERSION})${piVersion && !satisfiesFloor(piVersion, MIN_PI_VERSION) ? " — BELOW FLOOR" : ""}`);
@@ -2188,6 +2239,66 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			await openAgentOverlay(ctx);
+		},
+	});
+
+	// The dedicated settings surface never replaces Pi's /settings and never calls /reload.
+	registerPersonaSettings(pi, {
+		file: settingsFile,
+		companions: () => collectCompanionSettings(pi.events),
+		activeConfig: config,
+		env: process.env,
+		read: () => {
+			savedSettings = readPersonaSettings(settingsFile);
+			personaConfigs = savedSettings.personas;
+			return savedSettings;
+		},
+		write: (patch) => {
+			savedSettings = patchPersonaSettings(settingsFile, patch);
+			personaConfigs = savedSettings.personas;
+		},
+		isCurrent: (ctx) => !disposed && !ctx.signal?.aborted &&
+			(ctx.sessionManager?.getSessionId?.() === undefined ||
+				lastCtx?.sessionManager?.getSessionId?.() === ctx.sessionManager.getSessionId()),
+		diagnostics: doctorReport,
+		models: async (ctx) => {
+			lastCtx = ctx;
+			personaConfigs = readConfigStore();
+			const session = ctx.sessionManager?.getSessionId?.();
+			await openPersonaModelSettings(ctx, {
+				owners: () => personas.map((persona) => ({ name: persona.name, label: persona.label })),
+				activeOwner: () => controller.activePersona?.name,
+				profiles: (owner) => {
+					const persona = personas.find((p) => p.name === owner);
+					return [
+						...(persona?.orchestration?.strategy ? [{ name: "@orchestration", label: "Automatic orchestration" }] : []),
+						...personas.filter((p) => p.name !== owner && (p.council?.strategy || p.council?.members || p.council?.membersProblem))
+							.map((p) => ({ name: p.name, label: `Council: ${p.label}` })),
+					];
+				},
+				participants: (owner, profile) => {
+					const persona = personas.find((p) => p.name === owner);
+					if (!persona) throw new Error(`persona "${owner}" is no longer installed`);
+					const orchestrationStrategy = persona.orchestration?.strategy;
+					if (profile === "@orchestration" && orchestrationStrategy && persona.orchestration) {
+						const orchestration = persona.orchestration;
+						const panel = resolveOrchestrationMembers(orchestration, teams);
+						return runParticipants(ctx, { strategy: orchestrationStrategy, members: panel,
+							...(orchestration.params ? { params: orchestration.params } : {}) }, owner);
+					}
+					const resolved = resolveCouncilInvocation(personas, persona, profile ? { persona: profile } : {});
+					if (!resolved.ok) throw new Error(resolved.error);
+					const { strategy, roster, members, params } = resolved.value;
+					const panel = resolveOrchestrationMembers({ roster, ...(members ? { members } : {}) }, teams);
+					return runParticipants(ctx, { strategy, members: panel, params }, owner);
+				},
+				saved: (owner) => personaModels(personaConfigs, owner),
+				write: (owner, models) => {
+					savedSettings = patchPersonaSettings(settingsFile, { models: { [owner]: models } });
+					personaConfigs = savedSettings.personas;
+				},
+				isCurrent: () => !disposed && (session === undefined || lastCtx?.sessionManager?.getSessionId?.() === session),
+			});
 		},
 	});
 

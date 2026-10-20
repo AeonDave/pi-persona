@@ -666,7 +666,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// One progress tick, routed exactly as the subscription routes them: the per-call sink
 			// takes the AgentProgress shape (no `turns`), else the construction-time sink.
 			const emitProgress = (snap: ProgressSnapshot): void => {
-				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
 				else if (deps.onProgress) deps.onProgress(snap);
 			};
 			let contractDef: ContractDef | undefined = requestedDef;
@@ -674,7 +674,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			try {
 				unsub = session.subscribe((ev) => {
 					armIdle(); // any event = activity → reset the idle clock
-					const toolEvent = applyEvent(state, ev);
+					const toolEvent = applyEvent(state, ev, Date.now());
 					// Track the open calls so an abandoned one can be closed once the run settles.
 					if (toolEvent) {
 						if (toolEvent.phase === "start") openToolCalls.set(toolEvent.callId, toolEvent.name);
@@ -735,7 +735,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 							// launch path (extension.ts) only has the latter.
 							const snap = snapshot(state);
 							const activity = `✉ from ${env.from}`;
-							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity });
+							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}), activity });
 							else if (deps.onProgress) deps.onProgress({ ...snap, activity });
 						}
 					};

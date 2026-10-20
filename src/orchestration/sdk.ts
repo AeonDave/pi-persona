@@ -67,6 +67,8 @@ export interface AgentProgress {
 	tokens?: number;
 	/** The tool the agent is currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
+	/** Timestamp of newly streamed tool output; no tool output text crosses this seam. */
+	toolOutputAt?: number;
 	/** One authoritative runtime tool lifecycle transition; never contains tool args or output. */
 	toolEvent?: ToolEvent;
 }

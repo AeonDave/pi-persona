@@ -153,7 +153,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (isPositiveFiniteMs(spec.timeoutMs)) childOptions.timeoutMs = spec.timeoutMs;
 			if (onProgress) {
 				childOptions.onProgress = (snap) =>
-					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
 			}
 			// The run aborts if EITHER the whole-run signal or this agent's own (UI stop) fires.
 			const signal = combineSignals(deps.signal, callSignal);

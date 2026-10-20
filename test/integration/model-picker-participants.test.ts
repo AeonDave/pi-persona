@@ -156,10 +156,10 @@ async function boot(opts: {
 		ctx,
 		notes,
 		savedModels: () => {
-			const file = path.join(fresh, "persona", "config.json");
-			return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8"))["judge-host"]?.models ?? {} : {};
+			const file = path.join(fresh, "persona", "settings.json");
+			return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")).personas["judge-host"]?.models ?? {} : {};
 		},
-		savedConfig: () => JSON.parse(fs.readFileSync(path.join(fresh, "persona", "config.json"), "utf8")),
+		savedConfig: () => JSON.parse(fs.readFileSync(path.join(fresh, "persona", "settings.json"), "utf8")).personas,
 	};
 }
 

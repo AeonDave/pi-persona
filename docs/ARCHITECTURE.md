@@ -200,7 +200,8 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   lifecycle metadata only, never an agent-message router or control surface. See
   [`TELEMETRY.md`](./TELEMETRY.md) for privacy, retention, writer leases, and shutdown behavior.
 - **`src/persona/`** — identity: `persona.ts` (parse + `expandCouncilPreset` + `composeSystemPrompt`),
-  `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts`, `state.ts` (last-selected persona),
+  `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts` (pure model helpers),
+  `settings-store.ts` (canonical preferences, per-persona models and last-selected persona),
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
   `persona.ts` for supervisor turns and in the engines for delegated legs).
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
@@ -302,7 +303,7 @@ than borrowing another role's choice. Routing still resolves the full role key, 
 
 **Model assignment repair is configuration, not execution recovery.** `/persona models [profile]`
 is an explicit user edit in the Pi adapter: it reuses `resolveCouncilInvocation`,
-`collectModelParticipants` and the existing locked config writer, without adding another roster,
+`collectModelParticipants` and the canonical locked settings writer, without adding another roster,
 model store or provider-routing policy. The active caller owns saved assignments even when borrowing
 another council profile. Automatic discovery stays never-nag; explicit editing may replace saved or
 agent defaults, but not inline pins. Host catalog refresh has a 20-second cooperative deadline;
@@ -312,6 +313,41 @@ Cancelled rows preserve their old choices; accepted choices merge without cleari
 Running engines retain their captured assignments. Missing credentials are classified at the engine
 adapter boundary; only the SDK decides whether a main-model recovery is admissible. This separation
 avoids a global reset or automatic repinning that could silently change billing and panel diversity.
+
+**Unified settings.** `/persona-settings` is independent of Pi's `/settings`: full-page TUI, native
+RPC dialogs, and a read-only `show` report. `core/settings.ts` is the public preference registry and
+validator; the UI and environment precedence consume it rather than maintaining duplicate field lists.
+All persistent Persona preferences live in `<agentDir>/persona/settings.json`, version 1: sparse
+`preferences`, `personas` model maps and `lastPersona`. `settings-store.ts` owns bounded validated reads,
+cross-process locked field patches and atomic replacement. Null removes an exact override; unknown
+top-level and per-persona fields survive unrelated edits. Malformed/unsupported files are never
+overwritten: activation warns and falls back, while editing fails closed. Fresh read-only inspection
+does not materialize defaults.
+
+`selectionRevision` is a non-negative counter updated only by explicit `lastPersona` patches,
+including re-selection of the same name. Model/preference saves never advance it. Companion scope
+readers must use this semantic marker, not the settings file's mtime, as evidence of a selection gesture.
+
+Legacy `config.json` and `state.json` are imported only if the canonical file is absent, then archived
+as exact independent `.migrated` copies after commit. Archive conflicts preserve the original and warn;
+an existing canonical file is never reimported. `PI_PERSONA_STATE_FILE` only selects a legacy import
+source. No active legacy writer remains. Explicit public environment values retain startup precedence;
+internal child/bus guards are not preferences. Definitions, credentials and native Pi settings remain
+with their existing owners.
+
+Scalar preferences are activation-scoped: saving marks differences pending until a Pi restart or
+Pi's native `/reload`, not `/new`; the panel never reloads automatically. `/persona reload` only refreshes resources.
+The Models section selects the assignment owner independently of the viewed council/orchestration
+profile, supports exact-key resets and keeps inline pins immutable. It patches the same file and updates
+the resolver cache for future runs, never changing an already-running worker. Native compaction is untouched.
+
+Mind/Flow settings use optional synchronous discovery on Pi's public event bus
+(`pi-persona:settings:collect:v1`). The owning companion reports its current startup values; the same
+central registry validates owner/type and renders only supported fields. Persona alone writes their
+preferences in the canonical file; companions independently read their known fields, retaining
+standalone operation with no hard runtime dependency on Persona. No collection call performs I/O,
+starts services or wakes a model. Flow's desired port and idle grace apply to the next shared-service
+startup, never to a daemon other sessions are already using. Skill Optimizer is outside this contract.
 
 ### MCP (and other `session_start`-scoped extensions) in sub-agents
 
@@ -657,12 +693,14 @@ a local process able to modify that directory is already inside the trust bounda
   if delayed input hooks outlast the active run; no supported post-admission ordering guarantee
   has been established. The supervisor otherwise returns control and
   goes idle until a wake; the **peek watchdog** fires while async children run but stays SILENT unless
-  there is something to act on — a healthy background run should not interrupt. It can start a model turn
-  only for actionable events: a **fast** wakeup (`PI_PERSONA_PEEK_MS`, ~30s, `0` disables) when a child NEWLY
-  crosses the `STALL_FLAG_MS` (90s) stall window (a focused *possibly stuck* alert, framed patience-first —
-  ask the leg, don't probe its environment); messages to the supervisor also wake it. The **slow routine status card**
-  (`PI_PERSONA_CHECKIN_MS`, ~5 min, `0` disables) is a durable, expandable operator-only session entry
-  with the compact ProgressView digest — never full transcripts — and does not start a model turn. Live supervisor asks
+  there is something to act on — a healthy background run should not interrupt. Every newly detected stall
+  episode (`STALL_FLAG_MS`, 90s) appends a durable, expandable operator-only warning entry, including while
+  the supervisor is busy. Interactive stalls never wake the model. In headless sessions, the first stall
+  episode may produce one focused patience-first model wake per run lifetime (ask the leg, don't probe its
+  environment); later stall episodes for that run do not re-arm the model-wake budget. Unread messages to the
+  supervisor retain their existing wake path. The **slow routine status card** (`PI_PERSONA_CHECKIN_MS`,
+  ~5 min, `0` disables) is a durable, expandable operator-only session entry with the compact ProgressView
+  digest — never full transcripts — and does not start a model turn. Live supervisor asks
   are derived from the exact engine handle's optional `isWaitingForSupervisor` predicate: tree/F9/peek
   show waiting, and the watchdog suppresses false stalls until the ask settles. Parent clocks advance
   with child engine events (liveness, not proof of useful work); parents are waiting only when every

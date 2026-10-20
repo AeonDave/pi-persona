@@ -188,6 +188,106 @@ files are seed sources. A fresh install has no installed personas until `/person
 | Contract | `contracts/*.contract.json` | structured output fields requested by name and pinned per run |
 | Preset | `presets/*.preset.json` | reusable council strategy, roster, and parameter bundle |
 
+### Unified pi-persona settings
+
+`/persona-settings` opens pi-persona's own settings editor in the TUI or RPC UI. It is a separate
+extension command; it does not replace Pi's native `/settings` or edit native Pi preferences such
+as compaction. The TUI is a full-page, filterable panel (`/` to search, `r` to reset the selected
+saved override, `m` for model assignments, `d` for diagnostics); the RPC UI offers the same
+settings, model, and diagnostics flows. `/persona-settings show` emits a read-only report and is
+available in headless sessions.
+
+The sole active settings file is `<agentDir>/persona/settings.json` (normally
+`~/.pi/agent/persona/settings.json`). Its version-1 top-level shape is:
+
+```json
+{
+  "version": 1,
+  "preferences": { "engine": "inproc", "nudge": true },
+  "personas": { "dev": { "models": { "reviewer": "provider/model-id" } } },
+  "lastPersona": "dev"
+}
+```
+
+`preferences` contains the public extension settings; `personas.<name>.models` preserves
+provider-qualified model assignments, and `lastPersona` remembers the selection when
+`PI_PERSONA_PERSIST` is enabled. The preference registry groups all editable scalar settings as:
+
+| Group | Preference IDs |
+|---|---|
+| Discovery | `extraDirs`, `seed` |
+| Startup | `defaultPersona`, `persist` |
+| Interface | `keybinding` |
+| Delegation | `delegateDefaultAllow`, `childThinking`, `engine`, `peekEveryMs`, `checkInEveryMs`, `agentHardTimeoutMs`, `agentStartupTimeoutMs`, `nudge`, `asyncRetain`, `ledgerV2`, `changeReport` |
+| Collaboration | `broker`, `exocom` |
+| Prompt | `spine`, `spineLegs` |
+| Mind (when loaded) | `mindCapture` (`auto`/`prompt`/`off`), `mindNudge` |
+| Flow (when loaded) | `flowEnabled`, `flowPort`, `flowIdleMs` |
+
+`disabled` and the storage path are not editable preferences. Model assignments remain scoped by
+persona owner, rather than being promoted into global preferences.
+`selectionRevision` is internal metadata in the same file: explicit persona-selection gestures
+increment it, while model/preference edits leave it unchanged. Companion readers can therefore
+distinguish a re-selection from an unrelated settings save without following whole-file timestamps.
+The editor never reloads Pi automatically. Scalar preferences load after a Pi restart or Pi's native
+`/reload`; `/new` alone does not reactivate Persona's extension factory. `/persona reload` reloads
+persona definitions and does not apply preference changes. The panel shows when a saved value is
+pending reload. Model assignments are read by the
+existing resolver for future runs, so they do not alter workers already running.
+
+Mind and Flow report their supported settings through Pi's public event bus; the panel does not import
+or require either plugin. Their preferences live in the same `preferences` object above, not in new
+plugin configuration files. Skill Optimizer remains independent. Absent companions do not expose
+nonfunctional controls. Updated companion versions are needed to contribute settings to this panel.
+
+`flowEnabled` controls default dashboard attachment; `--no-flow` still opts out for one run.
+`flowPort` is the desired port for the next shared service start, not a command to move an existing
+service. `flowIdleMs` is the advanced shared-service idle grace (50–60000 ms): it applies only with
+no Pi registrations **and** no browser SSE clients. Saving it never restarts another Pi's service.
+
+Explicit public `PI_PERSONA_*` environment values retain startup precedence over saved preferences.
+The panel marks an environment-controlled setting as locked; resetting its saved value only removes
+that saved override and does not defeat the environment. `PI_PERSONA_DISABLE` is an internal
+process guard and is not an editable setting.
+
+When no canonical `settings.json` exists, startup imports the retired `config.json` model store and
+`state.json` persona state (or the path supplied by `PI_PERSONA_STATE_FILE`) once. Successfully
+migrated, unchanged legacy files are archived as `<file>.migrated`; if validation, safe archival, or
+concurrency checks fail, the legacy source is kept and a warning is reported. Once `settings.json`
+exists, it is the only active store: legacy files are not dual-read. An invalid or unsafe canonical
+file is reported rather than overwritten. `PI_PERSONA_STATE_FILE` now only selects a legacy state
+file to import when the canonical file does not yet exist; it does not move or redirect active
+settings storage.
+
+The model editor asks you to choose an owner persona and then its current or a named council
+profile; it never activates that persona. It lists the roster and strategy-declared auxiliary
+participants using the runtime model precedence described below. The searchable model picker uses
+Pi's currently available provider-qualified models; opening the editor does not refresh provider
+catalogs, and refresh is an explicit action. Saving or removing an assignment affects future runs.
+Reset removes only that saved key (`null` in a settings patch), revealing lower-precedence sources
+such as a bare agent assignment; inline model pins remain read-only. “Other saved assignments” lets
+you remove keys outside the selected profile without exposing unsafe legacy key text.
+
+The existing `/persona models [council-persona]` shortcut remains available for the active caller.
+It refreshes the model catalog before editing, and a named council profile does not change which
+persona owns the saved assignments. Use the Models action in `/persona-settings` when you need to
+choose the owner explicitly.
+
+#### Companion settings adapter contract
+
+The optional synchronous bus channel `pi-persona:settings:collect:v1` receives
+`{ add(id, values) }`. A loaded supervisor companion responds with `add("mind", { mindCapture,
+mindNudge })` or `add("flow", { flowEnabled, flowPort, flowIdleMs })`, using its current startup
+snapshot. Each may report a supported subset. Persona validates ownership/types against the same
+registry used by the editor and displays only reported fields; an unrelated plugin cannot contribute
+an optimizer or native Pi setting through this channel. Contributors must not read credentials,
+refresh providers, write files, wake the model or start a service in response to collection.
+
+Persona alone patches the canonical settings file; companions read their own known fields and
+preserve their standalone operation and environment overrides. They must release/re-arm their
+listener with the owning extension lifecycle. Add a new control by updating registry metadata,
+validation, the owning consumer and contract tests—not by adding another settings writer.
+
 `tools` accepts an allowlist such as `[read, grep]`, an `allow`/`deny` object, or `[]` for no tools.
 Entries are plain tool names or `*` patterns; Pi's `+name`/`-name` default-tool modifier
 syntax is not an allowlist and is rejected. Use the `deny` field to remove tools. Omit `tools` to
@@ -438,8 +538,9 @@ test; the data-driven definitions above require no core change.
 **Keys** — `f8` cycles persona; `f9` or `/agents` opens the agent overlay: ↑↓ navigate, ⏎ open, `x`
 stop, `s` steer, and Esc close.
 
-**Commands** — `/persona [name|off|list|reload|seed|restore]` · `/models [query]` ·
-`/orchestrate <task>` · `/flow <name> <task>` · `/peek [id]` · `/exocom` · `/doctor`.
+**Commands** — `/persona [name|off|list|reload|seed|restore|models [council-persona]]` ·
+`/persona-settings [show]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` ·
+`/peek [id]` · `/exocom` · `/doctor`.
 
 `/doctor` reports the cross-process broker's lifecycle on one line: `broker: on — endpoint …` once
 the host is listening, `broker: on — (starting…)` mid-attempt, or
@@ -480,10 +581,13 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_KEY` | `f8` | keybinding that cycles installed personas |
 | `PI_PERSONA_PERSIST` | on | `off` stops remembering the last-selected persona across sessions |
 | `PI_PERSONA_DELEGATE_DEFAULT` | allow | `deny` (or an off-word) makes an unlisted delegate target default-deny instead of default-allow |
-| `PI_PERSONA_STATE_FILE` | a global default path | overrides where the last-selected-persona state is stored |
 | `PI_PERSONA_ASYNC_RETAIN` | 25 | how many settled-but-uncollected async runs are retained before FIFO-evicting the oldest |
 | `PI_PERSONA_LEDGER_V2` | off | `on` widens the delegation-ledger retry-veto key to also include role/tools/isolation, not just agent+model+task |
 | `PI_PERSONA_LEG_CHANGE_REPORT` | on | `off` disables the non-worktree files-changed report (two `git status` spawns per leg) |
+
+`PI_PERSONA_STATE_FILE` is only a migration input for the retired standalone state file; it no
+longer selects an active persistence path. The canonical store is always
+`<agentDir>/persona/settings.json`.
 
 ## Development
 

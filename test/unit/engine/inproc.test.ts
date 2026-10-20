@@ -137,6 +137,25 @@ test("inproc engine propagates each authoritative tool lifecycle event once with
 	assert.equal(JSON.stringify(events).includes("sensitive"), false, "tool output is not propagated");
 });
 
+test("inproc engine forwards tool-output liveness without forwarding tool text", async () => {
+	const progress: Array<{ output: string; toolOutputAt?: number }> = [];
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([
+			{ type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash", args: { command: "echo secret" } },
+			{ type: "tool_execution_update", toolCallId: "bash-1", toolName: "bash", partialResult: { content: [{ type: "text", text: "secret tool output" }] } },
+			msgEnd("answer"),
+		]),
+	});
+	const result = await engine.run({ agent: "a", task: "inspect" }, (snap) => progress.push({ output: snap.output, ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}) }));
+	assert.equal(result.output, "answer");
+	assert.ok(progress.some((snap) => snap.toolOutputAt !== undefined), "the timestamp crosses the AgentProgress seam");
+	assert.equal(progress.some((snap) => snap.output.includes("secret tool output")), false, "tool contents never cross the progress seam");
+});
+
 test("inproc engine folds the session event stream into output + usage (no live model)", async () => {
 	const spy: Spy = {};
 	const engine = makeInProcessEngine({
