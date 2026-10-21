@@ -84,6 +84,8 @@ function cancelled(usages: AgentResult["usage"][]): AgentResult {
 
 export const debate: Strategy = {
 	name: "debate",
+	when: "2+ members argue live with each other, then a majority vote",
+	team: "magi",
 	params: {
 		bestOf: { type: "number", doc: "default: majority of the roster" },
 		aggregate: { type: "string", default: "majority", doc: '"majority" | "unanimity"' },

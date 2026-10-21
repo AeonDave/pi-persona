@@ -53,7 +53,7 @@ export interface AgentRunSpec {
 
 /** Is `x` a genuine positive, finite `timeoutMs` override — vs. absent/junk (undefined, NaN,
  *  Infinity, ≤0), which means "no override, fall back to the run's existing default"? The
- *  ONE predicate every `timeoutMs` site gates on (`specOf`, the single-async delegate path,
+ *  ONE predicate every `timeoutMs` site gates on (`specOf`, the single-leg delegate path,
  *  and both engine adapters), so they can't drift into checking it differently. */
 export function isPositiveFiniteMs(x: number | undefined): x is number {
 	return x !== undefined && Number.isFinite(x) && x > 0;
@@ -67,8 +67,6 @@ export interface AgentProgress {
 	tokens?: number;
 	/** The tool the agent is currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
-	/** Timestamp of newly streamed tool output; no tool output text crosses this seam. */
-	toolOutputAt?: number;
 	/** One authoritative runtime tool lifecycle transition; never contains tool args or output. */
 	toolEvent?: ToolEvent;
 }
@@ -107,7 +105,8 @@ export interface StrategySDK {
 	agent(spec: AgentRunSpec, options?: AgentCallOptions): Promise<AgentResult>;
 	parallel<T>(thunks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;
 	reduce: {
-		aggregate(results: AgentResult[]): AgentResult;
+		/** `labels` (aligned to `results`) name each section by lens or item instead of the agent. */
+		aggregate(results: AgentResult[], labels?: readonly string[]): AgentResult;
 		vote(candidates: AgentResult[], opts: VoteOpts): ReducerResult;
 		/** Anonymise + label candidates for an impartial judge (run `agent(judge, …)` on
 		 *  the returned ballot, then map the verdict via `pick`). */
@@ -146,6 +145,17 @@ export interface StrategyParam {
 
 export interface Strategy {
 	name: string;
+	/** The problem class this method answers, in one line — rendered into the council tool's
+	 *  description from the registry, so the guidance cannot drift from the code. */
+	when?: string;
+	/** What the roster positions MEAN, where order or role matters (`[splitter, worker]`). */
+	roster?: string;
+	/** The team this method is built for. A call that switches TO this method and names no roster seats it,
+	 *  instead of the profile's roster (the wrong panel for it) or the `magi` fallback (read-only voters). */
+	team?: string;
+	/** Param keys the run cannot proceed without; a call that omits one is refused up front,
+	 *  before any run, tree row or model picker exists. Each must also be declared in `params`. */
+	required?: readonly string[];
 	/** Declared, discoverable params (name → type/default/doc). Consumed by the council tool
 	 *  (warn on unknown keys) and `/doctor`. A strategy with no params omits this. */
 	params?: Record<string, StrategyParam>;

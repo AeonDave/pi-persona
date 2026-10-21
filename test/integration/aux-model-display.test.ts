@@ -10,6 +10,7 @@ import piPersona, { type EngineFactories } from "../../src/extension.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
 import { emptyUsage } from "../../src/engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../../src/orchestration/sdk.ts";
+import { convene } from "../setup/convene.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -25,6 +26,7 @@ function makeMockPi() {
 	const tools: Record<string, unknown> = {};
 	const commands: Record<string, { handler: AnyFn }> = {};
 	const events: TelemetryEvent[] = [];
+	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
 		events: { emit: (_name: string, event: TelemetryEvent) => events.push(event) },
 		on: (name: string, handler: AnyFn) => { hooks[name] = handler; },
@@ -36,7 +38,7 @@ function makeMockPi() {
 		registerShortcut: () => {},
 		registerFlag: () => {},
 		getFlag: () => false,
-		sendMessage: () => {},
+		sendMessage: (message: unknown, options: unknown) => { sent.push({ message, options }); },
 		getAllTools: () => Object.keys(tools).map((name) => ({ name })),
 		getActiveTools: () => Object.keys(tools),
 		setActiveTools: () => {},
@@ -48,6 +50,7 @@ function makeMockPi() {
 		pi: pi as unknown as ExtensionAPI,
 		events,
 		tool: (name: string) => tools[name],
+		sentMessages: () => [...sent],
 		fire: (name: string, ...args: unknown[]) => hooks[name]?.(...args),
 		command: (name: string, args: string, ctx: unknown) => commands[name]?.handler(args, ctx),
 	};
@@ -124,8 +127,7 @@ async function boot(selectModel: (title: string, options: string[]) => string): 
 }
 
 async function runCriticLoop(h: Harness, params: Record<string, unknown>): Promise<unknown> {
-	const council = h.m.tool("council") as { execute: AnyFn };
-	return council.execute("aux-model-display", { question: "review", strategy: "critic-loop", params }, undefined, undefined, h.ctx);
+	return convene(h, "aux-model-display", { question: "review", strategy: "critic-loop", params });
 }
 
 function actorEvents(h: Harness, agent: string): Array<{ label: string; model: string | undefined }> {
@@ -179,21 +181,14 @@ test("inline role models and bare auxiliary assignments remain visible at their 
 test("colliding role hints omit an uncertain display model while preserving each inline route", async () => {
 	const h = await boot((_title, options) => options[0] ?? "");
 	try {
-		const council = h.m.tool("council") as { execute: AnyFn };
-		const result = await council.execute(
-			"colliding-role-hints",
-			{
-				question: "review",
-				strategy: "fanout",
-				members: [
-					{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for auth", model: "alpha/one" },
-					{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for storage", model: "beta/two" },
-				],
-			},
-			undefined,
-			undefined,
-			h.ctx,
-		) as { isError?: boolean };
+		const result = await convene(h, "colliding-role-hints", {
+			question: "review",
+			strategy: "fanout",
+			members: [
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for auth", model: "alpha/one" },
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for storage", model: "beta/two" },
+			],
+		});
 		assert.notEqual(result.isError, true);
 
 		const reviewers = actorEvents(h, "reviewer");

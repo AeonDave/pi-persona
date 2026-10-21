@@ -1,8 +1,9 @@
 /**
  * Flow journal (v0.5) — JSONL resume. Each completed phase appends one line; on a later
  * run the journal is read back into a resume map (phase id → output) so done phases are
- * skipped. Lines whose `hash` doesn't match the current `flow@hash` are ignored (the flow
- * changed), and a phase recorded `ok:false` is NOT resumed (it re-runs). `parseJournal`
+ * skipped. Lines whose `hash` doesn't match the current run hash (`flowRunHash`: flow + task +
+ * cwd) are ignored (another flow version, task or project), and a phase recorded `ok:false` is
+ * NOT resumed (it re-runs). `parseJournal`
  * and the filename derivation are pure (tested); the read/write helpers are thin `fs` glue.
  */
 
@@ -24,8 +25,9 @@ const PATH_HOSTILE = /[/\\<>:"|?*\x00-\x1f]/g;
  *  name as a filename can be; the `flow@hash` half is what actually keeps journals apart, since
  *  it covers the whole spec (the name included). Two names that encode alike — `ci:quick` and
  *  `ci?quick` — are therefore still two different specs with two different hashes and two
- *  different files, and so is a name long enough to be truncated here. Should a truncated hash
- *  ever collide anyway, every LINE still carries the full one, so a resume reads only its own. */
+ *  different files, and so is a name long enough to be truncated here. Runs of ONE flow on another
+ *  task or project share this file, and a truncated hash could collide: either way every LINE
+ *  carries the full run hash (`flowRunHash`), so a resume reads only its own. */
 export function journalFileName(spec: FlowSpec): string {
 	return `${encodeFlowName(spec.name)}.${flowHash(spec).slice(0, 8)}.journal.jsonl`;
 }
@@ -38,7 +40,7 @@ function encodeFlowName(name: string): string {
 	return encoded || "flow";
 }
 
-/** Fold a JSONL journal into a resume map for the given `flow@hash`. Later lines win, so a
+/** Fold a JSONL journal into a resume map for the given run hash. Later lines win, so a
  *  phase that failed then succeeded ends up resumed; a phase still failed is left to re-run.
  *  A `gateApproved` line marks a checkpoint already approved so a resume doesn't re-prompt. */
 export function parseJournal(content: string, hash: string): Record<string, ResumedResult> {
@@ -71,6 +73,25 @@ export function readJournal(path: string, hash: string): Record<string, ResumedR
 		return parseJournal(fs.readFileSync(path, "utf8"), hash);
 	} catch {
 		return {};
+	}
+}
+
+/** A finished run leaves the file: drop ITS lines (unreadable ones too), keep every other run's
+ *  resumable progress, and remove the file once nothing is left. Best-effort. */
+export function clearJournal(path: string, hash: string): void {
+	try {
+		const others = fs.readFileSync(path, "utf8").split("\n").filter((line) => {
+			try {
+				const e = JSON.parse(line) as FlowJournalEntry | null;
+				return !!e && typeof e === "object" && e.hash !== hash;
+			} catch {
+				return false;
+			}
+		});
+		if (others.length === 0) fs.rmSync(path, { force: true });
+		else fs.writeFileSync(path, `${others.join("\n")}\n`);
+	} catch {
+		/* best effort — a journal that cannot be cleaned is only a stale resume candidate */
 	}
 }
 

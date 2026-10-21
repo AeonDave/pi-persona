@@ -62,8 +62,12 @@ function clip(diff: string, max: number): string {
 
 export const compete: Strategy = {
 	name: "compete",
+	when: "rival implementations in worktrees, blind-judged; returns the winning diff (clean git repo)",
+	roster: "competitors",
+	team: "build",
+	required: ["judge"],
 	params: {
-		judge: { type: "agent", doc: "(required) the arbiter agent, or an inline { agent, role?, model?, skills? }" },
+		judge: { type: "agent", doc: "the arbiter agent, or an inline { agent, role?, model?, skills? }" },
 		ballotDiffChars: { type: "number", default: 6000, doc: "ballot-only diff clip length; the winner's diff is always full" },
 	},
 	async run(input, sdk) {

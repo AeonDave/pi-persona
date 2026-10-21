@@ -15,7 +15,7 @@
  * (echo/cd/one-line check) is orchestration glue and does not advance the run; a run reaching the
  * threshold is a by-hand sweep. Tool identity is not required (a real sweep mixes read/grep/curl). A
  * high single-command threshold stays as a SECONDARY trigger for a genuinely enormous one-shot dump
- * (a sign it should have been detached/quarantined). A hand-off (delegate/council) resets the run;
+ * (a sign it should have been detached/quarantined). A hand-off (delegate/council/flow) resets the run;
  * nothing else does.
  *
  * Backoff: repeating the identical reminder is noise once the operator has seen it and kept going —
@@ -23,15 +23,17 @@
  * sub-agent can't inherit; from the supervisor side that loop is indistinguishable from a delegable
  * sweep, so no signal can separate them). Each un-actioned nudge WIDENS the next run window (n× the
  * base): the reminder lands early, then de-escalates. Pure — no I/O, fully unit-testable.
+ *
+ * The module also hosts the two call-time wake guards, {@link PollGuard} and {@link longWaitSeconds}.
  */
 
 /** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
-export const HANDOFF_TOOL_NAMES: ReadonlySet<string> = new Set(["delegate", "council"]);
-/** Supervision glue: collecting a delegated result (`intercom wait`/`result`) or arming a
- *  `timer` is neither hands-on work nor a hand-off. Their payloads are large by nature, so
+export const HANDOFF_TOOL_NAMES: ReadonlySet<string> = new Set(["delegate", "council", "flow"]);
+/** Supervision glue: collecting a delegated result (`intercom result`) or arming a
+ *  `timer`/`monitor` is neither hands-on work nor a hand-off. Their payloads are large by nature, so
  *  counting them would punish the exact behavior the nudge exists to encourage. They neither
  *  advance nor reset the run, and never nudge. */
-const GLUE_TOOLS = new Set(["intercom", "timer"]);
+const GLUE_TOOLS = new Set(["intercom", "timer", "monitor"]);
 /** Mutation tools often return only a terse acknowledgement. Their output size is not a useful
  * proxy for the amount of direct coding work, so every call counts as substantive. */
 const MUTATING_TOOLS = new Set(["edit", "write", "apply_patch"]);
@@ -140,6 +142,7 @@ export class DelegationNudge {
 		if (GLUE_TOOLS.has(toolName)) return undefined;
 		if (HANDOFF_TOOL_NAMES.has(toolName)) {
 			if (!handoffSucceeded) {
+				if (toolName === "flow") return undefined; // self-describing failure (abort, bad name, a failed phase): never a re-dispatch cue (a rejected checkpoint is not an error: it counts as a landed hand-off)
 				const normalizedSize = Math.max(0, Math.floor(size));
 				const identity = failureText === undefined ? `size:${normalizedSize}` : fingerprintFailure(failureText);
 				const key = `${toolName}:${identity}`;
@@ -193,17 +196,15 @@ export class DelegationNudge {
  * UP: the child's report carries an explicit surrender/blocked marker. It returns a reminder to
  * append to that very result — in RECENT context, on the leg that just landed — that a delegating
  * supervisor must not bank a premature block: confirm it names a genuine missing capability, else
- * steer it back with the recovery pass or re-dispatch. This is the runtime half of the operator
+ * verify it directly or re-dispatch with a sharper brief. This is the runtime half of the operator
  * protocol's "reject premature surrender" rule; the top-of-prompt persona directive has decayed by
  * the time a blocked leg returns.
  *
  * Keyed on the ecosystem's OWN explicit protocol tokens (an operator emits `[BLOCKED: need X]`, a CTF
  * leg emits `FLAG: UNKNOWN`) — never a fuzzy "sounds stuck" guess, so it does not misfire on ordinary
- * prose. It inspects only `delegate`/`council` results (a child's report); the supervisor's own tools
+ * prose. It inspects only `delegate`/`council`/`flow` results (a child's report); the supervisor's own tools
  * are DelegationNudge's job, so the two never fire on the same event. Pure — no I/O, unit-testable.
  */
-
-/** Tools whose result is a delegated child's report (where a surrender can surface). */
 
 /** Explicit surrender/blocked markers the operator + CTF protocols emit (operator.md). */
 const SURRENDER_MARKERS: readonly RegExp[] = [/\[BLOCKED\b/i, /\bFLAG:\s*UNKNOWN\b/i];
@@ -211,14 +212,15 @@ const SURRENDER_MARKERS: readonly RegExp[] = [/\[BLOCKED\b/i, /\bFLAG:\s*UNKNOWN
 const PERSISTENCE_NOTE = renderVisibleCheckpoint("delegated result needs verification", [
 	"Trigger: a delegated leg returned BLOCKED/UNKNOWN.",
 	"Verify: accept only concrete external blockers (access, credentials, or tools).",
-	"Otherwise: run the recovery pass or re-dispatch with a sharper brief.",
+	"Otherwise: verify directly or re-dispatch with a sharper brief.",
 ]);
 
 export class PersistenceNudge {
 	/**
 	 * Feed one supervisor tool result: its tool name and the full text of the result. Returns the
 	 * reminder to append when a delegated leg's report signals premature surrender, else undefined.
-	 * The SYNC path (a `delegate`/`council` tool_result the supervisor sees inline).
+	 * The INLINE path: a `delegate`/`council`/`flow` tool_result the supervisor sees in the launching call,
+	 * which only a headless session produces (an interactive one backgrounds all three).
 	 */
 	observe(toolName: string, text: string): string | undefined {
 		if (!HANDOFF_TOOL_NAMES.has(toolName)) return undefined;
@@ -227,11 +229,57 @@ export class PersistenceNudge {
 
 	/**
 	 * Tool-agnostic surrender check on already-known-to-be-a-leg-report text. The ASYNC path uses
-	 * this: a background run (the interactive default) delivers its report through the completion
-	 * notifier as a fresh follow-up, NOT a `delegate` tool_result, so {@link observe}'s tool gate
-	 * would never see it — the caller has already established the text is a settled leg's output.
+	 * this: a background run (every interactive `delegate`, `council` and `flow`) delivers its report
+	 * through the completion notifier as a fresh follow-up, or `intercom result` collects it explicitly
+	 * — NOT a tool_result, so {@link observe}'s tool gate would never see it. The caller has already
+	 * established the text is a settled leg's output.
 	 */
 	scan(text: string): string | undefined {
 		return SURRENDER_MARKERS.some((re) => re.test(text)) ? PERSISTENCE_NOTE : undefined;
 	}
+}
+
+/**
+ * PollGuard — the call-time half of "end your turn, a finished run or batch wakes you". A peek (or a
+ * `result` on a still-running run) whose signature equals the previous one for the same scope
+ * learned nothing; asking again only holds the turn that the idle-gated completion wake needs to be
+ * idle. Per scope, the first repeat is refused and the second asks Pi to end the turn (`terminate` is
+ * a batch hint Pi honours only when every call in the batch sets it). No clock: a changed signature —
+ * a run settled, started, queued, began waiting or newly crossed the stall threshold — is
+ * new information and always allowed. Pure.
+ */
+export class PollGuard {
+	private readonly seen = new Map<string, { sig: string; strikes: number }>();
+
+	check(scope: string, sig: string): "ok" | "repeat" | "terminate" {
+		const entry = this.seen.get(scope);
+		if (entry?.sig !== sig) {
+			this.seen.set(scope, { sig, strikes: 0 });
+			return "ok";
+		}
+		entry.strikes += 1;
+		return entry.strikes === 1 ? "repeat" : "terminate";
+	}
+
+	reset(): void {
+		this.seen.clear();
+	}
+}
+
+/** A leading sleep at/above this many seconds holds the turn that background-child wakes need idle. */
+const LONG_WAIT_SECONDS = 20;
+
+const SLEEP_UNIT_SECONDS: Readonly<Record<string, number>> = { s: 1, m: 60, h: 3600, d: 86_400 };
+// Only the leading statement: GNU `sleep N[smhd]` and PowerShell `Start-Sleep [-Seconds|-s] N` /
+// `-Milliseconds|-m N`. Loops, `a; sleep 30`, scripts and `timeout`/`ping` forms are deliberately out.
+const LEADING_SLEEP = /^\s*(?:sleep\s+(?<bash>[\d.]+)(?<unit>[smhd])?|start-sleep(?:\s+-(?:seconds|s)(?=[:\s]))?[:\s]\s*(?<ps>[\d.]+)|start-sleep\s+-(?:milliseconds|m)[:\s]\s*(?<ms>[\d.]+))(?=[\s;&|)]|$)/i;
+
+/** Seconds of a leading long sleep in a shell command, else undefined. */
+export function longWaitSeconds(command: string): number | undefined {
+	const g = LEADING_SLEEP.exec(command)?.groups;
+	if (!g) return undefined;
+	const seconds = g.ms !== undefined
+		? Number(g.ms) / 1000
+		: Number(g.bash ?? g.ps) * (SLEEP_UNIT_SECONDS[g.unit?.toLowerCase() ?? "s"] ?? 1);
+	return seconds >= LONG_WAIT_SECONDS ? seconds : undefined;
 }

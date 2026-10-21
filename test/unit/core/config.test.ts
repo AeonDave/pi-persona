@@ -147,13 +147,13 @@ test("OFF_WORDS is exported, so the one convention is readable from outside the 
 	}
 });
 
-test("PI_PERSONA_ASYNC_RETAIN sets the async tracker's retention bound (default 25; junk/<1 falls back)", () => {
-	assert.equal(resolveConfig({}).asyncRetain, 25, "today's hardcoded retention by default");
+test("PI_PERSONA_ASYNC_RETAIN sets the async tracker's retention bound (default 64; junk/<1 falls back)", () => {
+	assert.equal(resolveConfig({}).asyncRetain, 64, "one whole maxChildren-wide call by default");
 	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "50" }).asyncRetain, 50);
 	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "1" }).asyncRetain, 1, "smallest meaningful bound");
-	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "abc" }).asyncRetain, 25, "non-numeric ⇒ default");
-	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "-5" }).asyncRetain, 25, "negative ⇒ default");
-	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "0" }).asyncRetain, 25, "0 isn't a meaningful retention bound ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "abc" }).asyncRetain, 64, "non-numeric ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "-5" }).asyncRetain, 64, "negative ⇒ default");
+	assert.equal(resolveConfig({ PI_PERSONA_ASYNC_RETAIN: "0" }).asyncRetain, 64, "0 isn't a meaningful retention bound ⇒ default");
 });
 
 test("PI_PERSONA_SPINE selects the shared behavioral layer (default OFF; `on` or a path)", () => {

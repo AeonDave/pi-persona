@@ -5,11 +5,13 @@
  * comes from the roster's personas; bias guards live in the vote reducer.
  *
  * Reflection round (params.reflect, default ON): after the independent round, each
- * core sees the OTHER cores' positions **anonymised** and casts a FINAL vote —
- * revising only if a genuinely new consideration moves it (holding is fine). This
+ * core sees the PANEL's positions **anonymised** — its own among them, unmarked, because the
+ * reflecting leg is a fresh session and that list is its only memory of round 1 — and casts a
+ * FINAL vote, revising only if a genuinely new consideration moves it (holding is fine). This
  * lets a core catch a blind spot without turning MAGI into groupthink: the positions
  * are anonymised (no "defer to Casper" authority bias), it is exactly ONE round (not
- * iterate-to-consensus — that is `council-rounds`), and dissent is always preserved.
+ * iterate-to-consensus — that is `council-rounds`), and dissent is always preserved. A core whose
+ * reflection leg fails keeps the valid vote it already cast (disclosed in the ruling footer).
  * Set `reflect: false` for a pure independent poll (uncorrelated errors, cheapest).
  */
 
@@ -55,6 +57,8 @@ function rescuedModel(c: AgentResult | undefined): string | undefined {
 
 export const magi: Strategy = {
 	name: "magi",
+	when: "contested fork: voters pick on a closed-choice question (yes/no, A/B); majority plus dissent",
+	team: "magi",
 	params: {
 		aggregate: { type: "string", default: "majority", doc: '"majority" | "unanimity"' },
 		reflect: { type: "boolean", default: true, doc: "one anonymised reflection round" },
@@ -88,7 +92,6 @@ export const magi: Strategy = {
 			return cancelled(round1.map((c) => c.usage));
 		}
 
-		let candidates = opening;
 		const okCount = opening.filter((c) => c.ok).length;
 		const tokensBeforeReflection = round1.reduce((total, result) => total + result.usage.input + result.usage.output, 0);
 		// A reflection is meaningful only when every core can participate. Under an active token
@@ -97,19 +100,19 @@ export const magi: Strategy = {
 		// goes for children: a rescue already spent a child per recovered core, and exceeding
 		// `maxChildren` THROWS out of sdk.agent() — turning a poll that has a ruling into no ruling.
 		const childrenUsed = round1.length + round1.filter((c) => c.modelRecovery).length;
-		const reflectionHasTokenRoom =
-			sdk.limits.budgetTokens <= 0 || tokensBeforeReflection + team.length <= sdk.limits.budgetTokens;
-		const reflectionHasChildRoom = childrenUsed + team.length <= sdk.limits.maxChildren;
-		const didReflect = reflect && okCount >= 2 && reflectionHasTokenRoom && reflectionHasChildRoom;
-		if (reflect && okCount >= 2 && !reflectionHasTokenRoom) {
-			sdk.log(`magi: reflection skipped — token budget cannot fund the full panel (${sdk.limits.budgetTokens})`);
-		}
-		if (reflect && okCount >= 2 && !reflectionHasChildRoom) {
-			sdk.log(`magi: reflection skipped — child budget cannot fund the full panel (maxChildren ${sdk.limits.maxChildren}, ${childrenUsed} used)`);
-		}
+		const wantsReflection = reflect && okCount >= 2;
+		const skip = !wantsReflection ? undefined
+			: sdk.limits.budgetTokens > 0 && tokensBeforeReflection + team.length > sdk.limits.budgetTokens
+				? { why: "token budget", detail: `cannot fund the full panel (${sdk.limits.budgetTokens})` }
+			: childrenUsed + team.length > sdk.limits.maxChildren
+				? { why: "child budget", detail: `cannot fund the full panel (maxChildren ${sdk.limits.maxChildren}, ${childrenUsed} used)` }
+			: undefined;
+		const didReflect = wantsReflection && !skip;
+		if (skip) sdk.log(`magi: reflection skipped — ${skip.why} ${skip.detail}`);
 
+		let reflected: AgentResult[] = [];
 		if (didReflect) {
-			// Round 2 — each core sees the others' positions ANONYMISED (no author identity, so a
+			// Round 2 — each core sees the panel's positions ANONYMISED (no author identity, so a
 			// core can't defer to a "senior" peer) and casts its FINAL vote. Instructed to hold
 			// unless genuinely moved, so this informs without manufacturing false consensus.
 			const positions = opening
@@ -123,7 +126,7 @@ export const magi: Strategy = {
 			// The recovered model must survive into this round: rebuilding from `rosterSpec(m)` alone
 			// would hand the rescued core back the model that just broke, so it fails again, is
 			// quarantined as invalid, and the recovery buys nothing but tokens.
-			candidates = await sdk.parallel(
+			reflected = await sdk.parallel(
 				team.map((m, i) => () => {
 					const model = rescuedModel(opening[i]);
 					return sdk.agent({ ...rosterSpec(m), ...(model ? { model } : {}), task: reflectTask, outputContract: "default" });
@@ -134,11 +137,23 @@ export const magi: Strategy = {
 			// DURING the reflection round is visible here only as every core settling
 			// `failureKind: "abort"` — as is one on a caller that passed no signal. Without the
 			// second clause a stopped run reports a normal-looking "no ruling" from a killed poll.
-			if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) {
-				return cancelled([...round1, ...candidates].map((c) => c.usage));
+			if (sdk.signal?.aborted || reflected.every((c) => c.failureKind === "abort")) {
+				return cancelled([...round1, ...reflected].map((c) => c.usage));
 			}
 		}
-		const decision = sdk.reduce.vote(candidates, { aggregate, keepBestFallback: true });
+		// A reflection leg that FAILED (timeout, provider, contract...) is a missing second opinion, not a
+		// missing voter: the core keeps the valid vote it already cast, so a 3-core poll stays a 3-core
+		// poll. A STOPPED leg is never substituted. The substituted vote is not billed again (`allRuns`).
+		const ballots = didReflect
+			? reflected.map((r, i) => {
+					const first = opening[i];
+					return !r.ok && r.failureKind !== "abort" && first?.ok ? first : r;
+				})
+			: opening;
+		const kept = didReflect ? ballots.filter((b, i) => b !== reflected[i]).length : 0;
+		// "Reflected" means at least one core cast a second-round vote; a round that failed everywhere changed nothing.
+		const reflectedAny = didReflect && kept < ballots.length;
+		const decision = sdk.reduce.vote(ballots, { aggregate, keepBestFallback: true });
 
 		// Lead with the ruling (the answer); the decision/tally plumbing is a compact footer,
 		// not the headline. The collapsed council card shows `headline`; the supervisor still
@@ -156,8 +171,10 @@ export const magi: Strategy = {
 		const rescuedLine = rescued.length > 0
 			? ` · ${rescued.length} core${rescued.length === 1 ? "" : "s"} recovered on ${[...new Set(rescued.map((c) => c.modelRecovery?.to ?? ""))].filter(Boolean).join(", ")}`
 			: "";
+		const keptLine = kept > 0 ? ` · ${kept} core${kept === 1 ? "" : "s"} kept their round-1 vote (reflection failed)` : "";
+		const skipLine = skip ? ` · reflection skipped (${skip.why})` : "";
 		lines.push(
-			`\n— magi: ${decision.status}${didReflect ? " (after 1 reflection round)" : ""}${decision.usedFallback ? " · fell back to best-by-confidence" : ""} · tally ${tally}${invalid}${rescuedLine}`,
+			`\n— magi: ${decision.status}${reflectedAny ? " (after 1 reflection round)" : ""}${decision.usedFallback ? " · fell back to best-by-confidence" : ""} · tally ${tally}${invalid}${rescuedLine}${keptLine}${skipLine}`,
 		);
 
 		const winnerResult = decision.winner?.structured?.result;
@@ -170,16 +187,16 @@ export const magi: Strategy = {
 		// Usage sums EVERY run the poll actually paid for: the opening round (each logical result
 		// already carries its rescue's tokens exactly once) and the reflection round, kept separate
 		// from the opening one when reflection ran.
-		const allRuns: AgentResult[] = didReflect ? [...round1, ...candidates] : round1;
+		const allRuns: AgentResult[] = [...round1, ...reflected];
 		const result: AgentResult = {
 			agent: "magi",
 			output: lines.join("\n"),
-			structured: { status: decision.status, tally: decision.tally, usedFallback: decision.usedFallback, reflected: didReflect, headline },
+			structured: { status: decision.status, tally: decision.tally, usedFallback: decision.usedFallback, reflected: reflectedAny, headline },
 			usage: sumUsage(allRuns.map((c) => c.usage)),
 			ok: decision.winner !== undefined,
 		};
 		if (!result.ok) {
-			const cause = summarizeFailedResults(candidates, "magi produced no ruling");
+			const cause = summarizeFailedResults(ballots, "magi produced no ruling");
 			result.error = cause.error;
 			result.failureKind = cause.failureKind;
 		}

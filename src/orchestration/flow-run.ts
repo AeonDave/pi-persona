@@ -40,7 +40,7 @@ export type ResumedResult = AgentResult & { gateApproved?: boolean };
 export interface FlowRunDeps {
 	/** Run one phase's strategy → its result (wraps `runPersonaStrategy` in prod). */
 	runPhase: RunPhaseFn;
-	/** The pinned `flow@hash` for this run (I3) — recorded in every journal line. */
+	/** The pinned run identity (I3: `flowRunHash` = flow + task + cwd) — recorded in every journal line. */
 	hash: string;
 	signal?: AbortSignal;
 	/** Grace an aborted wave gets to unwind cooperatively before its still-running phases are
@@ -71,6 +71,17 @@ export interface FlowOutcome {
 	/** The run signal fired before every phase settled ok. A cancelled flow is NOT the same as one
 	 *  that merely finished without an answer, and callers report it differently. */
 	cancelled?: boolean;
+	/** The first checkpoint (in spec order) that was not approved, when that is the ONLY reason the
+	 *  flow did not finish: a stop the operator chose, not a failure. `ok` stays false and `error`
+	 *  stays "blocked: …" (a mandatory flow must keep failing closed); `output` is the gated
+	 *  phase's own answer plus a stop note. */
+	stoppedAtGate?: string;
+}
+
+/** What a finished flow IS to a reader. A checkpoint the operator declined is a STOP, their choice, never a
+ *  failure: the one predicate the tool result, the tree row and the cards share. */
+export function flowDisposition(outcome: { ok: boolean; stoppedAtGate?: string | undefined }): "done" | "stopped" | "failed" {
+	return outcome.ok ? "done" : outcome.stoppedAtGate !== undefined ? "stopped" : "failed";
 }
 
 /** How long an aborted wave is given to unwind COOPERATIVELY before its still-running phases are
@@ -270,6 +281,12 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 	const failure = cancellation
 		? failures.find((entry) => entry.result.failureKind === "abort")
 		: rootFailures[0] ?? failures[0];
+	// A rejected checkpoint is a STOP, not a failure, only when nothing else went wrong: a real phase
+	// failure or a cancellation is the more important fact and keeps its ordinary report. A rejected
+	// gate with no dependents blocks nothing, so the flow is still `ok` and was not stopped.
+	const stoppedAtGate = !cancellation && !ok && rootFailures.length === 0
+		? spec.phases.find((p) => gateState.get(p.id) === "rejected")?.id
+		: undefined;
 	const failedPhase = failure?.phase.id;
 	const error = cancellation ? (failure?.result.error ?? CANCELLED_ERROR) : failure?.result.error;
 	const failureKind = cancellation ? "abort" as const : failure?.result.failureKind;
@@ -278,24 +295,32 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		: `Flow failed: ${error ?? "the flow did not complete successfully"}`;
 	const cancellationText = `Flow cancelled${failedPhase ? ` at phase "${failedPhase}"` : ""}: ${error ?? CANCELLED_ERROR}`;
 	const outputAlreadySignalsCancellation = /\b(?:cancel(?:led|lation)?|abort(?:ed)?|stopp?ed)\b/i.test(terminalOutput);
-	const output = cancellation
-		? terminalOutput.trim()
-			? outputAlreadySignalsCancellation
-				? terminalOutput
-				: `${terminalOutput}\n\n${cancellationText}`
-			: cancellationText
-		: terminalOutput.trim()
-			? terminalOutput
-			: failure
-				? failureText
-				: terminalOutput;
+	const terminalReport = (): string => {
+		// A rejected checkpoint answers with the gated phase's own output: that is what the operator was
+		// asked to approve, and dropping it on a "no" would throw away work already paid for. Another
+		// branch that finished keeps its answer beside it.
+		if (stoppedAtGate !== undefined) {
+			return [
+				done.get(stoppedAtGate)?.output ?? "",
+				terminalOutput,
+				`- flow stopped at checkpoint "${stoppedAtGate}": not approved (declined, dismissed, or no interactive session). Later phases did not run.`,
+			].filter((part) => part.trim()).join("\n\n");
+		}
+		if (cancellation) {
+			if (!terminalOutput.trim()) return cancellationText;
+			return outputAlreadySignalsCancellation ? terminalOutput : `${terminalOutput}\n\n${cancellationText}`;
+		}
+		if (terminalOutput.trim()) return terminalOutput;
+		return failure ? failureText : terminalOutput;
+	};
 	return {
 		ok,
 		results,
-		output,
+		output: terminalReport(),
 		...(failedPhase ? { failedPhase } : {}),
 		...(error ? { error } : {}),
 		...(failureKind ? { failureKind } : {}),
 		...(cancelled ? { cancelled: true } : {}),
+		...(stoppedAtGate !== undefined ? { stoppedAtGate } : {}),
 	};
 }

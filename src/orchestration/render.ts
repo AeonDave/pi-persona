@@ -72,7 +72,7 @@ export function humanizeAggregateResult(r: AgentResult): string | undefined {
 	for (const value of members) {
 		if (!value || typeof value !== "object" || Array.isArray(value)) continue;
 		const member = value as Record<string, unknown>;
-		const agent = typeof member.agent === "string" && member.agent.trim() ? member.agent.trim() : "member";
+		const agent = field(member, "member") ?? field(member, "agent") ?? "member";
 		const ok = member.ok === true;
 		const output = typeof member.output === "string" ? member.output : "";
 		const structured = member.structured && typeof member.structured === "object" && !Array.isArray(member.structured)

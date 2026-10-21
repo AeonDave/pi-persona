@@ -2,8 +2,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fenceUntrusted } from "../core/fence.ts";
-import { expandDetailHint, failureDetails, formatCouncilCallLabel } from "../extension/shared.ts";
-import { knownParams, strategyNames } from "../orchestration/strategy.ts";
+import { expandDetailHint, failureDetails, formatCouncilCallLabel, isInline } from "../extension/shared.ts";
+import { knownParams, missingRequiredParams, strategyCatalog } from "../orchestration/strategy.ts";
 import { memberBaseLabel, type RosterMember } from "../orchestration/roster.ts";
 import { formatCouncilResult, humanizeAggregateResult } from "../orchestration/render.ts";
 import type { FailureKind } from "../orchestration/types.ts";
@@ -12,10 +12,10 @@ import { resolveCouncilInvocation } from "../persona/persona.ts";
 import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { Text } from "@earendil-works/pi-tui";
-import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
-import { compactVisibleText } from "../ui/presentation.ts";
-import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
+import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../ui/presentation.ts";
+import { toolUsageField } from "../ui/usage.ts";
 import { emptyUsage } from "../engine/stream.ts";
+import { launchReceipt, type BackgroundRuns, type TrackedRun } from "./background-run.ts";
 
 
 export interface CouncilToolDeps {
@@ -28,11 +28,11 @@ export interface CouncilToolDeps {
 		orch: OrchestrationGrammar,
 		task: string,
 		label: string,
-		signal?: AbortSignal,
+		tracked?: TrackedRun,
 	): Promise<AgentResult | undefined>;
+	/** Launch/join: a council is one tracked run, like a delegate leg (see background-run.ts). */
+	runs: BackgroundRuns;
 	drainBusBlock(): string;
-	childUsage: ChildUsageLedger;
-	publishPersonaCost(): void;
 }
 
 /** What the card names as the panel: the team, or the ad-hoc members themselves — an
@@ -55,7 +55,7 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 		strategy: Type.Optional(
 			Type.String({ description: 'Per-call strategy override (default: the selected or active council profile\'s strategy, or built-in "magi")' }),
 		),
-		roster: Type.Optional(Type.String({ description: 'Per-call roster override (default: the selected or active profile\'s roster, then its orchestration roster, or built-in "magi")' })),
+		roster: Type.Optional(Type.String({ description: 'Per-call roster override (default: the method\'s own team when you switch method; else the selected or active profile\'s roster, then its orchestration roster, or built-in "magi")' })),
 		members: Type.Optional(
 			Type.Array(Type.Unknown(), {
 				description:
@@ -72,30 +72,24 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 	pi.registerTool({
 		name: "council",
 		label: "Council",
-		description: [
+		// The method catalog is generated from the strategy registry (`when`/`roster`/`required`), never hand-written.
+		description: `${[
 			"Convene a council of specialists with controlled, complementary biases to deliberate a",
-			"decision — returns the selected strategy's result, preserving vote tally and dissent when produced.",
-			"Scale it to the decision: convene for a genuine fork, a contested or high-stakes call, or a",
-			"pick between rival answers — NOT before every decision, and a routine task does not",
-			"deserve a whole panel. Then EXECUTE the ruling yourself and re-convene only when execution",
-			"surfaces a NEW decision. Do NOT use it to get work done: `delegate` (and your own tools)",
-			"produce the work; the council decides, the executor acts.",
-			"Patterns: adversarial vote with dissent (magi, council-rounds); a reasoned pick between rival",
-			"COMPLETE answers by an impartial arbiter (judge); adversarial critique then revise",
-			"(critic-loop); head-to-head argument (debate); many findings merged into ONE deliverable",
-			"(synthesize, map); rival implementations judged blind (compete); a single pair (pair).",
+			"decision or run a coordinated method over a task — returns the selected strategy's result,",
+			"preserving vote tally and dissent when produced.",
+			"Scale it to the task: convene when the method adds value — NOT before every decision, and a",
+			"routine task does not deserve a whole panel. Then act on the result yourself and re-convene only",
+			"when acting surfaces a NEW decision. Do NOT use it for plain independent parallel work: that is",
+			"`delegate`. Interactive sessions run a council in the background: you get a run id at once and ONE",
+			"follow-up carries the ruling, so end your turn and never poll it; headless sessions return the",
+			"ruling inline.",
 			'Use `persona: "magi"` to invoke an installed persona\'s declared council without switching away',
 			"from the active caller; its prompt, model, tools, and permissions are never inherited.",
-			`Strategies: ${strategyNames()
-				.map((n) => {
-					const p = knownParams(n);
-					const keys = p ? Object.keys(p) : [];
-					return keys.length > 0 ? `${n}(${keys.join(", ")})` : n;
-				})
-				.join(" · ")}.`,
 			"Pass `members` to seat an ad-hoc panel for one call, or `params` to vary the profile's default",
 			'council — e.g. { "reflect": false }.',
-		].join(" "),
+			"Pick the strategy by problem class (`*` = required param):",
+		].join(" ")}
+${strategyCatalog()}`,
 		parameters: CouncilParams,
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			d.lastCtx = ctx;
@@ -106,10 +100,13 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				members: params.members,
 				params: params.params as Record<string, unknown> | undefined,
 			});
-			if (!resolved.ok) {
+			// A call that cannot run (no such persona, a missing `required` param) is refused HERE, as an
+			// immediate tool error — before a run, a tree row or the model picker exists.
+			const error = resolved.ok ? missingRequiredParams(resolved.value.strategy, resolved.value.params) : resolved.error;
+			if (!resolved.ok || error) {
 				return {
-					content: [{ type: "text", text: `council failed: ${resolved.error}` }],
-					details: failureDetails({ error: resolved.error, persona: params.persona }),
+					content: [{ type: "text", text: `council failed: ${error}` }],
+					details: failureDetails({ error: error ?? "", persona: params.persona }),
 					isError: true,
 				};
 			}
@@ -137,8 +134,29 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				// Ephemeral members ride the SAME grammar path as a named team (see
 				// `resolveOrchestrationMembers`) — nothing about the profile is inherited.
 				if (members) orch.members = members;
-				const result = await d.runStrategyVisible(ctx, orch, params.question, `council:${_id}`, signal);
-				const s = (result?.structured ?? {}) as {
+				// The same launch `delegate` uses: ONE tracked run. Interactive sessions get a receipt now and
+				// the ruling as ONE completion follow-up (the idle-gated wake, fenced and bounded); headless
+				// sessions join the run before returning, since nothing would deliver a follow-up there.
+				const inline = isInline(ctx);
+				const id = d.runs.launch({ kind: "council", label: `council ${strategy}`, task: params.question, inline }, async (run) =>
+					(await d.runStrategyVisible(ctx, orch, params.question, "council", run)) ??
+					{ agent: strategy, output: "(the council returned no ruling)", usage: emptyUsage(), ok: false, error: "no ruling" });
+				if (!inline) {
+					const names = compactInlineText(`${strategy} · ${panel}`, { maxChars: 120 });
+					return {
+						content: [{ type: "text", text: `${launchReceipt("council", id, names, "with the ruling")}${paramNote}` }],
+						details: { runId: id, strategy, roster: panel, persona },
+						isError: false,
+					};
+				}
+				const { runs, usage } = await d.runs.settle([id], signal);
+				const run = runs[0];
+				const result = run?.result;
+				if (!result) {
+					const message = run?.error ?? run?.status ?? "the run record is gone";
+					return { content: [{ type: "text", text: `council failed: ${message}` }], details: failureDetails({ error: message, strategy, roster: panel }), isError: true };
+				}
+				const s = (result.structured ?? {}) as {
 					headline?: string;
 					status?: string;
 					tally?: Record<string, number>;
@@ -146,33 +164,28 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 					count?: number;
 					items?: unknown;
 				};
-				const ruling = result?.output ?? "(the council returned no ruling)";
-				const uiBody = result ? (humanizeAggregateResult(result) ?? result.output) : "";
 				const headline = s.headline ?? (typeof s.count === "number" ? `${s.count} member results` : s.status ?? "");
-				const ok = result?.ok ?? false;
 				const details = {
-					ok,
+					ok: result.ok,
 					headline,
 					status: s.status,
 					tally: s.tally,
 					usedFallback: s.usedFallback,
 					items: s.items,
-					body: uiBody,
+					body: humanizeAggregateResult(result) ?? result.output,
 					strategy,
 					roster: panel,
 					persona,
-					...(result?.error ? { error: result.error } : {}),
-					...(result?.failureKind ? { failureKind: result.failureKind } : {}),
+					...(result.error ? { error: result.error } : {}),
+					...(result.failureKind ? { failureKind: result.failureKind } : {}),
 				};
-				const usage = result?.usage ?? emptyUsage();
-				d.childUsage.account(usage);
-				d.publishPersonaCost();
 				return {
 					// The ruling is sub-agent (council member) text — fence it like every other
 					// path that hands sub-agent output to the supervisor.
-					content: [{ type: "text", text: `${fenceUntrusted(ruling)}${paramNote}${d.drainBusBlock()}` }],
-					details: ok ? details : failureDetails(details),
-					isError: !ok,
+					// A run stopped before it convened has no ruling, only its cause: show that, not an empty fence.
+					content: [{ type: "text", text: `${fenceUntrusted(result.output || result.error || "")}${paramNote}${d.drainBusBlock()}` }],
+					details: result.ok ? details : failureDetails(details),
+					isError: !result.ok,
 					...toolUsageField(usage),
 				};
 			} catch (err) {
@@ -205,8 +218,14 @@ export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void 
 				roster?: string;
 				error?: string;
 				failureKind?: FailureKind;
+				runId?: string;
 			};
 			const first = result.content[0];
+			if (d.runId) {
+				// Interactive launch receipt: the ruling arrives later as the completion follow-up.
+				const launched = `${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", compactInlineText(`launched ${d.runId} · ${d.strategy ?? "?"} · ${d.roster ?? "?"}`, { maxChars: 120 }))}`;
+				return new Text(expanded && first?.type === "text" ? `${launched}\n${theme.fg("toolOutput", sanitizeTerminalText(first.text))}` : launched, 0, 0);
+			}
 			const body = sanitizeTerminalText(d.body || (first && first.type === "text" ? first.text : ""));
 			const failed = d.ok === false || !!d.error;
 			if (failed) {

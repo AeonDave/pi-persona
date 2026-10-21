@@ -5,7 +5,6 @@ import {
 	boundCompletionSurface,
 	buildCompletionReport,
 	buildPeekDigest,
-	buildWaitTimeoutNote,
 	getFullRunOutput,
 	MAX_ASYNC_STATUS_ROWS,
 	MAX_COMPLETION_REPORT_CHARS,
@@ -20,23 +19,12 @@ test("automatic completion payload is a summary-sized surface with explicit dril
 	assert.ok(MAX_COMPLETION_REPORT_CHARS <= 12_000);
 });
 
-test("wait timeout directs the supervisor back to useful work instead of a polling loop", () => {
-	const note = buildWaitTimeoutNote(["run-1", "run-2"], 180_000);
-	assert.match(note, /still running after 180000ms/);
-	assert.match(note, /completion will notify/i);
-	assert.match(note, /do not immediately wait again/i);
-	assert.doesNotMatch(note, /or wait again/i);
-});
-
-test("async status and timeout views bound very large active run sets", () => {
+test("async status views bound very large active run sets", () => {
 	const runs = Array.from({ length: 1_000 }, (_, index) => run({ id: `run-${index}` }));
 	const digest = buildPeekDigest(runs);
-	const wait = buildWaitTimeoutNote(runs.map((entry) => entry.id), 60_000);
 	assert.equal(digest.split("\n").filter((line) => /^\[run-/.test(line)).length, MAX_ASYNC_STATUS_ROWS);
 	assert.match(digest, /936 additional async runs omitted/);
-	assert.match(wait, /\+936 more/);
 	assert.ok(digest.length < 12_000);
-	assert.ok(wait.length < 4_000);
 });
 
 function run(overrides: Partial<AsyncRun>): AsyncRun {

@@ -15,6 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { killProcessTree } from "../src/engine/child.ts";
+import { appendBounded, contentText, jsonLineReader, resultDetails, sendCommand, short } from "./lib/rpc-smoke.mjs";
 
 const model = process.env.LIVE_MODEL?.trim();
 if (!model) {
@@ -78,7 +79,6 @@ const args = [
 ];
 
 let child;
-let lineBuffer = "";
 let stderrTail = "";
 let settled = false;
 let firstAgentEndAt;
@@ -92,33 +92,6 @@ let forbiddenMonitorAction;
 let secondAssistantText = "";
 let completeOutcome;
 const eventLog = [];
-
-function appendBounded(current, chunk, max) {
-	const next = current + chunk;
-	return next.length <= max ? next : next.slice(-max);
-}
-
-function short(value, max = 320) {
-	let text;
-	try {
-		text = typeof value === "string" ? value : JSON.stringify(value ?? "");
-	} catch {
-		text = String(value);
-	}
-	text = text.replace(/\s+/g, " ").trim();
-	return text.length <= max ? text : `${text.slice(0, max)}…`;
-}
-
-function contentText(content) {
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string" ? part.text : "")
-		.join("");
-}
-
-function resultDetails(result) {
-	return result && typeof result === "object" && result.details && typeof result.details === "object" ? result.details : undefined;
-}
 
 function isMonitorFollowUp(event) {
 	if (event.type !== "message_start" && event.type !== "message_end") return false;
@@ -196,21 +169,8 @@ function handleEvent(event) {
 	}
 }
 
-function feedStdout(chunk) {
-	lineBuffer = appendBounded(lineBuffer, chunk, 1_000_000);
-	let newline;
-	while ((newline = lineBuffer.indexOf("\n")) >= 0) {
-		const line = lineBuffer.slice(0, newline).replace(/\r$/, "");
-		lineBuffer = lineBuffer.slice(newline + 1);
-		if (!line.trim()) continue;
-		handleEvent(JSON.parse(line));
-	}
-}
-
-function send(command) {
-	if (!child?.stdin?.writable) throw new Error("RPC stdin is not writable");
-	child.stdin.write(`${JSON.stringify(command)}\n`);
-}
+const feedStdout = jsonLineReader((event) => handleEvent(event));
+const send = (command) => sendCommand(child, command);
 
 async function waitForOutcome() {
 	return await new Promise((resolve, reject) => {

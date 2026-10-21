@@ -137,8 +137,8 @@ test("inproc engine propagates each authoritative tool lifecycle event once with
 	assert.equal(JSON.stringify(events).includes("sensitive"), false, "tool output is not propagated");
 });
 
-test("inproc engine forwards tool-output liveness without forwarding tool text", async () => {
-	const progress: Array<{ output: string; toolOutputAt?: number }> = [];
+test("inproc engine never forwards raw tool-output text through the progress seam", async () => {
+	const progress: Array<{ output: string }> = [];
 	const engine = makeInProcessEngine({
 		resolveAgent,
 		contracts,
@@ -150,9 +150,9 @@ test("inproc engine forwards tool-output liveness without forwarding tool text",
 			msgEnd("answer"),
 		]),
 	});
-	const result = await engine.run({ agent: "a", task: "inspect" }, (snap) => progress.push({ output: snap.output, ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}) }));
+	const result = await engine.run({ agent: "a", task: "inspect" }, (snap) => progress.push(snap));
 	assert.equal(result.output, "answer");
-	assert.ok(progress.some((snap) => snap.toolOutputAt !== undefined), "the timestamp crosses the AgentProgress seam");
+	assert.ok(progress.length > 0);
 	assert.equal(progress.some((snap) => snap.output.includes("secret tool output")), false, "tool contents never cross the progress seam");
 });
 
@@ -650,6 +650,7 @@ test("inproc engine idle-kills a session that emits NO events after timeoutMs (t
 	assert.equal(abortCalled, true, "the watchdog aborted the hung session");
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /timed out/);
+	assert.match(r.error ?? "", /raise this leg's timeoutMs if its tool is legitimately silent/, "the idle-timeout text names the remedy");
 	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
 });
 

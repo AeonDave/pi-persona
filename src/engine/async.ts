@@ -6,20 +6,21 @@
  *
  * NOTE: live *steering* of a running child-process agent (resume/redirect) needs
  * the cross-process broker (v0.5) or the InProcessEngine (v0.4). This module
- * covers launch + peek + completion-notify (the parts that work on `pi -p`).
+ * covers launch + peek + completion-notify.
  */
 
-import type { ProgressSnapshot } from "./stream.ts";
+import type { ProgressSnapshot, ToolEvent } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
-import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel } from "../core/display-label.ts";
+import { DEFAULT_ASYNC_RETAIN } from "../core/config.ts";
+import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel, sanitizeStatusLabel } from "../core/display-label.ts";
 import { compactTokens } from "../core/format.ts";
 import { formatDuration } from "../core/time.ts";
 
 export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
 
-/** "possibly stuck" — the soft stall signal shared by the supervisor alert and the UI badge. It is
- *  deliberately patient: a long scan, a big generation, or a blocking command shows no visible
- *  progress yet is perfectly healthy, so both surfaces flag a leg only after a genuinely long quiet
+/** "possibly stuck" — the soft stall signal shared by the operator card, the peek digest and the UI
+ *  badge. It is deliberately patient: a long scan, a big generation, or a blocking command shows no
+ *  visible progress yet is perfectly healthy, so every surface flags a leg only after a genuinely long quiet
  *  spell. Purely advisory (no auto-abort); the idle watchdog + token budget are the enforcing backstops. */
 export const STALL_FLAG_MS = 90_000;
 
@@ -40,15 +41,16 @@ export interface AsyncRun {
 	/** The already-shortened model (e.g. "sonnet") this run was launched with — kept pre-shortened
 	 *  so this module needs no import from delegate.ts just to render it. */
 	model?: string;
-	/** Clock (ms) this run was launched at, and the clock it settled at — the pair the supervisor's
-	 *  "that leg took 2m 5s" reading is computed from. Both come from the tracker's INJECTED clock,
+	/** Clock (ms) this run started executing (launch, or admission for a queued one), and the clock it
+	 *  settled at — the pair the supervisor's "that leg took 2m 5s" reading is computed from. Both
+	 *  come from the tracker's INJECTED clock,
 	 *  so a test can settle a two-hour run without waiting. Optional because runs also reach the
 	 *  renderers from call sites that never stamped them; absent ⇒ no duration is claimed. */
 	startedAt?: number;
 	settledAt?: number;
-	/** Clock (ms) of the last time `progress` actually *advanced* (output grew, or turns/tokens
-	 *  rose) — NOT merely the last event. A worker looping without headway keeps emitting but
-	 *  never bumps this, so `now - lastAdvanceAt` is what tells "working" from "stuck". */
+	/** Clock (ms) of the last time the run made {@link madeHeadway} — NOT merely the last event. A worker
+	 *  looping without headway, or a tool streaming output forever, keeps emitting but never bumps this,
+	 *  so `now - lastAdvanceAt` is what tells "working" from "stuck". */
 	lastAdvanceAt?: number;
 	/** Waiting for semaphore admission; queued time is not agent execution time. */
 	queued?: boolean;
@@ -65,6 +67,36 @@ export interface AsyncRun {
 	 *  run INSIDE {@link AsyncRunTracker.launch}, before the caller holds the id, so a registration
 	 *  performed after launch() returns would re-insert an already-dead run and leak it. */
 	mutates?: boolean;
+	/** The id of the one `tasks` call this leg was launched by. Its members are delivered together, once the
+	 *  last of them settles (see {@link AsyncRunTracker.batchSettled}); a single-leg launch has none. */
+	batch?: string;
+	/** What a running run is blocked on, when it is the OPERATOR (a flow checkpoint modal): shown in the
+	 *  digest instead of a stall verdict, because silence while a human decides is not a wedge. */
+	awaiting?: string;
+}
+
+/** What {@link madeHeadway} reads of one progress reading: a tracker snapshot, or a leg's `AgentProgress`
+ *  (which carries no turns). */
+export interface ProgressReading {
+	output?: string | undefined;
+	tokens?: number | undefined;
+	turns?: number | undefined;
+	toolEvent?: ToolEvent | undefined;
+}
+
+/**
+ * The ONE rule for "this run advanced": the assistant produced more (output grew, tokens or turns rose) or a
+ * tool call just COMPLETED. Raw tool output is deliberately not headway - a straggler that streams text
+ * forever (`npm run dev`, `--watch`, `tail -f`) must still read as stalled, so the operator-only card can
+ * flag it. Nothing is killed and the model is not woken; a legitimately noisy tool earns an advisory only.
+ * A completion counts once: the transient `toolEvent` rides the one snapshot it was emitted on, so
+ * replaying that snapshot credits nothing. Pure.
+ */
+export function madeHeadway(prev: ProgressReading | undefined, next: ProgressReading): boolean {
+	return (next.output?.length ?? 0) > (prev?.output?.length ?? 0)
+		|| (next.tokens ?? 0) > (prev?.tokens ?? 0)
+		|| (next.turns ?? 0) > (prev?.turns ?? 0)
+		|| (next.toolEvent?.phase === "end" && next.toolEvent !== prev?.toolEvent);
 }
 
 /** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
@@ -88,14 +120,25 @@ export class AsyncRunTracker {
 	private readonly now: () => number;
 
 	/** `now` is injected so the stall clock is deterministic under test (real time by default).
-	 *  `maxRetained` (default 25 — today's hardcoded bound) is the config-driven PI_PERSONA_ASYNC_RETAIN
-	 *  knob's landing spot: how many settled-but-uncollected runs survive before FIFO-eviction. */
+	 *  `maxRetained` (default {@link DEFAULT_ASYNC_RETAIN}; the extension passes `config.asyncRetain`) is the config-driven
+	 *  PI_PERSONA_ASYNC_RETAIN knob's landing spot: how many settled-but-uncollected runs survive before FIFO-eviction. */
 	constructor(opts?: { now?: () => number; maxRetained?: number }) {
 		this.now = opts?.now ?? ((): number => Date.now());
-		this.maxRetained = opts?.maxRetained ?? 25;
+		this.maxRetained = opts?.maxRetained ?? DEFAULT_ASYNC_RETAIN;
 	}
 
-	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; queued?: boolean }, run: RunThunk): string {
+	/** How many run ids this lineage has issued: what a restored instance must continue from. */
+	get issued(): number {
+		return this.seq;
+	}
+
+	/** Continue the id counter from a previous instance of the same session so ids never repeat within
+	 *  one history. Monotonic: anything that would rewind it, or is not a whole number, is ignored. */
+	continueFrom(issued: number): void {
+		if (Number.isSafeInteger(issued) && issued > this.seq) this.seq = issued;
+	}
+
+	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; queued?: boolean; batch?: AsyncRun["batch"] }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
 		const startedAt = this.now(); // one clock read, so the launch and stall stamps cannot disagree
@@ -109,6 +152,7 @@ export class AsyncRunTracker {
 			...(meta.queued ? { queued: true } : { lastAdvanceAt: startedAt }),
 		};
 		if (meta.mutates) entry.mutates = true;
+		if (meta.batch) entry.batch = meta.batch;
 		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
 		// once at the tracker boundary so a caller cannot smuggle multiline instructions into any of
 		// those views; renderers still sanitize defensively when they compose a label.
@@ -124,14 +168,8 @@ export class AsyncRunTracker {
 		try {
 			Promise.resolve(
 				run((s) => {
-					// Newly emitted textual tool output is a progress advance. Use the injected clock,
-					// never the stream's event timestamp, for stall-age accounting.
-					const prev = entry.progress;
-					const toolOutputAdvanced = s.toolOutputAt !== undefined && Number.isFinite(s.toolOutputAt)
-						&& s.toolOutputAt >= 0 && s.toolOutputAt !== prev.toolOutputAt;
-					if (!entry.queued && (s.output.length > prev.output.length || s.tokens > prev.tokens || s.turns > prev.turns || toolOutputAdvanced)) {
-						entry.lastAdvanceAt = this.now();
-					}
+					// The injected clock stamps the advance, never an event's own timestamp.
+					if (!entry.queued && madeHeadway(entry.progress, s)) entry.lastAdvanceAt = this.now();
 					entry.progress = s;
 				}, id),
 			)
@@ -167,8 +205,8 @@ export class AsyncRunTracker {
 		entry.settledAt = this.now();
 		this.settledOrder.push(entry.id);
 		this.prune();
-		// Iterate a SNAPSHOT: a waitFor join unsubscribes from inside its own listener, and
-		// splicing the live array under the cursor would shift the next join's listener past it.
+		// Iterate a SNAPSHOT: a listener may unsubscribe from inside its own callback, and
+		// splicing the live array under the cursor would shift the next listener past it.
 		// A listener's throw must likewise not skip the ones after it — and on the natural-settle
 		// path this runs inside an unobserved promise chain, where an escaping throw becomes a
 		// process-killing unhandled rejection.
@@ -183,13 +221,34 @@ export class AsyncRunTracker {
 		}
 	}
 
-	/** Start the stall window when a queued run actually acquires its concurrency slot. */
+	/** A queued run acquired its concurrency slot: execution, and its stall window, start now. */
 	markAdmitted(id: string): boolean {
 		const entry = this.runs.get(id);
 		if (!entry || entry.status !== "running" || entry.settled || entry.queued !== true) return false;
 		delete entry.queued;
-		entry.lastAdvanceAt = this.now();
+		entry.startedAt = entry.lastAdvanceAt = this.now();
 		return true;
+	}
+
+	/** Mark a running run as waiting on the operator (`label`), or release it (`undefined`). The clock
+	 *  restarts on release, so the human's think time is never counted as the run's own silence. */
+	setAwaiting(id: string, label: string | undefined): boolean {
+		const entry = this.runs.get(id);
+		if (!entry || entry.status !== "running" || entry.settled) return false;
+		if (label === undefined) {
+			delete entry.awaiting;
+			this.advance(id);
+		} else {
+			entry.awaiting = sanitizeStatusLabel(label, "waiting for operator", 120);
+		}
+		return true;
+	}
+
+	/** Credit headway to a running run whose own snapshot cannot show it: a council or flow aggregates its
+	 *  legs' progress, so one leg's advance is invisible in the sum. Queued, settled and unknown runs are left alone. */
+	advance(id: string): void {
+		const entry = this.runs.get(id);
+		if (entry && entry.status === "running" && !entry.settled && !entry.queued) entry.lastAdvanceAt = this.now();
 	}
 
 	/**
@@ -280,6 +339,14 @@ export class AsyncRunTracker {
 		return this.list().filter((r) => r.status === "running");
 	}
 
+	/** True when `run` may be reported: it belongs to no batch, or no member of its batch is still
+	 *  running. Asked of the live tracker, never counted from a delivered set, so a member collected
+	 *  early (`intercom result`), stopped, or failed inside launch() can never keep its batch waiting. */
+	batchSettled(run: AsyncRun): boolean {
+		const batch = run.batch;
+		return batch === undefined || !this.running().some((r) => r.batch === batch);
+	}
+
 	onComplete(cb: (run: AsyncRun) => void): () => void {
 		this.completeListeners.push(cb);
 		return () => {
@@ -287,44 +354,9 @@ export class AsyncRunTracker {
 			if (i >= 0) this.completeListeners.splice(i, 1);
 		};
 	}
-
-	/**
-	 * Wait (join) until every listed run settles, or `timeoutMs` elapses — never rejects:
-	 * it resolves with the runs' CURRENT states, so the caller reports what settled and
-	 * what is still going. Backs the `intercom wait` action (the supervisor holds its turn
-	 * to collect async results it now needs before its next step).
-	 */
-	waitFor(ids: string[], timeoutMs: number, signal?: AbortSignal): Promise<AsyncRun[]> {
-		const targets = ids.map((id) => this.runs.get(id)).filter((r): r is AsyncRun => r !== undefined);
-		if (targets.every((r) => r.status !== "running")) return Promise.resolve(targets);
-		return new Promise((resolve) => {
-			let off = (): void => {};
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const finish = (): void => {
-				off();
-				if (timer) clearTimeout(timer);
-				signal?.removeEventListener("abort", finish);
-				resolve(targets);
-			};
-			off = this.onComplete(() => {
-				if (targets.every((r) => r.status !== "running")) finish();
-			});
-			timer = setTimeout(finish, timeoutMs);
-			timer.unref?.();
-			if (signal) {
-				if (signal.aborted) finish();
-				else signal.addEventListener("abort", finish, { once: true });
-			}
-		});
-	}
 }
 
-/**
- * A compact ProgressView digest of async runs — the full on-demand `/peek` view, and the body the
- * routine check-in wraps ({@link buildCheckIn}). When `opts` carries the current clock + a stall
- * window, a RUNNING run that hasn't advanced within that window is flagged "possibly stuck". The
- * periodic FAST wakeup does NOT send this digest — it sends the focused {@link buildPeekAlert}.
- */
+/** First occurrence of each run id, in order. */
 export function dedupeRunsById(runs: AsyncRun[]): AsyncRun[] {
 	const byId = new Map<string, AsyncRun>();
 	for (const r of runs) if (!byId.has(r.id)) byId.set(r.id, r);
@@ -346,13 +378,14 @@ export function runDisplayName(run: Pick<AsyncRun, "agent" | "label" | "model">)
  *
  * Wall time is the supervisor's cheapest signal about a delegation — whether the leg it is reading
  * came back in seconds or ground for two hours changes what to do next — and no completion surface
- * used to say it. Undefined (rather than "?" or "0s") when the pair is missing or inverted, so an
+ * used to say it. Undefined (rather than "?" or "0s") when the pair is missing, inverted or not finite, so an
  * unstamped run renders exactly as it did before instead of gaining a fabricated reading.
  */
 export function runDurationLabel(run: AsyncRun): string | undefined {
 	const { startedAt, settledAt } = run;
-	if (startedAt === undefined || settledAt === undefined || settledAt < startedAt) return undefined;
-	return formatDuration(settledAt - startedAt);
+	if (startedAt === undefined || settledAt === undefined) return undefined;
+	const span = settledAt - startedAt;
+	return Number.isFinite(span) && span >= 0 ? formatDuration(span) : undefined;
 }
 
 /** The " in 2m 5s" / " after 2m 5s" fragment for a settled leg, or "" when it has no duration. */
@@ -404,20 +437,6 @@ export function boundCompletionSurface(
 
 const resultActionHint = (id: string): string => `intercom { action:"result", to:"${id}" }`;
 
-/** A timeout is a status update, not an invitation to poll. The passive completion notifier is
- * the normal delivery path, so send the supervisor back to useful work and reserve peek/steer/stop
- * for intervention. */
-export function buildWaitTimeoutNote(ids: readonly string[], timeoutMs: number): string {
-	const visibleIds = ids.slice(0, MAX_ASYNC_STATUS_ROWS);
-	const omitted = ids.length - visibleIds.length;
-	const idSummary = `${visibleIds.join(", ")}${omitted > 0 ? `, … +${omitted} more` : ""}`;
-	return (
-		`⏳ still running after ${timeoutMs}ms: ${idSummary}. ` +
-		"Continue useful supervisor work; completion will notify you automatically. " +
-		"Use peek only when status is needed, steer to redirect, or stop a truly stalled run — do not immediately wait again."
-	);
-}
-
 /**
  * The explicit overflow signal for the one case retention cannot cover: more runs settled than the
  * tracker keeps, so some of the ids this very report names can no longer be fetched. Saying it here,
@@ -464,6 +483,12 @@ export function isAsyncRunStalled(run: AsyncRun, now: number, stallMs: number): 
 		&& now - run.lastAdvanceAt >= stallMs;
 }
 
+/**
+ * A compact ProgressView digest of async runs — the full on-demand `/peek` view, and the body the
+ * routine check-in wraps ({@link buildCheckIn}). When `opts` carries the current clock + a stall
+ * window, a RUNNING run that hasn't advanced within that window is flagged "possibly stuck". The
+ * periodic stall check never wakes the model with this digest; it files it as an operator-only card.
+ */
 export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs?: number; waitingForSupervisor?: ReadonlySet<string> }): string {
 	if (runs.length === 0) return "No async runs.";
 	const running = runs.filter((r) => r.status === "running").length;
@@ -478,8 +503,13 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 		const name = runDisplayName(r);
 		const head = `[${r.id}] ${name} — ${r.status}`;
 		if (r.status === "running") {
-			let line = `${head} (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
+			// A tracked council/flow reports tokens only (its legs carry no turn count): "0 turns" would be false.
+			let line = `${head} (${r.progress.turns > 0 ? `${r.progress.turns} turns, ` : ""}${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
+			// Queued time is not execution time, so a queued run claims no "running for".
+			const ran = r.queued ? undefined : runDurationLabel({ ...r, ...(now !== undefined ? { settledAt: now } : {}) });
+			if (ran) line += ` · running for ${ran}`;
 			if (r.queued) line += " · queued (waiting for concurrency slot)";
+			else if (r.awaiting) line += ` · ${r.awaiting}`;
 			else if (opts?.waitingForSupervisor?.has(r.id)) line += " · waiting for supervisor";
 			else if (now !== undefined && stallMs !== undefined && isAsyncRunStalled(r, now, stallMs)) {
 				const stalledFor = now - r.lastAdvanceAt!;
@@ -504,7 +534,7 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 
 /**
  * Turns the periodic peek from a poll into an EXCEPTION signal. Tracks which running legs have already
- * been surfaced as stalled, so the supervisor is woken ONCE when a leg crosses the stall window — never
+ * been surfaced as stalled, so the operator is told ONCE when a leg crosses the stall window — never
  * every tick while it stays stalled, and never at all while it is making progress. A leg that advances
  * again (its `lastAdvanceAt` moves) re-arms, so a later stall re-alerts; legs that leave the list are
  * forgotten. Pure w.r.t. the injected `now`, so it is unit-tested without a real clock.
@@ -512,20 +542,6 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
 export class PeekWatcher {
 	/** runId → the `lastAdvanceAt` value at which the operator episode was reported. */
 	private readonly reportedAt = new Map<string, number>();
-	/** Runs whose one lifetime model stall wake was successfully delivered. */
-	private readonly modelWoken = new Set<string>();
-
-	firstWakeCandidates(runs: AsyncRun[]): AsyncRun[] {
-		return runs.filter((run) => !this.modelWoken.has(run.id));
-	}
-
-	acknowledgeModelWake(runIds: readonly string[]): void {
-		for (const id of runIds) this.modelWoken.add(id);
-	}
-
-	retryReports(runs: readonly AsyncRun[]): void {
-		for (const run of runs) this.reportedAt.delete(run.id);
-	}
 
 	/** The running legs that have NEWLY crossed the stall window since we last reported them. */
 	poll(runs: AsyncRun[], now: number, stallMs: number, waitingForSupervisor: ReadonlySet<string> = new Set()): AsyncRun[] {
@@ -538,8 +554,8 @@ export class PeekWatcher {
 				this.reportedAt.delete(r.id);
 				continue;
 			}
-			if (waitingForSupervisor.has(r.id)) {
-				this.reportedAt.delete(r.id); // a live ask is not a stall; re-evaluate immediately when it settles
+			if (waitingForSupervisor.has(r.id) || r.awaiting) {
+				this.reportedAt.delete(r.id); // a live ask or an operator decision is not a stall; re-evaluate when it settles
 				continue;
 			}
 			if (r.lastAdvanceAt === undefined) continue;
@@ -557,33 +573,7 @@ export class PeekWatcher {
 	/** Forget all tracked state (session start / reload hygiene). */
 	reset(): void {
 		this.reportedAt.clear();
-		this.modelWoken.clear();
 	}
-}
-
-/**
- * The periodic peek's wake message for a batch of NEWLY-stalled legs (from {@link PeekWatcher}), or ""
- * when none. Unlike {@link buildPeekDigest} (the full, on-demand `/peek` view), this is an exception
- * signal, not a status dump: a long operation looks identical to a stall from outside, so the framing is
- * patience-first, and intervention means asking the leg — never reaching into its environment to check.
- */
-export function buildPeekAlert(stuck: AsyncRun[], opts: { now: number }): string {
-	if (stuck.length === 0) return "";
-	const visibleStuck = stuck.slice(0, MAX_ASYNC_STATUS_ROWS);
-	const lines = visibleStuck.map((r) => {
-		const secs = Math.round((opts.now - (r.lastAdvanceAt ?? opts.now)) / 1000);
-		return `⚠ ${r.id} (${runDisplayName(r)}) — no visible progress for ${secs}s (${r.progress.turns} turns, ${compactTokens(r.progress.tokens)} cumulative input + output tokens)`;
-	});
-	const omitted = stuck.length - visibleStuck.length;
-	if (omitted > 0) lines.push(`… ${omitted} additional stalled-run alerts omitted from this bounded view.`);
-	lines.push(PROGRESS_TOKEN_NOTE);
-	return [
-		`${stuck.length} background ${stuck.length === 1 ? "leg" : "legs"} may be stalled:`,
-		...lines,
-		"A long operation (a slow scan, a big generation, a blocking command) looks the same as a stall from out here. " +
-			"If it's likely still working, leave it — the result returns to you as a follow-up. If you think it's genuinely " +
-			"wedged, ask the leg for a one-line status (a light `steer`) or `stop` it — don't run commands in its environment to check.",
-	].join("\n");
 }
 
 /** The operator-only periodic status card. It carries the progress digest without model instructions. */
@@ -597,20 +587,29 @@ export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: num
  * burst into a single message is what keeps completions from piling up as separate queued
  * follow-ups (pi renders one sticky line per queued message); the explicit guidance keeps the
  * supervisor from blindly re-issuing a delegation that just failed. `fence` wraps untrusted
- * sub-agent text so the supervisor treats it as data, never as instructions.
+ * sub-agent text so the supervisor treats it as data, never as instructions. `bounded: false` lifts
+ * every cap, for the headless inline return where the caller is parked in the call and nothing is injected.
  */
-export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) => string): string {
+export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) => string, opts: { bounded?: boolean } = {}): string {
 	const done = runs.filter((r) => r.status === "done");
 	const failed = runs.filter((r) => r.status === "failed");
 	const stopped = runs.filter((r) => r.status === "stopped");
 	// Share the notification budget across every leg that can contribute payload. This keeps a
 	// large fan-out fair: the first result cannot consume the whole follow-up while later statuses
 	// are still waiting to be rendered. The final report cap remains a hard backstop for metadata.
+	const bounded = opts.bounded !== false;
+	const cap = (chars: number): number => (bounded ? chars : Number.POSITIVE_INFINITY);
 	const payloadRuns = runs.filter((r) => r.status === "done" || r.progress.output.trim());
-	const fairRunChars = Math.min(
+	const fairRunChars = cap(Math.min(
 		MAX_COMPLETION_RUN_CHARS,
 		Math.max(256, Math.floor(MAX_COMPLETION_REPORT_CHARS / Math.max(1, payloadRuns.length * 2))),
-	);
+	));
+	// Each failed leg is clipped on its own line, from a budget of its own: every id and cause stays
+	// listed however wide the fan-out, and the drill-down names a real run.
+	const failureChars = cap(Math.min(
+		MAX_COMPLETION_RUN_CHARS,
+		Math.max(200, Math.floor(MAX_COMPLETION_REPORT_CHARS / (4 * Math.max(1, failed.length)))),
+	));
 	// Failures are always reported — the supervisor must know so it can adjust or tell
 	// the user. Blind retry loops are prevented at RUNTIME by the DelegationLedger
 	// (an identical delegation that failed twice is vetoed before it spawns), not by
@@ -640,9 +639,9 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 		}
 	}
 	if (failed.length > 0) {
-		const reasons = failed.map((r) => `• ${r.id} (${runDisplayName(r)})${durationSuffix(r, "after")}: ${r.error ?? "(no detail)"}`).join("\n");
+		const reasons = failed.map((r) => `• ${r.id} (${runDisplayName(r)})${durationSuffix(r, "after")}: ${clipRunOutput(r.error ?? "(no detail)", r.id, failureChars, "failure detail")}`).join("\n");
 		blocks.push(
-			`\n❌ ${failed.length} failed:\n${fence(clipRunOutput(reasons, "failures", fairRunChars))}\n\n` +
+			`\n❌ ${failed.length} failed:\n${fence(reasons)}\n\n` +
 				"Handle each failure deliberately: retry ONCE with a different model or approach, or report it to the user. " +
 				"If a failed/aborted leg left partial output below, salvage what's usable instead of re-running from scratch. " +
 				"Do not re-issue the same failing delegation repeatedly.",
@@ -656,17 +655,24 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 			}
 		}
 	}
-	return boundCompletionSurface(blocks.join("\n"));
+	const report = blocks.join("\n");
+	if (!bounded) return report;
+	// The cap cuts whole legs from the middle of a wide fan-out. Name every run in the tail, which the
+	// cut keeps, so a cut leg is still fetchable by id instead of silently missing.
+	const named = report.length > MAX_COMPLETION_REPORT_CHARS
+		? `${report}\n\nRun ids in this report: ${runs.slice(0, MAX_ASYNC_STATUS_ROWS).map((r) => r.id).join(", ")}`
+		: report;
+	return boundCompletionSurface(named);
 }
 
 /**
  * The completion report PLUS the premature-surrender counterweight. When a settled DONE leg's report
- * carries a surrender marker, `scan` returns the note to append (else undefined). BOTH the background
- * completion notifier and the `intercom wait` join render through this, so a blocked leg gets the
- * same counterweight however it is collected — the sync `tool_result` hook never sees a background
- * run. Only DONE legs are scanned: a FAILED leg is already surfaced as a failure by
- * {@link buildCompletionReport}, so the guard and the append agree (no done-vs-all mismatch). `scan`
- * is injected (PersistenceNudge.scan) to keep this module decoupled from the nudge.
+ * carries a surrender marker, `scan` returns the note to append (else undefined). The background
+ * completion notifier renders through this, so a blocked leg gets the counterweight on the
+ * automatic follow-up — the sync `tool_result` hook never sees a background run. Only DONE legs
+ * are scanned: a FAILED leg is already surfaced as a failure by {@link buildCompletionReport},
+ * so the guard and the append agree (no done-vs-all mismatch). `scan` is injected
+ * (PersistenceNudge.scan) to keep this module decoupled from the nudge.
  */
 export function renderCompletion(
 	runs: AsyncRun[],
@@ -720,6 +726,10 @@ export interface IdleNotifierDeps<T> {
 	 * drain keeps pace with small items instead of being pinned to the worst case. Either form is
 	 * clamped to at least one item: a queue must always drain. */
 	maxBatchItems?: number | ((pending: readonly T[]) => number);
+	/** Whether a buffered item may be delivered yet. A held item stays buffered (peekable, discardable)
+	 *  and is not polled: it ships on the first flush after the `notify()`/`kick()` that made it ready.
+	 *  Unset ⇒ everything is ready. */
+	isReady?: (item: T) => boolean;
 	/** Clock hook, injected for deterministic tests (defaults to `Date.now`). */
 	now?: () => number;
 }
@@ -728,7 +738,8 @@ export interface IdleNotifierDeps<T> {
  * Coalesces items into a single supervisor message, delivered only while the supervisor is idle.
  * A stale host follow-up is NOT a blocker: an idle delivery starts the clean turn that can drain it.
  * Self-healing: while busy it re-arms; sync throws and async rejections restore the whole batch.
- * Used for async-run completions and child intercom asks.
+ * Used for async-run completions (a batch's members held until the last one settles) and child
+ * intercom asks.
  */
 export class IdleCoalescingNotifier<T> {
 	private readonly deps: IdleNotifierDeps<T>;
@@ -784,15 +795,15 @@ export class IdleCoalescingNotifier<T> {
 	}
 
 	/** A snapshot of the buffered-but-not-yet-delivered items (e.g. runs that SETTLED but whose
-	 *  follow-up hasn't flushed yet). Lets `intercom wait`/`peek` surface results in the
-	 *  settle→deliver gap instead of reporting nothing; the caller `discard`s what it collects so
-	 *  the pending flush won't re-deliver it. */
+	 *  follow-up hasn't flushed yet). Lets `intercom peek` surface results in the
+	 *  settle→deliver gap instead of reporting nothing. Peeking does not collect: only an explicit
+	 *  `result` `discard`s the item so the pending flush won't re-deliver it. */
 	peekPending(): T[] {
 		return [...this.pending];
 	}
 
 	/** Drop buffered items matching `pred` — e.g. results the supervisor already collected
-	 *  synchronously (intercom `wait`), which must not be re-delivered as a follow-up. */
+	 *  explicitly (intercom `result`), which must not be re-delivered as a follow-up. */
 	discard(pred: (item: T) => boolean): void {
 		for (let i = this.pending.length - 1; i >= 0; i--) {
 			if (pred(this.pending[i] as T)) this.pending.splice(i, 1);
@@ -816,7 +827,8 @@ export class IdleCoalescingNotifier<T> {
 	flushIfIdle(): Promise<void> {
 		if (this.flushing) return this.flushing;
 		this.clearArmedTimer();
-		if (this.pending.length === 0) return Promise.resolve();
+		const ready = this.readyItems();
+		if (ready.length === 0) return Promise.resolve();
 
 		const generation = this.generation;
 		let batch: T[] | undefined;
@@ -841,8 +853,9 @@ export class IdleCoalescingNotifier<T> {
 				}
 			}
 
-			const take = this.maxBatchItems === undefined ? this.pending.length : Math.max(1, Math.floor(this.maxBatchItems(this.pending)));
-			batch = this.pending.splice(0, take);
+			const take = this.maxBatchItems === undefined ? ready.length : Math.max(1, Math.floor(this.maxBatchItems(ready)));
+			batch = ready.slice(0, take);
+			for (const item of batch) this.pending.splice(this.pending.indexOf(item), 1);
 			const message = this.deps.render(batch);
 			if (!message) {
 				// Empty text from a non-empty batch is a renderer failure, not an acknowledgement: put the
@@ -917,8 +930,14 @@ export class IdleCoalescingNotifier<T> {
 		this.handle = undefined;
 	}
 
+	/** The buffered items that may be delivered now, in order. */
+	private readyItems(): T[] {
+		const { isReady } = this.deps;
+		return isReady ? this.pending.filter(isReady) : [...this.pending];
+	}
+
 	private arm(ms: number): void {
-		if (this.handle !== undefined || this.pending.length === 0) return;
+		if (this.handle !== undefined || this.readyItems().length === 0) return;
 		let scheduled!: unknown;
 		scheduled = this.deps.setTimer(() => {
 			if (this.handle !== scheduled) return; // cancelled/replaced timer racing its callback

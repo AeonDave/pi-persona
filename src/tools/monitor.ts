@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { MonitorManager } from "../core/monitor.ts";
-import { failureDetails } from "../extension/shared.ts";
+import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 
 export interface MonitorToolDeps {
@@ -17,7 +17,7 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 	pi.registerTool({
 		name: "monitor",
 		label: "Monitor",
-		description: "Watch a job, file, log or system event using a background program. arm starts command (an executable) with args in the current workspace; no implicit shell. The argument list allows up to 64 literal arguments, each up to 8192 characters and 24,000 characters in total. mode=output wakes on nonempty stdout lines; write an adapter that prints only relevant changes. mode=exit wakes once when the launched job finishes. Returns immediately; continue independent work, then end your turn to receive events automatically. Requires monitor AND bash permission. Default: one event, ten-minute deadline; max eight monitors, twenty events each, twenty-four hours. list shows active watches; cancel stops the owned process tree and queued wakes. Keep this Pi session open; watches stop on session shutdown/reload. Do not wrap delegate or Exocom in a monitor: their notifications are already automatic.",
+		description: "Watch a job, file, log or system event using a background program. arm starts command (an executable) with args in the current workspace; no implicit shell. The argument list allows up to 64 literal arguments, each up to 8192 characters and 24,000 characters in total. mode=output wakes on nonempty stdout lines; write an adapter that prints only relevant changes. mode=exit wakes once when the launched job finishes. Returns immediately; continue independent work, then end your turn: events wake you automatically. Requires monitor AND bash permission. Default: one event, ten-minute deadline; max eight monitors, twenty events each, twenty-four hours. list shows active watches; cancel stops the owned process tree and queued wakes. Keep this Pi session open; watches stop on session shutdown/reload, and a headless `pi -p` run exits after its turn. A wake source, not a wait: for a fixed time use `timer`; sub-agents and Exocom wake you on their own.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("arm"), Type.Literal("list"), Type.Literal("cancel")]),
 			command: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "arm: executable, e.g. node, python or powershell.exe. Use args for script paths and arguments." })),
@@ -55,7 +55,7 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 				...(params.maxEvents !== undefined ? { maxEvents: params.maxEvents } : {}),
 			});
 			if (!result.ok) return fail(result.error);
-			return { content: [{ type: "text" as const, text: `Armed ${result.entry.id} (${compactInlineText(result.entry.label, { maxChars: 120 })}); ${params.mode === "exit" ? "wakes when this job exits" : "wakes on relevant stdout lines"}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. Keep this session open. Continue independent work, or end your turn and wait for the automatic notice.` }], details: { ok: true, id: result.entry.id, expiresAtEpochMs: result.entry.expiresAtEpochMs } };
+			return { content: [{ type: "text" as const, text: `Armed ${result.entry.id} (${compactInlineText(result.entry.label, { maxChars: 120 })}); ${params.mode === "exit" ? "wakes when this job exits" : "wakes on relevant stdout lines"}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. ${armWakeAdvice(ctx, "watch", "condition", "Keep this session open. Continue independent work, or end your turn; it wakes you by itself, so never sleep, poll, or arm a `timer` to wait for it.")}` }], details: { ok: true, id: result.entry.id, expiresAtEpochMs: result.entry.expiresAtEpochMs } };
 		},
 		renderCall(args, theme) {
 			const action = compactInlineText(args.action ?? "", { maxChars: 12 });

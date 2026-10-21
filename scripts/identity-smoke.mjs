@@ -23,6 +23,7 @@ import { endpoint } from "../src/exocom/paths.ts";
 import { ExocomPlane } from "../src/exocom/plane.ts";
 import { readAll, removeEntryIfMatches } from "../src/exocom/registry.ts";
 import { killProcessTree } from "../src/engine/child.ts";
+import { appendBounded, contentText, resultDetails } from "./lib/rpc-smoke.mjs";
 
 const model = process.env.LIVE_MODEL?.trim();
 if (!model || !/^[^/\s]+\/\S+$/.test(model)) {
@@ -71,22 +72,6 @@ function removeDeadReceiverEntry(workspace, receiverSessionId, receiverPid) {
 	if (readAll(agentDir, hash).some((candidate) => candidate.session_id === receiverSessionId)) {
 		throw new Error("receiver registry entry remained after exact ownership cleanup");
 	}
-}
-
-function appendBounded(current, chunk, max) {
-	const next = current + chunk;
-	return next.length <= max ? next : next.slice(-max);
-}
-
-function contentText(content) {
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string" ? part.text : "")
-		.join("");
-}
-
-function resultDetails(result) {
-	return result && typeof result === "object" && result.details && typeof result.details === "object" ? result.details : undefined;
 }
 
 function makeEnv(exocom) {

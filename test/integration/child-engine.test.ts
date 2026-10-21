@@ -127,6 +127,7 @@ test("runChildAgent kills a hung child after timeoutMs and reports the timeout (
 	assert.equal(r.aborted, false, "a timeout is NOT an abort");
 	assert.equal(r.ok, false);
 	assert.match(r.errorMessage ?? "", /timed out/);
+	assert.match(r.errorMessage ?? "", /raise this leg's timeoutMs if its tool is legitimately silent/, "the idle-timeout text names the remedy");
 });
 
 test(

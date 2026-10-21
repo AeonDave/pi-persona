@@ -44,8 +44,12 @@ function cancelled(arbiter: string, display: AgentResult[], usage: AgentResult["
 
 export const judge: Strategy = {
 	name: "judge",
+	when: "rival COMPLETE answers: independent panel, one impartial arbiter picks",
+	roster: "the panel",
+	team: "magi",
+	required: ["judge"],
 	params: {
-		judge: { type: "agent", doc: "(required) the arbiter agent, or an inline { agent, role?, model?, skills? }" },
+		judge: { type: "agent", doc: "the arbiter agent, or an inline { agent, role?, model?, skills? }" },
 		contract: { type: "string", doc: "optional output contract the panel runs against" },
 	},
 	async run(input, sdk) {

@@ -1,33 +1,32 @@
 /** `delegate` tool registration. */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../agents/agent.ts";
 import { Type } from "typebox";
+import { END_TURN_NOTE } from "../core/brief.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
-import { Container, Spacer } from "@earendil-works/pi-tui";
 import { configuredModels } from "../extension/engine.ts";
 import { compactInlineText, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
-import { formatUsage, toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
-import { sumUsage } from "../orchestration/reducers.ts";
-import { expandDetailHint, failureDetails } from "../extension/shared.ts";
+import { toolUsageField } from "../ui/usage.ts";
+import { expandDetailHint, failureDetails, isInline } from "../extension/shared.ts";
 import {
-	DelegationLedger, type DelegateView, type DelegateParams as DelegateCall, nameFor, normalizeDelegateConcurrency,
-	runDelegate, shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError, unknownContractError,
-	validateDelegationBrief, validateParallelWriteSets, wantsAsyncRun, coerceDelegateParams,
+	DelegationLedger, type DelegateParams as DelegateCall, keyInputOf, nameFor, normalizeDelegateConcurrency,
+	shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError, unknownContractError,
+	validateDelegationBrief, validateParallelWriteSets, coerceDelegateParams,
 } from "./delegate.ts";
 import { Semaphore } from "../orchestration/parallel.ts";
 import type { AgentRunSpec, SteerFn, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
-import { agentNodeStatusForDelegate, sanitizeLabel } from "../extension/shared.ts";
+import { sanitizeLabel } from "../extension/shared.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import type { AgentTree } from "../ui/agent-tree.ts";
-import { runDisplayName, type AsyncRunTracker } from "../engine/async.ts";
+import { buildCompletionReport, runDisplayName, type AsyncRunTracker } from "../engine/async.ts";
+import type { BackgroundRuns } from "./background-run.ts";
 import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "../engine/stream.ts";
 import { progressPatch } from "../ui/agent-tree.ts";
-import type { AddNodeInput } from "../ui/agent-tree.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 
 interface DelegateLaunchSnapshot {
@@ -151,21 +150,18 @@ export interface DelegateToolDeps {
 	contractNames: () => string[];
 	buildEngine: (signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, opts?: { async?: boolean }) => StrategyEngine;
 	agentTree: AgentTree;
-	nextRootId: (prefix: string) => string;
 	tracker: AsyncRunTracker;
+	/** Headless: joins the runs a call launched (see background-run.ts). */
+	runs: BackgroundRuns;
+	/** The launch pool, shared with the background `council` and `flow` runs (absent ⇒ a private one). */
+	launchPool?: Semaphore;
 	config: { ledgerV2: boolean };
 	RUN_LIMITS: RunLimits;
 	publishAgentTool(agentId: string, event: ToolEvent): void;
 	stopRegistry: Map<string, () => void>;
 	steerRegistry: Map<string, SteerFn>;
-	stopRequested: Set<string>;
-	ensurePersonaModels(ctx: ExtensionContext, roster: unknown[]): Promise<void>;
-	clearStops(prefix: string): void;
-	clearSteers(prefix: string): void;
 	drainBusBlock(): string;
 	startPeek(): void;
-	childUsage: ChildUsageLedger;
-	publishPersonaCost(): void;
 }
 
 export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): void {
@@ -215,7 +211,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Boolean({ description: "true = give this sub-agent working MCP tools (runs it on the child engine so pi-mcp-adapter initializes; the default engine leaves MCP tools 'not initialized'). Pass any server session id in the task to share a server-keyed backend's state." }),
 		),
 		timeoutMs: Type.Optional(
-			Type.Number({ description: "Idle timeout in ms for this worker: resets on progress, not a total runtime cap. A positive value overrides the shared default; zero or negative uses the default." }),
+			Type.Number({ description: "Idle window in ms for this worker, reset by any progress. NOT a deadline: a worker that keeps progressing runs past it. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
 		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
@@ -238,7 +234,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			Type.Boolean({ description: "true = give the single sub-agent working MCP tools (runs it on the child engine; the default engine leaves MCP tools 'not initialized')" }),
 		),
 		timeoutMs: Type.Optional(
-			Type.Number({ description: "Single-mode idle timeout in ms: resets on progress, not a total runtime cap. A positive value overrides the shared default; zero or negative uses the default." }),
+			Type.Number({ description: "Single-mode idle window in ms, reset by any progress. NOT a deadline: a worker that keeps progressing runs past it. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
 		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
@@ -250,18 +246,6 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		),
 		concurrency: Type.Optional(
 			Type.Integer({ minimum: 1, description: `Max children to run at once (default ${d.RUN_LIMITS.maxConcurrency}; larger requests are clamped)` }),
-		),
-		async: Type.Optional(
-			Type.Boolean({
-				description:
-					"Explicitly run in the background (already the DEFAULT in interactive sessions) — returns run ids at once; each result comes back to you automatically as a follow-up. Set false to force blocking. If both async and sync are supplied, async takes precedence.",
-			}),
-		),
-		sync: Type.Optional(
-			Type.Boolean({
-				description:
-					"Block this turn until the sub-agent(s) finish and return their results inline — only when you need them before your very next step. (Headless sessions already default to sync.) Omit async when using this flag; an explicit async value takes precedence.",
-			}),
 		),
 	});
 
@@ -289,11 +273,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		return undefined;
 	}
 
-	// The async launch pool: every background run passes through here, so a 20-task async
-	// fan-out respects the same concurrency ceiling a sync delegate does, instead of opening
-	// 20 model sessions at once. Queued runs show as "running" with no progress yet; stopping
-	// a queued run works (the engine settles a pre-aborted signal without a model call).
-	const asyncSlots = new Semaphore(d.RUN_LIMITS.maxConcurrency);
+	// The launch pool: EVERY delegate run passes through here, headless ones included, so a 20-task
+	// fan-out respects one concurrency ceiling instead of opening 20 model sessions at once. Queued
+	// runs show as "running" with no progress yet; stopping a queued run works (the engine settles a
+	// pre-aborted signal without a model call). A background `council`/`flow` takes ONE slot of this same
+	// pool for its whole run (tools/background-run.ts); its inner legs are gated by the strategy SDK's own semaphore.
+	const asyncSlots = d.launchPool ?? new Semaphore(d.RUN_LIMITS.maxConcurrency);
 	let asyncNameSequence = 0;
 
 	// Runtime anti-loop guard: an identical (agent, model, task) delegation that failed
@@ -317,15 +302,44 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !readOnlyTools.has(tool));
 	}
 
-	// Launch one agent in the background (tracked) and add its live async node to the tree.
-	// `label` is the bare codename (nameFor) — the model is folded in here (and stored on the
-	// d.tracker entry) so the tree node and every intercom digest show the SAME composed name.
-	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, batchSlots?: Semaphore): string {
+	// An interactive `tasks` fan-out of 2+ legs gets one header row — `delegate · N legs`, detail `k/N settled`
+	// — that leaves with its last leg. Settlement only ever updates or removes it, never adds, so a leg that
+	// settles after the tree was cleared (/new, shutdown) cannot resurrect it. Legs are counted as they
+	// settle (not derived from the tracker), so a leg failing inside launch() cannot close it early.
+	const batchRows = new Map<string, { size: number; settled: number }>();
+	const batchRowId = (batch: string): string => `delegate:${batch}`;
+	function openBatchRow(batch: string, size: number): string {
+		batchRows.set(batch, { size, settled: 0 });
+		const id = batchRowId(batch);
+		d.agentTree.add({ id, label: `delegate · ${size} legs`, kind: "delegate", status: "running", detail: `0/${size} settled` });
+		return id;
+	}
+	d.tracker.onComplete(({ batch }) => {
+		if (batch === undefined) return;
+		const row = batchRows.get(batch);
+		if (!row) return;
+		row.settled += 1;
+		if (row.settled < row.size) {
+			d.agentTree.update(batchRowId(batch), { detail: `${row.settled}/${row.size} settled` });
+			return;
+		}
+		batchRows.delete(batch);
+		d.agentTree.update(batchRowId(batch), { status: "done" }); // a node removed while "running" is reported as stopped
+		d.agentTree.remove(batchRowId(batch));
+	});
+
+	// Launch one agent (tracked) and add its live async node to the tree. `label` is the bare codename
+	// (nameFor) — the model is folded in here (and stored on the d.tracker entry) so the tree node and
+	// every intercom digest show the SAME composed name. `inline` (headless) means the launching call
+	// stays parked until the run settles, so the leg may not block on a supervisor reply it cannot give.
+	// `fanOut` is set for a leg of a `tasks` call: its batch id, the per-call concurrency gate, and the
+	// header row it hangs under (interactive fan-outs of 2+ legs only).
+	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, inline: boolean, fanOut?: { batch: string; slots: Semaphore | undefined; groupId: string | undefined }): string {
 		const model = shortModel(runSpec.model);
 		// The writer classification travels WITH the run (d.tracker metadata), not in a side Set keyed by
 		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
 		// registration after launch() returns would re-insert an already-dead run and leak it.
-		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), queued: true }, (onProgress, runId) => {
+		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), queued: true, ...(fanOut ? { batch: fanOut.batch } : {}) }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
 			// A real, HARD stop for the async run (a steer is only a soft request the child may
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
@@ -339,9 +353,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						(snap) => {
 							onProgress(snap);
 							if (snap.toolEvent) d.publishAgentTool(nodeId, snap.toolEvent);
-							d.agentTree.update(nodeId, progressPatch(snap, Date.now()));
+							const now = Date.now();
+							d.agentTree.update(nodeId, progressPatch(snap, now));
+							// Any leg advancing is the batch advancing: its header must not show a false stall.
+							if (fanOut?.groupId) d.agentTree.update(fanOut.groupId, { lastAdvanceAt: now });
 						},
-						{ async: true },
+						{ async: !inline },
 						// STOP via `ac.signal` (hard abort) and STEER via the run-id key (soft redirect) —
 						// both work for the supervisor (intercom `stop`/`steer`) and the f9 overlay (`x`/`s`),
 						// for ANY persona (these are supervisor→child controls, not child tools).
@@ -355,25 +372,15 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				}, ac.signal);
 			// A per-call semaphore composes with the process-wide ceiling. Acquire it first so a
 			// queued member of a serial batch never occupies a global slot while waiting for its
-			// predecessor. This makes `concurrency: 1` mean the same thing in sync and async mode.
-			return (batchSlots ? batchSlots.with(execute, ac.signal) : execute())
+			// predecessor, so `concurrency: 1` means one leg at a time.
+			return (fanOut?.slots ? fanOut.slots.with(execute, ac.signal) : execute())
 				.catch((error: unknown): AgentResult => {
 					if (!ac.signal.aborted) throw error;
 					return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
 				})
 				.then((r) => {
 					if (shouldRecordDelegationOutcome(r)) {
-						ledger.record(
-							{
-								agent,
-								...(runSpec.model ? { model: runSpec.model } : {}),
-								task,
-								...(runSpec.role ? { role: runSpec.role } : {}),
-								...(runSpec.tools !== undefined ? { tools: runSpec.tools } : {}),
-								...(runSpec.isolation ? { isolation: runSpec.isolation } : {}),
-							},
-							r.ok,
-						);
+						ledger.record(keyInputOf({ ...runSpec, task }), r.ok);
 					}
 					return r;
 				});
@@ -385,14 +392,35 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		d.agentTree.add({
 			id: nodeId,
 			label: model ? `${label} · ${model}` : label,
+			...(fanOut?.groupId ? { parentId: fanOut.groupId } : {}),
 			status: "running",
 			kind: "subagent",
 			agent,
 			...(runSpec.model ? { model: runSpec.model } : {}),
 			detail: "queued",
 		});
-		d.startPeek(); // arm the async-run status/stall monitor (no-op if both cadences are disabled)
+		// Arm the async-run status/stall monitor (no-op if both cadences are disabled). A headless leg runs
+		// inline with nobody to read a status card, exactly as the pre-tracker headless path did.
+		if (!inline) d.startPeek();
 		return id;
+	}
+
+	// Headless (`pi -p`): nothing drains a follow-up once the process exits, so the call that launched
+	// the runs joins them and returns the very report their completion follow-up would have carried.
+	async function settleInline(ids: string[], signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback | undefined, droppedNote = "") {
+		const { runs, usage } = await d.runs.settle(ids, signal, (done, total) => {
+			onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${total} done` }], details: {} });
+		});
+		const ok = runs.every((run) => run.status === "done");
+		const dropped = droppedNote && `
+
+[pi-persona]${droppedNote}`;
+		return {
+			content: [{ type: "text" as const, text: `${buildCompletionReport(runs, fenceUntrusted, { bounded: false })}${dropped}${d.drainBusBlock()}` }],
+			details: ok ? {} : failureDetails({}),
+			isError: !ok,
+			...toolUsageField(usage),
+		};
 	}
 
 	pi.registerTool({
@@ -400,12 +428,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		label: "Delegate",
 		description: [
 			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
-			"Pass agent and task for one worker, or a tasks array for parallel workers. Follow the active persona's delegation policy for required fields.",
-			"When requireBrief is active, EVERY worker needs brief: { objective, scopeRoe, position, constraints, requiredArtifacts, stopConditions } with nonempty values, including read-only scouts. In parallel mode put it in each tasks[].brief; task prose and a top-level brief do not substitute. Read the current per-turn delegation brief for a complete example.",
-			"A persona may also require a structured output contract or disjoint writeSet ownership for parallel writers. Incomplete calls are rejected before any worker starts; fill the missing fields across the batch before retrying.",
-			"In interactive sessions it runs in the BACKGROUND by default: you get run ids at once and stay free.",
-			"Work independently while children run; when only children remain, end your turn and let their automatic completion follow-ups wake you.",
-			"Do not monitor, poll, or automatically wait for all children. Use `intercom wait` only when a result is needed before your next step; `sync: true` intentionally blocks instead; headless runs default to sync.",
+			"Pass agent and task for one worker, or a tasks array for parallel workers. Required fields follow the active persona's delegation policy (the per-turn delegation brief shows the exact call shape); an incomplete call is rejected before any worker starts, and the error names what is missing.",
+			"Interactive sessions ALWAYS run it in the BACKGROUND: you get run ids at once and stay free, and each result wakes you as a completion follow-up (a `tasks` call wakes you ONCE, when its last leg settles). Work independently meanwhile; when only children remain, end your turn. NEVER sleep, poll, or arm a `timer` to wait for a child. Headless sessions (`pi -p`) block for the turn and return results inline.",
 			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
@@ -415,6 +439,11 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		parameters: DelegateParams,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			d.lastCtx = ctx;
+			// Interactive sessions (TUI and RPC) ALWAYS run in the background: the supervisor stays free
+			// and results return as follow-ups (the idle-gated push path). Headless (`pi -p`) launches the
+			// SAME runs but joins them before returning — the single turn must carry the result. A runtime
+			// constraint, not a model-facing choice, so there is no flag.
+			const inline = isInline(ctx);
 			const coerced = coerceDelegateParams(rawParams);
 			if (!coerced.ok) return { content: [{ type: "text", text: coerced.error }], details: failureDetails({}), isError: true };
 			let params = coerced.params;
@@ -462,7 +491,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						const reason = effectiveConcurrency > 1
 							? "would overlap a material mutation"
 							: "is ordered before a material mutation";
-						const message = `delegate: fresh verification must run after every material mutation; ${names} ${reason}. Serialize the batch with every writer first and every declared verifier last, or start the verifier in a later call once every writer has SETTLED (its completion follow-up, or intercom { action:"wait", to:"<run-id>" }) — a later call while a writer is still running is rejected the same way.`;
+						const message = `delegate: fresh verification must run after every material mutation; ${names} ${reason}. Serialize the batch with every writer first and every declared verifier last, or start the verifier in a later call once every writer has SETTLED (interactive: end your turn; its completion follow-up wakes you) — a later call while a writer is still running is rejected the same way.`;
 						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 					}
 				}
@@ -480,7 +509,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					if (writeSetError) return { content: [{ type: "text", text: writeSetError }], details: failureDetails({}), isError: true };
 				}
 			}
-			// The gate above sees ONE call. Interactive delegate is background by default, so the
+			// The gate above sees ONE call. Interactive delegate is ALWAYS background, so the
 			// remedy it prescribes — run the verifier in a later call — lands WHILE the mutation is
 			// still running unless the same rule holds across calls; the policy would otherwise be
 			// defeated by following its own instructions. Guidance is never the enforcement here
@@ -498,8 +527,10 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						const omittedMutations = liveMutations.length - visibleMutations.length;
 						const inFlight = `${visibleMutations.map((run) => `${run.id} (${sanitizeLabel(run.agent)})`).join(", ")}${omittedMutations > 0 ? `, … +${omittedMutations} more` : ""}`;
 						const message =
-							`delegate: fresh verification must run after every material mutation; ${verifierList} cannot start while ${inFlight} ${liveMutations.length === 1 ? "is" : "are"} still mutating. ` +
-							`Wait for the completion follow-up (or intercom { action:"wait", to:"${liveMutations[0]?.id}" }), then start the verifier against the resulting state.`;
+							`delegate: fresh verification must run after every material mutation; ${verifierList} cannot start while ${inFlight} ${liveMutations.length === 1 ? "is" : "are"} still running and may mutate the workspace. ` +
+							(inline
+								? "The writer's own call returns its result; start the verifier in a later call against the resulting state."
+								: "End your turn; the writer's completion follow-up wakes you, then start the verifier against the resulting state.");
 						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 					}
 				}
@@ -525,36 +556,13 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			// identical delegation that already failed twice does not spawn again.
 			const requested =
 				params.tasks && params.tasks.length > 0
-					? params.tasks.map((t) => ({
-							agent: t.agent,
-							...(t.model ? { model: t.model } : {}),
-							task: t.task,
-							...(t.role ? { role: t.role } : {}),
-							...(t.tools !== undefined ? { tools: t.tools } : {}),
-							...(t.isolation ? { isolation: t.isolation } : {}),
-						}))
+					? params.tasks.map(keyInputOf)
 					: params.agent && params.task
-						? [
-								{
-									agent: params.agent,
-									...(params.model ? { model: params.model } : {}),
-									task: params.task,
-									...(params.role ? { role: params.role } : {}),
-									...(params.tools !== undefined ? { tools: params.tools } : {}),
-									...(params.isolation ? { isolation: params.isolation } : {}),
-								},
-							]
+						? [keyInputOf({ ...params, agent: params.agent, task: params.task })]
 						: [];
 			const veto = ledger.vet(requested);
 			if (veto) return { content: [{ type: "text", text: veto }], details: failureDetails({}), isError: true };
-			// Background by default in interactive sessions: the supervisor stays free and results
-			// return as follow-ups (the idle-gated push path). Headless (`pi -p`) defaults to sync —
-			// the single turn must carry the result, and nothing drains a follow-up after the
-			// process exits. An explicit `async` always wins; `sync: true` opts one call out.
-			const wantsAsync = wantsAsyncRun(params, ctx.hasUI === true);
-			// Async (single OR parallel): run in the background so YOU stay free to keep
-			// working / answer the user — results arrive later as follow-ups; /peek to watch.
-			if (wantsAsync && params.tasks && params.tasks.length > 0) {
+			if (params.tasks && params.tasks.length > 0) {
 				const tasks = params.tasks.slice(0, d.RUN_LIMITS.maxChildren);
 				const dropped = params.tasks.length - tasks.length;
 				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, d.RUN_LIMITS.maxConcurrency);
@@ -563,213 +571,112 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				const batchSlots = effectiveConcurrency < tasks.length ? new Semaphore(effectiveConcurrency) : undefined;
 				const nameOffset = asyncNameSequence;
 				asyncNameSequence += tasks.length;
+				// One id per call: the name offset only ever grows, so no two calls share it.
+				const batch = `batch-${nameOffset.toString(36)}`;
+				const fanOut = { batch, slots: batchSlots, groupId: !inline && tasks.length > 1 ? openBatchRow(batch, tasks.length) : undefined };
 				const runs = tasks.map((t, i): DelegateLaunchSnapshot => {
-					// Routed through specOf() (not a hand-rolled field list) so this, the interactive
-					// DEFAULT delegate path, never drifts from the sync path's mapping — NP2's per-leg
-					// `timeoutMs` (and any future knob) lands here for free instead of needing a second copy.
+					// Routed through specOf() (not a hand-rolled field list): a per-leg knob such as `timeoutMs`
+					// lands here for free instead of needing a second copy.
 					const spec = specOf(t, nameOffset + i);
 					const label = nameFor(t, nameOffset + i);
-					const id = launchAsyncRun(t.agent, t.task, spec, label, batchSlots);
+					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut);
 					const model = shortModel(spec.model);
 					return { id, label, agent: t.agent, ...(model ? { model } : {}) };
 				});
 				const ids = runs.map((run) => run.id);
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${d.RUN_LIMITS.maxChildren}) were dropped.` : "";
+				if (inline) return settleInline(ids, signal, onUpdate, droppedNote);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Launched ${ids.length} async runs in the background (${ids.join(", ")}) — keep working; each notifies on completion. /peek to watch.${droppedNote}`,
+							text: `Launched ${ids.length} background leg${ids.length === 1 ? "" : "s"} as one batch: ${runs.map((run) => `${run.id} (${runDisplayName(run)})`).join(", ")}; you will be woken ONCE when the batch settles (${END_TURN_NOTE}).${droppedNote}`,
 						},
 					],
 					details: { runIds: ids, runs, ...(dropped > 0 ? { dropped } : {}) },
 					isError: false,
 				};
 			}
-			if (wantsAsync && params.agent && params.task) {
+			if (params.agent && params.task) {
 				const agent = params.agent;
 				const task = params.task;
 				const nameIndex = asyncNameSequence++;
 				// Use the canonical mapper here too: explicit `none`/`false` and future fields must
-				// survive exactly as they do in fan-out and sync mode.
+				// survive exactly as they do in a fan-out.
 				const single = { ...params, agent, task };
 				const runSpec = specOf(single, nameIndex);
 				const label = nameFor(single, nameIndex);
-				const id = launchAsyncRun(agent, task, runSpec, label);
+				const id = launchAsyncRun(agent, task, runSpec, label, inline);
+				if (inline) return settleInline([id], signal, onUpdate);
 				const model = shortModel(runSpec.model);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Launched async run ${id} (${agent}) — runs in the background; you'll be notified on completion. /peek ${id} to watch.`,
+							text: `Launched async run ${id} (${agent}) — runs in the background and wakes you on completion (${END_TURN_NOTE}).`,
 						},
 					],
 					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}) }] },
 					isError: false,
 				};
 			}
-			const delRoot = `delegate:${_toolCallId}`;
-			d.agentTree.add({ id: delRoot, label: "delegate", status: "running", kind: "delegate" });
-			try {
-				const delegateLimits = { maxConcurrency: d.RUN_LIMITS.maxConcurrency, maxChildren: d.RUN_LIMITS.maxChildren };
-				const outcome = await runDelegate(
-					params,
-					d.buildEngine(signal),
-					delegateLimits,
-					(views) => {
-						views.forEach((v, i) => {
-							const id = `${delRoot}/${i}`;
-							if (!v.running) {
-								d.stopRegistry.delete(id);
-								d.stopRequested.delete(id);
-								d.steerRegistry.delete(id);
-							}
-							const status = agentNodeStatusForDelegate(v);
-							const spec = requested[i];
-							const node: AddNodeInput = {
-								id,
-								label: v.label,
-								parentId: delRoot,
-								status,
-								kind: "subagent",
-								...(spec?.agent ? { agent: spec.agent } : {}),
-								...(spec?.model ? { model: spec.model } : {}),
-							};
-							node.detail = v.running ? v.activity : formatUsage(v.usage);
-							if (v.output) node.output = v.output;
-							d.agentTree.add(node);
-						});
-						const done = views.filter((v) => !v.running).length;
-						onUpdate?.({ content: [{ type: "text", text: `delegate: ${done}/${views.length} done` }], details: { views } });
-					},
-					(i, abort) => d.stopRegistry.set(`${delRoot}/${i}`, abort),
-					(i, steer) => d.steerRegistry.set(`${delRoot}/${i}`, steer),
-					// The same run signal the engine was built with: a leg whose engine REJECTS under a
-					// whole-run stop must file as "abort", not as an agent failure the user never caused.
-					signal,
-					(i, event) => d.publishAgentTool(`${delRoot}/${i}`, event),
-				);
-				// Feed the anti-loop ledger (results align with the requested tasks by index).
-				outcome.results.forEach((r, i) => {
-					const t = requested[i];
-					if (t && shouldRecordDelegationOutcome(r)) ledger.record(t, r.ok);
-				});
-				d.agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : outcome.ok ? "done" : "failed" });
-				const usage = sumUsage(outcome.results.map((r) => r.usage));
-				d.childUsage.account(usage);
-				d.publishPersonaCost();
-				return {
-					// Sub-agent text is untrusted even as a tool result (guardrails §: fence
-					// before it reaches the supervisor) — the async path already fences via
-					// buildCompletionReport; the sync path must match.
-					content: [{ type: "text", text: `${fenceUntrusted(outcome.text)}${d.drainBusBlock()}` }],
-					details: outcome.ok ? { views: outcome.views } : failureDetails({ views: outcome.views }),
-					isError: !outcome.ok,
-					...toolUsageField(usage),
-				};
-			} catch (error) {
-				d.agentTree.update(delRoot, { status: signal?.aborted ? "stopped" : "failed" });
-				throw error;
-			} finally {
-				d.clearStops(delRoot);
-				d.clearSteers(delRoot);
-				d.agentTree.remove(delRoot);
-			}
+			return {
+				content: [{ type: "text", text: "delegate: provide either { agent, task } or { tasks: [{ agent, task }, ...] }" }],
+				details: failureDetails({}),
+				isError: true,
+			};
 		},
 
 		renderCall(args, theme) {
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const coerced = coerceDelegateParams(args);
 			const view = coerced.ok ? coerced.params : undefined;
-			const mode = wantsAsyncRun(view ?? args, true) ? theme.fg("warning", " async") : theme.fg("dim", " sync");
 			if (view?.tasks && view.tasks.length > 0) {
 				// Names live in the tree / final card — keep the call line itself minimal.
-				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})`)}${mode}`, 0, 0);
+				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})`)}`, 0, 0);
 			}
 			if (typeof args.tasks === "string" && args.tasks.trim()) {
-				return new Text(`${title}${theme.fg("accent", "parallel")}${mode}`, 0, 0);
+				return new Text(`${title}${theme.fg("accent", "parallel")}`, 0, 0);
 			}
 			const identity = [view?.name ?? args.name, view?.agent ?? args.agent ?? "?"].filter(Boolean).join(" · ");
 			const modelValue = view?.model ?? args.model;
 			const model = typeof modelValue === "string" && modelValue.trim() ? theme.fg("dim", ` · ${compactInlineText(shortModel(modelValue), { maxChars: 48 })}`) : "";
-			return new Text(`${title}${theme.fg("accent", compactInlineText(identity, { maxChars: 96 }) || "?")}${model}${mode}`, 0, 0);
+			return new Text(`${title}${theme.fg("accent", compactInlineText(identity, { maxChars: 96 }) || "?")}${model}`, 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme, context) {
-			// Safe: the delegate `execute` above always stores `{ views: DelegateView[] }` (sync,
-			// single/parallel) or `{ runId | runIds }` (async) in `details`; the double cast just narrows
+			// Safe: the delegate `execute` above stores `{ runId | runIds, runs, dropped }` (interactive launch)
+			// or nothing (a headless call's report is its text) in `details`; the double cast just narrows
 			// Pi's opaque `details` type to that known shape for rendering.
-			const details = result.details as unknown as { views?: DelegateView[]; runId?: string; runIds?: string[]; runs?: unknown; dropped?: number } | undefined;
-			const views = details?.views ?? [];
-			if (views.length === 0) {
-				const first = result.content[0];
-				const fallback = details?.runIds?.length
-					? `async runs ${details.runIds.join(", ")}`
-					: details?.runId
-						? `async run ${details.runId}`
-						: "(no output)";
-				const text = sanitizeTerminalText(first?.type === "text" ? first.text : fallback);
-				const allowTracker = context === undefined || context.isPartial === true;
-				const rows = details ? launchRows(details, d.tracker, allowTracker) : [];
-				if (expanded) return new Text(expandedLaunchDetails(text, rows), 0, 0);
-				if (details?.runId || details?.runIds?.length) {
-					if (rows.length > 0 && !result.isError) {
-						return new Text(theme.fg("accent", collapsedLaunchSummary(rows, details.dropped)), 0, 0);
-					}
-					if (result.isError) {
-						const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
-						return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
-					}
-					const ids = details.runIds?.length ? details.runIds.slice(0, 3) : [details.runId as string];
-					const omitted = (details.runIds?.length ?? 0) - ids.length;
-					const dropped = details.dropped ? ` · ${details.dropped} task${details.dropped === 1 ? "" : "s"} dropped (max children)` : "";
-					return new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", `launched ${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
+			const details = result.details as unknown as { runId?: string; runIds?: string[]; runs?: unknown; dropped?: number } | undefined;
+			const first = result.content[0];
+			const fallback = details?.runIds?.length
+				? `async runs ${details.runIds.join(", ")}`
+				: details?.runId
+					? `async run ${details.runId}`
+					: "(no output)";
+			const text = sanitizeTerminalText(first?.type === "text" ? first.text : fallback);
+			const allowTracker = context === undefined || context.isPartial === true;
+			const rows = details ? launchRows(details, d.tracker, allowTracker) : [];
+			if (expanded) return new Text(expandedLaunchDetails(text, rows), 0, 0);
+			if (details?.runId || details?.runIds?.length) {
+				if (rows.length > 0 && !result.isError) {
+					return new Text(theme.fg("accent", collapsedLaunchSummary(rows, details.dropped)), 0, 0);
 				}
 				if (result.isError) {
 					const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
-					return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+					return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
 				}
-				return new Text(theme.fg("toolOutput", compactVisibleText(text, { maxLines: 4, maxLineChars: 100 }).text), 0, 0);
+				const ids = details.runIds?.length ? details.runIds.slice(0, 3) : [details.runId as string];
+				const omitted = (details.runIds?.length ?? 0) - ids.length;
+				const dropped = details.dropped ? ` · ${details.dropped} task${details.dropped === 1 ? "" : "s"} dropped (max children)` : "";
+				return new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", `launched ${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
 			}
-			const title = theme.fg("toolTitle", theme.bold("delegate "));
-			const running = views.filter((v) => v.running).length;
-			// While running, render nothing — the live per-agent view is the tree widget
-			// (and the f9 overlay). A sticky card here would just duplicate it. The full
-			// per-leg cards below appear once the run completes.
-			if (running > 0) return new Container();
-			const okCount = views.filter((v) => v.ok).length;
-			const container = new Container();
-			container.addChild(new Text(`${title}${theme.fg("accent", `${okCount}/${views.length} ok`)}`, 0, 0));
-			// A failure is actionable; never bury it below a page of successful legs. Collapsed cards
-			// show at most three semantic one-line previews. Expansion remains the lossless inspection
-			// surface, while F9 keeps the live navigable tree.
-			const ordered = expanded ? views : [...views].sort((a, b) => Number(a.ok) - Number(b.ok));
-			const visible = expanded ? ordered : ordered.slice(0, 3);
-			for (const v of visible) {
-				const icon = v.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
-				const usageStr = formatUsage(v.usage);
-				const usage = usageStr ? theme.fg("dim", ` ${usageStr}`) : "";
-				const body = sanitizeTerminalText(v.output || "(no output)");
-				if (expanded) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 96 }) || "agent")}${usage}`, 0, 0));
-					container.addChild(new Text(theme.fg("toolOutput", body), 0, 0));
-					continue;
-				}
-				// Keep the collapsed semantic row below 100 columns even on a very wide terminal.
-				// Usage remains one keystroke away in expanded mode; the collapsed card prioritizes
-				// identity + outcome instead of wrapping one result into several pseudo-rows.
-				const preview = compactVisibleText(body, { maxLines: 1, maxLineChars: 60 });
-				container.addChild(
-					new Text(`${icon} ${theme.fg("accent", compactInlineText(v.label, { maxChars: 28 }) || "agent")} · ${theme.fg("toolOutput", preview.text)}`, 0, 0),
-				);
+			if (result.isError) {
+				const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
+				return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
 			}
-			if (!expanded) {
-				const omitted = views.length - visible.length;
-				const prefix = omitted > 0 ? `… +${omitted} more result${omitted === 1 ? "" : "s"} · ` : "";
-				container.addChild(new Text(theme.fg("dim", `${prefix}${expandDetailHint()}`), 0, 0));
-			}
-			return container;
+			return new Text(theme.fg("toolOutput", compactVisibleText(text, { maxLines: 4, maxLineChars: 100 }).text), 0, 0);
 		},
 	});
 }

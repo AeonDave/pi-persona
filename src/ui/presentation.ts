@@ -168,3 +168,27 @@ export function compactVisibleText(
 		originalChars: input.length,
 	};
 }
+
+/**
+ * The prompt an operator reads before releasing a flow checkpoint: which gate, what runs next,
+ * and enough of the gated phase's output to decide. The prompt is modal, so it cannot point at an
+ * "expand" key; it states how much it left out instead.
+ */
+export function gateReviewText(gate: {
+	flow: string;
+	phase: string;
+	/** The phases the approval releases. */
+	next: ReadonlyArray<{ id: string; strategy: string }>;
+	output: string;
+}): string {
+	const name = (value: string): string => compactInlineText(value, { maxChars: 64 });
+	const body = compactVisibleText(gate.output, { maxLines: 12, maxLineChars: 100 });
+	return [
+		`Checkpoint "${name(gate.phase)}" of flow "${name(gate.flow)}" — approve and continue?`,
+		...(gate.next.length > 0 ? [`then: ${gate.next.map((p) => `${name(p.id)} (${name(p.strategy)})`).join(", ")}`] : []),
+		// Everything below is the child's text: a fixed rule keeps it from passing as more prompt.
+		"--- gated output (untrusted) ---",
+		body.text,
+		...(body.truncated ? [`(+${Math.max(0, gate.output.length - body.text.length)} characters not shown)`] : []),
+	].join("\n");
+}

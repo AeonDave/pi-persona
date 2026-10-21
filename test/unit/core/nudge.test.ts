@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_NUDGE_THRESHOLDS, DelegationNudge, PersistenceNudge } from "../../../src/core/nudge.ts";
+import { DEFAULT_NUDGE_THRESHOLDS, DelegationNudge, HANDOFF_TOOL_NAMES, longWaitSeconds, PersistenceNudge, PollGuard } from "../../../src/core/nudge.ts";
 
 // Small explicit thresholds keep these tests independent of the tunable defaults:
 // a run of 4 substantive commands = a sweep; a command under 10 chars is glue.
@@ -115,6 +115,30 @@ test("council is also a hand-off and resets the run", () => {
 	assert.equal(n.observe("bash", 50), undefined);
 });
 
+test("flow is a hand-off too: a successful flow resets the by-hand run like delegate/council", () => {
+	assert.ok(HANDOFF_TOOL_NAMES.has("flow"));
+	const n = mk();
+	n.observe("bash", 50);
+	n.observe("bash", 50);
+	n.observe("bash", 50);
+	assert.equal(n.observe("flow", 9999), undefined, "the hand-off itself is never counted as grinding");
+	assert.equal(n.observe("bash", 50), undefined, "the run counts from the flow");
+});
+
+test("a failed flow is self-describing: no re-dispatch card, no reset, and its size is not charged as burn", () => {
+	const n = mk();
+	n.observe("bash", 50);
+	n.observe("grep", 50);
+	n.observe("read", 50); // run 3, one short of the sweep
+	for (let i = 0; i < 4; i++) assert.equal(n.observe("flow", 9999, false, "flow aborted"), undefined, "an abort / bad name / failed phase is never a re-dispatch cue");
+	assert.ok(n.observe("bash", 50), "the by-hand run is intact: the failed flow bought no false reset");
+
+	const burnFloor = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 2, minStepChars: 10, minSweepBurnChars: 500 });
+	burnFloor.observe("flow", 1_000_000, false, "bad flow name");
+	burnFloor.observe("bash", 50);
+	assert.equal(burnFloor.observe("bash", 50), undefined, "a failed flow's text length did not count toward the sweep's burn floor");
+});
+
 test("backoff: each un-actioned nudge widens the next run window (early reminder, then de-escalates)", () => {
 	const n = mk(); // runLength 4
 	for (let i = 0; i < 3; i++) assert.equal(n.observe("bash", 50), undefined); // run 1..3
@@ -164,7 +188,7 @@ test("the dump trigger de-escalates like the sweep: repeated fat one-shots don't
 	assert.match(n.observe("bash", 120) ?? "", /pi-persona/, "fires again after a full base window");
 });
 
-test("intercom/timer results are orchestration glue: they neither advance nor reset the run", () => {
+test("intercom/timer/monitor results are orchestration glue: they neither advance nor reset the run", () => {
 	const n = new DelegationNudge({ singleHeavyChars: 100_000, runLength: 4, minStepChars: 10, minSweepBurnChars: 0 });
 	// Collecting delegated results is the DOCUMENTED way to gather hand-offs — it must not
 	// be punished as hands-on grinding, and must not masquerade as a hand-off either.
@@ -174,7 +198,8 @@ test("intercom/timer results are orchestration glue: they neither advance nor re
 	n.observe("intercom", 50_000);
 	n.observe("intercom", 50_000);
 	n.observe("timer", 50_000);
-	assert.equal(n.observe("intercom", 50_000), undefined, "six fat intercom/timer results never nudge");
+	n.observe("monitor", 205); // a realistic arm acknowledgement straddles minStepChars (200) by label length
+	assert.equal(n.observe("intercom", 50_000), undefined, "seven fat glue results never nudge");
 	// And they didn't advance the run either: a sweep still needs 4 REAL steps.
 	assert.equal(n.observe("read", 300), undefined);
 	assert.equal(n.observe("read", 300), undefined);
@@ -222,7 +247,7 @@ test("PersistenceNudge fires when a delegated leg reports a blocked marker", () 
 	assert.match(note ?? "", /^⟢ pi-persona · delegated result needs verification$/m);
 	assert.match(note ?? "", /^  Trigger: a delegated leg returned BLOCKED\/UNKNOWN\.$/m);
 	assert.match(note ?? "", /^  Verify: accept only concrete external blockers/m);
-	assert.match(note ?? "", /^  Otherwise: run the recovery pass or re-dispatch/m);
+	assert.match(note ?? "", /^  Otherwise: verify directly or re-dispatch with a sharper brief.$/m);
 	assert.equal((note ?? "").split("\n").length, 4, "the visible reminder has a stable four-line shape");
 });
 
@@ -238,6 +263,12 @@ test("PersistenceNudge stays quiet on a clean, successful leg report", () => {
 	assert.equal(n.observe("delegate", "done — foothold obtained, PROOF: id → uid=0(root)"), undefined);
 });
 
+test("PersistenceNudge treats a flow that relays a surrender marker like delegate/council", () => {
+	const n = new PersistenceNudge();
+	assert.match(n.observe("flow", "phase 2 of 3 settled ... [BLOCKED: need X] ...") ?? "", /needs verification/);
+	assert.equal(n.observe("flow", "all phases settled, PROOF: ok"), undefined);
+});
+
 test("PersistenceNudge ignores the supervisor's own tools — only delegate/council reports", () => {
 	const n = new PersistenceNudge();
 	// A bash/read result that happens to contain the marker is the supervisor's OWN work, not a leg.
@@ -251,6 +282,65 @@ test("PersistenceNudge.scan is tool-agnostic — the async-completion path (dele
 	// notifier, NOT a delegate/council tool_result — so the surrender check must be reachable
 	// without a tool name.
 	assert.ok(n.scan("tried A, B, C. [BLOCKED: need domain creds]"), "a blocked async report trips the scan");
-	assert.match(n.scan("FLAG: UNKNOWN") ?? "", /recovery pass/i);
+	assert.match(n.scan("FLAG: UNKNOWN") ?? "", /re-dispatch/i);
 	assert.equal(n.scan("done — foothold obtained, PROOF: id → uid=0(root)"), undefined, "a clean report is quiet");
+});
+
+test("PollGuard: the first check is ok, an unchanged signature repeats then terminates", () => {
+	const g = new PollGuard();
+	assert.equal(g.check("*", "run-1|running"), "ok");
+	assert.equal(g.check("*", "run-1|running"), "repeat", "strike 1");
+	assert.equal(g.check("*", "run-1|running"), "terminate", "strike 2");
+	assert.equal(g.check("*", "run-1|running"), "terminate", "and every strike after it");
+});
+
+test("PollGuard: a changed signature is ok again and clears the strikes", () => {
+	const g = new PollGuard();
+	g.check("*", "a");
+	assert.equal(g.check("*", "a"), "repeat");
+	assert.equal(g.check("*", "b"), "ok", "something changed: a legitimate peek");
+	assert.equal(g.check("*", "b"), "repeat", "the strike count starts over");
+});
+
+test("PollGuard: scopes are independent and reset() forgets everything", () => {
+	const g = new PollGuard();
+	g.check("*", "a");
+	assert.equal(g.check("result:run-1", "a"), "ok", "a different scope has its own last signature");
+	assert.equal(g.check("*", "a"), "repeat");
+	assert.equal(g.check("result:run-1", "a"), "repeat", "…and its own strike count: one repeat per scope is not two");
+	g.reset();
+	assert.equal(g.check("*", "a"), "ok", "after reset the next check is a first check");
+	assert.equal(g.check("*", "a"), "repeat", "and the strike count restarted");
+});
+
+test("longWaitSeconds matches a leading sleep of at least 20 seconds, bash and PowerShell", () => {
+	assert.equal(longWaitSeconds("sleep 30"), 30);
+	assert.equal(longWaitSeconds("sleep 1m"), 60);
+	assert.equal(longWaitSeconds("  sleep 2h; echo done"), 7200);
+	assert.equal(longWaitSeconds("sleep 20"), 20, "the threshold itself is a long wait");
+	assert.equal(longWaitSeconds("sleep 30 && npm test"), 30, "a leading sleep still holds the turn");
+	assert.equal(longWaitSeconds("Start-Sleep 25"), 25);
+	assert.equal(longWaitSeconds("Start-Sleep -Seconds 45"), 45);
+	assert.equal(longWaitSeconds("start-sleep -s:45"), 45);
+	assert.equal(longWaitSeconds("Start-Sleep -Milliseconds 30000"), 30);
+	assert.equal(longWaitSeconds("Start-Sleep -m 45000"), 45);
+	assert.equal(longWaitSeconds("SLEEP 60"), 60, "case-insensitive");
+});
+
+test("longWaitSeconds ignores short sleeps and anything that is not a leading sleep", () => {
+	for (const command of [
+		"sleep 19",
+		"sleep 2 && curl localhost",
+		"Start-Sleep -Milliseconds 19999",
+		"timeout 30 npm test",
+		"ping -c 30 host",
+		"docker compose up; sleep 30",
+		"while true; do sleep 5; done",
+		"python -c 'import time; time.sleep(60)'",
+		"sleep infinity",
+		"sleepy 60",
+		"sleep 30x",
+		"echo sleep 60",
+		"",
+	]) assert.equal(longWaitSeconds(command), undefined, command);
 });

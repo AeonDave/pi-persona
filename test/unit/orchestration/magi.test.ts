@@ -376,3 +376,87 @@ test("a core that fails its recovery re-runs the reflection round on its OWN mod
 		`each attempt (opening, recovery, reflection, reflection recovery) is on the model it asked for: ${JSON.stringify(melchior)}`,
 	);
 });
+
+// --------------------------------------------------------------------------------------------
+// Reflection honesty — a core whose reflection leg FAILS keeps the valid vote it already cast, and
+// a reflection that never ran says so in the ruling instead of only in an un-sunk log.
+
+/** Round 1 is a clean 2-1 split (A, A, B); each core in `failing` fails its REFLECTION leg with `kind`. */
+function reflectionFailingEngine(failing: string[], kind: NonNullable<AgentResult["failureKind"]>) {
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => {
+			calls++;
+			if (/positions so far/.test(s.task) && failing.includes(s.agent)) {
+				return { agent: s.agent, output: "", usage: usage(), ok: false, error: "reflection died", failureKind: kind };
+			}
+			const vote = s.agent === "casper" ? "B" : "A";
+			return { agent: s.agent, output: `${s.agent}:${vote}`, structured: { vote, confidence: 0.7 }, usage: usage(), ok: true };
+		},
+	};
+	return { engine, calls: () => calls };
+}
+const trio = { team: () => ["melchior", "balthasar", "casper"] };
+
+test("a core whose reflection fails keeps its round-1 vote, says so, and is billed once", async () => {
+	for (const kind of ["timeout", "agent"] as const) {
+		const { engine, calls } = reflectionFailingEngine(["casper"], kind);
+		const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: trio, limits: LIMITS }));
+		assert.equal(r.ok, true);
+		assert.match(r.output, /a=2, b=1/, `${kind}: all three votes are in the tally`);
+		assert.doesNotMatch(r.output, /invalid excluded/, `${kind}: the failed reflection is not an invalid ballot`);
+		assert.match(r.output, /1 core kept their round-1 vote \(reflection failed\)/, `${kind}: ${r.output}`);
+		assert.equal(r.structured?.reflected, true);
+		assert.match(r.output, /after 1 reflection round/);
+		assert.equal(calls(), 6, "three opening legs and three reflection legs");
+		assert.equal(r.usage.input, 6, "the substituted vote is not billed a second time");
+	}
+});
+
+test("when every reflection leg fails, the round-1 votes still rule", async () => {
+	const { engine } = reflectionFailingEngine(["melchior", "balthasar", "casper"], "agent");
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: trio, limits: LIMITS }));
+	assert.equal(r.ok, true);
+	assert.equal(r.structured?.reflected, false, "no core reflected, so the ruling does not claim a reflection round");
+	assert.doesNotMatch(r.output, /after 1 reflection round/);
+	assert.match(r.output, /a=2, b=1/);
+	assert.match(r.output, /3 cores kept their round-1 vote \(reflection failed\)/);
+});
+
+test("a reflection leg that was ABORTED is never replaced by its round-1 vote", async () => {
+	const { engine } = reflectionFailingEngine(["casper"], "abort");
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: trio, limits: LIMITS }));
+	assert.doesNotMatch(r.output, /kept their round-1 vote/);
+	assert.match(r.output, /1 invalid excluded/, "the stopped leg stays an excluded ballot");
+});
+
+test("a reflection skipped for budget is named in the ruling, not only in the log", async () => {
+	const { engine } = brokenModelEngine({});
+	const roster = magiRoster({ melchior: "a/one", balthasar: "b/two", casper: "c/three" });
+	const tokens = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster, limits: { ...LIMITS, budgetTokens: 3 } }));
+	assert.match(tokens.output, /reflection skipped \(token budget\)/);
+	assert.equal(tokens.structured?.reflected, false);
+	const children = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster, limits: { ...LIMITS, maxChildren: 4 } }));
+	assert.match(children.output, /reflection skipped \(child budget\)/);
+	const ran = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster, limits: LIMITS }));
+	assert.doesNotMatch(ran.output, /reflection skipped/, "no skip is claimed when reflection ran");
+	const off = await magi.run({ task: "decide", roster: "magi", params: { reflect: false } }, makeSDK({ engine, roster, limits: LIMITS }));
+	assert.doesNotMatch(off.output, /reflection skipped/, "reflect:false is a choice, not a skip");
+});
+
+test("a magi dissent line names the agent, never a run-key suffix, for same-agent lenses", async () => {
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => {
+			const vote = /SECURITY/.test(s.role ?? "") ? "B" : "A";
+			return { agent: s.agent, output: "o", structured: { vote, confidence: 0.7, result: `${vote} wins` }, usage: usage(), ok: true };
+		},
+	};
+	const lenses = { team: () => [
+		{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens" },
+		{ agent: "reviewer", role: "Focus ONLY on the TESTS lens" },
+		{ agent: "reviewer", role: "Focus ONLY on the STYLE lens" },
+	] };
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: lenses, limits: LIMITS }));
+	assert.match(r.output, /\[reviewer · B\] B wins/);
+	assert.doesNotMatch(r.output, /#\d/);
+});

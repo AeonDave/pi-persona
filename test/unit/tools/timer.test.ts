@@ -9,16 +9,14 @@ import { registerTimerTool } from "../../../src/tools/timer.ts";
 function harness(now = 1_000_000) {
 	const tools = new Map<string, any>();
 	const pi = { registerTool: (tool: { name: string }) => tools.set(tool.name, tool) } as unknown as ExtensionAPI;
-	registerTimerTool(pi, {
-		lastCtx: undefined,
-		timerScheduler: new TimerScheduler({
-			now: () => now,
-			setTimer: () => 1,
-			clearTimer: () => {},
-			onFire: () => {},
-		}),
+	const timerScheduler = new TimerScheduler({
+		now: () => now,
+		setTimer: () => 1,
+		clearTimer: () => {},
+		onFire: () => {},
 	});
-	return { tools };
+	registerTimerTool(pi, { lastCtx: undefined, timerScheduler });
+	return { tools, timerScheduler };
 }
 
 test("timer arm refuses a missing message instead of storing an empty follow-up", async () => {
@@ -76,6 +74,20 @@ test("timer arm with delaySeconds succeeds when the message and delay are presen
 	assert.match(result.content[0]?.text ?? "", /Armed timer-1/);
 	assert.match(result.content[0]?.text ?? "", /fires in 1m 00s/);
 	assert.match(result.content[0]?.text ?? "", /1970-01-01T00:17:40\.000Z/);
+	assert.doesNotMatch(result.content[0]?.text ?? "", /check status/, "the message is in the tool call; the result does not echo it");
+	assert.match(result.content[0]?.text ?? "", /You can end this turn now; keep the session open for the alarm\./);
+});
+
+test("timer arm says the truth in a headless run instead of inviting the model to end its turn", async () => {
+	const { tools } = harness();
+	const result = await tools.get("timer").execute("call-1", { action: "arm", message: "check", delaySeconds: 60 }, undefined, undefined, { hasUI: false });
+	assert.equal(result.isError, false);
+	assert.equal(result.details.ok, true);
+	const text = result.content[0]?.text ?? "";
+	assert.match(text, /Headless pi -p: the process exits when this turn settles/);
+	assert.doesNotMatch(text, /end this turn now/);
+	const ui = await tools.get("timer").execute("call-2", { action: "arm", message: "check", delaySeconds: 60 }, undefined, undefined, { hasUI: true });
+	assert.match(ui.content[0]?.text ?? "", /You can end this turn now/);
 });
 
 test("timer arm rejects an unqualified absolute date-time", async () => {
@@ -94,6 +106,8 @@ test("timer description states the session-open dependency and finite alarm boun
 	const description = String(tools.get("timer").description);
 	assert.match(description, /session must remain open/i);
 	assert.match(description, /32/);
+	assert.match(description, /never use it to wait for a sub-agent or monitor/i);
+	assert.match(description, /or to poll: if something can report the event, use `monitor`/i);
 	assert.doesNotMatch(description, /nmap|Paperwork/i);
 });
 
@@ -108,12 +122,12 @@ test("timer schema documents the runtime message and delay bounds", () => {
 });
 
 test("timer keeps valid padded messages and sub-second values that round to one second", async () => {
-	const { tools } = harness();
+	const { tools, timerScheduler } = harness();
 	const result = await tools.get("timer").execute("call-1", {
 		action: "arm",
 		message: `wake${" ".repeat(4_001)}`,
 		delaySeconds: 0.9999,
 	});
 	assert.equal(result.isError, false);
-	assert.match(result.content[0]?.text ?? "", /On fire .*"wake"/);
+	assert.equal(timerScheduler.list()[0]?.message, "wake");
 });

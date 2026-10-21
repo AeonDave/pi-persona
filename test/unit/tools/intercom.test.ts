@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { InProcessBus, MAX_RETAINED_MESSAGE_CHARS } from "../../../src/bus/inproc.ts";
 import { formatInbox, MAX_INTERCOM_LIST_PEERS, MAX_INTERCOM_MESSAGE_CHARS, runIntercom } from "../../../src/tools/intercom.ts";
-import { buildIntercomWaitStillNote, fenceIntercomToolOutcome } from "../../../src/tools/intercom-tool.ts";
+import { fenceIntercomToolOutcome } from "../../../src/tools/intercom-tool.ts";
 
 test("intercom list returns the registered peers (minus self)", () => {
 	const bus = new InProcessBus();
@@ -171,13 +171,6 @@ test("formatInbox renders an actionable id for a one-way message", () => {
 	assert.match(rendered, /characters omitted/);
 });
 
-test("intercom wait reports an interruption instead of claiming its timeout elapsed", () => {
-	const note = buildIntercomWaitStillNote(["run-1"], 60_000, true);
-	assert.match(note, /interrupted/i);
-	assert.doesNotMatch(note, /timed out|timeout elapsed/i);
-	assert.match(note, /run-1/);
-});
-
 test("intercom fences a recovered child payload but leaves missing-message diagnostics actionable", () => {
 	const fence = (text: string): string => `<fenced>${text}</fenced>`;
 	const success = fenceIntercomToolOutcome(
@@ -192,4 +185,13 @@ test("intercom fences a recovered child payload but leaves missing-message diagn
 	);
 	assert.equal(success, "<fenced>child payload</fenced>");
 	assert.equal(failure, "No retained message with id \"m1\".");
+});
+
+test("a message call without a messageId points a model that wanted to talk to a running child at steer", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const out = runIntercom({ action: "message" }, bus, "supervisor");
+	assert.equal(out.details.ok, false);
+	assert.match(out.text, /^intercom message needs \{ messageId: <message id> \}\./);
+	assert.match(out.text, /To message a running child use steer \{ to: <run id>, message \}\./);
 });

@@ -28,10 +28,17 @@ export interface FlowSpec {
 export type FlowParse = { ok: true; flow: FlowSpec } | { ok: false; error: string };
 export type TopoResult = { ok: true; order: string[] } | { ok: false; error: string };
 
-/** The pinned `flow@hash` for a run (I3): a stable sha256 over the spec, so a hot reload
- *  of the file can't change an in-flight run and a resume only matches the same flow. */
+/** A stable sha256 over the spec — the flow half of a run's identity, and the journal file name's
+ *  hash (`journalFileName`): a hot reload of the file can't change an in-flight run. */
 export function flowHash(spec: FlowSpec): string {
 	return stableHash(spec);
+}
+
+/** The pinned run identity (I3) recorded in every journal line: flow + task + cwd. A resume
+ *  skips finished phases only for the SAME flow on the SAME task in the SAME project; a failed
+ *  `flow X` on task A must never feed its phases' output to `flow X` on task B. */
+export function flowRunHash(spec: FlowSpec, task: string, cwd: string): string {
+	return stableHash({ flow: flowHash(spec), task: task.trim(), cwd });
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {

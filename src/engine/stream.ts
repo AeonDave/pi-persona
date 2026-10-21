@@ -61,8 +61,6 @@ export interface StreamState {
 	/** Calls whose start was surfaced but whose end has not arrived. This is not a retention
 	 *  cache: active ids are never evicted merely because completed calls churn. */
 	activeToolCalls?: Set<string>;
-	/** Timestamp of the latest textual tool_execution_update, used only as a liveness signal. */
-	toolOutputAt?: number;
 	/** Recently completed call ids whose start/end phase was surfaced. Both caches are bounded;
 	 *  they suppress duplicate wire events without growing for the lifetime of a long run. */
 	seenToolStarts?: Set<string>;
@@ -238,7 +236,7 @@ function appendTranscript(state: StreamState, chunk: string, sep: string): void 
 
 /** Fold one parsed stream event into the accumulating state (in place), returning a
  * deduplicated structured lifecycle transition when the runtime supplied a stable call id. */
-export function applyEvent(state: StreamState, event: unknown, observedAt?: number): ToolEvent | undefined {
+export function applyEvent(state: StreamState, event: unknown): ToolEvent | undefined {
 	if (!isObject(event)) return undefined;
 
 	// Track the current tool so the UI can show "running: grep src/…" while a
@@ -271,20 +269,6 @@ export function applyEvent(state: StreamState, event: unknown, observedAt?: numb
 		const toolEvent: ToolEvent = { phase: "end", callId, name };
 		if (typeof event.isError === "boolean") toolEvent.failed = event.isError;
 		return toolEvent;
-	}
-
-	if (event.type === "tool_execution_update") {
-		const callId = event.toolCallId;
-		const toolName = event.toolName;
-		const partialResult = event.partialResult;
-		const hasText = isObject(partialResult) && Array.isArray(partialResult.content)
-			&& partialResult.content.some((part) => isObject(part) && part.type === "text" && typeof part.text === "string" && part.text.length > 0);
-		if (typeof callId === "string" && callId.length > 0
-			&& typeof toolName === "string" && toolName.length > 0
-			&& state.activeToolCalls?.has(callId) === true && hasText && observedAt !== undefined) {
-			state.toolOutputAt = observedAt;
-		}
-		return undefined;
 	}
 
 	// Live partial: pi streams the growing message as `message_update` events. Surface
@@ -357,8 +341,6 @@ export interface ProgressSnapshot {
 	tokens: number;
 	/** The tool currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
-	/** Timestamp of the latest textual tool output update, when available. */
-	toolOutputAt?: number;
 	/** One authoritative runtime tool lifecycle transition, when this snapshot is event-driven. */
 	toolEvent?: ToolEvent;
 }
@@ -372,7 +354,6 @@ export function snapshot(state: StreamState, toolEvent?: ToolEvent): ProgressSna
 		tokens: state.usage.input + state.usage.output,
 	};
 	if (state.activity !== undefined) snap.activity = state.activity;
-	if (state.toolOutputAt !== undefined) snap.toolOutputAt = state.toolOutputAt;
 	if (toolEvent !== undefined) snap.toolEvent = toolEvent;
 	return snap;
 }

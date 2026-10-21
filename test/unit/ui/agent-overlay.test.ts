@@ -574,3 +574,95 @@ test("composeAgentRow leaves an ordinary row untruncated", () => {
 	assert.ok(row.includes("L"), "the label still renders");
 	assert.ok(row.endsWith("1m 15s"), "the elapsed badge renders untruncated at the end of the row");
 });
+
+function stopAllOverlay(tree: AgentTree, stopped: string[], canStop?: (id: string) => boolean): AgentOverlay {
+	return new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+		...(canStop ? { canStop } : {}),
+	});
+}
+
+test("X asks for confirmation, then stops every running agent at once", () => {
+	const tree = new AgentTree(() => 0);
+	for (const id of ["a", "b", "c"]) tree.add({ id, label: id });
+	const stopped: string[] = [];
+	const overlay = stopAllOverlay(tree, stopped);
+	assert.match(overlay.render(80).join("\n"), /X stop all \(3\)/, "the hint advertises the group stop with its size");
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, [], "the first press only arms");
+	assert.match(overlay.render(80).join("\n"), /press X again to stop 3 running agents/);
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b", "c"]);
+	assert.match(overlay.render(80).join("\n"), /stop requested for 3 agents; queued or later stages may still start/);
+	overlay.dispose();
+});
+
+test("any other key disarms X, so a stale confirmation cannot stop a group later", () => {
+	const tree = new AgentTree(() => 0);
+	for (const id of ["a", "b"]) tree.add({ id, label: id });
+	const stopped: string[] = [];
+	const overlay = stopAllOverlay(tree, stopped);
+	overlay.handleInput("X");
+	overlay.handleInput("j");
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, [], "the second X after an intervening key arms again instead of stopping");
+	assert.match(overlay.render(80).join("\n"), /press X again to stop 2 running agents/);
+	overlay.dispose();
+});
+
+test("X re-arms when the set of running agents changed since the confirmation prompt", () => {
+	const tree = new AgentTree(() => 0);
+	for (const id of ["a", "b"]) tree.add({ id, label: id });
+	const stopped: string[] = [];
+	const overlay = stopAllOverlay(tree, stopped);
+	overlay.handleInput("X");
+	tree.add({ id: "c", label: "c" }); // the user confirms something they have not seen
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, [], "a changed set is re-confirmed, never stopped on the stale prompt");
+	assert.match(overlay.render(80).join("\n"), /press X again to stop 3 running agents/);
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b", "c"]);
+	overlay.dispose();
+});
+
+test("X is offered only for two or more stoppable agents, and counts nothing it cannot stop", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "a" });
+	const stopped: string[] = [];
+	const single = stopAllOverlay(tree, stopped);
+	assert.doesNotMatch(single.render(80).join("\n"), /X stop all/);
+	single.handleInput("X");
+	single.handleInput("X");
+	assert.deepEqual(stopped, [], "one agent is what plain x is for");
+	single.dispose();
+
+	tree.add({ id: "b", label: "b" });
+	tree.add({ id: "c", label: "c" });
+	const partial = stopAllOverlay(tree, stopped, (id) => id !== "c");
+	assert.match(partial.render(80).join("\n"), /X stop all \(2\)/, "an agent without a live stop handle is not counted");
+	partial.handleInput("X");
+	partial.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b"]);
+	partial.dispose();
+});
+
+test("a run root that carries its own stop is a selectable row: x ends the whole run, not one leg", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "async:run-1", label: "council magi", kind: "council" });
+	tree.add({ id: "async:run-1/phase", label: "a phase container", parentId: "async:run-1", kind: "phase" });
+	tree.add({ id: "async:run-1/phase/melchior", label: "melchior", parentId: "async:run-1/phase" });
+	tree.add({ id: "async:run-1/casper", label: "casper", parentId: "async:run-1" });
+	const stopped: string[] = [];
+	const overlay = stopAllOverlay(tree, stopped, (id) => id === "async:run-1" || id.endsWith("melchior"));
+	const view = overlay.render(80).join("\n");
+	assert.match(view, /▸.*council magi/, "the root is the first selectable row");
+	assert.doesNotMatch(view, /▸.*a phase container/);
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["async:run-1"], "the root's own stop ends the whole run");
+	overlay.handleInput("j");
+	assert.match(overlay.render(80).join("\n"), /▸.*melchior/, "a container without a stop of its own is skipped: the next row is the leaf");
+	overlay.dispose();
+});

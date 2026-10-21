@@ -78,6 +78,8 @@ function cancelled(rounds: number, usages: AgentResult["usage"][]): AgentResult 
 
 export const councilRounds: Strategy = {
 	name: "council-rounds",
+	when: "hard fork needing iterated debate: re-vote each round to a bestOf majority",
+	team: "magi",
 	params: {
 		rounds: { type: "number", default: 3, doc: "max deliberation rounds" },
 		bestOf: { type: "number", doc: "default: majority of the roster" },

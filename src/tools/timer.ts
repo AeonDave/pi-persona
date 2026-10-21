@@ -1,7 +1,7 @@
 /** Session timer tool — arm a wall-clock wake. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { failureDetails } from "../extension/shared.ts";
+import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { formatRemaining, type TimerScheduler } from "../core/timer.ts";
 import { parseInstant } from "../core/time.ts";
 import { readClockSnapshot } from "../extension/clock.ts";
@@ -13,11 +13,8 @@ export interface TimerToolDeps {
 }
 
 export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
-	// ── timer tool (arm a wall-clock alarm that WAKES the session when it fires) ───
-	// Solves the "wait N minutes for a scheduled event or service window" problem WITHOUT a poll loop:
-	// arm an alarm, end your turn, and when it expires the extension injects a follow-up that
-	// resumes you (idle-gated so it starts a fresh turn instead of stranding). Up to 32 alarms may be
-	// armed; cancel/list them. In-memory per session (a reload/new session clears armed alarms).
+	// ── timer tool: a wall-clock alarm that WAKES the idle session when it fires (see core/timer.ts) ───
+	// Up to 32 alarms; in-memory per session (a reload/new session clears them).
 	const TimerToolParams = Type.Object({
 		action: Type.Union([Type.Literal("arm"), Type.Literal("cancel"), Type.Literal("list"), Type.Literal("now")], {
 			description: "arm = schedule a wakeup · cancel = drop one by id · list = show armed alarms · now = read the fresh clock",
@@ -34,11 +31,12 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 		name: "timer",
 		label: "Timer",
 		description: [
-			"Arm a wall-clock ALARM that wakes you when it fires — the token-cheap way to wait for a",
-			"fixed moment (a scheduled event, a service window, a scheduled re-check) instead of a",
-			"poll loop. `arm` with { message, delaySeconds } or { message, atIso }; end your turn; when",
-			"it expires a follow-up carrying your message is injected and you resume. `cancel` by id,",
-			"`list` the armed ones. Up to 32 alarms may be armed at once. The session must remain open;",
+			"Wake yourself at a wall-clock moment the world decides (an external deadline, a service window,",
+			"a reminder at a fixed time). `arm` with { message, delaySeconds } or { message, atIso }; continue",
+			"independent work, then end your turn when nothing else remains; when it fires, a follow-up",
+			"carrying your message arrives once you are idle. `cancel` by id, `list` the armed ones.",
+			"Never use it to wait for a sub-agent or monitor (they wake you on their own) or to poll: if something can report the event, use `monitor`.",
+			"Up to 32 alarms may be armed at once. The session must remain open;",
 			"alarms are in-memory and cleared on shutdown or reload. `now` returns a fresh UTC time plus",
 			"the local timezone and numeric offset.",
 		].join(" "),
@@ -98,7 +96,7 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 				return { content: [{ type: "text", text: r.error ?? "timer arm failed." }], details: failureDetails({ action: "arm", ok: false }), isError: true };
 			}
 			const e = r.entry;
-			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(r.remainingMs ?? e.fireAtEpochMs - e.armedAtEpochMs)} [${new Date(e.fireAtEpochMs).toISOString()}]. On fire I'll be woken with: "${e.message}". You can end this turn now; keep the session open for the alarm.`;
+			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(r.remainingMs ?? e.fireAtEpochMs - e.armedAtEpochMs)} [${new Date(e.fireAtEpochMs).toISOString()}]. ${armWakeAdvice(ctx, "alarm", "time-gated step", "You can end this turn now; keep the session open for the alarm.")}`;
 			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, ok: true }, isError: false };
 		},
 	});

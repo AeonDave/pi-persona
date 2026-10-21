@@ -47,3 +47,34 @@ export function knownParams(name: string): Record<string, StrategyParam> | undef
 	const strategy = BUILTINS[name];
 	return strategy ? (strategy.params ?? {}) : undefined;
 }
+
+/** One line per strategy for the council tool's description, generated from the registry:
+ *  `- name(params, required*) — when; roster: positions; default team X.` Guidance on which method fits a
+ *  problem class lives with the method, so it cannot drift from what the code does. */
+export function strategyCatalog(): string {
+	return strategyNames()
+		.map((name) => {
+			const s = BUILTINS[name] as Strategy;
+			const keys = Object.keys(s.params ?? {}).map((k) => (s.required?.includes(k) ? `${k}*` : k));
+			const head = `- ${name}${keys.length > 0 ? `(${keys.join(", ")})` : ""}`;
+			// `magi` is the fallback every call already gets, so only a different default team is worth a mention.
+			const team = s.team && s.team !== "magi" ? `; default team ${s.team}` : "";
+			return `${head}${s.when ? ` — ${s.when}` : ""}${s.roster ? `; roster: ${s.roster}` : ""}${team}.`;
+		})
+		.join("\n");
+}
+
+/** Refuse a council call that cannot run, BEFORE any run, tree row or model picker exists: a
+ *  `required` param that is missing or blank (blank counts as missing, exactly as the strategies'
+ *  own `parseAuxActor` reads it). `undefined` means the call is sound. An UNKNOWN strategy is not
+ *  judged here: the run itself fails with the installed list (an interactive council reports that in
+ *  its completion follow-up, not in the launching call). */
+export function missingRequiredParams(name: string, params: Record<string, unknown>): string | undefined {
+	const strategy = BUILTINS[name];
+	const missing = (strategy?.required ?? []).filter((key) => {
+		const value = params[key];
+		return value === undefined || value === null || (typeof value === "string" && !value.trim());
+	});
+	if (missing.length === 0) return undefined;
+	return `"${name}" requires ${missing.map((key) => `params.${key} — ${strategy?.params?.[key]?.doc ?? "required"}`).join("; ")}`;
+}

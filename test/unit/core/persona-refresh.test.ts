@@ -41,11 +41,17 @@ for (const name of PERSONAS) {
 			return contract;
 		};
 		const expected = behavior(old);
-		// swarm deliberately gained a declared `ownership: declare` council param (task 13: `map`'s
-		// per-item write-set ledger) — an intentional orchestration change, not a refresh regression.
+		// The refresh changed a persona's declared behaviour in exactly these ways, each on purpose: swarm
+		// declares `ownership: declare` (task 13: `map`'s per-item write-set ledger) and gates parallel writers
+		// at call time; audit and verify gained the call-time gate their own method needs. A persona's council
+		// method (strategy, roster, params) must resolve exactly as it did before; anything else is a refresh
+		// regression.
 		if (name === "swarm") {
 			expected.council = { ...expected.council, params: { ownership: "declare" } };
+			expected.delegation = { requireBrief: true, requireDisjointWrites: true };
 		}
+		if (name === "audit") expected.delegation = { requireBrief: true };
+		if (name === "verify") expected.delegation = { requireFreshVerification: true, verificationAgents: ["verifier"] };
 		assert.deepEqual(behavior(current), expected);
 	});
 }

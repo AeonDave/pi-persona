@@ -10,7 +10,6 @@ import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona, {
-	agentNodeStatusForDelegate,
 	announceAsyncRunSettlement,
 	canDeliverPersonaNotification,
 	coachingDisabledHint,
@@ -27,12 +26,13 @@ import piPersona, {
 	shouldReportHeartbeatFailure,
 	makeRootIdAllocator,
 	type PendingAsk,
+	renderOperatorResult,
 	renderPendingAskBatch,
 	reconcileAnsweredAsk,
 	sanitizeLabel,
 	sendPersonaFollowUp,
 } from "../../src/extension.ts";
-import { type DelegateView, shouldRecordDelegationOutcome } from "../../src/tools/delegate.ts";
+import { shouldRecordDelegationOutcome } from "../../src/tools/delegate.ts";
 import { MAX_BROADCAST_DETAIL_ITEMS } from "../../src/tools/exocom.ts";
 import { MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS } from "../../src/tools/intercom.ts";
 import { parseTelemetryEvent } from "../../src/telemetry/contract.ts";
@@ -193,6 +193,60 @@ test("monitor event wakes the extension only after the supervisor becomes idle",
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
 
+// The timer wake contract at the extension seam: an alarm that fires while the supervisor is busy is
+// HELD, goes out as ONE triggerTurn follow-up at agent_settled, and never survives session shutdown.
+/** Start a session, then fake ONLY setTimeout (after start-up, so the notifier's debounce/retry timers are faked too). */
+async function armedTimerSession(idle: { value: boolean }) {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "timer"]);
+	piPersona(m.pi);
+	const ctx = makeCtx(REPO_ROOT).ctx;
+	ctx.isIdle = () => idle.value;
+	await m.fire("session_start", {}, ctx);
+	mock.timers.enable({ apis: ["setTimeout"] });
+	const result = await (m.tool("timer") as { execute: AnyFn }).execute("arm", { action: "arm", message: "check", delaySeconds: 60 }, undefined, undefined, ctx);
+	assert.equal(result.details.ok, true);
+	return { m, ctx };
+}
+
+test("a timer firing mid-turn is held, then sent as ONE triggerTurn follow-up at agent_settled", async () => {
+	const idle = { value: false };
+	const { m, ctx } = await armedTimerSession(idle);
+	try {
+		mock.timers.tick(60_000);
+		mock.timers.tick(1_000); // let the debounce and at least one retry run against the busy gate
+		assert.equal(m.sentMessages().length, 0, "a busy supervisor must not receive the wake");
+		idle.value = true;
+		await m.fire("agent_settled", {}, ctx);
+		const sent = m.sentMessages();
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0]?.options, { deliverAs: "followUp", triggerTurn: true });
+		assert.match((sent[0]?.message as { content?: string }).content ?? "", /^⏰ 1 timer fired/);
+		mock.timers.tick(10_000);
+		assert.equal(m.sentMessages().length, 1, "the wake is neither re-delivered nor re-armed");
+	} finally { await m.fire("session_shutdown", {}, ctx); mock.timers.reset(); }
+});
+
+test("session_shutdown cancels armed alarms and drops a buffered wake", async () => {
+	const idle = { value: true };
+	const { m, ctx } = await armedTimerSession(idle);
+	try {
+		await m.fire("session_shutdown", {}, ctx);
+		mock.timers.tick(120_000);
+		assert.equal(m.sentMessages().length, 0, "an armed alarm must not fire after shutdown");
+	} finally { mock.timers.reset(); }
+
+	const busy = { value: false };
+	const second = await armedTimerSession(busy);
+	try {
+		mock.timers.tick(61_000); // fires while busy: buffered, not sent
+		await second.m.fire("session_shutdown", {}, second.ctx);
+		busy.value = true;
+		mock.timers.tick(10_000);
+		assert.equal(second.m.sentMessages().length, 0, "a wake buffered before shutdown must not be sent after it");
+	} finally { mock.timers.reset(); }
+});
+
 test("switching to a persona without bash stops its monitors and hides command-watch guidance", async () => {
 	const cwd = tempDir("pi-persona-monitor-permission-");
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
@@ -255,11 +309,11 @@ function jsonSchemaAcceptsString(schema: unknown): boolean {
 	return [...(node.anyOf ?? []), ...(node.oneOf ?? [])].some((branch) => jsonSchemaAcceptsString(branch));
 }
 
-function makeCtx(cwd: string) {
+function makeCtx(cwd: string, opts: { hasUI?: boolean } = {}) {
 	const notes: string[] = [];
 	const ctx = {
 		cwd,
-		hasUI: false,
+		hasUI: opts.hasUI === true,
 		model: undefined,
 		modelRegistry: { getAll: () => [] },
 		isIdle: () => true,
@@ -358,35 +412,35 @@ test("legacy delegate and steer cards omit redundant boilerplate but preserve ex
 	piPersona(m.pi);
 	const delegate = m.tool("delegate") as { renderCall: AnyFn; renderResult: AnyFn };
 	const intercom = m.tool("intercom") as { renderResult: AnyFn };
-	const call = renderComponent(delegate.renderCall({ agent: "researcher", name: "Lark", model: "provider/model", task: "PRIVATE TASK INSTRUCTIONS", async: true }, traceTheme));
+	const call = renderComponent(delegate.renderCall({ agent: "researcher", name: "Lark", model: "provider/model", task: "PRIVATE TASK INSTRUCTIONS" }, traceTheme));
 	assert.match(call, /Lark/);
 	assert.match(call, /researcher/);
 	assert.match(call, /model/);
-	assert.match(call, /async/i);
+	assert.doesNotMatch(call, /\b(?:a?sync)\b/i, "the call line carries no sync/async tag: delegate has no such mode");
 	assert.doesNotMatch(call, /PRIVATE TASK/);
 	const unsafeModelCall = renderComponent(delegate.renderCall({ agent: "researcher", model: "provider/model\u001b[2J\nspoof", task: "hidden" }, traceTheme));
 	assert.doesNotMatch(unsafeModelCall, /\u001b|\n/, "model labels must remain sanitized single-line metadata");
-	const syncCall = renderComponent(delegate.renderCall({ agent: "reviewer", task: "SYNC TASK SECRET", sync: true }, traceTheme));
-	assert.match(syncCall, /reviewer/);
-	assert.match(syncCall, /sync/i);
-	assert.doesNotMatch(syncCall, /SYNC TASK/);
+	const plainCall = renderComponent(delegate.renderCall({ agent: "reviewer", task: "PLAIN TASK SECRET" }, traceTheme));
+	assert.match(plainCall, /reviewer/);
+	assert.doesNotMatch(plainCall, /\b(?:a?sync)\b/i);
+	assert.doesNotMatch(plainCall, /PLAIN TASK/);
 	const stringifiedTasks = renderComponent(delegate.renderCall({ tasks: JSON.stringify([{ agent: "a", task: "SECRET" }, { agent: "b", task: "SECRET" }]) }, traceTheme));
 	assert.match(stringifiedTasks, /parallel \(2\)/);
 	assert.doesNotMatch(stringifiedTasks, /SECRET/);
 
-	const original = "Launched async run run-abc (researcher) — runs in the background; you'll be notified on completion. /peek run-abc to watch.";
+	const original = "Launched async run run-abc (researcher) — runs in the background and wakes you on completion (never sleep, poll, peek, or arm a timer for it; end your turn if only it remains).";
 	const result = { content: [{ type: "text", text: original }], details: { runId: "run-abc" }, isError: false };
 	const collapsed = renderComponent(delegate.renderResult(result, { expanded: false }, traceTheme));
 	assert.match(collapsed, /run-abc/);
-	assert.doesNotMatch(collapsed, /background|notified|peek|keep working/i);
+	assert.doesNotMatch(collapsed, /background|wakes you|peek|keep working/i);
 	assert.equal(renderComponent(delegate.renderResult(result, { expanded: true }, traceTheme), 500).trimEnd(), original);
 	assert.deepEqual(result.content[0], { type: "text", text: original }, "rendering must not change model-facing content");
-	const batchBody = "Launched 4 async runs in the background (r1, r2, r3, r4) — keep working; each notifies on completion. /peek to watch. 2 task(s) beyond the max-children limit were dropped.";
+	const batchBody = "Launched 4 background legs as one batch (r1, r2, r3, r4); you will be woken ONCE when the batch settles (never sleep, poll, peek, or arm a timer for it; end your turn if only it remains). 2 task(s) beyond the max-children limit (4) were dropped.";
 	const batch = { content: [{ type: "text", text: batchBody }], details: { runIds: ["r1", "r2", "r3", "r4"], dropped: 2 }, isError: false };
 	const batchCard = renderComponent(delegate.renderResult(batch, { expanded: false }, traceTheme));
 	assert.match(batchCard, /r1, r2, r3, \+1 more/);
 	assert.match(batchCard, /2 tasks dropped/);
-	assert.doesNotMatch(batchCard, /background|notifies|peek|keep working/i);
+	assert.doesNotMatch(batchCard, /background|wakes you|peek|keep working/i);
 	assert.equal(renderComponent(delegate.renderResult(batch, { expanded: true }, traceTheme), 500).trimEnd(), batchBody);
 	const failureBody = `provider authentication failed: ${"x".repeat(2_000)}`;
 	const failure = { content: [{ type: "text", text: failureBody }], details: { runId: "run-fail" }, isError: true };
@@ -570,30 +624,35 @@ test("a streaming leg publishes one agent.updated per real change, not one per t
 	// label/kind/status/parentId/agent/model — so an unfiltered publish writes one byte-identical
 	// duplicate per streamed chunk and evicts genuine history from the producer's file budget.
 	const CHUNKS = 200;
-	const stub: StrategyEngine = {
-		run: async (spec, onProgress) => {
-			for (let i = 1; i <= CHUNKS; i++) onProgress?.({ output: "x".repeat(i) });
-			return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
-		},
-	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	piPersona(m.pi, {
+		engineFactories: {
+			makeInProcessEngine: (deps) => ({
+				run: async (spec) => {
+					for (let i = 1; i <= CHUNKS; i++) deps.onProgress?.({ output: "x".repeat(i), turns: 0, tokens: 0 });
+					return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
+				},
+			}),
+			makeEngine: () => { throw new Error("the in-process default must not build a child engine"); },
+		},
+	});
 	const cwd = tempDir("pi-persona-telemetry-flood-");
 	const { ctx: base } = makeCtx(cwd);
 	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-flood-session" } };
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
-	await delegate.execute("flood", { agent: "scout", task: "stream", sync: true }, undefined, undefined, ctx);
+	await delegate.execute("flood", { agent: "scout", task: "stream" }, undefined, undefined, ctx);
 	await m.fire("session_shutdown", {}, ctx);
 
 	const events = readTelemetryEvents(cwd);
-	const legUpdates = events.filter((event) => event.type === "agent.updated" && event.payload.id === "delegate:flood/0");
+	const legUpdates = events.filter((event) => event.type === "agent.updated" && event.payload.id === "async:run-1");
 	const distinct = new Set(legUpdates.map((event) => JSON.stringify(event.payload)));
 	assert.equal(
 		distinct.size,
 		legUpdates.length,
 		`every published agent.updated must move the projection: ${legUpdates.length} events, ${distinct.size} distinct`,
 	);
+	assert.ok(legUpdates.length > 0, "the leg was reported at all");
 	assert.ok(legUpdates.length <= 4, `a ${CHUNKS}-chunk stream must not publish one event per chunk (published ${legUpdates.length})`);
 });
 
@@ -676,20 +735,24 @@ test("an over-budget context reading is clamped at the producer, not dropped at 
 test("a tool argument that merely contains \"waiting\" never reports a running leg as waiting", async () => {
 	// `detail` is tool activity — `toolActivity(name, args)` splices up to 40 chars of the argument —
 	// so a grep for the word "waiting" is the only way this substring ever appears.
-	const stub: StrategyEngine = {
-		run: async (spec, onProgress) => {
-			onProgress?.({ output: "", activity: "grep waiting" });
-			return { agent: spec.agent, output: "found", usage: emptyUsage(), ok: true };
-		},
-	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	piPersona(m.pi, {
+		engineFactories: {
+			makeInProcessEngine: (deps) => ({
+				run: async (spec) => {
+					deps.onProgress?.({ output: "", turns: 0, tokens: 0, activity: "grep waiting" });
+					return { agent: spec.agent, output: "found", usage: emptyUsage(), ok: true };
+				},
+			}),
+			makeEngine: () => { throw new Error("the in-process default must not build a child engine"); },
+		},
+	});
 	const cwd = tempDir("pi-persona-telemetry-waiting-");
 	const { ctx: base } = makeCtx(cwd);
 	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-waiting-session" } };
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
-	await delegate.execute("greptool", { agent: "scout", task: "search", sync: true }, undefined, undefined, ctx);
+	await delegate.execute("greptool", { agent: "scout", task: "search" }, undefined, undefined, ctx);
 	await m.fire("session_shutdown", {}, ctx);
 
 	const events = readTelemetryEvents(cwd);
@@ -729,7 +792,7 @@ test("telemetry follows live supervisor asks and only leaves waiting after the l
 		},
 	});
 	const cwd = tempDir("pi-persona-telemetry-live-waiting-");
-	const { ctx: base } = makeCtx(cwd);
+	const { ctx: base } = makeCtx(cwd, { hasUI: true });
 	const ctx = { ...base, sessionManager: { getSessionId: () => "telemetry-live-waiting-session" } };
 	let runId: string | undefined;
 	const nodeStatuses = (): unknown[] => {
@@ -743,7 +806,7 @@ test("telemetry follows live supervisor asks and only leaves waiting after the l
 	};
 	try {
 		await m.fire("session_start", undefined, ctx);
-		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("telemetry-waiting", { agent: "scout", task: "wait for supervisor", async: true }, undefined, undefined, ctx);
+		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("telemetry-waiting", { agent: "scout", task: "wait for supervisor" }, undefined, undefined, ctx);
 		runId = launched.details?.runId as string | undefined;
 		assert.ok(runId, "the async leg gets a run id");
 		await engineEntered;
@@ -871,9 +934,625 @@ test("flow checkpoints fail closed in headless mode and when the TUI chooser is 
 		const flow = m.tool("flow") as { execute: AnyFn };
 		const result = await flow.execute(`gate-${mode}`, { name: "qa-gate", task: "plan only until approval" }, undefined, undefined, ctx);
 
-		assert.equal((result.details as { ok?: boolean }).ok, false, `${mode}: an absent explicit approval must reject the checkpoint`);
+		if (mode === "headless") {
+			assert.equal((result.details as { ok?: boolean }).ok, false, `${mode}: an absent explicit approval must reject the checkpoint`);
+		} else {
+			// Interactive: a receipt now, the rejection as the run's ONE completion (stopped, with the plan).
+			assert.equal(typeof (result.details as { runId?: string }).runId, "string");
+			await waitUntil(() => m.sentMessages().length > 0, "the stopped-at-checkpoint completion");
+			const wake = String((m.sentMessages()[0]?.message as { content?: string }).content ?? "");
+			assert.match(wake, /1 stopped/, `${mode}: a dismissed checkpoint is a stop, not a failure`);
+			assert.match(wake, /stopped at checkpoint "plan"/);
+		}
 		assert.equal(calls.length, 3, `${mode}: only the gated review roster may run; its dependent must remain blocked`);
+		await m.fire("session_shutdown", {}, ctx);
 	}
+});
+
+test("a flow checkpoint is reviewable, defaults to Reject, and a 'no' is a stop that keeps the plan", async () => {
+	const cwd = tempDir("pi-persona-flow-gate-review-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "flows", "qa-review.flow.json"),
+		JSON.stringify({
+			name: "qa-review",
+			phases: [
+				{ id: "plan", strategy: "fanout", roster: "review", gate: true },
+				{ id: "after", strategy: "fanout", roster: "review", needs: ["plan"] },
+			],
+		}),
+	);
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `the plan from ${spec.agent}`, usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const base = makeCtx(cwd).ctx;
+	const asked: Array<{ title: string; options: string[]; signal: AbortSignal | undefined }> = [];
+	const ctx = {
+		...base,
+		hasUI: true,
+		sessionManager: { getSessionId: () => "gate-review-session" },
+		ui: {
+			...base.ui,
+			select: async (title: string, options: string[], opts?: { signal?: AbortSignal }) => {
+				asked.push({ title, options, signal: opts?.signal });
+				return "Reject";
+			},
+		},
+	};
+	await m.fire("session_start", undefined, ctx);
+	const flow = m.tool("flow") as { execute: AnyFn };
+	// Interactive: the flow is ONE background run. The tool returns a receipt at once; the operator's 'no' at
+	// the checkpoint settles the run as STOPPED and the plan reaches the model in the run's single wake.
+	const receipt = await flow.execute("gate-review", { name: "qa-review", task: "plan it" }, undefined, undefined, ctx);
+	const runId = (receipt.details as { runId?: string }).runId as string;
+	assert.match(runId, /^run-/);
+	assert.equal(receipt.isError, false);
+	await waitUntil(() => m.sentMessages().length > 0, "the stopped-at-checkpoint completion");
+
+	assert.equal(asked.length, 1);
+	assert.match(asked[0]?.title ?? "", /^Checkpoint "plan" of flow "qa-review" — approve and continue\?\nthen: after \(fanout\)\n/);
+	assert.match(asked[0]?.title ?? "", /the plan from/, "the operator reads the gated output, not a 160-character stub");
+	assert.deepEqual(asked[0]?.options, ["Reject", "Approve"], "a stray Enter must fail closed");
+	assert.ok(asked[0]?.signal instanceof AbortSignal, "the run's own stop dismisses the prompt");
+	const wake = String((m.sentMessages()[0]?.message as { content?: string }).content ?? "");
+	assert.match(wake, /1 stopped/, "an unapproved checkpoint is a stop, not a failure");
+	assert.doesNotMatch(wake, /❌/);
+	assert.match(wake, /the plan from[\s\S]*flow stopped at checkpoint "plan"/, "the plan survives the rejection");
+	assert.equal(m.sentMessages().length, 1, "one run, one wake");
+
+	// Telemetry sees the same run: its root leaves the tree "stopped", not "failed".
+	await m.fire("session_shutdown", {}, ctx);
+	const dir = path.join(process.env.PI_AGENT_DIR!, "telemetry", "v2", workspaceHash(cwd), "pi-persona");
+	const events = fs.readdirSync(dir).filter((name) => name.endsWith(".jsonl")).flatMap((name) =>
+		fs.readFileSync(path.join(dir, name), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type: string; payload?: { id?: string; status?: string } }));
+	const roots = events.filter((event) => event.type === "agent.removed" && event.payload?.id === `async:${runId}`);
+	assert.deepEqual(roots.map((event) => event.payload?.status), ["stopped"]);
+});
+
+test("a flow parked at its checkpoint reads 'waiting for operator' in peek, never wakes the model, and is stopped by its run key", async () => {
+	const cwd = tempDir("pi-persona-flow-gate-parked-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "flows", "qa-park.flow.json"),
+		JSON.stringify({
+			name: "qa-park",
+			phases: [
+				{ id: "plan", strategy: "fanout", roster: "review", gate: true },
+				{ id: "after", strategy: "fanout", roster: "review", needs: ["plan"] },
+			],
+		}),
+	);
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `the plan from ${spec.agent}`, usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const base = makeCtx(cwd).ctx;
+	let modalSignal: AbortSignal | undefined;
+	let answer!: (pick: string | undefined) => void;
+	const modal = new Promise<string | undefined>((resolve) => { answer = resolve; });
+	const ctx = {
+		...base,
+		hasUI: true,
+		sessionManager: { getSessionId: () => "gate-park-session" },
+		ui: {
+			...base.ui,
+			select: async (_title: string, _options: string[], opts?: { signal?: AbortSignal }) => {
+				modalSignal = opts?.signal;
+				return modal;
+			},
+		},
+	};
+	await m.fire("session_start", undefined, ctx);
+	const flow = m.tool("flow") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	try {
+		const receipt = await flow.execute("gate-park", { name: "qa-park", task: "plan it" }, undefined, undefined, ctx);
+		const runId = (receipt.details as { runId: string }).runId;
+		await waitUntil(() => modalSignal !== undefined, "the checkpoint modal to open");
+
+		const peek = await intercom.execute("peek-gate", { action: "peek", to: runId }, undefined, undefined, ctx);
+		assert.match(peek.content[0].text, /waiting for operator at checkpoint plan/);
+		assert.doesNotMatch(peek.content[0].text, /possibly stuck|waiting for supervisor/);
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		assert.equal(m.sentMessages().length, 0, "the operator owns the checkpoint: nothing wakes the model");
+
+		// `intercom stop` on the run id reaches the whole flow: the modal is dismissed through its signal.
+		const stopped = await intercom.execute("stop-gate", { action: "stop", to: runId }, undefined, undefined, ctx);
+		assert.equal(stopped.isError, false);
+		assert.equal(modalSignal?.aborted, true, "stopping the run dismisses the question nobody will answer");
+		answer(undefined);
+		await waitUntil(() => m.sentMessages().length > 0, "the stopped run's completion");
+		assert.match(String((m.sentMessages()[0]?.message as { content?: string }).content ?? ""), /1 stopped/);
+	} finally {
+		answer(undefined);
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("concurrent flow checkpoints open ONE prompt at a time, and a stopped flow waiting its turn leaves the queue", async () => {
+	const cwd = tempDir("pi-persona-flow-gate-queue-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "flows", "qa-queue.flow.json"),
+		JSON.stringify({
+			name: "qa-queue",
+			phases: [
+				{ id: "plan", strategy: "fanout", roster: "review", gate: true },
+				{ id: "after", strategy: "fanout", roster: "review", needs: ["plan"] },
+			],
+		}),
+	);
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `the plan from ${spec.agent}`, usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const base = makeCtx(cwd).ctx;
+	// Pi's selector is ONE slot: a second concurrent select orphans the first. Model that, and fail loudly on overlap.
+	const open: Array<{ title: string; answer: (pick: string | undefined) => void }> = [];
+	let maxOpen = 0;
+	let live = 0;
+	const ctx = {
+		...base,
+		hasUI: true,
+		sessionManager: { getSessionId: () => "gate-queue-session" },
+		ui: {
+			...base.ui,
+			select: (title: string, _options: string[], opts?: { signal?: AbortSignal }) =>
+				new Promise<string | undefined>((resolve) => {
+					live += 1;
+					maxOpen = Math.max(maxOpen, live);
+					const answer = (pick: string | undefined): void => { live -= 1; resolve(pick); };
+					open.push({ title, answer });
+					opts?.signal?.addEventListener("abort", () => answer(undefined), { once: true });
+				}),
+		},
+	};
+	await m.fire("session_start", undefined, ctx);
+	const flow = m.tool("flow") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	try {
+		await flow.execute("q-a", { name: "qa-queue", task: "task A" }, undefined, undefined, ctx);
+		const b = (await flow.execute("q-b", { name: "qa-queue", task: "task B" }, undefined, undefined, ctx)).details.runId as string;
+		await waitUntil(() => open.length >= 1, "the first checkpoint prompt");
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		assert.equal(open.length, 1, "the second flow waits its turn: no second selector while one is open");
+		const peek = await intercom.execute("q-peek", { action: "peek", to: b }, undefined, undefined, ctx);
+		assert.match(peek.content[0].text, /waiting for operator at checkpoint plan/, "a queued checkpoint is still the operator's, not a stall");
+
+		open[0]!.answer("Approve");
+		await waitUntil(() => open.length === 2, "the second checkpoint prompt, once the first was answered");
+		assert.match(open[1]!.title, /task B|the plan from/);
+
+		// A third flow queues behind B's open prompt, is stopped there, and never opens a prompt of its own.
+		const c = (await flow.execute("q-c", { name: "qa-queue", task: "task C" }, undefined, undefined, ctx)).details.runId as string;
+		await waitUntil(() => m.sentMessages().length >= 1, "flow A's completion");
+		await intercom.execute("q-stop-c", { action: "stop", to: c }, undefined, undefined, ctx);
+		await waitUntil(() => m.sentMessages().some((s) => String((s.message as { content?: string }).content ?? "").includes(c)), "the stopped flow's completion");
+		open[1]!.answer("Reject");
+		await waitUntil(() => m.sentMessages().length >= 3, "the remaining completions");
+		assert.equal(open.length, 2, "the stopped flow left the queue without ever opening a prompt");
+		assert.equal(maxOpen, 1, "never more than one checkpoint prompt open at a time");
+	} finally {
+		for (const prompt of open) prompt.answer(undefined);
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("an interactive council or flow builds its legs `async` (a coached ask can block: the supervisor is idle); a headless one does not", async () => {
+	const cwd = tempDir("pi-persona-bg-async-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "qa-bg.flow.json"), JSON.stringify({ name: "qa-bg", phases: [{ id: "one", strategy: "fanout", roster: "review" }] }));
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true }),
+	};
+	const seen: Record<string, Array<boolean | undefined>> = {};
+	for (const tool of ["council", "flow"] as const) {
+		for (const hasUI of [false, true]) {
+			const key = `${tool}:${hasUI}`;
+			seen[key] = [];
+			const m = makeMockPi();
+			piPersona(m.pi, { engineFactories: { makeInProcessEngine: (deps) => { seen[key]!.push(deps.allowBlocking); return engine; }, makeEngine: () => engine } });
+			const { ctx } = makeCtx(cwd, { hasUI });
+			await m.fire("session_start", undefined, ctx);
+			const params = tool === "council" ? { question: "ship?", strategy: "fanout", roster: "magi" } : { name: "qa-bg", task: "go" };
+			await (m.tool(tool) as { execute: AnyFn }).execute(`bg-${key}`, params, undefined, undefined, ctx);
+			if (hasUI) await waitUntil(() => m.sentMessages().length > 0, `the ${key} completion`);
+			await m.fire("session_shutdown", {}, ctx);
+		}
+	}
+	for (const tool of ["council", "flow"]) {
+		assert.ok(seen[`${tool}:true`]!.length > 0 && seen[`${tool}:true`]!.every((value) => value === true), `${tool}: interactive legs may block on the idle supervisor`);
+		assert.ok(seen[`${tool}:false`]!.length > 0 && seen[`${tool}:false`]!.every((value) => value !== true), `${tool}: a headless run holds the turn and could not answer`);
+	}
+});
+
+test("a coached ask inside a background council reads 'waiting for supervisor', not 'possibly stuck'", async () => {
+	const m = makeMockPi();
+	let release!: () => void;
+	const parked = new Promise<void>((resolve) => { release = resolve; });
+	const engine: StrategyEngine = {
+		run: async (spec, _o, _s, onSteer) => {
+			onSteer?.(Object.assign(() => true, { isWaitingForSupervisor: () => true }) as never);
+			await parked;
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	try {
+		const receipt = await (m.tool("council") as { execute: AnyFn }).execute("wait-c", { question: "q", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		const id = (receipt.details as { runId: string }).runId;
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		const peek = await intercom.execute("wait-peek", { action: "peek", to: id }, undefined, undefined, ctx);
+		assert.match(peek.content[0].text, /waiting for supervisor/);
+	} finally {
+		release();
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+// ── council in the background: a receipt now, ONE wake with the ruling, nothing to poll ───────────────
+
+test("an interactive council is ONE background run: a receipt at once, ONE wake with the fenced ruling, the payload one `result` away", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `${spec.agent} says SHIP`, usage: { ...emptyUsage(), input: 5, output: 2 }, ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const council = m.tool("council") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	try {
+		const receipt = await council.execute("c-bg", { question: "ship or hold?", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		assert.equal(receipt.isError, false);
+		const id = (receipt.details as { runId: string }).runId;
+		const text = String(receipt.content?.[0]?.text ?? "");
+		assert.equal(text.startsWith(`Launched council ${id} (fanout · magi) in the background`), true, text);
+		assert.match(text, /woken ONCE with the ruling/);
+		assert.doesNotMatch(text, /SHIP/, "the receipt carries no ruling");
+
+		await waitUntil(() => m.sentMessages().length > 0, "the ruling's wake");
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		assert.equal(m.sentMessages().length, 1, "ONE wake, however many members spoke");
+		const sent = m.sentMessages()[0]!;
+		assert.deepEqual(sent.options, { deliverAs: "followUp", triggerTurn: true });
+		const wake = String((sent.message as { content?: string }).content ?? "");
+		assert.match(wake, /1 async run settled — 1 done, 0 failed/);
+		assert.match(wake, new RegExp(`✅ ${id} \\(council-fanout\\) done`));
+		assert.match(wake, /untrusted/i, "the ruling is member text: fenced like every completion");
+		for (const core of ["melchior", "balthasar", "casper"]) assert.match(wake, new RegExp(`${core} says SHIP`));
+
+		const full = await intercom.execute("c-bg-result", { action: "result", to: id }, undefined, undefined, ctx);
+		assert.equal(full.isError, false);
+		assert.match(String(full.content?.[0]?.text ?? ""), /melchior says SHIP/);
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("a BLOCKED council ruling still meets the persistence counterweight on the completion path", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: "[BLOCKED] cannot decide without the credentials", usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	try {
+		await (m.tool("council") as { execute: AnyFn }).execute("c-blocked", { question: "q", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		await waitUntil(() => m.sentMessages().length > 0, "the ruling's wake");
+		assert.match(String((m.sentMessages()[0]?.message as { content?: string }).content ?? ""), /delegated result needs verification/);
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("a persona's declared council still resolves with an empty call, in the background and headless alike", async () => {
+	const cwd = tempDir("pi-persona-council-defaults-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "defaulted.md"),
+		"---\nname: defaulted\npersona: true\ncouncil:\n  strategy: fanout\n  roster: magi\n---\nCouncil-defaults probe.",
+	);
+	for (const hasUI of [true, false]) {
+		const ran: string[] = [];
+		const engine: StrategyEngine = {
+			run: async (spec) => { ran.push(spec.agent); return { agent: spec.agent, output: `${spec.agent} ok`, usage: emptyUsage(), ok: true }; },
+		};
+		const m = makeMockPi();
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+		const { ctx } = makeCtx(cwd, { hasUI });
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "defaulted", ctx);
+		try {
+			const result = await (m.tool("council") as { execute: AnyFn }).execute("c-defaults", { question: "only the question" }, undefined, undefined, ctx);
+			if (hasUI) await waitUntil(() => m.sentMessages().length > 0, "the ruling's wake");
+			assert.equal(result.isError, false);
+			assert.deepEqual([...ran].sort(), ["balthasar", "casper", "melchior"], `hasUI=${hasUI}: the persona's own strategy and roster ran`);
+			if (hasUI) assert.match(String(result.content?.[0]?.text ?? ""), /\(fanout · magi\)/);
+		} finally {
+			await m.fire("session_shutdown", {}, ctx);
+		}
+	}
+});
+
+test("intercom stop reaches a running council through its run key: every leg aborts and the run settles STOPPED with one wake", async () => {
+	const signals: AbortSignal[] = [];
+	const engine: StrategyEngine = {
+		run: (spec, _onProgress, signal) =>
+			new Promise((resolve) => {
+				signals.push(signal as AbortSignal);
+				signal?.addEventListener("abort", () => resolve({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "aborted", failureKind: "abort" }), { once: true });
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	try {
+		const receipt = await (m.tool("council") as { execute: AnyFn }).execute("c-stop", { question: "q", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		const id = (receipt.details as { runId: string }).runId;
+		await waitUntil(() => signals.length === 3, "all three members to start");
+
+		const peek = await intercom.execute("c-peek", { action: "peek", to: id }, undefined, undefined, ctx);
+		assert.match(peek.content[0].text, /council-fanout — running/);
+
+		const stopped = await intercom.execute("c-stop-call", { action: "stop", to: id }, undefined, undefined, ctx);
+		assert.equal(stopped.isError, false, String(stopped.content?.[0]?.text));
+		await waitUntil(() => m.sentMessages().length > 0, "the stopped run's wake");
+		assert.ok(signals.every((signal) => signal.aborted), "the run-level stop reached every member");
+		const wake = String((m.sentMessages()[0]?.message as { content?: string }).content ?? "");
+		assert.match(wake, /1 stopped/);
+		assert.doesNotMatch(wake, /❌/, "a deliberate stop is not a failure");
+		assert.equal(m.sentMessages().length, 1);
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("`stop { to: 'all' }` includes a running council and flow, the same as a delegate leg", async () => {
+	const engine: StrategyEngine = {
+		run: (spec, _onProgress, signal) =>
+			new Promise((resolve) => {
+				signal?.addEventListener("abort", () => resolve({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "aborted", failureKind: "abort" }), { once: true });
+			}),
+	};
+	const cwd = tempDir("pi-persona-stopall-bg-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "slow.flow.json"), JSON.stringify({ name: "slow", phases: [{ id: "only", strategy: "fanout", roster: "review" }] }));
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(cwd, { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	try {
+		const c = await (m.tool("council") as { execute: AnyFn }).execute("sa-c", { question: "q", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		const f = await (m.tool("flow") as { execute: AnyFn }).execute("sa-f", { name: "slow", task: "t" }, undefined, undefined, ctx);
+		const ids = [(c.details as { runId: string }).runId, (f.details as { runId: string }).runId];
+		const stopped = await (m.tool("intercom") as { execute: AnyFn }).execute("sa-stop", { action: "stop", to: "all" }, undefined, undefined, ctx);
+		assert.equal(stopped.isError, false, String(stopped.content?.[0]?.text));
+		for (const id of ids) assert.match(String(stopped.content?.[0]?.text), new RegExp(id));
+		await waitUntil(() => m.sentMessages().some((e) => /2 async runs settled/.test(String((e.message as { content?: string }).content))), "both runs to settle stopped");
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("a background council takes ONE slot of the SAME launch pool as delegate legs: queued behind a full pool, admitted when a slot frees", async () => {
+	const release = new Map<string, () => void>();
+	const councilLegs: string[] = [];
+	const engine: StrategyEngine = {
+		run: (spec) =>
+			new Promise((resolve) => {
+				if (!spec.task.startsWith("hold-")) councilLegs.push(spec.agent);
+				release.set(spec.task, () => resolve({ agent: spec.agent, output: `ok ${spec.agent}`, usage: emptyUsage(), ok: true }));
+				if (!spec.task.startsWith("hold-")) release.get(spec.task)?.();
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	try {
+		// maxConcurrency is 4: four delegate legs fill the pool.
+		await (m.tool("delegate") as { execute: AnyFn }).execute("pool-fill", { tasks: [0, 1, 2, 3].map((i) => ({ agent: "scout", task: `hold-${i}` })) }, undefined, undefined, ctx);
+		await waitUntil(() => release.size === 4, "the four delegate legs to start");
+
+		const receipt = await (m.tool("council") as { execute: AnyFn }).execute("pool-council", { question: "q", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		const id = (receipt.details as { runId: string }).runId;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.deepEqual(councilLegs, [], "the council has not started: the pool is full");
+		const peek = await intercom.execute("pool-peek", { action: "peek", to: id }, undefined, undefined, ctx);
+		assert.match(peek.content[0].text, /queued \(waiting for concurrency slot\)/);
+
+		release.get("hold-0")?.();
+		await waitUntil(() => councilLegs.length === 3, "the council to take the freed slot and run its members");
+		for (const task of ["hold-1", "hold-2", "hold-3"]) release.get(task)?.();
+		await waitUntil(() => m.sentMessages().length > 0, "the completion wake");
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+// ── operator-run /flow and /orchestrate: stoppable as a whole, and visible to the next turn ──────────
+
+test("a mandated orchestration stays inline (its ruling is the first answer) and its WHOLE run is stoppable, not just one leg", async () => {
+	const cwd = tempDir("pi-persona-mandatory-stop-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "agents", "mandatory-stop.md"),
+		"---\nname: mandatory-stop\npersona: true\norchestration:\n  mode: strategy\n  strategy: council-rounds\n  roster: magi\n  params: { rounds: 3 }\n---\nWhole-run stop probe.",
+	);
+	let started = 0;
+	let openGate!: () => void;
+	const gate = new Promise<void>((resolve) => { openGate = resolve; });
+	const engine: StrategyEngine = {
+		// A leg that FINISHES its work despite being aborted: a stop aimed at legs alone would let the strategy
+		// go on to the next round. Only the RUN's signal ends the strategy, which is what is asserted.
+		run: async (spec) => {
+			started += 1;
+			await gate;
+			return { agent: spec.agent, output: `${spec.agent} answer`, usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, hasUI: true };
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "mandatory-stop", ctx);
+
+	const input = m.fire("input", { type: "input", source: "interactive", text: "decide", streamingBehavior: "followUp" }, ctx);
+	await waitUntil(() => started === 3, "the first round's three members to start");
+	await m.fire("session_shutdown", {}, ctx); // runs every registered stop: the run-level one among them
+	openGate();
+	await input;
+
+	assert.equal(started, 3, "the run-level stop ended the strategy: no later round convened");
+	const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
+	assert.match(prompt, /mandated multi-agent orchestration was CANCELLED/i, "inline, and reported as cancelled in the first answer's prompt");
+});
+
+test("an operator-run /flow reaches the supervisor's NEXT turn passively: fenced, bounded, never a turn of its own", async () => {
+	const cwd = tempDir("pi-persona-flow-handoff-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "handoff.flow.json"), JSON.stringify({ name: "handoff", phases: [{ id: "only", strategy: "fanout", roster: "review" }] }));
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `PLAN ${spec.agent}`, usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(cwd, { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	try {
+		await m.cmd("flow", "handoff build it", ctx);
+
+		const handoffs = m.sentMessages().filter((e) => (e.message as { customType?: string }).customType === "pi-persona");
+		assert.equal(handoffs.length, 1, "one passive hand-off per operator-run result");
+		assert.deepEqual(handoffs[0]!.options, { deliverAs: "nextTurn" }, "queued for the next turn, never triggering one");
+		const message = handoffs[0]!.message as { content: string; display: boolean };
+		assert.equal(message.display, false, "the card is the operator's copy");
+		assert.match(message.content, /^\[pi-persona\] The operator ran flow handoff \(finished\); its output:/);
+		assert.match(message.content, /untrusted/i, "sub-agent text is fenced");
+		assert.match(message.content, /PLAN /);
+		assert.ok(m.entries().some((e) => e.customType === "pi-persona-result"), "the operator's card is unchanged");
+		assert.equal(m.sentMessages().some((e) => (e.options as { triggerTurn?: boolean })?.triggerTurn === true), false);
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("an operator-run /flow stopped at a checkpoint hands the supervisor its plan, labelled as a stop", async () => {
+	const cwd = tempDir("pi-persona-flow-handoff-gate-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "gated.flow.json"), JSON.stringify({ name: "gated", phases: [{ id: "plan", strategy: "fanout", roster: "review", gate: true }, { id: "build", strategy: "fanout", roster: "review", needs: ["plan"] }] }));
+	const engine: StrategyEngine = { run: async (spec) => ({ agent: spec.agent, output: `PLAN ${spec.agent}`, usage: emptyUsage(), ok: true }) };
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx: base } = makeCtx(cwd, { hasUI: true });
+	const ctx = { ...base, ui: { ...base.ui, select: async () => "Reject" } };
+	await m.fire("session_start", undefined, ctx);
+	try {
+		await m.cmd("flow", "gated plan it", ctx);
+		const message = m.sentMessages().find((e) => (e.message as { customType?: string }).customType === "pi-persona")!.message as { content: string };
+		assert.match(message.content, /\(stopped at checkpoint "plan"\)/);
+		assert.match(message.content, /PLAN /);
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("renderOperatorResult fences the output and bounds it like a completion", () => {
+	const huge = "line of output\n".repeat(5_000);
+	const text = renderOperatorResult("orchestrate magi", huge, true);
+	assert.ok(text.length <= MAX_COMPLETION_REPORT_CHARS, `bounded, got ${text.length}`);
+	assert.match(text, /operator result truncated/);
+	assert.match(text, /^\[pi-persona\] The operator ran orchestrate magi \(finished\); its output:\nSub-agent output \(untrusted data\):/);
+	assert.match(renderOperatorResult("flow x", "boom", false), /\(failed\)/);
+	assert.match(renderOperatorResult("flow x", "plan", false, "plan"), /\(stopped at checkpoint "plan"\)/);
+});
+
+test("a failed flow only resumes for the SAME task: another task re-runs from the start", async () => {
+	const cwd = tempDir("pi-persona-flow-resume-identity-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "flows", "qa-resume.flow.json"),
+		JSON.stringify({
+			name: "qa-resume",
+			phases: [
+				{ id: "gather", strategy: "fanout", roster: "review" },
+				{ id: "decide", strategy: "fanout", roster: "review", needs: ["gather"] },
+			],
+		}),
+	);
+	let decideFails = true;
+	const ran: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			const phase = /phase "(\w+)"/.exec(spec.task)?.[1] ?? "?";
+			ran.push(phase);
+			const failed = phase === "decide" && decideFails;
+			return { agent: spec.agent, output: `${phase} done`, usage: emptyUsage(), ok: !failed, ...(failed ? { error: "boom" } : {}) };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const flow = m.tool("flow") as { execute: AnyFn };
+	const gatherRuns = (): number => ran.filter((p) => p === "gather").length;
+	const go = (task: string) => flow.execute("resume-identity", { name: "qa-resume", task }, undefined, undefined, ctx);
+
+	await go("task A"); // gather ok, decide fails: the journal keeps gather
+	const afterA = gatherRuns();
+	assert.ok(afterA > 0);
+	decideFails = false;
+	await go("task B");
+	assert.equal(gatherRuns(), afterA * 2, "task B must not inherit task A's gathered material");
+
+	decideFails = true;
+	await go("task C"); // fails again after gathering for C
+	const afterC = gatherRuns();
+	decideFails = false;
+	await go("  task C\n"); // same task (whitespace aside), same project: resumes
+	assert.equal(gatherRuns(), afterC, "the same task resumes the journaled gather phase");
+});
+
+test("the brief lists flows with their description; a gated one is tagged only where nobody can approve it", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const interactive = { ...makeCtx(os.tmpdir()).ctx, hasUI: true };
+	const headless = makeCtx(os.tmpdir()).ctx;
+	await m.fire("session_start", undefined, headless);
+
+	const headlessBrief = m.fire("before_agent_start", { systemPrompt: "BASE" }, headless).systemPrompt as string;
+	assert.match(headlessBrief, /^Flows \(run with `flow`\):$/m);
+	assert.match(headlessBrief, /^- deep-review — .+/m, "a bundled flow carries its description");
+	assert.match(headlessBrief, /^- gated-build — .+ \[checkpoint needs a human; rejected headless\]$/m);
+
+	const interactiveBrief = m.fire("before_agent_start", { systemPrompt: "BASE" }, interactive).systemPrompt as string;
+	assert.match(interactiveBrief, /^- gated-build — /m);
+	assert.doesNotMatch(interactiveBrief, /rejected headless/);
+});
+
+test("/flow with no argument lists each flow with its description and marks the ones that pause", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx, notes } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("flow", "", ctx);
+	const said = notes.join("\n");
+	assert.match(said, /flows — \/flow <name> <task>/);
+	assert.match(said, /^ {2}deep-review — .+/m);
+	assert.match(said, /^ {2}gated-build — .+\[pauses at a checkpoint for your approval\]$/m);
 });
 
 test("a pinned persona that does not resolve is reported, not silently ignored", async () => {
@@ -925,7 +1604,6 @@ test("explicit async stop is informational, enqueues one terminal completion, an
 	assert.deepEqual(notices, [{ message: "async run run-2 (research) stopped", level: "info" }]);
 	assert.deepEqual(completions, ["run-2"], "the terminal follow-up remains queued exactly once");
 	assert.equal(shouldRecordDelegationOutcome({ failureKind: "abort" }), false);
-	assert.equal(agentNodeStatusForDelegate({ running: false, ok: false, failureKind: "abort" }), "stopped");
 });
 
 test("natural async failures retain their error toast, completion, and ledger accounting", () => {
@@ -948,9 +1626,6 @@ test("natural async failures retain their error toast, completion, and ledger ac
 	assert.deepEqual(completions, ["run-3"]);
 	assert.equal(shouldRecordDelegationOutcome({ failureKind: "provider" }), true);
 	assert.equal(shouldRecordDelegationOutcome({}), true);
-	assert.equal(agentNodeStatusForDelegate({ running: false, ok: false, failureKind: "provider" }), "failed");
-	assert.equal(agentNodeStatusForDelegate({ running: false, ok: true }), "done");
-	assert.equal(agentNodeStatusForDelegate({ running: true, ok: false }), "running");
 });
 
 test("successful async completion immediately announces the worker name while retaining one semantic completion", () => {
@@ -986,19 +1661,27 @@ test("async settlement sanitizes the display name and still queues completion if
 	assert.deepEqual(completions, ["run-named"], "cosmetic UI failure cannot swallow a terminal report");
 });
 
-test("intercom rejects an explicit unknown wait id and gives current steering guidance", async () => {
+test("intercom rejects an explicit unknown result id and gives current steering guidance", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
 	const { ctx } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	const intercom = m.tool("intercom") as { execute: AnyFn };
-	const waited = await intercom.execute("missing-wait", { action: "wait", to: "run-missing" }, undefined, undefined, ctx);
-	assert.equal(waited.isError, true);
-	assert.match(String(waited.content?.[0]?.text ?? ""), /No retained async run "run-missing"/);
+	const missing = await intercom.execute("missing-result", { action: "result", to: "run-missing" }, undefined, undefined, ctx);
+	assert.equal(missing.isError, true);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /No retained async run "run-missing"/);
 	const steered = await intercom.execute("missing-steer", { action: "steer", to: "run-missing", message: "focus" }, undefined, undefined, ctx);
 	assert.equal(steered.isError, true);
 	assert.doesNotMatch(String(steered.content?.[0]?.text ?? ""), /child engine can't be steered/i);
-	assert.match(String(steered.content?.[0]?.text ?? ""), /live steer handle/i);
+	assert.match(String(steered.content?.[0]?.text ?? ""), /No retained async run "run-missing"/, "an unknown id is a miss, not a false 'no live steer handle'");
+	assert.doesNotMatch(String(steered.content?.[0]?.text ?? ""), /live steer handle|already finished/i);
+	const stopped = await intercom.execute("missing-stop", { action: "stop", to: "run-missing" }, undefined, undefined, ctx);
+	assert.equal(stopped.isError, true);
+	assert.match(String(stopped.content?.[0]?.text ?? ""), /No retained async run "run-missing"/);
+	assert.ok(
+		String(stopped.content?.[0]?.text ?? "").endsWith("Runs live only in the session that launched them (a restart, /new or reload ends them; collected results are evicted first once retention is full). Known runs: none."),
+		"a fresh or restored session has nothing to list, and says so",
+	);
 });
 
 test("async failure toast bounds and sanitizes the engine error", () => {
@@ -1024,7 +1707,7 @@ test("async failure toast bounds and sanitizes the engine error", () => {
  * A ctx whose model registry answers the LIST queries — so the tool's own model canonicalisation
  * and the provider-fallback decorator both build normally — but throws on the per-run `find` the
  * in-process engine resolves a `provider/id` ref through. That is the reachable seam that makes a
- * sync delegate leg's engine REJECT instead of settle, i.e. the harness-level crash the ledger
+ * delegate leg's engine REJECT instead of settle, i.e. the harness-level crash the ledger
  * must treat as no evidence at all.
  */
 function makeCrashingEngineCtx(cwd: string) {
@@ -1046,9 +1729,9 @@ function makeCrashingEngineCtx(cwd: string) {
 
 const INFRA_TASK = { tasks: [{ agent: "scout", task: "probe the crash", model: "test/m1" }] };
 
-/** The per-leg views the sync delegate path stores on its result (empty when the veto short-circuits). */
-function legViews(result: { details?: unknown }): DelegateView[] {
-	return (result.details as { views?: DelegateView[] } | undefined)?.views ?? [];
+/** A delegate result's text with the untrusted-output fence quoting (`> `) removed: the legs' own words. */
+function legText(result: { content?: Array<{ text?: unknown }> }): string {
+	return String(result.content?.[0]?.text ?? "").replace(/^> ?/gm, "");
 }
 
 test("two identical SETTLED delegate failures arm the ledger's permanent veto", async () => {
@@ -1063,7 +1746,7 @@ test("two identical SETTLED delegate failures arm the ledger's permanent veto", 
 
 	const first = await call();
 	assert.equal(first.isError, true);
-	assert.match(legViews(first)[0]?.output ?? "", /model not found in registry/, "the leg reached the engine and the engine settled it");
+	assert.match(legText(first), /model not found in registry/, "the leg reached the engine and the engine settled it");
 	await call();
 	assert.match(String((await call()).content?.[0]?.text ?? ""), /already failed 2×/, "the third identical delegation is refused before it spawns");
 });
@@ -1078,28 +1761,13 @@ test("an infrastructure-level engine rejection never burns a strike toward the d
 
 	const first = await call();
 	assert.equal(first.isError, true);
-	assert.match(legViews(first)[0]?.output ?? "", /registry unavailable/, "the leg reached the engine and the engine rejected");
+	assert.match(legText(first), /registry unavailable/, "the leg reached the engine and the engine rejected");
 	await call();
 	// A full disk or a crashed adapter says nothing about the delegation, so the user can still
 	// retry it after two of them — unlike the settled failures in the control test above.
 	const third = await call();
 	assert.doesNotMatch(String(third.content?.[0]?.text ?? ""), /already failed/, "a harness crash is not evidence for the permanent veto");
-	assert.match(legViews(third)[0]?.output ?? "", /registry unavailable/, "the third identical delegation still spawns");
-});
-
-test("a sync delegate leg whose engine rejects under the RUN signal files as an abort, not a failure", async () => {
-	const m = makeMockPi();
-	piPersona(m.pi);
-	const { ctx } = makeCrashingEngineCtx(os.tmpdir());
-	await m.fire("session_start", undefined, ctx);
-	const delegate = m.tool("delegate") as { execute: AnyFn };
-	const ac = new AbortController();
-	ac.abort(); // the operator stopped the whole run — the cancellation rides ONLY on the run signal
-
-	const view = legViews(await delegate.execute("del-run-abort", INFRA_TASK, ac.signal, undefined, ctx))[0];
-	assert.ok(view, "the fan-out produced one leg view");
-	assert.equal(view.failureKind, "abort", "the run-level stop classifies the leg, not the per-leg controller");
-	assert.equal(agentNodeStatusForDelegate(view), "stopped", "so the tree shows the user's own stop instead of a failure");
+	assert.match(legText(third), /registry unavailable/, "the third identical delegation still spawns");
 });
 
 test("delegate rejects an unknown output contract before spawning, naming the installed ones", async () => {
@@ -1165,10 +1833,8 @@ test("worktree isolation fails closed on a non-Git cwd and never runs the base e
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const response = await delegate.execute("worktree-nonrepo", { tasks: [{ agent: "scout", task: "write a file", isolation: "worktree" }] }, undefined, undefined, ctx);
-	const view = legViews(response)[0];
 	assert.equal(response.isError, true);
-	assert.equal(view?.ok, false);
-	assert.match(view?.output ?? "", /Git|remove isolation/i);
+	assert.match(legText(response), /Git|remove isolation/i);
 	assert.equal(baseRuns, 0, "the real checkout engine must never run as an isolation fallback");
 	assert.equal(childRuns, 0, "no child should spawn when the cwd is not a repository");
 });
@@ -1193,10 +1859,8 @@ test("worktree isolation rejects a dirty checkout before spawning a child (HEAD-
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const response = await delegate.execute("worktree-dirty", { tasks: [{ agent: "scout", task: "use the latest WIP", isolation: "worktree" }] }, undefined, undefined, ctx);
-	const view = legViews(response)[0];
 	assert.equal(response.isError, true);
-	assert.match(view?.output ?? "", /commit\/stash|commit.*stash|remove isolation/i);
-	assert.equal(view?.failureKind, "contract");
+	assert.match(legText(response), /commit\/stash|commit.*stash|remove isolation/i);
 	assert.equal(childRuns, 0, "a dirty repo must not create a HEAD-only worktree and lose WIP");
 	assert.match(gitAt(cwd, "status", "--porcelain=v1", "--untracked-files=all"), /base\.txt|untracked\.txt/);
 });
@@ -1223,10 +1887,8 @@ test("a successful direct worktree leg exports its edits instead of discarding t
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const response = await delegate.execute("worktree-artifact", { tasks: [{ agent: "scout", task: "implement it", isolation: "worktree" }] }, undefined, undefined, ctx);
-	const view = legViews(response)[0];
 	assert.equal(response.isError, false);
-	assert.equal(view?.ok, true);
-	assert.match(view?.output ?? "", /ISOLATED WORKTREE ARTIFACT|diff --git|new-implementation\.ts/i);
+	assert.match(legText(response), /ISOLATED WORKTREE ARTIFACT|diff --git|new-implementation\.ts/i);
 	assert.equal(fs.existsSync(path.join(cwd, "new-implementation.ts")), false, "the main checkout remains untouched");
 	assert.equal(baseRuns, 0, "the isolated leg uses the child engine, not the base engine");
 });
@@ -1246,10 +1908,8 @@ test("a successful isolated leg may satisfy the artifact contract with its retur
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const response = await delegate.execute("worktree-protocol-artifact", { tasks: [{ agent: "scout", task: "return the patch", isolation: "worktree" }] }, undefined, undefined, ctx);
-	const view = legViews(response)[0];
 	assert.equal(response.isError, false, "compete-style diff output remains a valid isolated deliverable");
-	assert.equal(view?.ok, true);
-	assert.match(view?.output ?? "", /diff --git a\/base\.txt b\/base\.txt/);
+	assert.match(legText(response), /diff --git a\/base\.txt b\/base\.txt/);
 });
 
 test("an isolated leg cannot fake an artifact with two summary marker lines", async () => {
@@ -1272,7 +1932,7 @@ test("an isolated leg cannot fake an artifact with two summary marker lines", as
 		ctx,
 	);
 	assert.equal(response.isError, true);
-	assert.match(legViews(response)[0]?.output ?? "", /no diff|artifact|isolated/i);
+	assert.match(legText(response), /no diff|artifact|isolated/i);
 });
 
 test("opt-in: a fresh install loads NO personas until /persona restore installs them", async () => {
@@ -1456,9 +2116,30 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	await m.cmd("persona", "dev", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
-	assert.match(injected.systemPrompt, /decisive software engineer/);
+	assert.match(injected.systemPrompt, /You are Dev: the engineer/);
 	// An active persona upgrades the soft discovery brief to the STANDING hand-off default.
 	assert.match(injected.systemPrompt, /Hand off by default/i, "active persona ⇒ standing mandate");
+});
+
+test("the brief teaches council and flow only to a persona that can call them", async () => {
+	const cwd = tempDir("pi-persona-brief-methods-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "no-methods.md"), "---\nname: no-methods\npersona: true\ntools:\n  deny: [council, flow]\n---\nDelegates only.\n");
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "all-methods.md"), "---\nname: all-methods\npersona: true\n---\nMay use everything.\n");
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "qa-brief.flow.json"), JSON.stringify({ name: "qa-brief", phases: [{ id: "one", strategy: "fanout", roster: "review" }] }));
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "all-methods", ctx);
+	const full = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
+	assert.match(full, /by problem class/);
+	assert.match(full, /Flows \(run with `flow`\)[\s\S]*qa-brief/);
+	await m.cmd("persona", "no-methods", ctx);
+	const limited = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
+	assert.match(limited, /Hand off by default/);
+	assert.doesNotMatch(limited, /by problem class|contested fork|qa-brief|Flows \(run with/, "no method is taught that the capability gate would refuse");
 });
 
 test("a custom persona opts into delegation policy behavior through frontmatter, not its name", async () => {
@@ -1544,6 +2225,295 @@ test("a custom persona enforces its declarative delegate policy before spawn", a
 	assert.match(specs[0]?.task ?? "", /\[DELEGATION BRIEF\]/);
 });
 
+test("delegate has no sync/async flags: an interactive session ALWAYS backgrounds, a headless one ALWAYS blocks", async () => {
+	const stub: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `done ${spec.task}`, usage: emptyUsage(), ok: true }),
+	};
+	const boot = async (hasUI: boolean) => {
+		const m = makeMockPi();
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+		const { ctx } = makeCtx(os.tmpdir(), { hasUI });
+		await m.fire("session_start", undefined, ctx);
+		return { m, ctx, delegate: m.tool("delegate") as { execute: AnyFn; description: string; parameters: unknown } };
+	};
+
+	const headless = await boot(false);
+	const properties = jsonSchemaProperties(headless.delegate.parameters) ?? {};
+	assert.deepEqual(["sync", "async"].filter((flag) => flag in properties), [], "the mode is a runtime fact of the session, not a model-facing choice");
+	assert.doesNotMatch(headless.delegate.description, /\b(?:a?sync)\b|intercom wait/i);
+	assert.match(headless.delegate.description, /NEVER sleep, poll, or arm a `timer`/);
+	assert.match(headless.delegate.description, /end your turn/i);
+	// Nothing drains a follow-up after a `pi -p` turn: every headless call returns its result inline,
+	// even from a model that still sends the retired flag.
+	for (const [n, legacy] of [{}, { async: true }].entries()) {
+		const result = await headless.delegate.execute(`headless-${n}`, { agent: "scout", task: `inline ${n}`, ...legacy }, undefined, undefined, headless.ctx);
+		assert.equal(result.isError, false);
+		assert.equal(result.details?.runId, undefined, "a headless call never launches a background run");
+		assert.match(String(result.content?.[0]?.text ?? ""), new RegExp(`done inline ${n}`));
+	}
+	assert.equal(headless.m.sentMessages().length, 0, "no completion follow-up exists to drain");
+	await headless.m.fire("session_shutdown", {}, headless.ctx);
+
+	// An interactive session always gets run ids at once and the result as a follow-up, even from a
+	// model that still sends the retired flags.
+	const interactive = await boot(true);
+	for (const [n, legacy] of [{}, { sync: true }, { async: false }].entries()) {
+		const result = await interactive.delegate.execute(`ui-${n}`, { agent: "scout", task: `later ${n}`, ...legacy }, undefined, undefined, interactive.ctx);
+		assert.equal(result.isError, false);
+		assert.equal(typeof result.details?.runId, "string", "an interactive call returns a run id at once");
+		assert.match(String(result.content?.[0]?.text ?? ""), /Launched async run/);
+		assert.match(String(result.content?.[0]?.text ?? ""), /never sleep, poll, peek, or arm a timer/);
+	}
+	await waitUntil(() => interactive.m.sentMessages().length > 0, "the completion follow-up");
+	await interactive.m.fire("session_shutdown", {}, interactive.ctx);
+});
+
+test("a headless delegate joins the SAME launched runs: one blocking call, one inline report, no follow-up", async () => {
+	const release = new Map<string, () => void>();
+	const stub: StrategyEngine = {
+		run: (spec) =>
+			new Promise((resolve) => {
+				const usage = { ...emptyUsage(), input: 7, output: 3 };
+				release.set(spec.task, () => resolve({ agent: spec.agent, output: `payload ${spec.task}`, usage, ok: true }));
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const pastDebounce = () => new Promise((resolve) => setTimeout(resolve, 400));
+
+	const call = delegate.execute("headless-batch", { tasks: [0, 1, 2].map((i) => ({ agent: "scout", task: `leg-${i}` })) }, undefined, undefined, ctx);
+	let returned = false;
+	void call.then(() => { returned = true; });
+	await waitUntil(() => release.size === 3, "all three legs to start");
+	release.get("leg-0")?.();
+	release.get("leg-1")?.();
+	await pastDebounce();
+	assert.equal(returned, false, "two of three legs settled: the call still blocks for the last one");
+
+	release.get("leg-2")?.();
+	const result = await call;
+	const text = String(result.content?.[0]?.text ?? "");
+	assert.equal(result.isError, false);
+	assert.match(text, /3 async runs settled — 3 done, 0 failed/, "the report is the completion renderer's");
+	for (const i of [0, 1, 2]) assert.match(text, new RegExp(`payload leg-${i}`));
+	assert.equal(result.usage?.input, 21, "the legs' spend rides the tool result");
+	assert.equal(result.usage?.output, 9);
+
+	await pastDebounce();
+	assert.deepEqual(m.sentMessages(), [], "the inline report IS the delivery: the queued completion was discarded, not repeated");
+	const peek = await (m.tool("intercom") as { execute: AnyFn }).execute("peek-after", { action: "peek" }, undefined, undefined, ctx);
+	assert.equal(peek.content?.[0]?.text, "No async runs.", "nothing is left running or queued for a later follow-up");
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+test("a headless delegate reports failed and rejected legs inline instead of dropping the batch", async () => {
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			if (spec.task === "crash") throw new Error("engine exploded on crash");
+			return spec.task === "bad"
+				? { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "boom from the leg", failureKind: "agent" }
+				: { agent: spec.agent, output: `payload ${spec.task}`, usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+
+	const tasks = ["good", "bad", "crash"].map((task) => ({ agent: "scout", task }));
+	const mixed = await delegate.execute("headless-mixed", { tasks }, undefined, undefined, ctx);
+	const text = String(mixed.content?.[0]?.text ?? "");
+	assert.equal(mixed.isError, true);
+	assert.match(text, /3 async runs settled — 1 done, 2 failed/);
+	assert.match(text, /payload good/, "the healthy sibling's result still reaches the supervisor");
+	assert.match(text, /boom from the leg/);
+	assert.match(text, /engine exploded on crash/, "a rejected engine run is one failed leg, not a lost batch");
+
+	const single = await delegate.execute("headless-single", { agent: "scout", task: "bad" }, undefined, undefined, ctx);
+	assert.equal(single.isError, true);
+	assert.match(String(single.content?.[0]?.text ?? ""), /1 failed[\s\S]*boom from the leg/);
+
+	const nothing = await delegate.execute("headless-nothing", {}, undefined, undefined, ctx);
+	assert.equal(nothing.isError, true);
+	assert.match(String(nothing.content?.[0]?.text ?? ""), /provide either \{ agent, task \}/);
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+test("aborting a headless delegate call stops every leg and returns once they have settled", async () => {
+	let started = 0;
+	let aborted = 0;
+	const stub: StrategyEngine = {
+		run: (spec, _progress, signal) =>
+			new Promise((resolve, reject) => {
+				started++;
+				signal?.addEventListener(
+					"abort",
+					() => {
+						aborted++;
+						// One leg settles as an abort, the other REJECTS under the stop: both file as stopped.
+						if (spec.task === "hang-1") reject(new Error("socket closed"));
+						else resolve({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" });
+					},
+					{ once: true },
+				);
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+
+	const ac = new AbortController();
+	const call = delegate.execute("headless-abort", { tasks: [0, 1].map((i) => ({ agent: "scout", task: `hang-${i}` })) }, ac.signal, undefined, ctx);
+	await waitUntil(() => started === 2, "both legs to start");
+	ac.abort();
+	const result = await call;
+	assert.equal(aborted, 2, "the tool's abort signal reached every leg");
+	assert.equal(result.isError, true);
+	assert.match(String(result.content?.[0]?.text ?? ""), /0 done, 0 failed, 2 stopped/, "a run-level stop is never filed as a failure");
+
+	// A signal that is already aborted never reaches a model: the legs settle as stopped.
+	const dead = new AbortController();
+	dead.abort();
+	const before = started;
+	const late = await delegate.execute("headless-pre-aborted", { agent: "scout", task: "never starts" }, dead.signal, undefined, ctx);
+	assert.equal(late.isError, true);
+	assert.equal(started, before, "no engine call was made for a pre-aborted run");
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+test("a headless fan-out beyond the max-children ceiling runs only the ceiling and says so", async () => {
+	const ran: string[] = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			ran.push(spec.task);
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	const tasks = Array.from({ length: 66 }, (_, i) => ({ agent: "scout", task: `leg-${i}` }));
+	const result = await (m.tool("delegate") as { execute: AnyFn }).execute("headless-ceiling", { tasks }, undefined, undefined, ctx);
+	assert.equal(ran.length, 64, "the ceiling is enforced before anything spawns");
+	assert.match(String(result.content?.[0]?.text ?? ""), /\n\n\[pi-persona\] 2 task\(s\) beyond the max-children limit \(64\) were dropped\./);
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+const HANDOFF_BRIEF = {
+	objective: "probe",
+	scopeRoe: "read only",
+	position: "cold start",
+	constraints: ["none"],
+	requiredArtifacts: ["a report"],
+	stopConditions: ["done"],
+};
+
+test("a headless delegate result still meets the persistence counterweight in the tool_result hook, exactly once", async () => {
+	const stub: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: "[BLOCKED] missing access", usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir());
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const result = await (m.tool("delegate") as { execute: AnyFn }).execute("headless-blocked", { agent: "scout", task: "try the thing", brief: HANDOFF_BRIEF }, undefined, undefined, ctx);
+	assert.doesNotMatch(String(result.content?.[0]?.text ?? ""), /delegated result needs verification/, "the tool result itself is the plain report");
+	const patched = m.fire("tool_result", { toolCallId: "headless-blocked", toolName: "delegate", content: result.content, details: result.details, isError: result.isError }, ctx) as
+		| { content?: Array<{ text?: string }> }
+		| undefined;
+	const text = patched?.content?.map((c) => c.text ?? "").join("\n") ?? "";
+	assert.equal(text.split("delegated result needs verification").length - 1, 1, "the hook appends the note once");
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+test("only an interactive delegate leg may block on the supervisor: a headless one is parked in the tool call and could not answer", async () => {
+	const blocking: Array<boolean | undefined> = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true }),
+	};
+	for (const hasUI of [false, true]) {
+		const m = makeMockPi();
+		piPersona(m.pi, {
+			engineFactories: {
+				makeInProcessEngine: (deps) => {
+					blocking.push(deps.allowBlocking);
+					return stub;
+				},
+				makeEngine: () => stub,
+			},
+		});
+		const { ctx } = makeCtx(os.tmpdir(), { hasUI });
+		await m.fire("session_start", undefined, ctx);
+		await (m.tool("delegate") as { execute: AnyFn }).execute(`blocking-${hasUI}`, { agent: "scout", task: "probe" }, undefined, undefined, ctx);
+		await waitUntil(() => blocking.length === (hasUI ? 2 : 1), "the leg's engine to be built");
+		await m.fire("session_shutdown", {}, ctx);
+	}
+	assert.deepEqual(blocking.map((value) => value === true), [false, true]);
+});
+
+test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; a separate single leg still wakes alone", async () => {
+	const release = new Map<string, () => void>();
+	const stub: StrategyEngine = {
+		run: (spec) =>
+			new Promise((resolve) => {
+				release.set(spec.task, () => resolve({ agent: spec.agent, output: `payload ${spec.task}`, usage: emptyUsage(), ok: true }));
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const followUps = () => m.sentMessages().map((s) => (s.message as { content: string }).content);
+	const pastDebounce = () => new Promise((resolve) => setTimeout(resolve, 400));
+
+	const launched = await delegate.execute(
+		"batch-wake",
+		{ tasks: [0, 1, 2].map((i) => ({ agent: "scout", task: `leg-${i}` })) },
+		undefined,
+		undefined,
+		ctx,
+	);
+	const text = String(launched.content?.[0]?.text ?? "");
+	assert.match(text, /Launched 3 background legs as one batch/);
+	assert.match(text, /woken ONCE when the batch settles/);
+	assert.match(text, /never sleep, poll, peek, or arm a timer/);
+	assert.doesNotMatch(text, /[/]peek/, "/peek is an operator command the model cannot run");
+	await waitUntil(() => release.size === 3, "all three legs to start");
+
+	// The supervisor is idle the whole time: legs finish one by one, and no partial wake goes out.
+	release.get("leg-0")?.();
+	await pastDebounce();
+	release.get("leg-1")?.();
+	await pastDebounce();
+	assert.deepEqual(followUps(), [], "two of three legs settled: nothing is reported yet");
+
+	release.get("leg-2")?.();
+	await waitUntil(() => followUps().length > 0, "the batch completion follow-up");
+	await pastDebounce();
+	assert.equal(followUps().length, 1, "exactly one wake for the whole batch");
+	const report = followUps()[0] as string;
+	assert.match(report, /3 async runs settled — 3 done, 0 failed/);
+	for (const i of [0, 1, 2]) assert.match(report, new RegExp(`payload leg-${i}`), "the single report carries every leg");
+
+	// A single-leg delegate has no batch: it wakes the supervisor on its own, as before.
+	await delegate.execute("single-wake", { agent: "scout", task: "solo" }, undefined, undefined, ctx);
+	await waitUntil(() => release.has("solo"), "the single leg to start");
+	release.get("solo")?.();
+	await waitUntil(() => followUps().length === 2, "the single leg's own follow-up");
+	assert.match(followUps()[1] as string, /payload solo/);
+	assert.doesNotMatch(followUps()[1] as string, /payload leg-/);
+	await m.fire("session_shutdown", {}, ctx);
+});
+
 test("a custom persona can require disjoint write ownership while read-only fanout stays ergonomic", async () => {
 	const cwd = tempDir("pi-persona-custom-write-policy-");
 	const personaPath = path.join(cwd, ".pi", "agents", "project-conductor.md");
@@ -1568,7 +2538,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 
 	const missing = await delegate.execute(
 		"custom-write-missing",
-		{ tasks: [{ agent: "operator", task: "change A" }, { agent: "operator", task: "change B" }], sync: true },
+		{ tasks: [{ agent: "operator", task: "change A" }, { agent: "operator", task: "change B" }] },
 		undefined,
 		undefined,
 		ctx,
@@ -1585,7 +2555,6 @@ test("a custom persona can require disjoint write ownership while read-only fano
 				{ agent: "operator", task: "change A", tools: [] },
 				{ agent: "operator", task: "change B", tools: [] },
 			],
-			sync: true,
 		},
 		undefined,
 		undefined,
@@ -1601,7 +2570,6 @@ test("a custom persona can require disjoint write ownership while read-only fano
 				{ agent: "scout", task: "change through MCP A", mcp: true },
 				{ agent: "scout", task: "change through MCP B", mcp: true },
 			],
-			sync: true,
 		},
 		undefined,
 		undefined,
@@ -1618,7 +2586,6 @@ test("a custom persona can require disjoint write ownership while read-only fano
 				{ agent: "operator", task: "change A with a script", tools: ["read", "bash"] },
 				{ agent: "operator", task: "change B with a script", tools: ["read", "bash"] },
 			],
-			sync: true,
 		},
 		undefined,
 		undefined,
@@ -1635,7 +2602,6 @@ test("a custom persona can require disjoint write ownership while read-only fano
 				{ agent: "operator", task: "change A", writeSet: ["src/a.ts"] },
 				{ agent: "verifier", task: "verify A" },
 			],
-			sync: true,
 		},
 		undefined,
 		undefined,
@@ -1653,7 +2619,6 @@ test("a custom persona can require disjoint write ownership while read-only fano
 				{ agent: "operator", task: "change A", writeSet: ["src/a.ts"] },
 			],
 			concurrency: 1,
-			async: true,
 		},
 		undefined,
 		undefined,
@@ -1671,7 +2636,6 @@ test("a custom persona can require disjoint write ownership while read-only fano
 				{ agent: "verifier", task: "verify A" },
 			],
 			concurrency: 1,
-			sync: true,
 		},
 		undefined,
 		undefined,
@@ -1682,7 +2646,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 
 	const readOnly = await delegate.execute(
 		"custom-write-readonly",
-		{ tasks: [{ agent: "scout", task: "inspect A" }, { agent: "scout", task: "inspect B" }], sync: true },
+		{ tasks: [{ agent: "scout", task: "inspect A" }, { agent: "scout", task: "inspect B" }] },
 		undefined,
 		undefined,
 		ctx,
@@ -1692,7 +2656,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 
 	const stringifiedScouts = await delegate.execute(
 		"custom-write-stringified-scouts",
-		{ tasks: JSON.stringify([{ agent: "scout", task: "inspect A" }, { agent: "scout", task: "inspect B" }]), sync: true },
+		{ tasks: JSON.stringify([{ agent: "scout", task: "inspect A" }, { agent: "scout", task: "inspect B" }]) },
 		undefined,
 		undefined,
 		ctx,
@@ -1702,7 +2666,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 
 	const stringifiedWriters = await delegate.execute(
 		"custom-write-stringified-writers",
-		{ tasks: JSON.stringify([{ agent: "operator", task: "change A" }, { agent: "operator", task: "change B" }]), sync: true },
+		{ tasks: JSON.stringify([{ agent: "operator", task: "change A" }, { agent: "operator", task: "change B" }]) },
 		undefined,
 		undefined,
 		ctx,
@@ -1730,7 +2694,7 @@ test("a declared verifier cannot start in a later call while the mutation it mus
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
 	const base = makeCtx(cwd);
-	const ctx = { ...base.ctx, hasUI: true }; // interactive ⇒ delegate runs in the BACKGROUND by default
+	const ctx = { ...base.ctx, hasUI: true }; // interactive ⇒ delegate ALWAYS runs in the BACKGROUND
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "project-conductor", ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
@@ -1763,6 +2727,42 @@ test("a declared verifier cannot start in a later call while the mutation it mus
 	fs.rmSync(cwd, { recursive: true, force: true });
 });
 
+test("a headless fresh-verification refusal does not wait for a follow-up that never comes", async () => {
+	const cwd = tempDir("pi-persona-fresh-verification-headless-");
+	const personaPath = path.join(cwd, ".pi", "agents", "project-conductor.md");
+	fs.mkdirSync(path.dirname(personaPath), { recursive: true });
+	fs.writeFileSync(
+		personaPath,
+		"---\nname: project-conductor\npersona: true\ndelegation:\n  requireFreshVerification: true\n  verificationAgents: [verifier]\n---\nCustom supervisor.",
+	);
+	const releases: Array<() => void> = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			await new Promise<void>((resolve) => releases.push(resolve));
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(cwd); // headless: the writer's call stays parked until it settles
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "project-conductor", ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const writer = delegate.execute("fresh-headless-writer", { agent: "operator", task: "change A" }, undefined, undefined, ctx);
+	for (let i = 0; i < 50 && releases.length < 1; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+
+	const early = await delegate.execute("fresh-headless-verifier", { agent: "verifier", task: "verify A" }, undefined, undefined, ctx);
+	assert.equal(early.isError, true);
+	const text = String(early.content?.[0]?.text ?? "");
+	assert.match(text, /fresh verification/i);
+	assert.match(text, /later call/);
+	assert.doesNotMatch(text, /end your turn|follow-up/i, "headless has no follow-up to wake it, and ending the turn exits the process");
+
+	releases.shift()?.();
+	assert.equal((await writer).isError, false);
+	fs.rmSync(cwd, { recursive: true, force: true });
+});
+
 test("maxChildren cannot silently truncate the fresh verifier from an otherwise valid serial batch", async () => {
 	const cwd = tempDir("pi-persona-fresh-verifier-cap-");
 	const personaPath = path.join(cwd, ".pi", "agents", "bounded-conductor.md");
@@ -1790,7 +2790,7 @@ test("maxChildren cannot silently truncate the fresh verifier from an otherwise 
 	];
 	const result = await delegate.execute(
 		"fresh-verifier-cap",
-		{ tasks, concurrency: 1, sync: true },
+		{ tasks, concurrency: 1 },
 		undefined,
 		undefined,
 		ctx,
@@ -1818,7 +2818,7 @@ test("async fanout honors its requested per-call concurrency", async () => {
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 
@@ -1830,7 +2830,6 @@ test("async fanout honors its requested per-call concurrency", async () => {
 				{ agent: "scout", task: "second" },
 			],
 			concurrency: 1.5,
-			async: true,
 		},
 		undefined,
 		undefined,
@@ -1850,11 +2849,23 @@ test("async fanout honors its requested per-call concurrency", async () => {
 	assert.equal(active, 0);
 });
 
-test("a fan-out wider than the retention bound keeps a settled payload fetchable by id", async () => {
+/** Pin one env var for a test; the returned function restores it (pass it to `t.after`). */
+function pinEnv(name: string, value: string): () => void {
+	const previous = process.env[name];
+	process.env[name] = value;
+	return () => {
+		if (previous === undefined) delete process.env[name];
+		else process.env[name] = previous;
+	};
+}
+
+test("a fan-out wider than the retention bound keeps a settled payload fetchable by id", async (t) => {
 	// The regime the retention guarantee exists for: every leg is registered as running up front
-	// (they queue behind the async semaphore), so more runs are tracked than asyncRetain (25) while
-	// only one has settled. That one is exactly what the completion follow-up tells the supervisor
-	// to fetch — it must not be the eviction victim.
+	// (they queue behind the async semaphore), so more runs are tracked than asyncRetain (pinned to
+	// 25 here; the default now covers a whole 64-leg call) while only one has settled. That one is
+	// exactly what the completion follow-up tells the supervisor to fetch — it must not be the
+	// eviction victim.
+	t.after(pinEnv("PI_PERSONA_ASYNC_RETAIN", "25"));
 	const releases: Array<() => void> = [];
 	const stub: StrategyEngine = {
 		run: async (spec) => {
@@ -1864,13 +2875,13 @@ test("a fan-out wider than the retention bound keeps a settled payload fetchable
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
 	const launched = await delegate.execute(
 		"async-wide-fanout",
-		{ tasks: Array.from({ length: 30 }, (_, i) => ({ agent: "scout", task: `leg-${i}` })), async: true },
+		{ tasks: Array.from({ length: 30 }, (_, i) => ({ agent: "scout", task: `leg-${i}` })) },
 		undefined,
 		undefined,
 		ctx,
@@ -1895,22 +2906,58 @@ test("a fan-out wider than the retention bound keeps a settled payload fetchable
 	}
 });
 
-test("a fan-out that settles MORE results than retention keeps says so, instead of reporting the ids as unknown", async () => {
+test("a whole maxChildren-wide fan-out stays fetchable at the default retention, large payloads and a failure included", async () => {
+	// The batch is held until its last leg settles, so all 64 payloads wait in the tracker together:
+	// the retention default must cover one whole call or early finishers are destroyed before the
+	// report that points at them is delivered.
+	const stub: StrategyEngine = {
+		run: async (spec) => spec.task === "leg-5"
+			? { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "leg-5 broke", failureKind: "agent" }
+			: { agent: spec.agent, output: `payload for ${spec.task} ${"x".repeat(1500)}`, usage: emptyUsage(), ok: true },
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	const launched = await delegate.execute(
+		"async-max-fanout",
+		{ tasks: Array.from({ length: 64 }, (_, i) => ({ agent: "scout", task: `leg-${i}` })) },
+		undefined,
+		undefined,
+		ctx,
+	);
+	const ids = launched.details?.runIds as string[];
+	assert.equal(ids.length, 64);
+	await waitUntil(() => m.sentMessages().length > 0, "the single batch follow-up");
+	const report = m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
+	assert.doesNotMatch(report, /can no longer be fetched by id/, "nothing was displaced, so nothing is declared lost");
+	assert.match(report, /leg-5 broke/, "the failed leg is named with its own cause");
+	for (const id of ids) assert.match(report, new RegExp(`\\b${id}\\b`), `${id} is named even where the bounded report cut its section`);
+	for (const id of ids) {
+		const fetched = await intercom.execute("max-result", { action: "result", to: id }, undefined, undefined, ctx);
+		assert.match(String(fetched.content?.[0]?.text ?? ""), /payload for leg-|leg-5 broke/, `${id} is still retained`);
+	}
+});
+
+test("a fan-out that settles MORE results than retention keeps says so, instead of reporting the ids as unknown", async (t) => {
 	// The residual the retention guarantee cannot close: 30 legs settle against a 25-run bound, so five
 	// payloads are genuinely destroyed. What must not happen is the supervisor following the report's
 	// own "open individual runs with intercom result" instruction into a bare not-found.
+	t.after(pinEnv("PI_PERSONA_ASYNC_RETAIN", "25"));
 	const stub: StrategyEngine = {
 		run: async (spec) => ({ agent: spec.agent, output: `payload for ${spec.task}`, usage: emptyUsage(), ok: true }),
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
 	const launched = await delegate.execute(
 		"async-overflow-fanout",
-		{ tasks: Array.from({ length: 30 }, (_, i) => ({ agent: "scout", task: `leg-${i}` })), async: true },
+		{ tasks: Array.from({ length: 30 }, (_, i) => ({ agent: "scout", task: `leg-${i}` })) },
 		undefined,
 		undefined,
 		ctx,
@@ -1935,9 +2982,94 @@ test("a fan-out that settles MORE results than retention keeps says so, instead 
 	assert.match(String(never.content?.[0]?.text ?? ""), /No retained async run "run-never"/, "an id that never existed still says exactly that");
 });
 
+test("a fan-out receipt maps every run id to its call-sign, and a miss lists what exists, running first", async () => {
+	const release = new Map<string, () => void>();
+	const stub: StrategyEngine = {
+		run: (spec) =>
+			new Promise((resolve) => {
+				release.set(spec.task, () => resolve({ agent: spec.agent, output: `payload ${spec.task}`, usage: emptyUsage(), ok: true }));
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+
+	const launched = await delegate.execute(
+		"receipt-map",
+		{ tasks: [{ agent: "scout", task: "leg-0", name: "Alpha-scan" }, { agent: "scout", task: "leg-1", name: "Bravo-trace" }, { agent: "scout", task: "leg-2", name: "Cedar-probe" }] },
+		undefined,
+		undefined,
+		ctx,
+	);
+	const runs = launched.details?.runs as Array<{ id: string; label: string }>;
+	const text = String(launched.content?.[0]?.text ?? "");
+	assert.ok(
+		text.startsWith(`Launched 3 background legs as one batch: ${runs.map((r) => `${r.id} (${r.label})`).join(", ")}; you will be woken ONCE`),
+		`the receipt pairs each run id with the call-sign the model gave it: ${text}`,
+	);
+	await waitUntil(() => release.size === 3, "all three legs to start");
+
+	release.get("leg-1")?.();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	const miss = await intercom.execute("miss-callsign", { action: "result", to: "Alpha-scan" }, undefined, undefined, ctx);
+	assert.equal(miss.isError, true);
+	const missText = String(miss.content?.[0]?.text ?? "");
+	assert.ok(missText.startsWith('No retained async run "Alpha-scan".'), missText);
+	assert.match(missText, /Runs live only in the session that launched them/);
+	const known = missText.slice(missText.indexOf("Known runs: "));
+	assert.ok(known.indexOf(`${runs[0]!.id} (Alpha-scan) running`) >= 0, known);
+	assert.ok(known.indexOf(`${runs[0]!.id} (Alpha-scan) running`) < known.indexOf(`${runs[1]!.id} (Bravo-trace) done`), "running runs come before settled ones");
+	assert.ok(known.indexOf(`${runs[2]!.id} (Cedar-probe) running`) >= 0);
+	for (const action of ["steer", "stop"]) {
+		const other = await intercom.execute(`miss-${action}`, { action, to: "Alpha-scan", message: "go" }, undefined, undefined, ctx);
+		assert.equal(other.isError, true);
+		assert.match(String(other.content?.[0]?.text ?? ""), /Known runs: /, `${action} on a call-sign teaches the run ids`);
+	}
+	for (const fn of release.values()) fn();
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+test("intercom stop { to: 'all' } cancels every running run through the real stop handles and leaves settled ones alone", async () => {
+	const aborted: string[] = [];
+	const release = new Map<string, () => void>();
+	const stub: StrategyEngine = {
+		run: (spec, _onProgress, signal) =>
+			new Promise((resolve) => {
+				release.set(spec.task, () => resolve({ agent: spec.agent, output: `payload ${spec.task}`, usage: emptyUsage(), ok: true }));
+				signal?.addEventListener("abort", () => {
+					aborted.push(spec.task);
+					resolve({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" });
+				}, { once: true });
+			}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const intercom = m.tool("intercom") as { execute: AnyFn };
+	await delegate.execute("stop-all-fanout", { tasks: [0, 1, 2].map((i) => ({ agent: "scout", task: `leg-${i}`, name: `Leg-${i}` })) }, undefined, undefined, ctx);
+	await waitUntil(() => release.size === 3, "all three legs to start");
+
+	const result = await intercom.execute("stop-all", { action: "stop", to: "all" }, undefined, undefined, ctx);
+	assert.equal(result.isError, false);
+	const stopText = String(result.content?.[0]?.text ?? "");
+	assert.ok(stopText.startsWith("Cancellation requested for 3 runs: "), stopText);
+	for (const name of ["Leg-0", "Leg-1", "Leg-2"]) assert.ok(stopText.includes(`(${name})`), `${name} is named in the receipt`);
+	await waitUntil(() => aborted.length === 3, "every leg's real abort signal to fire");
+	await waitUntil(() => m.sentMessages().length > 0, "the stopped reports");
+	const none = await intercom.execute("stop-all-again", { action: "stop", to: "all" }, undefined, undefined, ctx);
+	assert.equal(none.isError, true, "nothing is running any more");
+	assert.match(String(none.content?.[0]?.text ?? ""), /no running runs to stop/);
+	await m.fire("session_shutdown", {}, ctx);
+});
+
 test("PI_PERSONA_NUDGE=off silences the premature-surrender note on the BACKGROUND completion path too", async () => {
 	// The kill switch is documented as covering the persistence counterweight; interactive delegate is
-	// background by default, so the completion follow-up — not the sync tool_result hook — is the path
+	// always background, so the completion follow-up — not the sync tool_result hook — is the path
 	// that actually carries it.
 	const blocked = "[BLOCKED] I could not proceed without more access.";
 	const stub: StrategyEngine = {
@@ -1950,10 +3082,10 @@ test("PI_PERSONA_NUDGE=off silences the premature-surrender note on the BACKGROU
 		try {
 			const m = makeMockPi();
 			piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-			const { ctx } = makeCtx(os.tmpdir());
+			const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 			await m.fire("session_start", undefined, ctx);
 			const delegate = m.tool("delegate") as { execute: AnyFn };
-			await delegate.execute("nudge-async", { agent: "scout", task: "try the thing", async: true }, undefined, undefined, ctx);
+			await delegate.execute("nudge-async", { agent: "scout", task: "try the thing" }, undefined, undefined, ctx);
 			await waitUntil(() => m.sentMessages().length > 0, "the completion follow-up");
 			return m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
 		} finally {
@@ -1977,13 +3109,13 @@ test("intercom result retrieves one complete async payload by id without a dupli
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
 	const launched = await delegate.execute(
 		"async-full-result",
-		{ agent: "scout", task: "return a large report", async: true },
+		{ agent: "scout", task: "return a large report" },
 		undefined,
 		undefined,
 		ctx,
@@ -2008,11 +3140,11 @@ test("intercom result fences provider-authored failure causes", async () => {
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
-	const launched = await delegate.execute("async-failure-cause", { agent: "scout", task: "fail", async: true }, undefined, undefined, ctx);
+	const launched = await delegate.execute("async-failure-cause", { agent: "scout", task: "fail" }, undefined, undefined, ctx);
 	const id = launched.details?.runId as string;
 	let result: { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
 	for (let i = 0; i < 30; i++) {
@@ -2042,7 +3174,7 @@ test("stopping a queued async leg removes it before it can reach the engine", as
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
@@ -2055,7 +3187,6 @@ test("stopping a queued async leg removes it before it can reach the engine", as
 				{ agent: "scout", task: "second" },
 			],
 			concurrency: 1,
-			async: true,
 		},
 		undefined,
 		undefined,
@@ -2526,7 +3657,7 @@ test("a delegated leg inherits the spine — end to end, through the real engine
 		await m.fire("session_start", undefined, ctx);
 		const delegate = m.tool("delegate") as { execute: AnyFn };
 		const r = await delegate.execute("del-spine", { tasks: [{ agent: "scout", task: "probe [sysprompt]" }] }, undefined, undefined, ctx);
-		const out = legViews(r)[0]?.output ?? "";
+		const out = legText(r);
 		assert.match(out, /sysprompt: SPINE SENTINEL LAYER\n\n/, `the leg's composed prompt must LEAD with the spine — got: ${out}`);
 	} finally {
 		process.argv[1] = realArgv1 as string;
@@ -2589,7 +3720,7 @@ test("a delegated leg gets the WORKER spine, not the supervisor text — end to 
 
 		const delegate = m.tool("delegate") as { execute: AnyFn };
 		const r = await delegate.execute("del-worker", { tasks: [{ agent: "scout", task: "probe [sysprompt]" }] }, undefined, undefined, ctx);
-		const out = legViews(r)[0]?.output ?? "";
+		const out = legText(r);
 		assert.match(out, /sysprompt: WORKER ONLY LAYER\n\n/, `the leg's composed prompt must LEAD with the worker text — got: ${out}`);
 		assert.doesNotMatch(out, /SUPERVISOR ONLY LAYER/, "the supervisor text must never reach a leg");
 
@@ -3242,6 +4373,18 @@ test("command results are durable expandable cards instead of unbounded notifica
 	assert.match(expanded, new RegExp(sentinel));
 });
 
+test("a flow stopped at a rejected checkpoint is titled 'stopped', never 'complete' or 'failed'", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const renderer = m.entryRenderer("pi-persona-result");
+	assert.ok(renderer);
+	const colorTheme = { ...traceTheme, fg: (color: string, text: string) => `<${color}>${text}</${color}>` };
+	const data = { label: "flow gated-build", content: "the plan", ok: false, stoppedAtGate: "plan", failureKind: "agent", error: "blocked: a checkpoint gate was not approved" };
+	const card = renderComponent(renderer({ data }, { expanded: false }, colorTheme));
+	assert.match(card, /<warning>[^<]*flow gated-build · stopped · checkpoint plan[^<]*<\/warning>/, card);
+	assert.doesNotMatch(card, /complete|failed|not approved/, "the stop is not dressed as an outcome or an error cause");
+});
+
 test("delegate, intercom, council, and flow cards bound collapsed output and prioritize failures", () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
@@ -3249,47 +4392,24 @@ test("delegate, intercom, council, and flow cards bound collapsed output and pri
 	const intercom = m.tool("intercom") as { renderCall?: AnyFn; renderResult?: AnyFn };
 	const council = m.tool("council") as { renderResult?: AnyFn };
 	const flow = m.tool("flow") as { renderResult?: AnyFn };
-	const views = Array.from({ length: 12 }, (_, i) => ({
-		label: `worker-${i}`,
-		running: false,
-		ok: i !== 11,
-		failureKind: i === 11 ? "provider" : undefined,
-		output: i === 11 ? `provider failed: ${"F".repeat(2_000)}` : `result ${i}: ${"x".repeat(2_000)}`,
-		usage: emptyUsage(),
-	}));
+	// A headless delegate call's whole report is its text (no per-leg views), so the card is the bounded preview.
+	const report = `[pi-persona] 12 async runs settled — 11 done, 1 failed\n${Array.from({ length: 12 }, (_, i) => `worker-${i}: ${"x".repeat(2_000)}`).join("\n")}`;
 	const delegateCard = renderComponent(
-		delegate.renderResult(
-			{ content: [{ type: "text", text: "full" }], details: { views }, isError: true },
-			{ expanded: false },
-			traceTheme,
-		),
-	);
-	assert.ok(delegateCard.split("\n").length <= 10, delegateCard);
-	assert.match(delegateCard, /worker-11/);
-	assert.match(delegateCard, /provider failed/);
-	assert.match(delegateCard, /expand/i);
-	const wideDelegateCard = renderComponent(
-		delegate.renderResult(
-			{
-				content: [{ type: "text", text: "full" }],
-				details: { views: [{ label: `worker-${"L".repeat(200)}`, running: false, ok: true, output: "result ".concat("x".repeat(2_000)), usage: emptyUsage() }] },
-				isError: false,
-			},
-			{ expanded: false },
-			traceTheme,
-		),
+		delegate.renderResult({ content: [{ type: "text", text: report }], details: {}, isError: true }, { expanded: false }, traceTheme),
 		500,
 	);
-	assert.ok(wideDelegateCard.split("\n").every((line) => line.trimEnd().length <= 100), wideDelegateCard);
+	assert.ok(delegateCard.split("\n").length <= 10, delegateCard);
+	assert.match(delegateCard, /delegate failed/);
+	assert.match(delegateCard, /expand/i);
+	assert.ok(delegateCard.split("\n").every((line) => line.trimEnd().length <= 100), delegateCard);
 
 	assert.ok(intercom.renderResult, "intercom has a compact result renderer");
 	assert.ok(intercom.renderCall, "intercom has a compact call renderer");
-	const intercomCall = renderComponent(intercom.renderCall({ action: "wait", to: "run-3", timeoutMs: 180_000 }, traceTheme));
+	const intercomCall = renderComponent(intercom.renderCall({ action: "result", to: "run-3" }, traceTheme));
 	assert.match(intercomCall, /run-3/);
-	assert.match(intercomCall, /180000ms/);
 	const intercomCard = renderComponent(
 		intercom.renderResult(
-			{ content: [{ type: "text", text: `3 runs settled\n${"r".repeat(20_000)}` }], details: { action: "wait", ok: true }, isError: false },
+			{ content: [{ type: "text", text: `3 runs settled\n${"r".repeat(20_000)}` }], details: { action: "result", ok: true }, isError: false },
 			{ expanded: false },
 			traceTheme,
 		),
@@ -3297,7 +4417,7 @@ test("delegate, intercom, council, and flow cards bound collapsed output and pri
 	assert.ok(intercomCard.split("\n").length <= 7, intercomCard);
 	assert.match(intercomCard, /expand/i);
 	assert.equal(
-		(intercomCall + "\n" + intercomCard).match(/intercom wait/gi)?.length,
+		(intercomCall + "\n" + intercomCard).match(/intercom result/gi)?.length,
 		1,
 		"the durable result body must not repeat the call header Pi already rendered",
 	);
@@ -3371,7 +4491,7 @@ test("dynamic tool chrome sanitizes and bounds hostile labels and causes", () =>
 	const entry = m.entryRenderer("pi-persona-result");
 	const surfaces = [
 		renderComponent(delegate.renderCall({ agent: hostile, task: hostile }, traceTheme)),
-		renderComponent(delegate.renderResult({ content: [{ type: "text", text: "ok" }], details: { views: [{ label: hostile, running: false, ok: true, output: "ok", usage: emptyUsage() }] } }, { expanded: false }, traceTheme)),
+		renderComponent(delegate.renderResult({ content: [{ type: "text", text: hostile }], details: {}, isError: true }, { expanded: false }, traceTheme)),
 		renderComponent(council.renderCall({ strategy: hostile, roster: hostile }, traceTheme)),
 		renderComponent(council.renderResult({ content: [{ type: "text", text: "no" }], details: { ok: false, error: hostile, body: "no" } }, { expanded: false }, traceTheme)),
 		renderComponent(flow.renderCall({ name: hostile }, traceTheme)),
@@ -3559,13 +4679,13 @@ test("an instruction-shaped label remains an encoded identifier inside the attri
 // ── the "N agents" status counts agents actually IN FLIGHT ──────────────────────────────
 
 test("inFlightAgentCount counts running leaves only: async roots in, flow phases and settled legs out", () => {
-	// Two async runs (root-level) + one sync delegate fan-out of 3 legs = 5 agents in flight.
+	// Two async runs (root-level) + one fan-out root with 3 legs = 5 agents in flight.
 	assert.equal(
 		inFlightAgentCount([
-			{ id: "delegate:t1", status: "running" },
-			{ id: "delegate:t1/0", parentId: "delegate:t1", status: "running" },
-			{ id: "delegate:t1/1", parentId: "delegate:t1", status: "running" },
-			{ id: "delegate:t1/2", parentId: "delegate:t1", status: "running" },
+			{ id: "group:t1", status: "running" },
+			{ id: "group:t1/0", parentId: "group:t1", status: "running" },
+			{ id: "group:t1/1", parentId: "group:t1", status: "running" },
+			{ id: "group:t1/2", parentId: "group:t1", status: "running" },
 			{ id: "async:run-1", status: "running" },
 			{ id: "async:run-2", status: "running" },
 		]),
@@ -3581,10 +4701,10 @@ test("inFlightAgentCount counts running leaves only: async roots in, flow phases
 	// A settled leg is not in flight, even while its root is still being torn down.
 	assert.equal(
 		inFlightAgentCount([
-			{ id: "delegate:t2", status: "running" },
-			{ id: "delegate:t2/0", parentId: "delegate:t2", status: "done" },
-			{ id: "delegate:t2/1", parentId: "delegate:t2", status: "failed" },
-			{ id: "delegate:t2/2", parentId: "delegate:t2", status: "running" },
+			{ id: "group:t2", status: "running" },
+			{ id: "group:t2/0", parentId: "group:t2", status: "done" },
+			{ id: "group:t2/1", parentId: "group:t2", status: "failed" },
+			{ id: "group:t2/2", parentId: "group:t2", status: "running" },
 		]),
 		1,
 	);
@@ -3594,12 +4714,23 @@ test("inFlightAgentCount counts running leaves only: async roots in, flow phases
 	// is torn down, and a count that waited for that would keep claiming work that is over.
 	assert.equal(
 		inFlightAgentCount([
-			{ id: "delegate:t3", status: "running" },
-			{ id: "delegate:t3/0", parentId: "delegate:t3", status: "done" },
-			{ id: "delegate:t3/1", parentId: "delegate:t3", status: "done" },
+			{ id: "group:t3", status: "running" },
+			{ id: "group:t3/0", parentId: "group:t3", status: "done" },
+			{ id: "group:t3/1", parentId: "group:t3", status: "done" },
 		]),
 		0,
 	);
+	// A fan-out's `delegate` header is a container even with no child left in the tree: it must not
+	// count as an agent in the beat between its last leg leaving and its own removal.
+	assert.equal(
+		inFlightAgentCount([
+			{ id: "delegate:batch-0", status: "running", kind: "delegate" },
+			{ id: "async:run-1", parentId: "delegate:batch-0", status: "running" },
+			{ id: "async:run-2", parentId: "delegate:batch-0", status: "running" },
+		]),
+		2,
+	);
+	assert.equal(inFlightAgentCount([{ id: "delegate:batch-0", status: "running", kind: "delegate" }]), 0);
 });
 
 test("the published \"N agents\" status is the in-flight count, not the has-a-parent count", async () => {
@@ -3647,10 +4778,10 @@ test("intercom peek receives supervisor-wait state from the live async steer reg
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	try {
-		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("waiting-leg", { agent: "scout", task: "await reply", async: true }, undefined, undefined, ctx);
+		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("waiting-leg", { agent: "scout", task: "await reply" }, undefined, undefined, ctx);
 		const id = launched.details?.runId;
 		assert.equal(typeof id, "string");
 		await engineEntered;
@@ -3682,7 +4813,7 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx: base } = makeCtx(os.tmpdir());
+	const { ctx: base } = makeCtx(os.tmpdir(), { hasUI: true });
 	const widgets: Record<string, string[] | undefined> = {};
 	const ctx = {
 		...base,
@@ -3697,7 +4828,7 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
 
-	const launched = await delegate.execute("widget-clock-leg", { agent: "scout", task: "watch the clock", async: true }, undefined, undefined, ctx);
+	const launched = await delegate.execute("widget-clock-leg", { agent: "scout", task: "watch the clock" }, undefined, undefined, ctx);
 	const id = launched.details?.runId as string | undefined;
 	assert.ok(id, "the async leg gets a run id");
 	for (let i = 0; i < 20 && releases.length < 1; i++) await new Promise<void>((resolve) => setImmediate(resolve));
@@ -3727,6 +4858,51 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	releases.shift()?.();
 	await waitUntil(() => widgets["persona-agents"] === undefined, "the coalesced widget clear");
 	assert.equal(widgets["persona-agents"], undefined, "the leg's node leaves the tree once the released engine settles");
+});
+
+test("an async fan-out shows one batch header with k/N settled and the status count never rises while it drains", async () => {
+	const release = new Map<string, () => void>();
+	const stub: StrategyEngine = {
+		run: async (spec, _onProgress, _signal, onSteerable) => {
+			onSteerable?.(() => true);
+			await new Promise<void>((resolve) => release.set(spec.task, resolve));
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx: base } = makeCtx(os.tmpdir(), { hasUI: true });
+	const widgets: Record<string, string[] | undefined> = {};
+	const statuses: Array<string | undefined> = [];
+	const ctx = {
+		...base,
+		ui: {
+			...base.ui,
+			setWidget: (id: string, lines: string[] | undefined) => { widgets[id] = lines; },
+			setStatus: (id: string, text: string | undefined) => { if (id === "persona-agents") statuses.push(text); },
+		},
+	};
+	await m.fire("session_start", undefined, ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	await delegate.execute("batch-header", { tasks: [0, 1, 2].map((i) => ({ agent: "scout", task: `leg-${i}` })) }, undefined, undefined, ctx);
+	await waitUntil(() => release.size === 3, "all three legs to start");
+	const headerLine = () => widgets["persona-agents"]?.find((line) => line.includes("delegate · 3 legs"));
+	await waitUntil(() => headerLine() !== undefined, "the batch header in the widget");
+	assert.match(headerLine() as string, /⏳ delegate · 3 legs {2}0\/3 settled/);
+	assert.equal(widgets["persona-agents"]?.filter((line) => line.includes("scout")).length, 3, "the legs hang under the one header");
+
+	release.get("leg-0")?.();
+	await waitUntil(() => headerLine()?.includes("1/3 settled") ?? false, "the header to count the first settled leg");
+	release.get("leg-1")?.();
+	await waitUntil(() => headerLine()?.includes("2/3 settled") ?? false, "the header to count the second settled leg");
+	release.get("leg-2")?.();
+	await waitUntil(() => widgets["persona-agents"] === undefined, "the header to leave with its last leg");
+
+	const counts = statuses.filter((status): status is string => status !== undefined).map(Number);
+	assert.equal(Math.max(...counts), 3, "the header row itself is never counted as an agent");
+	const draining = counts.slice(counts.indexOf(3));
+	assert.deepEqual(draining, [...draining].sort((a, b) => b - a), `the status count only falls while the batch drains: ${counts.join(",")}`);
+	await m.fire("session_shutdown", {}, ctx);
 });
 
 test("coalesces structural and streamed agent widget work and suppresses duplicate status publishes", async () => {
@@ -3762,7 +4938,8 @@ test("coalesces structural and streamed agent widget work and suppresses duplica
 	await m.fire("session_start", undefined, ctx);
 	try {
 		const delegate = m.tool("delegate") as { execute: AnyFn };
-		await delegate.execute("widget-coalesce", { agent: "scout", task: "stream", async: false }, undefined, undefined, ctx);
+		await delegate.execute("widget-coalesce", { agent: "scout", task: "stream" }, undefined, undefined, ctx);
+		await waitUntil(() => m.sentMessages().length > 0, "the background leg's completion follow-up");
 
 		// The seed/live/progress/settle burst must share one frame; status may publish only its few
 		// actual count transitions, never one update per streamed chunk.
@@ -4261,13 +5438,13 @@ test("routine async check-ins append expandable operator entries without startin
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
-	const ctx = makeCtx(tempDir("pi-persona-checkin-entry-")).ctx;
+	const ctx = makeCtx(tempDir("pi-persona-checkin-entry-"), { hasUI: true }).ctx;
 	let sessionStarted = false;
 	try {
 		await m.fire("session_start", undefined, ctx);
 		sessionStarted = true;
 		const delegate = m.tool("delegate") as { execute: AnyFn };
-		await delegate.execute("checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
+		await delegate.execute("checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working" }, undefined, undefined, ctx);
 		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
 		assert.equal(runStarted, true, "the asynchronous test leg remains live across check-in ticks");
 		const tick = intervals.find((interval) => interval.ms === 300_000)?.tick;
@@ -4346,7 +5523,7 @@ test("interactive first stall appends a warning entry without a model wake", asy
 		await m.fire("session_start", undefined, ctx);
 		sessionStarted = true;
 		const delegate = m.tool("delegate") as { execute: AnyFn };
-		await delegate.execute("busy-checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
+		await delegate.execute("busy-checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working" }, undefined, undefined, ctx);
 		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
 		assert.equal(runStarted, true, "the asynchronous leg remains live during supervisor input");
 		const tick = intervals.find((interval) => interval.ms === 30_000)?.tick;
@@ -4376,7 +5553,7 @@ test("interactive first stall appends a warning entry without a model wake", asy
 	}
 });
 
-test("headless first stall wakes once per run lifetime", async () => {
+test("the peek tick survives unavailable status sinks and still wakes for an unread worker message", async () => {
 	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
 	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
 	process.env.PI_PERSONA_CHECKIN_MS = "300000";
@@ -4384,80 +5561,72 @@ test("headless first stall wakes once per run lifetime", async () => {
 	let now = 1_000_000;
 	const clock = mock.method(Date, "now", () => now);
 	const intervals: Array<{ ms: number; tick: () => void }> = [];
-	const fakeInterval = { unref: () => {} };
 	const intervalMock = mock.method(globalThis, "setInterval", (callback: AnyFn, ms = 0) => {
 		intervals.push({ ms, tick: () => callback() });
-		return fakeInterval as unknown as ReturnType<typeof setInterval>;
+		return { unref: () => {} } as unknown as ReturnType<typeof setInterval>;
 	});
 	const clearIntervalMock = mock.method(globalThis, "clearInterval", (_timer: unknown) => {});
+	const workerHandle = "quiet-scout-handle";
+	const workerBus: { current?: InProcessBus } = {};
 	let releaseRun!: () => void;
-	let runStarted = 0;
-	const runFinished: Promise<void>[] = [];
+	let resolveRunFinished!: () => void;
+	let runStarted = false;
 	const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
-	const engine: StrategyEngine = {
+	const runFinished = new Promise<void>((resolve) => { resolveRunFinished = resolve; });
+	const engine = (bus: InProcessBus | undefined): StrategyEngine => ({
 		run: async (spec) => {
-			runStarted++;
-			let resolveRunFinished!: () => void;
-			runFinished.push(new Promise<void>((resolve) => { resolveRunFinished = resolve; }));
+			if (bus) { workerBus.current = bus; bus.register(workerHandle); }
+			runStarted = true;
 			await runGate;
 			resolveRunFinished();
 			return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true };
 		},
-	};
+	});
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	piPersona(m.pi, { engineFactories: { makeEngine: () => engine(undefined), makeInProcessEngine: (deps) => engine(deps.bus) } });
 	const piApi = m.pi as unknown as { appendEntry: (customType: string, data: unknown) => void };
 	const appendEntry = piApi.appendEntry.bind(m.pi);
+	let statusAttempts = 0;
 	piApi.appendEntry = (customType, data) => {
-		if (customType === "pi-persona-status") throw new Error("status persistence unavailable");
+		if (customType === "pi-persona-status") { statusAttempts++; throw new Error("status persistence unavailable"); }
 		appendEntry(customType, data);
 	};
-	const { ctx: base, notes } = makeCtx(tempDir("pi-persona-checkin-append-failure-"));
-	let throwWarning = false;
+	const base = makeCtx(tempDir("pi-persona-status-sinks-down-")).ctx;
 	const ctx = {
 		...base,
-		hasUI: false,
-		ui: {
-			...base.ui,
-			notify: (message: string) => {
-				if (throwWarning) throw new Error("UI warning sink unavailable");
-				notes.push(message);
-			},
-		},
+		hasUI: true,
+		isIdle: () => true,
+		hasPendingMessages: () => false,
+		ui: { ...base.ui, notify: () => { throw new Error("UI warning sink unavailable"); } },
 	};
 	let stderrMock: ReturnType<typeof mock.method<typeof process.stderr, "write">> | undefined;
 	let sessionStarted = false;
 	try {
 		await m.fire("session_start", undefined, ctx);
 		sessionStarted = true;
-		const delegate = m.tool("delegate") as { execute: AnyFn };
-		await delegate.execute("stalled-run", { agent: "scout", name: "quiet-scout", task: "continue working", async: true }, undefined, undefined, ctx);
-		for (let i = 0; i < 10 && runStarted === 0; i++) await Promise.resolve();
-		assert.equal(runStarted, 1, "the asynchronous test leg remains live across watchdog ticks");
+		await (m.tool("delegate") as { execute: AnyFn }).execute("sinks-down-run", { agent: "scout", name: "quiet-scout", task: "continue working" }, undefined, undefined, ctx);
+		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
+		assert.equal(runStarted, true, "the background leg stays live across the tick");
 		const tick = intervals.find((interval) => interval.ms === 30_000)?.tick;
-		assert.ok(tick, "the fast stall/message wakeup cadence remains armed");
+		assert.ok(tick, "the fast stall/message cadence is armed");
+		assert.ok(workerBus.current?.send(workerHandle, "supervisor", "found the config", "progress"), "the worker posts a one-way message");
 
-		now += 300_000; // both the routine card and the newly-stalled alert are due
-		assert.doesNotThrow(tick, "failure to append operator status cannot abort the actionable wake");
-		assert.equal(m.sentMessages().length, 1, "a headless first-stall candidate wakes the supervisor");
-		assert.match(String((m.sentMessages()[0]?.message as { content?: string } | undefined)?.content ?? ""), /may be stalled/i);
-
-		throwWarning = true;
 		stderrMock = mock.method(process.stderr, "write", (() => { throw new Error("stderr warning sink unavailable"); }) as typeof process.stderr.write);
-		await delegate.execute("second-stalled-run", { agent: "scout", name: "quiet-scout-2", task: "continue working", async: true }, undefined, undefined, ctx);
-		for (let i = 0; i < 10 && runStarted < 2; i++) await Promise.resolve();
-		assert.equal(runStarted, 2, "a second leg starts while the first remains live");
-		now += 300_000; // another check-in and a new stall signal are due
-		assert.doesNotThrow(tick, "a second run's first stall remains actionable");
-		assert.equal(m.sentMessages().length, 2, "each distinct run gets one first-stall wake");
-		now += 300_000;
-		tick();
-		assert.equal(m.sentMessages().length, 2, "further stall ticks cannot spend either run's lifetime wake budget");
+		now += 300_000; // a stall episode AND a routine card are both due
+		assert.doesNotThrow(tick, "unavailable status sinks cannot abort the actionable wake");
+		stderrMock.mock.restore();
+		stderrMock = undefined;
+		assert.equal(statusAttempts, 2, "both the stall episode and the routine card hit the failing sink");
+		assert.equal(m.sentMessages().length, 1, "only the unread worker message wakes the model");
+		const wake = String((m.sentMessages()[0]?.message as { content?: string } | undefined)?.content ?? "");
+		assert.match(wake, /from sub-agents/);
+		assert.match(wake, /found the config/);
+		assert.doesNotMatch(wake, /stall/i, "a stall never reaches the model");
 	} finally {
+		stderrMock?.mock.restore();
 		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
 		releaseRun();
-		await Promise.all(runFinished);
-		stderrMock?.mock.restore();
+		if (runStarted) await runFinished;
 		clock.mock.restore();
 		intervalMock.mock.restore();
 		clearIntervalMock.mock.restore();
@@ -4816,10 +5985,50 @@ test("a per-persona model assignment that cannot be persisted is reported to the
 		const council = m.tool("council") as { execute: AnyFn };
 		// A roster that EXISTS (so the per-agent model picker runs) with a strategy that does not
 		// (so the run fails right after, without spawning anything).
+		// pickCtx is interactive: the council is a background run whose model picker opens after the receipt.
 		await council.execute("cfg-save", { question: "decide", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, pickCtx);
+		await waitUntil(() => m.sentMessages().length > 0, "the failed run's completion");
 		assert.match(notes.join("\n"), /could not save the model assignment/i);
 		assert.match(notes.join("\n"), /magi/);
 	} finally {
+		if (prev) process.env.PI_AGENT_DIR = prev;
+		else delete process.env.PI_AGENT_DIR;
+	}
+});
+
+test("a background council parked at the first-run model picker reads 'waiting for operator', not queued or stuck", async () => {
+	const fresh = tempDir("pi-persona-pickwait-");
+	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
+	const prev = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	let answer!: (pick: string | undefined) => void;
+	const modal = new Promise<string | undefined>((resolve) => { answer = resolve; });
+	let asked = false;
+	try {
+		const m = makeMockPi();
+		const engine: StrategyEngine = { run: async (spec) => ({ agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true }) };
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+		const { ctx } = makeCtx(os.tmpdir());
+		const pickCtx = {
+			...ctx,
+			hasUI: true,
+			mode: "rpc",
+			modelRegistry: { getAll: () => [{ provider: "alpha", id: "one" }, { provider: "beta", id: "two" }] },
+			ui: { ...ctx.ui, select: () => { asked = true; return modal; } },
+		};
+		await m.fire("session_start", undefined, pickCtx);
+		await m.cmd("persona", "magi", pickCtx);
+		const receipt = await (m.tool("council") as { execute: AnyFn }).execute("pick-wait", { question: "decide", strategy: "fanout", roster: "magi" }, undefined, undefined, pickCtx);
+		const id = (receipt.details as { runId: string }).runId;
+		await waitUntil(() => asked, "the model picker to open");
+		const peek = await (m.tool("intercom") as { execute: AnyFn }).execute("pick-peek", { action: "peek", to: id }, undefined, undefined, pickCtx);
+		assert.match(peek.content[0].text, /waiting for operator to pick models/);
+		assert.doesNotMatch(peek.content[0].text, /queued|possibly stuck/);
+		answer(undefined);
+		await waitUntil(() => m.sentMessages().length > 0, "the council's completion once the picker closed");
+		await m.fire("session_shutdown", {}, pickCtx);
+	} finally {
+		answer(undefined);
 		if (prev) process.env.PI_AGENT_DIR = prev;
 		else delete process.env.PI_AGENT_DIR;
 	}
@@ -4855,6 +6064,7 @@ test("a model picker that dies partway keeps — and persists — the picks the 
 		await m.cmd("persona", "magi", pickCtx);
 		const council = m.tool("council") as { execute: AnyFn };
 		await council.execute("partial-pick", { question: "decide", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, pickCtx);
+		await waitUntil(() => m.sentMessages().length > 0, "the failed run's completion");
 
 		assert.equal(asked, 2, "the loop stopped at the failing prompt");
 		// The persona is marked as prompted for the whole session, so a discarded answer would never
@@ -4898,6 +6108,7 @@ test("the model picker names the core's verticalization, so the choice is made f
 		await m.cmd("persona", "magi", pickCtx);
 		const council = m.tool("council") as { execute: AnyFn };
 		await council.execute("titles", { question: "decide", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, pickCtx);
+		await waitUntil(() => m.sentMessages().length > 0, "the failed run's completion");
 
 		assert.ok(titles.length > 0, "the picker was never opened");
 		for (const [core, purpose] of [["melchior", "Propulsore"], ["balthasar", "Conservatore"], ["casper", "Catalizzatore"]] as const) {
@@ -4919,10 +6130,16 @@ test("an aborted run reaches the strategy's own cooperative check — no member 
 	piPersona(m.pi);
 	const { ctx } = makeCtx(os.tmpdir());
 	const frames: string[][] = [];
+	const ac = new AbortController();
 	const treeCtx = {
 		...ctx,
 		ui: {
 			...ctx.ui,
+			// The synchronous semantic count reaches three only once the council has seeded its whole roster —
+			// the operator stops the run exactly then, before the strategy has convened anyone.
+			setStatus: (id: string, value?: string) => {
+				if (id === "persona-agents" && value === "3") ac.abort();
+			},
 			setWidget: (_id: string, lines: string[] | undefined) => {
 				if (lines) frames.push(lines);
 			},
@@ -4930,8 +6147,6 @@ test("an aborted run reaches the strategy's own cooperative check — no member 
 	};
 	await m.fire("session_start", undefined, treeCtx);
 	const council = m.tool("council") as { execute: AnyFn };
-	const ac = new AbortController();
-	ac.abort(); // the operator stopped the run before it convened
 
 	const result = await council.execute("abort-1", { question: "ship it?", strategy: "council-rounds", roster: "magi" }, ac.signal, undefined, treeCtx);
 	assert.match(String(result.content?.[0]?.text ?? ""), /cancelled after 0 round\(s\)/);
@@ -7046,11 +8261,11 @@ test("an explicitly collected async result reports how long the leg took", async
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir());
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const intercom = m.tool("intercom") as { execute: AnyFn };
-	const launched = await delegate.execute("async-duration", { agent: "scout", task: "quick look", async: true }, undefined, undefined, ctx);
+	const launched = await delegate.execute("async-duration", { agent: "scout", task: "quick look" }, undefined, undefined, ctx);
 	const id = launched.details?.runId as string;
 	let result: { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
 	for (let i = 0; i < 30; i++) {
@@ -7120,4 +8335,176 @@ test("a core listed twice keeps its lens; a roster-ROLE member does not repeat o
 	const lensed = labels.find((l) => l.startsWith("melchior · SECURITY"));
 	assert.ok(lensed, `no node for the role-specialised core: ${JSON.stringify(labels)}`);
 	assert.ok(!lensed.includes("Propulsore"), `a role member must not show two lenses, got "${lensed}"`);
+});
+
+// ── runtime wake guards: a long sleep and an unchanged peek hold the very turn the wake needs idle ──
+async function withLiveChild(
+	body: (s: { m: ReturnType<typeof makeMockPi>; ctx: ReturnType<typeof makeCtx>["ctx"]; runId: string }) => Promise<void>,
+	opts: { tools?: string[]; cwd?: string; sessionId?: string } = {},
+): Promise<void> {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const stub: StrategyEngine = {
+		run: async (spec) => { await gate; return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true }; },
+	};
+	const m = makeMockPi();
+	m.pi.setActiveTools(opts.tools ?? ["read", "bash", "delegate", "timer", "monitor"]);
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const base = makeCtx(opts.cwd ?? os.tmpdir(), { hasUI: true }).ctx;
+	const ctx = opts.sessionId ? { ...base, sessionManager: { getSessionId: () => opts.sessionId } } : base;
+	await m.fire("session_start", undefined, ctx);
+	try {
+		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("live-child", { agent: "scout", task: "work" }, undefined, undefined, ctx);
+		await body({ m, ctx, runId: launched.details.runId });
+	} finally { release(); await m.fire("session_shutdown", {}, ctx); }
+}
+
+const sleepCall = (command: string, extra: Record<string, unknown> = {}, toolName = "bash") => ({ toolCallId: `sleep-${command}`, toolName, input: { command }, ...extra });
+
+test("a long leading sleep is blocked while a background child runs, and its telemetry closes once", async () => {
+	const cwd = tempDir("pi-persona-sleep-guard-");
+	await withLiveChild(async ({ m, ctx, runId }) => {
+		const blocked = m.fire("tool_call", sleepCall("sleep 60"), ctx) as { block?: boolean; reason?: string; terminate?: boolean };
+		assert.equal(blocked.block, true);
+		assert.equal(blocked.terminate, undefined, "the sleep guard refuses; it never ends the turn");
+		assert.match(blocked.reason ?? "", new RegExp(`^A 60s wait blocks the completion wake and operator steering of the running sub-agents \\(${runId}\\)\\.`));
+		assert.match(blocked.reason ?? "", /A finished run or batch wakes you by itself - end your turn\./);
+		assert.match(blocked.reason ?? "", /For a fixed clock time use timer arm; for an external event use monitor - never to wait for these children\./);
+		assert.equal(m.fire("tool_call", sleepCall("Start-Sleep -Seconds 45", {}, "powershell"), ctx)?.block, true, "powershell is covered too");
+		for (const command of ["sleep 5", "npm test", "docker compose up; sleep 30", "git status"]) {
+			assert.equal(m.fire("tool_call", sleepCall(command), ctx), undefined, `${command} is not a long leading sleep`);
+		}
+	}, { cwd, sessionId: "sleep-guard-telemetry" });
+	const root = path.join(process.env.PI_AGENT_DIR!, "telemetry", "v2", workspaceHash(cwd), "pi-persona");
+	const events = fs.readdirSync(root).filter((name) => name.endsWith(".jsonl")).flatMap((name) => fs.readFileSync(path.join(root, name), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type: string; payload?: Record<string, unknown> }));
+	const forCall = (id: string, type: string) => events.filter((event) => event.type === type && event.payload?.callId === id);
+	assert.equal(forCall("sleep-sleep 60", "tool.started").length, 1);
+	assert.equal(forCall("sleep-sleep 60", "tool.finished").length, 1, "a blocked call is closed by the hook, exactly once");
+});
+
+test("the sleep guard counts a delegate launched in the same tool batch, until its result lands", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "delegate"]);
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	await m.fire("session_start", undefined, ctx);
+	try {
+		// Pi prepares a batch's calls in order, so a sleep prepared BEFORE a same-batch delegate sees
+		// nothing launching: an accepted false negative (the reverse order is covered below).
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx), undefined, "nothing live and nothing launching (sleep-before-delegate is the accepted false negative)");
+		assert.equal(m.fire("tool_call", { toolCallId: "d1", toolName: "delegate", input: { agent: "scout", task: "x" } }, ctx), undefined);
+		const blocked = m.fire("tool_call", sleepCall("sleep 60"), ctx) as { block?: boolean; reason?: string };
+		assert.equal(blocked.block, true, "Pi prepares every call of a batch before any runs: the delegate is in flight");
+		assert.match(blocked.reason ?? "", /of the sub-agents you are launching\./);
+		assert.doesNotMatch(blocked.reason ?? "", /timer|monitor/, "neither wake tool is active, so neither is offered");
+		m.fire("tool_result", { toolCallId: "d1", toolName: "delegate", content: [{ type: "text", text: "failed to launch" }], isError: true }, ctx);
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx), undefined, "a delegate that never produced a run stops counting");
+		m.fire("tool_call", { toolCallId: "d2", toolName: "delegate", input: { agent: "scout", task: "x" } }, ctx);
+		await m.fire("agent_settled", undefined, ctx);
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx), undefined, "a settled turn forgets in-flight launches");
+		m.fire("tool_call", { toolCallId: "d3", toolName: "delegate", input: { agent: "scout", task: "x" } }, ctx);
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx)?.block, true);
+		await m.fire("session_shutdown", undefined, ctx);
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx), undefined, "shutdown forgets in-flight launches");
+		m.fire("tool_call", { toolCallId: "d4", toolName: "delegate", input: { agent: "scout", task: "x" } }, ctx);
+		await m.fire("session_start", undefined, ctx);
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx), undefined, "a new session forgets in-flight launches");
+	} finally { await m.fire("session_shutdown", undefined, ctx); }
+});
+
+test("the sleep guard only names the wake tools the persona can actually call", async () => {
+	await withLiveChild(async ({ m, ctx }) => {
+		const reason = (m.fire("tool_call", sleepCall("sleep 60"), ctx) as { reason: string }).reason;
+		assert.match(reason, /use timer arm - never to wait for these children\.$/);
+		assert.doesNotMatch(reason, /monitor/);
+	}, { tools: ["read", "bash", "delegate", "timer"] });
+	await withLiveChild(async ({ m, ctx }) => {
+		const reason = (m.fire("tool_call", sleepCall("Start-Sleep 60", {}, "powershell"), ctx) as { reason: string }).reason;
+		assert.doesNotMatch(reason, /timer|monitor/, "monitor needs bash and timer is inactive");
+	}, { tools: ["read", "powershell", "delegate", "monitor"] });
+	await withLiveChild(async ({ m, ctx }) => {
+		const reason = (m.fire("tool_call", sleepCall("sleep 60"), ctx) as { reason: string }).reason;
+		assert.match(reason, /For an external event use monitor - never to wait for these children\.$/);
+		assert.doesNotMatch(reason, /timer/);
+	}, { tools: ["read", "bash", "delegate", "monitor"] });
+	// Active in the host is not callable by the persona: the capability half of the same check.
+	const cwd = tempDir("pi-persona-sleep-denied-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "no-timer.md"), "---\nname: no-timer\npersona: true\ntools:\n  deny: [timer]\n---\nNo alarms.\n");
+	await withLiveChild(async ({ m, ctx }) => {
+		await m.cmd("persona", "no-timer", ctx);
+		m.pi.setActiveTools(["read", "bash", "delegate", "timer", "monitor"]);
+		const reason = (m.fire("tool_call", sleepCall("sleep 60"), ctx) as { reason: string }).reason;
+		assert.doesNotMatch(reason, /timer/, "the persona denies timer even though the host has it active");
+		assert.match(reason, /use monitor/);
+	}, { cwd });
+});
+
+test("the sleep guard stays out of headless, nested, and nudge-off sessions", async () => {
+	await withLiveChild(async ({ m, ctx }) => {
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), { ...ctx, hasUI: false }), undefined, "headless delegate blocks inline, so no wake is waiting on the turn");
+	});
+	await withLiveChild(async ({ m, ctx }) => {
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60", { parentToolCallId: "outer" }), ctx), undefined, "a nested codemode call is a script's, not the model's");
+		assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx)?.block, true);
+	});
+	const previous = process.env.PI_PERSONA_NUDGE;
+	process.env.PI_PERSONA_NUDGE = "off";
+	try {
+		await withLiveChild(async ({ m, ctx }) => {
+			assert.equal(m.fire("tool_call", sleepCall("sleep 60"), ctx), undefined, "PI_PERSONA_NUDGE=off silences the guard");
+		});
+	} finally {
+		if (previous === undefined) delete process.env.PI_PERSONA_NUDGE;
+		else process.env.PI_PERSONA_NUDGE = previous;
+	}
+});
+
+test("intercom peek poll guard is wired: refuse, terminate, and reset on settle or a real operator message", async () => {
+	await withLiveChild(async ({ m, ctx, runId }) => {
+		const intercom = m.tool("intercom") as { execute: AnyFn };
+		const peek = () => intercom.execute("peek", { action: "peek" }, undefined, undefined, ctx);
+		assert.equal((await peek()).isError, false);
+		const second = await peek();
+		assert.equal(second.isError, true);
+		assert.match(second.content[0].text, new RegExp(`since your last peek \\(${runId} still running`));
+		assert.equal(second.terminate, undefined);
+		assert.equal((await peek()).terminate, true);
+		await m.fire("input", { source: "extension", text: "wake" }, ctx);
+		assert.equal((await peek()).terminate, true, "an extension-injected wake is not the operator");
+		await m.fire("input", { source: "interactive", text: "status?" }, ctx);
+		assert.equal((await peek()).isError, false, "a real operator message earns a fresh look");
+		assert.equal((await peek()).isError, true);
+		await m.fire("agent_settled", undefined, ctx);
+		assert.equal((await peek()).isError, false, "a settled turn resets the streak");
+	});
+	const previous = process.env.PI_PERSONA_NUDGE;
+	process.env.PI_PERSONA_NUDGE = "off";
+	try {
+		await withLiveChild(async ({ m, ctx }) => {
+			const intercom = m.tool("intercom") as { execute: AnyFn };
+			for (let i = 0; i < 4; i++) assert.equal((await intercom.execute("peek", { action: "peek" }, undefined, undefined, ctx)).isError, false, "nudge off ⇒ no guard");
+		});
+	} finally {
+		if (previous === undefined) delete process.env.PI_PERSONA_NUDGE;
+		else process.env.PI_PERSONA_NUDGE = previous;
+	}
+});
+
+test("the wake guidance is stated once (tool descriptions carry the sub-agent rule), and the headless tail is honest", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "timer", "monitor"]);
+	piPersona(m.pi);
+	const interactive = makeCtx(os.tmpdir(), { hasUI: true }).ctx;
+	const headless = makeCtx(os.tmpdir()).ctx;
+	await m.fire("session_start", undefined, interactive);
+	try {
+		const live = m.fire("before_agent_start", { systemPrompt: "BASE" }, interactive).systemPrompt as string;
+		assert.match(live, /These wakes require this Pi session to stay open\. Avoid duplicate watches\./);
+		assert.doesNotMatch(live, /results wake you on their own/, "the timer and monitor descriptions already carry the rule; the tail does not repeat it");
+		assert.match(live, /timer arm schedules a fixed-time wake/);
+		const batch = m.fire("before_agent_start", { systemPrompt: "BASE" }, headless).systemPrompt as string;
+		assert.match(batch, /Headless: a wake is delivered only if it fires before your turn settles; do not end the turn to wait for one\./);
+		assert.doesNotMatch(batch, /end your turn when only the event remains/, "the process exits with the turn, so the interactive tail would drop the wake");
+	} finally { await m.fire("session_shutdown", undefined, interactive); }
 });

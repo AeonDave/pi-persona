@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildDelegationBrief, buildExocomBrief, RUNTIME_CONTEXT_GUIDANCE } from "../../../src/core/brief.ts";
+import { buildDelegationBrief, buildExocomBrief, END_TURN_NOTE, RUNTIME_CONTEXT_GUIDANCE } from "../../../src/core/brief.ts";
 import { CALL_SIGN_PROMPT } from "../../../src/core/naming.ts";
+import { getStrategy } from "../../../src/orchestration/strategy.ts";
 
 const AGENTS = [
 	{ name: "operator", description: "Generic adaptive technical executor verticalized by skills." },
@@ -12,13 +13,13 @@ const AGENTS = [
 
 test("no agents + no persona → no brief (vanilla pi stays untouched)", () => {
 	assert.equal(
-		buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: false, asyncDefault: true }),
+		buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: false, background: true }),
 		undefined,
 	);
 });
 
 test("no agents + a delegating persona → seed guidance, not a broken roster", () => {
-	const brief = buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: true, asyncDefault: true });
+	const brief = buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: true, background: true });
 	assert.ok(brief);
 	assert.match(brief ?? "", /\/persona seed/);
 	assert.match(brief ?? "", /cannot run/i);
@@ -27,7 +28,7 @@ test("no agents + a delegating persona → seed guidance, not a broken roster", 
 test("empty targets but agents ARE installed → 'widen the allowlist', NOT the fresh-install seed lie", () => {
 	// A persona holds `delegate` but its permission allowlist matches none of the 5 installed
 	// agents (filtered to []). The brief must diagnose the restriction, not claim nothing is seeded.
-	const brief = buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: true, asyncDefault: true, installedCount: 5 });
+	const brief = buildDelegationBrief({ agents: [], teams: {}, flows: [], standing: true, background: true, installedCount: 5 });
 	assert.ok(brief);
 	assert.match(brief ?? "", /allows none of the 5/);
 	assert.match(brief ?? "", /allowlist/i);
@@ -41,7 +42,7 @@ test("lists each agent with its clipped description", () => {
 		teams: {},
 		flows: [],
 		standing: true,
-		asyncDefault: true,
+		background: true,
 	});
 	assert.ok(brief);
 	assert.match(brief ?? "", /- operator — x+… \[tools=session-default\]/);
@@ -61,7 +62,7 @@ test("agent roster exposes effective tool routing metadata without dumping long 
 		teams: {},
 		flows: [],
 		standing: true,
-		asyncDefault: true,
+		background: true,
 	});
 	assert.match(brief ?? "", /scout.*tools=read,grep,find,ls/i);
 	assert.match(brief ?? "", /operator.*tools=session-default/i, "an absent allowlist must not look like no tools");
@@ -69,34 +70,108 @@ test("agent roster exposes effective tool routing metadata without dumping long 
 	assert.match(brief ?? "", /lab.*tools=read,grep,find,ls,bash,write,\+3.*mcp.*worktree/i);
 });
 
-test("teams render as name[members] with ×N for repeated members; flows listed when present", () => {
+test("teams render as name[members] with ×N for repeated members", () => {
 	const brief = buildDelegationBrief({
 		agents: AGENTS,
 		teams: { review: ["reviewer", "reviewer", "reviewer"], repair: ["operator", "verifier"] },
-		flows: ["ship-check"],
+		flows: [],
 		standing: true,
-		asyncDefault: true,
+		background: true,
 	});
 	assert.match(brief ?? "", /review\[reviewer×3\]/);
 	assert.match(brief ?? "", /repair\[operator, verifier\]/);
-	assert.match(brief ?? "", /Flows: ship-check/);
 });
 
-test("no flows → no Flows line", () => {
-	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, asyncDefault: true });
-	assert.equal(/Flows:/.test(brief ?? ""), false);
+test("flows are listed with their description under a header that makes no delivery claim (the flow tool states it)", () => {
+	const brief = buildDelegationBrief({
+		agents: AGENTS,
+		teams: {},
+		flows: [{ name: "deep-review", description: "Fan out reviewers, then rule." }, { name: "ship-check" }],
+		standing: true,
+		background: true,
+	});
+	assert.match(brief ?? "", /^Flows \(run with `flow`\):$/m);
+	assert.doesNotMatch(brief ?? "", /blocks until/, "background in an interactive session: the brief must not say the call blocks");
+	assert.match(brief ?? "", /^- deep-review — Fan out reviewers, then rule\.$/m);
+	assert.match(brief ?? "", /^- ship-check$/m, "a flow without a description renders bare");
+	assert.equal(/Flows: /.test(brief ?? ""), false, "the bare-name list is gone");
+});
+
+test("a flow description is collapsed to one line and clipped like an agent's", () => {
+	const brief = buildDelegationBrief({
+		agents: AGENTS,
+		teams: {},
+		flows: [{ name: "wide", description: `first line\n   second\tline ${"x".repeat(200)}` }],
+		standing: true,
+		background: true,
+	});
+	const line = (brief ?? "").split("\n").find((l) => l.startsWith("- wide"));
+	assert.ok(line, "the flow has its own single line");
+	assert.match(line, /^- wide — first line second line x+…$/);
+	assert.ok(line.length <= "- wide — ".length + 96, `line was ${line.length} characters`);
+});
+
+test("a gated flow is tagged as needing a human only where nobody can approve it (headless)", () => {
+	const flows = [{ name: "gated-build", description: "Plan, pause, build.", gated: true }, { name: "deep-review", description: "Review." }];
+	const headless = buildDelegationBrief({ agents: AGENTS, teams: {}, flows, standing: true, background: false });
+	assert.match(headless ?? "", /^- gated-build — Plan, pause, build\. \[checkpoint needs a human; rejected headless\]$/m);
+	assert.match(headless ?? "", /^- deep-review — Review\.$/m, "an ungated flow is never tagged");
+	const interactive = buildDelegationBrief({ agents: AGENTS, teams: {}, flows, standing: true, background: true });
+	assert.match(interactive ?? "", /^- gated-build — Plan, pause, build\.$/m);
+	assert.doesNotMatch(interactive ?? "", /rejected headless/);
+});
+
+test("more flows than the cap say how many were left out", () => {
+	const flows = Array.from({ length: 18 }, (_, i) => ({ name: `flow${i}` }));
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows, standing: true, background: true });
+	assert.match(brief ?? "", /^- flow15$/m);
+	assert.doesNotMatch(brief ?? "", /^- flow16$/m);
+	assert.match(brief ?? "", /…and 2 more flows \(see \/doctor\)/);
+});
+
+test("no flows → no Flows block", () => {
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true });
+	assert.equal(/Flows/.test(brief ?? ""), false);
 });
 
 test("standing brief states the hand-off default and a minimum call using operator", () => {
-	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, asyncDefault: true });
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true });
 	assert.match(brief ?? "", /Hand off by default/i);
 	assert.match(brief ?? "", /delegate\(\{ agent: "operator"/);
 	assert.match(brief ?? "", /council/);
 	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT), "standing brief must reuse the shared call-sign invitation");
 	assert.match(brief ?? "", /Pi already renders tool calls/i);
 	assert.match(brief ?? "", /do not narrate|don't narrate/i);
-	assert.match(brief ?? "", /Periodic status cards are for the operator and do not interrupt your work/);
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas/i);
+});
+
+test("the standing brief maps decision classes to methods, and only names methods that exist", () => {
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [{ name: "deep-review" }], standing: true, background: true }) ?? "";
+	const line = brief.split("\n").find((l) => l.includes("contested fork")) ?? "";
+	assert.ok(line, "one line carries the decision-class map");
+	const methods = [...(line.match(/problem class \(([^)]*)\)/)?.[1] ?? "").matchAll(/→ `?([a-z][a-z-]*)`?/g)].map((m) => m[1]);
+	assert.deepEqual(methods, ["magi", "judge", "compete", "map", "critic-loop"], "the council parenthetical names strategies only");
+	for (const name of methods) assert.ok(getStrategy(name!), `${name} is a registered strategy`);
+	// `flow` is a separate TOOL for a shape an installed flow already encodes: its own sentence, not a strategy
+	assert.match(brief, /shape an installed flow already encodes → `flow`/);
+	// the map earns its tokens once: the old "deliberation or batch sweeps" gloss is gone, and an advertised
+	// `flow` is only named when the persona can see one
+	assert.doesNotMatch(brief, /deliberation or batch sweeps/);
+	const noFlows = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
+	assert.doesNotMatch(noFlows, /installed flow already encodes/);
+	const soft = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: false, background: true }) ?? "";
+	assert.doesNotMatch(soft, /contested fork/, "the soft discovery line stays a single sentence");
+});
+
+test("a persona that cannot call `council` is not taught problem classes; a convened council's ruling is not the supervisor's to redo", () => {
+	const input = { agents: AGENTS, teams: {}, flows: [], standing: true, background: true };
+	const withCouncil = buildDelegationBrief(input) ?? "";
+	const without = buildDelegationBrief({ ...input, council: false }) ?? "";
+	assert.match(withCouncil, /convene `council` by problem class/i);
+	assert.doesNotMatch(without, /council|contested fork/, "no class line for a tool the persona cannot call");
+	assert.match(without, /Hand off by default/, "the delegate default is untouched");
+	assert.doesNotMatch(withCouncil, /Keep only trivial single-step work, decisions/);
+	assert.match(withCouncil, /a decision a council was convened on is its ruling's/);
 });
 
 test("runtime context guidance no longer treats operator-only async status as model context", () => {
@@ -110,7 +185,7 @@ test("a generic requireBrief policy advertises the complete cold-start packet", 
 		teams: {},
 		flows: [],
 		standing: true,
-		asyncDefault: true,
+		background: true,
 		requireBrief: true,
 		outputContract: "finding",
 	});
@@ -128,7 +203,7 @@ test("generic write ownership and fresh-verification policies are advertised wit
 		teams: {},
 		flows: [],
 		standing: true,
-		asyncDefault: true,
+		background: true,
 		requireDisjointWrites: true,
 		requireFreshVerification: true,
 	});
@@ -141,7 +216,7 @@ test("generic write ownership and fresh-verification policies are advertised wit
 test("a read-only minimum call does not request write ownership", () => {
 	const brief = buildDelegationBrief({
 		agents: [{ name: "scout", tools: ["read", "grep", "find", "ls"] }],
-		teams: {}, flows: [], standing: true, asyncDefault: true, requireDisjointWrites: true,
+		teams: {}, flows: [], standing: true, background: true, requireDisjointWrites: true,
 	});
 	const call = brief?.match(/Minimum call: (delegate\(\{.*?\}\))\./)?.[1];
 	assert.ok(call, "the supervisor needs a complete minimum-call example");
@@ -155,29 +230,32 @@ test("without operator the example uses the first listed agent", () => {
 		teams: {},
 		flows: [],
 		standing: true,
-		asyncDefault: true,
+		background: true,
 	});
 	assert.match(brief ?? "", /delegate\(\{ agent: "scout"/);
 });
 
 test("no persona → soft discovery line, no standing mandate", () => {
-	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: false, asyncDefault: true });
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: false, background: true });
 	assert.ok(brief);
 	assert.equal(/Hand off by default/i.test(brief ?? ""), false);
 	assert.match(brief ?? "", /delegate/);
 });
 
-test("asyncDefault phrases the push model; sync default phrases the blocking call", () => {
-	const bg = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, asyncDefault: true });
-	const sync = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, asyncDefault: false });
+test("background phrases the push model; headless phrases the blocking call", () => {
+	const bg = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true });
+	const sync = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: false });
 	assert.match(bg ?? "", /background/i);
-	assert.match(bg ?? "", /don't watch or poll/i);
-	assert.equal(/don't watch or poll/i.test(sync ?? ""), false);
+	assert.match(bg ?? "", /end your turn/i);
+	assert.ok((bg ?? "").includes(END_TURN_NOTE), "the brief carries the SAME never-wait rule every launch receipt does");
+	assert.match(bg ?? "", /a fan-out's once, when its last leg settles/, "a fan-out is one wake, not one per result");
+	assert.equal(/never sleep/i.test(sync ?? ""), false);
+	assert.match(sync ?? "", /the call returns when they finish/i);
 });
 
 test("caps the agent list and says how many more", () => {
 	const many = Array.from({ length: 20 }, (_, i) => ({ name: `agent${i}` }));
-	const brief = buildDelegationBrief({ agents: many, teams: {}, flows: [], standing: true, asyncDefault: true });
+	const brief = buildDelegationBrief({ agents: many, teams: {}, flows: [], standing: true, background: true });
 	assert.match(brief ?? "", /and 4 more/);
 });
 

@@ -46,6 +46,9 @@ function cancelled(rounds: number, output: string, usages: AgentResult["usage"][
 
 export const criticLoop: Strategy = {
 	name: "critic-loop",
+	when: "ONE draft + adversarial critique, revised until the critic approves",
+	roster: "[generator, critic]",
+	team: "repair",
 	params: {
 		// `default` must name an agent that ACTUALLY runs (the collector resolves the participant
 		// as: the provided override, else roster[rosterIndex], else this agent) — never a phrase

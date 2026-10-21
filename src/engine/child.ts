@@ -242,7 +242,7 @@ export async function runChildAgent(
 			const onLine = (line: string) => {
 				if (!line.trim()) return;
 				try {
-					const toolEvent = applyEvent(state, JSON.parse(line), Date.now());
+					const toolEvent = applyEvent(state, JSON.parse(line));
 					// Ordinary stream progress stays coalesced to one snapshot per stdout chunk below.
 					// Tool lifecycle transitions are the exception: several can share one chunk and each
 					// authoritative transition must cross the progress seam exactly once.
@@ -509,7 +509,7 @@ export async function runChildAgent(
 			// start and was waiting on a slow first response.
 			result.errorMessage = `agent produced no progress within the ${opts.startupTimeoutMs}ms startup window — either it never started (a stalled init, e.g. an MCP adapter hanging) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (timedOut) {
-			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms${streamErr ? ` (last error: ${streamErr})` : ""}`;
+			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms (raise this leg's timeoutMs if its tool is legitimately silent)${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (aborted) {
 			result.errorMessage = `agent aborted${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (oversizedLine) {

@@ -5,6 +5,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
+import { Semaphore } from "../../../src/orchestration/parallel.ts";
+import { createBackgroundRuns } from "../../../src/tools/background-run.ts";
 import { registerDelegateTool } from "../../../src/tools/delegate-tool.ts";
 
 const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
@@ -19,23 +21,21 @@ function register(overrides: Record<string, unknown> = {}): { tool: any; deps: a
 		contractNames: () => ["default"],
 		buildEngine: () => ({ run: async (spec: any) => ({ agent: spec.agent, output: "done", usage: emptyUsage(), ok: true }) }),
 		agentTree: { add: () => {}, update: () => {}, remove: () => {} },
-		nextRootId: () => "delegate:test",
 		tracker,
+		completionNotifier: { discard: () => {} },
 		config: { ledgerV2: false },
 		RUN_LIMITS: { maxConcurrency: 4, maxChildren: 4, timeoutMs: 1000 },
 		publishAgentTool: () => {},
 		stopRegistry: new Map(),
 		steerRegistry: new Map(),
-		stopRequested: new Set(),
-		ensurePersonaModels: async () => {},
-		clearStops: () => {},
-		clearSteers: () => {},
 		drainBusBlock: () => "",
 		startPeek: () => {},
 		childUsage: { account: () => {} },
 		publishPersonaCost: () => {},
 		...overrides,
 	};
+	// A headless call joins its runs through the shared launcher, wired exactly as the extension wires it.
+	deps.runs ??= createBackgroundRuns({ tracker: deps.tracker, agentTree: deps.agentTree, stopRegistry: deps.stopRegistry, slots: new Semaphore(4), completionNotifier: deps.completionNotifier, startPeek: deps.startPeek, childUsage: { account: () => {}, accountMany: () => emptyUsage() } as any, publishPersonaCost: deps.publishPersonaCost });
 	registerDelegateTool({ registerTool: (definition: unknown) => { tool = definition; } } as unknown as ExtensionAPI, deps);
 	return { tool, deps };
 }
@@ -55,7 +55,7 @@ test("async single card persists and renders its tree alias after tracker reload
 	const first = register();
 	const launched = await first.tool.execute(
 		"single",
-		{ agent: "operator", name: "Dewglass-asyncfix", task: "repair the view", model: "provider/sonnet", async: true },
+		{ agent: "operator", name: "Dewglass-asyncfix", task: "repair the view", model: "provider/sonnet" },
 		undefined,
 		undefined,
 		ctx(),
@@ -86,7 +86,6 @@ test("fanout card shows only launched aliases and accounts for dropped tasks", a
 				{ agent: "scout", name: "Brooklantern", task: "second" },
 				{ agent: "operator", name: "Dropped-worker", task: "third" },
 			],
-		async: true,
 		},
 		undefined,
 		undefined,
@@ -188,7 +187,7 @@ test("duplicate composed aliases gain ids only to distinguish the colliding laun
 test("alias rendering sanitizes terminal controls and bounds labels on wide terminals", async () => {
 	const alias = `\u001b[2J${"界".repeat(160)}\nforged`;
 	const first = register();
-	const launched = await first.tool.execute("wide", { agent: "operator", name: alias, task: "inspect", async: true }, undefined, undefined, ctx());
+	const launched = await first.tool.execute("wide", { agent: "operator", name: alias, task: "inspect" }, undefined, undefined, ctx());
 	const afterReload = register();
 	const collapsed = render(afterReload.tool, launched, false, 500).trimEnd();
 	assert.doesNotMatch(collapsed, /\u001b|[\u0000-\u001f]/);
@@ -217,4 +216,13 @@ test("expanded launch metadata includes admitted snapshots beyond 128 rows", () 
 	assert.match(collapsed, /\+127 more/);
 	assert.match(collapsed, /expand/i);
 	assert.ok(visibleWidth(collapsed) <= 100);
+});
+
+test("only a background launch arms the status monitor; a headless leg runs inline with nobody to read a card", async () => {
+	let armed = 0;
+	const h = register({ startPeek: () => { armed++; }, childUsage: { accountMany: () => emptyUsage() } });
+	await h.tool.execute("headless", { agent: "operator", task: "t" }, undefined, undefined, { ...ctx(), hasUI: false });
+	assert.equal(armed, 0);
+	await h.tool.execute("interactive", { agent: "operator", task: "t" }, undefined, undefined, ctx());
+	assert.equal(armed, 1);
 });

@@ -44,6 +44,8 @@ function failed(results: AgentResult[], upstream: string, step: AgentResult): Ag
 
 export const pipeline: Strategy = {
 	name: "pipeline",
+	when: "ad-hoc ordered stages you name (no installed flow needed): each member refines the previous output; the last answer is the result",
+	roster: "stages, in order",
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length === 0) throw new Error("pipeline: a non-empty roster is required");

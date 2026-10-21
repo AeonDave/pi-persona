@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import {
 	buildCompletionReport,
-	buildPeekAlert,
 	buildPeekDigest,
 	clipRunOutput,
 	type AsyncRun,
@@ -30,14 +29,14 @@ test("async display surfaces sanitize hostile labels to bounded single-line iden
 		status: "running",
 		lastAdvanceAt: 0,
 		progress: { output: "", turns: 1, tokens: 1 },
+		label: hostileLabel,
+		model: hostileLabel,
 	});
-	running.label = hostileLabel;
-	running.model = hostileLabel;
 
 	const surfaces = [
 		buildPeekDigest([done]),
 		buildCompletionReport([done], (text) => text),
-		buildPeekAlert([running], { now: 90_000 }),
+		buildPeekDigest([running], { now: 90_000, stallMs: 45_000 }),
 	];
 	for (const surface of surfaces) {
 		assert.doesNotMatch(surface, /SYSTEM:\s*ignore previous instructions/);

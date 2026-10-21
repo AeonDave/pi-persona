@@ -64,7 +64,7 @@ test("ChildUsageLedger pending is engine-added spend not yet on a tool result", 
 	assert.equal(ledger.pending().input, 50);
 });
 
-test("ChildUsageLedger account with a key is idempotent so wait+result cannot double-bill", () => {
+test("ChildUsageLedger account with a key is idempotent so repeated result retrievals cannot double-bill", () => {
 	const ledger = new ChildUsageLedger();
 	const u = { ...emptyUsage(), cost: 0.3 };
 	ledger.add(u);
