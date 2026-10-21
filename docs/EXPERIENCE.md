@@ -43,27 +43,37 @@ supervisor is free. Keep the session open, and cancel a watch when its purpose e
 - **F9** opens the agent tree. Queued rows have not started their clocks. Live supervisor asks show
   `waiting for supervisor`, not a stall; running rows otherwise show elapsed time and switch to
   `⚠ stalled <duration>` after 90 seconds without progress — a suspicion, not proof of a deadlock.
-  Council parent clocks refresh on child engine events; that indicates liveness, not useful work.
+  Council parent clocks refresh on child engine events; that indicates liveness, not useful work. For the
+  stall card and `/peek`, "stalled" is stricter: 90 seconds with no assistant output, tokens, turns or
+  completed tool call, so a tool that only streams output (`npm run dev`, `tail -f`) is flagged too. It is
+  advice only: nothing is killed.
   A parent is waiting only when all its live descendant branches are waiting. Enter opens a selectable worker's output; `s` sends a course correction;
   `x` requests cancellation and appears only when the run can actually be stopped, marking the row
   `stopping…` at once; a stop that can't be applied says so instead of doing nothing. Escape goes
   back or closes the panel.
 - **`/peek`** gives a compact progress view. A quiet worker is a reason to inspect its last
   progress and current activity, not to launch a duplicate immediately.
+- **`/flow <name> <task>`** runs a flow (`/flow` alone lists them with descriptions; a `gate: true`
+  phase pauses for your approval, showing its output and what runs next). `/orchestrate <task>` runs
+  the active persona's `orchestration:` block (bundled personas declare `council:` instead, used via the
+  `council` tool); both run inline and their result also reaches the
+  supervisor's next turn. In the F9 list, `X` stops every running leaf agent after a
+  second press that states how many.
 - **Background results arrive automatically.** A supervisor can continue independent work while
   they run. When only background workers remain, end the turn and let completion follow-ups return
-  their results; do not monitor or poll healthy workers or automatically join the whole batch.
-  `intercom wait` snapshots immediately by default in interactive/RPC sessions; use `sync: true` for
-  an intentional bounded join when the next step depends on those results. Headless waits remain
-  blocking by default; pass `sync: false` for a snapshot.
-- **Answer a waiting worker before joining it.** A coaching worker may need a decision from its
+  their results; never sleep, poll, or arm a timer to wait for healthy workers (or monitors) - a
+  finished worker wakes the supervisor by itself. `intercom result { to: runId }` retrieves a settled
+  run. Interactive `delegate`, `council` and `flow` always run in the background (a receipt now, one
+  follow-up with the outcome; a flow checkpoint waits for you, not the supervisor; Esc does not abort
+  them: stop legs from F9 with `x`/`X`, or have the supervisor `intercom stop` the run); headless `pi -p` always blocks for the
+  turn and returns results inline, since nothing drains a follow-up after the process exits.
+- **Answer a waiting worker promptly.** A coaching worker may need a decision from its
   supervisor before it can finish. An unanswered question is actionable work.
 - **Steering is a request.** Check the subsequent output to see whether the worker incorporated
   it. In-process workers can receive guidance mid-run; child-engine workers (including MCP/worktree
   runs) receive it as a queued follow-up. Neither promises to interrupt arbitrary tool work, and
-  steering does not preempt an explicitly blocking `intercom wait`. End the supervisor turn rather
-  than join merely to idle. Check the terminal result after requesting cancellation; changes already
-  made are not undone.
+  steering is not a substitute for ending the turn. After requesting cancellation, the stopped report
+  arrives as a completion follow-up; changes already made are not undone.
 
 Launch cards and targeted Intercom calls show the same worker alias as the live tree. A steering
 receipt previews the message that was actually queued; expand it (`Ctrl+O` by default, or your

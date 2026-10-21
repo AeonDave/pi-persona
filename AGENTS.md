@@ -20,7 +20,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
     A test that exercises a variable sets it for itself, after that has run. Drop the flag and you
     are testing your shell, not the code.
 - Live end-to-end (REAL model calls, spends tokens): `npm run drive -- --persona <name> --model <provider/id> "<prompt>"`
+  - `drive.ts` exits non-zero and prints `[persona] ...` when the requested persona is not installed.
   - Control ops: `LIVE_MODEL=<provider/id> node --import tsx scripts/control-test.mjs` (STEER/STOP/RESUME)
+  - Interactive wake contract (manual, spends tokens, refuses without `LIVE_MODEL`):
+    `LIVE_MODEL=<provider/id> npm run smoke:wake` — RPC session, 3-leg `delegate` fan-out, asserts ONE
+    wake carrying all results and no peek/timer/sleep polling before it. Run it before a release.
   - Models must be **provider-qualified**, e.g. `claude-pro-max-native/claude-opus-4-8` or `.../claude-haiku-4-5`.
 
 ## Conventions
@@ -51,7 +55,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `createAgentSession`, DEFAULT) and **ChildProcessEngine** (`engine/child`, spawns `pi --mode json -p`,
   the correctness baseline + the path worktree isolation uses). Opt out with `PI_PERSONA_ENGINE=child`.
   BOTH enforce `RUN_LIMITS.timeoutMs` as an **idle window** (no events/output ⇒ abort; the inproc
-  watchdog is disabled for coaching children that may legitimately block on a supervisor reply) AND
+  watchdog is armed for every child; a live pending ask from that child re-arms it) AND
   `PI_PERSONA_AGENT_MAX_MS` as an **opt-in hard wall-clock cap** (lifetime ceiling armed once, never
   reset — catches a busy loop the idle window never does; OFF by default (0 = unlimited) so a healthy,
   progressing child runs to completion, set `<ms>` to arm it) AND
@@ -62,9 +66,14 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   notably a headless `mcp: true` leg whose `pi-mcp-adapter` hangs on interactive OAuth; `adapter.ts`
   turns that (turns===0 + `spec.mcp`) into a clear pre-auth remedy instead of an opaque timeout.
   The child engine delivers the task over **stdin** (`pi -p` prepends piped stdin) — never argv,
-  which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Async delegate launches
-  share one `maxConcurrency` semaphore (`Semaphore` in `orchestration/parallel.ts`), so an async
-  fan-out can't open more concurrent sessions than a sync one.
+  which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Every delegate leg, and every
+  tracked `council`/`flow` run (one slot for the whole run), headless included, shares one
+  `maxConcurrency` launch pool (`Semaphore` in `orchestration/parallel.ts`), so a fan-out can't open more
+  concurrent sessions than that; the strategy SDK's own semaphore gates the legs INSIDE a run.
+  Any event re-arms the idle window (a chatty tool is never killed), but stall credit follows one rule,
+  `madeHeadway` (`engine/async.ts`): raw tool-output chunks earn none, so a leg whose tool streams forever
+  raises only the operator-only stall card (nothing is killed, the model is not woken). The idle-timeout
+  failure text names the `timeoutMs` remedy.
   Each strategy SDK also gates every `agent()` call through one semaphore, including direct
   `Promise.all` calls; `parallel` overrides cannot raise its concurrency ceiling. Token budgets
   gate admission using completed usage, so already-running legs can overshoot the threshold.
@@ -111,16 +120,27 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   blind retry loops are stopped by the runtime `DelegationLedger` (an identical agent+model+task
   delegation that failed twice is vetoed before it spawns).
 - Dynamic sub-agents: `delegate` shapes an on-the-fly specialist with `role` (extra system prompt,
-  appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate. Intercom
-  `wait` snapshots already-settled reports by default in interactive/RPC sessions; `sync: true` opts
-  into a bounded join (≤ the bus-ask timeout). Headless waits default to joining; `sync: false` takes
-  a snapshot. Collected reports are discarded from the pending completion follow-up so they are
-  never double-reported; snapshots leave running children active. In interactive sessions `delegate`
-  is background-by-default (`sync: true` opts a call out; headless `pi -p` defaults to sync so the
-  single turn carries the result). An explicit `async` flag takes precedence over `sync` and the default.
+  appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate.
+  `delegate` has NO `sync`/`async` parameter and `intercom` has NO `wait`: interactive sessions
+  (`ctx.hasUI`, TUI and RPC) ALWAYS run `delegate` in the background (each result an idle-gated
+  completion follow-up; a `tasks` fan-out is ONE follow-up when its last member settles), headless
+  `pi -p` ALWAYS blocks and returns results inline (nothing drains a follow-up after the single turn).
+  A finished child wakes the supervisor by itself, so any in-turn wait (a sleep, a peek loop, a
+  `timer`/`monitor` used as a wait) blocks the wake it waits for. The prompt layer says to end the
+  turn; the call-time guards (`PollGuard` on repeated `peek`/`result`, the long-`sleep` block) live
+  under `config.nudge` (`PI_PERSONA_NUDGE=off`). `council` and `flow` follow the same rule through
+  `tools/background-run.ts` (`createBackgroundRuns`): interactive, ONE tracker run rooted at
+  `async:<runId>` (receipt now, one completion follow-up); headless, the same run joined inline. A
+  persona's `council:` defaults resolve exactly as before when the call omits strategy/roster/params; the
+  mandated `orchestration:` path stays pre-turn and inline, and `/orchestrate`, `/flow` and that path
+  register their own abort under their root row (`visibleRoot`). A rejected `gate: true` returns
+  `stoppedAtGate` (`ok` stays false, so mandatory flows still fail closed; a tracker run settles
+  `stopped`). Stop-all, checkpoint waits, operator-result hand-off, run ids, restore honesty, flow journal
+  identity (`flowRunHash`) and retention are in
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#supervision--the-waiting-model).
   Periodic async status and each newly detected stall episode are durable, expandable operator-only
-  entries. Interactive stalls never wake the model; headless sessions get at most one stall wake per run
-  lifetime. Completions, asks, and unread bus messages keep their existing actionable paths.
+  entries; stalls never wake the model. Completions, asks, and unread bus messages keep their
+  existing actionable paths.
   Message ids and run ids are separate: `intercom message { messageId }` retrieves retained bus
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
   drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears
@@ -129,7 +149,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
 - **Delegation nudges** (`core/nudge.ts`, on by default): a `tool_result` hook watches the supervisor's
   OWN tool stream and, when a delegating persona grinds heavy work by hand (output burn since the
-  last `delegate`/`council` crosses a threshold),
+  last `delegate`/`council`/`flow` crosses a threshold),
   APPENDS a compact labelled checkpoint to that command's result for the model AND emits the same
   checkpoint as a durable, expandable `pi-persona-nudge` TUI-only entry for the operator. It is never
   hidden/context-only: tool renderers may suppress their own `content`, but cannot suppress the
@@ -137,10 +157,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   directive has decayed. Pure state machine (`DelegationNudge`); gated to
   personas holding the `delegate` tool; sub-agents run in separate sessions so the hook only sees the
   supervisor. Its counterweight is **`PersistenceNudge`** — a leg that comes back `[BLOCKED]`/`FLAG:
-  UNKNOWN` gets a "don't bank it yet" reminder on each of the three delivery paths (sync result,
-  background completion, `intercom wait` — the last two via `engine/async.ts`'s `renderCompletion`), but
-  they do not scan the same text: `observe` scans the whole sync tool result (which `aggregateResults`
-  fills with every leg's body, failures included), while `renderCompletion` scans only `status: "done"`
+  UNKNOWN` gets a "don't bank it yet" reminder on each of its three delivery paths (the inline
+  `delegate`/`council`/`flow` result — headless only; the background completion
+  via `engine/async.ts`'s `renderCompletion`; and an explicit `intercom result` of a done run), but
+  they do not scan the same text: `observe` scans the whole sync tool result (every leg's body,
+  failures included; a headless `delegate` returns it unclipped), while `renderCompletion` scans only `status: "done"`
   runs. A background leg that FAILED while emitting `[BLOCKED]` therefore gets the failure block but no
   persistence note — deliberate (see the `renderCompletion` doc comment), not a bug to "fix" silently.
   Nested reports from codemode's `ctx.executeTool` retain bounded provenance through Pi's explicit
@@ -148,11 +169,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   the surrender marker gets the note/card. Nested programmatic data is never patched with a reminder,
   and discarded reports never generate an invisible one. Relay state clears at turn/session settlement.
   `config.nudge` (`PI_PERSONA_NUDGE=off`) silences all of it: the `tool_result` hook (the by-hand
-  reminder and the sync-result persistence one) and both `renderCompletion` call sites, which take
-  their `scan` through the same gate — so a background/`intercom wait` report carries no note either.
+  reminder and the sync-result persistence one) and the `renderCompletion` / `intercom result` paths,
+  which take their `scan` through the same gate — so a collected report carries no note either.
   Its standing counterpart is the **delegation brief** (`core/brief.ts`): `before_agent_start` appends
-  a live, capability-filtered roster (agents/teams/flows) + a hand-off default to the
-  system-prompt TAIL every turn — discovery that survives context burn.
+  a live, capability-filtered roster (agents, teams and flows, with descriptions and gated flows tagged in
+  headless sessions) + a hand-off default (with one decision-class → method line, checked against the
+  registry) to the system-prompt TAIL every turn — discovery that survives context burn.
 - **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
   (`AgentRunSpec.peers` — the `debate` strategy does). The child gets a `contact_peer` tool
   (`bus/peers.ts`): `list`/`send`, ONE-WAY only (blocking stays supervisor-only, so peers can
@@ -233,12 +255,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `src/core/monitor.ts`, process/delivery adapters in `src/monitor/`; use the existing idle notifier
   and process-tree cleanup. Session-scoped, no restoration on restart. See [`docs/MONITORS.md`](docs/MONITORS.md).
 
-- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), types.
+- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), session-runs (pure restore-notice helper: what a reload/resume lost + the run-id counter), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (cross-process relay, on by default: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`; `PI_PERSONA_BROKER=off` restores pre-broker spawn). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts` (pure model helpers), `settings-store.ts` (sole persistent settings owner).
-- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`. `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
+- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`, `background-run.ts` (tracked background council/flow runs: `launch`/`settle`, `TrackedRun`). `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
   persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),
@@ -248,7 +270,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   install shows NO personas until the user installs them. `/persona seed` copies missing defaults
   in, `/persona restore` force-restores originals (`src/core/seed.ts`). First-run auto-install is
   **opt-in**: off by default, enable with `PI_PERSONA_SEED=on` (guarded once by marker
-  `.pi-persona-seeded`). Contracts/presets/teams keep a builtin layer (they aren't personas).
+  `.pi-persona-seeded`). Release prep: add the previous tag's digest
+  to `LEGACY_SEEDED_DEFAULTS` for every changed persona/agent (the guard test in `seed.test.ts` prints the row).
+  F8 and `/doctor` point to `/persona seed` when no personas are installed. Contracts/presets/teams keep a builtin layer (they aren't personas).
 - `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic claim; run via `npm run smoke:exocom`). `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
@@ -268,7 +292,7 @@ their five preferences share the same registry/file. Do not hard-import a compan
 while collecting settings. Flow port/idle changes are for the next shared-service start, never a restart
 of a service other Pi sessions are using. Skill Optimizer remains independent.
 
-1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test.
+1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test. Declare `when` (one line), `roster` (positional roles, only where position matters) and `required` (param keys a call must carry) — the `council` tool description is generated from them (`strategyCatalog`) and refuses a missing required param up front; never hand-write a strategy list.
 2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `delegation:` / `coaching: true`; runtime behavior is field-driven, never keyed to a persona name.
 3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`, `mcp: true`
    (routes the leg through the child engine so `pi-mcp-adapter` initializes and its `mcp*`/direct

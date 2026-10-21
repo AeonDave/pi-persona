@@ -6,7 +6,8 @@ preserving the cached system prefix. During a long run it can call `timer` with 
 to refresh the clock. This is sampled wall-clock time, not a continuously updated model sense.
 
 Use `timer arm` for a known time. Use `monitor arm` when a program can report the event you care
-about. Sub-agent completions and Exocom messages already wake the supervisor automatically.
+about, never one whose only job is to elapse time. Sub-agent completions and Exocom messages already
+wake the supervisor automatically, so neither tool should wait on them.
 
 ## Background programs
 
@@ -56,7 +57,8 @@ model or an integration, not something the user needs to manage.
   to four per batch, and reports omitted older events if a busy model cannot keep up.
 - Keep Pi open. Watches are in memory and stop on shutdown, reload, or session replacement;
   they are not restored on resume. A headless `pi -p` invocation that exits after its answer is
-  not a persistent monitoring service.
+  not a persistent monitoring service: an alarm or event wakes it only if it lands before the single
+  turn settles, and the arm result says so instead of inviting the model to end its turn.
 
 ## Permissions and architecture
 

@@ -35,10 +35,10 @@ builtin, user, or project persona: `requireBrief`, `outputContract`, `requireDis
 declarative through `council: { strategy, roster, params }`; a custom persona can compose any installed
 strategy/team without a core change. The gates use effective agent/tool capabilities, conservatively
 treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
-concurrency in both synchronous and background execution. A serialized verifier is accepted only
+concurrency on the single launch path (interactive background or headless inline). A serialized verifier is accepted only
 after every material writer in that batch; otherwise the call fails before a child starts. The rule
 also holds ACROSS calls: a verifier launched while a material-writer background run is still live is
-rejected with the run id to wait on, so a later call cannot slip past the in-batch ordering.
+rejected, naming the mutating run ids, so a later call cannot slip past the in-batch ordering.
 
 ### The effort ladder (make the simple case simple; complexity is opt-in)
 
@@ -56,7 +56,9 @@ rejected with the run id to wait on, so a later call cannot slip past the in-bat
 You climb only when you want determinism, structure, or reuse. Nothing forces the higher tiers.
 The `council` tool is a gateway to all installed strategies, not a universal instruction to vote on
 routine work. Choose a strategy when its topology adds value; MAGI and Judge retain their specialized
-persona focus. A caller can supply ephemeral `members` with inline roles/models/skills instead of a
+persona focus. The tool description lists every strategy with its `when`, positional roster and required
+params, generated from the registry (`strategyCatalog`), and a call missing a required param is refused
+before any run exists. A caller can supply ephemeral `members` with inline roles/models/skills instead of a
 named team, without persisting a team or switching personas.
 
 ## Binding invariants (I1–I7)
@@ -100,7 +102,10 @@ These are the guardrails a contributor must not violate. They are enforced in co
 - **I5 — Flows are the top tier.** A declarative DAG (statically verified: acyclicity, references
   resolve, join reducers valid) above strategies. The flow engine stays thin — parse, verify,
   schedule, persist, resume — and a flow node may call any strategy. Journaled: finished nodes replay
-  from disk with no re-spend.
+  from disk with no re-spend. A resume matches only the same flow, the same task and the same project
+  (`flowRunHash` = flow + task + cwd); another task starts from scratch. A `gate: true` phase shows its
+  output and its dependents to the operator; a rejection returns `stoppedAtGate` (not a failure, though
+  `ok` stays false so mandatory orchestration still fails closed).
 - **I6 — Spawning is opportunistic by default; mandatory only when the persona declares it.** Two
   first-class cases: *opportunistic* (`mode: solo` / no block — the supervisor MAY delegate by its own
   judgement; never forced) and *mandatory* (`mode: strategy|flow|parallel|pipeline` with a roster —
@@ -161,8 +166,9 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `peerDependencies`, `/doctor`'s `pi:` line, and the README's stated floor trace back to this
   constant), `models`, `brief` (`buildDelegationBrief` — the per-turn delegation brief: live roster +
   standing hand-off default; and `buildExocomBrief` — the per-turn peer brief: live peers, the
-  peer-vs-sub-agent split, and the relevance bound on an exchange), `nudge` (the two
-  runtime-reinforcement state machines, `DelegationNudge` + `PersistenceNudge`), `display-label`
+  peer-vs-sub-agent split, and the relevance bound on an exchange), `nudge` (the
+  runtime-reinforcement state machines `DelegationNudge` + `PersistenceNudge`, and the call-time wake
+  guards `PollGuard` + `longWaitSeconds`), `display-label`
   (`sanitizeDisplayLabel` — an untrusted name reduced to bounded metadata before interpolation
   outside a fence), `timer` (`TimerScheduler` — the pure alarm engine behind the `timer` tool), `time`
   (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the elapsed-time
@@ -435,8 +441,9 @@ decides how precise each may be is a **prompt-cache** rule, not a taste one:
 - **Tail surfaces are free.** A tool result or a delivered message is written once and never re-sent
   as the cached prefix, so precision costs nothing there. An inbound peer delivery dates itself
   (`[rune] — reply · sent 20m ago`), and every settled leg reports its wall time on every
-  tracker-backed path — the done/failed/stopped report, the join, `intercom result`, and each
-  settled line of a peek digest.
+  tracker-backed path — the done/failed/stopped report, `intercom result`, and each
+  settled line of a peek digest; a running line ends its turns/tokens parenthesis with
+  `· running for <duration>` (not shown while queued).
 - **The system prompt is not.** It is re-composed and re-sent every turn and IS the cached prefix,
   so a minute-granular value there rewrites it every minute and throws away the provider's cache of
   everything before it. The **session anchor** therefore reads on a deliberately coarse ladder —
@@ -471,7 +478,7 @@ never simultaneously a telemetry event, a routed message, and a UI source of tru
   a source of truth. The `f9` agent tree and `peek` digest are ProgressViews.
 
 Steering is a supervisor-to-child control action, distinct from semantic Bus messages; requesting
-steering does not establish that an active blocking join has been interrupted. The peek digest is
+steering does not establish that a blocking headless delegate call has been interrupted. The peek digest is
 always a read-only ProgressView.
 
 External telemetry is not a fourth communication plane: it is a generic observer/export contract that
@@ -524,10 +531,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   Oversized or evicted messages return an unavailable diagnostic — retention is not durable evidence
   storage;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
-  Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card **sorts**
-  failed legs first, a failed council/flow card leads with the cause in its title, and an
-  `intercom wait` card leads with the `N settled — X done, Y failed` tally (per-leg causes sit in the
-  body, below the preview cut, so `wait`'s own success doesn't get a `failed` prefix);
+  Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card
+  names each failed leg on its own line, and a failed council/flow card leads with the cause in its title;
 - async launch cards and targeted Intercom call headers use the worker's canonical alias/model,
   matching the tree rather than promoting its routing ID to display identity. Launch/control receipts
   persist identity snapshots for history rendering; aliases never become routing keys. Colliding
@@ -542,8 +547,14 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   16 ms widget composition per terminal frame; identical lines/status are not republished, hierarchy
   rendering uses one adjacency index, and the F9 overlay rebuilds lazily when Pi paints rather than
   once per streamed token;
-- `/flow` and `/orchestrate` append durable, TUI-only expandable result entries rather than dumping a
-  large notification or a second copy into the model context;
+- `/flow` and `/orchestrate` append a durable, TUI-only expandable result card rather than a large
+  notification; the supervisor gets the same text (fenced, 12k-bounded) once, as a passive next-turn message;
+- an interactive `tasks` fan-out of two or more legs gets one container row, `delegate · N legs`
+  (`k/N settled`), that never counts as an in-flight agent and leaves with its last leg;
+- `X` is not a directed key: it acts on the whole stoppable set of leaf rows after a confirmation that
+  states how many agents it covers, and a changed set is re-confirmed. The set is every leaf plus any
+  run root with a stop handle (council/flow/mandated runs), and `x` on such a root stops the whole run.
+  `intercom stop` / `stop { to: "all" }` also cover tracker runs, `council` and `flow` included;
 - the F9 overlay's *directed* keys (`x` stop, `s` steer) act only on the agent the ▸ marker still
   shows; if that agent settles and is pruned mid-keystroke, the selection re-anchors visibly and the
   keypress is spent re-aiming instead of aborting an agent the user never chose. ↑↓, ⏎, and the scroll
@@ -679,38 +690,72 @@ a local process able to modify that directory is already inside the trust bounda
 
 ## Supervision & the waiting model
 
-- **sync** — the supervisor actively blocks on the delegate/strategy call (results still stream); no
-  idle/peek/steer.
-- **async** — interactive delegation is background-first; headless execution remains synchronous
-  by default. The prompt/runtime guidance is to continue independent work and, when only background
-  children remain, end the turn for automatic completion follow-ups rather than monitor or join the
-  whole batch. `intercom wait` collects a snapshot without blocking by default in interactive/RPC
-  sessions; settled results are reported and running children continue. Use `sync: true` for an
-  intentional bounded join. Headless sessions preserve the blocking default; `sync: false` requests a
-  snapshot. A snapshot does not wait, start timers/input hooks, or cancel children. Queued steering
-  does not release an explicitly active join. Input-triggered join interruption is
-  deliberately not implemented: a real Pi 1.0 SDK characterization shows steering can remain dormant
-  if delayed input hooks outlast the active run; no supported post-admission ordering guarantee
-  has been established. The supervisor otherwise returns control and
-  goes idle until a wake; the **peek watchdog** fires while async children run but stays SILENT unless
-  there is something to act on — a healthy background run should not interrupt. Every newly detected stall
-  episode (`STALL_FLAG_MS`, 90s) appends a durable, expandable operator-only warning entry, including while
-  the supervisor is busy. Interactive stalls never wake the model. In headless sessions, the first stall
-  episode may produce one focused patience-first model wake per run lifetime (ask the leg, don't probe its
-  environment); later stall episodes for that run do not re-arm the model-wake budget. Unread messages to the
-  supervisor retain their existing wake path. The **slow routine status card** (`PI_PERSONA_CHECKIN_MS`,
+There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode follows the session.
+
+- **Headless (`ctx.hasUI !== true`, e.g. `pi -p`)** — the supervisor blocks on the delegate, council or
+  flow call and gets results inline (returned once, unclipped; progress is only a `k/N done` counter), because nothing drains a follow-up after the
+  single turn exits. A runtime constraint, not a model-facing choice. The legs are still tracked, but
+  the status monitor stays off: the model is parked in the call and nobody reads a card.
+- **Interactive (TUI and RPC)** — delegation is ALWAYS background: the call returns run ids at once
+  and each result returns as an idle-gated completion follow-up (`intercom result { to: runId }`
+  retrieves a settled run; `peek`/`steer`/`stop` stay available, which a blocking call could never
+  offer). With only background children left, the supervisor ends its turn and goes idle until a wake;
+  it never sleeps, polls, or arms a `timer` to wait for a child or a monitor. The **peek watchdog**
+  fires while async children run but stays SILENT unless there is something to act on. A newly
+  detected stall (`STALL_FLAG_MS`, 90s) appends a durable, expandable operator-only card, even while
+  the supervisor is busy, and never wakes the model; unread messages to the supervisor keep their
+  wake path. The **slow routine status card** (`PI_PERSONA_CHECKIN_MS`,
   ~5 min, `0` disables) is a durable, expandable operator-only session entry with the compact ProgressView
   digest — never full transcripts — and does not start a model turn. Live supervisor asks
   are derived from the exact engine handle's optional `isWaitingForSupervisor` predicate: tree/F9/peek
   show waiting, and the watchdog suppresses false stalls until the ask settles. Parent clocks advance
   with child engine events (liveness, not proof of useful work); parents are waiting only when every
-  live descendant branch is waiting.
-  Stall alerts and live messages let an idle supervisor steer/stop a wedged child even with NO completion
-  fired; the enforcing backstop is the engines' hard wall-clock cap (above). The full digest is also on demand
-  via `/peek`.
+  live descendant branch is waiting. The peek watchdog's clock is stricter (`madeHeadway` in
+  `engine/async.ts`): a run advances only when assistant output, tokens or turns grew or a tool call
+  completed, and raw tool-output chunks earn nothing, so a leg whose tool streams forever (`npm run dev`,
+  `tail -f`) raises the operator-only stall card. A false advisory on a legitimately noisy long tool is
+  accepted; nothing is killed and the model is not woken. A council or flow run is credited per leg. The
+  tree/F9 clocks stay event-based.
+  The operator (or a manual `/peek`) can steer/stop a silent child. The supervisor's net for one is the
+  engine idle window (`RUN_LIMITS.timeoutMs`, 180s; startup deadline 300s), which kills it and returns a
+  failed completion follow-up whose text says to raise the leg's `timeoutMs`; the opt-in hard wall-clock cap (`PI_PERSONA_AGENT_MAX_MS`, off by
+  default) catches a busy non-converging leg.
+  Two call-time guards (under `config.nudge`, `PI_PERSONA_NUDGE=off` disables both) stop the in-turn
+  waits that would block those wakes: a repeated `intercom peek`/`result` whose answer has not changed
+  (per scope; `steer`/`stop` reset it) is refused, then asks Pi to end the turn (`terminate` is a hint
+  Pi honours when the peek is the batch's only call); a leading long `sleep`/`Start-Sleep` (>= 20s) is
+  stopped while background children run or are being launched (interactive only; a sleep prepared
+  before a same-batch `delegate` is an accepted false negative). A `delegate` fan-out (`tasks`) is
+  held and delivered as ONE completion follow-up when its last member settles, with every failed leg
+  named and clipped on its own line; single legs and separate calls are unchanged. Held reports are
+  dropped at session shutdown or reload, like the running legs, and the `PI_PERSONA_ASYNC_RETAIN`
+  default (64, the `tasks` cap) covers one whole call so early finishers stay fetchable. In headless `pi -p` the
+  `timer`/`monitor` arm text says the process exits when the turn settles, so such a wake lands only
+  if it fires before then.
+  **`council` and `flow` are the same kind of run** (`tools/background-run.ts`, `createBackgroundRuns`).
+  Interactive, each is ONE tracker run rooted at `async:<runId>`: a receipt now, ONE completion follow-up
+  (`intercom result { to: runId }` for the full payload), and the same `peek`/`stop`/`stop all`/f9 reach
+  as a delegate leg. Headless, the same run is launched and joined inside the tool call. Esc no longer aborts
+  one; stop it by key. Ownership of the limits: a run holds ONE slot of the delegate `maxConcurrency` launch
+  pool for its whole life (`queued` until granted; a flow keeps it while parked at a checkpoint); the strategy
+  SDK's per-run semaphore gates the legs INSIDE it, so members never compete with delegate legs for pool
+  slots; token budgets, the child limit, the delegation ledger and the fork-bomb guard stay in the SDK and
+  engine. A flow parked at a checkpoint is blocked on the OPERATOR: the run carries `awaiting`, peek reads
+  `waiting for operator at checkpoint <id>`, the stall watchdog skips it and nothing wakes the model; a
+  rejected checkpoint settles the run `stopped` and the plan reaches the model as its partial output. A
+  persona's `council:` defaults resolve unchanged when the call omits strategy, roster and params. The
+  mandated `orchestration:` path stays PRE-turn and inline (its result is the supervisor's first answer),
+  as do the `/orchestrate` and `/flow` slash commands; those runs register their own abort under their root
+  row, so shutdown ends the whole run. Operator-run results also reach the supervisor's next turn as a
+  passive, fenced, 12k-bounded message.
   Progress tokens are labelled **cumulative input/output**, not context occupancy; cache-read/write
   accounting is separate. Do not infer a full context window from that counter. File age or line-count
   changes alone likewise do not establish a stall, a passing test or completed work.
+  **Restore honesty:** `session_shutdown` records lost run ids, timers, monitors and the run-id counter
+  in a `pi-persona:runs` session entry (`core/session-runs.ts`). The next `session_start` (reload,
+  in-session resume, `pi -c`; not fork or `/new`) tells the supervisor once through a passive `nextTurn`
+  message, acknowledges it, and continues run ids so they never restart at `run-1` within a session.
+  Only ids matching a strict shape and capped counts are ever read back.
   Async failures are ALWAYS reported; the runtime `DelegationLedger` vetoes a blind retry loop (an
   identical agent+model+task delegation that failed twice is stopped before it spawns). Coaching is
   gated by `coaching: on` AND `canUseBus`.
@@ -718,26 +763,30 @@ a local process able to modify that directory is already inside the trust bounda
 **Runtime reinforcement of the hand-off default** comes as a standing part and a reactive part, because
 a persona directive lives at the TOP of the prompt and its pull decays as recent tool output balloons:
 
-- The **delegation brief** (`core/brief.ts`) is the STANDING half: live roster (agents + teams + flows)
-  and the hand-off default, appended to the system-prompt TAIL every turn, where recency wins the
+- The **delegation brief** (`core/brief.ts`) is the STANDING half: live roster (agents + teams + flows, with descriptions;
+  gated flows are tagged in headless sessions) and the hand-off default (including one decision-class → method
+  line that a test checks against the strategy registry), appended to the system-prompt TAIL every turn, where recency wins the
   tug-of-war a top-of-prompt line loses. It regenerates from the live registry (so it can't desync) and
-  filters to the active persona's `delegate` allowlist. It never dictates how MANY sub-agents or which
-  shape — that is each persona's own method.
+  filters to the active persona's `delegate` allowlist. It never dictates how MANY sub-agents; beyond the one class line,
+  the shape is each persona's own method.
 - The **nudges** (`core/nudge.ts`, on by default) are the REACTIVE half, landing in RECENT context on
   the event that warrants them:
   - **DelegationNudge** — a `tool_result` hook watches the supervisor's own tool stream and, when a
-    delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council`
+    delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council`/`flow`
     crosses a threshold), appends a compact labelled checkpoint (`Trigger` / `Scope` / `Action`) to
     that command's result for the model and mirrors it into a durable, expandable
     `pi-persona-nudge` custom entry for the operator. The entry is TUI-only (no duplicate model
     context or turn) and guarantees visibility even when a built-in/custom tool renderer suppresses
     result `content`. A successful hand-off resets the streak; a failed one keeps it and returns the
     same visible re-dispatch checkpoint.
+  - `flow` is a hand-off beside `delegate`/`council`: a successful flow resets the by-hand streak and a
+    failed one gets no re-dispatch checkpoint (its failure text is self-describing).
   - **PersistenceNudge** — the counterweight to premature surrender: a delegated leg's report carrying
-    `[BLOCKED]`/`FLAG: UNKNOWN` gets a "don't bank it yet" reminder. All three delivery paths carry it
-    (sync `delegate`/`council`, background completion, `intercom wait`), but coverage isn't identical:
+    `[BLOCKED]`/`FLAG: UNKNOWN` gets a "don't bank it yet" reminder. Three delivery paths carry it
+    (the inline `delegate`/`council`/`flow` result — headless only — background
+    completion, and an explicit `intercom result` of a done run), but coverage isn't identical:
     the sync path scans the WHOLE tool result including failed legs, while `renderCompletion` scans
-    only `status === "done"` runs by design — a failed background/`wait` leg already gets a failure
+    only `status === "done"` runs by design — a failed background leg already gets a failure
     block, so a `[BLOCKED]` marker there doesn't also get the persistence note. Same marker, same leg,
     different counterweight depending on how it was collected.
     Nested calls through codemode's `ctx.executeTool` leave their programmatic result untouched.
@@ -745,8 +794,9 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
     used to infer nesting. A bounded set of parent call ids carries report provenance through wrappers
     only while their output relays a surrender marker; the outer model-visible result alone gets the
     note/card. Suppressed reports produce neither, and turn/session settlement clears abandoned relay state.
-  - **The off switch covers every path.** `PI_PERSONA_NUDGE=off` silences DelegationNudge entirely and
-    PersistenceNudge on every collection path (sync result, background notifier, `intercom wait`).
+  - **The off switch covers every path.** `PI_PERSONA_NUDGE=off` silences DelegationNudge entirely,
+    PersistenceNudge on all three delivery paths (inline result, background completion, `intercom result`),
+    and both call-time wake guards (`PollGuard`, the long-sleep block).
 
 ## Discovery & seeding
 
@@ -763,6 +813,11 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
   pristine prior copy and preserves edited, linked, or unknown files. A migration can declare a bundled
   agent dependency; that missing file is installed first with no-clobber atomic creation, or the parent
   remains on its old bytes. Upgrades, dependency installs, and warnings are exposed in `/doctor`.
+  The legacy digest table (`LEGACY_SEEDED_DEFAULTS`) holds the LF-checkout bytes of every shipped
+  elite/swarm/MAGI-core version from v1.11.0, plus the v1.17.1 copies of every bundled persona. Release prep must add the
+  previous tag's digest for each changed persona/agent; the guard test in `seed.test.ts` prints the
+  row (and skips in CI's depth-1 checkout). With zero personas installed, F8 and `/doctor` point to
+  `/persona seed`, like `/persona list`.
   Contracts/presets/teams keep a builtin layer (they aren't personas).
 
 ## Cross-OS constructs
