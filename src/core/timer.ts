@@ -1,13 +1,12 @@
 /**
  * `TimerScheduler` — the pure kernel behind the supervisor-armable `timer` tool.
  *
- * Problem it solves: a supervisor that must WAIT for a fixed wall-clock moment (a scheduled event,
- * a service window, a scheduled re-check) has no cheap way to "sleep and resume". The
- * MCP/transport layer caps a blocking tool call at ~20-60s, so a 50-minute wait degenerates into
- * dozens of token-burning polls. The fix is an ALARM, not a sleep: arm a timer that, when it
- * expires, WAKES the session by injecting a follow-up (the extension routes the fire through the
- * same idle-delivery notifier that surfaces async-run completions — an idle delivery always starts
- * a fresh turn, so the supervisor resumes on its own).
+ * Problem it solves: a supervisor needs a wake at a fixed wall-clock moment the world decides (a
+ * scheduled event, a service window, a reminder). The MCP/transport layer caps a blocking tool
+ * call at ~20-60s, so a blocking sleep is not an option. The fix is an ALARM: arm a timer that,
+ * when it expires, WAKES the session by injecting a follow-up (the extension routes the fire
+ * through the same idle-delivery notifier that surfaces async-run completions — an idle delivery
+ * always starts a fresh turn, so the supervisor resumes on its own).
  *
  * This module is pure (injected clock + setTimer/clearTimer + an onFire sink), so scheduling,
  * validation, cancellation and listing are unit-tested without a live model or real wall clock.

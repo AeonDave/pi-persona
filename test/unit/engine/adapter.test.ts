@@ -218,6 +218,7 @@ test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for
 	assert.equal(r.ok, false);
 	assert.equal(r.failureKind, "timeout");
 	assert.match(r.error ?? "", /timed out/);
+	assert.match(r.error ?? "", /raise this leg's timeoutMs if its tool is legitimately silent/, "the child idle-timeout text names the remedy");
 });
 
 test("child adapter ignores a non-positive spec.timeoutMs override (falls back to the engine-level default)", async () => {

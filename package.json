@@ -63,7 +63,8 @@
     "test": "node --import tsx --import ./test/setup/hermetic-env.ts --test \"test/**/*.test.ts\"",
     "test:unit": "node --import tsx --import ./test/setup/hermetic-env.ts --test \"test/unit/**/*.test.ts\"",
     "drive": "node --import tsx scripts/drive.ts",
-    "smoke:exocom": "node --import tsx scripts/exocom-smoke.mjs"
+    "smoke:exocom": "node --import tsx scripts/exocom-smoke.mjs",
+    "smoke:wake": "node --import tsx scripts/wake-smoke.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { compactMemberResult, dissentLine, formatCouncilResult, humanizeAggregateResult, readableRuling } from "../../../src/orchestration/render.ts";
+import { aggregateResults } from "../../../src/orchestration/reducers.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
@@ -125,4 +126,9 @@ test("the collapsed council card sanitizes and bounds the child-authored headlin
 	assert.doesNotMatch(collapsed, /\u001b|\u0007/, "council chrome must not carry terminal escapes");
 	assert.match(collapsed, /^OWNED · winner · tally /);
 	assert.ok(collapsed.length <= 400, `collapsed council card was ${collapsed.length} chars`);
+});
+
+test("humanizeAggregateResult prefers the member label over the bare agent name", () => {
+	const agg = aggregateResults([{ agent: "reviewer", output: "sec", usage, ok: true }], ["reviewer · SECURITY"]);
+	assert.match(humanizeAggregateResult(agg) ?? "", /^✓ reviewer · SECURITY\n/);
 });

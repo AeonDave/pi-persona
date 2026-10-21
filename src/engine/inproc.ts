@@ -666,7 +666,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// One progress tick, routed exactly as the subscription routes them: the per-call sink
 			// takes the AgentProgress shape (no `turns`), else the construction-time sink.
 			const emitProgress = (snap: ProgressSnapshot): void => {
-				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
 				else if (deps.onProgress) deps.onProgress(snap);
 			};
 			let contractDef: ContractDef | undefined = requestedDef;
@@ -674,7 +674,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			try {
 				unsub = session.subscribe((ev) => {
 					armIdle(); // any event = activity → reset the idle clock
-					const toolEvent = applyEvent(state, ev, Date.now());
+					const toolEvent = applyEvent(state, ev);
 					// Track the open calls so an abandoned one can be closed once the run settles.
 					if (toolEvent) {
 						if (toolEvent.phase === "start") openToolCalls.set(toolEvent.callId, toolEvent.name);
@@ -735,7 +735,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 							// launch path (extension.ts) only has the latter.
 							const snap = snapshot(state);
 							const activity = `✉ from ${env.from}`;
-							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.toolOutputAt !== undefined ? { toolOutputAt: snap.toolOutputAt } : {}), activity });
+							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, activity });
 							else if (deps.onProgress) deps.onProgress({ ...snap, activity });
 						}
 					};
@@ -825,7 +825,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
-			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms (raise this leg's timeoutMs if its tool is legitimately silent)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			// The deadline cannot tell the two causes apart, so the message names both: claiming
 			// "it never started" would misdirect the operator of a leg that did start and was
 			// simply waiting on a slow first response (mirrors the child engine's wording).

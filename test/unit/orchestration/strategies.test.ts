@@ -936,7 +936,7 @@ test("map parses a bare array surrounded by prose (no fence) — the pre-existin
 test("map with ownership absent is byte-identical to before the param existed, even when items are dropped over the cap", async () => {
 	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
 	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);
-	const sections = Array.from({ length: LIMITS.maxChildren - 1 }, () => "### [worker] ok\n\nworked").join("\n\n---\n\n");
+	const sections = Array.from({ length: LIMITS.maxChildren - 1 }, (_, i) => `### [item ${i + 1}: item${i}] ok\n\nworked`).join("\n\n---\n\n");
 	const expected = `${sections}\n\n[pi-persona] 3 sub-item(s) beyond the worker cap (${LIMITS.maxChildren - 1}) were not run — this covers 7 of 10 sub-items.`;
 	assert.equal(r.output, expected, "no ownership param means no extra rendered line — the pre-existing footer is the whole story");
 });
@@ -1034,7 +1034,7 @@ test("map's verify param absent never spawns a verifier and output is byte-ident
 	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
 	const r = await map.run({ task: "T", roster: "m", params: {} }, sdk);
 	assert.equal(spawns, 3, "splitter + 2 workers only — no verifier ever spawns when the param is absent");
-	assert.equal(r.output, "### [worker] ok\n\ndone\n\n---\n\n### [worker] ok\n\ndone");
+	assert.equal(r.output, "### [item 1: a] ok\n\ndone\n\n---\n\n### [item 2: b] ok\n\ndone");
 });
 
 test('map "verify" runs one reviewer per COMPLETED item (fenced item + fenced worker output), never for a failed item', async () => {
@@ -2181,4 +2181,92 @@ test("debate preserves a homogeneous panel failure cause when no ruling exists",
 	assert.equal(r.ok, false);
 	assert.equal(r.error, "provider unavailable");
 	assert.equal(r.failureKind, "provider");
+});
+
+// ── N6: aggregates attribute outputs by lens role hint and by item ───────────────────────────────
+
+const REVIEW_LENSES = [
+	{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens" },
+	{ agent: "reviewer", role: "Focus ONLY on the TESTS lens" },
+];
+
+test("fanout over a role-specialised roster labels each section by lens and records the member", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => ({ agent: spec.agent, output: `found:${spec.role}`, usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => REVIEW_LENSES }, limits: LIMITS });
+	const r = await fanout.run({ task: "T", roster: "review", params: {} }, sdk);
+	assert.match(r.output, /### \[reviewer · SECURITY\] ok/);
+	assert.match(r.output, /### \[reviewer · TESTS\] ok/);
+	const members = (r.structured?.results as Array<{ member?: string }>).map((m) => m.member);
+	assert.deepEqual(members, ["reviewer · SECURITY", "reviewer · TESTS"]);
+});
+
+test("fanout over plain agents keeps agent headers and adds no member field", async () => {
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => ({ agent: spec.agent, output: "o", usage: usage(), ok: true }),
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["a", "b"] }, limits: LIMITS });
+	const r = await fanout.run({ task: "T", roster: "g", params: {} }, sdk);
+	assert.match(r.output, /### \[a\] ok/);
+	assert.ok((r.structured?.results as Array<Record<string, unknown>>).every((m) => !("member" in m)));
+});
+
+test("synthesize shows the synthesizer which lens produced each finding, and names a failed lens", async () => {
+	let synthesisTask = "";
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+			if (spec.task.includes("Findings:")) {
+				synthesisTask = spec.task;
+				return { agent: spec.agent, output: "merged", usage: usage(), ok: true };
+			}
+			return { agent: spec.agent, output: `found:${spec.role}`, usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => REVIEW_LENSES }, limits: LIMITS });
+	await synthesize.run({ task: "T", roster: "g", params: {} }, sdk);
+	assert.match(synthesisTask, /--- \[reviewer · SECURITY\] ---/);
+	assert.match(synthesisTask, /--- \[reviewer · TESTS\] ---/);
+
+	const dead: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> => ({ agent: spec.agent, output: "", usage: usage(), ok: false, error: "dead" }),
+	};
+	const failed = await synthesize.run({ task: "T", roster: "g", params: {} }, makeSDK({ engine: dead, roster: { team: () => REVIEW_LENSES }, limits: LIMITS }));
+	assert.match(failed.output, /\[reviewer · SECURITY\] dead; \[reviewer · TESTS\] dead/);
+});
+
+test("map labels each worker section with its item, clipped to one line", async () => {
+	const long = "x".repeat(200);
+	const engine: StrategyEngine = {
+		run: async (spec: AgentRunSpec): Promise<AgentResult> =>
+			spec.agent === "splitter"
+				? { agent: "splitter", output: JSON.stringify(["first\nitem", long]), usage: usage(), ok: true }
+				: { agent: spec.agent, output: "done", usage: usage(), ok: true },
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "T", roster: "m", params: {} }, sdk);
+	const headers = r.output.split("\n").filter((l) => l.startsWith("### ["));
+	assert.equal(headers[0], "### [item 1: first item] ok");
+	assert.match(headers[1] ?? "", /^### \[item 2: x{50,}…\] ok$/);
+	assert.ok((headers[1] ?? "").length < 100, "a long item cannot bloat the header");
+});
+
+test("map asks its splitter for {item, writeSet} objects exactly when ownership is declared or enforced, and for plain strings otherwise", async () => {
+	const prompts: Record<string, string> = {};
+	for (const ownership of ["off", "declare", "enforce"] as const) {
+		const engine: StrategyEngine = {
+			run: async (spec: AgentRunSpec): Promise<AgentResult> => {
+				if (spec.agent === "splitter") prompts[ownership] = spec.task;
+				return { agent: spec.agent, output: spec.agent === "splitter" ? JSON.stringify(["only"]) : "worked", usage: usage(), ok: true };
+			},
+		};
+		const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+		await map.run({ task: "T", roster: "m", params: ownership === "off" ? {} : { ownership } }, sdk);
+	}
+	assert.match(prompts.off ?? "", /JSON array of short strings/);
+	assert.doesNotMatch(prompts.off ?? "", /writeSet/, "without ownership the splitter prompt is byte-for-byte what it was");
+	for (const ownership of ["declare", "enforce"]) {
+		assert.match(prompts[ownership] ?? "", /"writeSet"/, `${ownership}: the splitter is asked to declare each item's write set`);
+		assert.doesNotMatch(prompts[ownership] ?? "", /array of short strings/, `${ownership}: one shape, not two competing ones`);
+	}
 });

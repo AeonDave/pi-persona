@@ -120,7 +120,7 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 		}
 		case "message": {
 			if (!params.messageId) {
-				return { text: "intercom message needs { messageId: <message id> }.", details: { action: "message", ok: false } };
+				return { text: "intercom message needs { messageId: <message id> }. To message a running child use steer { to: <run id>, message }.", details: { action: "message", ok: false } };
 			}
 			if (params.messageId.length > MAX_INTERCOM_REF_CHARS) {
 				return { text: `intercom messageId exceeds the ${MAX_INTERCOM_REF_CHARS}-character limit.`, details: { action: "message", ok: false } };

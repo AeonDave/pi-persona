@@ -7,6 +7,10 @@
 
 import { isThinkingLevel } from "./types.ts";
 
+/** Settled-but-uncollected async runs retained by default. Equal to the `tasks` cap (RUN_LIMITS.maxChildren,
+ *  64), so one maximum-width call can never evict its own first results before the batch is delivered. */
+export const DEFAULT_ASYNC_RETAIN = 64;
+
 export interface PiPersonaConfig {
 	disabled: boolean;
 	extraDirs: string[];
@@ -24,14 +28,14 @@ export interface PiPersonaConfig {
 	/** Engine backend for sub-agents: "inproc" (run in-process via `createAgentSession`,
 	 *  the default) or "child" (spawn `pi -p`, the baseline). */
 	engine?: "child" | "inproc";
-	/** Fast stall/message wakeup interval (ms): while async children run, a tick checks progress but
-	 *  stays SILENT unless a leg NEWLY looks stalled or a sub-agent messaged the supervisor — so a
+	/** Fast stall/message tick (ms): while async children run, a tick stays SILENT unless a leg NEWLY
+	 *  looks stalled (operator-only card) or a sub-agent messaged the supervisor (model wake), so a
 	 *  healthy run never interrupts. On by default (30000); PI_PERSONA_PEEK_MS=0 opts out (the routine
 	 *  check-in below is independent). */
 	peekEveryMs: number;
 	/** Routine check-in interval (ms): how often, while async children run, the operator gets a durable,
 	 *  expandable compact progress entry. It is status-only and does not start a model turn. Deliberately
-	 *  slow and independent of the fast stall/message wakeup. 300000 (5 min) by default;
+	 *  slow and independent of the fast stall/message tick. 300000 (5 min) by default;
 	 *  PI_PERSONA_CHECKIN_MS=0 opts out. */
 	checkInEveryMs: number;
 	/** Per-agent hard wall-clock cap (ms): an OPT-IN lifetime ceiling. When set (>0) it settles even
@@ -54,8 +58,9 @@ export interface PiPersonaConfig {
 	 *  300000 (5 min) by default; PI_PERSONA_AGENT_STARTUP_MS=0 disables it. */
 	agentStartupTimeoutMs: number;
 	/** Delegation nudge: when a delegating supervisor grinds a RUN of hands-on commands by hand (a
-	 *  by-hand sweep) without a hand-off, append a reminder to the offending tool's result. On by
-	 *  default; PI_PERSONA_NUDGE=off opts out. */
+	 *  by-hand sweep) without a hand-off, append a reminder to the offending tool's result. The same
+	 *  switch gates the call-time wake guards (the repeated peek/result refusal and the long-sleep
+	 *  block). On by default; PI_PERSONA_NUDGE=off opts out of all of them. */
 	nudge: boolean;
 	/** Cross-process broker (spec B1-B7): on by default so child-engine legs (MCP, worktree,
 	 *  `PI_PERSONA_ENGINE=child`) expose the same steer/contact_supervisor plane in-process
@@ -67,9 +72,9 @@ export interface PiPersonaConfig {
 	 *  additionally gated by the persona's canUseBus. */
 	exocom: boolean;
 	/** How many settled-but-uncollected async runs {@link AsyncRunTracker} retains before
-	 *  FIFO-evicting the oldest completed ones. 25 by default (today's hardcoded bound); set
-	 *  PI_PERSONA_ASYNC_RETAIN=<n> (a finite value >= 1) to raise it under heavy fan-out. A
-	 *  value < 1 (junk, negative, or 0 — not a meaningful retention bound) keeps the default. */
+	 *  FIFO-evicting the oldest completed ones. {@link DEFAULT_ASYNC_RETAIN} by default; set
+	 *  PI_PERSONA_ASYNC_RETAIN=<n> (a finite value >= 1) to change it. A value < 1 (junk,
+	 *  negative, or 0 — not a meaningful retention bound) keeps the default. */
 	asyncRetain: number;
 	/** Opt-in wider {@link DelegationLedger} veto key: OFF (default) keys purely on
 	 *  `agent+model+task` (today's veto *behavior* — unchanged; the key bytes themselves have
@@ -171,7 +176,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// steerable without a hidden env pin. Off-words restore pre-broker spawn env.
 		broker: !isOff(env.PI_PERSONA_BROKER ?? "on"),
 		exocom: false,
-		asyncRetain: 25,
+		asyncRetain: DEFAULT_ASYNC_RETAIN,
 		ledgerV2: false,
 		spine: "",
 		spineLegs: "",
@@ -199,7 +204,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		if (Number.isFinite(startup) && startup >= 0) config.agentStartupTimeoutMs = startup;
 	}
 	// A finite value >= 1 sets the retention bound; 0 isn't meaningful here (unlike the interval
-	// knobs above, where 0 opts out) so it — like junk/negative — falls back to the default 25.
+	// knobs above, where 0 opts out) so it — like junk/negative — falls back to the default.
 	const asyncRetainRaw = env.PI_PERSONA_ASYNC_RETAIN?.trim();
 	if (asyncRetainRaw !== undefined && asyncRetainRaw !== "") {
 		const retain = Number(asyncRetainRaw);

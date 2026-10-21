@@ -304,42 +304,19 @@ test("snapshot of a brand-new stream state is zeroed", () => {
 	assert.deepEqual(snapshot(createStreamState()), { output: "", turns: 0, tokens: 0 });
 });
 
-test("tool output updates advance liveness without changing transcript or answer", () => {
+test("raw tool output updates are not progress: the snapshot, transcript and answer stay put", () => {
 	const s = createStreamState();
 	applyEvent(s, { type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "ls" } });
-	const before = snapshot(s).output;
-	applyEvent(s, { type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", partialResult: { content: [{ type: "text", text: "listing files" }] } }, 123);
-	assert.equal(s.toolOutputAt, 123);
-	assert.equal(snapshot(s).output, before, "tool output is not appended to the transcript");
+	const before = snapshot(s);
+	for (const text of ["listing files", "listing files", ""]) {
+		assert.equal(
+			applyEvent(s, { type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", partialResult: { content: [{ type: "text", text }] } }),
+			undefined,
+			"an update is not a lifecycle transition",
+		);
+	}
+	assert.deepEqual(snapshot(s), before, "a chatty tool leaves nothing for the tracker to read as headway");
 	assert.equal(s.output, "", "tool output never becomes the returned answer");
-});
-
-test("empty and malformed tool updates do not advance liveness", () => {
-	const s = createStreamState();
-	applyEvent(s, { type: "tool_execution_start", toolCallId: "call-1", toolName: "bash" });
-	for (const update of [
-		{ toolCallId: "call-1", toolName: "bash", partialResult: { content: [] } },
-		{ toolCallId: "call-1", toolName: "bash", partialResult: { content: [{ type: "text", text: "" }] } },
-		{ toolCallId: "call-1", toolName: "bash", partialResult: { content: [{ type: "text", text: 3 }] } },
-		{ toolCallId: "", toolName: "bash", partialResult: { content: [{ type: "text", text: "x" }] } },
-		{ toolCallId: "other", toolName: "bash", partialResult: { content: [{ type: "text", text: "x" }] } },
-		{ toolCallId: "call-1", toolName: "", partialResult: { content: [{ type: "text", text: "x" }] } },
-	]) applyEvent(s, { type: "tool_execution_update", ...update }, 456);
-	assert.equal(s.toolOutputAt, undefined);
-});
-
-test("repeated textual tool output is fresh liveness when newly emitted", () => {
-	const s = createStreamState();
-	applyEvent(s, { type: "tool_execution_start", toolCallId: "call-1", toolName: "bash" });
-	applyEvent(s, { type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", partialResult: { content: [{ type: "text", text: "same" }] } }, 10);
-	applyEvent(s, { type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", partialResult: { content: [{ type: "text", text: "same" }] } }, 20);
-	assert.equal(s.toolOutputAt, 20, "newly emitted identical text is fresh activity");
-});
-
-test("snapshot preserves tool output timestamps including zero", () => {
-	const s = createStreamState();
-	s.toolOutputAt = 0;
-	assert.equal(snapshot(s).toolOutputAt, 0);
 });
 
 // --- G1: cacheWrite is num-guarded like the other usage fields ---

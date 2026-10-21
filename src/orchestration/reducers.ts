@@ -89,21 +89,25 @@ export function itemLedger(
 	});
 }
 
-/** Combine fan-out results into one labeled-section result; ok iff all ok. */
-export function aggregateResults(results: AgentResult[]): AgentResult {
-	const sections = results.map((r) => {
+/** Combine fan-out results into one labeled-section result; ok iff all ok. `labels` (aligned to
+ *  `results`) name each section by lens or item instead of the bare agent; the label is kept as
+ *  `member` only when it adds something, so a label-free call is byte-identical to before. */
+export function aggregateResults(results: AgentResult[], labels?: readonly string[]): AgentResult {
+	const labelOf = (r: AgentResult, i: number): string => labels?.[i] ?? r.agent;
+	const sections = results.map((r, i) => {
 		const status = r.ok ? "ok" : `failed${r.failureKind ? ` (${r.failureKind})` : ""}`;
 		const body = r.output || r.error || "(no output)";
 		const cause = !r.ok && r.error && r.output && r.error !== r.output ? `\n\nError: ${r.error}` : "";
-		return `### [${r.agent}] ${status}\n\n${body}${cause}`;
+		return `### [${labelOf(r, i)}] ${status}\n\n${body}${cause}`;
 	});
 	const aggregate: AgentResult = {
 		agent: "aggregate",
 		output: sections.join("\n\n---\n\n"),
 		structured: {
 			count: results.length,
-			results: results.map((r) => ({
+			results: results.map((r, i) => ({
 				agent: r.agent,
+				...(labelOf(r, i) !== r.agent ? { member: labelOf(r, i) } : {}),
 				ok: r.ok,
 				output: r.output,
 				error: r.error ?? null,

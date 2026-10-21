@@ -16,6 +16,7 @@ import { fenceUntrusted } from "../../core/fence.ts";
 import { cappedList } from "../../core/format.ts";
 import { validateParallelWriteSets } from "../../core/ownership.ts";
 import type { ChildUsage } from "../../engine/stream.ts";
+import { compactInlineText } from "../../ui/presentation.ts";
 import { itemLedger, type ItemLedgerEntry, sumUsage } from "../reducers.ts";
 import { parseAuxActor } from "../params.ts";
 import { rosterSpec, type RosterMember, type RosterSpec } from "../roster.ts";
@@ -144,10 +145,16 @@ async function splitIntoItems(
 	task: string,
 	maxItems: number,
 	reserveChildren: number,
+	declareWriteSets: boolean,
 ): Promise<SplitOutcome> {
+	// With ownership on, the splitter is the only party that can declare each item's write set, so it is asked
+	// for the object shape itself: one instruction, not a string array here and objects in the caller's prose.
+	const shape = declareWriteSets
+		? 'a JSON array of {"item": "<short description>", "writeSet": ["<every path a worker would edit>"]} objects (use [] for a read-only item)'
+		: "a JSON array of short strings";
 	const split = await sdk.agent({
 		...splitter,
-		task: `Break this task into independent sub-items. Return ONLY a JSON array of short strings — one per sub-item, nothing else.\n\nTask: ${task}`,
+		task: `Break this task into independent sub-items. Return ONLY ${shape} — one per sub-item, nothing else.\n\nTask: ${task}`,
 	}, { reserveChildren });
 	if (!split.ok) {
 		return {
@@ -263,6 +270,9 @@ function buildItemLedger(
 
 export const map: Strategy = {
 	name: "map",
+	when: "N items found at runtime: splitter lists, worker handles each in parallel",
+	roster: "[splitter, worker]",
+	team: "swarm",
 	params: {
 		maxItems: { type: "number", doc: "default AND ceiling: the run's maxChildren, less the splitter's own slot" },
 		peers: { type: "boolean", default: false, doc: "workers share load-bearing cross-item discoveries live" },
@@ -304,7 +314,7 @@ export const map: Strategy = {
 		// conservative upper bound; the cap above already guarantees the reserved waves fit.
 		const maxWorkerItems = Math.max(0, Math.floor(maxItems));
 		const splitReserve = maxWorkerItems * (reviewer ? 2 : 1);
-		const split = await splitIntoItems(sdk, splitter, input.task, maxItems, splitReserve);
+		const split = await splitIntoItems(sdk, splitter, input.task, maxItems, splitReserve, ownership !== "off");
 		if (!split.ok) return split.result;
 		const { allItems, items, dropped, usage: splitUsage } = split;
 		sdk.log(`map: ${items.length} items → ${worker.agent}${peers ? " (cross-talk on)" : ""}`);
@@ -317,7 +327,7 @@ export const map: Strategy = {
 		if (ownership === "enforce") enforceOwnershipOrThrow(items);
 
 		const results = await runWorkers(sdk, worker, input.task, items, peers, reviewer ? items.length : 0);
-		const agg = sdk.reduce.aggregate(results);
+		const agg = sdk.reduce.aggregate(results, items.map((it, i) => `item ${i + 1}: ${compactInlineText(it.item, { maxChars: 60 })}`));
 		// Say what was left out. The clamp is right — a worker per item past the cap would trip the
 		// pre-spawn guard and lose the whole fan-out — but an aggregate that silently covers part of
 		// the splitter's list reads as a complete answer over an incomplete input set.

@@ -17,6 +17,10 @@
 
 import { inventedExocomNameHint, inventedLegNameHint } from "./naming.ts";
 
+/** The one "a background run wakes you, never wait for it" rule: every launch receipt and the brief
+ *  carry THIS string, so the copies cannot drift apart. */
+export const END_TURN_NOTE = "never sleep, poll, peek, or arm a timer for it; end your turn if only it remains";
+
 /** Stable protocol guidance, not a user-like reminder or the optional behavioral spine. */
 export const RUNTIME_CONTEXT_GUIDANCE =
 	"[pi-persona] Runtime context: identity metadata, skill-prefetch catalogs and clock snapshots " +
@@ -36,17 +40,26 @@ export interface BriefAgent {
 	isolation?: "none" | "worktree";
 }
 
+export interface BriefFlow {
+	name: string;
+	description?: string;
+	/** Has a checkpoint phase: a human must approve before its dependents run. */
+	gated?: boolean;
+}
+
 export interface BriefInput {
 	/** Installed agents the active capabilities allow as delegate targets. */
 	agents: BriefAgent[];
 	/** Team name → member agent names (inline specialisations flattened to their agent). */
 	teams: Record<string, string[]>;
-	/** Installed flow names (empty ⇒ the line is omitted). */
-	flows: string[];
+	/** Installed flows (empty ⇒ the block and the `flow` hint are omitted; the caller empties it when `flow` is not callable). */
+	flows: BriefFlow[];
+	/** The persona can call `council` (default true): false omits the problem-class line. */
+	council?: boolean;
 	/** A persona is active: state the standing hand-off default, not just the roster. */
 	standing: boolean;
-	/** Delegate runs in the background by default (interactive sessions) — phrases delivery. */
-	asyncDefault: boolean;
+	/** Interactive session: delegate always runs in the background (headless blocks) — phrases delivery. */
+	background: boolean;
 	/** Require the six-field cold-start packet on every delegated leg. */
 	requireBrief?: boolean;
 	/** Output contract the active persona supplies by default. */
@@ -69,8 +82,11 @@ const DESC_CLIP = 96;
 /** Most agents/teams/flows listed by name; beyond this the brief says "+N more". */
 const MAX_LISTED = 16;
 const MAX_TOOL_NAMES = 6;
+/** Decision class -> council strategy (a test checks every name is a registered strategy). */
+const DECISION_CLASSES = "contested fork → magi; rival complete answers → judge; rival implementations → compete; N items → map; draft + critique → critic-loop";
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const oneLine = (s: string, n: number): string => clip(s.replace(/\s+/g, " ").trim(), n);
 
 function compactNames(names: readonly string[]): string {
 	const clean = names
@@ -143,12 +159,32 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 			`Teams (rosters for council/strategies): ${teamNames.map((t) => `${t}[${memberSummary(input.teams[t] ?? [])}]`).join(" · ")}`,
 		);
 	}
-	if (input.flows.length > 0) lines.push(`Flows: ${input.flows.slice(0, MAX_LISTED).join(", ")}`);
+	if (input.flows.length > 0) {
+		lines.push("Flows (run with `flow`):");
+		const listedFlows = input.flows.slice(0, MAX_LISTED);
+		for (const f of listedFlows) {
+			// A checkpoint is a normal pause with a human present; the tag is for the session where
+			// nobody can approve it, because there the flow stops at the gate and the choice matters.
+			const tag = f.gated && !input.background ? " [checkpoint needs a human; rejected headless]" : "";
+			lines.push(`- ${f.name}${f.description ? ` — ${oneLine(f.description, DESC_CLIP)}` : ""}${tag}`);
+		}
+		if (input.flows.length > listedFlows.length) {
+			lines.push(`- …and ${input.flows.length - listedFlows.length} more flows (see /doctor)`);
+		}
+	}
 	lines.push("Presentation: Pi already renders tool calls and their output. Do not narrate upcoming commands or stream a worklog; surface only decisions, blockers, and the final synthesis.");
 
+	// Problem class -> method: one standing line; the council tool's description carries the per-strategy detail.
+	// `flow` is a separate tool, so it gets its own sentence rather than a slot among the strategies.
+	const council = input.council !== false;
+	const methods = council ? ` Convene \`council\` by problem class (${DECISION_CLASSES}).` : "";
+	const flowHint = input.flows.length > 0 ? " A shape an installed flow already encodes → `flow`." : "";
+	const inline = council
+		? "Keep trivial single-step work and the final synthesis inline; a decision a council was convened on is its ruling's, not yours."
+		: "Keep only trivial single-step work, decisions, and the final synthesis inline.";
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
-	const delivery = input.asyncDefault
-		? "they run in the background and each result returns to you automatically as a follow-up — do useful independent work while children run; when only children remain, end your turn and let completion wake you. Do not monitor, poll, or automatically wait for all children (don't watch or poll a healthy leg). Join intentionally only when a result is needed before your next step; you're woken if a child newly stalls or messages you. Periodic status cards are for the operator and do not interrupt your work"
+	const delivery = input.background
+		? `they run in the background; results arrive as a follow-up only after your turn ends (a fan-out's once, when its last leg settles) — do independent work meanwhile; ${END_TURN_NOTE}`
 		: "the call returns when they finish";
 	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
 	if (input.requireBrief) {
@@ -164,7 +200,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}); convene \`council\` for deliberation or batch sweeps. Keep only trivial single-step work, decisions, and the final synthesis inline. Name each leg yourself. ${inventedLegNameHint()} ${minimum}`
+			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${minimum}`
 			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).`,
 	);
 	return lines.join("\n");

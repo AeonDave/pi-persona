@@ -10,10 +10,11 @@ import { buildExocomBrief, RUNTIME_CONTEXT_GUIDANCE } from "../core/brief.ts";
 import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
-import { HANDOFF_TOOL_NAMES, type DelegationNudge, type PersistenceNudge } from "../core/nudge.ts";
+import { HANDOFF_TOOL_NAMES, longWaitSeconds, type DelegationNudge, type PersistenceNudge, type PollGuard } from "../core/nudge.ts";
+import { findStoredRuns, makeRunsEntry, restoreNotice, RUNS_ENTRY_CUSTOM_TYPE } from "../core/session-runs.ts";
 import { buildSessionAnchor } from "../core/time.ts";
 import { readClockSnapshot } from "./clock.ts";
-import { type AsyncRun, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
+import { type AsyncRun, type AsyncRunTracker, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
 import { constrainedTurnAllows } from "../exocom/gate.ts";
 import type { LedgerClaim } from "../exocom/ledger.ts";
 import type { DisplayPeer } from "../exocom/plane.ts";
@@ -38,6 +39,9 @@ import { compactInlineText } from "../ui/presentation.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { ExocomInstall } from "../exocom/install.ts";
 import type { SessionIdentity } from "./identity.ts";
+
+type SessionManagerLike = { getSessionId?: () => string; getEntries?: () => readonly unknown[] };
+const sessionManagerOf = (ctx: ExtensionContext): SessionManagerLike => (ctx as ExtensionContext & { sessionManager?: SessionManagerLike }).sessionManager ?? {};
 
 type MandatoryOutcome = { label: string; output: string; ok: boolean; error?: string; failureKind?: FailureKind };
 
@@ -69,11 +73,15 @@ export interface HookHost {
 	telemetryAgent(node: AgentNode): TelemetryAgentInput;
 	delegationNudge: DelegationNudge;
 	persistenceNudge: PersistenceNudge;
+	/** Refuses an unchanged repeat of an intercom peek/result; absent when the nudge kill switch is off. */
+	pollGuard: PollGuard | undefined;
+	/** The async-run tracker: what is still running, and the run-id counter a restore continues. */
+	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom">;
 	appendNudgeEntry(content: string): void;
 	completionNotifier: IdleCoalescingNotifier<AsyncRun>;
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
 	timerNotifier: IdleCoalescingNotifier<TimerEntry>;
-	timerScheduler: { cancelAll(): void };
+	timerScheduler: { cancelAll(): void; readonly size: number };
 	monitors: MonitorSession;
 	peekWatcher: PeekWatcher;
 	stopPeek(): void;
@@ -124,13 +132,59 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		}
 		pendingSurrenderRelays.add(id);
 	};
+	// `delegate`/`council`/`flow` calls (all background launches) whose tool_call passed but whose result has
+	// not landed. Pi prepares every call of a batch before any executes, so a same-batch launch + `sleep`
+	// would otherwise see no running child yet. A launch that later fails validation counts until its result lands: accepted.
+	const launching = new Set<string>();
+	const clearInFlight = (): void => { pendingSurrenderRelays.clear(); launching.clear(); };
+	/** A tool the model can call right now: active in the host and allowed by the persona. */
+	const toolAllowed = (name: string): boolean => {
+		const caps = h.controller.capabilities;
+		return pi.getActiveTools().includes(name) && (!caps || canCallTool(caps, name));
+	};
+	// ── restore honesty ───────────────────────────────────────────────────────
+	// A reload/resume/`pi -c` ends this instance and with it every background run, armed timer and
+	// monitor (memory only). Shutdown records what dies and the run-id counter in a session entry
+	// (core/session-runs.ts); the next start tells the restored supervisor once, passively, and
+	// continues the ids so they never repeat within one history. Best effort: a failure on either
+	// side degrades to the old behaviour, never to a broken shutdown or start.
+	let restoredIssued = 0; // the counter this instance started from: unchanged ⇒ nothing new to record
+	function recordLostWork(ctx: ExtensionContext): void {
+		try {
+			const sessionId = sessionManagerOf(ctx).getSessionId?.();
+			if (!sessionId) return;
+			const lost = {
+				runs: [...new Set([...h.tracker.running(), ...h.completionNotifier.peekPending()].map((run) => run.id))],
+				timers: h.timerScheduler.size,
+				monitors: h.monitors.list().length,
+			};
+			if (lost.runs.length === 0 && lost.timers === 0 && lost.monitors === 0 && h.tracker.issued <= restoredIssued) return;
+			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(sessionId, h.tracker.issued, lost));
+		} catch { /* shutdown must complete */ }
+	}
+	function announceLostWork(ctx: ExtensionContext): void {
+		try {
+			const manager = sessionManagerOf(ctx);
+			const stored = findStoredRuns(manager.getEntries?.() ?? [], manager.getSessionId?.() ?? "");
+			if (!stored) return;
+			h.tracker.continueFrom(stored.issued);
+			restoredIssued = h.tracker.issued;
+			const notice = restoreNotice(stored.lost);
+			if (!notice) return;
+			pi.sendMessage({ customType: "pi-persona", content: notice, display: true }, { deliverAs: "nextTurn" }); // passive: never starts a turn
+			// Acknowledge so the newest entry is an empty loss: the same loss can never be announced twice.
+			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0 }));
+		} catch { /* the session start must complete */ }
+	}
+
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
-		pendingSurrenderRelays.clear();
+		clearInFlight();
 		h.lastCtx = ctx;
 		h.delegationNudge.reset(); // a fresh session starts with a clean by-hand run
 		h.childUsage.reset();
 		h.publishPersonaCost();
+		announceLostWork(ctx);
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no h.personas until `/persona seed` or `/persona restore`.
 		if (h.config.seed && !existsSync(h.seedMarker())) {
@@ -182,8 +236,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		await exocom.reconcile(ctx); // after persona activation, so plane + active tools share one gate
 		await h.telemetry?.stop("session-replaced");
 		h.telemetry = undefined;
-		const sessionManager = (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager;
-		const sessionId = sessionManager?.getSessionId?.();
+		const sessionId = sessionManagerOf(ctx).getSessionId?.();
 		if (sessionId) {
 			const eventBus = (pi as unknown as { events?: { emit?: (name: string, event: TelemetryEvent) => void } }).events;
 			try {
@@ -227,8 +280,9 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
-		pendingSurrenderRelays.clear();
+		clearInFlight();
 		h.lastCtx = ctx;
+		recordLostWork(ctx); // before the notifiers/timers/runs below are torn down
 		h.disposed = true; // gate any late async-run onComplete from touching the next session's instance
 		h.deferredOrchestrations.length = 0;
 		h.pendingOrchestration = undefined;
@@ -277,7 +331,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	// idle window first; its replay starts the next run and the remaining FIFO entries follow one per
 	// settlement. With no deferred input, flush ordinary wakes immediately.
 	pi.on("agent_settled", async () => {
-		pendingSurrenderRelays.clear();
+		clearInFlight();
+		h.pollGuard?.reset(); // a settled turn ends any poll streak: the next peek is a fresh look
 		if (h.lastCtx) h.telemetry?.publish("instance.updated", { ...exocom.currentTelemetryInstance(h.lastCtx), status: "idle" });
 		// Pi's `prepareToolCall` returns {kind:"immediate"} when the abort signal is already set
 		// after beforeToolCall — skipping afterToolCall, and so our tool_result hook. Those calls
@@ -356,13 +411,16 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		const now = Date.now();
 		const anchor = buildSessionAnchor(ctx.sessionManager?.getHeader?.() ?? null, now);
 		if (anchor) prompt = `${prompt}\n\n${anchor}`;
-		const wakeCaps = h.controller.capabilities;
-		const activeWakeTools = new Set(pi.getActiveTools());
-		const wakeAllows = (name: string) => activeWakeTools.has(name) && (!wakeCaps || canCallTool(wakeCaps, name));
 		const wakeGuidance: string[] = [];
-		if (wakeAllows("timer")) wakeGuidance.push("timer now reads the current clock; timer arm schedules a fixed-time wake (absolute times require a timezone).");
-		if (wakeAllows("monitor") && wakeAllows("bash")) wakeGuidance.push("monitor watches a job or event-producing program: mode=exit for job completion, mode=output for file/log/system changes reported as stdout lines. Filter changes in the producer; set a useful deadline and event count, and cancel the watch when its purpose ends.");
-		if (wakeGuidance.length) prompt = `${prompt}\n\n[Session wakes] ${wakeGuidance.join(" ")} Continue independent work while waiting; end your turn when only the event remains. These wakes require this Pi session to stay open. Use existing automatic sub-agent/peer notifications for their results; avoid duplicate watches or polling loops.`;
+		if (toolAllowed("timer")) wakeGuidance.push("timer now reads the current clock; timer arm schedules a fixed-time wake (absolute times require a timezone).");
+		if (toolAllowed("monitor") && toolAllowed("bash")) wakeGuidance.push("monitor watches a job or event-producing program: mode=exit for job completion, mode=output for file/log/system changes reported as stdout lines. Filter changes in the producer; set a useful deadline and event count, and cancel the watch when its purpose ends.");
+		if (wakeGuidance.length) {
+			// Headless `pi -p` exits when the turn settles, so "end your turn" would drop the wake.
+			const wakeTail = ctx.hasUI
+				? "Continue independent work while waiting; end your turn when only the event remains. These wakes require this Pi session to stay open."
+				: "Headless: a wake is delivered only if it fires before your turn settles; do not end the turn to wait for one.";
+			prompt = `${prompt}\n\n[Session wakes] ${wakeGuidance.join(" ")} ${wakeTail} Avoid duplicate watches.`;
+		}
 		const brief = h.delegationBrief(ctx);
 		if (brief) prompt = `${prompt}\n\n${brief}`;
 		// Per-turn exocom peer AWARENESS (mirrors the delegation brief above): regenerated from the
@@ -482,32 +540,28 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			status: "running",
 		});
 		const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
-		const gate = h.controller.gate(event.toolName, event.input);
-		if (gate) {
+		// A blocked call never reaches tool_result, so close its telemetry here.
+		const reject = <R>(result: R): R => {
 			h.telemetryToolStartedAt.delete(event.toolCallId);
 			h.telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
-			return gate;
-		}
+			return result;
+		};
+		const gate = h.controller.gate(event.toolName, event.input);
+		if (gate) return reject(gate);
 		if (exocom.ledgerFile) {
 			let pending: ReturnType<ExocomInstall["pendingAsks"]>;
 			try {
 				pending = exocom.pendingAsks(ctx);
 			} catch (error) {
 				if (constrainedTurnAllows(event.toolName)) pending = [];
-				else {
-					h.telemetryToolStartedAt.delete(event.toolCallId);
-					h.telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
-					return { block: true, reason: `exocom: ledger unavailable; mutation/delegation is fail-closed until storage recovers (${error instanceof Error ? error.message : String(error)})` };
-				}
+				else return reject({ block: true, reason: `exocom: ledger unavailable; mutation/delegation is fail-closed until storage recovers (${error instanceof Error ? error.message : String(error)})` });
 			}
 			if (pending.length > 0 && !constrainedTurnAllows(event.toolName)) {
-				h.telemetryToolStartedAt.delete(event.toolCallId);
-				h.telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
 				const omitted = pending.length > 1 ? `; ${pending.length - 1} more pending` : "";
-				return {
+				return reject({
 					block: true,
 					reason: `exocom: pending ask(s) to this session — only exocom_name (identity metadata), exocom_answer, exocom_decline, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id}${omitted})`,
-				};
+				});
 			}
 			if (WRITE_TOOLS.has(event.toolName) && typeof input.path === "string" && input.path.trim()) {
 				// Advisory: a ledger read failure here must not block an otherwise-allowed write.
@@ -524,11 +578,23 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 						const label = exocom.peerLabelFor(claim.from_session) ?? claim.from_name;
 						const reason = writeWarningReason(input.path, claim, label);
 						try { if (ctx.hasUI) ctx.ui.notify(reason, "warning"); } catch { /* cosmetic */ }
-						h.telemetryToolStartedAt.delete(event.toolCallId);
-						h.telemetry?.publish("tool.finished", { callId: event.toolCallId, agentId: "supervisor", name: event.toolName, status: "failed" });
-						return { block: true, reason };
+						return reject({ block: true, reason });
 					}
 				}
+			}
+		}
+		// A long leading sleep holds the turn that the idle-gated completion wake needs idle (and queues
+		// the operator's steering). Interactive only: a headless leg runs inline, so the model is parked
+		// in the delegate call and no wake is waiting on the turn.
+		if (h.config.nudge && ctx.hasUI === true && !event.parentToolCallId && (event.toolName === "bash" || event.toolName === "powershell") && typeof input.command === "string") {
+			const waitSeconds = longWaitSeconds(input.command);
+			const running = h.tracker.running().map((run) => run.id);
+			if (waitSeconds !== undefined && running.length + launching.size > 0) {
+				const instead = [toolAllowed("timer") && "a fixed clock time use timer arm", toolAllowed("monitor") && toolAllowed("bash") && "an external event use monitor"].filter(Boolean).join("; for ");
+				return reject({
+					block: true,
+					reason: `A ${Math.round(waitSeconds)}s wait blocks the completion wake and operator steering of ${running.length > 0 ? `the running sub-agents (${running.join(", ")})` : "the sub-agents you are launching"}. A finished run or batch wakes you by itself - end your turn.${instead ? ` For ${instead} - never to wait for these children.` : ""}`,
+				});
 			}
 		}
 		if (event.toolName === "intercom") {
@@ -583,6 +649,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				...(message.replyTo ? { replyTo: message.replyTo } : {}),
 			});
 		}
+		if (event.toolName === "delegate" || event.toolName === "council" || event.toolName === "flow") launching.add(event.toolCallId);
 		return undefined;
 	});
 
@@ -590,12 +657,13 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	// hands-on commands by hand — a by-hand sweep with no hand-off — append a reminder to the
 	// offending tool's result. It lands in RECENT context, on the very command that tripped it, where
 	// a top-of-prompt persona directive has already lost its pull. Sub-h.agents run in their own
-	// sessions, so this hook only ever sees the SUPERVISOR's own tools. A `delegate`/`council` result
-	// resets the run.
+	// sessions, so this hook only ever sees the SUPERVISOR's own tools. A `delegate`/`council`/`flow`
+	// result resets the run (a failed `flow` is self-describing and neither resets nor nudges).
 	pi.on("tool_result", (event, ctx) => {
 		h.lastCtx = ctx;
 		const open = h.telemetryToolStartedAt.get(event.toolCallId);
 		h.telemetryToolStartedAt.delete(event.toolCallId);
+		launching.delete(event.toolCallId);
 		if (open !== undefined) {
 			h.telemetry?.publish("tool.finished", {
 				callId: event.toolCallId,
@@ -711,12 +779,12 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		}
 		const notes: string[] = [];
 		// Grinding-by-hand reminder: a RUN of substantive hands-on commands on the supervisor's own
-		// tools (delegate/council reset the run). `size` classifies substantive vs glue + fat dump.
+		// tools (delegate/council/flow reset the run). `size` classifies substantive vs glue + fat dump.
 		const size = text.length;
 		const sweepNote = h.delegationNudge.observe(event.toolName, size, !errorPatch && event.isError !== true, text);
 		if (sweepNote) notes.push(sweepNote);
-		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council
-		// results only; because delegate/council reset the run the two never fire on one event).
+		// Premature-surrender reminder: a delegated leg that came back BLOCKED/UNKNOWN (delegate/council/flow
+		// results only; because those reset the run the two never fire on one event).
 		if (surrender) notes.push(surrender);
 		if (notes.length === 0) return errorPatch;
 		const joined = notes.join("\n\n");
@@ -843,6 +911,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	pi.on("input", async (event, ctx) => {
 		h.lastCtx = ctx;
 		if (event.source === "extension") return undefined;
+		h.pollGuard?.reset(); // a real operator message earns a fresh look
 		const orch = h.controller.activePersona?.orchestration;
 		const task = event.text?.trim();
 		if (!orch || !task) return undefined;

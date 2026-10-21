@@ -50,7 +50,7 @@ test("AgentTree remove reports descendants and clear reports the prior snapshot"
   assert.equal(removed?.type, "removed");
   if (removed?.type === "removed") assert.deepEqual(removed.nodes.map((n) => n.id).sort(), ["child", "root"]);
 
-  tree.add({ id: "x", label: "delegate", kind: "delegate" });
+  tree.add({ id: "x", label: "council", kind: "council" });
   tree.clear();
   const cleared = changes.at(-1);
   assert.equal(cleared?.type, "cleared");

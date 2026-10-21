@@ -22,6 +22,7 @@ import { seedDefaults } from "../../src/core/seed.ts";
 import { participantKey } from "../../src/persona/model-participants.ts";
 import { emptyUsage } from "../../src/engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../../src/orchestration/sdk.ts";
+import { convene as conveneOn } from "../setup/convene.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -37,6 +38,7 @@ function makeMockPi() {
 	const hooks: Record<string, AnyFn> = {};
 	const tools: Record<string, unknown> = {};
 	const commands: Record<string, { handler: AnyFn }> = {};
+	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
 		on: (ev: string, h: AnyFn) => { hooks[ev] = h; },
 		registerTool: (def: { name: string }) => { tools[def.name] = def; },
@@ -47,7 +49,7 @@ function makeMockPi() {
 		registerShortcut: () => {},
 		registerFlag: () => {},
 		getFlag: () => false,
-		sendMessage: () => {},
+		sendMessage: (message: unknown, options: unknown) => { sent.push({ message, options }); },
 		getAllTools: () => Object.keys(tools).map((n) => ({ name: n })),
 		getActiveTools: () => Object.keys(tools),
 		setActiveTools: () => {},
@@ -58,6 +60,7 @@ function makeMockPi() {
 	return {
 		pi: pi as unknown as ExtensionAPI,
 		tool: (name: string) => tools[name],
+		sentMessages: () => [...sent],
 		fire: (ev: string, ...args: unknown[]) => {
 			const h = hooks[ev];
 			if (!h) throw new Error(`no hook: ${ev}`);
@@ -172,6 +175,8 @@ function fakeEngine(runs: AgentRunSpec[]): StrategyEngine {
 		},
 	};
 }
+
+const convene = (h: Harness, id: string, params: Record<string, unknown>) => conveneOn(h, id, params);
 
 // Explicit user refresh is separate from the automatic, never-nag picker.
 test("/persona models magi refreshes saved cores for the active caller without switching personas", async () => {
@@ -304,8 +309,7 @@ test("an arbiter declared by an agent-typed strategy param is a participant and 
 	const cwd = projectWith("panel: [operator, verifier]\n");
 	const h = await boot({ cwd, persona: personaOf("Host.") });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("arbiter-1", { question: "decide", strategy: "judge", roster: "panel", params: { judge: "casper" } }, undefined, undefined, h.ctx);
+		await convene(h, "arbiter-1", { question: "decide", strategy: "judge", roster: "panel", params: { judge: "casper" } });
 
 		const asked = h.titles.filter((t) => t.includes('"casper"'));
 		assert.equal(asked.length, 1, `the arbiter must be offered a model, asked: ${JSON.stringify(h.titles)}`);
@@ -327,8 +331,7 @@ test("each lens role of one agent is its own participant, saved under a stable k
 	const cwd = projectWith(`lenses:\n  - { agent: reviewer, role: "${SECURITY}" }\n  - { agent: reviewer, role: "${PERF}" }\n`);
 	const h = await boot({ cwd, persona: personaOf("Host.") });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("roles-1", { question: "review", strategy: "fanout", roster: "lenses" }, undefined, undefined, h.ctx);
+		await convene(h, "roles-1", { question: "review", strategy: "fanout", roster: "lenses" });
 
 		assert.equal(h.titles.length, 2, `both lenses asked, got: ${JSON.stringify(h.titles)}`);
 		assert.ok(h.titles.some((t) => t.includes("reviewer · SECURITY")), h.titles.join(" | "));
@@ -342,7 +345,7 @@ test("each lens role of one agent is its own participant, saved under a stable k
 
 		// A SECOND run in the same session asks nothing: every participant is assigned now.
 		const before = h.titles.length;
-		await council.execute("roles-2", { question: "review again", strategy: "fanout", roster: "lenses" }, undefined, undefined, h.ctx);
+		await convene(h, "roles-2", { question: "review again", strategy: "fanout", roster: "lenses" });
 		assert.equal(h.titles.length, before, "an assigned participant is never re-asked");
 		// …and the saved role key is what the legs actually ran on.
 		const byRole = h.runs.filter((r) => r.agent === "reviewer");
@@ -357,14 +360,13 @@ test("a NEW roster's members are prompted once while an already-assigned roster 
 	const cwd = projectWith("first: [operator]\nsecond: [scout]\n");
 	const h = await boot({ cwd, persona: personaOf("Host.") });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("r1", { question: "one", strategy: "fanout", roster: "first" }, undefined, undefined, h.ctx);
+		await convene(h, "r1", { question: "one", strategy: "fanout", roster: "first" });
 		assert.deepEqual(h.titles.map((t) => t.match(/Model for "([^"]+)"/)?.[1]), ["operator"]);
 
-		await council.execute("r2", { question: "two", strategy: "fanout", roster: "first" }, undefined, undefined, h.ctx);
+		await convene(h, "r2", { question: "two", strategy: "fanout", roster: "first" });
 		assert.equal(h.titles.length, 1, "the assigned roster is silent on the second run");
 
-		await council.execute("r3", { question: "three", strategy: "fanout", roster: "second" }, undefined, undefined, h.ctx);
+		await convene(h, "r3", { question: "three", strategy: "fanout", roster: "second" });
 		assert.deepEqual(h.titles.map((t) => t.match(/Model for "([^"]+)"/)?.[1]), ["operator", "scout"], "a new actor is asked the first time it appears");
 		assert.deepEqual(Object.keys(h.savedModels()).sort(), ["operator", "scout"]);
 	}
@@ -374,11 +376,10 @@ test("a dismissed picker is never reopened for the same participant in the same 
 	const cwd = projectWith("pairless: [operator, verifier]\n");
 	const h = await boot({ cwd, persona: personaOf("Host."), select: () => undefined });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("d1", { question: "one", strategy: "fanout", roster: "pairless" }, undefined, undefined, h.ctx);
+		await convene(h, "d1", { question: "one", strategy: "fanout", roster: "pairless" });
 		const first = h.titles.length;
 		assert.equal(first, 2, "both members are offered a choice");
-		await council.execute("d2", { question: "two", strategy: "fanout", roster: "pairless" }, undefined, undefined, h.ctx);
+		await convene(h, "d2", { question: "two", strategy: "fanout", roster: "pairless" });
 		assert.equal(h.titles.length, first, "a dismissal is not a re-prompt; the run falls back to the session model");
 		assert.deepEqual(h.savedModels(), {}, "nothing was chosen, so nothing was written");
 		// The dismissed legs still ran, on the session default.
@@ -390,8 +391,7 @@ test("headless never opens a model dialog", async () => {
 	const cwd = projectWith("duo: [operator, verifier]\n");
 	const h = await boot({ cwd, persona: personaOf("Host."), hasUI: false });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("headless-1", { question: "one", strategy: "fanout", roster: "duo" }, undefined, undefined, h.ctx);
+		await convene(h, "headless-1", { question: "one", strategy: "fanout", roster: "duo" });
 		assert.deepEqual(h.titles, [], "a headless run must not ask anything");
 		assert.deepEqual(h.savedModels(), {}, "and must not invent assignments");
 		assert.equal(h.runs.length, 2, "the run still happens, on the runtime default");
@@ -405,8 +405,7 @@ test("an agent's own frontmatter model is never overridden by the picker", async
 	);
 	const h = await boot({ cwd, persona: personaOf("Host.") });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("front-1", { question: "one", strategy: "fanout", roster: "declared" }, undefined, undefined, h.ctx);
+		await convene(h, "front-1", { question: "one", strategy: "fanout", roster: "declared" });
 		assert.deepEqual(h.titles, [], `a declared model needs no prompt, got: ${JSON.stringify(h.titles)}`);
 		assert.deepEqual(h.savedModels(), {}, "the config defaults are left exactly as they were");
 		assert.deepEqual(h.runs.map((r) => r.agent), ["pinned"]);
@@ -433,8 +432,7 @@ test("a strategy engine is built WITHOUT the provider-reroute decorator (the SDK
 		engines: { makeEngine: () => failing, makeInProcessEngine: () => failing },
 	});
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		const result = await council.execute("nofallback-1", { question: "one", strategy: "fanout", roster: "duo" }, undefined, undefined, h.ctx);
+		const result = await convene(h, "nofallback-1", { question: "one", strategy: "fanout", roster: "duo" });
 		const legs = attempts.filter((a) => a.endsWith("@(resolved-by-engine)"));
 		assert.equal(legs.length, 2, `one first attempt per leg, got ${JSON.stringify(attempts)}`);
 		const reroutes = attempts.filter((a) => !a.endsWith("@(resolved-by-engine)"));
@@ -454,20 +452,17 @@ test("inline members win the named roster for the picker, and nothing static is 
 	const cwd = projectWith("team: [operator]\n");
 	const h = await boot({ cwd, persona: personaOf("Host.") });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute(
+		await convene(
+			h,
 			"inline-1",
 			{ question: "one", strategy: "fanout", roster: "team", members: [{ agent: "scout" }, { agent: "reviewer", role: "SECURITY lens" }] },
-			undefined,
-			undefined,
-			h.ctx,
 		);
 		const asked = h.titles.map((t) => t.match(/Model for "([^"]+)"/)?.[1]);
 		assert.deepEqual(asked, ["scout", "reviewer · SECURITY"], `the INLINE panel is the panel, got ${JSON.stringify(asked)}`);
 		assert.deepEqual(h.runs.map((r) => r.agent), ["scout", "reviewer"], "and it is what ran");
 
 		// The named team is untouched for the next call.
-		await council.execute("inline-2", { question: "two", strategy: "fanout", roster: "team" }, undefined, undefined, h.ctx);
+		await convene(h, "inline-2", { question: "two", strategy: "fanout", roster: "team" });
 		assert.deepEqual(h.runs.slice(2).map((r) => r.agent), ["operator"], "the static roster is unchanged");
 	}
 });
@@ -482,8 +477,7 @@ test("a role prompt carrying terminal escapes or newlines cannot repaint the pic
 	// that it is arbitrary caller prose on its way to a TUI title.
 	const h = await boot({ cwd: projectWith("unused: []\n"), persona: personaOf("Host.") });
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		await council.execute("nasty-1", { question: "one", strategy: "fanout", members: [{ agent: "reviewer", role: nasty }] }, undefined, undefined, h.ctx);
+		await convene(h, "nasty-1", { question: "one", strategy: "fanout", members: [{ agent: "reviewer", role: nasty }] });
 
 		assert.equal(h.titles.length, 1, `the lens is still offered a choice: ${JSON.stringify(h.titles)}`);
 		const title = h.titles[0] ?? "";
@@ -520,8 +514,7 @@ test("a model-fallback toast is sanitised and can never throw into the run", asy
 		engines: { makeEngine: () => failing, makeInProcessEngine: () => failing },
 	});
 	{
-		const council = h.m.tool("council") as { execute: AnyFn };
-		const result = await council.execute("toast-1", { question: "one", strategy: "fanout", roster: "duo" }, undefined, undefined, h.ctx);
+		const result = await convene(h, "toast-1", { question: "one", strategy: "fanout", roster: "duo" });
 		assert.ok(attempts.length >= 1, `the leg ran: ${JSON.stringify(attempts)} notes=${JSON.stringify(h.notes)}`);
 		const toasts = h.notes.filter((n) => n.includes("re-running on"));
 		assert.equal(toasts.length, 1, `one recovery toast for the one broken leg: attempts=${JSON.stringify(attempts)} notes=${JSON.stringify(h.notes)}`);

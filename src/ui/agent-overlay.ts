@@ -2,8 +2,8 @@
  * A focusable overlay over the unified agent tree, opened with ctx.ui.custom
  * (overlay: true). ↑↓ navigate the *agents* (leaf rows; a parent like "delegate"
  * is a non-selectable header), ⏎ drills into one — its live output in an
- * auto-scrolling viewport sized to the terminal — `x` stops it, `s` steers it
- * (from the list too), esc backs out / closes. Subscribes to the tree, so it
+ * auto-scrolling viewport sized to the terminal — `x` stops it, `X` (twice) stops every
+ * running agent, `s` steers it (from the list too), esc backs out / closes. Subscribes to the tree, so it
  * re-renders live as agents stream.
  *
  * The pure parts (flatten/order, glyphs, scroll window) live in agent-tree.ts /
@@ -119,6 +119,7 @@ export class AgentOverlay extends Container {
 	private unsubscribe: () => void;
 	private selectedId: string | undefined; // the selected agent's *id*, never its row index
 	private aimLost = false; // the aimed-at agent settled: swallow the next directed keystroke
+	private stopAllArmed: string | undefined; // the stoppable set the "press X again" prompt armed on
 	private listScroll = 0; // list rows scrolled off the top (keeps the selection visible)
 	private detailId: string | undefined;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
@@ -209,9 +210,11 @@ export class AgentOverlay extends Container {
 		return deriveWaitingNodeIds(nodes, (id) => this.actions.isWaitingForSupervisor?.(id) === true);
 	}
 
+	/** The selectable rows: every leaf, plus a container that carries a stop of its own (a council/flow run
+	 *  root), so `x` reaches the whole run instead of one leg. Other containers stay headers. */
 	private leafRows(snap: AgentNode[] = this.tree.snapshot()): FlatRow[] {
 		const parents = new Set(snap.map((n) => n.parentId).filter((p): p is string => p !== undefined));
-		return flattenTree(snap).filter((r) => !parents.has(r.node.id));
+		return flattenTree(snap).filter((r) => !parents.has(r.node.id) || this.actions.canStop?.(r.node.id) === true);
 	}
 
 	/**
@@ -296,7 +299,7 @@ export class AgentOverlay extends Container {
 		this.addChild(new Spacer(1));
 		const stoppable = selected !== undefined && this.canStopNode(selected);
 		const steerable = selected !== undefined && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false);
-		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${this.hintLine("list", stoppable, steerable)}   esc close`), 1, 0));
+		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
 		this.renderNotice();
 	}
 
@@ -413,6 +416,8 @@ export class AgentOverlay extends Container {
 	handleInput(keyData: string): void {
 		const hadNotice = this.notice !== undefined;
 		this.notice = undefined; // any key clears a previous refusal notice
+		const armed = this.stopAllArmed;
+		this.stopAllArmed = undefined; // only an immediately repeated X confirms
 		const kb = getKeybindings();
 		if (this.detailId) {
 			// Steer mode: type a message into the running agent. Capture all printable keys
@@ -483,6 +488,8 @@ export class AgentOverlay extends Container {
 		} else if (keyData === "x") {
 			const leaf = this.aimedLeaf(leaves);
 			if (leaf) this.tryStop(leaf.node.id);
+		} else if (keyData === "X") {
+			this.stopAll(armed);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.close();
 		} else if (hadNotice) this.refresh(); // unhandled key: still repaint so a cleared notice disappears
@@ -495,11 +502,17 @@ export class AgentOverlay extends Container {
 		return node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
 	}
 
-	/** The trailing "x stop"/"s steer" hint fragment for an action line — the list's three-space
-	 *  style or the detail view's " · " style, the two views' only difference here. */
-	private hintLine(kind: "list" | "detail", stoppable: boolean, steerable: boolean): string {
+	/** The agents `X` would stop: every leaf that `x` could stop. Shared by the hint and the key. */
+	private stoppableIds(snap: AgentNode[] = this.tree.snapshot()): string[] {
+		return this.leafRows(snap).filter((r) => this.canStopNode(r.node)).map((r) => r.node.id);
+	}
+
+	/** The trailing "x stop"/"X stop all"/"s steer" hint fragment for an action line — the list's
+	 *  three-space style or the detail view's " · " style, the two views' only difference here.
+	 *  `stopAll` (list only) is the stoppable count; one agent is what plain `x` is for. */
+	private hintLine(kind: "list" | "detail", stoppable: boolean, steerable: boolean, stopAll = 0): string {
 		const sep = kind === "list" ? "   " : "   ·   ";
-		return `${stoppable ? `${sep}x stop` : ""}${steerable ? `${sep}s steer` : ""}`;
+		return `${stoppable ? `${sep}x stop` : ""}${stopAll >= 2 ? `${sep}X stop all (${stopAll})` : ""}${steerable ? `${sep}s steer` : ""}`;
 	}
 
 	/** The one-line refusal notice, shown identically under the list and the detail view. */
@@ -514,6 +527,25 @@ export class AgentOverlay extends Container {
 		const node = this.tree.snapshot().find((n) => n.id === nodeId);
 		if (!node || !this.canStopNode(node) || !this.actions.onStop?.(nodeId)) {
 			this.notice = `nothing to stop for ${node?.label ?? nodeId}`;
+		}
+		this.refresh();
+	}
+
+	/** `X`: stop every stoppable agent after one confirming press. The prompt states how many agents
+	 *  it covers and arms on the exact set it saw, so a set that changed since (or any key in
+	 *  between) asks again — a bulk, irreversible stop is never fired on a stale confirmation. */
+	private stopAll(armed: string | undefined): void {
+		const ids = this.stoppableIds();
+		const key = ids.join("|");
+		if (ids.length >= 2) {
+			if (armed === key) {
+				let stopped = 0;
+				for (const id of ids) if (this.actions.onStop?.(id)) stopped++;
+				this.notice = `stop requested for ${stopped} agent${stopped === 1 ? "" : "s"}; queued or later stages may still start`;
+			} else {
+				this.stopAllArmed = key;
+				this.notice = `press X again to stop ${ids.length} running agents`;
+			}
 		}
 		this.refresh();
 	}

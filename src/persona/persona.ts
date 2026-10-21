@@ -11,6 +11,7 @@ import { asBoolean, asPermission, asStringArray, parseYamlSubset, splitFrontmatt
 import type { Permission } from "../core/permissions.ts";
 import { asSystemPromptMode, type SystemPromptMode } from "../core/types.ts";
 import { parseRuntimeRosterMember, type RosterMember } from "../orchestration/roster.ts";
+import { getStrategy } from "../orchestration/strategy.ts";
 
 export type OrchestrationMode = "solo" | "parallel" | "pipeline" | "strategy" | "flow";
 const ORCHESTRATION_MODES: readonly OrchestrationMode[] = ["solo", "parallel", "pipeline", "strategy", "flow"];
@@ -323,16 +324,19 @@ export function resolveCouncilInvocation(
 		if (!parsed.ok) return { ok: false, error: parsed.error };
 		members = parsed.members;
 	}
+	// A call that switches to another method starts from THAT method's team and params: the profile's roster and
+	// params belong to the profile's own strategy (dev's `repair` pair would otherwise be seated as magi voters).
+	const switched = strategy !== (base?.strategy || "magi");
 	const roster = members
 		? ""
 		: request.roster?.trim() ||
+			(switched ? getStrategy(strategy)?.team : undefined) ||
 			base?.roster ||
 			sourcePersona?.orchestration?.roster ||
 			(!requestedName ? activePersona?.orchestration?.roster : undefined) ||
 			"magi";
-	// Profile params belong to the profile's strategy. A per-call strategy switch starts
-	// with that strategy's own defaults; only explicitly supplied params cross the switch.
-	const inheritedParams = strategy !== (base?.strategy || "magi") ? {} : base?.params ?? {};
+	// Only explicitly supplied params cross a strategy switch.
+	const inheritedParams = switched ? {} : base?.params ?? {};
 	const value: ResolvedCouncilInvocation = {
 		strategy,
 		roster,

@@ -9,8 +9,6 @@ import { boundCompletionSurface, MAX_COMPLETION_REPORT_CHARS } from "../engine/a
 import type { InboundDecision } from "../exocom/inbound.ts";
 import { EXOCOM } from "../exocom/limits.ts";
 import type { DisplayPeer, ExocomInboundResult } from "../exocom/plane.ts";
-import type { DelegateView } from "../tools/delegate.ts";
-import type { AgentNodeStatus } from "../ui/agent-tree.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 
 const PI_PERSONA_TOOL_ERROR = "__piPersonaToolError";
@@ -113,10 +111,20 @@ export function exocomInboundBatchSize(items: readonly string[]): number {
 
 export const EXOCOM_INBOX_MAX = 3 * EXOCOM.SENDER_MAX_MSGS;
 
-export function agentNodeStatusForDelegate(view: Pick<DelegateView, "running" | "ok"> & { failureKind?: DelegateView["failureKind"] }): AgentNodeStatus {
-	if (view.running) return "running";
-	if (view.failureKind === "abort") return "stopped";
-	return view.ok ? "done" : "failed";
+/** A headless session (`pi -p`): a launching tool joins its run before returning, because nothing would
+ *  deliver a follow-up once the process exits. Interactive (TUI/RPC) sessions launch and return a receipt. */
+export function isInline(ctx: { hasUI?: boolean }): boolean {
+	return ctx.hasUI !== true;
+}
+
+/**
+ * The closing advice of a `timer`/`monitor` arm result. Headless `pi -p` exits when the turn settles,
+ * so a wake lands only if it fires first: ending the turn to wait for one would drop it.
+ */
+export function armWakeAdvice(ctx: { hasUI?: boolean } | undefined, noun: string, pending: string, interactive: string): string {
+	return ctx?.hasUI === false
+		? `Headless pi -p: the process exits when this turn settles, so this ${noun} wakes you only if it fires before then. Do not end your turn expecting it; finish inline, or report the ${pending} as pending.`
+		: interactive;
 }
 
 export function sendPersonaFollowUp(
@@ -171,5 +179,5 @@ export function fenceIntercomOutcome(out: { text: string; details: { action: str
 
 export function coachingDisabledHint(personaName: string | undefined): string {
 	const who = sanitizeDisplayLabel(personaName ?? "default", "default");
-	return `(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To just watch or redirect them use action "peek"/"steer"; to exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
+	return `(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To redirect one use action "steer"; results return on their own. To exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
 }

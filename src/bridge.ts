@@ -102,8 +102,9 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	const client = (deps.makeClient ?? makeBrokerClient)(clientDeps);
 
 	// Blocking asks are honoured only when the spawning run is async (`PI_PERSONA_ALLOW_BLOCKING`,
-	// set by adapter.ts from the strategy's `allowBlocking`) — a sync delegate/council/orchestrate
-	// turn holds the supervisor's turn, so a blocking `decision`/`interview` here would deadlock it
+	// set by adapter.ts from the strategy's `allowBlocking`) — a headless delegate/council/flow or a
+	// mandated pre-turn orchestration holds the supervisor's turn, so a blocking `decision`/`interview` here
+	// would deadlock it; an interactive (background) run leaves the supervisor idle and may block
 	// (the same safety default the in-process engine applies; see contact.ts / spec §4.9).
 	const allowBlocking = env.PI_PERSONA_ALLOW_BLOCKING === "1";
 	const bus = new BrokerBus(client);

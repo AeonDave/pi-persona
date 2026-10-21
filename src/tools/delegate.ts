@@ -1,28 +1,13 @@
 /**
- * The `delegate` tool's core logic — pure, engine-injected, testable. Maps params
- * to engine runs (single + bounded parallel), formats the result, and emits live
- * per-task "views" (running → done/failed) so the UI can show each sub-agent as
- * it runs. A task may carry `skills`/`model`/`tools` to spawn a *dynamic* sub-agent
- * (e.g. the generic `operator` specialised by the skills it loads). Capability
- * gating happens upstream in the `tool_call` hook.
+ * The `delegate` tool's pure core: parameter coercion and validation, the task → run-spec mapping,
+ * and the anti-loop ledger. A task may carry `skills`/`model`/`tools` to spawn a *dynamic* sub-agent
+ * (e.g. the generic `operator` specialised by the skills it loads). Capability gating happens
+ * upstream in the `tool_call` hook; launching and settling live in `delegate-tool.ts`.
  */
 
-import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
-import { mapWithConcurrency } from "../orchestration/parallel.ts";
 import { cappedList } from "../core/format.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
-import { validateParallelWriteSets } from "../core/ownership.ts";
-import { aggregateResults } from "../orchestration/reducers.ts";
-import {
-	type AgentRunSpec,
-	type InfrastructureFailure,
-	isInfrastructureFailure,
-	isPositiveFiniteMs,
-	legFailure,
-	type SteerFn,
-	type StrategyEngine,
-} from "../orchestration/sdk.ts";
-import type { AgentResult } from "../orchestration/types.ts";
+import { type AgentRunSpec, type InfrastructureFailure, isInfrastructureFailure, isPositiveFiniteMs } from "../orchestration/sdk.ts";
 
 export interface DelegateTask {
 	agent: string;
@@ -73,8 +58,6 @@ export interface DelegateParams {
 	outputContract?: string;
 	tasks?: DelegateTask[];
 	concurrency?: number;
-	async?: boolean;
-	sync?: boolean;
 }
 
 /** Structured cold-start context that any persona policy may require. */
@@ -299,21 +282,6 @@ export function coerceDelegateParams(raw: unknown): { ok: true; params: Delegate
 	return { ok: true, params: bag as DelegateParams };
 }
 
-/** A live per-sub-agent view for the UI (running → done/failed). */
-export interface DelegateView {
-	agent: string;
-	/** Display label: `name · model` (e.g. "kiln-port · sonnet-4-6"). */
-	label: string;
-	running: boolean;
-	ok: boolean;
-	/** Terminal failure classification; `abort` projects as stopped rather than failed in the UI. */
-	failureKind?: AgentResult["failureKind"];
-	output: string;
-	/** The tool the leg is currently running (e.g. "grep src/…"), "" if none. */
-	activity: string;
-	usage: ChildUsage;
-}
-
 /** Short model name for display: drop provider + `claude-` + any `:thinking`. */
 export function shortModel(ref: string | undefined): string {
 	if (!ref) return "";
@@ -323,8 +291,7 @@ export function shortModel(ref: string | undefined): string {
 
 /** The bare display NAME for a sub-agent (no model suffix): the loader's name, or a codename
  *  for a generic operator, else the agent's own name. Exported so a caller that folds in the
- *  model itself (e.g. the async tree node, `AsyncRun.label`) doesn't have to strip it back out
- *  of {@link labelFor}'s composite string. */
+ *  model itself (e.g. the async tree node, `AsyncRun.label`). */
 export function nameFor(t: { agent: string; name?: string }, index: number): string {
 	// No catalog of call-signs: an unnamed generic operator stays the agent name, disambiguated
 	// by index. The model is supposed to invent `<call-sign>-<purpose>` itself; this is only the
@@ -333,28 +300,8 @@ export function nameFor(t: { agent: string; name?: string }, index: number): str
 	return sanitizeDisplayLabel(t.name?.trim() || fallback, fallback);
 }
 
-/** Display label for a sub-agent: its bare {@link nameFor} name plus its short model. */
-export function labelFor(t: { agent: string; name?: string; model?: string }, index: number): string {
-	const name = nameFor(t, index);
-	const m = shortModel(t.model);
-	return m ? `${name} · ${m}` : name;
-}
-
-export interface DelegateOutcome {
-	text: string;
-	results: AgentResult[];
-	views: DelegateView[];
-	ok: boolean;
-}
-
-/** Hard ceilings the engine enforces regardless of what the LLM asks for. */
-export interface DelegateLimits {
-	maxConcurrency: number;
-	maxChildren: number;
-}
-
-/** Normalize an LLM-authored concurrency request once for sync scheduling, async scheduling, and
- * policy gates. Fractional/non-finite inputs fail toward serialization instead of rounding up. */
+/** Normalize an LLM-authored concurrency request once for scheduling and policy gates.
+ * Fractional/non-finite inputs fail toward serialization instead of rounding up. */
 export function normalizeDelegateConcurrency(value: number | undefined, maximum: number): number {
 	const ceiling = Math.max(1, Number.isFinite(maximum) ? Math.floor(maximum) : 1);
 	if (value === undefined) return ceiling;
@@ -363,9 +310,8 @@ export function normalizeDelegateConcurrency(value: number | undefined, maximum:
 }
 
 /** Map a task to the run-spec fields the engine accepts — the single source of truth for the
- *  delegate path's field mapping. Exported so the async launch path (extension.ts) routes
- *  through the SAME mapping instead of duplicating it (a duplicated copy is how NP2's
- *  `timeoutMs` could silently miss the async fan-out, which is the interactive default). */
+ *  delegate path's field mapping (a second copy is how a per-leg knob like `timeoutMs` silently
+ *  misses one launch route). */
 export function specOf(t: DelegateTask, index = 0): AgentRunSpec {
 	const renderedBrief = renderDelegationBrief(t.brief);
 	const spec: AgentRunSpec = {
@@ -404,6 +350,18 @@ export interface DelegationKeyInput {
 	role?: string;
 	tools?: string[];
 	isolation?: string;
+}
+
+/** The ledger's view of a task or run spec: just the key fields, absent when unset. */
+export function keyInputOf(t: Pick<DelegateTask, "agent" | "task" | "model" | "role" | "tools" | "isolation">): DelegationKeyInput {
+	return {
+		agent: t.agent,
+		task: t.task,
+		...(t.model ? { model: t.model } : {}),
+		...(t.role ? { role: t.role } : {}),
+		...(t.tools !== undefined ? { tools: t.tools } : {}),
+		...(t.isolation ? { isolation: t.isolation } : {}),
+	};
 }
 
 export class DelegationLedger {
@@ -469,9 +427,6 @@ export class DelegationLedger {
  * an operator abort is cancellation, and an engine REJECTION is the harness breaking (see
  * {@link isInfrastructureFailure}) — a full disk or a crashed adapter says nothing about whether the
  * delegation was a good idea, and two of them would blacklist a task that was never really attempted.
- * Lives beside the ledger so every path that records feeds it the same notion of evidence: the sync
- * fan-out settles a rejection as `ok:false` while the single and async paths let it propagate, and
- * without this the identical infrastructure crash would count in one path and vanish in the others.
  */
 export function shouldRecordDelegationOutcome(result: Partial<InfrastructureFailure>): boolean {
 	return result.failureKind !== "abort" && !isInfrastructureFailure(result);
@@ -517,147 +472,4 @@ export function unknownContractError(requested: Array<string | undefined>, insta
 		`delegate: unknown output contract(s) ${quoted(unknown)} — nothing was spawned. Installed contracts: ${cappedList(installed, 16)}. ` +
 		"`outputContract` takes a contract NAME; omit it for free-form output and describe the report shape in `requiredArtifacts`."
 	);
-}
-
-/**
- * Should this `delegate` call run in the BACKGROUND (async)? An explicit `async` always wins;
- * otherwise an interactive session (`hasUI`) defaults to background — the supervisor stays free and
- * results return as follow-ups — unless the call opts out with `sync: true`. A headless run (no UI,
- * e.g. `pi -p`) defaults to SYNC: the single turn must carry the result, and nothing drains a
- * follow-up after the process exits. `renderCall` passes `hasUI: true` (it only ever fires in a UI),
- * so the async tag it shows tracks the exact same default the execute path takes.
- */
-export function wantsAsyncRun(params: { async?: boolean; sync?: boolean }, hasUI: boolean): boolean {
-	return params.async ?? (hasUI && params.sync !== true);
-}
-
-function viewOf(agent: string, label: string, r: AgentResult): DelegateView {
-	return {
-		agent,
-		label,
-		running: false,
-		ok: r.ok,
-		...(r.failureKind !== undefined ? { failureKind: r.failureKind } : {}),
-		output: r.ok ? r.output || "(no output)" : r.error ?? "(failed)",
-		activity: "",
-		usage: r.usage,
-	};
-}
-
-export async function runDelegate(
-	params: DelegateParams,
-	engine: StrategyEngine,
-	limits: DelegateLimits = { maxConcurrency: 4, maxChildren: 8 },
-	onProgress?: (views: DelegateView[]) => void,
-	onLegStart?: (index: number, abort: () => void) => void,
-	onLegSteerable?: (index: number, steer: SteerFn) => void,
-	/** The RUN-level abort signal — the same one the caller baked into its engine. A whole-run
-	 *  cancellation reaches a leg through THIS, never through the per-leg controller below, so
-	 *  without it a cancelled leg whose engine rejects is filed as an agent failure and the user's
-	 *  own stop renders as FAILED. Mirrors `SDKDeps.signal`, which classifies the same way. */
-	signal?: AbortSignal,
-	/** Authoritative per-leg tool lifecycle; arguments and output are intentionally absent. */
-	onLegToolEvent?: (index: number, event: ToolEvent) => void,
-): Promise<DelegateOutcome> {
-	if (params.tasks && params.tasks.length > 0) {
-		// Enforce the hard ceilings: cap the fan-out and clamp the concurrency the
-		// LLM requested — a strategy/tool call cannot exceed the declared limits.
-		const tasks = params.tasks.slice(0, limits.maxChildren);
-		const dropped = params.tasks.length - tasks.length;
-		const concurrency = normalizeDelegateConcurrency(params.concurrency, limits.maxConcurrency);
-		if (concurrency > 1) {
-			const writeSetError = validateParallelWriteSets(tasks);
-			if (writeSetError) return { text: writeSetError, results: [], views: [], ok: false };
-		}
-		const labels = tasks.map((t, i) => labelFor(t, i));
-		const views: DelegateView[] = tasks.map((t, i) => ({
-			agent: t.agent,
-			label: labels[i] as string,
-			running: true,
-			ok: false,
-			output: "",
-			activity: "",
-			usage: emptyUsage(),
-		}));
-		onProgress?.(views.map((v) => ({ ...v })));
-
-		const results = await mapWithConcurrency(tasks, concurrency, async (t, i) => {
-			const ac = new AbortController();
-			onLegStart?.(i, () => ac.abort());
-			// An engine that REJECTS becomes this leg's own ok:false result: the fan-out's completed
-			// siblings (already spawned and billed) must still reach the supervisor. Nothing in here
-			// is run-fatal — the max-children ceiling was applied to `tasks` before anything spawned.
-			let r: AgentResult;
-			try {
-				r = await engine.run(
-					specOf(t, i),
-					(p) => {
-						// Stream the leg's rolling output + current tool activity.
-						if (p.toolEvent) onLegToolEvent?.(i, p.toolEvent);
-						const cur = views[i] as DelegateView;
-						views[i] = { ...cur, output: p.output || cur.output, activity: p.activity ?? "" };
-						onProgress?.(views.map((v) => ({ ...v })));
-					},
-					ac.signal,
-					(steer) => onLegSteerable?.(i, steer),
-				);
-			} catch (err) {
-				r = legFailure(t.agent, err, ac.signal.aborted || (signal?.aborted ?? false));
-			}
-			views[i] = viewOf(t.agent, labels[i] as string, r);
-			onProgress?.(views.map((v) => ({ ...v })));
-			return r;
-		});
-		const agg = aggregateResults(results);
-		const text =
-			dropped > 0
-				? `${agg.output}\n\n[pi-persona] ${dropped} task(s) beyond the max-children limit (${limits.maxChildren}) were dropped.`
-				: agg.output;
-		return { text, results, views, ok: agg.ok };
-	}
-
-	if (params.agent && params.task) {
-		const single: DelegateTask = { agent: params.agent, task: params.task };
-		if (params.name) single.name = params.name;
-		if (params.skills && params.skills.length > 0) single.skills = params.skills;
-		if (params.model) single.model = params.model;
-		if (params.tools !== undefined) single.tools = params.tools;
-		if (params.role?.trim()) single.role = params.role.trim();
-		if (params.isolation !== undefined) single.isolation = params.isolation;
-		if (params.mcp !== undefined) single.mcp = params.mcp;
-		if (params.timeoutMs !== undefined) single.timeoutMs = params.timeoutMs;
-		if (params.brief !== undefined) single.brief = params.brief;
-		if (params.writeSet !== undefined) single.writeSet = params.writeSet;
-		if (params.outputContract !== undefined) single.outputContract = params.outputContract;
-		const label = labelFor(single, 0);
-		const view: DelegateView = {
-			agent: params.agent,
-			label,
-			running: true,
-			ok: false,
-			output: "",
-			activity: "",
-			usage: emptyUsage(),
-		};
-		onProgress?.([{ ...view }]);
-		const ac = new AbortController();
-		onLegStart?.(0, () => ac.abort());
-		const r = await engine.run(
-			specOf(single),
-			(p) => {
-				if (p.toolEvent) onLegToolEvent?.(0, p.toolEvent);
-				if (p.output) view.output = p.output;
-				view.activity = p.activity ?? "";
-				onProgress?.([{ ...view }]);
-			},
-			ac.signal,
-			(steer) => onLegSteerable?.(0, steer),
-		);
-		const text = r.ok ? r.output || "(no output)" : `Agent "${params.agent}" failed: ${r.error ?? "(no detail)"}`;
-		const terminalView = viewOf(params.agent, label, r);
-		onProgress?.([{ ...terminalView }]);
-		return { text, results: [r], views: [terminalView], ok: r.ok };
-	}
-
-	return { text: "delegate: provide either { agent, task } or { tasks: [{ agent, task }, ...] }", results: [], views: [], ok: false };
 }

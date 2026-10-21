@@ -7,11 +7,11 @@ import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { coachingDisabledHint, expandDetailHint, reconcileAnsweredAsk } from "../extension/shared.ts";
 import {
-	type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildPeekDigest, buildWaitTimeoutNote,
-	MAX_ASYNC_STATUS_ROWS,
+	type AsyncRun, AsyncRunTracker, buildPeekDigest,
 	dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier,
-	renderCompletion, runDisplayName, runDurationLabel,
+	isAsyncRunStalled, runDisplayName, runDurationLabel,
 } from "../engine/async.ts";
+import type { PollGuard } from "../core/nudge.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { type IntercomOutcome, type IntercomParams, MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS, runIntercom } from "./intercom.ts";
@@ -32,33 +32,31 @@ export interface IntercomToolDeps {
 	SUPERVISOR: string;
 	STALL_FLAG_MS: number;
 	waitingRunIds?: () => ReadonlySet<string>;
+	/** Refuses an unchanged repeat of peek/result on a running run. Built only when `config.nudge`. */
+	pollGuard?: PollGuard | undefined;
 	missingRunMessage(id: string, display: string | undefined): string;
 	stopAgent(nodeId: string): boolean;
 	steerAgent(nodeId: string, text: string): boolean;
 	steerRegistry: Map<string, unknown>;
 	stopRequested: Set<string>;
-	drainBusBlock(): string;
+	/** The premature-surrender note for a settled report (config-gated), else undefined. */
 	scanForSurrender(text: string): string | undefined;
-	get disposed(): boolean;
 	childUsage: ChildUsageLedger;
 	publishPersonaCost(): void;
-}
-
-/** Keep an aborted wait honest: its signal may end the join well before the configured window. */
-export function buildIntercomWaitStillNote(ids: readonly string[], timeoutMs: number, interrupted: boolean): string {
-	if (!interrupted) return buildWaitTimeoutNote(ids, timeoutMs);
-	const visibleIds = ids.slice(0, MAX_ASYNC_STATUS_ROWS).map((id) => sanitizeDisplayLabel(id, "run"));
-	const omitted = ids.length - visibleIds.length;
-	const idSummary = `${visibleIds.join(", ")}${omitted > 0 ? `, … +${omitted} more` : ""}`;
-	return (
-		`⏹ wait interrupted before the configured ${timeoutMs}ms window elapsed; still running: ${idSummary}. ` +
-		"Continue useful supervisor work; completion will notify you automatically. Use intercom wait again when ready."
-	);
 }
 
 /** Fence only child-authored payloads; missing-message diagnostics remain actionable tool prose. */
 export function fenceIntercomToolOutcome(out: IntercomOutcome, action: string, fence: (text: string) => string): string {
 	return action === "message" && out.details.ok ? fence(out.text) : fenceIntercomOutcome(out, fence);
+}
+
+/** `run-4 (alpha · haiku) running, run-3 (scout) done, … (+2 more)` — the one bounded run listing
+ *  every id-to-call-sign teaching surface shares (a run miss, a bulk stop). `none` when empty. */
+export function describeRuns(runs: readonly AsyncRun[], opts: { status?: boolean; max?: number } = {}): string {
+	if (runs.length === 0) return "none";
+	const max = opts.max ?? 8;
+	const shown = runs.slice(0, max).map((run) => `${run.id} (${runDisplayName(run)})${opts.status ? ` ${run.status}` : ""}`);
+	return `${shown.join(", ")}${runs.length > max ? `, … (+${runs.length - max} more)` : ""}`;
 }
 
 /** Renderer-local state only. The persisted result, not this cache, owns display identity. */
@@ -77,13 +75,61 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		const collision = d.tracker.list().some((other) => other.id !== id && runDisplayName(other) === name);
 		return collision ? `${name} [${sanitizeDisplayLabel(id, "run")}]` : name;
 	}
+	/** An id the tracker holds nothing for: teach what exists (and why a stale id dead-ends) instead of
+	 *  letting steer/stop fall through to a false "already finished" or "no live steer handle". */
+	function missingRun(action: "result" | "steer" | "stop", to: string, display: string | undefined, snapshot: object) {
+		return { content: [{ type: "text" as const, text: d.missingRunMessage(to, display) }], details: failureDetails({ action, ok: false, ...snapshot }), isError: true };
+	}
+	/** `stop { to: "all" }`: request cancellation of every running run, each with the per-run semantics of a
+	 *  single stop — except that a run already stopping is reported, never force-cleared, in bulk. */
+	function stopAllRuns() {
+		const snapshot = { runId: "all", target: "all" };
+		const requested: AsyncRun[] = [];
+		const already: AsyncRun[] = [];
+		const unreachable: AsyncRun[] = [];
+		for (const run of d.tracker.running()) {
+			const nodeId = `async:${run.id}`;
+			if (d.stopRequested.has(nodeId)) already.push(run);
+			else (d.stopAgent(nodeId) ? requested : unreachable).push(run);
+		}
+		const noHandle = unreachable.length > 0 ? `No live stop handle: ${describeRuns(unreachable)}.` : "";
+		if (requested.length === 0 && already.length === 0) {
+			return { content: [{ type: "text" as const, text: noHandle || "intercom stop: no running runs to stop." }], details: failureDetails({ action: "stop", ok: false, ...snapshot }), isError: true };
+		}
+		if (requested.length > 0) d.pollGuard?.reset();
+		const parts = [
+			...(requested.length > 0 ? [`Cancellation requested for ${requested.length} run${requested.length === 1 ? "" : "s"}: ${describeRuns(requested)}. Stopped reports arrive as completion follow-ups; partial output is kept; changes already made are not undone.`] : []),
+			...(already.length > 0 ? [`Already stopping: ${describeRuns(already)}.${requested.length === 0 ? " Repeat stop { to: <run id> } on one that stays running to force-clear it." : ""}`] : []),
+			...(noHandle ? [noHandle] : []),
+		];
+		return { content: [{ type: "text" as const, text: parts.join(" ") }], details: { action: "stop", ok: true, ...snapshot }, isError: false };
+	}
+	/**
+	 * An unchanged repeat of a status check learns nothing and holds the turn the idle-gated completion
+	 * wake needs: refuse it, and on the second repeat end the turn. The signature is every shown run's
+	 * state (status, queued, waiting, stalled), so anything newly informative passes.
+	 */
+	function pollRefusal(action: "peek" | "result", scope: string, runs: readonly AsyncRun[], waiting: ReadonlySet<string> | undefined, snapshot: object) {
+		const running = runs.filter((r) => r.status === "running");
+		if (!d.pollGuard || running.length === 0) return undefined;
+		const now = Date.now();
+		const sig = runs.map((r) => [r.id, r.status, r.queued === true, waiting?.has(r.id) === true, isAsyncRunStalled(r, now, d.STALL_FLAG_MS)].join("|")).sort().join(",");
+		const verdict = d.pollGuard.check(scope, sig);
+		if (verdict === "ok") return undefined;
+		const text = `intercom ${action}: no run settled, started, queued, began waiting or stalled since your last ${action} (${running.map((r) => r.id).join(", ")} still running). Checking again blocks your own completion follow-ups and the operator's steering — end your turn; a finished run or batch wakes you. Use steer or stop only to intervene.`;
+		return {
+			content: [{ type: "text" as const, text }],
+			details: failureDetails({ action, ok: false, ...snapshot }),
+			isError: true,
+			...(verdict === "terminate" ? { terminate: true } : {}),
+		};
+	}
 	// ── intercom tool (supervisor side of the comm plane: read/answer children) ───
 	const IntercomToolParams = Type.Object({
 		action: Type.Union(
 			[
 				Type.Literal("peek"),
 				Type.Literal("result"),
-				Type.Literal("wait"),
 				Type.Literal("steer"),
 				Type.Literal("stop"),
 				Type.Literal("list"),
@@ -94,24 +140,20 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			],
 			{
 				description:
-					"peek = watch async sub-agents · result = retrieve one complete settled result by run id · wait = collect current reports; sync:true joins (default: nonblocking with UI, blocking headless) · steer = soft redirect into one by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = coaching messages (needs a coaching persona)",
+					"peek = status of async sub-agents · result = retrieve one complete settled result by run id · steer = soft redirect into one by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = coaching messages (needs a coaching persona)",
 			},
 		),
-		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek: the async run id (e.g. 'run-1') · wait: an async run id; omit it to collect all current/pending completions · send: the child handle (from `list`)" })),
+		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek: the async run id (e.g. 'run-1'); stop: \"all\" cancels every running run · send: the child handle (from `list`)" })),
 		messageId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "message: the drained bus message id shown by `inbox`" })),
 		askId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "reply: the message id of the child's pending question" })),
 		message: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_MESSAGE_CHARS, description: "steer/reply/send: the text to deliver" })),
-		sync: Type.Optional(Type.Boolean({ description: "wait: block for runs to settle; defaults to false in interactive/RPC sessions and true in headless sessions" })),
-		timeoutMs: Type.Optional(Type.Number({ description: "wait with sync:true: max ms to hold your turn (default 600000; values below 1000 clamp to 1000, values above 600000 clamp to 600000) — on timeout you get what settled + what's still running" })),
 	});
 	pi.registerTool({
 		name: "intercom",
 		label: "Intercom",
 		description: [
-			"See, steer, message, and JOIN your running sub-agents.",
-			"`peek` watches what your async sub-agents are doing; `result` retrieves one complete settled",
-			"payload by run id; `wait` collects current reports and is nonblocking by default with UI (interactive/RPC); set `sync: true` for an intentional bounded join. Headless defaults to joining; set `sync: false` for a snapshot. Do not automatically wait for all children.",
-			"Work independently while children run; when only children remain, end your turn and let completion follow-ups wake you; do not monitor or poll healthy children.",
+			"Steer, stop and inspect your background sub-agents; a finished run or batch wakes you with a completion follow-up.",
+			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` retrieves one complete settled payload by run id.",
 			"`steer` sends a soft course-correction to one (by run id); in-process async runs can receive it mid-run,",
 			"while child-engine (MCP/worktree) async runs receive it as a brokered follow-up. After remaining tools return, Pi can consume steering; arbitrary active tool work is not promised to stop immediately.",
 			"`message` retrieves a drained bus message by its message id; `list`/`inbox`/`reply`/`send` exchange coaching messages (a child reaches you via `contact_supervisor`)",
@@ -124,7 +166,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			// interpolate it into trusted prose without reducing it to compact identifier metadata.
 			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
 			const targetSnapshot = params.to === undefined ? {} : { runId: params.to, target: displayRunTarget(params.to) };
-			// peek + wait + steer + stop are supervisor→child controls over the async d.tracker /
+			// peek + result + steer + stop are supervisor→child controls over the async tracker /
 			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
 				// No `to` → running legs PLUS any settled-but-not-yet-delivered ones (the settle→deliver
@@ -132,25 +174,28 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const runs = params.to
 					? [d.tracker.peek(params.to)].filter((r): r is AsyncRun => !!r)
 					: dedupeRunsById([...d.tracker.running(), ...d.completionNotifier.peekPending()]);
-				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(d.waitingRunIds ? { waitingForSupervisor: d.waitingRunIds() } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot }, isError: false };
+				const waiting = d.waitingRunIds?.();
+				const refusal = pollRefusal("peek", params.to ?? "*", runs, waiting, targetSnapshot);
+				if (refusal) return refusal;
+				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(waiting ? { waitingForSupervisor: waiting } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot }, isError: false };
 			}
 			if (params.action === "result") {
 				if (!params.to) {
 					return { content: [{ type: "text", text: "intercom result needs { to: <run id> }." }], details: failureDetails({ action: "result", ok: false }), isError: true };
 				}
 				const run = d.tracker.peek(params.to);
-				if (!run) {
-					return { content: [{ type: "text", text: d.missingRunMessage(params.to, displayTarget) }], details: failureDetails({ action: "result", ok: false, ...targetSnapshot }), isError: true };
-				}
+				if (!run) return missingRun("result", params.to, displayTarget, targetSnapshot);
 				if (run.status === "running") {
+					const refusal = pollRefusal("result", `result:${params.to}`, [run], d.waitingRunIds?.(), targetSnapshot);
+					if (refusal) return refusal;
 					return {
-						content: [{ type: "text", text: `${targetSnapshot.target} is still running. Use intercom peek/wait, or request result after it settles.` }],
+						content: [{ type: "text", text: `${targetSnapshot.target} is still running; a finished run or batch wakes you with a completion follow-up. End your turn if nothing else remains.` }],
 						details: failureDetails({ action: "result", ok: false, status: run.status, ...targetSnapshot }),
 						isError: true,
 					};
 				}
 				// Explicit collection owns this delivery: remove a still-buffered passive completion so the
-				// same result cannot appear again as a follow-up a moment later. Telling the d.tracker too
+				// same result cannot appear again as a follow-up a moment later. Telling the tracker too
 				// makes this retained copy the first thing retention evicts — the supervisor has read it,
 				// so it is the cheapest payload in the map to lose.
 				d.completionNotifier.discard((pending) => pending.id === run.id);
@@ -162,82 +207,16 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const cause = run.error ? `\nFailure detail:\n${fenceUntrusted(run.error)}` : "";
 				const displayRun = sanitizeDisplayLabel(run.label ?? run.agent);
 				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
-				// the supervisor through, so it carries the same reading the passive/join reports do.
+				// the supervisor through, so it carries the same reading the passive completion report does.
 				const took = runDurationLabel(run);
+				// The follow-up discarded above is what would have carried the premature-surrender note, so
+				// a collected DONE report must carry it itself (a failed leg is already a failure report).
+				const note = run.status === "done" ? d.scanForSurrender(full) : undefined;
 				const billed = d.childUsage.accountMany([{ key: run.id, usage: run.result?.usage ?? emptyUsage() }]);
 				d.publishPersonaCost();
 				return {
-					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${cause}\n${body}` }],
+					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${cause}\n${body}${note ? `\n\n${note}` : ""}` }],
 					details: { action: "result", ok: true, status: run.status, ...targetSnapshot },
-					isError: false,
-					...toolUsageField(billed),
-				};
-			}
-			if (params.action === "wait") {
-				// No `to` → wait on running legs AND collect settled legs still queued for follow-up
-				// delivery, so a wait in the settle→deliver gap returns their results (not "nothing").
-				if (params.to && !d.tracker.peek(params.to)) {
-					return { content: [{ type: "text", text: d.missingRunMessage(params.to, displayTarget) }], details: failureDetails({ action: "wait", ok: false, ...targetSnapshot }), isError: true };
-				}
-				const ids = params.to
-					? [params.to]
-					: dedupeRunsById([...d.tracker.running(), ...d.completionNotifier.peekPending()]).map((r) => r.id);
-				if (ids.length === 0) {
-					return { content: [{ type: "text", text: "No async runs to wait for." }], details: { action: "wait", ok: true }, isError: false };
-				}
-				// Interactive/RPC defaults to a snapshot: waiting inside a tool stalls queued user steering.
-				// Headless retains its historical join; callers can override either default with sync.
-				if (!(params.sync ?? ctx.hasUI !== true)) {
-					const current = ids.map((id) => d.tracker.peek(id)).filter((run): run is AsyncRun => !!run);
-					const settled = current.filter((run) => run.status !== "running");
-					const still = current.filter((run) => run.status === "running");
-					const settledIds = new Set(settled.map((run) => run.id));
-					d.completionNotifier.discard((run) => settledIds.has(run.id));
-					for (const id of settledIds) d.tracker.markCollected(id);
-					const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => d.scanForSurrender(t)) : "";
-					const stillIds = still.map((run) => sanitizeDisplayLabel(run.id, "run"));
-					const omitted = stillIds.length > MAX_ASYNC_STATUS_ROWS;
-					const runningNote = still.length > 0
-						? `Background continues; automatic completion will notify you. End your turn when this is the only remaining work. Still running: ${stillIds.slice(0, MAX_ASYNC_STATUS_ROWS).join(", ")}${omitted ? `, … +${stillIds.length - MAX_ASYNC_STATUS_ROWS} more` : ""}.`
-						: "";
-					const text = boundCompletionSurface([report, runningNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).");
-					const billed = d.childUsage.accountMany(settled.map((run) => ({ key: run.id, usage: run.result?.usage ?? emptyUsage() })));
-					d.publishPersonaCost();
-					return {
-						content: [{ type: "text", text }],
-							details: { action: "wait", ok: true, settled: [...settledIds], running: still.map((run) => run.id), ...targetSnapshot },
-						isError: false,
-						...toolUsageField(billed),
-					};
-				}
-				// Bounded join: never longer than a child's ask timeout (bus `ask` default 600s),
-				// so a coaching child blocking on OUR reply can't deadlock us past its own timeout.
-				// Default matches that ceiling — heavy sub-agents (30+ turns) routinely outlast a
-				// short window, and a premature "still running" forces a needless re-wait.
-				const timeoutMs = Math.min(Math.max(params.timeoutMs ?? 600_000, 1_000), 600_000);
-				const runs = await d.tracker.waitFor(ids, timeoutMs, _signal);
-				const settled = runs.filter((r) => r.status !== "running");
-				const still = runs.filter((r) => r.status === "running");
-				// These results are delivered HERE — drop them from the pending follow-up
-				// notifier so they aren't reported a second time. Render through the SAME
-				// renderCompletion the passive path uses, so a leg that came back BLOCKED still
-				// carries the premature-surrender note when it is collected via `wait`.
-				const settledIds = new Set(settled.map((r) => r.id));
-				d.completionNotifier.discard((run) => settledIds.has(run.id));
-				for (const id of settledIds) d.tracker.markCollected(id);
-				const report = settled.length > 0 ? renderCompletion(settled, fenceUntrusted, (t) => d.scanForSurrender(t)) : "";
-				const stillNote = still.length > 0
-					? buildIntercomWaitStillNote(still.map((r) => r.id), timeoutMs, _signal?.aborted === true)
-					: "";
-				const joined = [report, stillNote].filter(Boolean).join("\n\n") || "Nothing to report (unknown run ids?).";
-				const text = boundCompletionSurface(joined);
-				const billed = d.childUsage.accountMany(
-					settled.map((r) => ({ key: r.id, usage: r.result?.usage ?? emptyUsage() })),
-				);
-				d.publishPersonaCost();
-				return {
-					content: [{ type: "text", text }],
-					details: { action: "wait", ok: true, settled: [...settledIds], running: still.map((r) => r.id), ...targetSnapshot },
 					isError: false,
 					...toolUsageField(billed),
 				};
@@ -248,7 +227,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				}
 				const nodeId = `async:${params.to}`;
 				const knownRun = d.tracker.peek(params.to);
-				if (knownRun && knownRun.status !== "running") {
+				if (!knownRun) return missingRun("steer", params.to, displayTarget, targetSnapshot);
+				if (knownRun.status !== "running") {
 					return {
 						content: [{ type: "text", text: `Cannot steer "${targetSnapshot.target}" — this run is already settled (${knownRun.status}). Use intercom result with to="${displayTarget}" to inspect its retained result.` }],
 						details: failureDetails({ action: "steer", ok: false, status: knownRun.status, ...targetSnapshot }),
@@ -262,26 +242,31 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 						isError: true,
 					};
 				}
-				// Routed through the guarded d.steerAgent so a just-finished/d.disposed handle can't throw.
+				// Routed through the guarded steerAgent so a just-finished/disposed handle can't throw.
 				const steered = d.steerAgent(nodeId, params.message);
+				// An intervention changes the child's state without moving any flag the guard compares.
+				if (steered) d.pollGuard?.reset();
 				return steered
 					? { content: [{ type: "text", text: `Steering queued for ${targetSnapshot.target} (${displayTarget}).` }], details: { action: "steer", ok: true, ...targetSnapshot, message: params.message }, isError: false }
 					: { content: [{ type: "text", text: `Could not steer "${targetSnapshot.target}" — it may have just finished, or the message was empty.` }], details: failureDetails({ action: "steer", ok: false, ...targetSnapshot }), isError: true };
 			}
 			if (params.action === "stop") {
+				if (params.to === "all") return stopAllRuns();
 				if (!params.to) {
 					return { content: [{ type: "text", text: "intercom stop needs { to: <run id> }." }], details: failureDetails({ action: "stop", ok: false }), isError: true };
 				}
+				if (!d.tracker.peek(params.to)) return missingRun("stop", params.to, displayTarget, targetSnapshot);
 				// Abort the real run signal. The child backend can kill its process tree; the
 				// in-process backend requests host cancellation and settles its lifecycle separately.
 				const nodeId = `async:${params.to}`;
 				const repeated = d.stopRequested.has(nodeId);
 				const stopped = d.stopAgent(nodeId);
+				if (stopped) d.pollGuard?.reset();
 				if (stopped && !repeated) {
-					return { content: [{ type: "text", text: `Cancellation requested for ${targetSnapshot.target}. Check its terminal result; changes already made are not undone.` }], details: { action: "stop", ok: true, ...targetSnapshot }, isError: false };
+					return { content: [{ type: "text", text: `Cancellation requested for ${targetSnapshot.target}; its stopped report arrives with the completion follow-up (its batch's, if it has one). Changes already made are not undone.` }], details: { action: "stop", ok: true, ...targetSnapshot }, isError: false };
 				}
 				// A repeated stop has just invoked the REAL cancel handle again. Only now force-clear
-				// d.tracker state if engine settlement is still lagging; the handle remains registered
+				// tracker state if engine settlement is still lagging; the handle remains registered
 				// until onComplete so cancellation can never be replaced by UI-only bookkeeping.
 				if (stopped && repeated && d.tracker.forceSettle(params.to, "force-stopped by supervisor after repeated engine cancellation")) {
 					return {
@@ -304,7 +289,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			if (params.action === "reply" && out.details.ok && params.askId) {
 				reconcileAnsweredAsk(params.askId, d.intercomNotifier, d.bus, d.SUPERVISOR);
 			}
-			// Child-authored inbox bodies are untrusted, exactly like the d.drainBusBlock/peek copies.
+			// Child-authored inbox bodies are untrusted, exactly like the automatic drain and peek copies.
 			// A retrieved body is child-authored even though it is no longer an inbox batch; keep the
 			// same trust fence around it as inbox and automatic drain surfaces.
 			let text = fenceIntercomToolOutcome(out, params.action, fenceUntrusted);
@@ -320,15 +305,12 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			const runTarget = typeof args.to === "string"
 				? state?.target?.id === args.to ? state.target.label : displayRunTarget(args.to)
 				: undefined;
-			if (action === "wait" || action === "peek") target = runTarget ?? "all";
+			if (action === "peek") target = runTarget ?? "all";
 			else if (["result", "steer", "stop"].includes(action)) target = runTarget ?? "?";
 			else if (action === "send") target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
 			else if (action === "message") target = compactInlineText(args.messageId ?? "?", { maxChars: 80 }) || "?";
 			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
-			const timeout = action === "wait" && Number.isFinite(args.timeoutMs) && args.timeoutMs !== undefined
-				? ` · ${Math.max(0, Math.floor(args.timeoutMs))}ms`
-				: "";
-			const formatCall = (label: string) => `${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${label ? theme.fg("dim", ` ${compactInlineText(label, { maxChars: 80 })}${timeout}`) : ""}`;
+			const formatCall = (label: string) => `${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${label ? theme.fg("dim", ` ${compactInlineText(label, { maxChars: 80 })}`) : ""}`;
 			const component = new Text(formatCall(target), 0, 0);
 			if (state) { state.callText = component; state.formatCall = formatCall; }
 			return component;
@@ -339,7 +321,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			const action = details.action ?? context?.args?.action;
 			const savedId = details.runId ?? context?.args?.to;
 			const legacyCompleted = !details.target && context !== undefined && context.isPartial !== true
-				&& ["steer", "stop", "result", "peek", "wait"].includes(action ?? "");
+				&& ["steer", "stop", "result", "peek"].includes(action ?? "");
 			if (state && typeof savedId === "string" && (details.target || legacyCompleted)) {
 				// Old receipts have no display snapshot. A new session may reuse their run ID;
 				// the current tracker cannot supply a historical alias for that unrelated execution.

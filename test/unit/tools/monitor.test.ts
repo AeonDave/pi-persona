@@ -16,7 +16,7 @@ function harness(allowed = true) {
 			cancel: (id: string) => { cancelled.push(id); return true; },
 		},
 	});
-	const run = (params: unknown, signal?: AbortSignal) => tool.execute("call", params, signal, undefined, { cwd: "D:/project" });
+	const run = (params: unknown, signal?: AbortSignal, hasUI?: boolean) => tool.execute("call", params, signal, undefined, { cwd: "D:/project", ...(hasUI === undefined ? {} : { hasUI }) });
 	return { run, started, cancelled, tool };
 }
 
@@ -35,6 +35,16 @@ test("monitor launches an explicit executable and argv in the current workspace"
 	assert.equal(h.started[0].cwd, "D:/project");
 	assert.deepEqual(h.started[0].args, ["watch a file.mjs"]);
 	assert.match(result.content[0].text, /session.*open/i);
+});
+
+test("monitor says the truth in a headless run instead of inviting the model to end its turn", async () => {
+	const h = harness();
+	const headless = await h.run({ action: "arm", command: "node", label: "watch", mode: "exit" }, undefined, false);
+	assert.equal(headless.details.ok, true);
+	assert.match(headless.content[0].text, /Headless pi -p: the process exits when this turn settles/);
+	assert.doesNotMatch(headless.content[0].text, /wakes you by itself/);
+	const ui = await h.run({ action: "arm", command: "node", label: "watch", mode: "exit" }, undefined, true);
+	assert.match(ui.content[0].text, /end your turn; it wakes you by itself/);
 });
 
 test("monitor does not arm on an already aborted tool call", async () => {
@@ -67,4 +77,8 @@ test("monitor schema documents the aggregate argv bound", () => {
 	const args = (tool.parameters as any).properties.args;
 	assert.match(String(args.description), /24[,_ ]?000/);
 	assert.match(String(tool.description), /24[,_ ]?000/);
+});
+
+test("monitor description is a wake source, not a wait", () => {
+	assert.match(String(harness().tool.description), /not a wait.*`timer`.*sub-agents and Exocom wake you/i);
 });

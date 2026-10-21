@@ -35,6 +35,8 @@ const NAVIGATOR_PROTOCOL = [
 
 export const pair: Strategy = {
 	name: "pair",
+	when: "one member works, a navigator reviews live",
+	roster: "[driver, navigator]",
 	async run(input, sdk) {
 		const team = input.roster ? sdk.roster.team(input.roster) : [];
 		if (team.length < 2) throw new Error("pair: a roster of [driver, navigator] is required");

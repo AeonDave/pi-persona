@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { boundDisplayRows, compactInlineText, compactVisibleLine, compactVisibleText, sanitizeTerminalText } from "../../../src/ui/presentation.ts";
+import { boundDisplayRows, compactInlineText, compactVisibleLine, compactVisibleText, gateReviewText, sanitizeTerminalText } from "../../../src/ui/presentation.ts";
 
 test("compactVisibleLine caps a composed card row in terminal columns", () => {
 	const clipped = compactVisibleLine(`✗ ${"漢".repeat(200)} · ${"x".repeat(200)}`);
@@ -133,4 +133,42 @@ test("boundDisplayRows keeps a live widget stable while exposing the full-list a
 	assert.equal(bounded[0], "local");
 	assert.match(bounded.at(-1) ?? "", /\+15 more/);
 	assert.match(bounded.at(-1) ?? "", /exocom_list/);
+});
+
+test("gateReviewText: titles the checkpoint, lists what runs next, and previews the output", () => {
+	const text = gateReviewText({
+		flow: "gated-build",
+		phase: "plan",
+		next: [{ id: "build", strategy: "critic-loop" }, { id: "audit", strategy: "fanout" }],
+		output: "step one\n\nstep two",
+	});
+	const lines = text.split("\n");
+	assert.equal(lines[0], 'Checkpoint "plan" of flow "gated-build" — approve and continue?');
+	assert.equal(lines[1], "then: build (critic-loop), audit (fanout)");
+	assert.match(lines[2] ?? "", /^--- .*untrusted.* ---$/, "a fixed rule marks where runtime text ends and the child's begins");
+	assert.deepEqual(lines.slice(3), ["step one", "step two"]);
+});
+
+test("gateReviewText: a gate with no dependents has no 'then' line", () => {
+	const text = gateReviewText({ flow: "f", phase: "p", next: [], output: "done" });
+	assert.match(text, /^Checkpoint "p" of flow "f" — approve and continue\?\n--- .*untrusted.* ---\ndone$/);
+});
+
+test("gateReviewText: strips ANSI, caps the body at 12 lines and says how much was not shown", () => {
+	const output = ["\u001b[31mred plan\u001b[0m", ...Array.from({ length: 40 }, (_, i) => `line ${i}`)].join("\n");
+	const text = gateReviewText({ flow: "f", phase: "p", next: [], output });
+	assert.doesNotMatch(text, /\u001b/);
+	assert.match(text, /^red plan$/m);
+	const [, , ...rest] = text.split("\n"); // title, rule
+	const marker = rest.pop() ?? "";
+	assert.ok(rest.length <= 12, `the body was ${rest.length} lines`);
+	assert.match(marker, /^\(\+\d+ characters not shown\)$/);
+});
+
+test("gateReviewText: a short output carries no truncation marker", () => {
+	assert.doesNotMatch(gateReviewText({ flow: "f", phase: "p", next: [], output: "short" }), /not shown/);
+});
+
+test("gateReviewText: an empty output still names what is being approved", () => {
+	assert.match(gateReviewText({ flow: "f", phase: "p", next: [], output: "" }), /\(no output\)$/);
 });

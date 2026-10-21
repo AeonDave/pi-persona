@@ -88,3 +88,18 @@ test("itemLedger carries a declared writeSet through for every status", () => {
 test("itemLedger with no items and nothing dropped is empty", () => {
 	assert.deepEqual(itemLedger([], [], 0), []);
 });
+
+test("aggregateResults labels sections by the supplied member label and records it only when it differs", () => {
+	const agg = aggregateResults([ok("reviewer", "sec"), ok("reviewer", "perf")], ["reviewer · SECURITY", "reviewer"]);
+	assert.match(agg.output, /### \[reviewer · SECURITY\] ok\n\nsec/);
+	assert.match(agg.output, /### \[reviewer\] ok\n\nperf/);
+	const results = agg.structured?.results as Array<Record<string, unknown>>;
+	assert.equal(results[0]?.member, "reviewer · SECURITY");
+	assert.equal("member" in (results[1] ?? {}), false, "no member field when the label is the agent name");
+});
+
+test("aggregateResults without labels is byte-identical: agent headers and no member field", () => {
+	const agg = aggregateResults([ok("a", "A out")]);
+	assert.equal(agg.output, "### [a] ok\n\nA out");
+	assert.equal("member" in ((agg.structured?.results as Array<Record<string, unknown>>)[0] ?? {}), false);
+});

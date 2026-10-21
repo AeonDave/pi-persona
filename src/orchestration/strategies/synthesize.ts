@@ -10,7 +10,7 @@
  *          peers?: boolean (gatherers share contradictions/corroborations live — default off) }
  */
 
-import { rosterSpec } from "../roster.ts";
+import { rosterNodeKeys, rosterSpec } from "../roster.ts";
 import { fenceUntrusted } from "../../core/fence.ts";
 import { parseAuxActor } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
@@ -28,6 +28,9 @@ const CROSS_TALK = [
 
 export const synthesize: Strategy = {
 	name: "synthesize",
+	when: "many angles into ONE deliverable: gatherers in parallel, one synthesiser merges",
+	roster: "gatherers",
+	team: "review",
 	params: {
 		// The default IS roster[0] — declared as `rosterIndex`, never as an agent name: the
 		// participant collector resolves "override, else roster[rosterIndex], else `default`",
@@ -61,10 +64,12 @@ export const synthesize: Strategy = {
 				}, { reserveChildren: 1 }), // leave the mandatory merge slot; SDK reserves queued gatherers
 			),
 		);
-		const usable = results.filter((r) => r.ok && r.output.trim());
+		// Lens-aware labels (`reviewer · SECURITY`): the synthesizer must see WHICH lens found what.
+		const labels = rosterNodeKeys(team);
+		const usable = results.flatMap((r, i) => (r.ok && r.output.trim() ? [{ label: labels[i], output: r.output.trim() }] : []));
 		if (usable.length === 0) {
 			const cause = summarizeFailedResults(results, "no gatherer produced output");
-			const reasons = results.map((r) => `[${r.agent}] ${r.error ?? "(no output)"}`).join("; ");
+			const reasons = results.map((r, i) => `[${labels[i]}] ${r.error ?? "(no output)"}`).join("; ");
 			return {
 				agent: "synthesize",
 				output: `(no gatherer produced output: ${reasons})`,
@@ -75,7 +80,7 @@ export const synthesize: Strategy = {
 			};
 		}
 
-		const sections = usable.map((r) => `--- [${r.agent}] ---\n${fenceUntrusted(r.output.trim())}`).join("\n\n");
+		const sections = usable.map((u) => `--- [${u.label}] ---\n${fenceUntrusted(u.output)}`).join("\n\n");
 		const final = await sdk.agent({
 			...synthesizer,
 			task:

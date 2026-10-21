@@ -174,6 +174,8 @@ proc.stdout.on("data", (d: string) => {
 
 let stderr = "";
 let errBuf = "";
+// A persona that never activated runs as vanilla Pi: a green exit would verify no persona, brief or tool.
+let personaMissing: string | undefined;
 proc.stderr.setEncoding("utf8");
 proc.stderr.on("data", (d: string) => {
 	stderr += d;
@@ -181,12 +183,16 @@ proc.stderr.on("data", (d: string) => {
 	errBuf += d;
 	const lines = errBuf.split("\n");
 	errBuf = lines.pop() ?? "";
-	for (const l of lines) if (l.includes("[pi-persona]")) console.log(`  ${l.trim()}`);
+	for (const l of lines) {
+		if (l.includes("[pi-persona]")) console.log(`  ${l.trim()}`);
+		// The substring is owned by the headless warning in src/extension/hooks.ts.
+		else if (opts.persona && l.includes("is not an installed persona")) personaMissing = l.trim();
+	}
 });
 
 proc.on("close", (code: number | null) => {
 	const secs = ((Date.now() - t0) / 1000).toFixed(1);
-	const exitCode = effectiveDriveExitCode(code, assistantError ?? spawnError);
+	const exitCode = effectiveDriveExitCode(code, assistantError ?? spawnError ?? personaMissing);
 	if (finalUsage) {
 		const cost = (finalUsage.cost as Json | undefined)?.total ?? 0;
 		console.log(
@@ -195,6 +201,7 @@ proc.on("close", (code: number | null) => {
 	}
 	if (assistantError) console.error(`[assistant error] ${short(assistantError, 600)}`);
 	if (spawnError) console.error(`[spawn error] ${short(spawnError, 600)}`);
+	if (personaMissing) console.error(`[persona] ${short(personaMissing, 300)} - check the name, or seed the profile first (/persona seed, or PI_PERSONA_SEED=on)`);
 	if (code !== 0 && stderr.trim()) console.error(`[stderr] ${stderr.trim().slice(0, 600)}`);
 	console.log(`▷ exit ${exitCode}`);
 	process.exit(exitCode);

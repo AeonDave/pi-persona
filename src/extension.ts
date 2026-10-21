@@ -11,7 +11,7 @@
  * isolation; see docs/ARCHITECTURE.md).
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,11 +35,11 @@ import {
 	type SpineLegacyResult,
 	type SpineLegacySelection,
 } from "./core/seed.ts";
-import { buildDelegationBrief } from "./core/brief.ts";
+import { type BriefFlow, buildDelegationBrief } from "./core/brief.ts";
 import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
-import { DelegationNudge, PersistenceNudge } from "./core/nudge.ts";
+import { DelegationNudge, PersistenceNudge, PollGuard } from "./core/nudge.ts";
 import { installedPiVersion, MIN_PI_VERSION, satisfiesFloor } from "./core/pi-compat.ts";
 import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
@@ -53,7 +53,6 @@ import {
 	type PendingAsk,
 } from "./extension/shared.ts";
 export {
-	agentNodeStatusForDelegate,
 	boundExocomInboundBatch,
 	canDeliverPersonaNotification,
 	canonicalExocomTelemetryTargets,
@@ -84,22 +83,24 @@ import { collectCompanionSettings } from "./extension/companion-settings.ts";
 import { parseExocomArgv } from "./exocom/activation.ts";
 import { formatLedgerStatus } from "./exocom/status.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
-import { registerIntercomTool } from "./tools/intercom-tool.ts";
+import { describeRuns, registerIntercomTool } from "./tools/intercom-tool.ts";
 import { registerTimerTool } from "./tools/timer.ts";
 import { registerMonitorTool } from "./tools/monitor.ts";
 import { createMonitorSession, type MonitorSession } from "./monitor/session.ts";
+import { createBackgroundRuns, type TrackedRun } from "./tools/background-run.ts";
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekAlert, buildPeekDigest, buildRetentionOverflowNote, isAsyncRunStalled, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
-import { type FlowSpec, flowHash, parseFlow, verifyFlowRefs } from "./orchestration/flow.ts";
-import { journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
+import { type FlowSpec, flowRunHash, parseFlow, verifyFlowRefs } from "./orchestration/flow.ts";
+import { clearJournal, journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
-import type { FlowOutcome } from "./orchestration/flow-run.ts";
+import { Semaphore } from "./orchestration/parallel.ts";
+import { flowDisposition, type FlowOutcome } from "./orchestration/flow-run.ts";
 import { type RosterMember, roleHint, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
 import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
@@ -126,13 +127,13 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
-import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./ui/presentation.ts";
+import { compactInlineText, compactVisibleText, gateReviewText, sanitizeTerminalText } from "./ui/presentation.ts";
 import { ChildUsageLedger, formatPersonaCostStatus, formatUsage, PERSONA_COST_STATUS_KEY } from "./ui/usage.ts";
 
-const RUN_LIMITS: RunLimits = {
+export const RUN_LIMITS: RunLimits = {
 	// A generous anti-runaway backstop, not a council-size cap: a declared ensemble
 	// (e.g. 9 members × several rounds) must fit; the token budget is the real cost guard.
 	maxChildren: 64,
@@ -175,6 +176,8 @@ interface CommandResultEntry {
 	label: string;
 	content: string;
 	ok: boolean;
+	/** A flow that paused at a rejected checkpoint: not a failure, so it is titled "stopped". */
+	stoppedAtGate?: string;
 	failureKind?: FailureKind;
 	error?: string;
 }
@@ -211,18 +214,30 @@ export function announceAsyncRunSettlement(
 	enqueue(run);
 }
 
+/** An operator-run `/flow` or `/orchestrate` result as the supervisor's NEXT turn sees it: one header
+ *  line, then the output fenced as data (it is sub-agent text) and bounded like a completion. */
+export function renderOperatorResult(label: string, output: string, ok: boolean, stoppedAtGate?: string): string {
+	const disposition = flowDisposition({ ok, stoppedAtGate });
+	const state = disposition === "done" ? "finished" : disposition === "stopped" ? `stopped at checkpoint "${compactInlineText(stoppedAtGate ?? "", { maxChars: 64 })}"` : "failed";
+	return boundCompletionSurface(
+		`[pi-persona] The operator ran ${compactInlineText(label, { maxChars: 96 })} (${state}); its output:\n${fenceUntrusted(output)}`,
+		"operator result truncated at 12000 characters; only the operator can see the rest (ask them to paste what you need)",
+	);
+}
+
 /** Agents actually IN FLIGHT: a RUNNING node with no children of its own. "Has a parent" is not the
  *  same as "is an agent" — a flow phase is a container that also has a parent, a root-level `async:`
  *  run is a leaf that has none, and a settled leg still sits in the tree until its root is torn
- *  down. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
-export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus }>): number {
+ *  down. A fan-out's `delegate` header row is a container even in the beat after its last leg
+ *  left, so it never counts. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
+export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus; kind?: AgentNode["kind"] }>): number {
 	const parents = new Set<string>();
 	for (const node of nodes) {
 		if (node.parentId !== undefined) parents.add(node.parentId);
 	}
 	let count = 0;
 	for (const node of nodes) {
-		if (node.status === "running" && !parents.has(node.id)) count++;
+		if (node.status === "running" && node.kind !== "delegate" && !parents.has(node.id)) count++;
 	}
 	return count;
 }
@@ -317,9 +332,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			[data.failureKind, data.error].filter((part): part is string => !!part).join(" · "),
 			{ maxLines: 1, maxLineChars: 80 },
 		).text;
-		const status = data.ok ? "complete" : "failed";
+		const stopped = flowDisposition({ ok: data.ok === true, stoppedAtGate: data.stoppedAtGate }) === "stopped";
+		const status = stopped
+			? `stopped · checkpoint ${compactInlineText(data.stoppedAtGate ?? "", { maxChars: 32 })}`
+			: data.ok ? "complete" : "failed";
 		const label = compactInlineText(data.label, { maxChars: 96 }) || "result";
-		const title = theme.fg(data.ok ? "success" : "error", theme.bold(`${label} · ${status}${!data.ok && cause !== "(no output)" ? ` · ${cause}` : ""}`));
+		const title = theme.fg(
+			stopped ? "warning" : data.ok ? "success" : "error",
+			theme.bold(`${label} · ${status}${!data.ok && !stopped && cause !== "(no output)" ? ` · ${cause}` : ""}`),
+		);
 		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
 		const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
 		const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
@@ -365,16 +386,35 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		label: string,
 		content: string,
 		ok: boolean,
-		meta: { failureKind?: FailureKind; error?: string } = {},
+		meta: { failureKind?: FailureKind; error?: string; stoppedAtGate?: string } = {},
 	): void => {
 		pi.appendEntry("pi-persona-result", {
 			label,
 			content,
 			ok,
+			...(meta.stoppedAtGate !== undefined ? { stoppedAtGate: meta.stoppedAtGate } : {}),
 			...(meta.failureKind ? { failureKind: meta.failureKind } : {}),
 			...(meta.error ? { error: meta.error } : {}),
 		} satisfies CommandResultEntry);
 	};
+	/** An operator-run `/flow` or `/orchestrate` result: the card for the operator, and the same text for the
+	 *  supervisor's NEXT turn — `nextTurn` is passive (it never starts one), so "now implement the plan" or
+	 *  "apply the winning diff" finds the result in context instead of nothing. */
+	const appendOperatorResult: typeof appendCommandResult = (label, content, ok, meta = {}) => {
+		appendCommandResult(label, content, ok, meta);
+		try {
+			pi.sendMessage({ customType: "pi-persona", content: renderOperatorResult(label, content, ok, meta.stoppedAtGate), display: false }, { deliverAs: "nextTurn" });
+		} catch {
+			/* the card above is the operator's copy; a host that cannot queue the hand-off must not fail the command */
+		}
+	};
+	/** `/flow` and `/orchestrate` result card; `ok` stays honest, a rejected checkpoint is "stopped". */
+	const appendFlowResult = (flow: string, outcome: FlowOutcome): void =>
+		appendOperatorResult(`flow ${flow}`, outcome.output || "(flow produced no output)", outcome.ok, {
+			...(outcome.stoppedAtGate !== undefined ? { stoppedAtGate: outcome.stoppedAtGate } : {}),
+			...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
+			...(outcome.error ? { error: outcome.error } : {}),
+		});
 	const enabledSpineRoles = (): SpineLegacySelection => ({
 		supervisor: config.spine === "on",
 		worker: config.spineLegs === "on",
@@ -594,7 +634,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (node.kind) return node.kind;
 		if (node.id.startsWith("flow:")) return "flow";
 		if (node.id.startsWith("strategy:") || node.id.startsWith("council:")) return "council";
-		if (node.id.startsWith("delegate:")) return "delegate";
 		return "subagent";
 	}
 	function telemetryStatus(node: AgentNode): TelemetryAgentStatus {
@@ -687,6 +726,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// Persistence nudge: the counterweight — when a delegated leg comes back BLOCKED/UNKNOWN, remind
 	// the supervisor not to bank a premature surrender (same config.nudge gate + hook as above).
 	const persistenceNudge = new PersistenceNudge();
+	// Poll guard: refuses an unchanged repeat of intercom peek/result (same kill switch).
+	const pollGuard = config.nudge ? new PollGuard() : undefined;
 	// Every visible run (strategy, council, flow) gets its own tree root — see makeRootIdAllocator.
 	const nextRootId = makeRootIdAllocator();
 	// node id → abort that one agent (so the overlay can STOP a single sub-agent).
@@ -717,7 +758,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return deriveWaitingNodeIds(nodes, (id) => steerRegistry.get(id)?.isWaitingForSupervisor?.() === true);
 	}
 	function waitingAsyncRunIds(): Set<string> {
-		return new Set(tracker.running().filter((run) => steerRegistry.get(`async:${run.id}`)?.isWaitingForSupervisor?.() === true).map((run) => run.id));
+		// Through the tree, so a council/flow run (a root whose LEGS hold the steer handles) reads as waiting
+		// exactly when every live leg does, the same rule a delegate leg answers directly.
+		const waiting = waitingTreeIds();
+		return new Set(tracker.running().filter((run) => waiting.has(`async:${run.id}`)).map((run) => run.id));
 	}
 	const clearSteers = (prefix: string): void => {
 		for (const k of [...steerRegistry.keys()]) if (k === prefix || k.startsWith(`${prefix}/`)) steerRegistry.delete(k);
@@ -966,6 +1010,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		definitionWarnings = [...result.warnings, ...contractsLoad.warnings];
 	}
 
+	// Empty by design on a fresh install (see above): point at the install gesture from every
+	// surface that would otherwise be silent or read as broken — `/persona list`, /doctor, F8.
+	const NO_PERSONAS_HINT =
+		"No personas installed. pi-persona does not auto-install — run `/persona seed` to copy the bundled defaults into your agent dir (edit them freely; `/persona restore` re-installs the originals).";
+
 	// Install the bundled defaults into the user's agent dir — this is the ONLY way personas/agents
 	// become active (they are not a live builtin layer). `/persona seed` pulls in missing defaults,
 	// `/persona restore` force-overwrites them back to the originals. First-run auto-install is
@@ -1117,12 +1166,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	};
 	// Async runs outlive the turn that launched them; on completion we surface the result(s) back as
 	// ONE coalesced notice so the (idle) supervisor can react — e.g. retry a failure with another model.
-	// With delegate now background-by-default (interactive), this is the COMMON delivery path, so the
-	// premature-surrender counterweight must ride it too: a settled leg whose report carries a
-	// [BLOCKED]/FLAG:UNKNOWN marker gets the persistence note appended (the sync tool_result hook can't
-	// see a background run — its report arrives here as a fresh follow-up, not a delegate result).
+	// Interactive delegate ALWAYS runs in the background, so this is the COMMON delivery path: the
+	// premature-surrender counterweight rides it (the sync tool_result hook can't see a background run),
+	// and a `tasks` fan-out is held until its LAST leg settles so the supervisor is woken once with every
+	// result instead of once per leg. Single legs are never held.
 	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
 		...idleDelivery,
+		isReady: (run) => tracker.batchSettled(run),
 		render: (runs) => {
 			const report = renderCompletion(runs, fenceUntrusted, (t) => scanForSurrender(t));
 			// Retention is a bound, not a promise: a fan-out wider than it settles more payloads than the
@@ -1179,19 +1229,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
 	// The premature-surrender counterweight rides the SAME kill switch as the by-hand nudge
-	// (PI_PERSONA_NUDGE=off). Both completion surfaces — the background follow-up and `intercom wait` —
-	// go through here, so "off" means off wherever a settled leg is collected, not just on the
-	// synchronous tool_result hook.
+	// (PI_PERSONA_NUDGE=off). The background completion follow-up goes through here, so "off" means
+	// off there too, not just on the synchronous tool_result hook.
 	const scanForSurrender = (text: string): string | undefined => (config.nudge ? persistenceNudge.scan(text) : undefined);
 	// A run id that is neither live nor retained has two very different meanings: it never existed, or
 	// its payload was evicted under retention pressure. Only the second deserves an explanation — and a
 	// bare "no such run" for a result the supervisor was just TOLD to fetch is exactly the dead end
 	// this distinction exists to prevent.
 	function missingRunMessage(id: string, display: string | undefined): string {
-		if (!tracker.wasDropped(id)) return `No retained async run "${display}".`;
+		if (tracker.wasDropped(id)) {
+			return (
+				`Async run "${display}" settled, but its full payload is gone: more runs settled than the ${tracker.retention}-run retention bound keeps. ` +
+				"Its summary is, or will be, in the completion follow-up. Raise PI_PERSONA_ASYNC_RETAIN, or fan out in narrower waves and collect as you go, to keep more."
+			);
+		}
+		// Never existed, or ended with the session that launched it (a call-sign is not an address either):
+		// list what does exist — running first, then the newest settled — so the next call can be right.
+		const settled = tracker.list().filter((run) => run.status !== "running").reverse().sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0));
 		return (
-			`Async run "${display}" settled, but its full payload is gone: more runs settled than the ${tracker.retention}-run retention bound keeps. ` +
-			"Its summary was delivered in the completion follow-up. Raise PI_PERSONA_ASYNC_RETAIN, or fan out in narrower waves and collect as you go, to keep more."
+			`No retained async run "${display}". Runs live only in the session that launched them (a restart, /new or reload ends them; collected results are evicted first once retention is full). ` +
+			`Known runs: ${describeRuns([...tracker.running(), ...settled], { status: true })}.`
 		);
 	}
 	// Turns the periodic peek from a poll into an exception signal: it surfaces a leg only when it
@@ -1244,9 +1301,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		});
 	});
 
-	// Async-run watchdog: the fast PI_PERSONA_PEEK_MS cadence wakes the supervisor only for a newly-stalled
-	// leg or unread message. The slower PI_PERSONA_CHECKIN_MS cadence appends a durable operator-only status
-	// card; it does not start a model turn. Bounded: unref'd, self-stops when no runs remain.
+	// Async-run watchdog: the fast PI_PERSONA_PEEK_MS cadence appends an operator-only card for a
+	// newly-stalled leg and wakes the supervisor only for an unread message. The slower
+	// PI_PERSONA_CHECKIN_MS cadence appends a durable operator-only status card; it does not start a
+	// model turn. Bounded: unref'd, self-stops when no runs remain.
 	let peekTimer: ReturnType<typeof setInterval> | undefined;
 	// Last time progress status was surfaced (a new stall alert or routine card), for the slow cadence.
 	let lastPeekAt = 0;
@@ -1257,7 +1315,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	}
 	function startPeek(): void {
-		// Fast wakeups and routine cards opt out independently. The carrier timer runs while EITHER is on
+		// Fast ticks and routine cards opt out independently. The carrier timer runs while EITHER is on
 		// and ticks at the faster of the two (a disabled one is Infinity, so it never drives).
 		const fastMs = config.peekEveryMs > 0 ? config.peekEveryMs : Number.POSITIVE_INFINITY;
 		const checkMs = config.checkInEveryMs > 0 ? config.checkInEveryMs : Number.POSITIVE_INFINITY;
@@ -1296,23 +1354,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				lastPeekAt = now;
 				appendStatus(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingRuns }), "routine");
 			}
-			// Interactive stalls are operator-only. Headless sessions may consume one model wake per
-			// run lifetime; unread non-ask messages retain their existing actionable route.
+			// A stall is operator-only (appended above) and never costs a model turn; unread non-ask
+			// messages keep their actionable route.
 			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true) || lastCtx?.hasPendingMessages?.() === true) return;
 			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
-			const wakeCandidates = fast && lastCtx?.hasUI === false
-				? peekWatcher.firstWakeCandidates(runs.filter((run) => isAsyncRunStalled(run, now, STALL_FLAG_MS)))
-				: [];
-			if (wakeCandidates.length === 0 && unread.length === 0) return;
-			const parts: string[] = [];
-			if (wakeCandidates.length > 0) parts.push(buildPeekAlert(wakeCandidates, { now }));
-			if (unread.length > 0) parts.push(`📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}`);
+			if (unread.length === 0) return;
 			try {
-				sendPersonaFollowUp(pi, `[pi-persona] ${parts.join("\n\n")}`);
-				peekWatcher.acknowledgeModelWake(wakeCandidates.map((run) => run.id));
-			} catch {
-				peekWatcher.retryReports(wakeCandidates);
-			}
+				sendPersonaFollowUp(pi, `[pi-persona] 📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}`);
+			} catch { /* best-effort wake: the session may be tearing down */ }
 		}, tickMs);
 		peekTimer.unref?.();
 	}
@@ -1431,15 +1480,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	 * Only a live UI ever sees a dialog (`ctx.hasUI`), and only when there is more than one
 	 * authenticated model to choose between.
 	 */
-	async function ensurePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[]): Promise<void> {
+	async function ensurePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], tracked?: TrackedRun): Promise<void> {
 		const scope = modelSelectionScope(ctx);
 		if (!scope || !ctx.hasUI) return;
 		const missing = pendingParticipants(participants, { prompted: promptedFor(scope.persona, participants) });
 		if (missing.length === 0) return;
 		const available = configuredModels(ctx);
 		if (available.length < 2) return; // automatic setup cannot diversify a single model
-		const chosen = await choosePersonaModels(ctx, missing, available, scope);
-		if (chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
+		// A tracked run parked at this picker is waiting on the OPERATOR: say so, or it reads "queued" and,
+		// past the stall window, "possibly stuck".
+		if (tracked) {
+			tracked.onAwaiting("waiting for operator to pick models");
+			agentTree.update(tracked.rootId, { detail: "waiting for operator to pick models" });
+		}
+		try {
+			const chosen = await choosePersonaModels(ctx, missing, available, scope);
+			if (chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
+		} finally {
+			tracked?.onAwaiting(undefined);
+		}
 	}
 
 	type ModelSelectionScope = { persona: string; isCurrent(): boolean };
@@ -1649,7 +1708,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// The SDK lifecycle callbacks that drive the unified tree for one strategy run rooted at
 	// `rootId` — shared by /orchestrate, the council tool, and each flow phase. Seeds running
 	// cores, flips ⏳ → ✓/✗ with usage, streams progress, and registers stop/steer handles.
-	function strategyTreeDeps(ctx: ExtensionContext, rootId: string, nodeParticipants: ReadonlyMap<string, ModelParticipant | null> = new Map()) {
+	function strategyTreeDeps(ctx: ExtensionContext, rootId: string, nodeParticipants: ReadonlyMap<string, ModelParticipant | null> = new Map(), tracked?: TrackedRun) {
 		return {
 			onAgentStart: (agent: string, abort: () => void, key?: string) => {
 				stopRegistry.set(`${rootId}/${key ?? agent}`, abort);
@@ -1688,6 +1747,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				agentTree.update(id, progressPatch(p, now));
 				// Child engine events refresh liveness, not proof of useful work; repaint alone never advances it.
 				agentTree.update(rootId, { lastAdvanceAt: now });
+				tracked?.onProgress(id, p); // …and the tracked run's own clock and token total, if it has one
 			},
 		};
 	}
@@ -1697,6 +1757,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return caps ? { canSpawn: (agent) => canDelegateTo(caps, agent) } : {};
 	}
 
+	/** The tree root and run-level stop of one visible run. A tracked run (the `council`/`flow` tools) arrives
+	 *  with both: `async:<runId>` and the signal its stop key aborts. Anything else (a mandated orchestration,
+	 *  `/orchestrate`, `/flow`) is rooted here and registers its OWN stop under the root's id, so `stopAgent`,
+	 *  the overlay's `canStop` and shutdown reach the whole run — Pi's `ctx.signal` is undefined while the agent
+	 *  is idle, which is exactly when those run, so there is no host signal to lean on. `live` is what going
+	 *  live adds to the root row: a tracked root already exists, "queued", and restarts its clock here. */
+	function visibleRoot(prefix: string, tracked: TrackedRun | undefined): { rootId: string; signal: AbortSignal; live: AgentNodePatch } {
+		if (tracked) {
+			const now = Date.now();
+			return { rootId: tracked.rootId, signal: tracked.signal, live: { detail: "", startedAt: now, lastAdvanceAt: now } };
+		}
+		const ac = new AbortController();
+		const rootId = nextRootId(prefix);
+		stopRegistry.set(rootId, () => ac.abort());
+		return { rootId, signal: ac.signal, live: {} };
+	}
+
 	// Run a persona strategy with the unified tree wired in: assign models on first run,
 	// seed the roster (cores show by name at once), flip ⏳ → ✓/✗ live, clear when done.
 	async function runStrategyVisible(
@@ -1704,15 +1781,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		orch: OrchestrationGrammar,
 		task: string,
 		idPrefix: string,
-		signal?: AbortSignal,
+		tracked?: TrackedRun,
 	) {
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = resolveOrchestrationMembers(orch, teams);
 		const participants = runParticipants(ctx, { strategy: label, ...(orch.params ? { params: orch.params } : {}), members: roster });
-		await ensurePersonaModels(ctx, participants);
+		await ensurePersonaModels(ctx, participants, tracked);
 		const participantsByNode = participantByNode(participants);
-		const rootId = nextRootId(`${idPrefix}:${label}`);
-		agentTree.add({ id: rootId, label, status: "running", kind: "council" });
+		const { rootId, signal, live } = visibleRoot(`${idPrefix}:${label}`, tracked);
+		agentTree.add({ id: rootId, label, status: "running", kind: "council", ...live });
 		// Seed the whole roster at once (cores show by name immediately); "queued" until the
 		// engine actually starts each one — an honest view under the concurrency limit.
 		const seedKeys = rosterNodeKeys(roster);
@@ -1727,11 +1804,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
 			// cooperatively between rounds, so an aborted run stops convening instead of running every
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
-			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal, undefined, { providerFallback: false }), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), ...(signal ? { signal } : {}), ...strategyTreeDeps(ctx, rootId, participantsByNode), ...strategySpawnGate(), ...modelFallbackDep(ctx) });
-			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
+			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), signal, ...strategyTreeDeps(ctx, rootId, participantsByNode, tracked), ...strategySpawnGate(), ...modelFallbackDep(ctx) });
+			agentTree.update(rootId, { status: signal.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
 			return result ?? undefined;
 		} catch (error) {
-			agentTree.update(rootId, { status: signal?.aborted ? "stopped" : "failed" });
+			agentTree.update(rootId, { status: signal.aborted ? "stopped" : "failed" });
 			throw error;
 		} finally {
 			clearStops(rootId);
@@ -1770,12 +1847,39 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (found === undefined) return undefined;
 		return parseFlow(found);
 	}
+	// Installed flows with what a chooser needs: the description and whether a checkpoint pauses
+	// for a human. An unparseable file stays a bare name (running it reports the parse error).
+	function flowCatalog(cwd: string): BriefFlow[] {
+		return listFlows(cwd).map((name): BriefFlow => {
+			const parsed = loadFlow(cwd, name);
+			const flow = parsed?.ok ? parsed.flow : undefined;
+			return {
+				name,
+				...(flow?.description ? { description: flow.description } : {}),
+				...(flow?.phases.some((p) => p.gate) ? { gated: true } : {}),
+			};
+		});
+	}
+
+	// Pi's extension selector is ONE slot: a second concurrent `ctx.ui.select` displaces the first without ever
+	// resolving it, orphaning a run behind a prompt nobody can see. Background flows can park at a checkpoint
+	// together, so their prompts open one at a time in arrival order. A stopped flow leaves the line at once.
+	let gateLine: Promise<unknown> = Promise.resolve();
+	function inGateLine<T>(signal: AbortSignal, stopped: T, open: () => Promise<T>): Promise<T> {
+		const turn = gateLine.then(() => (signal.aborted ? stopped : open()));
+		gateLine = turn.catch(() => undefined);
+		const left = new Promise<T>((resolve) => {
+			if (signal.aborted) resolve(stopped);
+			else signal.addEventListener("abort", () => resolve(stopped), { once: true });
+		});
+		return Promise.race([turn, left]);
+	}
 
 	// Run a flow's DAG with the unified tree (phases as nodes, cores beneath) + journaled
-	// resume: a prior run's journal (keyed by flow@hash) skips already-done phases; the
+	// resume: a prior run's journal (keyed by flow + task + cwd) skips already-done phases; the
 	// journal is cleared on a fully-successful run.
-	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, signal?: AbortSignal): Promise<FlowOutcome> {
-		const hash = flowHash(spec);
+	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, tracked?: TrackedRun): Promise<FlowOutcome> {
+		const hash = flowRunHash(spec, baseTask, ctx.cwd);
 		const journalDir = join(personaDataDir(), "flows");
 		try {
 			mkdirSync(journalDir, { recursive: true });
@@ -1801,10 +1905,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return [phase.id, { members, participants }] as const;
 			}),
 		);
-		await ensurePersonaModels(ctx, spec.phases.flatMap((p) => phasePlans.get(p.id)?.participants ?? []));
+		await ensurePersonaModels(ctx, spec.phases.flatMap((p) => phasePlans.get(p.id)?.participants ?? []), tracked);
 
-		const flowRoot = nextRootId(`flow:${spec.name}`);
-		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running", kind: "flow" });
+		const { rootId: flowRoot, signal, live } = visibleRoot(`flow:${spec.name}`, tracked);
+		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running", kind: "flow", ...live });
 		for (const p of spec.phases) {
 			const pid = `${flowRoot}/${p.id}`;
 			const node: AddNodeInput = { id: pid, label: `${p.id} · ${p.strategy}`, parentId: flowRoot, status: resume[p.id] ? "done" : "running", kind: "phase" };
@@ -1834,7 +1938,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const outcome = await runFlow(spec, baseTask, {
 				hash,
 				resume,
-				...(signal ? { signal } : {}),
+				signal,
 				journal: journalWriter(journalPath),
 				onPhase: (id, status, result) => {
 					const patch: { status: AgentNodeStatus; output?: string; detail?: string } = {
@@ -1860,12 +1964,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
 					if (phase.roster) orch.roster = phase.roster;
 					const r = await runPersonaStrategy(orch, task, {
-						engine: buildEngine(signal, undefined, { providerFallback: false }),
+						engine: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }),
 						teams,
 						limits: RUN_LIMITS,
 						...sessionModelDep(ctx),
-						...(signal ? { signal } : {}), // cooperative per-round abort inside the phase's strategy, not just the engine
-						...strategyTreeDeps(ctx, pid, participantsByNode),
+						signal, // cooperative per-round abort inside the phase's strategy, not just the engine
+						...strategyTreeDeps(ctx, pid, participantsByNode, tracked),
 						...strategySpawnGate(),
 						...modelFallbackDep(ctx),
 					});
@@ -1876,26 +1980,34 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// boundary, never an informational prompt. Approval is journaled for resume.
 				approveGate: async (phase, result) => {
 					if (!ctx.hasUI) return false;
-					const preview = result.output.replace(/\s+/g, " ").slice(0, 160);
+					const next = spec.phases.filter((p) => p.needs?.includes(phase.id));
+					// The run is the OPERATOR's to release here, not the model's: say so on the tree row and, for a
+					// tracked run, on its peek line — silence at a modal is neither a stall nor a reason to wake anyone.
+					const waiting = `waiting for operator at checkpoint ${phase.id}`;
+					agentTree.update(flowRoot, { detail: waiting });
+					tracked?.onAwaiting(waiting);
 					try {
-						const pick = await ctx.ui.select(`Checkpoint "${phase.id}" — approve and continue the flow?\n${preview}`, ["Approve", "Reject"]);
+						// Reject first: a stray Enter on the default row fails closed. The run signal dismisses
+						// the prompt, so a stopped flow is not held open by a question nobody will answer.
+						const pick = await inGateLine(signal, undefined, () =>
+							ctx.ui.select(gateReviewText({ flow: spec.name, phase: phase.id, next, output: result.output }), ["Reject", "Approve"], { signal }),
+						);
 						return pick === "Approve";
 					} catch {
 						return false;
+					} finally {
+						tracked?.onAwaiting(undefined);
+						agentTree.update(flowRoot, { detail: "", lastAdvanceAt: Date.now() });
 					}
 				},
 			});
-			if (outcome.ok) {
-				try {
-					rmSync(journalPath, { force: true }); // clean journal once the whole flow succeeds
-				} catch {
-					/* ignore */
-				}
-			}
-			agentTree.update(flowRoot, { status: signal?.aborted ? "stopped" : outcome.ok ? "done" : "failed" });
+			if (outcome.ok) clearJournal(journalPath, hash); // this run is finished; other tasks' progress stays
+			// A rejected checkpoint is a pause the operator chose, not a failure (same call as the flow tool).
+			const disposition = flowDisposition(outcome);
+			agentTree.update(flowRoot, { status: disposition === "failed" && signal.aborted ? "stopped" : disposition });
 			return outcome;
 		} catch (error) {
-			agentTree.update(flowRoot, { status: signal?.aborted ? "stopped" : "failed" });
+			agentTree.update(flowRoot, { status: signal.aborted ? "stopped" : "failed" });
 			throw error;
 		} finally {
 			clearStops(flowRoot);
@@ -1937,11 +2049,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				...(a.isolation ? { isolation: a.isolation } : {}),
 			})),
 			teams: teamAgents,
-			flows: listFlows(ctx.cwd),
+			// Methods are only taught to a persona that can call them: an allowlist without `council`/`flow` is not
+			// told to convene one (the call would be refused by the capability gate).
+			flows: !caps || canCallTool(caps, "flow") ? flowCatalog(ctx.cwd) : [],
+			...(caps && !canCallTool(caps, "council") ? { council: false } : {}),
 			standing: controller.activePersona !== undefined,
-			// Interactive sessions delegate in the background by default; headless (`pi -p`)
-			// stays sync (the single turn must carry the result) — mirror that in the copy.
-			asyncDefault: ctx.hasUI === true,
+			// Interactive sessions ALWAYS delegate in the background; headless (`pi -p`) always
+			// blocks (the single turn must carry the result) — mirror that in the copy.
+			background: ctx.hasUI === true,
 			...(delegation?.requireBrief !== undefined ? { requireBrief: delegation.requireBrief } : {}),
 			...(delegation?.outputContract ? { outputContract: delegation.outputContract } : {}),
 			...(delegation?.requireDisjointWrites !== undefined ? { requireDisjointWrites: delegation.requireDisjointWrites } : {}),
@@ -1993,7 +2108,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			lines.push(`data root migration: moved ${dataRootMigration.moved.length}, kept ${dataRootMigration.kept.length} (legacy pi-persona root folded into ${personaDataDir()})`);
 		}
 		for (const warning of dataRootMigration.warnings) lines.push(warning);
-		lines.push(`personas (${personas.length}): ${personas.map((p) => p.name).join(", ") || "—"}`);
+		lines.push(`personas (${personas.length}): ${personas.map((p) => p.name).join(", ") || NO_PERSONAS_HINT}`);
 		lines.push(`agents (${agents.length}): ${agents.map((a) => a.name).join(", ") || "—"}`);
 		if (definitionCollisions.length > 0) {
 			lines.push(`definition collisions (${definitionCollisions.length}, omitted): ${definitionCollisions.map((collision) => collision.name).join(", ")}`);
@@ -2068,6 +2183,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		telemetryAgent,
 		delegationNudge,
 		persistenceNudge,
+		pollGuard,
+		tracker,
 		appendNudgeEntry,
 		completionNotifier,
 		intercomNotifier,
@@ -2113,6 +2230,20 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	};
 	installHooks(pi, hookHost, exocom);
 
+	// ONE launch pool for every background run: a delegate leg, a `council` and a `flow` each take a slot
+	// (maxConcurrency). The strategy SDK's own per-run semaphore gates the legs INSIDE a council or flow.
+	const launchPool = new Semaphore(RUN_LIMITS.maxConcurrency);
+	const backgroundRuns = createBackgroundRuns({
+		tracker,
+		agentTree,
+		stopRegistry,
+		slots: launchPool,
+		completionNotifier,
+		startPeek,
+		childUsage,
+		publishPersonaCost,
+	});
+
 	registerDelegateTool(pi, {
 		get lastCtx() { return lastCtx; },
 		set lastCtx(value) { lastCtx = value; },
@@ -2121,21 +2252,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		contractNames: () => installedContractNames(contractDefs),
 		buildEngine,
 		agentTree,
-		nextRootId,
 		tracker,
+		runs: backgroundRuns,
+		launchPool,
 		config: { ledgerV2: config.ledgerV2 },
 		RUN_LIMITS,
 		publishAgentTool,
 		stopRegistry,
 		steerRegistry,
-		stopRequested,
-		ensurePersonaModels,
-		clearStops,
-		clearSteers,
 		drainBusBlock,
 		startPeek,
-		childUsage,
-		publishPersonaCost,
 	});
 
 // ── f8 cycle ────────────────────────────────────────────────────────────────
@@ -2143,7 +2269,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		description: "Cycle persona (pi-persona)",
 		handler: async (ctx: ExtensionContext) => {
 			lastCtx = ctx;
-			if (personas.length === 0) return;
+			if (personas.length === 0) {
+				if (ctx.hasUI) ctx.ui.notify(NO_PERSONAS_HINT, "info");
+				return;
+			}
 			const current = controller.activePersona;
 			const idx = current ? personas.findIndex((p) => p.name === current.name) : -1;
 			const next = idx + 1;
@@ -2181,14 +2310,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		SUPERVISOR,
 		STALL_FLAG_MS,
 		waitingRunIds: waitingAsyncRunIds,
+		pollGuard,
 		missingRunMessage,
 		stopAgent,
 		steerAgent,
 		steerRegistry,
 		stopRequested,
-		drainBusBlock,
 		scanForSurrender,
-		get disposed() { return disposed; },
 		childUsage,
 		publishPersonaCost,
 	});
@@ -2211,9 +2339,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		controller,
 		get personas() { return personas; },
 		runStrategyVisible,
+		runs: backgroundRuns,
 		drainBusBlock,
-		childUsage,
-		publishPersonaCost,
 	});
 
 	registerFlowTool(pi, {
@@ -2222,8 +2349,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		loadFlow,
 		listFlows,
 		runFlowVisible,
-		childUsage,
-		publishPersonaCost,
+		runs: backgroundRuns,
 	});
 
 // ── f9: navigable agent overlay ──────────────────────────────────────────────
@@ -2402,14 +2528,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return;
 			}
 			if (arg === "" || arg === "list") {
-				// Empty by design on a fresh install: personas load only from the user dir, which the
-				// user populates on purpose. Point them at the install gesture rather than leaving a
-				// bare "(none)" that reads like something is broken.
 				if (personas.length === 0) {
-					ctx.ui.notify(
-						"No personas installed. pi-persona does not auto-install — run `/persona seed` to copy the bundled defaults into your agent dir (edit them freely; `/persona restore` re-installs the originals).",
-						"info",
-					);
+					ctx.ui.notify(NO_PERSONAS_HINT, "info");
 					return;
 				}
 				const lines = personas.map(
@@ -2548,11 +2668,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					return;
 				}
 				try {
-					const outcome = await runFlowVisible(ctx, parsed.flow, task);
-					appendCommandResult(`flow ${orch.flow}`, outcome.output || "(flow produced no output)", outcome.ok, {
-						...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
-						...(outcome.error ? { error: outcome.error } : {}),
-					});
+					appendFlowResult(orch.flow, await runFlowVisible(ctx, parsed.flow, task));
 				} catch (err) {
 					ctx.ui.notify(`orchestrate failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 				}
@@ -2571,7 +2687,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			try {
 				const result = await runStrategyVisible(ctx, orch, task, "orchestrate");
-				appendCommandResult(
+				appendOperatorResult(
 					`orchestrate ${strategyName}`,
 					result?.output || "(no output)",
 					result?.ok ?? false,
@@ -2593,9 +2709,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			lastCtx = ctx;
 			const trimmed = args.trim();
 			if (!trimmed || trimmed === "list") {
-				const flows = listFlows(ctx.cwd);
+				const flows = flowCatalog(ctx.cwd);
 				ctx.ui.notify(
-					flows.length ? `flows: ${flows.join(", ")}  ·  /flow <name> <task>` : "no flows — add a *.flow.json under .pi/flows/",
+					flows.length
+						? [
+							"flows — /flow <name> <task>",
+							...flows.map((f) =>
+								`  ${f.name}${f.description ? ` — ${compactInlineText(f.description, { maxChars: 96 })}` : ""}${f.gated ? " [pauses at a checkpoint for your approval]" : ""}`),
+						].join("\n")
+						: "no flows found — the bundled ones did not load (check the pi-persona install); your own go in .pi/flows/*.flow.json",
 					"info",
 				);
 				return;
@@ -2617,11 +2739,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return;
 			}
 			try {
-				const outcome = await runFlowVisible(ctx, parsed.flow, task);
-				appendCommandResult(`flow ${name}`, outcome.output || "(flow produced no output)", outcome.ok, {
-					...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
-					...(outcome.error ? { error: outcome.error } : {}),
-				});
+				appendFlowResult(name, await runFlowVisible(ctx, parsed.flow, task));
 			} catch (err) {
 				ctx.ui.notify(`flow failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}

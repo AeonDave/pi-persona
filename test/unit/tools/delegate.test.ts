@@ -1,12 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import type { AgentRunSpec, StrategyEngine } from "../../../src/orchestration/sdk.ts";
+import { legFailure } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { coerceDelegateParams, DelegationLedger, type DelegateView, labelFor, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, runDelegate, shortModel, shouldRecordDelegationOutcome, unknownAgentError, unknownContractError, wantsAsyncRun, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
+import { coerceDelegateParams, DelegationLedger, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, shortModel, shouldRecordDelegationOutcome, unknownAgentError, unknownContractError, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
-const engineThat = (fn: (spec: AgentRunSpec) => AgentResult): StrategyEngine => ({ run: async (s) => fn(s) });
 
 const completeBrief = (): DelegationBrief => ({
 	objective: "Find the root cause",
@@ -39,40 +38,33 @@ test("specOf copies a non-empty writeSet, and omits the field when writeSet is a
 	assert.equal(specOf({ agent: "scout", task: "t" }).writeSet, undefined);
 });
 
-test("specOf and runDelegate preserve an explicit empty tool allowlist", async () => {
+test("specOf preserves an explicit empty tool allowlist", () => {
 	assert.deepEqual(specOf({ agent: "locked", task: "reason", tools: [] }).tools, []);
-	const seen: Array<string[] | undefined> = [];
-	const engine = engineThat((spec) => {
-		seen.push(spec.tools);
-		return { agent: spec.agent, output: "done", usage: usage(), ok: true };
-	});
-	await runDelegate({ agent: "locked", task: "reason", tools: [] }, engine);
-	assert.deepEqual(seen, [[]]);
 });
 
-test("runDelegate forwards authoritative per-leg tool lifecycle without display parsing", async () => {
-	const events: Array<{ index: number; phase: string; callId: string; name: string }> = [];
-	const engine: StrategyEngine = {
-		run: async (spec, onProgress) => {
-			onProgress?.({ output: "", toolEvent: { phase: "start", callId: "call-7", name: "read" } });
-			onProgress?.({ output: "done", toolEvent: { phase: "end", callId: "call-7", name: "read" } });
-			return { agent: spec.agent, output: "done", usage: usage(), ok: true };
-		},
-	};
-	await runDelegate(
-		{ agent: "scout", task: "inspect" },
-		engine,
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		(index, event) => events.push({ index, phase: event.phase, callId: event.callId, name: event.name }),
-	);
-	assert.deepEqual(events, [
-		{ index: 0, phase: "start", callId: "call-7", name: "read" },
-		{ index: 0, phase: "end", callId: "call-7", name: "read" },
-	]);
+test("specOf maps every per-leg field; a junk timeoutMs leaves the key genuinely absent", () => {
+	const spec = specOf({
+		agent: "operator",
+		task: "t",
+		skills: ["python-patterns"],
+		model: "prov/m",
+		tools: ["read"],
+		role: "  You are a Rust auditor.  ",
+		mcp: false,
+		isolation: "none",
+		timeoutMs: 5000,
+	});
+	assert.deepEqual(spec.skills, ["python-patterns"]);
+	assert.equal(spec.model, "prov/m");
+	assert.deepEqual(spec.tools, ["read"]);
+	assert.equal(spec.role, "You are a Rust auditor.");
+	assert.equal(spec.mcp, false, "an explicit false survives");
+	assert.equal(spec.isolation, "none", "an explicit none survives");
+	assert.equal(spec.timeoutMs, 5000);
+	for (const timeoutMs of [0, -5, Number.NaN]) {
+		assert.ok(!("timeoutMs" in specOf({ agent: "a", task: "t", timeoutMs })), `${timeoutMs} never reaches the spec, not even as present-undefined`);
+	}
+	assert.ok(!("timeoutMs" in specOf({ agent: "a", task: "t" })));
 });
 
 test("validateDelegationBrief reports every missing/non-empty field with a repair hint", () => {
@@ -140,108 +132,6 @@ test("parallel write-set validation rejects ownership outside the repository", (
 
 test("write-set normalization treats repository root markers as ancestors", () => {
 	assert.equal(findWriteSetOverlaps([{ agent: "a", writeSet: ["."] }, { agent: "b", writeSet: ["src/file.ts"] }]).length, 1);
-});
-
-test("runDelegate rejects overlapping parallel write sets before any engine call", async () => {
-	let spawned = 0;
-	const engine = engineThat(() => {
-		spawned++;
-		return { agent: "x", output: "must not run", usage: usage(), ok: true };
-	});
-	const r = await runDelegate({ tasks: [{ agent: "a", task: "t", writeSet: ["src"] }, { agent: "b", task: "t", writeSet: ["src/file.ts"] }] }, engine);
-	assert.equal(spawned, 0);
-	assert.equal(r.ok, false);
-	assert.match(r.text, /serialize|overlap/i);
-});
-
-test("runDelegate single mode runs one named agent and returns its output", async () => {
-	const engine = engineThat((s) => ({ agent: s.agent, output: `out:${s.task}`, usage: usage(), ok: true }));
-	const r = await runDelegate({ agent: "scout", task: "explore" }, engine);
-	assert.equal(r.ok, true);
-	assert.equal(r.results.length, 1);
-	assert.match(r.text, /out:explore/);
-});
-
-test("runDelegate single mode emits the terminal view after a successful run", async () => {
-	const progress: DelegateView[][] = [];
-	const engine = engineThat((s) => ({ agent: s.agent, output: "FAUX_HOST_MODEL_OK", usage: usage(), ok: true }));
-	await runDelegate(
-		{ agent: "worker", task: "inspect", name: "Flow-identity-worker" },
-		engine,
-		undefined,
-		(views) => progress.push(views),
-	);
-	assert.deepEqual(progress.map((views) => views[0]?.running), [true, false]);
-	assert.equal(progress[1]?.[0]?.ok, true);
-	assert.equal(progress[1]?.[0]?.label, "Flow-identity-worker");
-	assert.equal(progress[1]?.[0]?.output, "FAUX_HOST_MODEL_OK");
-});
-
-test("runDelegate parallel mode runs all tasks (bounded) and aggregates", async () => {
-	const seen: string[] = [];
-	const engine = engineThat((s) => {
-		seen.push(s.agent);
-		return { agent: s.agent, output: `out:${s.agent}`, usage: usage(), ok: true };
-	});
-	const r = await runDelegate(
-		{ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }, { agent: "c", task: "t" }] },
-		engine,
-	);
-	assert.deepEqual(seen.sort(), ["a", "b", "c"]);
-	assert.equal(r.results.length, 3);
-	assert.match(r.text, /\[a\]/);
-	assert.equal(r.ok, true);
-});
-
-test("runDelegate threads a per-leg steer handle (onLegSteerable) from the engine", async () => {
-	const steered: string[] = [];
-	const engine: StrategyEngine = {
-		run: async (s, _onProgress, _signal, onSteerable) => {
-			onSteerable?.((text) => {
-				steered.push(`${s.agent}:${text}`);
-			});
-			return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-		},
-	};
-	const handles: Array<(t: string) => void> = [];
-	await runDelegate({ agent: "scout", task: "t" }, engine, undefined, undefined, undefined, (_i, steer) => handles.push(steer));
-	assert.equal(handles.length, 1, "onLegSteerable fired for the leg");
-	handles[0]?.("redirect to errors");
-	assert.deepEqual(steered, ["scout:redirect to errors"], "the steer handle reaches the engine's steer fn");
-});
-
-test("runDelegate passes an on-the-fly `role` through to the engine spec (single + parallel)", async () => {
-	const roles: Array<string | undefined> = [];
-	const engine = engineThat((s) => {
-		roles.push(s.role);
-		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-	});
-	await runDelegate({ agent: "operator", task: "t", role: "You are a Rust auditor." }, engine);
-	await runDelegate({ tasks: [{ agent: "operator", task: "t", role: "You are a CSS wizard." }, { agent: "scout", task: "t" }] }, engine);
-	assert.deepEqual(roles, ["You are a Rust auditor.", "You are a CSS wizard.", undefined]);
-});
-
-test("runDelegate preserves explicit mcp true/false through to the engine spec (single + parallel)", async () => {
-	const mcp: Array<boolean | undefined> = [];
-	const engine = engineThat((s) => {
-		mcp.push(s.mcp);
-		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-	});
-	await runDelegate({ agent: "operator", task: "t", mcp: true }, engine);
-	await runDelegate({ agent: "operator", task: "t", mcp: false }, engine);
-	await runDelegate({ tasks: [{ agent: "operator", task: "t", mcp: true }, { agent: "scout", task: "t", mcp: false }, { agent: "scout", task: "t" }] }, engine);
-	assert.deepEqual(mcp, [true, false, true, false, undefined]);
-});
-
-test("runDelegate preserves explicit isolation worktree/none through to the engine spec", async () => {
-	const isolation: Array<"none" | "worktree" | undefined> = [];
-	const engine = engineThat((s) => {
-		isolation.push(s.isolation);
-		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-	});
-	await runDelegate({ agent: "operator", task: "t", isolation: "none" }, engine);
-	await runDelegate({ tasks: [{ agent: "operator", task: "t", isolation: "worktree" }, { agent: "scout", task: "t", isolation: "none" }] }, engine);
-	assert.deepEqual(isolation, ["none", "worktree", "none"]);
 });
 
 test("DelegationLedger vetoes only after MAX identical failures; model/task changes are new keys", () => {
@@ -347,131 +237,6 @@ test("DelegationLedger key: ledgerV2 ON ⇒ a whitespace-padded role (raw) keys 
 	);
 });
 
-test("runDelegate reports a single-agent failure with its error", async () => {
-	const engine = engineThat(() => ({ agent: "x", output: "", usage: usage(), ok: false, error: "boom" }));
-	const r = await runDelegate({ agent: "x", task: "t" }, engine);
-	assert.equal(r.ok, false);
-	assert.match(r.text, /boom/);
-});
-
-test("runDelegate preserves abort classification in its terminal UI view", async () => {
-	const engine = engineThat(() => ({
-		agent: "x",
-		output: "partial",
-		usage: usage(),
-		ok: false,
-		error: "agent aborted",
-		failureKind: "abort",
-	}));
-	const progress: Array<string | undefined> = [];
-	const r = await runDelegate(
-		{ tasks: [{ agent: "x", task: "t" }] },
-		engine,
-		undefined,
-		(views) => progress.push(views[0]?.failureKind),
-	);
-	assert.equal(r.views[0]?.failureKind, "abort");
-	assert.equal(progress.at(-1), "abort", "the final progress projection carries the abort classification");
-});
-
-test("runDelegate reports live per-task views via onProgress (parallel)", async () => {
-	const engine = engineThat((s) => ({ agent: s.agent, output: `out:${s.agent}`, usage: usage(), ok: true }));
-	const doneCounts: number[] = [];
-	const r = await runDelegate(
-		{ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] },
-		engine,
-		{ maxConcurrency: 4, maxChildren: 8 },
-		(views) => doneCounts.push(views.filter((v) => !v.running).length),
-	);
-	assert.equal(r.views.length, 2);
-	assert.ok(r.views.every((v) => !v.running && v.ok));
-	assert.ok(doneCounts.length >= 2, "progress reported as tasks complete");
-	assert.equal(doneCounts[doneCounts.length - 1], 2);
-});
-
-test("runDelegate threads a per-task timeoutMs through to the engine spec (single-leg override, siblings untouched — the untouched sibling's key is genuinely absent)", async () => {
-	const specs: AgentRunSpec[] = [];
-	const engine = engineThat((s) => {
-		specs.push(s);
-		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-	});
-	await runDelegate({ tasks: [{ agent: "operator", task: "t", timeoutMs: 5000 }, { agent: "scout", task: "t" }] }, engine);
-	assert.equal(specs[0]?.timeoutMs, 5000);
-	assert.ok(!("timeoutMs" in (specs[1] ?? {})), "the sibling with no override has NO timeoutMs key, not a present-undefined one");
-});
-
-test("runDelegate ignores a non-finite/non-positive timeoutMs (falls back to the engine default — the key is genuinely absent, not present-as-undefined)", async () => {
-	const specs: AgentRunSpec[] = [];
-	const engine = engineThat((s) => {
-		specs.push(s);
-		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-	});
-	await runDelegate(
-		{ tasks: [{ agent: "a", task: "t", timeoutMs: 0 }, { agent: "b", task: "t", timeoutMs: -5 }, { agent: "c", task: "t", timeoutMs: Number.NaN }] },
-		engine,
-	);
-	assert.ok(specs.every((s) => !("timeoutMs" in s)), "junk timeoutMs never reaches the spec — the key itself is absent, not present-as-undefined");
-});
-
-test("runDelegate threads timeoutMs through to the engine spec in single mode too (valid carries; junk/absent falls back to a genuinely absent key)", async () => {
-	const specs: AgentRunSpec[] = [];
-	const engine = engineThat((s) => {
-		specs.push(s);
-		return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-	});
-	await runDelegate({ agent: "scout", task: "t", timeoutMs: 12_000 }, engine);
-	await runDelegate({ agent: "scout", task: "t", timeoutMs: -1 }, engine);
-	await runDelegate({ agent: "scout", task: "t" }, engine);
-	assert.equal(specs[0]?.timeoutMs, 12_000, "a valid timeoutMs carries through");
-	assert.ok(!("timeoutMs" in (specs[1] ?? {})), "a junk (-1) timeoutMs is genuinely absent, not present-as-undefined");
-	assert.ok(!("timeoutMs" in (specs[2] ?? {})), "an omitted timeoutMs is genuinely absent");
-});
-
-test("runDelegate passes per-task skills/model/tools to the engine (dynamic sub-agent)", async () => {
-	const specs: AgentRunSpec[] = [];
-	const engine: StrategyEngine = {
-		run: async (s) => {
-			specs.push(s);
-			return { agent: s.agent, output: "o", usage: usage(), ok: true };
-		},
-	};
-	await runDelegate(
-		{ tasks: [{ agent: "operator", task: "do it", skills: ["python-patterns"], model: "prov/m", tools: ["read"] }] },
-		engine,
-	);
-	assert.deepEqual(specs[0]?.skills, ["python-patterns"]);
-	assert.equal(specs[0]?.model, "prov/m");
-	assert.deepEqual(specs[0]?.tools, ["read"]);
-});
-
-test("runDelegate single mode produces one done view", async () => {
-	const r = await runDelegate({ agent: "x", task: "t" }, engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true })));
-	assert.equal(r.views.length, 1);
-	assert.equal(r.views[0]?.running, false);
-	assert.equal(r.views[0]?.ok, true);
-});
-
-test("runDelegate clamps concurrency and caps the task count to the limits", async () => {
-	let inFlight = 0;
-	let maxInFlight = 0;
-	const ran: string[] = [];
-	const engine: StrategyEngine = {
-		run: async (s) => {
-			inFlight++;
-			maxInFlight = Math.max(maxInFlight, inFlight);
-			await new Promise((r) => setTimeout(r, 5));
-			inFlight--;
-			ran.push(s.agent);
-			return { agent: s.agent, output: "o", usage: usage(), ok: true };
-		},
-	};
-	const tasks = Array.from({ length: 6 }, (_, i) => ({ agent: `a${i}`, task: "t" }));
-	const r = await runDelegate({ tasks, concurrency: 99 }, engine, { maxConcurrency: 2, maxChildren: 4 });
-	assert.equal(ran.length, 4, "task count capped to maxChildren");
-	assert.ok(maxInFlight <= 2, "concurrency clamped to maxConcurrency");
-	assert.match(r.text, /dropped/);
-});
-
 test("normalizeDelegateConcurrency floors fractions, clamps bounds, and serializes invalid numbers", () => {
 	assert.equal(normalizeDelegateConcurrency(undefined, 4), 4);
 	assert.equal(normalizeDelegateConcurrency(1.9, 4), 1);
@@ -481,12 +246,9 @@ test("normalizeDelegateConcurrency floors fractions, clamps bounds, and serializ
 	assert.equal(normalizeDelegateConcurrency(Number.POSITIVE_INFINITY, 4), 1);
 });
 
-test("shortModel + labelFor produce a friendly 'name · model' label", () => {
+test("shortModel drops provider, claude- prefix and thinking suffix; nameFor numbers extra operators", () => {
 	assert.equal(shortModel("anthropic/claude-sonnet-4-6"), "sonnet-4-6");
 	assert.equal(shortModel("openrouter/openrouter/owl-alpha:high"), "owl-alpha");
-	assert.equal(labelFor({ agent: "operator", model: "anthropic/claude-sonnet-4-6" }, 0), "operator · sonnet-4-6");
-	assert.equal(labelFor({ agent: "scout", model: "x/y" }, 0), "scout · y", "a fixed agent keeps its own name");
-	assert.equal(labelFor({ agent: "operator", name: "auditor", model: "p/claude-haiku" }, 3), "auditor · haiku");
 	assert.equal(nameFor({ agent: "operator" }, 1), "operator-2", "unnamed extra operators are numbered, not catalog-named");
 });
 
@@ -495,45 +257,6 @@ test("nameFor turns an untrusted codename into a bounded single-line identifier"
 	assert.doesNotMatch(name, /[\r\n]/);
 	assert.doesNotMatch(name, /SYSTEM:\s*ignore/);
 	assert.ok(name.length <= 80);
-});
-
-test("runDelegate carries the display label in each view", async () => {
-	const engine = engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }));
-	const r = await runDelegate({ tasks: [{ agent: "operator", task: "t", model: "anthropic/claude-sonnet-4-6" }] }, engine);
-	assert.equal(r.views[0]?.label, "operator · sonnet-4-6");
-});
-
-test("runDelegate forwards the same assigned names shown by its views", async () => {
-	const seen: Array<{ name?: string; task: string }> = [];
-	const engine = engineThat((s) => {
-		seen.push(s);
-		return { agent: s.agent, output: "o", usage: usage(), ok: true };
-	});
-	const r = await runDelegate({ tasks: [
-		{ agent: "operator", task: "audit", name: "Atlas audit" },
-		{ agent: "operator", task: "verify" },
-	] }, engine, { maxConcurrency: 1, maxChildren: 2 });
-	assert.deepEqual(seen.map((s) => s.name), ["Atlas-audit", "operator-2"]);
-	assert.deepEqual(r.views.map((view) => view.label), ["Atlas-audit", "operator-2"]);
-});
-
-test("runDelegate exposes a per-leg abort via onLegStart", async () => {
-	const starts: number[] = [];
-	const engine = engineThat((s) => ({ agent: s.agent, output: "o", usage: usage(), ok: true }));
-	await runDelegate(
-		{ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] },
-		engine,
-		undefined,
-		undefined,
-		(i) => starts.push(i),
-	);
-	assert.deepEqual(starts.sort(), [0, 1]);
-});
-
-test("runDelegate rejects when neither single nor parallel params are given", async () => {
-	const engine = engineThat((s) => ({ agent: s.agent, output: "", usage: usage(), ok: true }));
-	const r = await runDelegate({}, engine);
-	assert.equal(r.ok, false);
 });
 
 test("unknownAgentError: all known → undefined", () => {
@@ -583,123 +306,23 @@ test("unknownContractError: caps the installed list at 16", () => {
 	assert.equal(/c19/.test(err ?? ""), false);
 });
 
-// wantsAsyncRun — the background-by-default launch decision (extension.ts execute + renderCall).
-// The headline v1.5.0 behavior: a regression flipping headless→async (stranding results after
-// `pi -p` exits) or interactive→sync must fail here, not slip through green.
-
-test("wantsAsyncRun: interactive (hasUI) defaults to background, headless defaults to sync", () => {
-	assert.equal(wantsAsyncRun({}, true), true, "interactive ⇒ background by default");
-	assert.equal(wantsAsyncRun({}, false), false, "headless ⇒ sync (the single turn must carry the result)");
-});
-
-test("wantsAsyncRun: sync:true opts an interactive call out; explicit async always wins", () => {
-	assert.equal(wantsAsyncRun({ sync: true }, true), false, "sync:true blocks even interactively");
-	assert.equal(wantsAsyncRun({ async: true }, false), true, "explicit async overrides the headless default");
-	assert.equal(wantsAsyncRun({ async: false }, true), false, "explicit async:false overrides the interactive default");
-	assert.equal(wantsAsyncRun({ async: true, sync: true }, true), true, "async wins over sync when both are set");
-});
-
-test("wantsAsyncRun: renderCall passes hasUI:true (it only fires in a UI) — mirrors the execute default", () => {
-	assert.equal(wantsAsyncRun({}, true), true, "a defaulted interactive call shows the async tag");
-	assert.equal(wantsAsyncRun({ sync: true }, true), false, "sync:true drops the tag");
-});
-
-// Partial results: an engine that REJECTS a leg (instead of settling ok:false) must not discard
-// the fan-out's completed siblings — the delegation reports N results for N tasks either way.
-
-test("runDelegate parallel mode keeps completed legs when one engine run rejects", async () => {
-	const engine: StrategyEngine = {
-		run: async (s) => {
-			if (s.agent === "b") throw new Error("engine exploded on b");
-			return { agent: s.agent, output: `out:${s.agent}`, usage: usage(), ok: true };
-		},
-	};
-	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }, { agent: "c", task: "t" }] }, engine);
-
-	assert.equal(r.results.length, 3, "one result per task, failed or not");
-	assert.deepEqual(r.results.map((x) => x.ok), [true, false, true]);
-	assert.equal(r.results[0]?.output, "out:a", "the completed sibling's work survives");
-	assert.match(r.results[1]?.error ?? "", /engine exploded on b/);
-	assert.equal(r.results[1]?.failureKind, "agent");
-	assert.equal(r.ok, false, "the delegation as a whole still failed");
-	assert.match(r.text, /out:a/);
-	assert.match(r.text, /out:c/);
-});
-
-test("a rejected leg's view settles as failed, never stuck 'running'", async () => {
-	const views: DelegateView[][] = [];
-	const engine: StrategyEngine = {
-		run: async (s) => {
-			if (s.agent === "b") throw new Error("boom");
-			return { agent: s.agent, output: "ok", usage: usage(), ok: true };
-		},
-	};
-	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }] }, engine, undefined, (v) => views.push(v));
-
-	assert.deepEqual(r.views.map((v) => v.running), [false, false]);
-	assert.equal(r.views[1]?.ok, false);
-	assert.match(r.views[1]?.output ?? "", /boom/, "the view carries the error the leg died on");
-	const last = views[views.length - 1] as DelegateView[];
-	assert.deepEqual(last.map((v) => v.running), [false, false], "the last streamed frame is settled too");
-});
-
-test("a leg aborted before it rejects settles as 'abort', so the UI shows stopped, not failed", async () => {
-	const engine: StrategyEngine = { run: async () => Promise.reject(new Error("AbortError")) };
-	const r = await runDelegate(
-		{ tasks: [{ agent: "a", task: "t" }] },
-		engine,
-		undefined,
-		undefined,
-		(_i, abort) => abort(),
-	);
-	assert.equal(r.views[0]?.failureKind, "abort");
-	assert.equal(r.results[0]?.failureKind, "abort");
-});
-
-// What the anti-loop ledger is allowed to treat as evidence. Containing a rejection as ok:false put
-// infrastructure crashes on the same footing as agent failures for the first time; a crash that
-// counts twice permanently vetoes a delegation nobody ever really attempted.
-
-test("two infrastructure crashes must not permanently veto a delegation that was never really attempted", async () => {
+test("two infrastructure crashes must not permanently veto a delegation that was never really attempted", () => {
 	const ledger = new DelegationLedger();
 	const task = { agent: "a", task: "t" };
-	const crashing: StrategyEngine = {
-		run: async () => {
-			throw new Error("ENOSPC writing the prompt file");
-		},
-	};
-	// Exactly how extension.ts feeds the ledger after a sync fan-out.
-	const record = async (engine: StrategyEngine) => {
-		const outcome = await runDelegate({ tasks: [task] }, engine);
-		outcome.results.forEach((r) => {
-			if (shouldRecordDelegationOutcome(r)) ledger.record(task, r.ok);
-		});
+	const record = (r: AgentResult) => {
+		if (shouldRecordDelegationOutcome(r)) ledger.record(task, r.ok);
 	};
 
-	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) await record(crashing);
+	// A rejected engine run (a full disk, a crashed adapter) is filed by the SDK's own leg-failure rule.
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) record(legFailure("a", new Error("ENOSPC writing the prompt file"), false));
 	assert.equal(ledger.vet([task]), undefined, "a full disk is not evidence that the delegation is a dead end");
 
-	// The contrast that keeps the veto meaningful: the SAME loop against an engine that REPORTS a
-	// failure — the agent tried and could not — does blacklist the task.
-	const failing = engineThat((s) => ({ agent: s.agent, output: "", usage: usage(), ok: false, error: "no path forward", failureKind: "agent" }));
-	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) await record(failing);
+	// The contrast that keeps the veto meaningful: the SAME loop against a REPORTED failure — the agent
+	// tried and could not — does blacklist the task.
+	for (let i = 0; i < MAX_IDENTICAL_FAILURES; i++) {
+		record({ agent: "a", output: "", usage: usage(), ok: false, error: "no path forward", failureKind: "agent" });
+	}
 	assert.match(ledger.vet([task]) ?? "", /already failed/, "a genuine agent failure still counts toward the veto");
-});
-
-test("a leg the RUN signal cancelled is classified as an abort, not an agent failure", async () => {
-	// The per-leg controller is untouched by a whole-run cancellation, so without the run signal a
-	// user's stop lands as an "agent" failure: FAILED in the tree, and a strike in the ledger.
-	const run = new AbortController();
-	const engine: StrategyEngine = {
-		run: async () => {
-			run.abort();
-			throw new Error("AbortError");
-		},
-	};
-	const r = await runDelegate({ tasks: [{ agent: "a", task: "t" }] }, engine, undefined, undefined, undefined, undefined, run.signal);
-
-	assert.equal(r.results[0]?.failureKind, "abort", "a cancelled run must not masquerade as an agent failure");
-	assert.equal(r.views[0]?.failureKind, "abort", "the UI projects the leg as stopped, not failed");
 });
 
 test("coerceDelegateParams unwraps a stringified tasks array and JSON-string items", () => {
@@ -707,13 +330,12 @@ test("coerceDelegateParams unwraps a stringified tasks array and JSON-string ite
 		{ agent: "operator", task: "digest spectre", brief: completeBrief(), writeSet: ["notes/a.md"], skills: ["reading-budget-discipline"] },
 		{ agent: "operator", task: "digest wraith", brief: completeBrief(), writeSet: ["notes/b.md"] },
 	];
-	const asString = coerceDelegateParams({ tasks: JSON.stringify(legs), sync: true });
+	const asString = coerceDelegateParams({ tasks: JSON.stringify(legs) });
 	assert.equal(asString.ok, true);
 	if (!asString.ok) return;
 	assert.equal(asString.params.tasks?.length, 2);
 	assert.equal(asString.params.tasks?.[0]?.agent, "operator");
 	assert.equal(asString.params.tasks?.[1]?.writeSet?.[0], "notes/b.md");
-	assert.equal(asString.params.sync, true);
 
 	const asItems = coerceDelegateParams({ tasks: [JSON.stringify(legs[0]), JSON.stringify(legs[1])] });
 	assert.equal(asItems.ok, true);
@@ -761,17 +383,4 @@ test("coerceDelegateParams validates decoded task fields instead of trusting the
 		assert.equal(coerced.ok, false, `decoded ${String(sample.field)} must be rejected`);
 		if (!coerced.ok) assert.match(coerced.error, sample.field);
 	}
-});
-
-test("the max-children ceiling still drops surplus tasks rather than running them", async () => {
-	let runs = 0;
-	const engine = engineThat((s) => {
-		runs += 1;
-		return { agent: s.agent, output: "o", usage: usage(), ok: true };
-	});
-	const tasks = Array.from({ length: 5 }, (_, i) => ({ agent: `a${i}`, task: "t" }));
-	const r = await runDelegate({ tasks }, engine, { maxConcurrency: 4, maxChildren: 2 });
-	assert.equal(runs, 2, "the ceiling is enforced before anything spawns");
-	assert.equal(r.results.length, 2);
-	assert.match(r.text, /3 task\(s\) beyond the max-children limit/);
 });
