@@ -93,7 +93,8 @@ export interface SeedResult {
 
 /** Exact bytes from earlier releases whose seeded copies are known to be stale. A user file is
  * eligible only when BOTH size and digest match. Keep this explicit allow-list deliberately
- * small: it is a migration policy, not a fuzzy upgrader. */
+ * small: it is a migration policy, not a fuzzy upgrader. Before tagging a release, add the
+ * previous tag's digest for every changed asset; the guard test in seed.test.ts prints the row. */
 export interface SeededDefaultSpec {
 	size: number;
 	sha256: string;
@@ -119,42 +120,108 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 5194, sha256: "0899ee3b10971c2b324e9e9c868fcab833ea80a80b83d94a1f0a95147475e9b5" },
 		// v1.12.1
 		{ size: 5195, sha256: "54da40a44a777f8a3b36b6c038248116e19be5a6515707747d070dc3f32ead56" },
+		// v1.14.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 3292, sha256: "d058a5cf683fa178ffb6c6fc98172328680d0fb19e21cf46a24d42613b5c48de" },
+		{ size: 3344, sha256: "a11cd85fd22b1c426c5fe148ceab8550f1815aace0702566fea3ad742bc25c13" },
 	],
 	"personas/planner.md": [
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 3350, sha256: "78a1f1c88d4d779dca46414029a247e8c48db85b3b7266be9366c6dc23714d87" },
 		{ size: 3397, sha256: "8055b7440f2cf1e79378196eda675bdeb5d58b8941d450f8901672cf82a9e876" },
+		// v1.14.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 2456, sha256: "a238aa8dbe01f42edc707585d1eccee3b63401eb1dbe91b607347a49624d27cb" },
+		{ size: 2493, sha256: "f8f8a8cdb6110022984556a7102f523411053282f818249c20ec8e0153c810e1" },
 	],
 	"personas/researcher.md": [
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 4441, sha256: "a3819ea76afee2a2f14d50c99198a09d4a4bd858e22ea9e4ceb3d868dcbb78c8" },
 		{ size: 4498, sha256: "2bd9dcaf47bd4ef3d139be361d260fbf7c9caa523144548593cdfc7ea4a2246c" },
+		// v1.14.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 2606, sha256: "68a1e62ddde7b0b0ecfd165e699c76cf6d6f3d533b6d1051dc4d5a64e9968807" },
+		{ size: 2643, sha256: "717fcd632de176e339928158516f35a6a4d82588e6ca36083726d1dbcfdc0e18" },
 	],
 	"personas/audit.md": [
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 2110, sha256: "ea893333fc128a760455bb4eaac3ee2d384163f40950fca2c201b41860bd9d8a" },
 		{ size: 2145, sha256: "04f2167437081d69806a704238411275006df98e6ee902bc0a8cb6eb81b0ef14" },
+		// v1.14.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 1636, sha256: "c35e053ef8578d93b1aa2efa4ecb97138ef84542f9cd7b524b1c7a267c4fdc05" },
+		{ size: 1665, sha256: "0c8dd4e637570aa82b25070a9027a2f46bda25a25f2195d06df0ccb6d98bb211" },
 	],
 	"personas/verify.md": [
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 1927, sha256: "4c670aba28ce15937d60074ec4ac7d50f6db3cccf137b60d9758627d69e82a0f" },
 		{ size: 1955, sha256: "9696278c243f83c9e8ee5f128faacebb8a89f85464b2c182f1bb77365a6d5643" },
+		// v1.14.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 2127, sha256: "d17d2f73f13388f1c92a13045b7a6d1032aa6b710ab4147dfc2eacd27f07a522" },
+		{ size: 2158, sha256: "7e26e68b77793e7349a2945f7674d5a116e3d1cfc5299e038d7b3a468e977ab2" },
+	],
+	// v1.7.0–v1.17.1 pristine seeds (LF and CRLF checkout variants); these two had no row before.
+	"personas/judge.md": [
+		{ size: 1778, sha256: "2f8c987de59d0f2aac6bdb62f556fc5937605d1036b4a42c8ada7a48461d4710" },
+		{ size: 1810, sha256: "3f0287dd7052f1f0bc65b40dc3af52847c0e5b2295cfcb4001ebe345b9e3fadc" },
+	],
+	"personas/magi.md": [
+		{ size: 2361, sha256: "a608fc26a13070fad79b84f9d1a5f39fd3b760aefb98732f1f95134a89cd0366" },
+		{ size: 2402, sha256: "0b24f01d93517d5fc56a7318d374ee679fa146e919e86e753f422f9f10a37bda" },
 	],
 	// The MAGI cores gained `purpose:` (their verticalization) in v1.10.6. Agents are seeded COPIES,
 	// not a live layer read from the package, so without these an existing install keeps three cores
 	// that render as bare names — the label feature would ship inert for everyone who already has them.
-	"agents/melchior.md": { size: 1503, sha256: "aa7a69296640f1023e00e2f2285b12cfdee158bb89f7b0b3d8c03a6317de9508" },
-	"agents/balthasar.md": { size: 1527, sha256: "27273ed49ea265f528efad4724e6abec6d051fa60d1f4fa678982e7383364981" },
-	"agents/casper.md": { size: 1508, sha256: "5074341b7e1ae7e9a44bc71de0405a17ccb404eacfaeb2fcf40f2ac4c23828ea" },
+	// Each core lists v1.0.0–v1.10.5, then v1.11.0–v1.14.0 (adds the confidence tie-break paragraph).
+	"agents/melchior.md": [
+		{ size: 1503, sha256: "aa7a69296640f1023e00e2f2285b12cfdee158bb89f7b0b3d8c03a6317de9508" },
+		{ size: 1523, sha256: "8a78c1ff201d728187fe19f19ea5f62f2d02f67c5cc5c3a9e5255c8776cbe74d" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 1747, sha256: "43ab5f65ecb89260c09b7e33daef3b68b1bc1c60c81b73b245fdf9984f601044" },
+		{ size: 1779, sha256: "6b4dcc0cc7416ac9a4543b7330edaeefb29b1006cc5e67b86f15ca94c4eaaf24" },
+	],
+	"agents/balthasar.md": [
+		{ size: 1527, sha256: "27273ed49ea265f528efad4724e6abec6d051fa60d1f4fa678982e7383364981" },
+		{ size: 1549, sha256: "9e91de81e76dc6fab13ed5a6d0c26319ca89da8da6fb5c71c8d852fcb86b73f0" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 1773, sha256: "6716f5c68f2eb0bc1e72b33cef3e78b062efa07a01d12edb95e671a482832753" },
+		{ size: 1805, sha256: "baafecc02b01c962bfc933b3f3f768808d541c85b0e01b29f6ff04a710f6d716" },
+	],
+	"agents/casper.md": [
+		{ size: 1508, sha256: "5074341b7e1ae7e9a44bc71de0405a17ccb404eacfaeb2fcf40f2ac4c23828ea" },
+		{ size: 1531, sha256: "97f2fd367b7c13bfaec39d9bd61065023ef501a519d95e516e39842c487f9427" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 1832, sha256: "32effd595231b7bb6ce6af01c87108bb030d489cc8758946206161e148e270e4" },
+		{ size: 1865, sha256: "9d22349de3252074ba7d1482ee942c36e384181939ec71f1fddfd4c527d3d436" },
+	],
 	// Current pristine seed before the compact-digest/reusable-artifact prompt update (LF and CRLF).
 	"agents/research.md": [
 		{ size: 3771, sha256: "6d084d11c84a594ddac0986bcf81aea6e5768b9df18196fedc8715bfd3f1eb16" },
 		{ size: 3825, sha256: "768899c4c9a5f60a8ff18602d7ee5a696414fd35a8d53e6ae2cc9dfa41d7a88f" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 4132, sha256: "bb35ec537ae654bf60e8552721dfd797db34b5dd5f623b23a95adf2cd72c70e0" },
+		{ size: 4190, sha256: "b579b08e6a9035b8ec9e55166f7bbe3dd11d421edca4e0df6146ceff4fe3d459" },
 	],
 	// v1.14.1 pristine seed (LF and CRLF checkout variants).
 	"agents/evidence-verifier.md": [
 		{ size: 1465, sha256: "428be556abbbd530826631ef255cd7effa3484b00b0c7c35877e8b0c9a786aef" },
 		{ size: 1487, sha256: "5e4b2b41700bf7b669769f40dd5e98b41db0d708e1dec75697d06fd6abeaa2a1" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 1560, sha256: "4fa0af121789e4408bde6ae1d8ced73c7b42adf31e4bf48121621e1047b09861" },
+		{ size: 1583, sha256: "3156e4748dc32bfd0d4699054a0a8407f7110270ce717af774d54d34d0e98d13" },
+	],
+	// v1.17.1 pristine seeds (LF and CRLF checkout variants); these four had no row before.
+	"agents/operator.md": [
+		{ size: 4598, sha256: "be7a18654c6106c8fa3be9694c75ef375d17bf13789bfce9ed1f76012d646d59" },
+		{ size: 4661, sha256: "9031054af66bca2b726536e5348f6d0223f66bb7b544cc256457b015d55c850f" },
+	],
+	"agents/reviewer.md": [
+		{ size: 3427, sha256: "8570b80e48a2b44dc364f7a41b3cd06741507329d91b0b9d7e1b716e7eaf7ee2" },
+		{ size: 3476, sha256: "73f404259730719051f8e9aedb17ddd398304ed40068128cd97eae3a884b0912" },
+	],
+	"agents/scout.md": [
+		{ size: 1341, sha256: "ffea9fe3643dbc0e5dea8ffc0722f41050374daed33e7f3a46378de36a630a62" },
+		{ size: 1364, sha256: "425b8ef2c1141b602b2f67e47224f855a8a11f936affd4429272347678de8b58" },
+	],
+	"agents/verifier.md": [
+		{ size: 1037, sha256: "ce8f161b1879084b336e2f24495a82aba7279f099b450852ba02db8b4850def5" },
+		{ size: 1058, sha256: "78d7c9e7e6d961b0005d216968196dea28b8ef09a8ccd52b0f7a4de97754a800" },
 	],
 	"personas/elite.md": [
 		{
@@ -218,6 +285,12 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
 		},
 		{
+			// v1.12.2–v1.14.0
+			size: 19312,
+			sha256: "a817f6e76164a142a15ec843978942e31ab765ae463bdded3966c0863d010894",
+			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
+		},
+		{
 			// v1.14.1 pristine seed (LF and CRLF checkout variants).
 			size: 19417,
 			sha256: "e64985de2708ef0715aa01b555f7e322b97b6dfbceca3c26913949f2c4e69f98",
@@ -228,6 +301,11 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 			sha256: "69be3a81b6b20ff51e21f8a6730049a5f740dd00c069f21d1a5a2184fda97f24",
 			requiredAdditions: ELITE_REQUIRED_ADDITIONS,
 		},
+		// v1.14.2–v1.16.1 and v1.16.2–v1.17.1 pristine seeds (LF and CRLF checkout variants each).
+		{ size: 19575, sha256: "7a349e63abc07c60c3937eb01005c0567e27327ec13a79550fcfe7deb5f87630", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
+		{ size: 19831, sha256: "7b078a2b2c2339df1169351fd58c97d5e99e4b33bff00c43229e566f0a737701", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
+		{ size: 19585, sha256: "23146654476bc477c48ce972b13566a31198c41c1aa051540d25cfb45394ab9d", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
+		{ size: 19841, sha256: "2751df2d27066c1d7398be3cc4d72abc4ecba01fb757c34b949bf74d64154dcb", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
 	],
 	// Live-peer collaboration landed in v1.12.2. Without these, a seeded copy from 1.7–1.12.1
 	// (and the two earlier untouched hashes) keeps the pre-collaboration prompt forever.
@@ -241,6 +319,10 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 1857, sha256: "77de7f590fdede6ede4848be11b39fb16bfb4733687ac1b1244cc59e626874c6" }, // v1.1.0–v1.4.0
 		{ size: 1955, sha256: "b7a7caa38c4d31c8cc27b85eb7facbf2339a024ad8d4cd2ba681a2a885de7646" }, // v1.5.1–v1.6.3
 		{ size: 2285, sha256: "985a1c5455b2c81537a55b31daed216d7f67a897b3b2d5bde35d64f3779d6fe4" }, // v1.7.0–v1.12.1
+		{ size: 2360, sha256: "ae0cfe758d9e1b9a4d2d4bad151999418e10e8291226764e7d155b44ce8ff5ea" }, // v1.14.0–v1.14.2
+		// v1.15.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
+		{ size: 2570, sha256: "3e6537f555d35b396041166d38da5cb397e076d00c258e25992d2e6abb8a37ef" },
+		{ size: 2608, sha256: "c54acac4f88a1dfbe7b21eb3c4bcea658896f953ea8de5d592bc06d2ad0f312a" },
 	],
 };
 

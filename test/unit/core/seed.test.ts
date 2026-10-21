@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -696,4 +697,82 @@ test("v1.14.1 custom Elite and evidence-verifier copies remain untouched", () =>
 	for (const [, name] of assets) {
 		assert.match(fs.readFileSync(path.join(userDirForCustom, "agents", name), "utf8"), /# local customization/);
 	}
+});
+
+test("v1.17.1 pristine Audit and Elite copies migrate for both checkout EOL forms", () => {
+	// The legacy table is what carries a prompt change to existing installs: a wrong digest ships it inert.
+	const fixture = (name: string) => fs.readFileSync(fileURLToPath(new URL(`../../fixtures/personas-1.17.1/${name}`, import.meta.url)));
+	const bundledDir = tempDir("pi-persona-v1171-bundled-");
+	fs.mkdirSync(path.join(bundledDir, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(bundledDir, "agents"), { recursive: true });
+	for (const asset of ["personas/audit.md", "personas/elite.md", "agents/evidence-verifier.md"]) {
+		fs.copyFileSync(path.join(REPO_ROOT, asset), path.join(bundledDir, asset));
+	}
+	for (const lineEnding of ["\n", "\r\n"] as const) {
+		const userDirForForm = userDir();
+		fs.mkdirSync(path.join(userDirForForm, "agents"), { recursive: true });
+		fs.copyFileSync(path.join(REPO_ROOT, "agents/evidence-verifier.md"), path.join(userDirForForm, "agents", "evidence-verifier.md"));
+		for (const name of ["audit.md", "elite.md"]) {
+			fs.writeFileSync(path.join(userDirForForm, "agents", name), withLineEnding(fixture(name), lineEnding));
+		}
+		const result = migratePristineSeededDefaults(bundledDir, userDirForForm);
+		const label = lineEnding === "\n" ? "LF" : "CRLF";
+		assert.deepEqual(result.migrated.sort(), ["audit.md", "elite.md"].map((name) => path.join(userDirForForm, "agents", name)).sort(), `migrates ${label} copies`);
+		for (const name of ["audit.md", "elite.md"]) {
+			assert.deepEqual(fs.readFileSync(path.join(userDirForForm, "agents", name)), fs.readFileSync(path.join(bundledDir, "personas", name)), `${name} now matches the shipped persona (${label})`);
+		}
+	}
+});
+
+test("a v1.14.0 pristine Elite (19,312 B) migrates and installs its required evidence-verifier", () => {
+	const bundledDir = tempDir("pi-persona-v1140-bundled-");
+	fs.mkdirSync(path.join(bundledDir, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(bundledDir, "agents"), { recursive: true });
+	for (const asset of ["personas/elite.md", "agents/evidence-verifier.md"]) fs.copyFileSync(path.join(REPO_ROOT, asset), path.join(bundledDir, asset));
+	const userDirForOld = userDir();
+	fs.mkdirSync(path.join(userDirForOld, "agents"), { recursive: true });
+	const elite = path.join(userDirForOld, "agents", "elite.md");
+	fs.copyFileSync(fileURLToPath(new URL("../../fixtures/personas-1.14.0/elite.md", import.meta.url)), elite);
+
+	const result = migratePristineSeededDefaults(bundledDir, userDirForOld);
+	assert.deepEqual(result.migrated, [elite]);
+	assert.deepEqual(result.installed, [path.join(userDirForOld, "agents", "evidence-verifier.md")]);
+	assert.deepEqual(fs.readFileSync(elite), fs.readFileSync(path.join(bundledDir, "personas/elite.md")));
+});
+
+test("every shipped asset that changed since the last release tag carries that tag's digest in the legacy table", () => {
+	// Hand upkeep of LEGACY_SEEDED_DEFAULTS already failed once (1.11-1.14 shipped without rows), so a
+	// forgotten row is a red test, not a review comment. Release prep adds the previous tag's row; this
+	// prints it, for BOTH checkout line-ending forms (a Windows checkout copies CRLF bytes) and with the
+	// size the migration also compares. Last tag only — older gaps are history, not this release's job.
+	// Skips without git/tags (an npm-installed copy, or CI's depth-1 checkout).
+	const git = (...args: string[]): Buffer | undefined => {
+		try {
+			return execFileSync("git", args, { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 16 * 1024 * 1024 });
+		} catch {
+			return undefined;
+		}
+	};
+	const tag = git("describe", "--tags", "--abbrev=0", "--match", "v*")?.toString("utf8").trim();
+	if (!tag) return;
+	const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+	const missing: string[] = [];
+	for (const dir of ["personas", "agents"]) {
+		for (const name of fs.readdirSync(path.join(REPO_ROOT, dir)).filter((f) => f.endsWith(".md"))) {
+			const asset = `${dir}/${name}`;
+			const old = git("show", `${tag}:${asset}`);
+			if (!old) continue; // new since the tag: nothing older to migrate
+			const current = Buffer.from(fs.readFileSync(path.join(REPO_ROOT, asset), "utf8").replaceAll("\r\n", "\n"), "utf8");
+			if (sha256(old) === sha256(current)) continue;
+			const entry = LEGACY_SEEDED_DEFAULTS[asset];
+			const specs = Array.isArray(entry) ? entry : entry ? [entry] : [];
+			for (const lineEnding of ["\n", "\r\n"] as const) {
+				const bytes = withLineEnding(old, lineEnding);
+				if (!specs.some((spec) => spec.sha256 === sha256(bytes) && spec.size === bytes.byteLength)) {
+					missing.push(`${asset}: add { size: ${bytes.byteLength}, sha256: "${sha256(bytes)}" }, // ${tag} ${lineEnding === "\n" ? "LF" : "CRLF"}`);
+				}
+			}
+		}
+	}
+	assert.deepEqual(missing, [], `LEGACY_SEEDED_DEFAULTS lacks the ${tag} bytes of changed assets, so their prompt update would ship inert:\n${missing.join("\n")}`);
 });

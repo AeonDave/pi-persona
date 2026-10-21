@@ -392,9 +392,6 @@ test("the bundled dev persona uses a sequential fail-closed repair council", () 
 		requireFreshVerification: true,
 		verificationAgents: ["verifier"],
 	});
-	for (const field of ["scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"]) {
-		assert.match(dev.body, new RegExp(`\\b${field}\\b`));
-	}
 });
 
 test("the bundled elite persona exposes a sequential evidence-assurance council", () => {
@@ -404,10 +401,6 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 	assert.equal(elite.council?.roster, "evidence-assurance");
 	assert.deepEqual(elite.council?.params, { rounds: 3 });
 	assert.deepEqual(elite.delegation, { requireBrief: true, outputContract: "finding" });
-	for (const field of ["scopeRoe", "position", "constraints", "requiredArtifacts", "stopConditions"]) {
-		assert.match(elite.body, new RegExp(`\\b${field}\\b`));
-	}
-	assert.match(elite.body, /outputContract:\s*"finding"/);
 	assert.match(elite.body, /target egress/i, "Elite makes the target's network egress an explicit invariant");
 	assert.match(
 		elite.body,
@@ -416,13 +409,23 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 	);
 	assert.match(
 		elite.body,
-		/UNKNOWN[\s\S]*do not (?:use|touch).*target/i,
+		/UNKNOWN\*\*: keep it off the target/i,
 		"Elite fails closed when a network-capable tool's target egress is unknown",
 	);
 	assert.match(
 		elite.body,
-		/Propagate the invariant into every delegation:[\s\S]*scopeRoe[\s\S]*constraints[\s\S]*(?:local\/VPN|local.*VPN)/i,
+		/every packet\s+names \*\*target traffic: local\/VPN only\*\*/i,
 		"Elite propagates the local/VPN-only boundary into delegated legs",
+	);
+	assert.match(
+		elite.body,
+		/## Evidence is a hard boundary[\s\S]*\*\*UNKNOWN\*\* is treated as HOSTED\/LOGGING/i,
+		"Elite classes the evidence route and fails closed on UNKNOWN, the defensive mirror of the egress boundary",
+	);
+	assert.match(
+		elite.body,
+		/## Purple loop[\s\S]*Replay the original plus one variant[\s\S]*lookalike\s+benign control/i,
+		"Elite proves a detection by a replayed technique, a variant, and a quiet lookalike benign control",
 	);
 	assert.doesNotMatch(
 		elite.body,
