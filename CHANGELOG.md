@@ -6,6 +6,109 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Added
+
+- Run `council` and `flow` as ONE tracked background run in interactive sessions (TUI and RPC), like
+  `delegate`: the call returns a receipt, ONE completion follow-up carries the ruling or outcome, and
+  `intercom result`, `peek`, `stop`, `stop { to: "all" }` and f9 reach it through the same `async:<runId>`
+  root. Headless `pi -p` launches the same run and joins it inline. A run holds one `maxConcurrency` slot
+  (shown `queued` until granted); the strategy SDK's own semaphore still gates its legs. A flow parked at
+  a checkpoint reads `waiting for operator at checkpoint <id>`, is skipped by the stall watchdog, and never
+  wakes the model.
+- Stop a `/flow`, `/orchestrate` or mandated `orchestration:` run as a whole: each registers its own abort
+  under its root row, so shutdown and reload end it instead of letting later rounds start. In f9, `x`
+  on that root row stops the whole run.
+- Hand an operator-run `/flow` or `/orchestrate` result to the supervisor's NEXT turn as a passive,
+  fenced message bounded to 12k characters, beside the existing card.
+- Generate the `council` strategy catalog from the registry: a `Strategy` may declare `when`, `roster`
+  and `required`, and the tool description renders one line per strategy. A call missing a `required`
+  param (`judge`, `compete` without `params.judge`) is refused up front, before any run, tree row or
+  model picker. The standing brief gains one decision-class line (contested fork -> magi, rival complete
+  answers -> judge, rival implementations -> compete, N items -> map, draft + critique -> critic-loop,
+  fixed stages -> flow).
+- Add a peek/result poll guard and a long-sleep guard, both under `config.nudge`
+  (`PI_PERSONA_NUDGE=off` disables them). A repeated `intercom peek` or `result` on a still-running run
+  whose answer has not changed is refused, then asks Pi to end the turn; a leading long `sleep`/`Start-Sleep`
+  is stopped while background children run or are being launched (interactive only). `steer` and `stop`
+  reset the poll guard.
+- Deliver a `delegate` `tasks` fan-out as ONE completion follow-up when its last member settles, with
+  every failed leg named on its own line, and show a `delegate · N legs  k/N settled` header row for
+  fan-outs of two or more legs. A fan-out receipt maps each run id to its call-sign; an unknown id on
+  `intercom result`, `steer` or `stop` lists the known runs.
+- Add `intercom stop { to: "all" }` and an f9 `X` stop-all (press twice; the first press states the
+  count). Runs already stopping are skipped, never force-cleared in bulk. `stop all` covers every tracker
+  run, `council` and `flow` included; `X` counts and signals every stoppable leaf and every run root that has a stop handle.
+- Add `running for <duration>` to a running run's peek line (omitted while queued).
+- Add a restore notice: a reload, in-session resume or `pi -c` tells the supervisor once, through a
+  passive next-turn message, which runs, timers and monitors did not survive, and run ids continue
+  instead of restarting at `run-1`.
+- Show the gated phase's output (12 lines) and what runs next at a flow checkpoint, with Reject as the
+  default. `/flow` and the supervisor brief list flows with descriptions, tagging gated flows.
+- Label `fanout`, `synthesize` and `map` sections by lens or item (`reviewer · SECURITY`,
+  `item 2: <text>`); `structured.results[i].member` carries the label when it differs from the agent.
+- Add `scripts/wake-smoke.mjs` (`LIVE_MODEL=<provider/id> npm run smoke:wake`): a manual, token-spending
+  live check that an interactive 3-leg fan-out gets one automatic wake with no peek, timer or sleep
+  polling before it.
+- Make `drive.ts` exit non-zero when the requested persona is not installed, and point F8 and `/doctor`
+  at `/persona seed` when no personas are installed.
+- Add the legacy seed digests for `elite` v1.12.2-v1.14.0, `swarm` v1.14.0-v1.14.2, the MAGI cores
+  v1.11.0-v1.14.0, and v1.17.1 `dev`, `planner`, `researcher`, `verify`, `swarm`, `judge` and `magi`,
+  with a release guard test that prints the missing row.
+
+### Changed
+
+- Esc no longer aborts an interactive `council` or `flow`: stop it from f9 (`x` on its root row, `X`) or have the supervisor `intercom stop` the run.
+  A mistyped council strategy or roster now fails in the completion follow-up instead of as an immediate
+  tool error. Persona `council:` defaults and the pre-turn `orchestration:` path are unchanged;
+  `/orchestrate` and `/flow` stay inline and operator-driven.
+- Stop crediting streamed tool output as child progress (reverses the 1.17.1 liveness credit). A run
+  advances only on assistant output, tokens, turns or a completed tool call (`madeHeadway`), so a
+  chatty long-running tool (`npm run dev`, `tail -f`) raises the operator-only stall card; nothing is
+  killed and the model is not woken. A council or flow run is credited per leg. The idle-timeout failure
+  now says to raise the leg's `timeoutMs`.
+- Rewrite the eight bundled personas (`audit`, `dev`, `judge`, `magi`, `planner`, `researcher`, `swarm`,
+  `verify`) into one shape and size (1.2-2.2 KB bodies) and register their v1.17.1 copies as migratable.
+  `swarm` declares `ownership` (`enforce` is opt-in), `audit` requires briefs, `verify` requires fresh verification, and
+  `dev`/`planner` name real delegate targets instead of teams.
+- Show a tracked council/flow in peek by tokens only (no false "0 turns"), name the panel on council
+  cards (the team, or the ad-hoc members), and have background-run receipts tell the supervisor not to
+  sleep, poll, peek or arm a timer, but to end the turn.
+- Build the legs of a background council/flow with `async: true` (`TrackedRun.background`), so a
+  coached leg's `contact_supervisor` ask can block while the supervisor is idle.
+- Make the headless `timer`/`monitor` arm results and the `[Session wakes]` tail say the wake lands only
+  if it fires before the turn settles, and reword both tools as wake sources, not polling.
+- Key flow resume on flow + task + cwd, and clear only the finished run's journal lines. A rejected
+  checkpoint is a stop, not a failure: the run settles `stopped`, keeps the gated plan, and reports
+  `flow stopped · checkpoint <id>` (`ok` stays false, so mandatory flows still fail closed).
+- Treat `flow` as a hand-off in the delegation nudge: a successful flow resets the by-hand run and a
+  failed one gets no re-dispatch checkpoint. The persistence note now says to verify directly or
+  re-dispatch with a sharper brief.
+- Keep a MAGI core's round-1 vote when its reflection leg fails (other than a stop), and name the keep
+  and any budget-skipped reflection in the ruling footer.
+- Raise the `PI_PERSONA_ASYNC_RETAIN` default from 25 to 64, the `tasks` cap, so one call cannot evict
+  its own early finishers.
+- Trim policy prose the per-turn brief already carries from the `delegate` description, and replace the
+  hand-written Patterns and Strategies lines in the `council` description with the generated catalog
+  (about +140 tokens).
+- Register the 1.14.2-1.17.1 `elite` and 1.14.0-1.17.1 `audit` seeds as migratable, so untouched
+  installed copies pick up the new prompt wording automatically.
+
+### Fixed
+
+- Stop a failed `flow X` on task A from silently resuming its finished phases under `flow X` on task B.
+- Stop run ids restarting at `run-1` after a reload or resume, which let `intercom result run-1` return
+  an unrelated run.
+
+### Removed
+
+- Remove the `delegate` `sync` and `async` parameters. Interactive sessions always run `delegate` in the
+  background and deliver each result as a completion follow-up; headless `pi -p` always blocks and returns
+  results inline.
+- Remove `intercom wait` with its `sync` and `timeoutMs` parameters: a finished child wakes the supervisor,
+  and `intercom result { to: runId }` retrieves a settled run.
+- Remove the headless one-shot stall wake. Stalls are operator-only cards and never wake the model;
+  `PI_PERSONA_PEEK_MS` drives only the stall card and the unread-message wake.
+
 ## [1.17.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.1) - 2026-10-20
 
 ### Added

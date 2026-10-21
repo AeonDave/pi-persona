@@ -72,12 +72,14 @@ For example, specialists can investigate code paths, tests, and the API contract
 Their findings return to the **same supervisor**, which integrates them, verifies the fix, and reports
 the outcome. This is one possible workflow, not a fixed pipeline; dependent steps run in order.
 
-Interactive delegation runs in the background by default. Results return automatically when the
-supervisor is free; you can inspect or redirect a worker at any point.
+Interactive delegation, councils and flows always run in the background; there is no blocking mode, so you
+can inspect, redirect, or stop a run at any point. Results return automatically when the supervisor is free, and
+the model is told to end its turn rather than sleep, poll, or arm a timer to wait. Headless `pi -p`
+blocks for the single turn and returns results inline.
 
 Periodic async status appears as a durable, expandable operator-only card (five minutes by default); it
-does not start a model turn or enter model context. Completions, blocking asks, unread worker messages,
-and newly stalled workers still use their actionable notification paths.
+does not start a model turn or enter model context. Completions, blocking asks, and unread worker
+messages wake the supervisor; a stalled worker appears only as an operator card.
 
 Launch and control cards show the worker's name. Steering receipts preview the message sent;
 expand with `Ctrl+O` (the default binding) to read it in full. A queued message is not proof that
@@ -87,8 +89,9 @@ the worker has acted on it.
 |---|---|
 | **F8** | Cycle through installed personas |
 | **F9** or `/agents` | Open the live agent panel |
-| **Enter** / **s** / **x** in the panel | Open output / send guidance / request a stop |
+| **Enter** / **s** / **x** / **X** in the panel | Open output / send guidance / request a stop / stop every running agent (press twice) |
 | `/peek` | Show a compact progress summary |
+| `/flow <name> <task>` | Run a flow (`/flow` alone lists them with descriptions; a `gate: true` phase pauses for your approval). `/orchestrate <task>` runs the active persona's `orchestration:` block (no bundled persona declares one; they use `council:` via the `council` tool) |
 | `/persona list` | List installed personas |
 | `/persona off` | Turn off the active persona |
 | `/persona models [council-persona]` | Refresh the catalog and reselect council models for the active persona |
@@ -147,7 +150,7 @@ everyday coding, or choose one for the work ahead.
 | `swarm` | Applying the same operation across many independent items |
 | `magi` | Comparing three perspectives through a vote, with dissent preserved |
 | `judge` | Having an independent reviewer choose between competing proposals |
-| `elite` | Scoped security assessment and evidence review |
+| `elite` | Red and blue security work: pentest, detection and response, purple loops, hardening validation |
 
 These are editable starting points. Browse the bundled [personas](personas) and [worker agents](agents),
 or read the [practical guide](docs/EXPERIENCE.md) for help choosing a workflow.

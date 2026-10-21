@@ -10,8 +10,8 @@ two unconditional guidelines: *be concise* and *show file paths clearly* (plus o
 bash-usage line, and whatever the caller passes as `promptGuidelines`). It carries no behavioral
 direction beyond that — nothing about scope discipline, verification, irreversibility, or how to
 treat text produced by another agent. Every pi-persona persona has therefore grown its own copy of those rules, and the copies
-drift: `elite.md` and `dev.md` each restate verify-before-claiming, untrusted-output handling, and
-delegation reflexes in their own words.
+drift: `elite.md` still carries its own delegation reflexes and evidence rules, while the other
+bundled personas now share one shape.
 
 The spine is that shared layer, written once. It sits between Pi's base prompt and the persona body,
 so a persona can be about *identity and method* instead of restating the same baseline every time.

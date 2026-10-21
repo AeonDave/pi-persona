@@ -11,7 +11,7 @@ copy-paste recipes see [`REFERENCE.md`](./REFERENCE.md); for the system design s
 
 ## The Strategy SDK
 
-A strategy is `{ name, params?, run(input, sdk) }` (`src/orchestration/sdk.ts`). `run` receives the
+A strategy is `{ name, params?, when?, roster?, required?, run(input, sdk) }` (`src/orchestration/sdk.ts`). `run` receives the
 task/roster/params and a constrained `sdk`; it returns one `AgentResult`. The engine is injected, so
 a strategy is backend-agnostic and unit-testable against a stub engine.
 
@@ -47,6 +47,12 @@ worker/verifier waves at splitting and the remaining verifier wave during worker
 `critic-loop`, and `council-rounds` reserve their remaining required steps/rounds. Recovery must not
 turn a usable partial panel into a run-fatal child-budget overflow.
 
+Who owns which limit: a `council` or `flow` TOOL run takes ONE slot of the delegate launch pool
+(`maxConcurrency`, see [ARCHITECTURE.md](ARCHITECTURE.md#supervision--the-waiting-model)) for its whole life, and
+the SDK's semaphore below gates only the legs INSIDE it, so a strategy's members never contend with delegate
+legs for pool slots. Interactive sessions launch the run in the background (a receipt, then ONE completion
+follow-up); headless sessions join it inline. A strategy needs nothing to opt in.
+
 Every `agent()` call in one SDK instance shares a concurrency semaphore, including direct
 `Promise.all` calls and overlapping `parallel()` batches. A requested batch concurrency may lower
 the ceiling, never raise it. Cancellation removes queued legs before they reach an engine.
@@ -79,15 +85,15 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 
 | Strategy | Mechanism | Params (default) | Comm/engine features |
 |---|---|---|---|
-| `fanout` | Every roster agent on the same task in parallel, then `aggregate`. | — | roster-role |
+| `fanout` | Every roster agent on the same task in parallel, then `aggregate`. Sections are labelled by lens (`reviewer · SECURITY`); `structured.results[i].member` carries the label when it differs from the agent name. | — | roster-role |
 | `pipeline` | Roster in SEQUENCE, each builds on the prior output; answer = last step. | — | roster-role |
-| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`. | `maxItems` (default AND ceiling: maxChildren − 1 without verification, halved and rounded down with `verify`, minimum 1; the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
+| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`; sections are labelled `item N: <text>`. | `maxItems` (default AND ceiling: maxChildren − 1 without verification, halved and rounded down with `verify`, minimum 1; the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
 | `critic-loop` | Generator proposes, critic attacks; `reject`/`revise` triggers another draft, and only explicit `approve` succeeds. Exhaustion fails closed with the last reviewed draft + unresolved critique (never an unreviewed tail revision). | `generator` (roster[0]), `critic` (roster[1]), `rounds` (positive integer, 3) | roster-role, `outputContract` |
-| `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. | `aggregate` ("majority"), `reflect` (true) | vote reducer |
+| `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. A core whose reflection leg fails (other than a stop) keeps its round-1 vote; the footer says so, and a reflection skipped for budget is named (`token budget`/`child budget`). | `aggregate` ("majority"), `reflect` (true) | vote reducer |
 | `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
 | `debate` | 2+ members work the same task in parallel and exchange positions LIVE via `contact_peer`, then a majority vote settles it. | `bestOf` (majority), `aggregate` ("majority") | **peers always**, vote reducer |
 | `judge` | A panel answers in parallel; one impartial arbiter picks on an anonymised, shuffled ballot. Only a successful arbiter result can select a winner; partial structured output from a failed/aborted arbiter fails closed. | `judge` (required), `contract` (none) | judge reducer |
-| `synthesize` | Parallel gatherers → one synthesiser merges the labeled findings into a single coherent answer (the "reduce" `fanout` lacks). | `synthesizer` (roster[0]), `peers` (false) | roster-role, opt-in peers |
+| `synthesize` | Parallel gatherers → one synthesiser merges the findings, labelled by lens like `fanout`, into a single coherent answer (the "reduce" `fanout` lacks). | `synthesizer` (roster[0]), `peers` (false) | roster-role, opt-in peers |
 | `pair` | A driver executes while a navigator inspects the same ground live (risk checklist up front, corrections per milestone, final review attached). | — | **peers always** (both legs) |
 | `compete` | N competitors implement the same task in ISOLATED git worktrees; a successful blind judge picks; the winner is returned as a unified diff for the SUPERVISOR to apply. If judging fails, every valid diff is returned unjudged and the strategy fails closed. | `judge` (required), `ballotDiffChars` (6000) | **`isolation: worktree`**, judge reducer |
 
@@ -189,6 +195,11 @@ Picker preflight reads these declarations instead of guessing participants from 
 - The **`council` tool** warns (via `ui.notify`, never hard-fails — I2 lenient) when a call passes a
   key the active strategy doesn't declare, e.g. `ignoring unknown param "reflct" for magi (known:
   reflect, aggregate)`. A correct call is behaviourally unchanged.
+- The **`council` tool description** renders one line per strategy from the registry: `name(params, required*)
+  — when; roster: positions`. `required` keys (`judge` and `compete` need `params.judge`) are refused at call time
+  — `council failed: "<strategy>" requires params.<key> — …` — before any run, tree row or model picker exists
+  (`missingRequiredParams`); a persona's own `council:` params count, so the bundled personas are unaffected.
+  An unknown strategy or roster is not judged up front: the run reports it in its completion follow-up.
 - **`/doctor`** lists each strategy's params live, so the schema is discoverable and this canonical
   table can't drift from the code.
 
@@ -227,7 +238,8 @@ Correct or remove the field before calling that persona's council, even with per
 
 The mandatory `orchestration:` path fires pre-turn on the raw user text, so it takes no dynamic
 per-call params (author params are threaded intact) — that is the difference between the two modes:
-`council:` is convened on demand and fully overridable; `orchestration:` runs the shape automatically.
+`council:` is convened on demand and fully overridable; `orchestration:` runs the shape automatically. It stays inline (its result IS the first answer, unlike
+the backgrounded `council` tool) and registers its own run-level abort, so shutdown ends the whole run.
 Its runtime status survives the hand-off into the supervisor turn: only `ok:true` is presented as a
 ruling. A failed, cancelled, or unresolved run is visibly labelled as such, keeps its fenced evidence,
 and must be repaired/re-verified rather than being laundered into a completion claim.
@@ -235,7 +247,10 @@ and must be repaired/re-verified rather than being laundered into a completion c
 ## Adding a strategy
 
 1. `src/orchestration/strategies/<name>.ts` — export a `Strategy` composing `agent`/`parallel`/
-   `reduce.*`. Declare `params` if it reads any. Inject any per-member protocol via the TASK text.
+   `reduce.*`. Declare `params` if it reads any, a one-line `when` (which problem class it fits), `roster`
+   only where member position matters (`[splitter, worker]`), and `required` for params a call cannot omit.
+   The `council` description is generated from these; never hand-write a strategy list. Inject any
+   per-member protocol via the TASK text.
 2. Register it in `strategy.ts` `BUILTINS`.
 3. Add a unit test on a stub engine (assert the spec it builds, not a live model).
 4. If it needs a new comm/engine capability rather than composing existing primitives, that is a core

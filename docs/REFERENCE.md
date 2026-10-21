@@ -34,12 +34,12 @@ hard-fail.
 
 | Surface | Does |
 |---|---|
-| `delegate` tool | spawn one or more sub-agents; interactive calls are background-first, while `sync: true` blocks the turn |
-| `council` tool | select any installed strategy over a named roster or temporary inline `members`; voting strategies preserve tally and dissent. Use when the topology adds value, not for routine work |
-| `intercom` tool | observe and control internal runs with `peek`, `result`, `wait`, `steer`, and `stop`; `list`, `inbox`, `message`, `reply`, and `send` drive the coaching bus. `wait` snapshots without blocking by default with UI; `sync: true` opts into a bounded blocking join (headless defaults to blocking; use `sync: false` for a snapshot); queued steering does not preempt an explicit join |
+| `delegate` tool | spawn one or more sub-agents; interactive sessions always run it in the background (results return as completion follow-ups); headless `pi -p` always blocks and returns results inline. There is no `sync`/`async` parameter. A leg whose tool is silent longer than the idle window (180 s) fails with a message telling you to raise that leg's `timeoutMs`. A `tasks` fan-out's receipt pairs each run id with its call-sign, and one wake covers the whole batch |
+| `council` tool | select any installed strategy over a named roster or temporary inline `members`; voting strategies preserve tally and dissent. Interactive sessions run a council in the background, like `delegate`: a receipt with a run id now, ONE completion follow-up with the ruling (`intercom result { to: runId }` for the full payload); headless `pi -p` returns it inline. Use it when the method adds value (vote, arbiter's pick, critique loop, per-item sweep, rival builds), not for plain independent parallel work, which is `delegate`. The strategy list in the tool description is generated from the registry (`when`, positional `roster`, `*` for a required param); a call missing a required param (`judge` and `compete` need `params.judge`) fails at once with `council failed: "<strategy>" requires params.<key> — …` and launches nothing, while an unknown strategy or roster is reported by the run itself, in the completion follow-up. A persona's declared `council:` still resolves when strategy, roster and params are omitted. Per-strategy behaviour (section labels, MAGI reflection fallbacks) is in [`STRATEGIES.md`](./STRATEGIES.md) |
+| `intercom` tool | observe and control internal runs with `peek`, `result`, `steer`, and `stop`; `list`, `inbox`, `message`, `reply`, and `send` drive the coaching bus. There is no `wait`: a finished child wakes the supervisor through the completion follow-up |
 | `timer` tool | read the fresh clock with `now`, or schedule an idle wake with `arm`, `cancel`, and `list`; alarms are one-shot and in-memory per session |
 | `monitor` tool | run a bounded job (`mode: exit`) or event-producing program (`mode: output`) and wake the supervisor; see [`MONITORS.md`](./MONITORS.md) |
-| `flow` tool and `/flow` | run a journaled DAG of strategies; `gate: true` creates an approval checkpoint |
+| `flow` tool and `/flow` | run a journaled DAG of strategies, resumable only for the same flow, task and project; `gate: true` creates an approval checkpoint, shown with the gated output and what runs next (Reject is the default). The `flow` tool runs in the background interactively (receipt, then ONE follow-up when it ends; a checkpoint waits for the operator, peek reads `waiting for operator at checkpoint <id>`, and no wake happens there) and inline headless, where every checkpoint is rejected. A rejected checkpoint is a stop (`flow stopped · checkpoint <id>`, the gated plan is kept), not a failure. `/flow` and `/orchestrate` stay inline and operator-driven, and their results also reach the supervisor's next turn. `/flow` alone lists flows with descriptions; the supervisor brief lists them too, tagging gated flows as needing a human in headless sessions |
 | `models` tool | list or search authenticated model ids in `provider/id` form; the session provider is marked |
 | persona `mode:` | choose `solo`, `parallel`, `pipeline`, `strategy:<name>`, or `flow:<name>` |
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
@@ -52,8 +52,6 @@ The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reac
 backends, keeping a caller-provided run label available in the live tree and runtime result. Every
 settled async run also emits an immediate UI banner with that name and its terminal outcome. The
 model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
-An explicit `delegate` `async` flag overrides both `sync` and the session default: `async: true`
-forces background execution; `async: false` forces synchronous execution.
 
 ### Pi 1.0 codemode
 
@@ -66,13 +64,13 @@ model, not as a wrapper that prints every result in full. `Promise.allSettled()`
 siblings when a call rejects; a fulfilled `bash` call still requires checking `exit_code`.
 Only printed/returned script output reaches the model. Nested results therefore do not contribute
 raw bytes or invisible reminders to pi-persona's context-burn nudges; an actual successful nested
-`delegate`/`council` still resets the hand-off streak.
+`delegate`/`council`/`flow` still resets the hand-off streak.
 
 Pi identifies calls made through codemode's `ctx.executeTool` with `parentToolCallId`. If a nested
 delegation report is relayed with `[BLOCKED]` or `FLAG: UNKNOWN`, only the outer model-visible result
 gets the persistence checkpoint and its expandable card. Discarding the report creates no reminder
 and never alters the programmatic inner result. See [the nudge contract](./ARCHITECTURE.md#supervision--the-waiting-model)
-for the differences between synchronous and background reports.
+for the differences between inline (headless) and background reports.
 
 The outer code/result card belongs to Pi, not pi-persona's delegate renderer. Keep bulky details
 expandable (`Ctrl+O` by default; `/hotkeys` shows active bindings). `Ctrl+T` toggles thinking blocks
@@ -94,20 +92,20 @@ a live pending ask on the exact child handle, never inferred from its last activ
 
 | Surface | Needs | What you get |
 |---|---|---|
-| **Observe and control** | any persona | `peek` inspects async sub-agents; `wait` is nonblocking by default with UI (`sync: true` joins; headless defaults to joining, with `sync: false` for snapshots); `steer` sends a soft correction; `stop` requests cancellation. The `f9` overlay provides the same controls (`s`, `x`). Queued steering does not preempt an active join. Cancelling a worker does not undo existing changes |
+| **Observe and control** | any persona | `peek` inspects async sub-agents; `steer` sends a soft correction; `stop` requests cancellation, and `stop { to: "all" }` cancels every running run, `council` and `flow` included (runs already stopping are skipped, never force-cleared in bulk; a slash or mandated run is stopped at shutdown, not by this). The `f9` overlay provides the same controls (`s`, `x`, `X`). Cancelling a worker does not undo existing changes; an unknown id on `result`, `steer` or `stop` returns a miss text listing the known runs |
 | **Retrieve** | any persona | `result { to }` returns one retained run payload; `message { messageId }` returns one retained bus message. History is bounded to 256 messages and 256,000 body characters, and retrieval never starts a worker |
 | **Message bus** | `coaching: true` | children get `contact_supervisor`; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
 | **Sibling peer comm** | strategy opt-in | `debate` and `pair` members always get one-way `contact_peer`; `map` and `synthesize` add it with `params: { peers: true }` |
 
 With coaching enabled, an async child's `decision` or `interview` waits for a supervisor reply.
-A synchronous child posts the question one-way and continues instead: the supervisor is holding
-that turn and cannot answer a blocking ask. Progress messages are always one-way.
+A headless (inline) child posts the question one-way and continues instead: the supervisor is
+parked in that call and cannot answer a blocking ask. Progress messages are always one-way.
 
-Delegated output is untrusted and is fenced before it reaches the supervisor. Interactive async
-work is background-first: continue independent work, and when only children remain, end the turn for
-automatic completion follow-ups rather than monitoring or joining all children. Use `wait` only when
-the next step depends on results. Async runs report failures to the supervisor, and a repeated
-identical failed delegation is stopped by the runtime ledger before another child is spawned. A run whose model's provider fails at call time (auth,
+Delegated output is untrusted and is fenced before it reaches the supervisor. Interactive
+delegation always runs in the background: continue independent work, and when only children remain, end the turn for
+automatic completion follow-ups; never sleep, poll, or arm a `timer` to wait for children or monitors.
+Async runs report failures to the supervisor, and a repeated identical failed delegation is stopped by
+the runtime ledger before another child is spawned. A run whose model's provider fails at call time (auth,
 outage, 5xx) may retry the same model id through a compatible fallback provider when its selection
 is unpinned; explicit delegate provider pins remain strict. Strategies and flows instead recover a
 model/provider failure once on the current main model, including unavailable saved or pinned choices.
@@ -177,7 +175,8 @@ Personas and agents are Markdown files with YAML frontmatter. Teams, flows, cont
 are data files. Discovery precedence is builtin < user `~/.pi/agent/persona` < project `.pi/`.
 Personas and agents are loaded from the user and project agent folders; bundled persona and agent
 files are seed sources. A fresh install has no installed personas until `/persona seed`,
-`/persona restore`, or opt-in first-run seeding installs them.
+`/persona restore`, or opt-in first-run seeding installs them. With none installed, F8, `/doctor` and
+`/persona list` all point to `/persona seed`.
 
 | Definition | Location | Purpose |
 |---|---|---|
@@ -317,7 +316,8 @@ delegate({
     stopConditions: ["Stop after finding the cause or report the missing evidence"]
   }
 })
-intercom({ action: "peek" })
+// The call returns a run id at once: end the turn. The completion arrives as a follow-up;
+// `intercom result { to }` fetches a settled run, and peek/steer/stop are for when the user asks.
 ```
 
 For independent Pi processes, open the same workspace in two terminals with `pi --exocom` and use
@@ -491,7 +491,7 @@ unsafe-sink risks, secrets/token mishandling, and missing input validation. Cite
 ```
 
 **A flow with a human checkpoint** — phases are journaled and dependents wait for a `gate: true`
-approval. Save as `.pi/flows/gated-build.flow.json`:
+approval. The checkpoint prompt shows the gated phase's output (12 lines) and what runs next, with Reject as the default. A rejection is reported as `flow stopped · checkpoint <id>` and keeps the gated output; it is not a failure, though a mandatory flow still fails closed. Headless sessions always reject checkpoints. Save as `.pi/flows/gated-build.flow.json`:
 
 ```json
 {
@@ -536,7 +536,9 @@ test; the data-driven definitions above require no core change.
 ## Commands, flags, and environment
 
 **Keys** — `f8` cycles persona; `f9` or `/agents` opens the agent overlay: ↑↓ navigate, ⏎ open, `x`
-stop, `s` steer, and Esc close.
+stop, `s` steer, and Esc close. `X` (list view) stops every running leaf agent that `x` could stop: the first
+press states the count (`press X again to stop N running agents`), any other key or a changed set re-asks.
+It is offered only for two or more; queued or later stages may still start.
 
 **Commands** — `/persona [name|off|list|reload|seed|restore|models [council-persona]]` ·
 `/persona-settings [show]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` ·
@@ -567,11 +569,11 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_CHILD_THINKING` | inherited | reasoning effort for child-engine sub-agents |
 | `PI_PERSONA_SEED` | off | `on` auto-installs bundled personas on first run |
 | `PI_PERSONA_BROKER` | on | `off` disables the cross-process comm plane for child, worktree, and MCP legs |
-| `PI_PERSONA_PEEK_MS` | 30000 | fast async stall/message wakeup tick; `0` disables it |
+| `PI_PERSONA_PEEK_MS` | 30000 | fast async stall-card/message tick; `0` disables it |
 | `PI_PERSONA_CHECKIN_MS` | 300000 | durable expandable operator status entry while async children run; does not start a model turn; `0` disables it |
 | `PI_PERSONA_AGENT_MAX_MS` | off | opt-in per-agent hard wall-clock cap; unset leaves healthy work running |
 | `PI_PERSONA_AGENT_STARTUP_MS` | 300000 | startup deadline for a child that makes no progress; `0` disables it. Like the idle window, a leg waiting on a supervisor reply is not idle: the watchdog re-arms while its ask is pending, instead of killing on a blind ceiling |
-| `PI_PERSONA_NUDGE` | on | `off` silences delegation and persistence nudges; synchronous checkpoints stay in model-visible tool results and are mirrored to durable, expandable TUI-only cards |
+| `PI_PERSONA_NUDGE` | on | `off` silences delegation and persistence nudges and disables the repeated peek/result and long-sleep guards; inline-result checkpoints stay in model-visible tool results and are mirrored to durable, expandable TUI-only cards |
 | `PI_PERSONA_EXOCOM` | off | `1` joins the current workspace Exocom scope; cross-workspace selection is CLI-only |
 | `PI_PERSONA_SPINE` | off | `on` or a path enables the shared behavioral layer; see [`SPINE.md`](./SPINE.md) |
 | `PI_PERSONA_SPINE_LEGS` | follows `PI_PERSONA_SPINE` | selector for delegated legs, allowing all four spine measurement arms |
@@ -581,7 +583,7 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_KEY` | `f8` | keybinding that cycles installed personas |
 | `PI_PERSONA_PERSIST` | on | `off` stops remembering the last-selected persona across sessions |
 | `PI_PERSONA_DELEGATE_DEFAULT` | allow | `deny` (or an off-word) makes an unlisted delegate target default-deny instead of default-allow |
-| `PI_PERSONA_ASYNC_RETAIN` | 25 | how many settled-but-uncollected async runs are retained before FIFO-evicting the oldest |
+| `PI_PERSONA_ASYNC_RETAIN` | 64 | how many settled-but-uncollected async runs are retained before FIFO-evicting the oldest (equals the `tasks` cap, so one call can never evict itself) |
 | `PI_PERSONA_LEDGER_V2` | off | `on` widens the delegation-ledger retry-veto key to also include role/tools/isolation, not just agent+model+task |
 | `PI_PERSONA_LEG_CHANGE_REPORT` | on | `off` disables the non-worktree files-changed report (two `git status` spawns per leg) |
 
