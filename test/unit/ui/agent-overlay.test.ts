@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 
-import { AgentOverlay, composeAgentRow } from "../../../src/ui/agent-overlay.ts";
-import { type AgentNode, AgentTree } from "../../../src/ui/agent-tree.ts";
+import { AgentOverlay, type AgentOverlayActions, composeAgentRow } from "../../../src/ui/agent-overlay.ts";
+import { type AddNodeInput, type AgentNode, AgentTree } from "../../../src/ui/agent-tree.ts";
 
 const THEME = { fg: (_role: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
 const TUI_STUB = { requestRender: () => {} } as unknown as TUI;
@@ -664,5 +664,179 @@ test("a run root that carries its own stop is a selectable row: x ends the whole
 	assert.deepEqual(stopped, ["async:run-1"], "the root's own stop ends the whole run");
 	overlay.handleInput("j");
 	assert.match(overlay.render(80).join("\n"), /▸.*melchior/, "a container without a stop of its own is skipped: the next row is the leaf");
+	overlay.dispose();
+});
+
+// --- Wake-source rows (monitor / timer): beside the agents in the same tree ---------------------
+
+const MONITOR_ROW: AddNodeInput = {
+	id: "monitor:monitor-2",
+	label: "qualify batch1",
+	kind: "monitor",
+	detail: "monitor-2 · exit",
+	startedAt: 0,
+	dueAt: 7_200_000,
+};
+const TIMER_ROW: AddNodeInput = {
+	id: "timer:timer-1",
+	label: "status review",
+	kind: "timer",
+	detail: "timer-1",
+	startedAt: 0,
+	dueAt: 2_952_000,
+};
+
+/** An overlay over `tree` with a fixed clock and the production stall threshold. */
+function wakeOverlay(tree: AgentTree, actions: AgentOverlayActions = {}, now = 0): AgentOverlay {
+	return new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { now: () => now, stallMs: 90_000, ...actions });
+}
+
+test("a running monitor row shows the monitor glyph, its detail and a deadline countdown, never a stall badge", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(MONITOR_ROW);
+	// 723s in, 6477s to the deadline; the row has been quiet far longer than stallMs (90s).
+	const overlay = wakeOverlay(tree, {}, 723_000);
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /◉ qualify batch1/, "a running monitor uses the ◉ glyph, not ⏳");
+	assert.doesNotMatch(view, /⏳/);
+	assert.match(view, /monitor-2 · exit/, "the source's detail text is shown");
+	assert.match(view, /12m 3s · deadline in 1h 47m/, "elapsed plus a countdown to the deadline");
+	assert.doesNotMatch(view, /stalled/, "a quiet monitor is waiting for its event, not stalled");
+	overlay.dispose();
+});
+
+test("a running timer row shows the alarm glyph and a fires-in countdown", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(TIMER_ROW);
+	const overlay = wakeOverlay(tree, {}, 0);
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /⏰ status review/);
+	assert.match(view, /fires in 49m 12s/);
+	assert.doesNotMatch(view, /stalled|⏳/);
+	overlay.dispose();
+});
+
+test("a settled wake row falls back to the ordinary status glyph", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ ...MONITOR_ROW, status: "stopped" });
+	tree.add({ ...TIMER_ROW, status: "done" });
+	const overlay = wakeOverlay(tree, {}, 723_000);
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /■ qualify batch1/);
+	assert.match(view, /✓ status review/);
+	assert.doesNotMatch(view, /◉|⏰/);
+	overlay.dispose();
+});
+
+test("x on a selected wake row is offered and stops it through the normal stop path", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(MONITOR_ROW);
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(
+		tree,
+		{
+			canStop: () => true,
+			onStop: (id) => {
+				stopped.push(id);
+				return true;
+			},
+		},
+		723_000,
+	);
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /⏎ open {3}x stop {3}esc close/, "the hint offers x stop for the selected wake row");
+	assert.doesNotMatch(view, /X stop all/, "a wake row alone is never a stop-all group");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["monitor:monitor-2"]);
+	overlay.dispose();
+});
+
+test("s steer is never offered for a wake row, and pressing s does not open the compose line", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(MONITOR_ROW);
+	const overlay = wakeOverlay(tree, { canSteer: () => false, canStop: () => true }, 723_000);
+	assert.doesNotMatch(overlay.render(120).join("\n"), /s steer/);
+	overlay.handleInput("s");
+	const after = overlay.render(120).join("\n");
+	assert.doesNotMatch(after, /steer ▸/, "no compose line opened");
+	assert.doesNotMatch(after, /● live/, "and the overlay did not drill in");
+	assert.match(after, /↑↓ navigate/, "still on the list");
+	overlay.dispose();
+});
+
+test("steer follows the row: an agent beside a wake row keeps s steer, the wake row loses it", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "async:A", label: "worker" });
+	tree.add(TIMER_ROW);
+	const overlay = wakeOverlay(tree, { canSteer: (id) => id === "async:A" });
+	assert.match(overlay.render(120).join("\n"), /s steer/, "the agent is selected first and can be steered");
+	overlay.handleInput("j"); // onto the timer
+	assert.match(overlay.render(120).join("\n"), /▸ ⏰ status review/);
+	assert.doesNotMatch(overlay.render(120).join("\n"), /s steer/);
+	overlay.handleInput("s");
+	assert.doesNotMatch(overlay.render(120).join("\n"), /steer ▸/);
+	overlay.dispose();
+});
+
+test("X stops every agent but never a monitor or a timer", () => {
+	const tree = new AgentTree(() => 0);
+	// Wake rows interleaved with the agents, so the filter (not insertion order) is what is tested.
+	tree.add({ id: "a", label: "a" });
+	tree.add(MONITOR_ROW);
+	tree.add({ id: "b", label: "b" });
+	tree.add(TIMER_ROW);
+	tree.add({ id: "c", label: "c" });
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, {
+		canStop: () => true,
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+	});
+	assert.match(overlay.render(120).join("\n"), /X stop all \(3\)/, "the count is the three agents, not five rows");
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, [], "the first press only arms");
+	assert.match(overlay.render(120).join("\n"), /press X again to stop 3 running agents/);
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b", "c"], "exactly the agents: the monitor and the timer are untouched");
+	assert.match(overlay.render(120).join("\n"), /stop requested for 3 agents/);
+	overlay.dispose();
+});
+
+test("X is not offered for one agent plus a monitor: wake rows do not make a group", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "a" });
+	tree.add(MONITOR_ROW);
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, {
+		canStop: () => true,
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+	});
+	assert.doesNotMatch(overlay.render(120).join("\n"), /X stop all/, "one agent is what plain x is for");
+	overlay.handleInput("X");
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, []);
+	overlay.dispose();
+});
+
+test("drilling into a monitor row shows its output, the live marker and the monitor glyph in the header", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ ...MONITOR_ROW, output: "command: node scripts/qualify.mjs" });
+	const overlay = wakeOverlay(tree, { canSteer: () => false, canStop: () => true }, 723_000);
+	overlay.handleInput("\n"); // a wake row is a leaf: selectable and drillable
+	const lines = overlay.render(100);
+	const view = lines.join("\n");
+	const header = lines.find((line) => line.includes("qualify batch1"));
+	assert.ok(header, "the detail header renders");
+	assert.match(header, /^│\s+◉ qualify batch1\s+● live/, "the header uses the wake glyph and the live marker");
+	assert.doesNotMatch(view, /⏳/);
+	assert.match(view, /monitor-2 · exit/, "the detail line is shown under the header");
+	assert.match(view, /command: node scripts\/qualify\.mjs/, "the row's output is the body");
+	assert.match(view, /esc back.*x stop/, "x stop is offered in the detail view");
+	assert.doesNotMatch(view, /s steer/);
 	overlay.dispose();
 });
