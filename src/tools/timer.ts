@@ -24,7 +24,7 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 		),
 		delaySeconds: Type.Optional(Type.Number({ description: "arm: fire this many seconds from now; it is rounded to milliseconds and must produce a delay from 1 second through 86400 seconds. Give this OR atIso, not both." })),
 		atIso: Type.Optional(Type.String({ description: "arm: fire at this absolute ISO-8601 instant (date-time must include Z or a numeric timezone offset, e.g. '2026-07-11T19:00:00Z'). Give this OR delaySeconds, not both." })),
-		label: Type.Optional(Type.String({ description: "arm: a short human label for the alarm (e.g. 'status review')." })),
+		label: Type.Optional(Type.String({ description: "arm: a short human label for the alarm (e.g. 'status review'). Labels longer than 120 characters are clipped." })),
 		id: Type.Optional(Type.String({ description: "cancel: the timer id to cancel (e.g. 'timer-1')." })),
 	});
 	pi.registerTool({

@@ -378,3 +378,17 @@ test("rows drive the AgentTree end to end", () => {
 	assert.equal(timerNode?.status, "done");
 	assert.equal(timerNode?.detail, "timer-1 · fired");
 });
+
+test("timerArmed clamps a runaway label to 120 chars ending in an ellipsis", () => {
+	const label = "L".repeat(1_000);
+	const row = new WakeRows().timerArmed(timerEntry({ label }));
+	assert.equal(row.label.length, 120);
+	assert.ok(row.label.endsWith("…"));
+	assert.equal(row.label, `${"L".repeat(119)}…`);
+	assert.equal(row.detail, "timer-1", "an over-long label is still not the id, so the id stays as the detail");
+});
+
+test("timerArmed keeps a label of exactly 120 chars verbatim", () => {
+	const label = "k".repeat(120);
+	assert.equal(new WakeRows().timerArmed(timerEntry({ label })).label, label);
+});

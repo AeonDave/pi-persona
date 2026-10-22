@@ -10,8 +10,9 @@ import type { AddNodeInput, AgentNodePatch, AgentNodeStatus } from "./agent-tree
  * module turns each lifecycle callback into an `AddNodeInput` / `AgentNodePatch` and nothing more:
  * no tree, no clock, no Pi imports. Every timestamp comes from the entry or event itself, so the
  * output is deterministic. `label` and `detail` stay short and single-line (the user label passes
- * through as-is; the id and the mode are all that is added here); anything long — the command, the
- * timer message, the event lines — lives in `output`, which only the F9 drill-in shows.
+ * through as-is, except a timer's, which is clamped to 120 chars; the id and the mode are all that is
+ * added here); anything long — the command, the timer message, the event lines — lives in `output`,
+ * which only the F9 drill-in shows.
  */
 
 /** Longest `command: …` description line (args may total 24k chars). */
@@ -20,6 +21,8 @@ const COMMAND_LINE_MAX = 2_000;
 const EVENT_TEXT_MAX = 1_000;
 /** Longest first-line summary of a non-output terminal event, used as the row detail. */
 const SUMMARY_MAX = 120;
+/** Longest timer label shown on a row (the scheduler bounds it too; this projection does not trust that). */
+const TIMER_LABEL_MAX = 120;
 /** Event lines the drill-in remembers per monitor; older ones fall off the front. */
 const MAX_EVENT_LINES = 40;
 /** The manager's status line for a clean exit; diagnostics (stdout/stderr tails) follow on later lines. */
@@ -150,7 +153,7 @@ export class WakeRows {
 	timerArmed(entry: TimerEntry): AddNodeInput {
 		return {
 			id: wakeNodeId("timer", entry.id),
-			label: entry.label,
+			label: clamp(entry.label, TIMER_LABEL_MAX),
 			kind: "timer",
 			status: "running",
 			// A timer armed without a label is already labelled by its id; do not repeat it.
