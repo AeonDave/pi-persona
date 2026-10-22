@@ -64,7 +64,7 @@ token or billing cap.
 
 A team member is a bare agent name OR an inline `{ agent, role, model, skills }` map that specialises
 ONE agent (`roster.ts` · `rosterSpec` normalises both). So `review` is one `reviewer` agent run under
-three lens roles (SECURITY · PERFORMANCE · TESTS), not three files. Every strategy must run members
+four lens roles (CORRECTNESS · SECURITY · PERFORMANCE · TESTS), not four files. Every strategy must run members
 through `rosterSpec` to honour the specialisation — **`critic-loop` is the one to watch**: it resolves
 `generator`/`critic` to full specs so a role-carrying roster works, while still accepting a bare-name
 `params.generator`/`critic` override.

@@ -11,6 +11,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { parseYamlSubset, splitFrontmatter } from "../../../src/core/frontmatter.ts";
+import { parseAgent } from "../../../src/agents/agent.ts";
 import { parseTeams, rosterSpec } from "../../../src/orchestration/roster.ts";
 import { knownParams, missingRequiredParams } from "../../../src/orchestration/strategy.ts";
 import { parsePersona, resolveCouncilInvocation } from "../../../src/persona/persona.ts";
@@ -35,7 +36,7 @@ const DECLARED_METHOD: Record<string, { strategy: string; roster: string; params
 	dev: { strategy: "critic-loop", roster: "repair", params: { rounds: 3 } },
 	judge: { strategy: "judge", roster: "magi", params: { judge: "reviewer", contract: "default" } },
 	magi: { strategy: "magi", roster: "magi", params: {} },
-	planner: undefined,
+	planner: { strategy: "critic-loop", roster: "design", params: { rounds: 2 } },
 	researcher: undefined,
 	swarm: { strategy: "map", roster: "swarm", params: { ownership: "declare" } },
 	verify: { strategy: "critic-loop", roster: "repair", params: { rounds: 4 } },
@@ -130,4 +131,46 @@ test("every bundled persona's delegation policy and tool deny are spelled as the
 	assert.deepEqual(policies.verify, { requireFreshVerification: true, verificationAgents: ["verifier"] });
 	assert.deepEqual(SET.find((p) => p.name === "planner")!.persona.tools, { deny: ["edit"] });
 	assert.deepEqual(SET.filter((p) => p.persona.coaching).map((p) => p.name).sort(), ["dev", "planner", "researcher", "swarm"]);
+});
+
+// The bundled agents and teams as ONE set. `evidence-verifier` is the security chain's agent and, like `elite`,
+// is a deliberately separate prompt: it is left out of every size and wording rule here.
+const AGENT_FILES = readdirSync(`${ROOT}agents`).filter((f) => f.endsWith(".md") && f !== "evidence-verifier.md");
+const agentText = (name: string): string => readFileSync(`${ROOT}agents/${name}.md`, "utf8");
+const agentBody = (name: string): string => splitFrontmatter(agentText(name)).body.trim();
+
+test("every bundled agent says BE BRIEF. BE CLEAR. and stays within its size budget", () => {
+	// Less context per leg is the point: a ratchet, not a target. Raise one only with a reason.
+	const BUDGET: Record<string, number> = { architect: 1600, balthasar: 1500, casper: 1500, melchior: 1500, operator: 3000, research: 2200, reviewer: 2400, scout: 1300, verifier: 2000 };
+	assert.deepEqual(AGENT_FILES.map((f) => f.slice(0, -3)).sort(), Object.keys(BUDGET).sort(), "every bundled agent has a size budget");
+	for (const [name, max] of Object.entries(BUDGET)) {
+		const body = agentBody(name);
+		assert.ok(body.includes("**BE BRIEF. BE CLEAR.**"), `${name}: says BE BRIEF. BE CLEAR.`);
+		assert.ok(Buffer.byteLength(body) <= max, `${name}: body is ${Buffer.byteLength(body)} B, budget ${max} B`);
+	}
+});
+
+test("architect plans and never edits; reviewer critiques code AND plans without being strict", () => {
+	const architect = parseAgent(agentText("architect"), "architect.md")!;
+	assert.deepEqual(architect.tools, ["read", "grep", "find", "ls"], "architect is read-only: the plan is text, the supervisor files it");
+	for (const heading of ["Goal", "Non-goals", "Steps", "Risks", "Open decisions"]) assert.ok(agentBody("architect").includes(`**${heading}:**`), `architect reports ${heading}`);
+	const reviewer = agentBody("reviewer");
+	assert.match(reviewer, /\*\*PLAN\*\* \(a plan or document\)/, "reviewer has a plan/document lens");
+	assert.match(reviewer, /`LGTM` whenever nothing must-fix remains/, "a plan with no must-fix item passes");
+	assert.match(reviewer, /nits go in a separate optional list and never block `LGTM`/);
+});
+
+test("the review team runs a correctness lens first and every lens it names is one the reviewer defines", () => {
+	const review = TEAMS.review!.map(rosterSpec);
+	assert.equal(review.length, 4);
+	assert.ok(review.every((m) => m.agent === "reviewer"));
+	assert.deepEqual(review.map((m) => /Focus ONLY on the (\w+) lens/.exec(m.role ?? "")?.[1]), ["CORRECTNESS", "SECURITY", "PERFORMANCE", "TESTS"]);
+	for (const lens of review.map((m) => /Focus ONLY on the (\w+) lens/.exec(m.role ?? "")![1])) assert.ok(agentBody("reviewer").includes(`**${lens}:**`), `reviewer defines the ${lens} lens`);
+	assert.deepEqual(TEAMS.design?.map((m) => rosterSpec(m).agent), ["architect", "reviewer"], "design is the critic-loop pair: generator, then critic");
+});
+
+test("operator keeps the surrender markers the runtime scans for, and the sentence that says so", () => {
+	const operator = agentBody("operator");
+	assert.ok(operator.includes("`[BLOCKED: need X]` (X = the missing external capability) and `FLAG: UNKNOWN` (a flag or secret objective you did not obtain)"));
+	assert.ok(operator.includes("The runtime scans the whole report for both and flags the result to the supervisor for verification: write them only to surrender, never in quotes or prose."));
 });

@@ -1,6 +1,6 @@
 {
   "name": "deep-review",
-  "description": "Fan security/performance/tests out in parallel and merge them into one verdict, then let the MAGI council rule on what to do — a DAG over strategies.",
+  "description": "Fan correctness/security/performance/tests out in parallel and merge them into one verdict, then let the MAGI council rule on what to do — a DAG over strategies.",
   "phases": [
     { "id": "gather", "strategy": "synthesize", "roster": "review", "params": { "synthesizer": "reviewer" } },
     { "id": "decide", "strategy": "magi", "roster": "magi", "needs": ["gather"] }

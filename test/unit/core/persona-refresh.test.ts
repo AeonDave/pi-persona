@@ -50,6 +50,8 @@ for (const name of PERSONAS) {
 			expected.council = { ...expected.council, params: { ownership: "declare" } };
 			expected.delegation = { requireBrief: true, requireDisjointWrites: true };
 		}
+		// planner declares its own method now: the `design` loop (`architect` drafts, `reviewer` critiques).
+		if (name === "planner") expected.council = { strategy: "critic-loop", roster: "design", params: { rounds: 2 } };
 		if (name === "audit") expected.delegation = { requireBrief: true };
 		if (name === "verify") expected.delegation = { requireFreshVerification: true, verificationAgents: ["verifier"] };
 		assert.deepEqual(behavior(current), expected);

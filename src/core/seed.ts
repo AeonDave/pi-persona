@@ -106,6 +106,8 @@ export interface SeededDefaultSpec {
 export type SeededDefaultEntry = SeededDefaultSpec | readonly SeededDefaultSpec[];
 
 const ELITE_REQUIRED_ADDITIONS = ["agents/evidence-verifier.md"] as const;
+/** A migrated planner declares the `design` loop, whose generator is the `architect` agent. */
+const PLANNER_REQUIRED_ADDITIONS = ["agents/architect.md"] as const;
 
 export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>> = {
 	"personas/dev.md": [
@@ -126,11 +128,11 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 	],
 	"personas/planner.md": [
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
-		{ size: 3350, sha256: "78a1f1c88d4d779dca46414029a247e8c48db85b3b7266be9366c6dc23714d87" },
-		{ size: 3397, sha256: "8055b7440f2cf1e79378196eda675bdeb5d58b8941d450f8901672cf82a9e876" },
+		{ size: 3350, sha256: "78a1f1c88d4d779dca46414029a247e8c48db85b3b7266be9366c6dc23714d87", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
+		{ size: 3397, sha256: "8055b7440f2cf1e79378196eda675bdeb5d58b8941d450f8901672cf82a9e876", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
 		// v1.14.0–v1.17.1 pristine seed (LF and CRLF checkout variants).
-		{ size: 2456, sha256: "a238aa8dbe01f42edc707585d1eccee3b63401eb1dbe91b607347a49624d27cb" },
-		{ size: 2493, sha256: "f8f8a8cdb6110022984556a7102f523411053282f818249c20ec8e0153c810e1" },
+		{ size: 2456, sha256: "a238aa8dbe01f42edc707585d1eccee3b63401eb1dbe91b607347a49624d27cb", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
+		{ size: 2493, sha256: "f8f8a8cdb6110022984556a7102f523411053282f818249c20ec8e0153c810e1", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
 	],
 	"personas/researcher.md": [
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)

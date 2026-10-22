@@ -68,6 +68,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - Add the legacy seed digests for `elite` v1.12.2-v1.14.0, `swarm` v1.14.0-v1.14.2, the MAGI cores
   v1.11.0-v1.14.0, and v1.17.1 `dev`, `planner`, `researcher`, `verify`, `swarm`, `judge` and `magi`,
   with a release guard test that prints the missing row.
+- Add the `architect` agent: a read-only planner (`read`, `grep`, `find`, `ls`) for ONE change that
+  returns Goal, Non-goals, Steps (owner and acceptance check each), Risks and Open decisions, and
+  never edits. A new `design` team pairs it with `reviewer` as the `critic-loop` generator and critic.
+- Add a CORRECTNESS lens (logic, off-by-one, races, null handling, unhandled errors, broken invariants)
+  as the first member of the `review` team, so `audit`, `deep-review` and every `synthesize` panel
+  now run four lenses: correctness, security, performance and tests. A user copy of `teams.yaml`
+  (`~/.pi/agent/persona/teams.yaml` or project `.pi/teams.yaml`) keeps its own `review` roster, so add
+  the CORRECTNESS member there by hand; the new `design` team resolves from the builtin layer.
 
 ### Changed
 
@@ -117,6 +125,18 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - Clip a `timer` label longer than 120 characters (ending in `…`) instead of keeping it unbounded.
   The clipped label is what `timer list`, the arm receipt, the fire follow-up and the agent-tree row
   show.
+- Make `reviewer` the critic of plans and documents as well as code: a PLAN lens (a missing step, an
+  unverifiable claim, an unowned risk, a check that cannot prove its step) and a verdict rule that is
+  deliberately not strict, `LGTM` whenever nothing must-fix remains, with nits listed as optional.
+- Give `planner` a declared `council:` default, the `design` loop (`architect` drafts, `reviewer`
+  critiques, two rounds), and say so in its method; a fork evidence cannot settle still goes to
+  `council` with `strategy: "magi"`. Migrating a pristine v1.14.0-v1.17.1 `planner` seed now installs
+  the `architect` agent it needs.
+- Shorten the bundled prompts for less context per leg, keeping every rule and the pinned persona
+  structure: `dev`, `swarm`, `planner`, `researcher`, `audit`, `verify`, `magi` and `judge` now sit at
+  about 2.0-2.3 KB; `operator` (4.2 KB to 3.0 KB), `research`, `reviewer`, `verifier` and the MAGI cores
+  are tighter and say **BE BRIEF. BE CLEAR.** The two surrender markers and the runtime-scan sentence
+  in `operator` are unchanged.
 
 ### Fixed
 - Resolve loose `delegate` model names more forgivingly: a `provider/loose-id` pin matches inside
