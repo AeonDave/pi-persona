@@ -64,6 +64,11 @@ export interface TimerSchedulerDeps {
 	clearTimer: (handle: unknown) => void;
 	/** Called exactly once when a timer expires (never for a cancelled one). */
 	onFire: (entry: TimerEntry) => void;
+	/** Called once per admitted alarm, right after `arm` accepts it (never for a rejected request).
+	 *  Every announced alarm later reaches exactly one of `onFire` / `onCancelled`. */
+	onArmed?: (entry: TimerEntry) => void;
+	/** Called once per alarm dropped by `cancel` or `cancelAll` (never for one that fired). */
+	onCancelled?: (entry: TimerEntry) => void;
 	/** Minimum accepted delay (ms). Default 1000 — sub-second alarms are pointless here. */
 	minDelayMs?: number;
 	/** Maximum accepted delay (ms). Default 24h — guards against a runaway/typo alarm. */
@@ -143,6 +148,7 @@ export class TimerScheduler {
 		};
 		const handle = this.deps.setTimer(() => this.fire(id), delay);
 		this.timers.set(id, { entry, handle });
+		this.deps.onArmed?.(entry);
 		return { ok: true, entry, remainingMs: delay };
 	}
 
@@ -152,13 +158,17 @@ export class TimerScheduler {
 		if (!scheduled) return false;
 		this.deps.clearTimer(scheduled.handle);
 		this.timers.delete(id);
+		this.deps.onCancelled?.(scheduled.entry);
 		return true;
 	}
 
 	/** Cancel every armed alarm (reload/dispose hygiene — never leak a timer across sessions). */
 	cancelAll(): void {
-		for (const scheduled of this.timers.values()) this.deps.clearTimer(scheduled.handle);
+		const dropped = [...this.timers.values()];
+		for (const scheduled of dropped) this.deps.clearTimer(scheduled.handle);
 		this.timers.clear();
+		// Announced after the map is empty, so a listener that re-enters (list/cancel) sees the truth.
+		for (const scheduled of dropped) this.deps.onCancelled?.(scheduled.entry);
 	}
 
 	/** Snapshot of all armed alarms, soonest first, with live remaining time. */

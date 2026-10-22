@@ -175,3 +175,48 @@ test("formatRemaining renders h/m/s compactly", () => {
 	assert.equal(formatRemaining((60 * 60 + 3 * 60) * 1000), "1h 03m");
 	assert.equal(formatRemaining(-500), "0s");
 });
+
+// ── arm/cancel hooks: the seam the agent tree's timer rows hang on ──────────────────────────────
+
+test("onArmed sees every admitted alarm and onCancelled every explicit cancel, never a fire", () => {
+	let now = 1_000_000;
+	const queue = new Map<number, { fn: () => void; fireAt: number }>();
+	let nextHandle = 0;
+	const armed: string[] = [];
+	const cancelled: string[] = [];
+	const fired: string[] = [];
+	const scheduler = new TimerScheduler({
+		now: () => now,
+		setTimer: (fn, ms) => {
+			const h = nextHandle++;
+			queue.set(h, { fn, fireAt: now + ms });
+			return h;
+		},
+		clearTimer: (h) => queue.delete(h as number),
+		onFire: (e) => fired.push(e.id),
+		onArmed: (e) => armed.push(`${e.id}:${e.label}:${e.fireAtEpochMs}`),
+		onCancelled: (e) => cancelled.push(e.id),
+	});
+	assert.equal(scheduler.arm({ message: "x", delayMs: 500 }).ok, false, "a rejected arm is not announced");
+	assert.deepEqual(armed, []);
+	const a = scheduler.arm({ label: "status review", message: "check", delayMs: 60_000 });
+	const b = scheduler.arm({ message: "go", delayMs: 120_000 });
+	const c = scheduler.arm({ message: "later", delayMs: 180_000 });
+	assert.ok(a.ok && b.ok && c.ok);
+	assert.deepEqual(armed, ["timer-1:status review:1060000", "timer-2:timer-2:1120000", "timer-3:timer-3:1180000"]);
+
+	assert.equal(scheduler.cancel("timer-2"), true);
+	assert.equal(scheduler.cancel("timer-2"), false, "a second cancel is unknown and announces nothing");
+	assert.deepEqual(cancelled, ["timer-2"]);
+
+	now += 60_000;
+	for (const [h, t] of [...queue.entries()]) if (t.fireAt <= now) { queue.delete(h); t.fn(); }
+	assert.deepEqual(fired, ["timer-1"]);
+	assert.deepEqual(cancelled, ["timer-2"], "a fire is reported through onFire only");
+
+	scheduler.cancelAll();
+	assert.deepEqual(cancelled, ["timer-2", "timer-3"], "cancelAll reports each alarm it dropped, once");
+	assert.equal(scheduler.size, 0);
+	scheduler.cancelAll();
+	assert.deepEqual(cancelled, ["timer-2", "timer-3"], "an empty cancelAll announces nothing");
+});

@@ -1,14 +1,24 @@
 /** Monitor events use the same idle follow-up delivery as timer and Intercom. */
-import { MonitorManager, type MonitorEvent } from "../core/monitor.ts";
+import { MonitorManager, type MonitorEntry, type MonitorEvent } from "../core/monitor.ts";
 import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
 import { IdleCoalescingNotifier } from "../engine/async.ts";
 import { startMonitorProcess } from "./process.ts";
+
+/** A passive view of the monitor lifecycle (the agent tree's monitor rows). Every `armed` is followed
+ *  by exactly one of: a terminal `event`, or `removed` (cancel, permission loss, shutdown, start failure).
+ *  Observation never changes admission or delivery. */
+export interface MonitorObserver {
+	armed(entry: MonitorEntry): void;
+	event(event: MonitorEvent): void;
+	removed(entry: MonitorEntry): void;
+}
 
 interface MonitorSessionDeps {
 	isIdle(): boolean;
 	canRun(): boolean;
 	deliver(text: string): void;
 	start?: typeof startMonitorProcess;
+	observe?: MonitorObserver;
 }
 
 export function createMonitorSession(d: MonitorSessionDeps) {
@@ -31,7 +41,11 @@ export function createMonitorSession(d: MonitorSessionDeps) {
 	});
 	const manager = new MonitorManager({
 		...timerDeps, now: () => Date.now(), start: d.start ?? startMonitorProcess,
+		...(d.observe ? { onArmed: (entry: MonitorEntry) => d.observe?.armed(entry), onRemoved: (entry: MonitorEntry) => d.observe?.removed(entry) } : {}),
 		onEvent: (event) => {
+			// Observed BEFORE the permission gate: a terminal event has already left the manager, so the
+			// `cancelAll` below could never announce it, and its row would stay on screen forever.
+			d.observe?.event(event);
 			if (!d.canRun()) { cancelAll(); return; }
 			const oldest = notifier.peekPending()[0];
 			if (notifier.peekPending().length >= 64 && oldest) {
