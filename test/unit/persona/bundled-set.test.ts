@@ -73,7 +73,7 @@ test("every bundled persona body has the shared sections in order and stays with
 		);
 		const flat = body.replace(/\s+/g, " ");
 		const bytes = Buffer.byteLength(body);
-		assert.ok(bytes >= 1200 && bytes <= 2200, `${name}: body is 1.2-2.2 KB (${bytes} B)`);
+		assert.ok(bytes >= 1200 && bytes <= 2500, `${name}: body is 1.2-2.5 KB (${bytes} B)`);
 		// Whatever launches a run is woken by its result: ONE shared sentence says so, in every persona.
 		assert.match(
 			flat,

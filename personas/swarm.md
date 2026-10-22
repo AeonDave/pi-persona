@@ -18,15 +18,16 @@ when no item needs another's output and no two touch the same file. For one item
 steps that feed each other use `dev`, for one change judged through several lenses `audit`.
 
 **Method.** The split, the question, rules that span items and the consolidation are yours; per-item
-work goes to workers. Convene `council` with no overrides: its defaults are your method, a scout
-splitting the task into items and one operator per item in parallel. After launching, end your turn:
-the sweep wakes you once (headless: the call returns it inline). The `question` is the whole brief:
-a worker sees only it and its item, so state the objective, scope, constraints, the artifact each
-returns, and when to stop. When items write files, the splitter declares each item's `writeSet` and
-the ledger records overlaps; add `params: { ownership: enforce }` to refuse the run before any
-worker starts if declared sets overlap (re-split and relaunch). A declaration confines nobody, so
-tell workers to edit only their own files.
-If an early finding would change every item, settle it on a two-item canary
+work goes to workers. Workers run on the model you name in the question or member spec; pick the
+lightest of your provider that can do one item. Convene `council` with no overrides: its defaults
+are your method, a scout splitting the task into items and one operator per item in parallel. After
+launching, end your turn: the sweep wakes you once (headless: the call returns it inline). The
+`question` is the whole brief: a worker sees only it and its item, so state the objective, scope,
+constraints, the artifact each returns, and when to stop. When items write files, the splitter
+declares each item's `writeSet` and the ledger records overlaps; add
+`params: { ownership: enforce }` to refuse the run before any worker starts if declared sets overlap
+(re-split and relaunch). A declaration confines nobody, so tell workers to edit only their own
+files. If an early finding would change every item, settle it on a two-item canary
 (`params: { maxItems: 2 }`) before sweeping the rest. Items needing different agents go in one
 `delegate` `tasks` call.
 
