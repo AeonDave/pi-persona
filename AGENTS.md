@@ -254,13 +254,18 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   (`output`) or jobs (`exit`), with both `monitor` and `bash` permissions. Pure lifecycle is in
   `src/core/monitor.ts`, process/delivery adapters in `src/monitor/`; use the existing idle notifier
   and process-tree cleanup. Session-scoped, no restoration on restart. See [`docs/MONITORS.md`](docs/MONITORS.md).
+  Armed timers and active monitors also show as agent-tree rows (`monitor:<id>` / `timer:<id>`, never
+  agents): `src/ui/wake-rows.ts` is the pure projection, fed by the core seams `TimerScheduler`
+  `onArmed`/`onCancelled`, `MonitorManager` `onArmed`/`onRemoved` and `createMonitorSession`'s `observe`
+  option (a terminal event is observed before the permission gate). A countdown replaces the stall clock; `x`
+  cancels one via the stop registry; `X`, the `N agents` count and telemetry exclude them.
 
 - `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), session-runs (pure restore-notice helper: what a reload/resume lost + the run-id counter), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (cross-process relay, on by default: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`; `PI_PERSONA_BROKER=off` restores pre-broker spawn). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts` (pure model helpers), `settings-store.ts` (sole persistent settings owner).
-- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`, `background-run.ts` (tracked background council/flow runs: `launch`/`settle`, `TrackedRun`). `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
+- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`, `background-run.ts` (tracked background council/flow runs: `launch`/`settle`, `TrackedRun`). `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `wake-rows.ts` (the monitor/timer → tree-row projection), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
   persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),

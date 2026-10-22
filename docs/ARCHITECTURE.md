@@ -211,7 +211,7 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
   `persona.ts` for supervisor turns and in the engines for delegated legs).
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
-  tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `presentation.ts` (the shared
+  tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `wake-rows.ts` (the monitor/timer → tree-row projection), `presentation.ts` (the shared
   card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
   (token/usage formatting, `ChildUsageLedger` / `toToolUsage` — sub-agent spend is
   attached as Pi `toolResult.usage` so the footer and pi-theme-1337's frame count it;
@@ -564,7 +564,15 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   itself once nothing is. A running row shows elapsed time until it goes `STALL_FLAG_MS` (90s) quiet,
   then the same `⚠ stalled <duration>` badge the async peek watchdog uses. `x` marks the target
   `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,
-  already settled) surfaces as a one-line notice instead of silently no-op'ing.
+  already settled) surfaces as a one-line notice instead of silently no-op'ing;
+- armed timers and active monitors are **wake rows** in the same tree (`src/ui/wake-rows.ts`, ids
+  `monitor:<id>` / `timer:<id>`): rows, not agents. A countdown (`fires in` / `deadline in`) replaces the
+  elapsed/stall clock, so they never carry the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
+  one through the same stop registry as an agent (the `monitor cancel` / `timer cancel` effect); `s` steer
+  is never offered. They are excluded from the `X` stop-all count, confirmation and bulk stop, from the
+  `N agents` in-flight status, and from telemetry (`agent.*` events are agents only). They settle like
+  an async row (the final ✓/✗/■ for a beat, then removal) and live only in the arming session, never
+  restored.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.

@@ -8,6 +8,13 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Added
 
+- Show armed timers and active monitors as rows in the sticky agent widget and the F9 / `/agents` panel,
+  beside sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` (an `output`
+  monitor reads `k/N events` as they arrive) and `⏰ <label>  <id> · fires in <remaining>`. A countdown
+  replaces the stall clock, so a quiet watch is never flagged `⚠ stalled`. `⏎` opens the command, cwd,
+  times and last 40 event lines (monitor) or the fire time and message (timer); `x` cancels that one
+  watch or alarm like `monitor cancel` / `timer cancel`. They are rows, not agents: `X` stop-all, the
+  `N agents` status and telemetry never count them, and they are not restored after a restart.
 - Run `council` and `flow` as ONE tracked background run in interactive sessions (TUI and RPC), like
   `delegate`: the call returns a receipt, ONE completion follow-up carries the ruling or outcome, and
   `intercom result`, `peek`, `stop`, `stop { to: "all" }` and f9 reach it through the same `async:<runId>`
