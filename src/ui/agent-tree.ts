@@ -11,7 +11,7 @@ import { compactInlineText } from "./presentation.ts";
  */
 
 export type AgentNodeStatus = "running" | "done" | "failed" | "stopped";
-export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase";
+export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase" | "monitor" | "timer";
 
 export interface AgentNode {
 	id: string;
@@ -31,6 +31,8 @@ export interface AgentNode {
 	 *  Excluded from change notifications — the live clock paints them. */
 	startedAt?: number;
 	lastAdvanceAt?: number;
+	/** Epoch ms when a wake source is due: a monitor's deadline or a timer's fire time. Its countdown replaces the elapsed/stall clock. Set once by the source; a change notifies (it is not a clock key). */
+	dueAt?: number;
 }
 
 export type AgentTreeChange =
@@ -60,6 +62,21 @@ export function flattenTree(nodes: AgentNode[]): FlatRow[] {
 /** Status → glyph, shared by every agent surface (tree, overlay). */
 export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "✓", failed: "✗", stopped: "■" };
 
+/** A wake source is a row that is not an agent (never counted, steered, or stopped in bulk). */
+export function isWakeSource(node: Pick<AgentNode, "kind">): boolean {
+	return node.kind === "monitor" || node.kind === "timer";
+}
+
+/** The kind-aware glyph shared by every surface (tree, overlay): a running timer is ⏰, a running
+ *  monitor ◉; everything else, settled wake rows included, uses the ordinary status glyph. */
+export function nodeGlyph(node: Pick<AgentNode, "status" | "kind">): string {
+	if (node.status === "running") {
+		if (node.kind === "timer") return "⏰";
+		if (node.kind === "monitor") return "◉";
+	}
+	return GLYPH[node.status];
+}
+
 export interface RenderOptions {
 	/** Current time; omitted ⇒ no elapsed/stall annotation (pure renders stay byte-identical). */
 	now?: number;
@@ -79,11 +96,20 @@ export function isQueuedMarker(detail: string | undefined): boolean {
 /** "1m 15s" while a running node keeps advancing; "⚠ stalled 1m 30s" once it has been quiet
  *  for `stallMs`. Undefined for settled nodes, nodes without clock data, or a node still carrying
  *  the "queued" marker — it was seeded ahead of the concurrency gate and has not started running
- *  yet, so its clock (stamped at seed time) has nothing true to report. Pure. */
-export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail">, now: number, stallMs: number, waitingForSupervisor = false): string | undefined {
+ *  yet, so its clock (stamped at seed time) has nothing true to report. A wake-source row (one with
+ *  a `dueAt`) counts down instead — "fires in 49m 12s" for a timer, "12m 3s · deadline in 1h 47m"
+ *  for a monitor — and NEVER shows the stall badge: a quiet monitor is waiting for its event,
+ *  not stalled. Pure. */
+export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail" | "kind" | "dueAt">, now: number, stallMs: number, waitingForSupervisor = false): string | undefined {
 	if (node.status !== "running" || node.startedAt === undefined) return undefined;
 	if (isQueuedMarker(node.detail)) return undefined;
 	if (waitingForSupervisor) return "waiting for supervisor";
+	if (node.dueAt !== undefined) {
+		const left = node.dueAt - now;
+		if (node.kind === "timer") return left > 0 ? `fires in ${formatDuration(left)}` : "firing…";
+		const elapsed = formatDuration(now - node.startedAt);
+		return left > 0 ? `${elapsed} · deadline in ${formatDuration(left)}` : `${elapsed} · deadline reached`;
+	}
 	const quietSince = node.lastAdvanceAt ?? node.startedAt;
 	if (stallMs > 0 && now - quietSince >= stallMs) return `⚠ stalled ${formatDuration(now - quietSince)}`;
 	return formatDuration(now - node.startedAt);
@@ -155,7 +181,7 @@ export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): s
 			const clock = opts.now !== undefined ? runningAnnotation(node, opts.now, opts.stallMs ?? 0, opts.waitingForSupervisor?.has(node.id) ?? false) : undefined;
 			const tail = [detailText, clock].filter((s): s is string => Boolean(s)).join(" · ");
 			const detail = tail ? `  ${tail}` : "";
-			lines.push(`${prefix}${branch}${GLYPH[node.status]} ${label}${detail}`);
+			lines.push(`${prefix}${branch}${nodeGlyph(node)} ${label}${detail}`);
 			const childPrefix = isRoot ? "" : `${prefix}${isLast ? "   " : "│  "}`;
 			walk(node.id, childPrefix);
 		});
@@ -209,6 +235,7 @@ export interface AddNodeInput {
 	output?: string;
 	startedAt?: number;
 	lastAdvanceAt?: number;
+	dueAt?: number;
 }
 
 export interface AgentNodePatch {
@@ -220,6 +247,7 @@ export interface AgentNodePatch {
 	output?: string;
 	startedAt?: number;
 	lastAdvanceAt?: number;
+	dueAt?: number;
 }
 
 /** Apply the fields `add`'s upsert branch and `update` both accept, in place — the one place
@@ -233,6 +261,7 @@ function applyPatch(node: AgentNode, patch: AgentNodePatch): void {
 	if (patch.output !== undefined) node.output = patch.output;
 	if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
 	if (patch.lastAdvanceAt !== undefined) node.lastAdvanceAt = patch.lastAdvanceAt;
+	if (patch.dueAt !== undefined) node.dueAt = patch.dueAt;
 }
 
 /** A small mutable registry with change notification. The extension owns one. */
@@ -269,6 +298,7 @@ export class AgentTree {
 			...(input.agent !== undefined ? { agent: input.agent } : {}),
 			...(input.model !== undefined ? { model: input.model } : {}),
 			...(input.output !== undefined ? { output: input.output } : {}),
+			...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
 		};
 		this.nodes.push(node);
 		this.emit({ type: "added", node: { ...node } });

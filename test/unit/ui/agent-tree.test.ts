@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { AgentTree, type AgentNode, deriveWaitingNodeIds, flattenTree, isQueuedMarker, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, deriveWaitingNodeIds, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -268,4 +268,82 @@ test("progressPatch bumps lastAdvanceAt and prefers activity over a token count"
 	assert.deepEqual(progressPatch({ output: "o", activity: "⚙ bash ls", tokens: 1500 }, 42), { lastAdvanceAt: 42, output: "o", detail: "⚙ bash ls" });
 	assert.deepEqual(progressPatch({ tokens: 164_005 }, 42), { lastAdvanceAt: 42, detail: "164k tok" });
 	assert.deepEqual(progressPatch({}, 42), { lastAdvanceAt: 42 });
+});
+
+test("nodeGlyph gives a running wake source its own glyph and falls back to the status glyph otherwise", () => {
+	assert.equal(nodeGlyph({ status: "running", kind: "timer" }), "⏰");
+	assert.equal(nodeGlyph({ status: "running", kind: "monitor" }), "◉");
+	assert.equal(nodeGlyph({ status: "running", kind: "subagent" }), "⏳");
+	assert.equal(nodeGlyph({ status: "running" }), "⏳", "a legacy node without a kind keeps the status glyph");
+	for (const kind of ["timer", "monitor"] as const) {
+		assert.equal(nodeGlyph({ status: "done", kind }), "✓");
+		assert.equal(nodeGlyph({ status: "failed", kind }), "✗");
+		assert.equal(nodeGlyph({ status: "stopped", kind }), "■");
+	}
+});
+
+test("isWakeSource is true for monitor and timer rows only", () => {
+	assert.equal(isWakeSource({ kind: "monitor" }), true);
+	assert.equal(isWakeSource({ kind: "timer" }), true);
+	for (const kind of ["subagent", "delegate", "council", "flow", "phase"] as const) assert.equal(isWakeSource({ kind }), false, kind);
+	assert.equal(isWakeSource({}), false, "an undefined kind is an agent row");
+});
+
+test("runningAnnotation counts a timer down to its fire time and never shows a stall badge", () => {
+	const timer = { status: "running" as const, kind: "timer" as const, startedAt: 0, dueAt: 2_952_000, detail: undefined };
+	assert.equal(runningAnnotation(timer, 0, 90_000), "fires in 49m 12s");
+	assert.equal(runningAnnotation(timer, 3_000_000, 90_000), "firing…");
+	assert.equal(runningAnnotation(timer, 2_952_000, 90_000), "firing…", "due exactly now is firing, not a zero countdown");
+	assert.doesNotMatch(runningAnnotation(timer, 200_000, 90_000) ?? "", /stalled/, "a timer waiting for its time is not stalled");
+	assert.equal(runningAnnotation(timer, 200_000, 90_000), "fires in 45m 52s");
+});
+
+test("runningAnnotation shows a monitor's elapsed time and deadline countdown, never a stall badge", () => {
+	const monitor = { status: "running" as const, kind: "monitor" as const, startedAt: 0, dueAt: 7_200_000, detail: undefined };
+	assert.equal(runningAnnotation(monitor, 723_000, 90_000), "12m 3s · deadline in 1h 47m");
+	assert.match(runningAnnotation(monitor, 7_300_000, 90_000) ?? "", /deadline reached$/);
+	assert.equal(runningAnnotation(monitor, 7_300_000, 90_000), "2h 1m · deadline reached");
+	assert.doesNotMatch(runningAnnotation(monitor, 723_000, 90_000) ?? "", /stalled/, "a quiet monitor is waiting for its event, not stalled");
+	assert.doesNotMatch(runningAnnotation(monitor, 7_300_000, 90_000) ?? "", /stalled/);
+});
+
+test("runningAnnotation leaves settled wake rows bare and keeps the ordinary precedence for agent rows", () => {
+	assert.equal(runningAnnotation({ status: "done", kind: "timer", startedAt: 0, dueAt: 1_000, detail: undefined }, 5_000, 90_000), undefined);
+	assert.equal(runningAnnotation({ status: "stopped", kind: "monitor", startedAt: 0, dueAt: 1_000, detail: undefined }, 5_000, 90_000), undefined);
+	assert.equal(runningAnnotation({ status: "running", kind: "timer", dueAt: 1_000, detail: undefined }, 500, 90_000), undefined, "no clock data → no annotation, wake source or not");
+	const agent = { status: "running" as const, kind: "subagent" as const, startedAt: 0, lastAdvanceAt: 0, detail: undefined };
+	assert.equal(runningAnnotation(agent, 100_000, 90_000, true), "waiting for supervisor");
+	assert.match(runningAnnotation(agent, 100_000, 90_000) ?? "", /stalled/, "an agent row without dueAt still stalls");
+	assert.equal(runningAnnotation({ ...agent, kind: "timer", dueAt: 200_000 }, 100_000, 90_000, true), "waiting for supervisor", "waiting-for-supervisor still outranks the wake branch");
+});
+
+test("renderAgentTree shows timer and monitor rows with their kind-aware glyph and countdown", () => {
+	const nodes: AgentNode[] = [
+		{ id: "timer-1", label: "status review", parentId: undefined, status: "running", kind: "timer", detail: "timer-1", startedAt: 0, lastAdvanceAt: 0, dueAt: 2_952_000 },
+		{ id: "monitor-2", label: "qualify batch1", parentId: undefined, status: "running", kind: "monitor", detail: "monitor-2 · exit", startedAt: 0, lastAdvanceAt: 0, dueAt: 7_200_000 },
+	];
+	assert.deepEqual(renderAgentTree(nodes, { now: 0, stallMs: 90_000 }), ["⏰ status review  timer-1 · fires in 49m 12s", "◉ qualify batch1  monitor-2 · exit · <1s · deadline in 2h"]);
+	assert.deepEqual(renderAgentTree(nodes.slice(1), { now: 723_000, stallMs: 90_000 }), ["◉ qualify batch1  monitor-2 · exit · 12m 3s · deadline in 1h 47m"]);
+	assert.deepEqual(renderAgentTree(nodes), ["⏰ status review  timer-1", "◉ qualify batch1  monitor-2 · exit"], "without a clock the rows stay byte-identical");
+	assert.deepEqual(renderAgentTree([{ ...nodes[0]!, status: "done" }], { now: 3_000_000 }), ["✓ status review  timer-1"], "a settled timer falls back to the ordinary glyph with no clock");
+});
+
+test("AgentTree carries dueAt, and a changed dueAt notifies while an identical one does not", () => {
+	const tree = new AgentTree(() => 1_000);
+	tree.add({ id: "timer-1", label: "status review", kind: "timer", dueAt: 60_000 });
+	assert.equal(tree.snapshot()[0]?.dueAt, 60_000);
+	assert.equal(tree.snapshot()[0]?.kind, "timer");
+	const plain = new AgentTree();
+	plain.add({ id: "a", label: "A" });
+	assert.equal("dueAt" in (plain.snapshot()[0] ?? {}), false, "an agent row carries no dueAt key");
+	const changes: string[] = [];
+	tree.onChange((change) => changes.push(change.type));
+	tree.update("timer-1", { dueAt: 60_000 });
+	assert.deepEqual(changes, [], "the same dueAt is not a change");
+	tree.update("timer-1", { dueAt: 90_000 });
+	assert.deepEqual(changes, ["updated"], "a different dueAt notifies — it is not a clock key");
+	assert.equal(tree.snapshot()[0]?.dueAt, 90_000);
+	tree.add({ id: "timer-1", label: "status review", dueAt: 120_000 });
+	assert.deepEqual(changes, ["updated", "updated"], "the upsert branch applies dueAt too");
+	assert.equal(tree.snapshot()[0]?.dueAt, 120_000);
 });
