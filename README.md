@@ -88,7 +88,7 @@ the worker has acted on it.
 | Key or command | Action |
 |---|---|
 | **F8** | Cycle through installed personas |
-| **F9** or `/agents` | Open the live agent panel |
+| **F9** or `/agents` | Open the live agent panel (sub-agents, armed timers and active monitors) |
 | **Enter** / **s** / **x** / **X** in the panel | Open output / send guidance / request a stop / stop every running agent (press twice) |
 | `/peek` | Show a compact progress summary |
 | `/flow <name> <task>` | Run a flow (`/flow` alone lists them with descriptions; a `gate: true` phase pauses for your approval). `/orchestrate <task>` runs the active persona's `orchestration:` block (no bundled persona declares one; they use `council:` via the `council` tool) |
@@ -105,6 +105,7 @@ use one `persona/settings.json`. Skill Optimizer keeps its separate configuratio
 
 For time-based work, ask “remind me in ten minutes.” For an event, ask “let me know when this build
 finishes.” Keep Pi open while timers and monitors are running; they are not restored after a restart.
+While armed, each shows as a row in the agent panel (F9) with its countdown, and `x` cancels it.
 See [timers and monitors](docs/MONITORS.md) for examples.
 
 ## Collaborate with another Pi

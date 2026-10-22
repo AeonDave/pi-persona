@@ -15,6 +15,7 @@ broadcast receipts are bounded and omitted mappings remain unknown. Do not repla
 `id` with a wire ID, infer a mapping by timestamp/alias, or merge observations from different streams.
 Single delegates publish their terminal progress before tree removal, so a completed worker remains
 `done` in the telemetry instead of being mistaken for a stopped in-flight leg.
+Monitor and timer rows of the local agent tree are not agents and are never published: no `agent.*` event carries a `monitor:` or `timer:` id.
 
 The pi-persona producer writes semantic projections under `telemetry/v2/<workspace>/<producerId>/`. `<workspace>` always identifies the Pi process's actual cwd; joining another Exocom scope does not rewrite telemetry identity. It never persists task/prompt text, tool arguments/activity, model output, paths, secrets, or message bodies. Known pi-persona event payloads are allowlisted; an unreviewed producer event retains only its envelope/type (payload `{}`) at the producer and consumer boundary. Future producers must add a reviewed allowlist/schema before publishing data intended for a consumer.
 

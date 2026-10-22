@@ -44,6 +44,17 @@ arrive together at an idle boundary. When only the event remains, it should end 
 requests such as “let me know when this build finishes” are enough; tool parameters are for the
 model or an integration, not something the user needs to manage.
 
+## Visibility
+
+An armed timer or active monitor shows as a row in the agent widget and the F9 / `/agents` overlay,
+beside the sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` for a monitor
+(`<id> · output · k/N events` as events arrive), `⏰ <label>  <id> · fires in <remaining>` for a timer.
+The countdown replaces the stall clock, so a quiet watch is never `⚠ stalled`. `⏎` opens the command,
+cwd, times and last 40 event lines (monitor) or the fire time and message (timer); `x` cancels that
+one watch like `monitor cancel` / `timer cancel`. These are rows, not agents: no steer, `X` stop-all
+skips them, and they never count in `N agents` or reach telemetry. A finished row shows ✓/✗/■
+briefly, then leaves.
+
 ## Lifetime and limits
 
 - `list` shows active watches; `cancel` with the returned `id` stops the owned process tree and
