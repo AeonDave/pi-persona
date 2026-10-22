@@ -302,6 +302,31 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !readOnlyTools.has(tool));
 	}
 
+	// Ownership intent belongs to the agent definition, not to the caller. An agent that declares the area
+	// it alone writes (`writeSet` in its frontmatter: research → `.research/`) hands that area to every leg
+	// that names none of its own, so the persona's ownership gate sees a writer with disjoint ownership
+	// rather than an unknown one the supervisor would have to guess a fix for. A leg's own non-empty
+	// writeSet always wins, and an agent that declares nothing leaves the leg exactly as the caller wrote
+	// it. Declarative like the field it fills: the paths annotate and gate, nothing enforces them at runtime.
+	function inheritAgentWriteSets(call: DelegateCall): DelegateCall {
+		const declared = (agent: string | undefined, own: readonly string[] | undefined): string[] | undefined => {
+			if (own?.some((path) => path.trim())) return undefined;
+			const set = d.agents.find((candidate) => candidate.name === agent)?.writeSet;
+			return set && set.length > 0 ? [...set] : undefined;
+		};
+		if (call.tasks && call.tasks.length > 0) {
+			return {
+				...call,
+				tasks: call.tasks.map((task) => {
+					const inherited = declared(task.agent, task.writeSet);
+					return inherited ? { ...task, writeSet: inherited } : task;
+				}),
+			};
+		}
+		const inherited = declared(call.agent, call.writeSet);
+		return inherited ? { ...call, writeSet: inherited } : call;
+	}
+
 	// An interactive `tasks` fan-out of 2+ legs gets one header row — `delegate · N legs`, detail `k/N settled`
 	// — that leaves with its last leg. Settlement only ever updates or removes it, never adds, so a leg that
 	// settles after the tree was cleared (/new, shutdown) cannot resurrect it. Legs are counted as they
@@ -459,6 +484,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						? { ...params, outputContract: defaultOutputContract }
 						: params;
 			}
+			// Before classification and every ownership consumer (the gate, the overlap check, the run specs).
+			params = inheritAgentWriteSets(params);
 			if (policy?.requireBrief) {
 				const briefError = validateDelegationBrief(params);
 				if (briefError) return { content: [{ type: "text", text: briefError }], details: failureDetails({}), isError: true };
@@ -498,9 +525,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				if (effectiveConcurrency > 1) {
 					if (policy?.requireDisjointWrites) {
 						if (writing.length > 1) {
-							const missing = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim())).map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
-							if (missing.length > 0) {
-								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths each of those legs alone may edit, restrict tools to read/grep/find/ls (or pick scout), or serialize with concurrency: 1.`;
+							const unowned = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim()));
+							if (unowned.length > 0) {
+								const missing = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
+								// One remedy per leg, naming the parameters: the caller should never have to guess a fix.
+								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"], or make it a reader with tools: ["read","grep","find","ls"] (or pick scout).`);
+								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. ${remedies.join(" ")} Or serialize the batch with concurrency: 1.`;
 								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 							}
 						}

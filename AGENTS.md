@@ -299,7 +299,9 @@ of a service other Pi sessions are using. Skill Optimizer remains independent.
 
 1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test. Declare `when` (one line), `roster` (positional roles, only where position matters) and `required` (param keys a call must carry) — the `council` tool description is generated from them (`strategyCatalog`) and refuses a missing required param up front; never hand-write a strategy list.
 2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `delegation:` / `coaching: true`; runtime behavior is field-driven, never keyed to a persona name.
-3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`, `mcp: true`
+3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `writeSet` (repository-relative paths the
+   agent alone writes, e.g. `research` → `[.research/]`; inherited by a `delegate` leg that gives none, so
+   the ownership gate sees a declared owner — declarative, never enforced), `isolation: worktree`, `mcp: true`
    (routes the leg through the child engine so `pi-mcp-adapter` initializes and its `mcp*`/direct
    tools work — the default in-process engine leaves them "not initialized"; also settable per-leg
    via `delegate`'s `mcp: true` / `AgentRunSpec.mcp`. Pass a server session id in the task to share
