@@ -347,3 +347,171 @@ test("AgentTree carries dueAt, and a changed dueAt notifies while an identical o
 	assert.deepEqual(changes, ["updated", "updated"], "the upsert branch applies dueAt too");
 	assert.equal(tree.snapshot()[0]?.dueAt, 120_000);
 });
+
+// --- Wake-source digest: a monitor/timer below the fold must stay visible ------------------------
+
+const WAKE_FOLD_LEG_COUNT = 7;
+
+/** A council root with seven running legs under it (8 rows: exactly the default summary budget). */
+function councilFanout(failedIndex?: number): AgentNode[] {
+	return [
+		{ id: "council#1", label: "council", parentId: undefined, status: "running", kind: "council", detail: undefined },
+		...Array.from({ length: WAKE_FOLD_LEG_COUNT }, (_, i): AgentNode => ({
+			id: `council#1/${i}`,
+			label: `leg-${i + 1}`,
+			parentId: "council#1",
+			status: i === failedIndex ? "failed" : "running",
+			kind: "subagent",
+			detail: i === failedIndex ? "provider" : undefined,
+		})),
+	];
+}
+
+const WAKE_MONITOR: AgentNode = {
+	id: "monitor:monitor-1",
+	kind: "monitor",
+	label: "qualify batch1",
+	parentId: undefined,
+	status: "running",
+	detail: "monitor-1 · exit",
+	startedAt: 0,
+	dueAt: 7_200_000,
+};
+const WAKE_TIMER: AgentNode = {
+	id: "timer:timer-1",
+	kind: "timer",
+	label: "status review",
+	parentId: undefined,
+	status: "running",
+	detail: "timer-1",
+	startedAt: 0,
+	dueAt: 253_000,
+};
+const OVERFLOW = /^… \+\d+ more · F9 or \/agents for the full live tree$/;
+
+test("a monitor armed after a full fan-out is surfaced as a digest line instead of vanishing behind the overflow", () => {
+	const lines = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.deepEqual(lines.slice(6), ["◉ 1 monitor · next due in 1h 59m", "… +3 more · F9 or /agents for the full live tree"]);
+	assert.equal(lines.filter((line) => /^◉ 1 monitor · next due in /.test(line)).length, 1);
+	assert.match(lines.at(-1) ?? "", OVERFLOW, "hidden wake rows still count as more");
+	assert.doesNotMatch(lines.slice(0, 6).join("\n"), /◉|qualify batch1/, "the monitor's own row stays below the fold; only the digest shows it");
+	assert.match(lines[0] ?? "", /council/, "the fan-out keeps the rows the digest did not need");
+});
+
+test("the digest counts monitors then timers and counts down to the nearest hidden due time", () => {
+	const lines = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR, WAKE_TIMER], 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.equal(lines[6], "◉ 1 monitor · ⏰ 1 timer · next due in 4m 12s", "the timer fires first, so it sets the countdown");
+	assert.match(lines.at(-1) ?? "", /^… \+4 more · F9/);
+});
+
+test("the digest pluralises each kind and omits a kind that has no hidden row", () => {
+	const timers: AgentNode[] = [WAKE_TIMER, { ...WAKE_TIMER, id: "timer:timer-2", label: "second review", dueAt: 600_000 }];
+	const onlyTimers = renderAgentTreeSummary([...councilFanout(), ...timers], 8, { now: 1_000 });
+	assert.equal(onlyTimers[6], "⏰ 2 timers · next due in 4m 12s");
+
+	const monitors: AgentNode[] = [WAKE_MONITOR, { ...WAKE_MONITOR, id: "monitor:monitor-2", label: "second watch", dueAt: 9_000_000 }];
+	const onlyMonitors = renderAgentTreeSummary([...councilFanout(), ...monitors], 8, { now: 1_000 });
+	assert.equal(onlyMonitors[6], "◉ 2 monitors · next due in 1h 59m");
+
+	const mixed = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR, ...timers], 8, { now: 1_000 });
+	assert.equal(mixed[6], "◉ 1 monitor · ⏰ 2 timers · next due in 4m 12s");
+});
+
+test("the digest says 'next due now' once the nearest hidden wake row is overdue", () => {
+	const lines = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8, { now: 7_200_000 });
+	assert.equal(lines[6], "◉ 1 monitor · next due now");
+	const later = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8, { now: 8_000_000 });
+	assert.equal(later[6], "◉ 1 monitor · next due now", "past the deadline reads the same");
+});
+
+test("without a clock the digest carries no 'next due' clause, and neither does a hidden row with no dueAt", () => {
+	const noClock = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8);
+	assert.equal(noClock.length, 8);
+	assert.equal(noClock[6], "◉ 1 monitor");
+	const { dueAt: _dueAt, ...undated } = WAKE_MONITOR;
+	const noDue = renderAgentTreeSummary([...councilFanout(), undated], 8, { now: 1_000 });
+	assert.equal(noDue[6], "◉ 1 monitor", "nothing finite to count down to");
+	const mixedDue = renderAgentTreeSummary([...councilFanout(), undated, { ...WAKE_TIMER, dueAt: Number.NaN }], 8, { now: 1_000 });
+	assert.equal(mixedDue[6], "◉ 1 monitor · ⏰ 1 timer", "a NaN dueAt is not finite either");
+});
+
+test("a failed leg and a hidden wake row each get their own line, and the summary stays inside its budget", () => {
+	const lines = renderAgentTreeSummary([...councilFanout(3), WAKE_MONITOR], 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.match(lines[5] ?? "", /^✗ 1 failed: leg-4 \(provider\)$/);
+	assert.equal(lines[6], "◉ 1 monitor · next due in 1h 59m");
+	assert.match(lines[7] ?? "", /^… \+4 more · F9/);
+	assert.match(lines[0] ?? "", /council/);
+	assert.equal(lines.slice(0, 5).length, 5, "five rows survive: failure line and digest each took a slot");
+});
+
+test("a wake row inside the fold gets no digest line", () => {
+	const lines = renderAgentTreeSummary([WAKE_MONITOR, ...councilFanout()], 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.match(lines[0] ?? "", /^◉ qualify batch1/, "the row is shown as itself");
+	assert.doesNotMatch(lines.join("\n"), /\d+ monitors?\b/, "so there is no digest to repeat it");
+	assert.match(lines.at(-1) ?? "", /^… \+2 more/);
+	assert.equal(lines.filter((line) => OVERFLOW.test(line)).length, 1);
+});
+
+test("the digest slot can pull a wake row that was just inside the fold below it", () => {
+	const filler = (i: number): AgentNode => ({ id: `a${i}`, label: `agent-${i}`, parentId: undefined, status: "running", detail: undefined });
+	// Rows: 6 agents, the monitor (index 6, the last visible slot at limit 8), one more agent, then the timer (index 8).
+	const nodes: AgentNode[] = [0, 1, 2, 3, 4, 5].map(filler);
+	nodes.push(WAKE_MONITOR, filler(6), WAKE_TIMER);
+	const lines = renderAgentTreeSummary(nodes, 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.equal(lines[6], "◉ 1 monitor · ⏰ 1 timer · next due in 4m 12s", "the digest slot demoted the monitor too, so it is counted");
+	assert.doesNotMatch(lines.slice(0, 6).join("\n"), /qualify batch1/);
+	assert.equal(lines[7], "… +3 more · F9 or /agents for the full live tree");
+});
+
+test("settled wake rows below the fold are not part of the digest", () => {
+	const settled: AgentNode[] = [
+		{ ...WAKE_MONITOR, status: "done" },
+		{ ...WAKE_TIMER, status: "stopped" },
+	];
+	const lines = renderAgentTreeSummary([...councilFanout(), ...settled], 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.doesNotMatch(lines.join("\n"), /\bmonitors?\b|\btimers?\b|next due/);
+	assert.equal(lines.at(-1), "… +3 more · F9 or /agents for the full live tree", "plain overflow: no failure, no digest, seven rows kept");
+	assert.equal(lines.filter((line) => /^[✓■] /.test(line)).length, 0, "and the settled rows themselves are below the fold");
+});
+
+test("a tight budget keeps the digest ahead of the overflow line", () => {
+	const nodes = [...councilFanout(), WAKE_MONITOR];
+	// limit 2: one slot for rows, then the digest takes it. Zero rows are shown; the digest and overflow remain.
+	assert.deepEqual(renderAgentTreeSummary(nodes, 2, { now: 1_000 }), ["◉ 1 monitor · next due in 1h 59m", "… +9 more · F9 or /agents for the full live tree"]);
+	// limit 1: one line only, and the wake digest outranks the overflow.
+	assert.deepEqual(renderAgentTreeSummary(nodes, 1, { now: 1_000 }), ["◉ 1 monitor · next due in 1h 59m"]);
+	// limit 3: one visible row, then digest and overflow.
+	const three = renderAgentTreeSummary(nodes, 3, { now: 1_000 });
+	assert.equal(three.length, 3);
+	assert.match(three[0] ?? "", /council/);
+	assert.equal(three[1], "◉ 1 monitor · next due in 1h 59m");
+	assert.equal(three[2], "… +8 more · F9 or /agents for the full live tree");
+});
+
+test("a failure outranks the wake digest, and neither exceeds a one- or two-line budget", () => {
+	const nodes = [...councilFanout(3), WAKE_MONITOR];
+	assert.deepEqual(renderAgentTreeSummary(nodes, 1, { now: 1_000 }), ["✗ 1 failed: leg-4 (provider)"], "failure > digest > overflow at one line");
+	assert.deepEqual(renderAgentTreeSummary(nodes, 2, { now: 1_000 }), ["✗ 1 failed: leg-4 (provider)", "◉ 1 monitor · next due in 1h 59m"], "the overflow line is the first to go");
+});
+
+test("without any hidden wake row the overflow summary is unchanged", () => {
+	const nodes: AgentNode[] = [...councilFanout(), { id: "council#1/extra", label: "leg-8", parentId: "council#1", status: "running", kind: "subagent", detail: undefined }];
+	const lines = renderAgentTreeSummary(nodes, 8, { now: 1_000 });
+	assert.equal(lines.length, 8);
+	assert.equal(lines.at(-1), "… +2 more · F9 or /agents for the full live tree");
+	assert.doesNotMatch(lines.join("\n"), /monitor|timer/);
+	assert.deepEqual(renderAgentTreeSummary(nodes, 8), [...renderAgentTree(nodes).slice(0, 7), "… +2 more · F9 or /agents for the full live tree"]);
+});
+
+test("the no-overflow path returns every row untouched, wake rows included", () => {
+	const nodes = [...councilFanout().slice(0, 4), WAKE_MONITOR, WAKE_TIMER];
+	assert.deepEqual(renderAgentTreeSummary(nodes, 8, { now: 1_000 }), renderAgentTree(nodes, { now: 1_000 }));
+	assert.equal(renderAgentTreeSummary(nodes, 6, { now: 1_000 }).length, 6, "exactly at the limit is not an overflow");
+	assert.doesNotMatch(renderAgentTreeSummary(nodes, 6, { now: 1_000 }).join("\n"), /\d+ monitors?\b|next due/);
+});

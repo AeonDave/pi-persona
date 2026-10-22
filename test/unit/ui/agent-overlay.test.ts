@@ -823,7 +823,7 @@ test("X is not offered for one agent plus a monitor: wake rows do not make a gro
 	overlay.dispose();
 });
 
-test("drilling into a monitor row shows its output, the live marker and the monitor glyph in the header", () => {
+test("drilling into a monitor row shows its output, the armed marker and the monitor glyph in the header", () => {
 	const tree = new AgentTree(() => 0);
 	tree.add({ ...MONITOR_ROW, output: "command: node scripts/qualify.mjs" });
 	const overlay = wakeOverlay(tree, { canSteer: () => false, canStop: () => true }, 723_000);
@@ -832,11 +832,117 @@ test("drilling into a monitor row shows its output, the live marker and the moni
 	const view = lines.join("\n");
 	const header = lines.find((line) => line.includes("qualify batch1"));
 	assert.ok(header, "the detail header renders");
-	assert.match(header, /^│\s+◉ qualify batch1\s+● live/, "the header uses the wake glyph and the live marker");
+	assert.match(header, /^│\s+◉ qualify batch1\s+● armed/, "the header uses the wake glyph and the armed marker");
+	assert.doesNotMatch(view, /● live/, "a wake row is armed, not a live agent");
 	assert.doesNotMatch(view, /⏳/);
 	assert.match(view, /monitor-2 · exit/, "the detail line is shown under the header");
 	assert.match(view, /command: node scripts\/qualify\.mjs/, "the row's output is the body");
 	assert.match(view, /esc back.*x stop/, "x stop is offered in the detail view");
 	assert.doesNotMatch(view, /s steer/);
+	overlay.dispose();
+});
+
+test("drilling into a running timer shows it as armed, with no agent-only live badge or steer hint", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ ...TIMER_ROW, output: "timer-1 · fires soon\nmessage: check the deploy" });
+	// No steer handle, exactly as production has for a wake row.
+	const overlay = wakeOverlay(tree, { canSteer: () => false, canStop: () => true });
+	overlay.handleInput("\n");
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /⏰ status review\s+● armed/, "the header says the alarm is armed");
+	assert.doesNotMatch(view, /● live/, "a timer is not a live agent");
+	assert.doesNotMatch(view, /steer unavailable/, "the steer-unavailable hint is agent chrome");
+	assert.doesNotMatch(view, /s steer/);
+	assert.match(view, /message: check the deploy/, "the description is still the body");
+	assert.match(view, /esc back.*x stop/, "x stop is still offered");
+	overlay.dispose();
+});
+
+test("a running agent without a steer handle still gets the live badge and the steer-unavailable hint", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "async:A", label: "worker" });
+	const overlay = wakeOverlay(tree, { canSteer: () => false });
+	overlay.handleInput("\n");
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /worker\s+● live/);
+	assert.doesNotMatch(view, /● armed/);
+	assert.match(view, /steer unavailable: no live handle yet/);
+	overlay.dispose();
+});
+
+test("a settled wake row carries neither badge in the detail view", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ ...TIMER_ROW, status: "done" });
+	const overlay = wakeOverlay(tree, { canSteer: () => false });
+	overlay.handleInput("\n");
+	const view = overlay.render(120).join("\n");
+	assert.doesNotMatch(view, /● armed|● live/);
+	assert.doesNotMatch(view, /steer unavailable/);
+	overlay.dispose();
+});
+
+test("opening the overlay aims at an agent, not at a monitor that happens to be listed first", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(MONITOR_ROW); // listed FIRST
+	tree.add({ id: "async:A", label: "worker" });
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, {
+		canStop: () => true,
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+	});
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /▸ ⏳ worker/, "the agent row carries the marker");
+	assert.doesNotMatch(view, /▸ ◉ qualify batch1/, "the long-running monitor does not");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["async:A"], "a first x cannot cancel the two-hour watch");
+	overlay.dispose();
+});
+
+test("the marker falls back to a wake row only when no agent is left", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(MONITOR_ROW);
+	tree.add({ id: "async:A", label: "worker" });
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, {
+		canStop: () => true,
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+	});
+	assert.match(overlay.render(120).join("\n"), /▸ ⏳ worker/);
+	tree.remove("async:A"); // the aimed-at agent settles; only the monitor remains
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /▸ ◉ qualify batch1/, "nothing else to aim at, so the monitor takes the marker");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, [], "the lost-aim guard still swallows the first directed key");
+	overlay.dispose();
+});
+
+test("a vanished agent hands the marker to the remaining agent, not to the monitor listed before it", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add(MONITOR_ROW);
+	tree.add({ id: "async:A", label: "worker A" });
+	tree.add({ id: "async:B", label: "worker B" });
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, {
+		canStop: () => true,
+		onStop: (id) => {
+			stopped.push(id);
+			return true;
+		},
+	});
+	assert.match(overlay.render(120).join("\n"), /▸ ⏳ worker A/);
+	tree.remove("async:A");
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /▸ ⏳ worker B/, "the surviving agent inherits the marker");
+	assert.doesNotMatch(view, /▸ ◉ qualify batch1/);
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, [], "the first x after a lost aim only re-anchors (existing semantics)");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["async:B"], "the second x acts on the agent the marker shows");
 	overlay.dispose();
 });
