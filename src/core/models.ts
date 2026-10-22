@@ -46,6 +46,8 @@ export type ModelResolution =
 	| { ok: false; reason: "unknown" | "ambiguous" | "blocked"; candidates: string[] };
 
 const full = (m: ModelLite): string => `${m.provider}/${m.id}`;
+/** Loose-match form of a model ref: lower-case, version dots folded to dashes. */
+const looseKey = (s: string): string => s.toLowerCase().replace(/(\d)\.(?=\d)/g, "$1-");
 
 function dedupe(models: ModelLite[]): ModelLite[] {
 	const seen = new Set<string>();
@@ -118,16 +120,23 @@ export function resolveModelRef(
 	policy?: ModelRoutingPolicy,
 ): ModelResolution {
 	const wanted = ref.trim();
-	const all = models.map(full);
 	const exact = models.find((m) => full(m) === wanted);
 	// An exact provider-qualified pin is an explicit user choice. Never rewrite or reject it
 	// because the current routing policy is intended only for loose automatic selection.
 	if (exact) return { ok: true, ref: wanted };
 
-	// Candidate set: a unique exact id (no provider), else a case-insensitive substring.
+	// Candidate set: a unique exact id (no provider), else a loose match — case-insensitive, dots
+	// and dashes interchangeable in versions ('opus-4.6' ≡ 'opus-4-6'), and a `provider/` prefix
+	// scoping the loose id to that provider's ids ('claude-pro-max-native/opus-4-6').
 	const byId = models.filter((m) => m.id === wanted);
-	const lower = wanted.toLowerCase();
-	const rawCandidates = dedupe(byId.length > 0 ? byId : models.filter((m) => full(m).toLowerCase().includes(lower)));
+	const slash = wanted.indexOf("/");
+	const scopedProvider = slash > 0 ? wanted.slice(0, slash) : undefined;
+	const scoped = scopedProvider ? models.filter((m) => m.provider === scopedProvider) : [];
+	const loose = looseKey(scoped.length > 0 ? wanted.slice(slash + 1) : wanted);
+	const pool = scoped.length > 0 ? scoped : models;
+	const rawCandidates = dedupe(byId.length > 0 ? byId : pool.filter((m) => looseKey(scoped.length > 0 ? m.id : full(m)).includes(loose)));
+	// With nothing to match, the catalog itself is the answer — session provider first.
+	const all = [...models.filter((m) => m.provider === preferProvider), ...models.filter((m) => m.provider !== preferProvider)].map(full);
 	const candidates = policy ? rawCandidates.filter((m) => isModelProviderAllowed(m, policy)) : rawCandidates;
 	if (policy) {
 		const allCandidatesArePolicyBlocked = rawCandidates.length > 0 && rawCandidates.every((m) => allowedModelProviders(m.id, policy) !== undefined && !isModelProviderAllowed(m, policy));

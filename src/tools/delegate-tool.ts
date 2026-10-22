@@ -433,7 +433,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
-			"A `model` may be a loose name ('sonnet') — it resolves to YOUR provider's id; ambiguous names return",
+			"A `model` may be a loose name ('sonnet', 'opus-4.6', 'claude-pro-max-native/opus-4-6') — it resolves to YOUR provider's id; ambiguous names return",
 			"candidates (or call `models`). Other options: name, tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
