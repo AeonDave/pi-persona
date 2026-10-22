@@ -10,7 +10,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 - Show armed timers and active monitors as rows in the sticky agent widget and the F9 / `/agents` panel,
   beside sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` (an `output`
-  monitor reads `k/N events` as they arrive) and `⏰ <label>  <id> · fires in <remaining>`. A countdown
+  monitor reads `k/N events` as they arrive) and `⏰ <label>  <id> · fires in <remaining>` (just
+  `⏰ <id>  fires in <remaining>` when the timer has no label). A countdown
   replaces the stall clock, so a quiet watch is never flagged `⚠ stalled`. `⏎` opens the command, cwd,
   times and last 40 event lines (monitor) or the fire time and message (timer); `x` cancels that one
   watch or alarm like `monitor cancel` / `timer cancel`. They are rows, not agents: `X` stop-all, the
@@ -99,6 +100,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   (about +140 tokens).
 - Register the 1.14.2-1.17.1 `elite` and 1.14.0-1.17.1 `audit` seeds as migratable, so untouched
   installed copies pick up the new prompt wording automatically.
+- Clip a `timer` label longer than 120 characters (ending in `…`) instead of keeping it unbounded.
+  The clipped label is what `timer list`, the arm receipt, the fire follow-up and the agent-tree row
+  show.
 
 ### Fixed
 - Resolve loose `delegate` model names more forgivingly: a `provider/loose-id` pin matches inside

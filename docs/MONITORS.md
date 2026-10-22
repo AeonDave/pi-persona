@@ -48,7 +48,8 @@ model or an integration, not something the user needs to manage.
 
 An armed timer or active monitor shows as a row in the agent widget and the F9 / `/agents` overlay,
 beside the sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` for a monitor
-(`<id> · output · k/N events` as events arrive), `⏰ <label>  <id> · fires in <remaining>` for a timer.
+(`<id> · output · k/N events` as events arrive), `⏰ <label>  <id> · fires in <remaining>` for a timer
+(just `⏰ <id>  fires in <remaining>` when the timer has no label).
 The countdown replaces the stall clock, so a quiet watch is never `⚠ stalled`. `⏎` opens the command,
 cwd, times and last 40 event lines (monitor) or the fire time and message (timer); `x` cancels that
 one watch like `monitor cancel` / `timer cancel`. These are rows, not agents: no steer, `X` stop-all

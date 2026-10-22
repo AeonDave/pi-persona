@@ -567,8 +567,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,
   already settled) surfaces as a one-line notice instead of silently no-op'ing;
 - armed timers and active monitors are **wake rows** in the same tree (`src/ui/wake-rows.ts`, ids
-  `monitor:<id>` / `timer:<id>`): rows, not agents. A countdown (`fires in` / `deadline in`) replaces the
-  elapsed/stall clock, so they never carry the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
+  `monitor:<id>` / `timer:<id>`): rows, not agents. The countdown replaces the stall clock: a timer
+  shows `fires in <d>` only, a monitor keeps its elapsed time (`<elapsed> · deadline in <d>`), so
+  neither carries the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
   one through the same stop registry as an agent (the `monitor cancel` / `timer cancel` effect); `s` steer
   is never offered. They are excluded from the `X` stop-all count, confirmation and bulk stop, from the
   `N agents` in-flight status, and from telemetry (`agent.*` events are agents only). They settle and
