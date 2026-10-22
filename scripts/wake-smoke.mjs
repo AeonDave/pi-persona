@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import { killProcessTree } from "../src/engine/child.ts";
 import { appendBounded, contentText, jsonLineReader, sendCommand, short } from "./lib/rpc-smoke.mjs";
+import { coerceWakeSmokeDelegateTasks } from "./lib/wake-smoke.ts";
 
 const USAGE = "usage: LIVE_MODEL=<provider/id> node --import tsx scripts/wake-smoke.mjs [--scout-model <provider/id>]";
 const DEFAULT_SCOUT_MODEL = "claude-pro-max-native/claude-haiku-4-5";
@@ -127,6 +128,7 @@ let wakeAt;
 let wakeAgentEndAt;
 let delegateCalls = 0;
 let launchedLegs = 0;
+let delegateArgumentError;
 const wakes = [];
 const forbidden = [];
 const sequence = [];
@@ -155,6 +157,20 @@ function forbiddenCall(event) {
 	return undefined;
 }
 
+function delegateArgsShape(args) {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return `root=${Array.isArray(args) ? "array" : typeof args}`;
+	const keys = Object.keys(args).slice(0, 12);
+	const typeOf = (value) => Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+	const types = keys.map((key) => `${key}:${typeOf(args[key])}`).join(",");
+	const tasks = args.tasks;
+	const tasksShape = typeof tasks === "string"
+		? `string(${tasks.length} chars)`
+		: Array.isArray(tasks)
+			? `array(${tasks.length})[${tasks.slice(0, 3).map((task) => task && typeof task === "object" ? `object{${Object.keys(task).slice(0, 8).join(",")}}` : typeOf(task)).join(";")}]`
+			: typeOf(tasks);
+	return `keys=[${keys.join(",")}], types={${types}}, tasks=${tasksShape}`;
+}
+
 function fail(reason) {
 	if (settled) return;
 	settled = true;
@@ -177,8 +193,18 @@ function handleEvent(event) {
 	if (event.type === "tool_execution_start") {
 		if (event.toolName === "delegate") {
 			delegateCalls++;
-			const tasks = event.args && typeof event.args === "object" ? event.args.tasks : undefined;
-			launchedLegs = Array.isArray(tasks) ? tasks.length : 0;
+			const normalized = coerceWakeSmokeDelegateTasks(event.args);
+			if (!normalized.ok) {
+				launchedLegs = 0;
+				note(`delegate args could not be normalized: ${short(normalized.error, 180)}`);
+			} else {
+				launchedLegs = normalized.tasks.length;
+				const scouts = normalized.tasks.filter((task) => task.agent === "scout").length;
+				const taskMarkers = markers.filter((marker, index) => normalized.tasks[index]?.task?.includes(marker)).length;
+				note(`delegate args shape: ${delegateArgsShape(event.args)}; normalized tasks=${launchedLegs}, scouts=${scouts}, markers=${taskMarkers}`);
+				if (scouts !== launchedLegs) delegateArgumentError = `expected scout tasks, found ${launchedLegs - scouts} non-scout task(s)`;
+				if (taskMarkers !== markers.length) delegateArgumentError ??= `expected all ${markers.length} markers in task briefs, found ${taskMarkers}`;
+			}
 			note(`delegate tasks[${launchedLegs}]`);
 		}
 		const bad = wakeAt === undefined ? forbiddenCall(event) : undefined;
@@ -256,6 +282,7 @@ async function waitForOutcome() {
 
 function verify() {
 	if (delegateCalls !== 1) throw new Error(`expected exactly 1 delegate call, saw ${delegateCalls}`);
+	if (delegateArgumentError) throw new Error(delegateArgumentError);
 	if (launchedLegs !== 3) throw new Error(`expected a 3-leg tasks fan-out, saw ${launchedLegs} legs`);
 	if (wakes.length !== 1) throw new Error(`expected exactly ONE completion wake, saw ${wakes.length}`);
 	const missing = markers.filter((m) => !wakes[0].text.includes(m));

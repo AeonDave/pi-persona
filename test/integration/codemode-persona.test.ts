@@ -14,7 +14,7 @@
  * Everything asserted here is host-produced: the nested marker is the `parentToolCallId` the real
  * agent loop sets, the nudge/card assertions come from the real hook plus the real `appendEntry`,
  * and the content assertions come from the context of the real next provider request. Positive
- * controls (a 5-step sweep, and a direct >`singleHeavyChars` read of the very same file) prove the
+ * controls (a 3-step sweep, and a direct >`singleHeavyChars` read of the very same file) prove the
  * nudge path is armed in this session, so a silent nested result can never be mistaken for a
  * disarmed harness or a persona that never activated.
  */
@@ -316,7 +316,7 @@ test("native codemode: a nested read past singleHeavyChars never nudges, and onl
 				delivered.push(lastToolResultText(context.messages));
 				return fauxAssistantMessage(fauxToolCall("codemode", { code: script }, { id: "cm-1" }), { stopReason: "toolUse" });
 			},
-			...(["r1", "r2", "r3", "r4"] as const).map((id) => (context: { messages: readonly Contentish[] }) => {
+			...(["r1", "r2"] as const).map((id) => (context: { messages: readonly Contentish[] }) => {
 				delivered.push(lastToolResultText(context.messages));
 				return stepRead(id);
 			}),
@@ -348,29 +348,27 @@ test("native codemode: a nested read past singleHeavyChars never nudges, and onl
 		assert.ok(outer.chars < 40_000, `the outer result stayed lean (${outer.chars} chars)`);
 
 		// ── what the model actually received ──
-		assert.equal(delivered.length, 6, `one record per provider request, got ${delivered.length}`);
+		assert.equal(delivered.length, 4, `one record per provider request, got ${delivered.length}`);
 		const codemodeToModel = delivered[1] ?? "";
 		assert.match(codemodeToModel, /HEAVY-SUMMARY/, "the script's printed output is what reached the model");
 		assert.doesNotMatch(codemodeToModel, new RegExp(HEAVY), "the heavy payload never reached the model");
 		assert.doesNotMatch(codemodeToModel, new RegExp(CHECKPOINT), "the fat nested read did not dump-nudge the outer result");
 
-		// ── the streak is untouched by the nested bytes: the sweep still fires on step 5 ──
-		for (let step = 2; step <= 4; step++) {
-			assert.doesNotMatch(delivered[step] ?? "", new RegExp(CHECKPOINT), `model-visible result ${step} is still an ordinary step`);
-		}
-		const sweep = delivered[5] ?? "";
-		assert.match(sweep, new RegExp(CHECKPOINT), "the 5th model-visible result trips the sweep — the path is armed");
+		// ── the streak is untouched by the nested bytes: the sweep still fires on step 3 ──
+		assert.doesNotMatch(delivered[2] ?? "", new RegExp(CHECKPOINT), "model-visible result 2 is still an ordinary step");
+		const sweep = delivered[3] ?? "";
+		assert.match(sweep, new RegExp(CHECKPOINT), "the 3rd model-visible result trips the sweep — the path is armed");
 		assert.match(sweep, /substantive direct tool calls/, "the trigger is the run of model-visible calls, not the nested bytes");
 		assert.doesNotMatch(sweep, new RegExp(HEAVY), "no heavy payload leaked into a step result");
 
 		assert.equal(nudges.length, 1, `exactly one card, from the one model-visible trigger: ${JSON.stringify(nudges)}`);
 		assert.match(nudges[0] ?? "", /substantive direct tool calls/);
-		const fifth = results.find((r) => r.modelVisibleIndex === 5);
-		assert.ok(fifth, "five model-visible results were observed");
-		assert.equal(fifth.nudgesBefore, 1, "the sweep card existed by the time the 5th model-visible result finished, and no earlier");
-		const fourth = results.find((r) => r.modelVisibleIndex === 4);
-		assert.ok(fourth);
-		assert.equal(fourth.nudgesBefore, 0, "nothing was minted after 4 steps — the nested read consumed no step");
+		const third = results.find((r) => r.modelVisibleIndex === 3);
+		assert.ok(third, "three model-visible results were observed");
+		assert.equal(third.nudgesBefore, 1, "the sweep card existed by the time the 3rd model-visible result finished, and no earlier");
+		const second = results.find((r) => r.modelVisibleIndex === 2);
+		assert.ok(second);
+		assert.equal(second.nudgesBefore, 0, "nothing was minted after 2 steps — the nested read consumed no step");
 	} finally {
 		await h?.dispose();
 		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;

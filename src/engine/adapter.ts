@@ -16,6 +16,7 @@ import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngin
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
 import { looksLikeProviderError } from "./errors.ts";
+import { piHostModuleHint } from "./host-module.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
@@ -215,6 +216,8 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const tag = `[${spec.agent} · ${modelRef}${dyn}]`;
 			if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
 			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
+			const hostModuleHint = !child.ok ? piHostModuleHint(`${child.errorMessage ?? ""}\n${child.stderr}`) : undefined;
+			if (hostModuleHint && result.error) result.error += ` — ${hostModuleHint}`;
 			// MCP-leg diagnosis: an `mcp: true` leg is routed here (the child engine) precisely so
 			// `pi-mcp-adapter` initializes in a fresh headless `pi -p`. When such a leg fails without
 			// completing a single turn, the near-certain cause is the MCP adapter hanging in init —
@@ -222,7 +225,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// Keyed on turns===0 (never really started), not empty output, so an early tool/log line
 			// can't mask it. Name the cause + the fix so the operator never has to guess (a real prod
 			// report: a dead `mcp: true` async delegation with an opaque timeout).
-			if (!child.ok && spec.mcp === true && child.usage.turns === 0) {
+			if (!child.ok && !hostModuleHint && spec.mcp === true && child.usage.turns === 0) {
 				result.error =
 					`${result.error ?? `${tag} agent failed`} — mcp:true leg never completed a turn: the MCP adapter likely hung initializing in the headless child ` +
 					`(a server needing interactive OAuth can't authenticate without a UI). Fix: authenticate the MCP server once in a normal \`pi\` session (\`/mcp auth\`) so its token is cached — the headless child reuses it; ` +
@@ -239,9 +242,11 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					? "timeout"
 					: child.aborted
 						? "abort"
-						: child.stopReason === "error" || looksLikeProviderError(`${child.errorMessage ?? ""}\n${child.stderr}`)
-							? "provider"
-							: "agent";
+						: hostModuleHint
+							? "agent"
+							: child.stopReason === "error" || looksLikeProviderError(`${child.errorMessage ?? ""}\n${child.stderr}`)
+								? "provider"
+								: "agent";
 
 			if (contractDef) {
 				// Shared parse+validate (unwraps ```json fences / prose first) — a member's

@@ -144,9 +144,9 @@ everyday coding, or choose one for the work ahead.
 | Persona | Best for |
 |---|---|
 | `dev` | Implementing, fixing, and reviewing code |
-| `planner` | Turning an idea into a plan before changing code |
+| `planner` | Turning an idea into a drafted, critiqued plan before changing code |
 | `researcher` | Investigating questions and collecting sourced findings |
-| `audit` | Reviewing a change from security, performance, and testing perspectives |
+| `audit` | Reviewing a change from correctness, security, performance, and testing perspectives |
 | `verify` | Repairing failures and checking the result with fresh tests |
 | `swarm` | Applying the same operation across many independent items |
 | `magi` | Comparing three perspectives through a vote, with dissent preserved |

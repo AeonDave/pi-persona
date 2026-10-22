@@ -15,6 +15,7 @@ const agents: Record<string, AgentConfig> = {
 };
 const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
+const HOST_MODULE_ERROR = "Cannot find module '/opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/openai-responses-KCCCXI3B.js' imported from /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-66G7ITPS.js";
 
 test("child adapter propagates each authoritative tool lifecycle event once without args or output", async () => {
 	const events: unknown[] = [];
@@ -287,6 +288,54 @@ test("child adapter classifies Pi's missing-provider-key diagnostic as provider"
 	assert.equal(r.failureKind, "provider");
 	assert.match(r.error ?? "", /No API key found for openai-codex/);
 });
+
+for (const mode of ["stream", "stderr"] as const) {
+	test(`child adapter keeps a missing Pi host bundle chunk terminal with an actionable diagnostic (${mode})`, async () => {
+		const original = HOST_MODULE_ERROR;
+		const event = { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: original } };
+		const script = mode === "stream"
+			? `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`
+			: `process.stderr.write(${JSON.stringify(original + "\n")}); process.exit(1);`;
+		const engine = makeEngine({
+			resolveAgent,
+			childOptions: { resolveInvocation: (args) => ({ command: process.execPath, args: ["-e", script, "--", ...args] }) },
+		});
+		const result = await engine.run({ agent: "a", task: "probe", model: "stub/m", mcp: true });
+		assert.equal(result.ok, false);
+		assert.equal(result.failureKind, "agent", "a local host module failure must never trigger model/provider recovery");
+		assert.equal(result.modelUsed, "stub/m");
+		assert.ok(result.error?.includes(original), "the original missing-module path and importer remain available");
+		assert.match(result.error ?? "", /local Pi host bundle/i);
+		assert.match(result.error ?? "", /updated in place/i);
+		assert.match(result.error ?? "", /fresh Pi process.*same provider\/model/i);
+		assert.match(result.error ?? "", /only if.*fresh process.*fails.*repair/i);
+		assert.doesNotMatch(result.error ?? "", /MCP adapter likely hung initializing/, "a known host-module failure is not an MCP authentication diagnosis");
+	});
+}
+
+for (const cause of ["abort", "timeout"] as const) {
+	test(`child adapter ${cause} takes precedence over a missing Pi host bundle chunk`, async () => {
+		const ac = new AbortController();
+		const event = { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: HOST_MODULE_ERROR } };
+		const script = `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")}); setInterval(() => {}, 1000);`;
+		const engine = makeEngine({
+			resolveAgent,
+			childOptions: {
+				timeoutMs: 200,
+				killGraceMs: 20,
+				resolveInvocation: (args) => ({ command: process.execPath, args: ["-e", script, "--", ...args] }),
+			},
+		});
+		let sawError = false;
+		const result = await engine.run({ agent: "a", task: "probe" }, () => {
+			sawError = true;
+			if (cause === "abort") ac.abort();
+		}, ac.signal);
+		assert.ok(sawError, "the host error was received before cancellation");
+		assert.equal(result.ok, false);
+		assert.equal(result.failureKind, cause);
+	});
+}
 
 test("child adapter keeps a pre-stream non-provider death as agent (terminal)", async () => {
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake } });

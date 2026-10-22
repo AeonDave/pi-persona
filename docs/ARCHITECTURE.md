@@ -33,7 +33,12 @@ Persona names are data, never dispatch keys. Optional `delegation:` fields apply
 builtin, user, or project persona: `requireBrief`, `outputContract`, `requireDisjointWrites`,
 `requireFreshVerification`, and `verificationAgents`. Council behavior remains independently
 declarative through `council: { strategy, roster, params }`; a custom persona can compose any installed
-strategy/team without a core change. The gates use effective agent/tool capabilities, conservatively
+strategy/team without a core change. Ownership intent follows the agent, not the caller: an agent definition
+can declare the area it alone writes (`writeSet`, e.g. `research` → `.research/`), and a write-capable delegate leg that
+names no `writeSet` inherits it before the gates run, so the disjoint-ownership and overlap checks see a
+declared owner; a leg's own set wins, and the field stays declarative (nothing enforces paths at runtime).
+Legs restricted to read-only tools do not inherit ownership defaults, so parallel readers do not conflict.
+The gates use effective agent/tool capabilities, conservatively
 treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
 concurrency on the single launch path (interactive background or headless inline). A serialized verifier is accepted only
 after every material writer in that batch; otherwise the call fails before a child starts. The rule
@@ -775,8 +780,11 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
 a persona directive lives at the TOP of the prompt and its pull decays as recent tool output balloons:
 
 - The **delegation brief** (`core/brief.ts`) is the STANDING half: live roster (agents + teams + flows, with descriptions;
-  gated flows are tagged in headless sessions) and the hand-off default (including one decision-class → method
-  line that a test checks against the strategy registry), appended to the system-prompt TAIL every turn, where recency wins the
+  gated flows are tagged in headless sessions) and the hand-off default (the supervisor's role: it holds the
+  objective, the plan and the judgement, so anything simple or mechanical goes to a leg and only what fits in one
+  tool call stays inline; one decision-class →
+  method line that a test checks against the strategy registry; one model-sizing rule that sends the supervisor
+  to the `models` tool once and carries no model names), appended to the system-prompt TAIL every turn, where recency wins the
   tug-of-war a top-of-prompt line loses. It regenerates from the live registry (so it can't desync) and
   filters to the active persona's `delegate` allowlist. It never dictates how MANY sub-agents; beyond the one class line,
   the shape is each persona's own method.
@@ -784,7 +792,9 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
   the event that warrants them:
   - **DelegationNudge** — a `tool_result` hook watches the supervisor's own tool stream and, when a
     delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council`/`flow`
-    crosses a threshold), appends a compact labelled checkpoint (`Trigger` / `Scope` / `Action`) to
+    crosses a threshold: 3 substantive calls and ~1k tokens), appends a compact labelled checkpoint
+    (`Trigger` / `Scope` / `Action`, with four delegate targets named in the action, those the persona's own prompt mentions first, and a
+    `Models` line for the session provider) to
     that command's result for the model and mirrors it into a durable, expandable
     `pi-persona-nudge` custom entry for the operator. The entry is TUI-only (no duplicate model
     context or turn) and guarantees visibility even when a built-in/custom tool renderer suppresses

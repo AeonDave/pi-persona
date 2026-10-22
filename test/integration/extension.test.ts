@@ -54,6 +54,7 @@ import { allocateJoinCode, resolveJoinCode } from "../../src/exocom/codes.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults, type SpineLegacyIO } from "../../src/core/seed.ts";
 import { failureDetails } from "../../src/extension/shared.ts";
+import { parseTeams } from "../../src/orchestration/roster.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
 // Hermetic: point the "user" agent dir at an empty temp dir. pi-persona no longer auto-loads the
@@ -385,6 +386,28 @@ test("models includes installed native-provider catalogs when the auth snapshot 
 	const text = String(result.content?.[0]?.text ?? "");
 	assert.match(text, /claude-pro-max-native\/claude-opus-4-8/, "an installed native provider must survive a partial getAvailable snapshot");
 	assert.doesNotMatch(text, /openrouter/, "an unrelated unconfigured built-in provider must stay hidden");
+});
+
+test("models marks the session model itself with (you), at the end of its line, and nothing else", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-models-you-"));
+	const session = { provider: "mine", id: "mid" };
+	const ctx = {
+		...base,
+		model: session,
+		modelRegistry: {
+			getAll: () => [{ provider: "mine", id: "big" }, session, { provider: "mine", id: "small" }, { provider: "mine", id: "mid-2" }],
+			getAvailable: () => [session],
+		},
+	};
+	const models = m.tool("models") as { execute: AnyFn };
+	const result = await models.execute("models-you", {}, undefined, undefined, ctx);
+	const lines = String(result.content?.[0]?.text ?? "").split("\n");
+	assert.ok(lines.includes("★ mine/mid (you)"), `the session model reads '★ mine/mid (you)': ${JSON.stringify(lines)}`);
+	assert.ok(lines.includes("★ mine/big"), "another model of the same provider carries ★ only");
+	assert.ok(lines.includes("★ mine/mid-2"), "an id that merely starts with the session id is not the session model");
+	assert.equal(lines.filter((l) => l.endsWith("(you)")).length, 1, "exactly one line is marked");
 });
 
 test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable per-leg override)", () => {
@@ -944,7 +967,9 @@ test("flow checkpoints fail closed in headless mode and when the TUI chooser is 
 			assert.match(wake, /1 stopped/, `${mode}: a dismissed checkpoint is a stop, not a failure`);
 			assert.match(wake, /stopped at checkpoint "plan"/);
 		}
-		assert.equal(calls.length, 3, `${mode}: only the gated review roster may run; its dependent must remain blocked`);
+		// The gated phase seats the bundled `review` team once; the blocked dependent seats it zero times.
+		const reviewLegs = parseTeams(fs.readFileSync(path.join(REPO_ROOT, "teams.yaml"), "utf8")).review?.length;
+		assert.equal(calls.length, reviewLegs, `${mode}: only the gated review roster may run; its dependent must remain blocked`);
 		await m.fire("session_shutdown", {}, ctx);
 	}
 });
@@ -2111,14 +2136,14 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	// discovery), but no standing hand-off mandate — that needs an active persona.
 	const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(bare.systemPrompt, /\[pi-persona\] Sub-agents:/, "no persona ⇒ discovery brief");
-	assert.doesNotMatch(bare.systemPrompt, /Hand off by default/i, "no persona ⇒ no standing mandate");
+	assert.doesNotMatch(bare.systemPrompt, /You are the supervisor: you hold the objective/, "no persona ⇒ no standing mandate");
 
 	await m.cmd("persona", "dev", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
 	assert.match(injected.systemPrompt, /You are Dev: the engineer/);
 	// An active persona upgrades the soft discovery brief to the STANDING hand-off default.
-	assert.match(injected.systemPrompt, /Hand off by default/i, "active persona ⇒ standing mandate");
+	assert.match(injected.systemPrompt, /You are the supervisor: you hold the objective/, "active persona ⇒ standing mandate");
 });
 
 test("the brief teaches council and flow only to a persona that can call them", async () => {
@@ -2138,7 +2163,7 @@ test("the brief teaches council and flow only to a persona that can call them", 
 	assert.match(full, /Flows \(run with `flow`\)[\s\S]*qa-brief/);
 	await m.cmd("persona", "no-methods", ctx);
 	const limited = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
-	assert.match(limited, /Hand off by default/);
+	assert.match(limited, /You are the supervisor: you hold the objective/);
 	assert.doesNotMatch(limited, /by problem class|contested fork|qa-brief|Flows \(run with/, "no method is taught that the capability gate would refuse");
 });
 
@@ -2243,6 +2268,8 @@ test("delegate has no sync/async flags: an interactive session ALWAYS background
 	assert.doesNotMatch(headless.delegate.description, /\b(?:a?sync)\b|intercom wait/i);
 	assert.match(headless.delegate.description, /NEVER sleep, poll, or arm a `timer`/);
 	assert.match(headless.delegate.description, /end your turn/i);
+	assert.match(headless.delegate.description, /^Delegate work to sub-agents — you hold the objective and the plan; anything simple or mechanical that takes more than one tool call goes to a leg\./);
+	assert.doesNotMatch(headless.delegate.description, /independent, heavy, or parallel parts|your default move/, "the parallelism-only framing is gone");
 	// Nothing drains a follow-up after a `pi -p` turn: every headless call returns its result inline,
 	// even from a model that still sends the retired flag.
 	for (const [n, legacy] of [{}, { async: true }].entries()) {
@@ -2545,7 +2572,9 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	);
 	assert.equal(missing.isError, true);
 	assert.match(String(missing.content?.[0]?.text ?? ""), /writeSet/i);
-	assert.match(String(missing.content?.[0]?.text ?? ""), /read\/grep\/find\/ls/);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /tools: \["read","grep","find","ls"\]/);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /tasks\[0\] \("operator"\): add writeSet:.*tasks\[1\] \("operator"\): add writeSet:/s, "one remedy per missing leg");
+	assert.match(String(missing.content?.[0]?.text ?? ""), /Or serialize the batch with concurrency: 1\.$/);
 	assert.equal(spawned, 0);
 
 	const emptyToolOverrides = await delegate.execute(
@@ -2674,6 +2703,163 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	assert.equal(stringifiedWriters.isError, true, "unwrapping JSON does not skip the ownership gate");
 	assert.match(String(stringifiedWriters.content?.[0]?.text ?? ""), /writeSet/i);
 	assert.equal(spawned, 8);
+});
+
+test("an agent's declared writeSet is inherited by a leg that names none, so a read-only-in-intent researcher fans out beside writers", async () => {
+	const cwd = tempDir("pi-persona-agent-writeset-");
+	const personaPath = path.join(cwd, ".pi", "agents", "project-conductor.md");
+	fs.mkdirSync(path.dirname(personaPath), { recursive: true });
+	fs.writeFileSync(personaPath, "---\nname: project-conductor\npersona: true\ndelegation:\n  requireDisjointWrites: true\n---\nCustom supervisor.");
+	const specs: AgentRunSpec[] = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "project-conductor", ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const run = (id: string, params: Record<string, unknown>) => delegate.execute(id, params, undefined, undefined, ctx);
+	const specFor = (agent: string): AgentRunSpec => {
+		const spec = specs.find((s) => s.agent === agent);
+		assert.ok(spec, `the ${agent} leg reached the engine`);
+		return spec;
+	};
+
+	// (i) research keeps write+bash, but its definition declares .research/ as the area it alone
+	// writes: the gate sees one disjoint owner per writer and the batch launches.
+	const launched = await run("agent-writeset-launch", {
+		tasks: [
+			{ agent: "research", task: "dig" },
+			{ agent: "reviewer", task: "review" },
+			{ agent: "operator", task: "edit", writeSet: ["src/a.c"] },
+		],
+	});
+	assert.equal(launched.isError, false, String(launched.content?.[0]?.text ?? ""));
+	assert.equal(specs.length, 3);
+	assert.deepEqual(specFor("research").writeSet, [".research/"], "the leg carries the agent's declared area to the run spec");
+	assert.equal(specFor("reviewer").writeSet, undefined, "a reader declares nothing and inherits nothing");
+	assert.deepEqual(specFor("operator").writeSet, ["src/a.c"]);
+
+	// (ii) An agent that declares nothing is still an unknown writer: only IT is named, per leg, with the
+	// parameter to add and the serial fallback.
+	specs.length = 0;
+	const refused = await run("agent-writeset-refused", {
+		tasks: [
+			{ agent: "research", task: "dig" },
+			{ agent: "operator", task: "edit" },
+		],
+	});
+	assert.equal(refused.isError, true);
+	const refusal = String(refused.content?.[0]?.text ?? "");
+	assert.match(refusal, /this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on tasks\[1\] \("operator"\)\./);
+	assert.doesNotMatch(refusal, /tasks\[0\]/, "the research leg inherited a set, so it is not among the missing");
+	assert.match(refusal, /tasks\[1\] \("operator"\): add writeSet: \["<files or directories only this leg edits>"\], or make it a reader with tools: \["read","grep","find","ls"\] \(or pick scout\)\./);
+	assert.match(refusal, /Or serialize the batch with concurrency: 1\.$/);
+	assert.equal(specs.length, 0, "refused before any spawn");
+
+	// (iii) The inherited directory owns its subtree: a sibling claiming a path inside it overlaps.
+	const overlapping = await run("agent-writeset-overlap", {
+		tasks: [
+			{ agent: "research", task: "dig" },
+			{ agent: "operator", task: "edit", writeSet: [".research/notes"] },
+		],
+	});
+	assert.equal(overlapping.isError, true);
+	const overlap = String(overlapping.content?.[0]?.text ?? "");
+	assert.match(overlap, /parallel writeSet overlap between task\[0\] \("research"\) path "\.research\/" and task\[1\] \("operator"\) path "\.research\/notes"/);
+	assert.equal(specs.length, 0);
+
+	// (iv) A leg's own writeSet wins over the agent default; an empty or blank one counts as none.
+	const own = await run("agent-writeset-own", {
+		tasks: [
+			{ agent: "research", task: "dig", writeSet: ["docs/research"] },
+			{ agent: "operator", task: "edit", writeSet: ["src/a.c"] },
+		],
+	});
+	assert.equal(own.isError, false, String(own.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, ["docs/research"], "the explicit set replaces, never merges with, the default");
+	specs.length = 0;
+	const blank = await run("agent-writeset-blank", {
+		tasks: [
+			{ agent: "research", task: "dig again", writeSet: [] },
+			{ agent: "operator", task: "edit again", writeSet: ["src/b.c"] },
+		],
+	});
+	assert.equal(blank.isError, false, String(blank.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, [".research/"], "no non-empty path ⇒ the agent's declared area");
+	assert.deepEqual(specFor("operator").writeSet, ["src/b.c"]);
+
+	// (v) Single mode takes the same road: the declared area reaches the run spec, and an explicit one wins.
+	specs.length = 0;
+	const single = await run("agent-writeset-single", { agent: "research", task: "dig alone" });
+	assert.equal(single.isError, false, String(single.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, [".research/"]);
+	specs.length = 0;
+	const singleOwn = await run("agent-writeset-single-own", { agent: "research", task: "dig elsewhere", writeSet: ["notes"] });
+	assert.equal(singleOwn.isError, false, String(singleOwn.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, ["notes"]);
+	specs.length = 0;
+	await run("agent-writeset-single-none", { agent: "operator", task: "no declared area" });
+	assert.equal(specFor("operator").writeSet, undefined, "an agent that declares nothing leaves the spec without a writeSet");
+});
+
+test("read-only delegate legs do not inherit agent ownership defaults", async (t) => {
+	const cwd = tempDir("pi-persona-reader-writeset-");
+	const personaPath = path.join(cwd, ".pi", "agents", "project-conductor.md");
+	fs.mkdirSync(path.dirname(personaPath), { recursive: true });
+	fs.writeFileSync(personaPath, "---\nname: project-conductor\npersona: true\ndelegation:\n  requireDisjointWrites: true\n---\nCustom supervisor.");
+	const specs: AgentRunSpec[] = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "project-conductor", ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const run = (tasks: Record<string, unknown>[]) => delegate.execute("reader-ownership", { tasks }, undefined, undefined, ctx);
+
+	await t.test("two read-only research legs may inspect the same area", async () => {
+		const result = await run([
+			{ agent: "research", task: "inspect A", tools: ["read"] },
+			{ agent: "research", task: "inspect B", tools: ["read", "grep"] },
+		]);
+		assert.equal(result.isError, false, String(result.content?.[0]?.text ?? ""));
+		assert.equal(specs.length, 2);
+		assert.ok(specs.every((spec) => spec.writeSet === undefined), "read-only grants inherit no write ownership");
+	});
+
+	await t.test("a reader may inspect the inherited area beside its writer", async () => {
+		specs.length = 0;
+		const result = await run([
+			{ agent: "research", task: "inspect notes", tools: ["read"] },
+			{ agent: "operator", task: "update notes", writeSet: [".research/notes"] },
+		]);
+		assert.equal(result.isError, false, String(result.content?.[0]?.text ?? ""));
+		assert.equal(specs.length, 2);
+		assert.equal(specs.find((spec) => spec.agent === "research")?.writeSet, undefined);
+		assert.deepEqual(specs.find((spec) => spec.agent === "operator")?.writeSet, [".research/notes"]);
+	});
+
+	await t.test("a reader's explicit ownership still participates in overlap checks", async () => {
+		specs.length = 0;
+		const result = await run([
+			{ agent: "research", task: "explicit scope", tools: ["read"], writeSet: [".research/"] },
+			{ agent: "operator", task: "conflicting scope", writeSet: [".research/notes"] },
+		]);
+		assert.equal(result.isError, true);
+		assert.match(String(result.content?.[0]?.text ?? ""), /parallel writeSet overlap/);
+		assert.equal(specs.length, 0, "explicit ownership is preserved and checked before spawn");
+	});
 });
 
 test("a declared verifier cannot start in a later call while the mutation it must check is still running", async () => {
@@ -5583,7 +5769,7 @@ test("a delegation checkpoint stays in model context and gets a durable visible 
 	const original = "x".repeat(2_000);
 	const event = { toolName: "read", content: [{ type: "text", text: original }] };
 	let patch: { content?: Array<{ type: string; text?: string }> } | undefined;
-	for (let i = 0; i < 5; i++) patch = m.fire("tool_result", event, ctx) as typeof patch;
+	for (let i = 0; i < 3; i++) patch = m.fire("tool_result", event, ctx) as typeof patch;
 	assert.ok(patch?.content, "the threshold-crossing tool result is patched in place");
 	assert.equal(patch.content[0]?.text, original, "the original visible tool output is preserved");
 	assert.match(patch.content[1]?.text ?? "", /^⟢ pi-persona · delegation checkpoint$/m);
@@ -5857,15 +6043,15 @@ test("switching persona clears the by-hand delegation run instead of billing it 
 	const { ctx } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "dev", ctx);
-	// A substantive (non-glue) hands-on result; 5 in a row is the sweep threshold.
-	// Size 2000 per step so 5 × 2000 = 10k burn exceeds the 8k minSweepBurnChars floor.
+	// A substantive (non-glue) hands-on result; 3 in a row is the sweep threshold.
+	// Size 2000 per step so 3 × 2000 = 6k burn exceeds the 4k minSweepBurnChars floor.
 	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
 	const sweep = (): number => {
 		let fired = 0;
-		for (let i = 0; i < 5; i++) if (m.fire("tool_result", heavy, ctx) !== undefined) fired++;
+		for (let i = 0; i < 3; i++) if (m.fire("tool_result", heavy, ctx) !== undefined) fired++;
 		return fired;
 	};
-	assert.equal(sweep(), 1, "5 hands-on commands in a row trip the sweep nudge");
+	assert.equal(sweep(), 1, "3 hands-on commands in a row trip the sweep nudge");
 
 	await m.cmd("persona", "audit", ctx);
 	assert.equal(sweep(), 1, "the new persona starts from a clean run — not persona A's streak and widened backoff");
@@ -5876,22 +6062,69 @@ test("switching persona clears the by-hand delegation run instead of billing it 
 	assert.equal(sweep(), 1, "the f8 cycle resets it too");
 });
 
+test("the sweep reminder names the delegate targets and this session's models (session provider only, capped, (you) marked)", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(os.tmpdir());
+	const session = { provider: "mine", id: "m1" };
+	const catalog = [
+		{ provider: "theirs", id: "t1" },
+		...Array.from({ length: 12 }, (_, i) => ({ provider: "mine", id: `m${i + 1}` })),
+	];
+	const ctx = { ...base, model: session, modelRegistry: { getAll: () => catalog, getAvailable: () => catalog } };
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
+	let patch: { content?: Array<{ type: string; text?: string }> } | undefined;
+	for (let i = 0; i < 3; i++) patch = m.fire("tool_result", heavy, ctx) as typeof patch;
+	const text = patch?.content?.map((c) => c.text ?? "").join("\n") ?? "";
+	const action = text.split("\n").find((l) => l.startsWith("  Action:")) ?? "";
+	assert.match(action, /^  Action: hand the remaining breadth to a leg — .+ — with a `model` of your provider, then supervise\.$/, text);
+	const roster = action.slice(action.indexOf("— ") + 2, action.lastIndexOf(" — with"));
+	assert.ok(roster.split(" · ").length <= 4, `at most four targets: ${roster}`);
+	assert.match(roster, /^[a-z][\w-]*( \(|$| · )/, "name first");
+	// Ordered by the active persona's own prompt: dev names scout, then reviewer, then operator.
+	assert.match(roster, /^scout\b/, `the roster starts with the agent dev's prompt names first: ${roster}`);
+	assert.deepEqual(roster.split(" · ").slice(0, 3).map((entry) => entry.split(" (")[0]), ["scout", "reviewer", "operator"]);
+	const models = text.split("\n").find((l) => l.startsWith("  Models (this session, your provider): ")) ?? "";
+	assert.equal(
+		models,
+		"  Models (this session, your provider): mine/m1 (you), mine/m2, mine/m3, mine/m4, mine/m5, mine/m6, mine/m7, mine/m8, mine/m9, mine/m10 …",
+	);
+	assert.doesNotMatch(text, /theirs\/t1/, "another provider's models are not offered");
+});
+
+test("the sweep reminder omits the Models line when the session has no model, and still lands at the third substantive call", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir()); // model: undefined, empty registry
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
+	assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+	assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+	const patch = m.fire("tool_result", heavy, ctx) as { content?: Array<{ type: string; text?: string }> } | undefined;
+	const text = patch?.content?.map((c) => c.text ?? "").join("\n") ?? "";
+	assert.match(text, /delegation checkpoint/);
+	assert.doesNotMatch(text, /Models \(this session/);
+});
+
 test("a failed delegate call does not silently reset the supervisor's by-hand nudge streak", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
 	const { ctx } = makeCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	await m.cmd("persona", "dev", ctx);
-	// Size 2000 per step so 5 × 2000 = 10k burn exceeds the 8k minSweepBurnChars floor.
+	// Size 2000 per step so 3 × 2000 = 6k burn exceeds the 4k minSweepBurnChars floor.
 	const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
-	for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+	for (let i = 0; i < 2; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
 	const failed = m.fire(
 		"tool_result",
 		{ toolName: "delegate", content: [{ type: "text", text: "unknown agent" }], isError: true },
 		ctx,
 	) as { content?: Array<{ type: string; text?: string }> } | undefined;
 	assert.match(failed?.content?.map((c) => c.text ?? "").join("\n") ?? "", /re-dispatch|failed hand-off/i);
-	assert.ok(m.fire("tool_result", heavy, ctx), "the next direct command still reaches the five-step threshold");
+	assert.ok(m.fire("tool_result", heavy, ctx), "the next direct command still reaches the three-step threshold");
 });
 
 test("failed hand-off dedupe fingerprints same-size text and preserves distinct failures", async () => {
@@ -6014,12 +6247,12 @@ test("nested tool results burn nothing and change nothing — the outer printed 
 	}
 	assert.equal(m.entries().length, entriesBefore, "no TUI card is minted from a nested result");
 
-	// The outer codemode call is what the model actually reads. Five substantive outer results
-	// (2000 chars each) must trip the sweep on the FIFTH — exactly once each, with none of the
+	// The outer codemode call is what the model actually reads. Three substantive outer results
+	// (2000 chars each) must trip the sweep on the THIRD — exactly once each, with none of the
 	// nested bytes folded into the burn.
 	const outer = (): NestedResultShape | undefined =>
 		m.fire("tool_result", { toolCallId: `${NESTED_PARENT}`, toolName: "codemode", content: [{ type: "text", text: "y".repeat(2000) }] }, ctx) as NestedResultShape | undefined;
-	for (let i = 0; i < 4; i++) assert.equal(outer(), undefined, `outer step ${i + 1} is an ordinary step`);
+	for (let i = 0; i < 2; i++) assert.equal(outer(), undefined, `outer step ${i + 1} is an ordinary step`);
 	const swept = outer();
 	assert.match(swept?.content?.map((c) => c.text ?? "").join("\n") ?? "", /delegation checkpoint/);
 	assert.equal(m.entries().length, entriesBefore + 1, "the crossing emits exactly one card");
@@ -6032,12 +6265,12 @@ test("a real nested hand-off ends the by-hand run; a failed one neither resets n
 		const { ctx } = makeCtx(os.tmpdir());
 		await m.fire("session_start", undefined, ctx);
 		await m.cmd("persona", "dev", ctx);
-		// Size 2000 per step so 5 × 2000 = 10k burn exceeds the 8k minSweepBurnChars floor.
+		// Size 2000 per step so 3 × 2000 = 6k burn exceeds the 4k minSweepBurnChars floor.
 		return { m, ctx, heavy: { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] } };
 	};
 	{
 		const { m, ctx, heavy } = await started();
-		for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+		for (let i = 0; i < 2; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
 		// The script actually dispatched a leg and it landed: accepted work, so the run is over even
 		// though the script never printed it.
 		assert.equal(
@@ -6045,15 +6278,15 @@ test("a real nested hand-off ends the by-hand run; a failed one neither resets n
 			undefined,
 			"a successful nested hand-off emits no note of its own",
 		);
-		for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined, "the streak restarted from the nested hand-off");
-		assert.ok(m.fire("tool_result", heavy, ctx), "…and reaches the five-step threshold exactly five steps later");
+		for (let i = 0; i < 2; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined, "the streak restarted from the nested hand-off");
+		assert.ok(m.fire("tool_result", heavy, ctx), "…and reaches the three-step threshold exactly three steps later");
 	}
 	// A hand-off that failed before doing anything must not silently end the run, and its repair
 	// note would be invisible anyway — so the next direct step is what carries the streak.
 	{
 		const { m, ctx, heavy } = await started();
 		const entriesBefore = m.entries().length;
-		for (let i = 0; i < 4; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
+		for (let i = 0; i < 2; i++) assert.equal(m.fire("tool_result", heavy, ctx), undefined);
 		assert.equal(
 			m.fire("tool_result", { toolCallId: `${NESTED_PARENT}/2`, parentToolCallId: NESTED_PARENT, toolName: "delegate", content: [{ type: "text", text: "unknown agent" }], isError: true }, ctx),
 			undefined,
@@ -6072,14 +6305,14 @@ test("nested calls are identified by explicit parentToolCallId, never by slash-s
 	await m.cmd("persona", "dev", ctx);
 	// A slash in the id is not evidence: the model may name anything, and Pi only sets
 	// `parentToolCallId` on a genuinely nested call. These count as model-visible outer results.
-	for (let i = 0; i < 4; i++) {
+	for (let i = 0; i < 2; i++) {
 		assert.equal(
 			m.fire("tool_result", { toolCallId: `user/fake-${i}`, toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] }, ctx),
 			undefined,
 		);
 	}
 	assert.ok(
-		m.fire("tool_result", { toolCallId: "user/fake-4", toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] }, ctx),
+		m.fire("tool_result", { toolCallId: "user/fake-2", toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] }, ctx),
 		"an id that merely looks nested is still model-visible output",
 	);
 });

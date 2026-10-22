@@ -64,7 +64,7 @@ token or billing cap.
 
 A team member is a bare agent name OR an inline `{ agent, role, model, skills }` map that specialises
 ONE agent (`roster.ts` · `rosterSpec` normalises both). So `review` is one `reviewer` agent run under
-three lens roles (SECURITY · PERFORMANCE · TESTS), not three files. Every strategy must run members
+four lens roles (CORRECTNESS · SECURITY · PERFORMANCE · TESTS), not four files. Every strategy must run members
 through `rosterSpec` to honour the specialisation — **`critic-loop` is the one to watch**: it resolves
 `generator`/`critic` to full specs so a role-carrying roster works, while still accepting a bare-name
 `params.generator`/`critic` override.
@@ -93,7 +93,7 @@ text, never `role` (or the derived tree key drifts from the seeded one).
 | `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
 | `debate` | 2+ members work the same task in parallel and exchange positions LIVE via `contact_peer`, then a majority vote settles it. | `bestOf` (majority), `aggregate` ("majority") | **peers always**, vote reducer |
 | `judge` | A panel answers in parallel; one impartial arbiter picks on an anonymised, shuffled ballot. Only a successful arbiter result can select a winner; partial structured output from a failed/aborted arbiter fails closed. | `judge` (required), `contract` (none) | judge reducer |
-| `synthesize` | Parallel gatherers → one synthesiser merges the findings, labelled by lens like `fanout`, into a single coherent answer (the "reduce" `fanout` lacks). | `synthesizer` (roster[0]), `peers` (false) | roster-role, opt-in peers |
+| `synthesize` | Parallel gatherers → one synthesiser merges the findings, labelled by lens like `fanout`, into a single coherent answer (the "reduce" `fanout` lacks). Partial panels explicitly name missing gatherers in the merge input, returned output and coverage metadata. | `synthesizer` (roster[0]), `peers` (false) | roster-role, opt-in peers |
 | `pair` | A driver executes while a navigator inspects the same ground live (risk checklist up front, corrections per milestone, final review attached). | — | **peers always** (both legs) |
 | `compete` | N competitors implement the same task in ISOLATED git worktrees; a successful blind judge picks; the winner is returned as a unified diff for the SUPERVISOR to apply. If judging fails, every valid diff is returned unjudged and the strategy fails closed. | `judge` (required), `ballotDiffChars` (6000) | **`isolation: worktree`**, judge reducer |
 

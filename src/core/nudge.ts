@@ -60,7 +60,7 @@ export interface NudgeThresholds {
 	 *  check), not a sweep step: it does not advance the run counter. */
 	minStepChars: number;
 	/** Minimum cumulative burn (chars since last hand-off) before a sweep run can fire. Without
-	 *  this, 5 tiny git/grep commands (200 chars each = 1000 total ≈ 0k tokens) trip the nudge
+	 *  this, a few tiny git/grep commands (200 chars each = 600 total ≈ 0k tokens) trip the nudge
 	 *  and renderNudge prints "~0k tokens" — advice to "delegate what burns context" when nothing
 	 *  burned. This floor gates the sweep so it only fires when the burn is substantive.
 	 *  Defaults to `DEFAULT_NUDGE_THRESHOLDS.minSweepBurnChars` when omitted. */
@@ -71,11 +71,12 @@ export interface NudgeThresholds {
 
 export const DEFAULT_NUDGE_THRESHOLDS: NudgeThresholds = {
 	singleHeavyChars: 40_000, // ~10k tokens in one command — a fat one-shot dump
-	runLength: 5, // 5 substantive hands-on commands in a row without a hand-off = a by-hand sweep.
+	runLength: 3, // 3 substantive hands-on commands in a row without a hand-off = a by-hand sweep.
 	// The standing delegation brief (core/brief.ts) carries the default every turn; this is the
-	// reactive backstop for the supervisor who grinds a sweep through it anyway.
+	// reactive backstop for the supervisor who grinds a sweep through it anyway. It lands EARLY on
+	// purpose: by the fifth by-hand step the context is already spent, which is the cost it prevents.
 	minStepChars: 200, // below this a command is glue, not a sweep step
-	minSweepBurnChars: 8_000, // ~2k tokens cumulative — below this the sweep is cheap triage, not a grind
+	minSweepBurnChars: 4_000, // ~1k tokens cumulative — below this the sweep is cheap triage, not a grind
 	failedHandoffBackoff: 1, // suppress one identical immediate repair reminder; the failure remains visible
 };
 
@@ -98,16 +99,105 @@ function renderVisibleCheckpoint(title: string, lines: readonly string[]): strin
  * not all burn is delegable: work bound to one interactive session a sub-agent can't inherit
  * (a live shell, a specific tunnel) stays with you — then the fix is to keep it lean, not to hand off.
  */
-function renderNudge(reason: "dump" | "sweep", run: number, burn: number, size: number): string {
+function renderNudge(reason: "dump" | "sweep", run: number, burn: number, size: number, hints: NudgeHints = {}): string {
 	const signal =
 		reason === "dump"
 			? [`Trigger: one direct tool result · ~${toK(size)}k estimated output tokens.`, `Scope: ~${toK(burn)}k in the current direct-work streak.`]
 			: [`Trigger: ${run} substantive direct tool calls · ~${toK(burn)}k estimated output tokens.`, "Scope: since the last successful hand-off."];
+	// With a roster the action says TO WHOM (and to size the leg's model); without one it stays generic.
+	const action = hints.roster
+		? `Action: hand the remaining breadth to a leg — ${hints.roster} — with a \`model\` of your provider, then supervise.`
+		: "Action: delegate independent work; repair weak hand-offs, then re-dispatch.";
 	return renderVisibleCheckpoint("delegation checkpoint", [
 		...signal,
-		"Action: delegate independent work; repair weak hand-offs, then re-dispatch.",
+		action,
+		...(hints.models ? [`Models (this session, your provider): ${hints.models}`] : []),
 		"Keep local: session-bound work; keep it lean and grep-first.",
 	]);
+}
+
+/** Longest roster / model list carried on a checkpoint line — one bounded line, never a paragraph. */
+const HINT_CLIP = 320;
+
+/** Run a caller-supplied thunk into one bounded, single-line string, or undefined. The text comes from
+ *  installed agent descriptions and the model registry, so it is collapsed (no newline can forge a
+ *  card line) and clipped; a throwing or empty thunk is simply no hint — it must never break the hook. */
+function hint(thunk: (() => string | undefined) | undefined): string | undefined {
+	if (!thunk) return undefined;
+	let raw: string | undefined;
+	try {
+		raw = thunk();
+	} catch {
+		return undefined;
+	}
+	const text = raw?.replace(/\s+/g, " ").trim();
+	if (!text) return undefined;
+	return text.length > HINT_CLIP ? `${text.slice(0, HINT_CLIP - 1)}…` : text;
+}
+
+/** Live context the reminder cites. Thunks, not values: both change under a running session (agents on
+ *  `/persona reload`, the session model on a switch), so they are read when the reminder fires. */
+export interface NudgeOptions {
+	/** Who to hand the breadth to, e.g. `scout (reads) · operator (edits, runs)`. */
+	roster?: () => string | undefined;
+	/** The models this session can route a leg to, as bare ids (the session's own marked). */
+	models?: () => string | undefined;
+}
+
+interface NudgeHints {
+	roster?: string | undefined;
+	models?: string | undefined;
+}
+
+/** Longest description carried per agent on the roster line. */
+const ROSTER_DESC_CLIP = 40;
+
+/** Order delegate targets by the active persona's own prompt: agents it names come first, in order of
+ *  first mention, then the rest in their given (registry) order. A mention is a whole-word,
+ *  case-insensitive match of the agent's name, so `scouting` is not `scout` and `evidence-verifier` is
+ *  not `verifier`. Generic by construction: the persona text is the data, no name is listed here. A
+ *  prompt that names no agent (or none at all) leaves the order untouched. Pure; returns a new array. */
+export function orderByMention<T extends { name: string }>(agents: readonly T[], personaPrompt: string | undefined): T[] {
+	if (!personaPrompt) return [...agents];
+	const firstMention = (name: string): number => {
+		if (!name) return Number.POSITIVE_INFINITY;
+		const literal = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const at = personaPrompt.search(new RegExp(`(?<![\\w-])${literal}(?![\\w-])`, "i"));
+		return at < 0 ? Number.POSITIVE_INFINITY : at;
+	};
+	return agents
+		.map((agent, index) => ({ agent, index, at: firstMention(agent.name) }))
+		.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.index - b.index))
+		.map((entry) => entry.agent);
+}
+
+/** The reminder's roster: `name (clipped description)` for the first `max` delegate targets, joined
+ *  ` · `. The caller passes the capability-filtered targets, so it never names an agent the persona
+ *  cannot call. Undefined when there are none. */
+export function renderNudgeRoster(agents: ReadonlyArray<{ name: string; description?: string }>, max = 4): string | undefined {
+	const parts = agents.slice(0, max).map((agent) => {
+		const description = (agent.description ?? "").replace(/\s+/g, " ").trim();
+		if (!description) return agent.name;
+		const clipped = description.length > ROSTER_DESC_CLIP ? `${description.slice(0, ROSTER_DESC_CLIP - 1)}…` : description;
+		return `${agent.name} (${clipped})`;
+	});
+	return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+/** The reminder's model list: the SESSION provider's ids only, in catalog order, as bare
+ *  `provider/id`, at most `max` of them (then ` …`), with ` (you)` on the session model. Undefined
+ *  when there is no session model or the provider has no catalog entries. No names, prices or
+ *  tiers: the supervisor sizes a leg from the ids themselves. */
+export function renderNudgeModels(
+	models: ReadonlyArray<{ provider: string; id: string }>,
+	session: { provider: string; id: string } | undefined,
+	max = 10,
+): string | undefined {
+	if (!session?.provider) return undefined;
+	const own = models.filter((m) => m.provider === session.provider);
+	if (own.length === 0) return undefined;
+	const shown = own.slice(0, max).map((m) => `${m.provider}/${m.id}${m.id === session.id ? " (you)" : ""}`);
+	return `${shown.join(", ")}${own.length > max ? " …" : ""}`;
 }
 
 export class DelegationNudge {
@@ -118,9 +208,11 @@ export class DelegationNudge {
 	private failedHandoffKey: string | undefined;
 	private failedHandoffRepeats = 0;
 	private readonly t: NudgeThresholds;
+	private readonly opts: NudgeOptions;
 
-	constructor(thresholds: NudgeThresholds = DEFAULT_NUDGE_THRESHOLDS) {
+	constructor(thresholds: NudgeThresholds = DEFAULT_NUDGE_THRESHOLDS, opts: NudgeOptions = {}) {
 		this.t = thresholds;
+		this.opts = opts;
 	}
 
 	/** Clear the run — call on a new session or persona switch. */
@@ -186,7 +278,10 @@ export class DelegationNudge {
 		if (!single && !sweep) return undefined;
 		this.lastNudgeRun = this.run;
 		this.nudges += 1;
-		return renderNudge(sweep ? "sweep" : "dump", this.run, this.burn, size);
+		return renderNudge(sweep ? "sweep" : "dump", this.run, this.burn, size, {
+			roster: hint(this.opts.roster),
+			models: hint(this.opts.models),
+		});
 	}
 }
 

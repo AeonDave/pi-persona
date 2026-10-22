@@ -7,9 +7,11 @@
  *   - DISCOVERY: the installed agents (name + clipped description), team rosters, and flows —
  *     regenerated from the live registry every turn, so it cannot desync the way hard-coded
  *     persona prose can, and it survives however much context the turn has burned.
- *   - THE STANDING DEFAULT: hand substantive work off by default, keep only trivial steps
- *     inline — restated every turn at the prompt tail, where it wins the recency tug-of-war
- *     a top-of-prompt persona directive loses.
+ *   - THE STANDING DEFAULT, framed as the supervisor's ROLE: it holds the objective, the plan and the
+ *     judgement, and a leg's transcript never enters its context, so anything simple or mechanical
+ *     (reads, edits, runs, sweeps) goes to a leg while it keeps the task in view; what fits in one
+ *     tool call stays inline; each leg's model is sized from `models`. Restated every turn at the
+ *     prompt tail, where it wins the recency tug-of-war a top-of-prompt persona directive loses.
  *
  * Pure module (no Pi imports). The caller (extension.ts) decides WHEN a brief applies
  * (capability gating, persona state); this module only renders.
@@ -56,6 +58,8 @@ export interface BriefInput {
 	flows: BriefFlow[];
 	/** The persona can call `council` (default true): false omits the problem-class line. */
 	council?: boolean;
+	/** Whether this session can call the `models` tool: false keeps model-sizing advice but omits tool discovery. */
+	canListModels?: boolean;
 	/** A persona is active: state the standing hand-off default, not just the roster. */
 	standing: boolean;
 	/** Interactive session: delegate always runs in the background (headless blocks) — phrases delivery. */
@@ -82,6 +86,12 @@ const DESC_CLIP = 96;
 /** Most agents/teams/flows listed by name; beyond this the brief says "+N more". */
 const MAX_LISTED = 16;
 const MAX_TOOL_NAMES = 6;
+/** The one model-sizing rule. No model names: the supervisor learns its provider's ids from `models`
+ *  (★ = its provider) and sizes each leg from them. */
+const MODEL_SIZING =
+	"Models: call `models` once at the start (★ = your provider) and give every leg a `model` of your provider sized to its task — the lightest that can do it under your supervision, your own only for work that needs your judgement; a leg without `model` runs on your own model.";
+const MODEL_SIZING_WITHOUT_DISCOVERY =
+	"Model sizing: choose the lightest model of your provider you know can do each leg's task under your supervision; reserve your own model for work that needs your judgement. A leg without `model` runs on your own model.";
 /** Decision class -> council strategy (a test checks every name is a registered strategy). */
 const DECISION_CLASSES = "contested fork → magi; rival complete answers → judge; rival implementations → compete; N items → map; draft + critique → critic-loop";
 
@@ -179,13 +189,16 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const council = input.council !== false;
 	const methods = council ? ` Convene \`council\` by problem class (${DECISION_CLASSES}).` : "";
 	const flowHint = input.flows.length > 0 ? " A shape an installed flow already encodes → `flow`." : "";
-	const inline = council
-		? "Keep trivial single-step work and the final synthesis inline; a decision a council was convened on is its ruling's, not yours."
-		: "Keep only trivial single-step work, decisions, and the final synthesis inline.";
+	const inlineRule = "Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several.";
+	const inline = council ? `${inlineRule} A decision a council was convened on is its ruling's, not yours.` : inlineRule;
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.background
 		? `they run in the background; results arrive as a follow-up only after your turn ends (a fan-out's once, when its last leg settles) — do independent work meanwhile; ${END_TURN_NOTE}`
 		: "the call returns when they finish";
+	const modelSizing = input.canListModels === false ? MODEL_SIZING_WITHOUT_DISCOVERY : MODEL_SIZING;
+	const softModelSizing = input.canListModels === false
+		? " Size each leg's model of your provider to its task; a leg without `model` runs on your own model."
+		: " Give each leg a `model` of your provider (`models`, ★ = yours) sized to its task.";
 	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
 	if (input.requireBrief) {
 		callFields.push(
@@ -200,8 +213,8 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${minimum}`
-			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).`,
+			? `You are the supervisor: you hold the objective, the plan and the judgement, and a leg's transcript never enters your context. So anything simple or mechanical — reading files, editing, running commands, sweeping a surface — goes to a leg while you keep the task in view. Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${modelSizing} ${minimum}`
+			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).${softModelSizing}`,
 	);
 	return lines.join("\n");
 }

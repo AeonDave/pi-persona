@@ -299,12 +299,14 @@ of a service other Pi sessions are using. Skill Optimizer remains independent.
 
 1. **Strategy**: add `src/orchestration/strategies/<name>.ts` (export a `Strategy`), register it in `strategy.ts` `BUILTINS`, add a unit test. Declare `when` (one line), `roster` (positional roles, only where position matters) and `required` (param keys a call must carry) — the `council` tool description is generated from them (`strategyCatalog`) and refuses a missing required param up front; never hand-write a strategy list.
 2. **Persona**: `personas/<name>.md` — frontmatter `persona: true` + optional `council:` / `orchestration:` / `delegation:` / `coaching: true`; runtime behavior is field-driven, never keyed to a persona name.
-3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `isolation: worktree`, `mcp: true`
+3. **Agent**: `agents/<name>.md` — optional `tools`, `model`, `writeSet` (repository-relative paths the
+   agent alone writes, e.g. `research` → `[.research/]`; inherited by a write-capable `delegate` leg that gives none, so
+   the ownership gate sees a declared owner — declarative, never enforced), `isolation: worktree`, `mcp: true`
    (routes the leg through the child engine so `pi-mcp-adapter` initializes and its `mcp*`/direct
    tools work — the default in-process engine leaves them "not initialized"; also settable per-leg
    via `delegate`'s `mcp: true` / `AgentRunSpec.mcp`. Pass a server session id in the task to share
    an HTTP backend's state).
-4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`), or per-member `- { agent, role, model?, skills? }` to build an ensemble of perspectives from ONE agent (e.g. `review` is one `reviewer` × 3 lens roles). Same-agent members are disambiguated in the live tree by a role hint (`reviewer · SECURITY`) via `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`), so three lenses show as three steerable nodes — keep the seeding loops and the SDK key derivation in lockstep if you touch either.
+4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`), or per-member `- { agent, role, model?, skills? }` to build an ensemble of perspectives from ONE agent (e.g. `review` is one `reviewer` × 4 lens roles; `design` pairs `architect` + `reviewer` for `critic-loop`). Same-agent members are disambiguated in the live tree by a role hint (`reviewer · SECURITY`) via `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`), so four lenses show as four steerable nodes — keep the seeding loops and the SDK key derivation in lockstep if you touch either.
 5. **Flow**: `flows/<name>.flow.json` — phases + `needs`, optional `gate: true` (checkpoint).
 6. **Contract**: `contracts/<name>.contract.json` (request via `outputContract`). **Preset**: `presets/<name>.preset.json`.
 

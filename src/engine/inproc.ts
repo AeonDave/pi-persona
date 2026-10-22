@@ -33,6 +33,7 @@ import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { looksLikeProviderError } from "./errors.ts";
+import { piHostModuleHint } from "./host-module.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
@@ -836,6 +837,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
+			const hostModuleHint = !ok ? piHostModuleHint(state.errorMessage ?? thrownError ?? "") : undefined;
+			if (hostModuleHint && result.error) result.error += ` — ${hostModuleHint}`;
 			// Classify the failure so the fallback decorator can reroute ONLY provider errors,
 			// never an abort/timeout/hard-cap/agent miss. A stream `error` stop reason is pi's
 			// own report of an API failure → provider. A THROWN error is not automatically a
@@ -846,9 +849,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 						? "timeout"
 						: aborted
 							? "abort"
-							: state.stopReason === "error" || (thrownError !== undefined && looksLikeProviderError(thrownError))
-								? "provider"
-								: "agent";
+							: hostModuleHint
+								? "agent"
+								: state.stopReason === "error" || (thrownError !== undefined && looksLikeProviderError(thrownError))
+									? "provider"
+									: "agent";
 
 			if (contractDef) {
 				const v = parseAndValidate(state.output, contractDef);

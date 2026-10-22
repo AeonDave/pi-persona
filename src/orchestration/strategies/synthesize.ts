@@ -12,6 +12,7 @@
 
 import { rosterNodeKeys, rosterSpec } from "../roster.ts";
 import { fenceUntrusted } from "../../core/fence.ts";
+import { sanitizeStatusLabel } from "../../core/display-label.ts";
 import { parseAuxActor } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import type { Strategy } from "../sdk.ts";
@@ -79,6 +80,19 @@ export const synthesize: Strategy = {
 				failureKind: cause.failureKind,
 			};
 		}
+		// A partial merge is useful, but a missing review lens is not a clean review. Carry the
+		// runtime coverage into BOTH the merger's input and its returned output, even if it omits it.
+		const missing = results.flatMap((r, i) => r.ok && r.output.trim() ? [] : [{
+			member: sanitizeStatusLabel(labels[i] ?? r.agent),
+			status: r.ok ? "empty" : "failed",
+			detail: sanitizeStatusLabel(r.ok ? "no output" : r.error ?? "no failure detail", "no failure detail", 200),
+		}]);
+		const coverage = missing.length > 0 ? { expected: team.length, usable: usable.length, missing } : undefined;
+		const coverageNote = coverage ? [
+			`Incomplete coverage: ${usable.length}/${team.length} gatherers returned usable findings. Missing members were not reviewed; do not present this as a complete review.`,
+			fenceUntrusted(missing.slice(0, 16).map((m) => `${m.member} — ${m.status}: ${m.detail}`).join("\n")),
+			...(missing.length > 16 ? [`${missing.length - 16} additional missing members are recorded in the result's coverage metadata.`] : []),
+		].join("\n") : "";
 
 		const sections = usable.map((u) => `--- [${u.label}] ---\n${fenceUntrusted(u.output)}`).join("\n\n");
 		const final = await sdk.agent({
@@ -86,6 +100,7 @@ export const synthesize: Strategy = {
 			task:
 				`Synthesise the findings below into ONE coherent, de-duplicated answer to the task. ` +
 				`Resolve contradictions explicitly (say which finding you trusted and why) and keep every load-bearing detail.\n\n` +
+				(coverageNote ? `${coverageNote}\n\n` : "") +
 				`Task: ${input.task}\n\nFindings:\n${sections}`,
 		});
 
@@ -93,12 +108,12 @@ export const synthesize: Strategy = {
 		// the synthesiser's `result` field if it emitted one, else the first non-empty line.
 		const firstLine = final.output.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
 		const structuredResult = final.structured?.result;
-		const headline = (typeof structuredResult === "string" && structuredResult.trim() ? structuredResult : firstLine).slice(0, 120);
+		const headline = `${coverage ? `Incomplete coverage: ${usable.length}/${team.length} · ` : ""}${typeof structuredResult === "string" && structuredResult.trim() ? structuredResult : firstLine}`.slice(0, 120);
 
 		const result: AgentResult = {
 			agent: "synthesize",
-			output: final.output,
-			structured: { ...(final.structured ?? {}), gatherers: usable.length, headline },
+			output: coverageNote ? `${coverageNote}\n\n${final.output}` : final.output,
+			structured: { ...(final.structured ?? {}), gatherers: usable.length, headline, ...(coverage ? { coverage } : {}) },
 			usage: sumUsage([...results, final].map((r) => r.usage)),
 			ok: final.ok,
 		};

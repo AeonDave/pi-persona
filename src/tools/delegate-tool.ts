@@ -302,6 +302,32 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !readOnlyTools.has(tool));
 	}
 
+	// Ownership intent belongs to the agent definition, not to the caller. An agent that declares the area
+	// it alone writes (`writeSet` in its frontmatter: research → `.research/`) hands that area to each writing leg
+	// that names none of its own, so the persona's ownership gate sees a writer with disjoint ownership
+	// rather than an unknown one the supervisor would have to guess a fix for. A leg's own non-empty
+	// writeSet always wins, and an agent that declares nothing leaves the leg exactly as the caller wrote
+	// it. Declarative like the field it fills: the paths annotate and gate, nothing enforces them at runtime.
+	function inheritAgentWriteSets(call: DelegateCall): DelegateCall {
+		const declared = (agent: string | undefined, own: readonly string[] | undefined): string[] | undefined => {
+			if (own?.some((path) => path.trim())) return undefined;
+			const set = d.agents.find((candidate) => candidate.name === agent)?.writeSet;
+			return set && set.length > 0 ? [...set] : undefined;
+		};
+		if (call.tasks && call.tasks.length > 0) {
+			return {
+				...call,
+				tasks: call.tasks.map((task) => {
+					const inherited = mayMutateWorkspace(task) ? declared(task.agent, task.writeSet) : undefined;
+					return inherited ? { ...task, writeSet: inherited } : task;
+				}),
+			};
+		}
+		if (!call.agent || !mayMutateWorkspace({ ...call, agent: call.agent })) return call;
+		const inherited = declared(call.agent, call.writeSet);
+		return inherited ? { ...call, writeSet: inherited } : call;
+	}
+
 	// An interactive `tasks` fan-out of 2+ legs gets one header row — `delegate · N legs`, detail `k/N settled`
 	// — that leaves with its last leg. Settlement only ever updates or removes it, never adds, so a leg that
 	// settles after the tree was cleared (/new, shutdown) cannot resurrect it. Legs are counted as they
@@ -427,14 +453,14 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		name: "delegate",
 		label: "Delegate",
 		description: [
-			"Delegate work to sub-agents — your default move whenever a task has independent, heavy, or parallel parts.",
+			"Delegate work to sub-agents — you hold the objective and the plan; anything simple or mechanical that takes more than one tool call goes to a leg.",
 			"Pass agent and task for one worker, or a tasks array for parallel workers. Required fields follow the active persona's delegation policy (the per-turn delegation brief shows the exact call shape); an incomplete call is rejected before any worker starts, and the error names what is missing.",
 			"Interactive sessions ALWAYS run it in the BACKGROUND: you get run ids at once and stay free, and each result wakes you as a completion follow-up (a `tasks` call wakes you ONCE, when its last leg settles). Work independently meanwhile; when only children remain, end your turn. NEVER sleep, poll, or arm a `timer` to wait for a child. Headless sessions (`pi -p`) block for the turn and return results inline.",
 			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
 			"A `model` may be a loose name ('sonnet', 'opus-4.6', 'claude-pro-max-native/opus-4-6') — it resolves to YOUR provider's id; ambiguous names return",
-			"candidates (or call `models`). Other options: name, tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
+			"candidates. Other options: name, tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
@@ -459,6 +485,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						? { ...params, outputContract: defaultOutputContract }
 						: params;
 			}
+			// Before classification and every ownership consumer (the gate, the overlap check, the run specs).
+			params = inheritAgentWriteSets(params);
 			if (policy?.requireBrief) {
 				const briefError = validateDelegationBrief(params);
 				if (briefError) return { content: [{ type: "text", text: briefError }], details: failureDetails({}), isError: true };
@@ -498,9 +526,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				if (effectiveConcurrency > 1) {
 					if (policy?.requireDisjointWrites) {
 						if (writing.length > 1) {
-							const missing = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim())).map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
-							if (missing.length > 0) {
-								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. Declare repository-relative paths each of those legs alone may edit, restrict tools to read/grep/find/ls (or pick scout), or serialize with concurrency: 1.`;
+							const unowned = writing.filter(({ task }) => !task.writeSet?.some((path) => path.trim()));
+							if (unowned.length > 0) {
+								const missing = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
+								// One remedy per leg, naming the parameters: the caller should never have to guess a fix.
+								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"], or make it a reader with tools: ["read","grep","find","ls"] (or pick scout).`);
+								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. ${remedies.join(" ")} Or serialize the batch with concurrency: 1.`;
 								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 							}
 						}

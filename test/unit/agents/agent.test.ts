@@ -116,3 +116,40 @@ test("the shipped MAGI cores each declare their verticalization", () => {
 		assert.equal(parsed?.purpose, purpose, `${file} must declare purpose: ${purpose}`);
 	}
 });
+
+test("parseAgent reads writeSet from an inline list, bare or quoted", () => {
+	assert.deepEqual(parseAgent("---\nname: r\nwriteSet: [.research/]\n---\nbody", "/s")?.writeSet, [".research/"]);
+	assert.deepEqual(parseAgent('---\nname: r\nwriteSet: [".research/", "docs/notes.md"]\n---\nbody', "/s")?.writeSet, [".research/", "docs/notes.md"]);
+	assert.deepEqual(parseAgent("---\nname: r\nwriteSet:\n  - .research/\n  - out\n---\nbody", "/s")?.writeSet, [".research/", "out"], "a block list reads the same");
+});
+
+test("parseAgent reads a single-string writeSet as a one-element list", () => {
+	assert.deepEqual(parseAgent("---\nname: r\nwriteSet: .research/\n---\nbody", "/s")?.writeSet, [".research/"]);
+	assert.deepEqual(parseAgent('---\nname: r\nwriteSet: "out, dir/"\n---\nbody', "/s")?.writeSet, ["out, dir/"], "a scalar is ONE path, never comma-split");
+});
+
+test("parseAgent trims writeSet paths and keeps only repository-relative ones", () => {
+	assert.deepEqual(parseAgent('---\nname: r\nwriteSet: ["  .research/  ", "src/a.ts"]\n---\nbody', "/s")?.writeSet, [".research/", "src/a.ts"]);
+	// Absolute, escaping and Windows-absolute paths are dropped; the valid sibling survives.
+	assert.deepEqual(
+		parseAgent('---\nname: r\nwriteSet: ["/etc", "../outside", "C:\\\\x", ".research/"]\n---\nbody', "/s")?.writeSet,
+		[".research/"],
+	);
+});
+
+test("parseAgent omits writeSet when nothing valid remains, or when it is not declared", () => {
+	assert.equal(parseAgent('---\nname: r\nwriteSet: ["/abs", "../up"]\n---\nbody', "/s")?.writeSet, undefined, "all-invalid ⇒ no field at all");
+	assert.equal(parseAgent("---\nname: r\nwriteSet: /abs\n---\nbody", "/s")?.writeSet, undefined);
+	assert.equal(parseAgent("---\nname: r\nwriteSet: []\n---\nbody", "/s")?.writeSet, undefined, "empty list ⇒ undeclared");
+	assert.equal(parseAgent("---\nname: r\nwriteSet: '   '\n---\nbody", "/s")?.writeSet, undefined);
+	assert.equal(parseAgent("---\nname: r\nwriteSet: 7\n---\nbody", "/s")?.writeSet, undefined, "a non-string scalar is not a path");
+	assert.equal(parseAgent("---\nname: r\n---\nbody", "/s")?.writeSet, undefined, "absent ⇒ undefined");
+});
+
+test("the bundled research worker declares .research/ as the area it alone writes", () => {
+	// Read-only in intent but write+bash-capable in grant: without a declared area, a persona that
+	// requires disjoint ownership would see an unknown writer and refuse every parallel batch.
+	const source = new URL("../../../agents/research.md", import.meta.url);
+	const agent = parseAgent(readFileSync(source, "utf8"), source.pathname);
+	assert.deepEqual(agent?.writeSet, [".research/"]);
+});
