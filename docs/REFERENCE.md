@@ -536,9 +536,10 @@ test; the data-driven definitions above require no core change.
 ## Commands, flags, and environment
 
 **Keys** — `f8` cycles persona; `f9` or `/agents` opens the agent overlay: ↑↓ navigate, ⏎ open, `x`
-stop, `s` steer, and Esc close. `X` (list view) stops every running leaf agent that `x` could stop: the first
-press states the count (`press X again to stop N running agents`), any other key or a changed set re-asks.
-It is offered only for two or more; queued or later stages may still start.
+stop, `s` steer, and Esc close. `X` (list view) stops every running leaf agent that `x` could stop (armed
+timers and monitors are not agents and are skipped): the first press states the count (`press X again to
+stop N running agents`), any other key or a changed set re-asks. It is offered only for two or more;
+queued or later stages may still start.
 
 **Commands** — `/persona [name|off|list|reload|seed|restore|models [council-persona]]` ·
 `/persona-settings [show]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` ·

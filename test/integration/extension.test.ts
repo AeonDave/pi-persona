@@ -8673,3 +8673,46 @@ test("the wake guidance is stated once (tool descriptions carry the sub-agent ru
 		assert.doesNotMatch(batch, /end your turn when only the event remains/, "the process exits with the turn, so the interactive tail would drop the wake");
 	} finally { await m.fire("session_shutdown", undefined, interactive); }
 });
+
+test("session_shutdown with many armed wake sources clears the widget once instead of repainting per row", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx: base, widgets } = wakeWidgetCtx(tempDir("pi-persona-wake-shutdown-"));
+	const widgetCalls: Array<string[] | undefined> = [];
+	const ctx = {
+		...base,
+		ui: {
+			...base.ui,
+			setWidget: (id: string, lines: string[] | undefined) => {
+				base.ui.setWidget(id, lines);
+				if (id === "persona-agents") widgetCalls.push(lines);
+			},
+		},
+	};
+	let shutDown = false;
+	try {
+		await m.fire("session_start", {}, ctx);
+		const timer = m.tool("timer") as { execute: AnyFn };
+		const monitor = m.tool("monitor") as { execute: AnyFn };
+		for (const label of ["wake-shutdown-a", "wake-shutdown-b", "wake-shutdown-c"]) {
+			assert.equal((await timer.execute(`arm-${label}`, { action: "arm", message: "never fires", delaySeconds: 600, label }, undefined, undefined, ctx)).details.ok, true);
+		}
+		assert.equal((await monitor.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "wake-shutdown-monitor", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx)).details.ok, true);
+		await waitUntil(
+			() => {
+				const lines = widgets["persona-agents"] ?? [];
+				return ["wake-shutdown-a", "wake-shutdown-b", "wake-shutdown-c", "wake-shutdown-monitor"].every((label) => lines.some((line) => line.includes(label)));
+			},
+			"all four wake rows in the widget",
+		);
+
+		// Everything painted so far is setup; only the repaints that shutdown itself causes count.
+		const before = widgetCalls.length;
+		await m.fire("session_shutdown", {}, ctx);
+		shutDown = true;
+		const during = widgetCalls.slice(before);
+		assert.ok(during.length <= 1, `shutdown clears the widget once, not once per cancelled row: ${JSON.stringify(during)}`);
+		assert.equal(widgets["persona-agents"], undefined, "the widget ends cleared");
+	} finally { if (!shutDown) await m.fire("session_shutdown", {}, ctx); }
+});

@@ -52,8 +52,10 @@ beside the sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in 
 The countdown replaces the stall clock, so a quiet watch is never `⚠ stalled`. `⏎` opens the command,
 cwd, times and last 40 event lines (monitor) or the fire time and message (timer); `x` cancels that
 one watch like `monitor cancel` / `timer cancel`. These are rows, not agents: no steer, `X` stop-all
-skips them, and they never count in `N agents` or reach telemetry. A finished row shows ✓/✗/■
-briefly, then leaves.
+skips them (`intercom stop { to: "all" }` likewise leaves them alone; cancel with `monitor cancel` /
+`timer cancel` or `x`), and they never count in `N agents` or reach telemetry. A finished row settles
+and leaves like an async run: its final ✓/✗/■ goes to the tree change stream (telemetry excluded), not
+to the screen.
 
 ## Lifetime and limits
 

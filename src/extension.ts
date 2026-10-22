@@ -1218,9 +1218,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		render: (entries) => renderTimerFire(entries),
 	});
 	// Wake sources (timers, monitors) are rows beside the sub-agents: added when armed, updated on
-	// events, settled like an async run (final status for a beat, then gone with their stop handle).
+	// events, settled like an async run. The final update and the removal are synchronous and the
+	// widget composition is coalesced, so the final status reaches the tree change stream, never the
+	// screen; the row simply leaves, together with its stop handle.
 	const wakeRows = new WakeRows();
 	function settleWakeRow(change: WakeRowChange): void {
+		// session_shutdown clears the tree and both registries itself right after cancelAll, so
+		// settling rows one by one would only repaint a widget it is about to clear (the tree
+		// listener repaints synchronously once disposed). The leftover timer:/monitor: stop handles
+		// are harmless: cancelling an unknown id is a no-op.
+		if (disposed) return;
 		agentTree.update(change.id, change.patch);
 		agentTree.remove(change.id);
 		stopRegistry.delete(change.id);
