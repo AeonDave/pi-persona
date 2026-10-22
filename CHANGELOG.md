@@ -65,6 +65,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
+- Update the four Pi development SDK packages together to 1.3.0, TypeBox to 1.4.2 and the locked
+  Node 22 typings to 22.20.5. Update the pinned setup-node, Scorecard, upload-artifact and CodeQL
+  Actions to their reviewed upstream releases; keep the Pi 1.0.0 host floor and optional peers.
 - Esc no longer aborts an interactive `council` or `flow`: stop it from f9 (`x` on its root row, `X`) or have the supervisor `intercom stop` the run.
   A mistyped council strategy or roster now fails in the completion follow-up instead of as an immediate
   tool error. Persona `council:` defaults and the pre-turn `orchestration:` path are unchanged;
@@ -105,6 +108,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   show.
 
 ### Fixed
+- Let stopping a background council or flow dismiss its initial model picker and release the run
+  without saving partial or late selections. Serialize automatic model setup with checkpoint dialogs
+  so concurrent runs cannot displace one another's prompts.
 - Resolve loose `delegate` model names more forgivingly: a `provider/loose-id` pin matches inside
   that provider (`claude-pro-max-native/opus-4-6`), version dots and dashes are interchangeable
   (`opus-4.6`), and an unknown name lists the session provider's models first instead of the

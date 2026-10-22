@@ -1529,7 +1529,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	 */
 	async function ensurePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], tracked?: TrackedRun): Promise<void> {
 		const scope = modelSelectionScope(ctx);
-		if (!scope || !ctx.hasUI) return;
+		if (!scope || !ctx.hasUI || tracked?.signal.aborted) return;
 		const missing = pendingParticipants(participants, { prompted: promptedFor(scope.persona, participants) });
 		if (missing.length === 0) return;
 		const available = configuredModels(ctx);
@@ -1541,8 +1541,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			agentTree.update(tracked.rootId, { detail: "waiting for operator to pick models" });
 		}
 		try {
-			const chosen = await choosePersonaModels(ctx, missing, available, scope);
-			if (chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
+			const choose = async (): Promise<void> => {
+				if (tracked?.signal.aborted || !scope.isCurrent()) return;
+				// A concurrent run may have assigned or dismissed these participants while this one waited.
+				const assigned = personaModels(personaConfigs, scope.persona);
+				const pending = pendingParticipants(participants, { prompted: promptedFor(scope.persona, participants) })
+					.filter((p) => !assigned[p.key] && !assigned[p.agent]);
+				const chosen = await choosePersonaModels(ctx, pending, available, scope, tracked?.signal);
+				if (!tracked?.signal.aborted && chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
+			};
+			// Automatic setup shares the checkpoint dialog line: parallel background runs cannot displace
+			// one another's prompt. The run's stop closes the active picker or removes it from the line.
+			if (tracked) await inGateLine(tracked.signal, undefined, choose);
+			else await choose();
 		} finally {
 			tracked?.onAwaiting(undefined);
 		}
@@ -1582,12 +1593,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	/** UI adapter shared by setup and editing; callers own eligibility and availability policy. */
-	async function choosePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], available: Array<{ provider: string; id: string }>, scope: ModelSelectionScope): Promise<Record<string, string> | undefined> {
+	async function choosePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], available: Array<{ provider: string; id: string }>, scope: ModelSelectionScope, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
 		const { persona } = scope;
 		const options = orderModelRefs(available.map((m) => `${m.provider}/${m.id}`), ctx.model?.provider);
 		const chosen: Record<string, string> = {};
 		try {
 			for (const p of participants) {
+				if (signal?.aborted) return;
 				// Recorded BEFORE the prompt: a dismissal (or a picker that dies) must not be retried
 				// for this session, exactly like an answer is not asked twice.
 				promptedParticipants.add(`${persona}\0${p.key}`);
@@ -1603,14 +1615,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// In the TUI: a searchable picker (type to filter) whose viewport follows the
 				// selection — the built-in select can't scroll a hundreds-long provider list
 				// usefully. Outside the TUI (RPC), fall back to the built-in select.
-				const pick =
-					ctx.mode === "tui"
+				let pick: string | undefined;
+				let cancelPicker: (() => void) | undefined;
+				try {
+					pick = ctx.mode === "tui"
 						? await ctx.ui.custom<string | undefined>(
-								(tui, theme, _kb, done) =>
-									new ModelPicker(tui, theme, title, options, ctx.model?.provider, (ref) => done(ref)),
+								(tui, theme, _kb, done) => {
+									// custom() has no signal option: its factory's done callback owns dismissal.
+									cancelPicker = () => done(undefined);
+									if (signal?.aborted) cancelPicker();
+									else signal?.addEventListener("abort", cancelPicker, { once: true });
+									return new ModelPicker(tui, theme, title, options, ctx.model?.provider, (ref) => done(ref));
+								},
 								{ overlay: true },
-							)
-						: await ctx.ui.select(title, options);
+								)
+						: await ctx.ui.select(title, options, signal ? { signal } : undefined);
+				} finally {
+					if (cancelPicker) signal?.removeEventListener("abort", cancelPicker);
+				}
+				if (signal?.aborted) return;
 				if (!scope.isCurrent()) {
 					ctx.ui.notify("persona models: persona or session changed; no assignments changed.", "warning");
 					return;
@@ -1620,6 +1643,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		} catch {
 			/* dismissed / no UI → fall back to the default model */
 		}
+		if (signal?.aborted) return;
 		if (!scope.isCurrent()) {
 			ctx.ui.notify("persona models: persona or session changed; no assignments changed.", "warning");
 			return;
@@ -1909,17 +1933,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	// Pi's extension selector is ONE slot: a second concurrent `ctx.ui.select` displaces the first without ever
-	// resolving it, orphaning a run behind a prompt nobody can see. Background flows can park at a checkpoint
-	// together, so their prompts open one at a time in arrival order. A stopped flow leaves the line at once.
+	// resolving it, orphaning a run behind a prompt nobody can see. Background model setup and flow checkpoints
+	// share this line, so their prompts open one at a time in arrival order. A stopped run leaves it at once.
 	let gateLine: Promise<unknown> = Promise.resolve();
 	function inGateLine<T>(signal: AbortSignal, stopped: T, open: () => Promise<T>): Promise<T> {
 		const turn = gateLine.then(() => (signal.aborted ? stopped : open()));
 		gateLine = turn.catch(() => undefined);
+		let onAbort: (() => void) | undefined;
 		const left = new Promise<T>((resolve) => {
 			if (signal.aborted) resolve(stopped);
-			else signal.addEventListener("abort", () => resolve(stopped), { once: true });
+			else {
+				onAbort = () => resolve(stopped);
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
 		});
-		return Promise.race([turn, left]);
+		return Promise.race([turn, left]).finally(() => {
+			if (onAbort) signal.removeEventListener("abort", onAbort);
+		});
 	}
 
 	// Run a flow's DAG with the unified tree (phases as nodes, cores beneath) + journaled

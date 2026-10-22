@@ -22,7 +22,7 @@ import { seedDefaults } from "../../src/core/seed.ts";
 import { participantKey } from "../../src/persona/model-participants.ts";
 import { emptyUsage } from "../../src/engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../../src/orchestration/sdk.ts";
-import { convene as conveneOn } from "../setup/convene.ts";
+import { convene as conveneOn, waitUntil } from "../setup/convene.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -87,7 +87,7 @@ function makeCtx(cwd: string, opts: { hasUI?: boolean; onSelect?: AnyFn } = {}) 
 		ui: {
 			setStatus: () => {},
 			notify: (msg: string) => { notes.push(msg); },
-			select: async (title: string, options: string[]) => (opts.onSelect ? opts.onSelect(title, options) : options[0]),
+			select: async (title: string, options: string[], dialogOptions?: unknown) => (opts.onSelect ? opts.onSelect(title, options, dialogOptions) : options[0]),
 			custom: async () => undefined,
 		},
 	};
@@ -141,9 +141,9 @@ async function boot(opts: {
 	};
 	piPersona(m.pi, { engineFactories: engines });
 	const titles: string[] = [];
-	const select: AnyFn = async (title: string, options: string[]) => {
+	const select: AnyFn = async (title: string, options: string[], dialogOptions?: unknown) => {
 		titles.push(title);
-		return opts.select ? opts.select(title, options) : options[0];
+		return opts.select ? opts.select(title, options, dialogOptions) : options[0];
 	};
 	const { ctx, notes } = makeCtx(opts.cwd, { hasUI: opts.hasUI ?? true, ...(opts.hasUI === false ? {} : { onSelect: select }) });
 	const personaFile = path.join(fresh, "persona", "agents", "judge-host.md");
@@ -526,6 +526,118 @@ test("a model-fallback toast is sanitised and can never throw into the run", asy
 		assert.match(String(result.content?.[0]?.text ?? ""), /untrusted data/i);
 	}
 });
+
+for (const mode of ["rpc", "tui"] as const) {
+	for (const kind of ["council", "flow"] as const) {
+		test(`stopping a background ${kind} closes its ${mode} model picker without saving partial or late choices`, async () => {
+			const cwd = projectWith("panel: [operator, scout, reviewer]\n");
+			fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+			fs.writeFileSync(path.join(cwd, ".pi", "flows", "pick-models.flow.json"), JSON.stringify({
+				name: "pick-models", phases: [{ id: "review", strategy: "fanout", roster: "panel" }],
+			}));
+			let pendingPick: ((value: string | undefined) => void) | undefined;
+			let closed = false;
+			let opened = 0;
+			const h = await boot({ cwd, persona: personaOf("Host."), select: (_title: string, options: string[], opts?: { signal?: AbortSignal }) => {
+				opened++;
+				if (opened === 1) return options[1];
+				return new Promise<string | undefined>((resolve) => {
+					pendingPick = resolve;
+					opts?.signal?.addEventListener("abort", () => { closed = true; resolve(undefined); }, { once: true });
+				});
+			} });
+			const ctx = h.ctx as ReturnType<typeof makeCtx>["ctx"];
+			if (mode === "tui") {
+				Object.assign(ctx, { mode: "tui" });
+				// The real custom UI closes only through the factory's done callback; it has no signal option.
+				Object.assign(ctx.ui, { custom: async (factory: AnyFn) => {
+					opened++;
+					let finish!: (value: string | undefined) => void;
+					const result = new Promise<string | undefined>((resolve) => { finish = resolve; });
+					const component = factory({ requestRender: () => {} }, { fg: (_role: string, text: string) => text, bold: (text: string) => text }, undefined,
+						(value: string | undefined) => { closed = true; finish(value); });
+					if (opened === 1) finish("beta/two");
+					else pendingPick = finish;
+					const value = await result;
+					component.dispose?.();
+					return value;
+				} });
+			}
+			try {
+				const tool = h.m.tool(kind) as { execute: AnyFn };
+				const launch = await tool.execute("launch", kind === "council"
+					? { question: "review", strategy: "fanout", roster: "panel" }
+					: { name: "pick-models", task: "review" }, undefined, undefined, ctx);
+				await waitUntil(() => opened === 2, "the second participant's model picker");
+				closed = false;
+				const intercom = h.m.tool("intercom") as { execute: AnyFn };
+				await intercom.execute("stop", { action: "stop", to: launch.details.runId }, undefined, undefined, ctx);
+				await waitUntil(() => closed, "cancellation to close the model picker", 500);
+				pendingPick?.("beta/two"); // a late host response must not save either this or the first choice
+				await waitUntil(() => h.m.sentMessages().some(({ message }) => /1 stopped/.test(String((message as { content?: string }).content))), "the stopped completion");
+				assert.equal(opened, 2, "no picker opens for the remaining participant after stop");
+				assert.deepEqual(h.savedModels(), {}, "the cancelled setup saves no partial assignments");
+				assert.equal(h.runs.length, 0, "no worker starts after cancellation");
+			} finally {
+				pendingPick?.(undefined);
+				await h.m.fire("session_shutdown", {}, ctx);
+			}
+		});
+	}
+}
+
+test("concurrent background runs serialize their automatic model pickers and recheck assignments before prompting", async () => {
+	let release!: (value: string | undefined) => void;
+	let hold = true;
+	const h = await boot({ cwd: projectWith("panel: [operator, scout]\n"), persona: personaOf("Host."),
+		select: (_title: string, options: string[]) => hold ? new Promise<string | undefined>((resolve) => { release = resolve; }) : options[0],
+	});
+	try {
+		const tool = h.m.tool("council") as { execute: AnyFn };
+		await tool.execute("first", { question: "first", strategy: "fanout", roster: "panel" }, undefined, undefined, h.ctx);
+		await waitUntil(() => h.titles.length === 1, "the first run's picker");
+		await tool.execute("second", { question: "second", strategy: "fanout", roster: "panel" }, undefined, undefined, h.ctx);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(h.titles.length, 1, "a concurrent run must not displace the first prompt");
+		hold = false;
+		release("alpha/one");
+		await waitUntil(() => h.runs.length === 4, "both councils to complete");
+		assert.equal(h.titles.length, 2, "each participant is prompted once, even across queued runs");
+	} finally {
+		hold = false;
+		release?.(undefined);
+		await h.m.fire("session_shutdown", {}, h.ctx);
+	}
+});
+
+for (const change of ["persona", "session"] as const) {
+	test(`a ${change} change while model setup is queued prevents the old run from opening another picker`, async () => {
+		let release!: (value: string | undefined) => void;
+		let hold = true;
+		let sessionId = "queued-picker-original";
+		const h = await boot({ cwd: projectWith("panel: [operator, scout]\n"), persona: personaOf("Host."),
+			select: (_title: string, options: string[]) => hold ? new Promise<string | undefined>((resolve) => { release = resolve; }) : options[0],
+		});
+		Object.assign(h.ctx as object, { sessionManager: { getSessionId: () => sessionId } });
+		try {
+			const tool = h.m.tool("council") as { execute: AnyFn };
+			await tool.execute("first", { question: "first", strategy: "fanout", roster: "panel" }, undefined, undefined, h.ctx);
+			await waitUntil(() => h.titles.length === 1, "the first run's picker");
+			await tool.execute("second", { question: "second", strategy: "fanout", roster: "panel" }, undefined, undefined, h.ctx);
+			if (change === "persona") await h.m.cmd("persona", "magi", h.ctx);
+			else sessionId = "queued-picker-replacement";
+			hold = false;
+			release("alpha/one");
+			await waitUntil(() => h.runs.length === 4, "both councils to finish model setup");
+			assert.equal(h.titles.length, 1, "the old scope must be checked before opening a queued picker");
+			assert.deepEqual(h.savedModels(), {}, "neither obsolete setup saves assignments");
+		} finally {
+			hold = false;
+			release?.(undefined);
+			await h.m.fire("session_shutdown", {}, h.ctx);
+		}
+	});
+}
 
 // silence the unused-import lint for a fixture-only helper
 void os;
