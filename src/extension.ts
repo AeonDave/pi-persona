@@ -127,7 +127,8 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isWakeSource, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
 import { compactInlineText, compactVisibleText, gateReviewText, sanitizeTerminalText } from "./ui/presentation.ts";
@@ -229,15 +230,16 @@ export function renderOperatorResult(label: string, output: string, ok: boolean,
  *  same as "is an agent" — a flow phase is a container that also has a parent, a root-level `async:`
  *  run is a leaf that has none, and a settled leg still sits in the tree until its root is torn
  *  down. A fan-out's `delegate` header row is a container even in the beat after its last leg
- *  left, so it never counts. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
-export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus; kind?: AgentNode["kind"] }>): number {
+ *  left, so it never counts. A wake source (a timer or monitor row) is not an agent at all and
+ *  never counts, running or not. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
+export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus; kind?: NonNullable<AgentNode["kind"]> }>): number {
 	const parents = new Set<string>();
 	for (const node of nodes) {
 		if (node.parentId !== undefined) parents.add(node.parentId);
 	}
 	let count = 0;
 	for (const node of nodes) {
-		if (node.status === "running" && node.kind !== "delegate" && !parents.has(node.id)) count++;
+		if (node.status === "running" && node.kind !== "delegate" && !isWakeSource(node) && !parents.has(node.id)) count++;
 	}
 	return count;
 }
@@ -699,6 +701,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	function publishAgentTreeChange(change: AgentTreeChange): void {
 		const producer = telemetry;
 		if (!producer) return;
+		// Wake rows (timers, monitors) are not agents, and their labels are free text the telemetry
+		// contract never persists: they stay on the local widget and never reach the bus.
+		if ((change.type === "added" || change.type === "updated") && isWakeSource(change.node)) return;
 		if (change.type === "added") {
 			lastAgentProjection.set(change.node.id, JSON.stringify(telemetryAgent(change.node)));
 			producer.publishAgentAdded(telemetryAgent(change.node));
@@ -709,7 +714,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return;
 		}
 		if (change.type === "removed") {
-			for (const node of change.nodes) {
+			for (const node of change.nodes.filter((n) => !isWakeSource(n))) {
 				lastAgentProjection.delete(node.id);
 				const status = node.status === "running" ? "stopped" : telemetryStatus(node);
 				producer.publish("agent.removed", { id: node.id, status });
@@ -749,7 +754,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		fn();
 		agentTree.update(nodeId, { detail: "stopping…" }); // visible at once; the run's own settle path writes the terminal status
 		flushAgentWidgetRender();
-		stopRequested.add(nodeId);
+		// A wake source settles synchronously inside `fn()` and clears its own handle, so there is no
+		// pending stop to remember (tracker runs keep their handle until they settle, so they are unchanged).
+		if (stopRegistry.has(nodeId)) stopRequested.add(nodeId);
 		steerRegistry.delete(nodeId); // a hard-stopped agent is no longer steerable (mirror the strategy path)
 		return true;
 	}
@@ -794,11 +801,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (!a || !b || a.length !== b.length) return false;
 		return a.every((line, i) => line === b[i]);
 	}
+	/** The "N agents" status answers how many agents are working, so a tree holding only wake rows
+	 *  (timers, monitors) publishes none, while the widget lines still show them. */
+	function agentCountStatus(nodes: readonly AgentNode[]): string | undefined {
+		const agents = nodes.filter((node) => !isWakeSource(node));
+		return agents.length === 0 ? undefined : String(inFlightAgentCount(agents));
+	}
 	function renderAgentWidget(nodes: readonly AgentNode[] = agentTree.snapshot()): void {
 		if (!lastCtx) return;
 		const empty = nodes.length === 0;
 		const lines = empty ? undefined : renderAgentTreeSummary([...nodes], 8, { now: Date.now(), stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingTreeIds(nodes) });
-		const status = empty ? undefined : String(inFlightAgentCount(nodes));
+		const status = agentCountStatus(nodes);
 		try {
 			if (!widgetLinesInitialized || !sameWidgetLines(lastWidgetLines, lines)) {
 				lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
@@ -820,8 +833,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 	function renderAgentStatus(): void {
 		if (!lastCtx) return;
-		const nodes = agentTree.snapshot();
-		const status = nodes.length === 0 ? undefined : String(inFlightAgentCount(nodes));
+		const status = agentCountStatus(agentTree.snapshot());
 		try {
 			if (!widgetStatusInitialized || lastWidgetStatus !== status) {
 				lastCtx.ui.setStatus("persona-agents", status);
@@ -1205,6 +1217,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		...idleDelivery,
 		render: (entries) => renderTimerFire(entries),
 	});
+	// Wake sources (timers, monitors) are rows beside the sub-agents: added when armed, updated on
+	// events, settled like an async run (final status for a beat, then gone with their stop handle).
+	const wakeRows = new WakeRows();
+	function settleWakeRow(change: WakeRowChange): void {
+		agentTree.update(change.id, change.patch);
+		agentTree.remove(change.id);
+		stopRegistry.delete(change.id);
+		stopRequested.delete(change.id);
+	}
 	const timerScheduler = new TimerScheduler({
 		now: () => Date.now(),
 		setTimer: (fn, ms) => {
@@ -1213,7 +1234,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return h;
 		},
 		clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-		onFire: (entry) => timerNotifier.notify(entry),
+		onArmed: (entry) => {
+			const row = wakeRows.timerArmed(entry);
+			stopRegistry.set(row.id, () => { timerScheduler.cancel(entry.id); });
+			agentTree.add(row);
+		},
+		onCancelled: (entry) => settleWakeRow(wakeRows.timerCancelled(entry)),
+		onFire: (entry) => { settleWakeRow(wakeRows.timerFired(entry)); timerNotifier.notify(entry); },
 	});
 	const canRunMonitor = () => {
 		if (disposed) return false;
@@ -1226,6 +1253,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		isIdle: idleDelivery.isIdle,
 		deliver: (text) => sendPersonaFollowUp(pi, text),
 		canRun: canRunMonitor,
+		observe: {
+			armed: (entry) => {
+				const row = wakeRows.monitorArmed(entry);
+				stopRegistry.set(row.id, () => { monitors?.cancel(entry.id); });
+				agentTree.add(row);
+			},
+			event: (event) => {
+				const change = wakeRows.monitorEvent(event);
+				if (change.settled) settleWakeRow(change);
+				else agentTree.update(change.id, change.patch);
+			},
+			removed: (entry) => settleWakeRow(wakeRows.monitorRemoved(entry)),
+		},
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
 	// The premature-surrender counterweight rides the SAME kill switch as the by-hand nudge

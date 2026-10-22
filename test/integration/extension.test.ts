@@ -4731,6 +4731,16 @@ test("inFlightAgentCount counts running leaves only: async roots in, flow phases
 		2,
 	);
 	assert.equal(inFlightAgentCount([{ id: "delegate:batch-0", status: "running", kind: "delegate" }]), 0);
+	// A monitor or a timer is a wake source beside the agents, never one of them.
+	assert.equal(
+		inFlightAgentCount([
+			{ id: "monitor:monitor-1", status: "running", kind: "monitor" },
+			{ id: "timer:timer-1", status: "running", kind: "timer" },
+			{ id: "async:run-1", status: "running" },
+		]),
+		1,
+	);
+	assert.equal(inFlightAgentCount([{ id: "timer:timer-1", status: "running", kind: "timer" }]), 0);
 });
 
 test("the published \"N agents\" status is the in-flight count, not the has-a-parent count", async () => {
@@ -4858,6 +4868,161 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	releases.shift()?.();
 	await waitUntil(() => widgets["persona-agents"] === undefined, "the coalesced widget clear");
 	assert.equal(widgets["persona-agents"], undefined, "the leg's node leaves the tree once the released engine settles");
+});
+
+// ── wake sources (monitors, timers) are rows in the sticky agent widget, never agents ────
+
+/** A TUI-ish ctx that records the sticky `persona-agents` widget frames and every "N agents" status. */
+function wakeWidgetCtx(cwd: string) {
+	const widgets: Record<string, string[] | undefined> = {};
+	const statuses: Array<string | undefined> = [];
+	const { ctx: base } = makeCtx(cwd, { hasUI: true });
+	const ctx = {
+		...base,
+		ui: {
+			...base.ui,
+			setWidget: (id: string, lines: string[] | undefined) => { widgets[id] = lines; },
+			setStatus: (id: string, text: string | undefined) => { if (id === "persona-agents") statuses.push(text); },
+		},
+	};
+	return { ctx, widgets, statuses };
+}
+
+const HOLD_OPEN = ["-e", "setInterval(() => {}, 1000)"];
+
+test("an active monitor is a row in the agent widget until it is cancelled", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx, widgets, statuses } = wakeWidgetCtx(tempDir("pi-persona-wake-monitor-"));
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as { execute: AnyFn };
+		const armed = await tool.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "qualify batch1", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx);
+		assert.equal(armed.details.ok, true);
+		await waitUntil(
+			() => widgets["persona-agents"]?.some((line) => line.includes("◉ qualify batch1") && line.includes("monitor-1 · exit") && line.includes("deadline in")) ?? false,
+			"the armed monitor's row in the widget",
+		);
+		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "a lone wake row publishes no \"N agents\" count");
+
+		const cancelled = await tool.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx);
+		assert.equal(cancelled.details.cancelled, true);
+		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled monitor to leave the widget");
+		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "no count was ever published for the monitor");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("a monitor that ends on its own leaves the widget", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx, widgets } = wakeWidgetCtx(tempDir("pi-persona-wake-monitor-end-"));
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as { execute: AnyFn };
+		const armed = await tool.execute("arm", { action: "arm", command: process.execPath, args: ["-e", "setTimeout(() => {}, 400)"], label: "short job", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx);
+		assert.equal(armed.details.ok, true);
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => line.includes("◉ short job")) ?? false, "the monitor's row to appear");
+		await waitUntil(() => widgets["persona-agents"] === undefined, "the finished monitor to leave the widget");
+		assert.equal((await tool.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count, 0);
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("an armed timer is a row with its countdown and leaves when it fires", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx, widgets, statuses } = wakeWidgetCtx(tempDir("pi-persona-wake-timer-"));
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("timer") as { execute: AnyFn };
+		const armed = await tool.execute("arm", { action: "arm", message: "check the status", delaySeconds: 1, label: "status review" }, undefined, undefined, ctx);
+		assert.equal(armed.details.ok, true);
+		await waitUntil(
+			() => widgets["persona-agents"]?.some((line) => line.includes("⏰ status review") && line.includes("timer-1") && line.includes("fires in")) ?? false,
+			"the armed timer's row in the widget",
+		);
+		await waitUntil(() => widgets["persona-agents"] === undefined, "the fired timer to leave the widget", 3000);
+		assert.equal((await tool.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count, 0);
+
+		// A cancelled timer leaves just the same, without ever firing.
+		assert.equal((await tool.execute("arm-2", { action: "arm", message: "never fires", delaySeconds: 600, label: "cancel me" }, undefined, undefined, ctx)).details.ok, true);
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => line.includes("⏰ cancel me") && line.includes("timer-2")) ?? false, "the second timer's row");
+		assert.equal((await tool.execute("cancel-2", { action: "cancel", id: "timer-2" }, undefined, undefined, ctx)).details.ok, true);
+		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled timer to leave the widget");
+		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "timers are never counted as agents");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("x on a wake row cancels it through the same stop path as an agent", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx: widgetCtx, widgets } = wakeWidgetCtx(tempDir("pi-persona-wake-stop-"));
+	const TUI_STUB = { requestRender: () => {} };
+	const THEME = { fg: (_role: string, s: string) => s, bold: (s: string) => s };
+	const ctx = {
+		...widgetCtx,
+		mode: "tui",
+		ui: {
+			...widgetCtx.ui,
+			// Open the F9 overlay for real, press `x` on the aimed row, and close it again.
+			custom: async (factory: AnyFn) => {
+				let resolve!: (value: unknown) => void;
+				const done = new Promise((r) => { resolve = r; });
+				const overlay = factory(TUI_STUB, THEME, undefined, resolve);
+				overlay.handleInput("x");
+				overlay.dispose?.();
+				resolve(undefined);
+				await done;
+			},
+		},
+	};
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as { execute: AnyFn };
+		assert.equal((await tool.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "stop me", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx)).details.ok, true);
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => line.includes("◉ stop me")) ?? false, "the monitor's row in the widget");
+
+		await m.cmd("agents", "", ctx);
+		assert.equal((await tool.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count, 0, "x cancelled the monitor itself, not just its row");
+		await waitUntil(() => widgets["persona-agents"] === undefined, "the stopped monitor to leave the widget");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("wake rows never reach telemetry", async () => {
+	const cwd = tempDir("pi-persona-wake-telemetry-");
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx: widgetCtx, widgets } = wakeWidgetCtx(cwd);
+	const ctx = { ...widgetCtx, sessionManager: { getSessionId: () => "wake-telemetry-session" } };
+	try {
+		await m.fire("session_start", {}, ctx);
+		const timer = m.tool("timer") as { execute: AnyFn };
+		const monitor = m.tool("monitor") as { execute: AnyFn };
+		assert.equal((await timer.execute("arm", { action: "arm", message: "wake-telemetry-message", delaySeconds: 600, label: "wake-telemetry-timer" }, undefined, undefined, ctx)).details.ok, true);
+		assert.equal((await monitor.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "wake-telemetry-monitor", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx)).details.ok, true);
+		await waitUntil(
+			() => {
+				const lines = widgets["persona-agents"] ?? [];
+				return lines.some((line) => line.includes("wake-telemetry-timer")) && lines.some((line) => line.includes("wake-telemetry-monitor"));
+			},
+			"both wake rows in the widget",
+		);
+		assert.equal((await timer.execute("cancel", { action: "cancel", id: "timer-1" }, undefined, undefined, ctx)).details.ok, true);
+		assert.equal((await monitor.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx)).details.cancelled, true);
+		await waitUntil(() => widgets["persona-agents"] === undefined, "both wake rows to leave the widget");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+
+	const events = readTelemetryEvents(cwd);
+	assert.ok(events.length > 0, "the session did publish telemetry");
+	for (const event of events.filter((e) => e.type === "agent.added" || e.type === "agent.updated" || e.type === "agent.removed")) {
+		const id = String(event.payload.id);
+		assert.ok(!id.startsWith("monitor:") && !id.startsWith("timer:"), `${event.type} must not describe a wake row: ${id}`);
+	}
+	assert.doesNotMatch(JSON.stringify(events), /wake-telemetry-(timer|monitor|message)/, "a wake row's free-text label never reaches the bus");
 });
 
 test("an async fan-out shows one batch header with k/N settled and the status count never rises while it drains", async () => {
