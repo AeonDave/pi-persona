@@ -552,8 +552,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - an interactive `tasks` fan-out of two or more legs gets one container row, `delegate · N legs`
   (`k/N settled`), that never counts as an in-flight agent and leaves with its last leg;
 - `X` is not a directed key: it acts on the whole stoppable set of leaf rows after a confirmation that
-  states how many agents it covers, and a changed set is re-confirmed. The set is every leaf plus any
-  run root with a stop handle (council/flow/mandated runs), and `x` on such a root stops the whole run.
+  states how many agents it covers, and a changed set is re-confirmed. The set is every agent leaf (wake
+  rows excepted) plus any run root with a stop handle (council/flow/mandated runs), and `x` on such a
+  root stops the whole run.
   `intercom stop` / `stop { to: "all" }` also cover tracker runs, `council` and `flow` included;
 - the F9 overlay's *directed* keys (`x` stop, `s` steer) act only on the agent the ▸ marker still
   shows; if that agent settles and is pruned mid-keystroke, the selection re-anchors visibly and the
@@ -570,9 +571,10 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   elapsed/stall clock, so they never carry the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
   one through the same stop registry as an agent (the `monitor cancel` / `timer cancel` effect); `s` steer
   is never offered. They are excluded from the `X` stop-all count, confirmation and bulk stop, from the
-  `N agents` in-flight status, and from telemetry (`agent.*` events are agents only). They settle like
-  an async row (the final ✓/✗/■ for a beat, then removal) and live only in the arming session, never
-  restored.
+  `N agents` in-flight status, and from telemetry (`agent.*` events are agents only). They settle and
+  leave like an async row: the final ✓/✗/■ goes to the tree change stream (telemetry excluded), not to
+  the screen, because the update and the removal are synchronous and the widget frame is coalesced. They
+  live only in the arming session, never restored.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.
