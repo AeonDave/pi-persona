@@ -156,3 +156,31 @@ test("model routing policy is data-driven and can be overridden", () => {
 	assert.deepEqual(providerFallbacks("openai-codex/gpt-5.6-luna", models, undefined, permissive), ["opencode/gpt-5.6-luna"]);
 	assert.ok(DEFAULT_MODEL_ROUTING_POLICY.rules.length > 0);
 });
+
+const CATALOG: ModelLite[] = [
+	{ provider: "openai-codex", id: "gpt-5.6" },
+	{ provider: "openai-codex", id: "gpt-5-mini" },
+	{ provider: "claude-pro-max-native", id: "claude-opus-4-6" },
+	{ provider: "claude-pro-max-native", id: "claude-sonnet-4-6" },
+	{ provider: "zai", id: "glm-5.3" },
+];
+
+test("provider/loose-id matches inside that provider's ids ('claude-pro-max-native/opus-4-6')", () => {
+	assert.deepEqual(resolveModelRef("claude-pro-max-native/opus-4-6", CATALOG), { ok: true, ref: "claude-pro-max-native/claude-opus-4-6" });
+	assert.deepEqual(resolveModelRef("claude-pro-max-native/sonnet", CATALOG), { ok: true, ref: "claude-pro-max-native/claude-sonnet-4-6" });
+});
+
+test("dots and dashes in a version are interchangeable ('opus-4.6', 'glm-5-3')", () => {
+	assert.deepEqual(resolveModelRef("claude-pro-max-native/opus-4.6", CATALOG), { ok: true, ref: "claude-pro-max-native/claude-opus-4-6" });
+	assert.deepEqual(resolveModelRef("opus-4.6", CATALOG, "claude-pro-max-native"), { ok: true, ref: "claude-pro-max-native/claude-opus-4-6" });
+	assert.deepEqual(resolveModelRef("glm-5-3", CATALOG), { ok: true, ref: "zai/glm-5.3" });
+});
+
+test("an unknown ref lists the session provider's models first", () => {
+	const r = resolveModelRef("nope-9", CATALOG, "claude-pro-max-native");
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.reason, "unknown");
+	assert.deepEqual(r.candidates.slice(0, 2), ["claude-pro-max-native/claude-opus-4-6", "claude-pro-max-native/claude-sonnet-4-6"]);
+	assert.equal(r.candidates.length, CATALOG.length);
+});

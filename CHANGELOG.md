@@ -94,6 +94,10 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   installed copies pick up the new prompt wording automatically.
 
 ### Fixed
+- Resolve loose `delegate` model names more forgivingly: a `provider/loose-id` pin matches inside
+  that provider (`claude-pro-max-native/opus-4-6`), version dots and dashes are interchangeable
+  (`opus-4.6`), and an unknown name lists the session provider's models first instead of the
+  catalog head.
 
 - Stop a failed `flow X` on task A from silently resuming its finished phases under `flow X` on task B.
 - Stop run ids restarting at `run-1` after a reload or resume, which let `intercom result run-1` return
