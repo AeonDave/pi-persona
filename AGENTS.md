@@ -306,7 +306,7 @@ of a service other Pi sessions are using. Skill Optimizer remains independent.
    tools work — the default in-process engine leaves them "not initialized"; also settable per-leg
    via `delegate`'s `mcp: true` / `AgentRunSpec.mcp`. Pass a server session id in the task to share
    an HTTP backend's state).
-4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`), or per-member `- { agent, role, model?, skills? }` to build an ensemble of perspectives from ONE agent (e.g. `review` is one `reviewer` × 3 lens roles). Same-agent members are disambiguated in the live tree by a role hint (`reviewer · SECURITY`) via `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`), so three lenses show as three steerable nodes — keep the seeding loops and the SDK key derivation in lockstep if you touch either.
+4. **Team**: one line in `teams.yaml` (`name: [agent, ...]`), or per-member `- { agent, role, model?, skills? }` to build an ensemble of perspectives from ONE agent (e.g. `review` is one `reviewer` × 4 lens roles; `design` pairs `architect` + `reviewer` for `critic-loop`). Same-agent members are disambiguated in the live tree by a role hint (`reviewer · SECURITY`) via `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`), so four lenses show as four steerable nodes — keep the seeding loops and the SDK key derivation in lockstep if you touch either.
 5. **Flow**: `flows/<name>.flow.json` — phases + `needs`, optional `gate: true` (checkpoint).
 6. **Contract**: `contracts/<name>.contract.json` (request via `outputContract`). **Preset**: `presets/<name>.preset.json`.
 

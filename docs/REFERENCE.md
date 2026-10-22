@@ -358,8 +358,9 @@ You research thoroughly. For independent sub-questions, fan out `scout` sub-agen
 override it for one call without editing the file:
 
 ```yaml
-# teams.yaml — one reviewer agent, three lens roles
+# teams.yaml — one reviewer agent, four lens roles
 review:
+  - { agent: reviewer, role: "Focus ONLY on the CORRECTNESS lens" }
   - { agent: reviewer, role: "Focus ONLY on the SECURITY lens" }
   - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens" }
   - { agent: reviewer, role: "Focus ONLY on the TESTS lens" }

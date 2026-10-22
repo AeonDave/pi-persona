@@ -54,6 +54,7 @@ import { allocateJoinCode, resolveJoinCode } from "../../src/exocom/codes.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults, type SpineLegacyIO } from "../../src/core/seed.ts";
 import { failureDetails } from "../../src/extension/shared.ts";
+import { parseTeams } from "../../src/orchestration/roster.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
 // Hermetic: point the "user" agent dir at an empty temp dir. pi-persona no longer auto-loads the
@@ -966,7 +967,9 @@ test("flow checkpoints fail closed in headless mode and when the TUI chooser is 
 			assert.match(wake, /1 stopped/, `${mode}: a dismissed checkpoint is a stop, not a failure`);
 			assert.match(wake, /stopped at checkpoint "plan"/);
 		}
-		assert.equal(calls.length, 3, `${mode}: only the gated review roster may run; its dependent must remain blocked`);
+		// The gated phase seats the bundled `review` team once; the blocked dependent seats it zero times.
+		const reviewLegs = parseTeams(fs.readFileSync(path.join(REPO_ROOT, "teams.yaml"), "utf8")).review?.length;
+		assert.equal(calls.length, reviewLegs, `${mode}: only the gated review roster may run; its dependent must remain blocked`);
 		await m.fire("session_shutdown", {}, ctx);
 	}
 });
