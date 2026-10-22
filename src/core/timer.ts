@@ -79,12 +79,26 @@ export interface TimerSchedulerDeps {
 	/** Maximum follow-up message length (chars). Default 4000 — the stored message is
 	 *  re-injected into context at fire time, so it is a budget, not a document. */
 	maxMessageChars?: number;
+	/** Longest accepted label (code units). Default 120 — the label lands in the tree row, `timer list`
+	 *  and the fire message, so it is a caption, not a document. A longer label is CLIPPED (ending in
+	 *  "…"), not rejected: a verbose label must never cost the alarm. */
+	maxLabelChars?: number;
 }
 
 const DEFAULT_MIN_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_ARMED = 32;
 const DEFAULT_MAX_MESSAGE_CHARS = 4_000;
+const DEFAULT_MAX_LABEL_CHARS = 120;
+
+/** At most `max` code units, ending in "…" when clipped; never cuts an astral character in half. */
+function clipLabel(text: string, max: number): string {
+	if (text.length <= max) return text;
+	let end = Math.max(0, max - 1);
+	const last = text.charCodeAt(end - 1);
+	if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+	return `${text.slice(0, end)}…`;
+}
 
 interface Scheduled {
 	entry: TimerEntry;
@@ -97,6 +111,7 @@ export class TimerScheduler {
 	private readonly maxDelayMs: number;
 	private readonly maxArmed: number;
 	private readonly maxMessageChars: number;
+	private readonly maxLabelChars: number;
 	private readonly timers = new Map<string, Scheduled>();
 	private seq = 0;
 
@@ -106,6 +121,7 @@ export class TimerScheduler {
 		this.maxDelayMs = deps.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
 		this.maxArmed = deps.maxArmed ?? DEFAULT_MAX_ARMED;
 		this.maxMessageChars = deps.maxMessageChars ?? DEFAULT_MAX_MESSAGE_CHARS;
+		this.maxLabelChars = deps.maxLabelChars ?? DEFAULT_MAX_LABEL_CHARS;
 	}
 
 	/** Arm a new alarm. Returns the entry on success, or a reason on rejection. */
@@ -141,7 +157,7 @@ export class TimerScheduler {
 		const id = `timer-${++this.seq}`;
 		const entry: TimerEntry = {
 			id,
-			label: (req.label ?? "").trim() || id,
+			label: clipLabel((req.label ?? "").trim(), this.maxLabelChars) || id,
 			fireAtEpochMs: fireAt,
 			armedAtEpochMs: now,
 			message,

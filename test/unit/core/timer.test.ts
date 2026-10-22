@@ -220,3 +220,70 @@ test("onArmed sees every admitted alarm and onCancelled every explicit cancel, n
 	scheduler.cancelAll();
 	assert.deepEqual(cancelled, ["timer-2", "timer-3"], "an empty cancelAll announces nothing");
 });
+
+/** A scheduler wired to a fake clock, announcing admitted alarms through `onArmed`. */
+function labelHarness(maxLabelChars?: number) {
+	const armed: TimerEntry[] = [];
+	const scheduler = new TimerScheduler({
+		now: () => 1_000_000,
+		setTimer: () => 0,
+		clearTimer: () => {},
+		onFire: () => {},
+		onArmed: (e) => armed.push(e),
+		...(maxLabelChars === undefined ? {} : { maxLabelChars }),
+	});
+	return { scheduler, armed };
+}
+
+test("an over-long label is clipped to 120 chars ending in an ellipsis, never rejected", () => {
+	const { scheduler, armed } = labelHarness();
+	const r = scheduler.arm({ label: "x".repeat(500), message: "check", delayMs: 60_000 });
+	assert.ok(r.ok && r.entry, "a verbose label never costs the alarm");
+	assert.equal(r.entry.label.length, 120);
+	assert.ok(r.entry.label.endsWith("…"));
+	assert.equal(r.entry.label, `${"x".repeat(119)}…`);
+	assert.equal(scheduler.list()[0]?.label, r.entry.label, "list carries the bounded label");
+	assert.equal(armed[0]?.label, r.entry.label, "onArmed receives the bounded label");
+	const text = renderTimerFire([r.entry]);
+	assert.ok(text.includes(r.entry.label), "the fire message carries the bounded label");
+	assert.equal(text.includes("x".repeat(120)), false, "and nothing of the unbounded original");
+});
+
+test("a label of exactly the bound is kept verbatim", () => {
+	const { scheduler, armed } = labelHarness();
+	const label = "y".repeat(120);
+	const r = scheduler.arm({ label, message: "check", delayMs: 60_000 });
+	assert.ok(r.ok && r.entry);
+	assert.equal(r.entry.label, label);
+	assert.equal(scheduler.list()[0]?.label, label);
+	assert.equal(armed[0]?.label, label);
+});
+
+test("the label is trimmed before it is measured, and a blank one still falls back to the id", () => {
+	const { scheduler } = labelHarness();
+	const padded = scheduler.arm({ label: `   ${"z".repeat(120)}   `, message: "check", delayMs: 60_000 });
+	assert.ok(padded.ok && padded.entry);
+	assert.equal(padded.entry.label, "z".repeat(120), "surrounding whitespace is not counted against the bound");
+	const blank = scheduler.arm({ label: "   ", message: "check", delayMs: 60_000 });
+	assert.ok(blank.ok && blank.entry);
+	assert.equal(blank.entry.label, blank.entry.id);
+});
+
+test("maxLabelChars overrides the bound", () => {
+	const { scheduler } = labelHarness(10);
+	const r = scheduler.arm({ label: "abcdefghijklmnop", message: "check", delayMs: 60_000 });
+	assert.ok(r.ok && r.entry);
+	assert.equal(r.entry.label, "abcdefghi…");
+	assert.equal(r.entry.label.length, 10);
+});
+
+test("clipping never splits a surrogate pair", () => {
+	const { scheduler } = labelHarness(10);
+	// "a".repeat(8) + 😀 (2 code units) + tail: the cut would land between the pair's halves.
+	const r = scheduler.arm({ label: `${"a".repeat(8)}😀tail`, message: "check", delayMs: 60_000 });
+	assert.ok(r.ok && r.entry);
+	assert.ok(r.entry.label.length <= 10);
+	assert.ok(r.entry.label.endsWith("…"));
+	assert.equal(r.entry.label, `${"a".repeat(8)}…`, "the dangling high surrogate is dropped, not left unpaired");
+	assert.equal(/[\ud800-\udbff](?![\udc00-\udfff])/.test(r.entry.label), false);
+});
