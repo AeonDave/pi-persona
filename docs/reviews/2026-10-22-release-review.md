@@ -183,8 +183,8 @@ runtime changes:
 | [#12](https://github.com/AeonDave/pi-persona/pull/12) | setup-node 7.1.0, Scorecard 2.5.0, upload-artifact 7.0.2, CodeQL 4.39.0 | Full commit pins verified against upstream version tags; existing permissions and checkout credential controls preserved |
 | [#13](https://github.com/AeonDave/pi-persona/pull/13) | TypeBox 1.4.2; locked Node typings 22.20.5 | Keep Node 22 typings; no relevant mutation of shared nested schema references found |
 
-These are development/tooling updates. The production dependency tree remains empty. Package
-version remains `1.17.1`; this work does not create a tag, release or npm publication.
+These are development/tooling updates. The production dependency tree remains empty. At review
+completion, package version was `1.17.1`; tagging and publication were outside this review's scope.
 
 ## Additional Claude branch
 

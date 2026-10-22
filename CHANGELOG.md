@@ -6,6 +6,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.17.2](https://github.com/AeonDave/pi-persona/tree/v1.17.2) - 2026-10-22
+
 ### Added
 
 - Let an agent declare the area it alone writes with `writeSet` in its frontmatter (`research` declares
