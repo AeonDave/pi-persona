@@ -2545,7 +2545,9 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	);
 	assert.equal(missing.isError, true);
 	assert.match(String(missing.content?.[0]?.text ?? ""), /writeSet/i);
-	assert.match(String(missing.content?.[0]?.text ?? ""), /read\/grep\/find\/ls/);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /tools: \["read","grep","find","ls"\]/);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /tasks\[0\] \("operator"\): add writeSet:.*tasks\[1\] \("operator"\): add writeSet:/s, "one remedy per missing leg");
+	assert.match(String(missing.content?.[0]?.text ?? ""), /Or serialize the batch with concurrency: 1\.$/);
 	assert.equal(spawned, 0);
 
 	const emptyToolOverrides = await delegate.execute(
@@ -2674,6 +2676,109 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	assert.equal(stringifiedWriters.isError, true, "unwrapping JSON does not skip the ownership gate");
 	assert.match(String(stringifiedWriters.content?.[0]?.text ?? ""), /writeSet/i);
 	assert.equal(spawned, 8);
+});
+
+test("an agent's declared writeSet is inherited by a leg that names none, so a read-only-in-intent researcher fans out beside writers", async () => {
+	const cwd = tempDir("pi-persona-agent-writeset-");
+	const personaPath = path.join(cwd, ".pi", "agents", "project-conductor.md");
+	fs.mkdirSync(path.dirname(personaPath), { recursive: true });
+	fs.writeFileSync(personaPath, "---\nname: project-conductor\npersona: true\ndelegation:\n  requireDisjointWrites: true\n---\nCustom supervisor.");
+	const specs: AgentRunSpec[] = [];
+	const stub: StrategyEngine = {
+		run: async (spec) => {
+			specs.push(spec);
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "project-conductor", ctx);
+	const delegate = m.tool("delegate") as { execute: AnyFn };
+	const run = (id: string, params: Record<string, unknown>) => delegate.execute(id, params, undefined, undefined, ctx);
+	const specFor = (agent: string): AgentRunSpec => {
+		const spec = specs.find((s) => s.agent === agent);
+		assert.ok(spec, `the ${agent} leg reached the engine`);
+		return spec;
+	};
+
+	// (i) research keeps write+bash, but its definition declares .research/ as the area it alone
+	// writes: the gate sees one disjoint owner per writer and the batch launches.
+	const launched = await run("agent-writeset-launch", {
+		tasks: [
+			{ agent: "research", task: "dig" },
+			{ agent: "reviewer", task: "review" },
+			{ agent: "operator", task: "edit", writeSet: ["src/a.c"] },
+		],
+	});
+	assert.equal(launched.isError, false, String(launched.content?.[0]?.text ?? ""));
+	assert.equal(specs.length, 3);
+	assert.deepEqual(specFor("research").writeSet, [".research/"], "the leg carries the agent's declared area to the run spec");
+	assert.equal(specFor("reviewer").writeSet, undefined, "a reader declares nothing and inherits nothing");
+	assert.deepEqual(specFor("operator").writeSet, ["src/a.c"]);
+
+	// (ii) An agent that declares nothing is still an unknown writer: only IT is named, per leg, with the
+	// parameter to add and the serial fallback.
+	specs.length = 0;
+	const refused = await run("agent-writeset-refused", {
+		tasks: [
+			{ agent: "research", task: "dig" },
+			{ agent: "operator", task: "edit" },
+		],
+	});
+	assert.equal(refused.isError, true);
+	const refusal = String(refused.content?.[0]?.text ?? "");
+	assert.match(refusal, /this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on tasks\[1\] \("operator"\)\./);
+	assert.doesNotMatch(refusal, /tasks\[0\]/, "the research leg inherited a set, so it is not among the missing");
+	assert.match(refusal, /tasks\[1\] \("operator"\): add writeSet: \["<files or directories only this leg edits>"\], or make it a reader with tools: \["read","grep","find","ls"\] \(or pick scout\)\./);
+	assert.match(refusal, /Or serialize the batch with concurrency: 1\.$/);
+	assert.equal(specs.length, 0, "refused before any spawn");
+
+	// (iii) The inherited directory owns its subtree: a sibling claiming a path inside it overlaps.
+	const overlapping = await run("agent-writeset-overlap", {
+		tasks: [
+			{ agent: "research", task: "dig" },
+			{ agent: "operator", task: "edit", writeSet: [".research/notes"] },
+		],
+	});
+	assert.equal(overlapping.isError, true);
+	const overlap = String(overlapping.content?.[0]?.text ?? "");
+	assert.match(overlap, /parallel writeSet overlap between task\[0\] \("research"\) path "\.research\/" and task\[1\] \("operator"\) path "\.research\/notes"/);
+	assert.equal(specs.length, 0);
+
+	// (iv) A leg's own writeSet wins over the agent default; an empty or blank one counts as none.
+	const own = await run("agent-writeset-own", {
+		tasks: [
+			{ agent: "research", task: "dig", writeSet: ["docs/research"] },
+			{ agent: "operator", task: "edit", writeSet: ["src/a.c"] },
+		],
+	});
+	assert.equal(own.isError, false, String(own.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, ["docs/research"], "the explicit set replaces, never merges with, the default");
+	specs.length = 0;
+	const blank = await run("agent-writeset-blank", {
+		tasks: [
+			{ agent: "research", task: "dig again", writeSet: [] },
+			{ agent: "operator", task: "edit again", writeSet: ["src/b.c"] },
+		],
+	});
+	assert.equal(blank.isError, false, String(blank.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, [".research/"], "no non-empty path ⇒ the agent's declared area");
+	assert.deepEqual(specFor("operator").writeSet, ["src/b.c"]);
+
+	// (v) Single mode takes the same road: the declared area reaches the run spec, and an explicit one wins.
+	specs.length = 0;
+	const single = await run("agent-writeset-single", { agent: "research", task: "dig alone" });
+	assert.equal(single.isError, false, String(single.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, [".research/"]);
+	specs.length = 0;
+	const singleOwn = await run("agent-writeset-single-own", { agent: "research", task: "dig elsewhere", writeSet: ["notes"] });
+	assert.equal(singleOwn.isError, false, String(singleOwn.content?.[0]?.text ?? ""));
+	assert.deepEqual(specFor("research").writeSet, ["notes"]);
+	specs.length = 0;
+	await run("agent-writeset-single-none", { agent: "operator", task: "no declared area" });
+	assert.equal(specFor("operator").writeSet, undefined, "an agent that declares nothing leaves the spec without a writeSet");
 });
 
 test("a declared verifier cannot start in a later call while the mutation it must check is still running", async () => {

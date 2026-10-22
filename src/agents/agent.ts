@@ -10,6 +10,7 @@
 
 import { sanitizeStatusLabel } from "../core/display-label.ts";
 import { asBoolean, asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { writeSetPathError } from "../core/ownership.ts";
 
 export interface AgentConfig {
 	name: string;
@@ -33,6 +34,11 @@ export interface AgentConfig {
 	 *  ("MCP not initialized"). The child gets its OWN MCP session; for a server-keyed
 	 *  backend (HTTP MCP, session id passed as a tool argument) pass the id to share state. */
 	mcp?: boolean;
+	/** Repository-relative paths this agent alone writes BY DESIGN (`research` → `.research/`). A
+	 *  delegate leg that gives no `writeSet` of its own inherits it, so a persona's disjoint-ownership
+	 *  gate sees the declared area instead of an unknown writer. Declarative, like the call-level
+	 *  field: nothing enforces the paths at runtime. A directory path owns its subtree. */
+	writeSet?: string[];
 	/** `spine: false` opts this agent out of the shared behavioral layer (docs/SPINE.md).
 	 *  Only an explicit false is recorded; absent ⇒ the session-level setting decides. */
 	spine?: boolean;
@@ -72,7 +78,21 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 	if (tools?.deny) agent.excludeTools = tools.deny;
 	if (fm.isolation === "worktree") agent.isolation = "worktree";
 	if (fm.mcp === true) agent.mcp = true;
+	const writeSet = declaredWriteSet(fm.writeSet);
+	if (writeSet) agent.writeSet = writeSet;
 	if (asBoolean(fm.spine) === false) agent.spine = false;
 
 	return agent;
+}
+
+/** An agent file is project data: keep only trimmed, repository-relative paths (the same rule the
+ *  call-level `writeSet` is held to), accept a lone string as a one-element list, and report nothing
+ *  when no usable path survives so an unusable declaration can never read as "owns the repository". */
+function declaredWriteSet(value: unknown): string[] | undefined {
+	const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+	const paths = raw
+		.filter((path): path is string => typeof path === "string")
+		.map((path) => path.trim())
+		.filter((path) => writeSetPathError(path) === undefined);
+	return paths.length > 0 ? paths : undefined;
 }

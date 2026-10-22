@@ -33,7 +33,11 @@ Persona names are data, never dispatch keys. Optional `delegation:` fields apply
 builtin, user, or project persona: `requireBrief`, `outputContract`, `requireDisjointWrites`,
 `requireFreshVerification`, and `verificationAgents`. Council behavior remains independently
 declarative through `council: { strategy, roster, params }`; a custom persona can compose any installed
-strategy/team without a core change. The gates use effective agent/tool capabilities, conservatively
+strategy/team without a core change. Ownership intent follows the agent, not the caller: an agent definition
+can declare the area it alone writes (`writeSet`, e.g. `research` → `.research/`), and a delegate leg that
+names no `writeSet` inherits it before the gates run, so the disjoint-ownership and overlap checks see a
+declared owner; a leg's own set wins, and the field stays declarative (nothing enforces paths at runtime).
+The gates use effective agent/tool capabilities, conservatively
 treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
 concurrency on the single launch path (interactive background or headless inline). A serialized verifier is accepted only
 after every material writer in that batch; otherwise the call fails before a child starts. The rule

@@ -45,6 +45,7 @@ hard-fail.
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
 | persona `delegation:` | require briefs, set an output contract, schedule disjoint writes, and order fresh verification |
 | `isolation: worktree` | run in a clean throwaway Git worktree and return an exported diff; non-Git, dirty, or oversized cases fail closed |
+| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. A directory owns its subtree; absolute and `../` paths are dropped. Declarative, not a sandbox |
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
@@ -181,7 +182,7 @@ files are seed sources. A fresh install has no installed personas until `/person
 | Definition | Location | Purpose |
 |---|---|---|
 | Persona | `personas/*.md` or installed `agents/*.md` with `persona: true` | supervisor prompt, capabilities, delegation, council, orchestration, and coaching |
-| Agent | `agents/*.md` or project `.pi/agents/*.md` | worker prompt, optional tools/model/isolation/MCP |
+| Agent | `agents/*.md` or project `.pi/agents/*.md` | worker prompt, optional tools/model/isolation/MCP/writeSet |
 | Team | `teams.yaml` | named roster of bare agent names or inline `{ agent, role, model, skills }` members |
 | Flow | `flows/*.flow.json` | strategy phases connected by `needs`, optionally gated |
 | Contract | `contracts/*.contract.json` | structured output fields requested by name and pinned per run |
@@ -291,7 +292,8 @@ validation, the owning consumer and contract tests—not by adding another setti
 Entries are plain tool names or `*` patterns; Pi's `+name`/`-name` default-tool modifier
 syntax is not an allowlist and is rejected. Use the `deny` field to remove tools. Omit `tools` to
 inherit the session tool set. `model`, `isolation: worktree`,
-`mcp: true`, and `purpose` are optional agent metadata. The body is the agent prompt. Inline roster
+`mcp: true`, `writeSet` (a list of repository-relative paths the agent alone writes, inherited by
+delegate legs that name none), and `purpose` are optional agent metadata. The body is the agent prompt. Inline roster
 members specialise one agent with a role, model, or skills without requiring another agent file.
 
 ### Multi-agent quick start
@@ -432,6 +434,9 @@ overlapping or missing ownership for parallel writers, and refuses a declared ve
 start before or beside a material writer in the same call or while a mutating background run is in
 flight. Only `read`, `grep`, `find`, and `ls` count as read-only; shell-capable, MCP-enabled, and
 unknown toolsets fail closed as writers. `writeSet` is a scheduling contract, not an OS sandbox.
+An agent can declare the area it alone writes (`writeSet: [.research/]` in `research`); a leg that gives
+no `writeSet` of its own inherits it, so a write-capable but read-in-intent agent is not refused as an
+unknown writer, and a leg that does name one keeps its own.
 
 ```markdown
 ---

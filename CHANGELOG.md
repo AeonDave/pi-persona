@@ -8,6 +8,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Added
 
+- Let an agent declare the area it alone writes with `writeSet` in its frontmatter (`research` declares
+  `[.research/]`): a `delegate` leg that names no `writeSet` inherits it, so a persona with
+  `requireDisjointWrites` no longer refuses a read-in-intent agent as an unknown writer and the supervisor
+  does not have to strip its tools. A leg's own `writeSet` still wins, and the field stays declarative.
+  The disjoint-ownership refusal now names each missing leg with the parameter to add (`writeSet`, or
+  `tools: ["read","grep","find","ls"]`) and the `concurrency: 1` alternative.
 - Show armed timers and active monitors as rows in the sticky agent widget and the F9 / `/agents` panel,
   beside sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` (an `output`
   monitor reads `k/N events` as they arrive) and `⏰ <label>  <id> · fires in <remaining>` (just
