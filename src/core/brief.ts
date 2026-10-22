@@ -7,10 +7,11 @@
  *   - DISCOVERY: the installed agents (name + clipped description), team rosters, and flows —
  *     regenerated from the live registry every turn, so it cannot desync the way hard-coded
  *     persona prose can, and it survives however much context the turn has burned.
- *   - THE STANDING DEFAULT: hand off every step that reads, edits, runs or sweeps (the supervisor's
- *     context is for judgement and synthesis), keep only what fits in one tool call inline, and size
- *     each leg's model from `models` — restated every turn at the prompt tail, where it wins the
- *     recency tug-of-war a top-of-prompt persona directive loses.
+ *   - THE STANDING DEFAULT, framed as the supervisor's ROLE: it holds the objective, the plan and the
+ *     judgement, and a leg's transcript never enters its context, so anything simple or mechanical
+ *     (reads, edits, runs, sweeps) goes to a leg while it keeps the task in view; what fits in one
+ *     tool call stays inline; each leg's model is sized from `models`. Restated every turn at the
+ *     prompt tail, where it wins the recency tug-of-war a top-of-prompt persona directive loses.
  *
  * Pure module (no Pi imports). The caller (extension.ts) decides WHEN a brief applies
  * (capability gating, persona state); this module only renders.
@@ -184,7 +185,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const council = input.council !== false;
 	const methods = council ? ` Convene \`council\` by problem class (${DECISION_CLASSES}).` : "";
 	const flowHint = input.flows.length > 0 ? " A shape an installed flow already encodes → `flow`." : "";
-	const inlineRule = "Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis.";
+	const inlineRule = "Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several.";
 	const inline = council ? `${inlineRule} A decision a council was convened on is its ruling's, not yours.` : inlineRule;
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.background
@@ -204,7 +205,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `Hand off by default: your context is for judgement and synthesis; every step that reads files, edits, runs commands or sweeps a surface is a leg's work (a leg's transcript never enters your context). Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${MODEL_SIZING} ${minimum}`
+			? `You are the supervisor: you hold the objective, the plan and the judgement, and a leg's transcript never enters your context. So anything simple or mechanical — reading files, editing, running commands, sweeping a surface — goes to a leg while you keep the task in view. Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${MODEL_SIZING} ${minimum}`
 			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }). Give each leg a \`model\` of your provider (\`models\`, ★ = yours) sized to its task.`,
 	);
 	return lines.join("\n");

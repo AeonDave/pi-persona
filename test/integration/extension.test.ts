@@ -2133,14 +2133,14 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	// discovery), but no standing hand-off mandate — that needs an active persona.
 	const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(bare.systemPrompt, /\[pi-persona\] Sub-agents:/, "no persona ⇒ discovery brief");
-	assert.doesNotMatch(bare.systemPrompt, /Hand off by default/i, "no persona ⇒ no standing mandate");
+	assert.doesNotMatch(bare.systemPrompt, /You are the supervisor: you hold the objective/, "no persona ⇒ no standing mandate");
 
 	await m.cmd("persona", "dev", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
 	assert.match(injected.systemPrompt, /You are Dev: the engineer/);
 	// An active persona upgrades the soft discovery brief to the STANDING hand-off default.
-	assert.match(injected.systemPrompt, /Hand off by default/i, "active persona ⇒ standing mandate");
+	assert.match(injected.systemPrompt, /You are the supervisor: you hold the objective/, "active persona ⇒ standing mandate");
 });
 
 test("the brief teaches council and flow only to a persona that can call them", async () => {
@@ -2160,7 +2160,7 @@ test("the brief teaches council and flow only to a persona that can call them", 
 	assert.match(full, /Flows \(run with `flow`\)[\s\S]*qa-brief/);
 	await m.cmd("persona", "no-methods", ctx);
 	const limited = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
-	assert.match(limited, /Hand off by default/);
+	assert.match(limited, /You are the supervisor: you hold the objective/);
 	assert.doesNotMatch(limited, /by problem class|contested fork|qa-brief|Flows \(run with/, "no method is taught that the capability gate would refuse");
 });
 
@@ -2265,8 +2265,8 @@ test("delegate has no sync/async flags: an interactive session ALWAYS background
 	assert.doesNotMatch(headless.delegate.description, /\b(?:a?sync)\b|intercom wait/i);
 	assert.match(headless.delegate.description, /NEVER sleep, poll, or arm a `timer`/);
 	assert.match(headless.delegate.description, /end your turn/i);
-	assert.match(headless.delegate.description, /your default move for every step that reads files, edits, runs commands or sweeps a surface — keep inline only what fits in one tool call\./);
-	assert.doesNotMatch(headless.delegate.description, /independent, heavy, or parallel parts/, "the parallelism-only framing is gone");
+	assert.match(headless.delegate.description, /^Delegate work to sub-agents — you hold the objective and the plan; anything simple or mechanical that takes more than one tool call goes to a leg\./);
+	assert.doesNotMatch(headless.delegate.description, /independent, heavy, or parallel parts|your default move/, "the parallelism-only framing is gone");
 	// Nothing drains a follow-up after a `pi -p` turn: every headless call returns its result inline,
 	// even from a model that still sends the retired flag.
 	for (const [n, legacy] of [{}, { async: true }].entries()) {
