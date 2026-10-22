@@ -300,6 +300,8 @@ function hookedHarness(opts: { startThrows?: boolean; startErrorsSync?: boolean;
 	const armed: string[] = [];
 	const removed: string[] = [];
 	const events: MonitorEvent[] = [];
+	/** Every hook, in the order it fired: the three arrays above cannot show relative order. */
+	const log: string[] = [];
 	const processes: FakeProcess[] = [];
 	let now = 1_000_000;
 	const timers = new Map<number, { fn: () => void; at: number }>();
@@ -320,11 +322,20 @@ function hookedHarness(opts: { startThrows?: boolean; startErrorsSync?: boolean;
 			if (opts.finishesSync) handlers.onExit(0);
 			return { stop: () => process.stopped++ };
 		},
-		onEvent: (event) => events.push(event),
-		onArmed: (entry) => armed.push(entry.id),
-		onRemoved: (entry) => removed.push(entry.id),
+		onEvent: (event) => {
+			events.push(event);
+			log.push(`event:${event.id}:${event.kind}:${event.terminal}`);
+		},
+		onArmed: (entry) => {
+			armed.push(entry.id);
+			log.push(`armed:${entry.id}`);
+		},
+		onRemoved: (entry) => {
+			removed.push(entry.id);
+			log.push(`removed:${entry.id}`);
+		},
 	});
-	return { manager, armed, removed, events, processes, advance: (ms: number) => { now += ms; for (const [h, t] of [...timers.entries()]) if (t.at <= now) { timers.delete(h); t.fn(); } } };
+	return { manager, armed, removed, events, log, processes, advance: (ms: number) => { now += ms; for (const [h, t] of [...timers.entries()]) if (t.at <= now) { timers.delete(h); t.fn(); } } };
 }
 
 test("every admitted monitor is announced once and ends with exactly one of: a terminal event, or onRemoved", () => {
@@ -354,6 +365,11 @@ test("every admitted monitor is announced once and ends with exactly one of: a t
 	assert.deepEqual(h.removed, ["monitor-1", "monitor-4"], "cancelAll announces each live monitor it dropped");
 	h.manager.cancelAll();
 	assert.deepEqual(h.removed, ["monitor-1", "monitor-4"]);
+
+	// Order, not just membership: a row must exist (armed) before anything settles or removes it.
+	const at = (entry: string): number => h.log.indexOf(entry);
+	assert.ok(at("armed:monitor-1") >= 0 && at("armed:monitor-1") < at("removed:monitor-1"), "armed precedes the removal");
+	assert.ok(at("armed:monitor-2") >= 0 && at("armed:monitor-2") < at("event:monitor-2:exit:true"), "armed precedes the terminal event");
 });
 
 test("a start that throws, or fails synchronously, is announced as armed then removed, so no row is orphaned", () => {
@@ -362,12 +378,14 @@ test("a start that throws, or fails synchronously, is announced as armed then re
 	assert.deepEqual(thrown.armed, ["monitor-1"]);
 	assert.deepEqual(thrown.removed, ["monitor-1"]);
 	assert.deepEqual(thrown.events, []);
+	assert.deepEqual(thrown.log, ["armed:monitor-1", "removed:monitor-1"], "armed THEN removed, in that order");
 
 	const errored = hookedHarness({ startErrorsSync: true });
 	assert.equal(errored.manager.arm(spec()).ok, false);
 	assert.deepEqual(errored.armed, ["monitor-1"]);
 	assert.deepEqual(errored.removed, ["monitor-1"]);
 	assert.deepEqual(errored.events, []);
+	assert.deepEqual(errored.log, ["armed:monitor-1", "removed:monitor-1"], "armed THEN removed, in that order");
 
 	// A process that finishes before start() returns: the terminal event already settled it, so the
 	// observer must see armed THEN the terminal event, and never a removal on top.
@@ -376,4 +394,5 @@ test("a start that throws, or fails synchronously, is announced as armed then re
 	assert.deepEqual(sync.armed, ["monitor-1"]);
 	assert.deepEqual(sync.events.map((e) => `${e.id}:${e.kind}:${e.terminal}`), ["monitor-1:exit:true"]);
 	assert.deepEqual(sync.removed, []);
+	assert.deepEqual(sync.log, ["armed:monitor-1", "event:monitor-1:exit:true"], "armed THEN the terminal event, in that order");
 });

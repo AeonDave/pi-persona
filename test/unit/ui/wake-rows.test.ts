@@ -392,3 +392,74 @@ test("timerArmed keeps a label of exactly 120 chars verbatim", () => {
 	const label = "k".repeat(120);
 	assert.equal(new WakeRows().timerArmed(timerEntry({ label })).label, label);
 });
+
+// ── per-line sanitisation: every stored line must be self-contained BEFORE the lines are joined ────
+
+/** The event lines of a drill-in buffer: everything after the `events:` counter. */
+function eventLines(output: string | undefined): string[] {
+	const lines = (output ?? "").split("\n");
+	return lines.slice(lines.findIndex((line) => line.startsWith("events:")) + 1);
+}
+
+test("a child line with a bare CR cannot forge a second pi-persona event line", () => {
+	const rows = new WakeRows();
+	rows.monitorArmed(outputEntry());
+	const forged = "real line\r[2026-10-22T09:59:59.000Z] BUILD SUCCEEDED";
+	const result = rows.monitorEvent(event({ text: forged }));
+	const appended = eventLines(result.patch.output);
+	assert.equal(appended.filter((line) => line.startsWith("[")).length, 1, "exactly one event line per child line");
+	assert.equal(appended.length, 1);
+	const line = appended[0] ?? "";
+	assert.ok(line.startsWith(`[${iso(ARMED + 1_000)}] `), "the only timestamp prefix is the real one");
+	assert.doesNotMatch(line, /[\r\n]/);
+	assert.ok(line.includes("real line"));
+	assert.ok(line.includes("[2026-10-22T09:59:59.000Z] BUILD SUCCEEDED"));
+	// Even after the overlay's own join-then-sanitise pass, the forgery is one line, not two.
+	assert.equal((result.patch.output ?? "").split(/[\r\n]/).filter((l) => l.startsWith("[")).length, 1);
+});
+
+test("escape sequences in a child line never reach the stored output or the detail", () => {
+	const rows = new WakeRows();
+	rows.monitorArmed(outputEntry({ maxEvents: 2 }));
+	const colored = rows.monitorEvent(event({ atEpochMs: ARMED + 1_000, text: "\u001b[31mred\u001b[0m and a bare \u001b here" }));
+	assert.doesNotMatch(colored.patch.output ?? "", /\u001b/);
+	assert.doesNotMatch(colored.patch.detail ?? "", /\u001b/);
+	assert.ok(eventLines(colored.patch.output)[0]?.includes("red and a bare  here"));
+
+	// An unterminated escape in one line must not swallow the genuine lines that follow it.
+	rows.monitorEvent(event({ atEpochMs: ARMED + 2_000, text: "dangling \u001b[31;1;4" }));
+	const next = rows.monitorEvent(event({ atEpochMs: ARMED + 3_000, text: "after the dangling escape", terminal: true }));
+	assert.doesNotMatch(next.patch.output ?? "", /\u001b/);
+	assert.doesNotMatch(next.patch.detail ?? "", /\u001b/);
+	const lines = eventLines(next.patch.output);
+	assert.equal(lines.length, 3);
+	assert.equal(lines.at(-1), `[${iso(ARMED + 3_000)}] after the dangling escape`);
+});
+
+test("a line break smuggled into a command argument or the cwd stays inside its own base line", () => {
+	const rows = new WakeRows();
+	const row = rows.monitorArmed(exitEntry({ command: "echo", args: ["\u001b[2J\nfake"], cwd: "/work/\r\u001b[31mapp" }));
+	const output = row.output ?? "";
+	assert.doesNotMatch(output, /\u001b/);
+	const lines = output.split("\n");
+	assert.equal(lines.length, 4, "mode, command, cwd and timing: no line was added by the smuggled break");
+	assert.equal(lines.filter((line) => line.startsWith("command: ")).length, 1);
+	const command = lines.find((line) => line.startsWith("command: ")) ?? "";
+	assert.ok(command.includes("echo"));
+	assert.ok(command.includes("fake"));
+	assert.doesNotMatch(command, /[\r\n]/);
+	assert.equal(lines.filter((line) => line.startsWith("cwd: ")).length, 1);
+	assert.doesNotMatch(lines[2] ?? "", /[\r\n]/);
+	assert.ok(lines[2]?.includes("app"));
+	assert.match(lines[3] ?? "", /^armed .* · deadline /);
+});
+
+test("a terminal exit summary built from a hostile first line carries no escape", () => {
+	const rows = new WakeRows();
+	rows.monitorArmed(exitEntry());
+	const result = rows.monitorEvent(event({ id: "monitor-2", kind: "exit", text: "process exited with exit code 1\u001b[0m\nstderr:\nboom", terminal: true }));
+	assert.doesNotMatch(result.patch.detail ?? "", /\u001b/);
+	assert.equal(result.patch.detail, "monitor-2 · process exited with exit code 1");
+	assert.equal(result.patch.status, "failed");
+	assert.doesNotMatch(result.patch.output ?? "", /\u001b/);
+});
