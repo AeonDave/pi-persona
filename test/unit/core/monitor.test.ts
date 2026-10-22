@@ -293,3 +293,87 @@ test("a synchronous start error rejects arm without queuing a duplicate error wa
 	assert.equal(stopped, 1);
 	assert.deepEqual(events, []);
 });
+
+// ── admission/removal hooks: the seam the agent tree's monitor rows hang on ──────────────────────
+
+function hookedHarness(opts: { startThrows?: boolean; startErrorsSync?: boolean; finishesSync?: boolean } = {}) {
+	const armed: string[] = [];
+	const removed: string[] = [];
+	const events: MonitorEvent[] = [];
+	const processes: FakeProcess[] = [];
+	let now = 1_000_000;
+	const timers = new Map<number, { fn: () => void; at: number }>();
+	let nextHandle = 0;
+	const manager = new MonitorManager({
+		now: () => now,
+		setTimer: (fn, ms) => {
+			const handle = nextHandle++;
+			timers.set(handle, { fn, at: now + ms });
+			return handle;
+		},
+		clearTimer: (handle) => timers.delete(handle as number),
+		start: (_spec, handlers) => {
+			if (opts.startThrows) throw new Error("spawn exploded");
+			const process: FakeProcess = { handlers, stopped: 0 };
+			processes.push(process);
+			if (opts.startErrorsSync) handlers.onError(new Error("ENOENT"));
+			if (opts.finishesSync) handlers.onExit(0);
+			return { stop: () => process.stopped++ };
+		},
+		onEvent: (event) => events.push(event),
+		onArmed: (entry) => armed.push(entry.id),
+		onRemoved: (entry) => removed.push(entry.id),
+	});
+	return { manager, armed, removed, events, processes, advance: (ms: number) => { now += ms; for (const [h, t] of [...timers.entries()]) if (t.at <= now) { timers.delete(h); t.fn(); } } };
+}
+
+test("every admitted monitor is announced once and ends with exactly one of: a terminal event, or onRemoved", () => {
+	const h = hookedHarness();
+	assert.equal(h.manager.arm(spec({ label: "" })).ok, false, "a rejected spec is never announced");
+	assert.deepEqual(h.armed, []);
+	h.manager.arm(spec({ label: "cancelled by hand" }));
+	h.manager.arm(spec({ label: "exits", mode: "exit" }));
+	h.manager.arm(spec({ label: "times out" }));
+	h.manager.arm(spec({ label: "cancelled in bulk", timeoutMs: 60 * 60 * 1_000 }));
+	assert.deepEqual(h.armed, ["monitor-1", "monitor-2", "monitor-3", "monitor-4"]);
+
+	assert.equal(h.manager.cancel("monitor-1"), true);
+	assert.deepEqual(h.removed, ["monitor-1"], "an explicit cancel is a silent removal");
+	assert.equal(h.manager.cancel("monitor-1"), false);
+	assert.deepEqual(h.removed, ["monitor-1"], "…announced once");
+
+	h.processes[1]!.handlers.onExit(0);
+	assert.equal(h.events.filter((e) => e.terminal).map((e) => e.id).join(), "monitor-2");
+	assert.deepEqual(h.removed, ["monitor-1"], "a terminal event is NOT also a removal: the observer settles the row from the event");
+
+	h.advance(10 * 60 * 1_000);
+	assert.deepEqual(h.events.filter((e) => e.terminal && e.kind === "timeout").map((e) => e.id), ["monitor-3"]);
+	assert.deepEqual(h.removed, ["monitor-1"]);
+
+	h.manager.cancelAll();
+	assert.deepEqual(h.removed, ["monitor-1", "monitor-4"], "cancelAll announces each live monitor it dropped");
+	h.manager.cancelAll();
+	assert.deepEqual(h.removed, ["monitor-1", "monitor-4"]);
+});
+
+test("a start that throws, or fails synchronously, is announced as armed then removed, so no row is orphaned", () => {
+	const thrown = hookedHarness({ startThrows: true });
+	assert.equal(thrown.manager.arm(spec()).ok, false);
+	assert.deepEqual(thrown.armed, ["monitor-1"]);
+	assert.deepEqual(thrown.removed, ["monitor-1"]);
+	assert.deepEqual(thrown.events, []);
+
+	const errored = hookedHarness({ startErrorsSync: true });
+	assert.equal(errored.manager.arm(spec()).ok, false);
+	assert.deepEqual(errored.armed, ["monitor-1"]);
+	assert.deepEqual(errored.removed, ["monitor-1"]);
+	assert.deepEqual(errored.events, []);
+
+	// A process that finishes before start() returns: the terminal event already settled it, so the
+	// observer must see armed THEN the terminal event, and never a removal on top.
+	const sync = hookedHarness({ finishesSync: true });
+	assert.equal(sync.manager.arm(spec({ mode: "exit" })).ok, true);
+	assert.deepEqual(sync.armed, ["monitor-1"]);
+	assert.deepEqual(sync.events.map((e) => `${e.id}:${e.kind}:${e.terminal}`), ["monitor-1:exit:true"]);
+	assert.deepEqual(sync.removed, []);
+});

@@ -55,6 +55,12 @@ export interface MonitorManagerDeps {
 	clearTimer: (handle: unknown) => void;
 	start: (spec: MonitorSpec, handlers: MonitorProcessHandlers) => MonitorProcess;
 	onEvent: (event: MonitorEvent) => void;
+	/** Called once per admitted monitor, BEFORE its process starts (never for a rejected spec).
+	 *  Every announced monitor later reaches exactly one of: a terminal `onEvent`, or `onRemoved`. */
+	onArmed?: (entry: MonitorEntry) => void;
+	/** Called once per monitor dropped WITHOUT a wake event: `cancel`, `cancelAll`, or a start that
+	 *  failed before it ran. A terminal event is never followed by this. */
+	onRemoved?: (entry: MonitorEntry) => void;
 }
 
 export type MonitorArmResult =
@@ -169,6 +175,7 @@ export class MonitorManager {
 			lineLength: 0,
 		};
 		this.monitors.set(id, active);
+		this.deps.onArmed?.(copyEntry(entry));
 
 		const handlers: MonitorProcessHandlers = {
 			onStdout: (chunk) => this.receiveStdout(id, chunk),
@@ -411,5 +418,6 @@ export class MonitorManager {
 		} catch {
 			/* best effort; cancellation remains terminal */
 		}
+		this.deps.onRemoved?.(copyEntry(active.entry));
 	}
 }
