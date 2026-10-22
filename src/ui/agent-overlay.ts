@@ -223,11 +223,14 @@ export class AgentOverlay extends Container {
 	 * (stop) and `s` (steer) onto a *different* agent whenever an earlier sibling went
 	 * away. When the aimed-at agent is the one that vanishes, fall back to the head of
 	 * the list, where the ▸ marker visibly shows the user their target changed — and
-	 * record that the aim was lost, for the directed keys (see `aimedLeaf`).
+	 * record that the aim was lost, for the directed keys (see `aimedLeaf`). The (re-)anchor
+	 * prefers an agent row: a monitor or timer that merely happens to be listed first must not
+	 * inherit the marker, or the next `x` could cancel a two-hour watch. A wake row takes it only
+	 * when no agent is left.
 	 */
 	private selectedLeaf(leaves: FlatRow[]): FlatRow | undefined {
 		const anchored = this.selectedId !== undefined ? leaves.find((r) => r.node.id === this.selectedId) : undefined;
-		const leaf = anchored ?? leaves[0];
+		const leaf = anchored ?? leaves.find((r) => !isWakeSource(r.node)) ?? leaves[0];
 		if (this.selectedId !== undefined && anchored === undefined && leaf !== undefined) this.aimLost = true;
 		this.selectedId = leaf?.node.id;
 		return leaf;
@@ -373,8 +376,11 @@ export class AgentOverlay extends Container {
 			return;
 		}
 		const live = node.status === "running";
+		// A wake source is armed, not a live agent: it has no steer handle, so the agent-only "● live"
+		// badge and the steer-unavailable hint below would both be wrong for it.
+		const wake = isWakeSource(node);
 		this.addChild(
-			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", "  ● live") : ""}`, 1, 0),
+			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", wake ? "  ● armed" : "  ● live") : ""}`, 1, 0),
 		);
 		if (node.detail) this.addChild(new Text(t.fg("dim", safeInline(node.detail)), 1, 0));
 		this.addChild(new Spacer(1));
@@ -407,7 +413,7 @@ export class AgentOverlay extends Container {
 		} else {
 			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
 			this.renderNotice();
-			if (live && !steerable) {
+			if (live && !steerable && !wake) {
 				this.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
 			}
 		}

@@ -191,14 +191,41 @@ export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): s
 	return lines;
 }
 
+/** One digest line for the running wake sources (monitors, timers) that fell below the summary
+ *  fold: counts by kind ("◉ 1 monitor · ⏰ 2 timers"), plus the countdown to the soonest finite
+ *  `dueAt` when a clock is given. A monitor armed after a fan-out would otherwise hide behind the
+ *  "… +N more" line — exactly the "armed but nothing visible" case wake rows exist to fix. Pure. */
+function wakeDigestLine(hidden: readonly AgentNode[], now: number | undefined): string {
+	const monitors = hidden.filter((node) => node.kind === "monitor").length;
+	const timers = hidden.filter((node) => node.kind === "timer").length;
+	const parts: string[] = [];
+	if (monitors > 0) parts.push(`${nodeGlyph({ status: "running", kind: "monitor" })} ${monitors} monitor${monitors === 1 ? "" : "s"}`);
+	if (timers > 0) parts.push(`${nodeGlyph({ status: "running", kind: "timer" })} ${timers} timer${timers === 1 ? "" : "s"}`);
+	if (now !== undefined) {
+		const due = hidden.map((node) => node.dueAt).filter((at): at is number => at !== undefined && Number.isFinite(at));
+		if (due.length > 0) {
+			const left = Math.min(...due) - now;
+			parts.push(left > 0 ? `next due in ${formatDuration(left)}` : "next due now");
+		}
+	}
+	return parts.join(" · ");
+}
+
 /**
  * Bounded above-editor digest. Large fan-outs belong in the scrollable F9
  * overlay; they must not push the editor and conversation off the screen.
+ *
+ * Below the fold, two kinds of row stay visible as one line each, because an operator must not
+ * have to open F9 to learn them: failures (`✗ N failed: …`) and RUNNING wake sources (`◉ 1 monitor
+ * · ⏰ 2 timers · next due in 4m 12s`). The layout when overflowing is
+ * `[...rows, failureLine?, wakeDigest?, overflowLine]`, every line inside `maxRows`; when the budget
+ * cannot hold them all the lowest-priority line goes first (failure > wake digest > overflow).
  */
 export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}): string[] {
 	const rows = renderAgentTree(nodes, opts);
 	const limit = Math.max(1, Math.floor(maxRows));
 	if (rows.length <= limit) return rows;
+	let failureLine: string | undefined;
 	const failed = nodes.filter((node) => node.status === "failed");
 	if (failed.length > 0) {
 		const names = failed.slice(0, 2).map((node) => {
@@ -207,20 +234,26 @@ export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: Re
 			return detail ? `${label} (${detail})` : label;
 		});
 		const extra = failed.length - names.length;
-		const failureLine = `✗ ${failed.length} failed: ${names.join(", ")}${extra > 0 ? `, +${extra} more` : ""}`;
-		if (limit === 1) return [failureLine];
-		const visibleCount = Math.max(0, limit - 2);
-		return [
-			...rows.slice(0, visibleCount),
-			failureLine,
-			`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`,
-		];
+		failureLine = `✗ ${failed.length} failed: ${names.join(", ")}${extra > 0 ? `, +${extra} more` : ""}`;
 	}
-	const visibleCount = Math.max(0, limit - 1);
-	return [
-		...rows.slice(0, visibleCount),
+	// `flattenTree(nodes)[i]` is the node behind `rows[i]`: `renderAgentTree` and `flattenTree` walk the
+	// same parent→children order, so a row's flat index doubles as its position in the rendered list.
+	const flat = flattenTree(nodes);
+	const hiddenWake = (from: number): AgentNode[] =>
+		flat.slice(from).map((row) => row.node).filter((node) => isWakeSource(node) && node.status === "running");
+	let visibleCount = Math.max(0, limit - (failureLine !== undefined ? 2 : 1));
+	let hidden = hiddenWake(visibleCount);
+	if (hidden.length > 0) {
+		// The digest takes a slot of its own; one fewer visible row can only hide more wake rows.
+		visibleCount = Math.max(0, visibleCount - 1);
+		hidden = hiddenWake(visibleCount);
+	}
+	const tail = [
+		...(failureLine !== undefined ? [failureLine] : []),
+		...(hidden.length > 0 ? [wakeDigestLine(hidden, opts.now)] : []),
 		`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`,
 	];
+	return [...rows.slice(0, visibleCount), ...tail.slice(0, Math.max(0, limit - visibleCount))];
 }
 
 export interface AddNodeInput {
