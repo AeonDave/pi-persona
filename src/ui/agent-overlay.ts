@@ -23,7 +23,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, flattenTree, GLYPH, runningAnnotation } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, flattenTree, isWakeSource, nodeGlyph, runningAnnotation } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
@@ -83,7 +83,7 @@ export function composeAgentRow(input: AgentRowInput): string {
 	const detail = detailMax > 0 ? safeInline(node.detail ?? "", detailMax) : "";
 	const detailText = detail ? t.fg("dim", `  ${detail}`) : "";
 
-	const labelLine = `${indent}${GLYPH[node.status]} ${label}`;
+	const labelLine = `${indent}${nodeGlyph(node)} ${label}`;
 	const prefixed = selected ? t.fg("accent", `▸ ${labelLine}`) : `  ${labelLine}`;
 	let body = `${prefixed}${detailText}`;
 	if (visibleWidth(body) > bodyMax) body = truncateToWidth(body, bodyMax, "");
@@ -374,7 +374,7 @@ export class AgentOverlay extends Container {
 		}
 		const live = node.status === "running";
 		this.addChild(
-			new Text(`${GLYPH[node.status]} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", "  ● live") : ""}`, 1, 0),
+			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", "  ● live") : ""}`, 1, 0),
 		);
 		if (node.detail) this.addChild(new Text(t.fg("dim", safeInline(node.detail)), 1, 0));
 		this.addChild(new Spacer(1));
@@ -502,9 +502,12 @@ export class AgentOverlay extends Container {
 		return node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
 	}
 
-	/** The agents `X` would stop: every leaf that `x` could stop. Shared by the hint and the key. */
+	/** The agents `X` would stop: every leaf that `x` could stop, wake sources excluded. `X` means
+	 *  "stop every agent"; a monitor's job (it may be a two-hour batch) or a timer's alarm is cancelled
+	 *  only by an explicit `x` on its own row. One list feeds the hint count, the confirmation prompt
+	 *  and the bulk stop, so the three always agree. */
 	private stoppableIds(snap: AgentNode[] = this.tree.snapshot()): string[] {
-		return this.leafRows(snap).filter((r) => this.canStopNode(r.node)).map((r) => r.node.id);
+		return this.leafRows(snap).filter((r) => !isWakeSource(r.node) && this.canStopNode(r.node)).map((r) => r.node.id);
 	}
 
 	/** The trailing "x stop"/"X stop all"/"s steer" hint fragment for an action line — the list's
