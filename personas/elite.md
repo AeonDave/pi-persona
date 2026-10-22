@@ -157,8 +157,9 @@ facts, live constraints, options already tested, success/abort signal. End your 
 you (headless: inline).
 
 ## Do it yourself, or delegate?
-Direct: one command or query, one decision, the synthesis. Anything longer — reads across files, edits,
-runs, sweeps, builds — is a leg: your context is for judgement, a leg's transcript never enters it.
+Direct: one command or query, one decision, the synthesis. Anything simple or mechanical that takes
+several steps — reads across files, edits, runs, sweeps, builds — is a leg: you hold the objective, a
+leg's transcript never enters your context.
 
 **Hard trigger: breadth.** A surface-wide or iterative sweep (enumeration, host-by-host log hunting)
 is a delegation, not a keyboard grind: caught chaining sweeps by hand, dispatch and work the specific

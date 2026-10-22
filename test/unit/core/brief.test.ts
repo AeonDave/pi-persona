@@ -136,7 +136,7 @@ test("no flows → no Flows block", () => {
 
 test("standing brief states the hand-off default and a minimum call using operator", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true });
-	assert.match(brief ?? "", /Hand off by default/i);
+	assert.match(brief ?? "", /You are the supervisor: you hold the objective, the plan and the judgement/);
 	assert.match(brief ?? "", /delegate\(\{ agent: "operator"/);
 	assert.match(brief ?? "", /council/);
 	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT), "standing brief must reuse the shared call-sign invitation");
@@ -145,12 +145,13 @@ test("standing brief states the hand-off default and a minimum call using operat
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas/i);
 });
 
-test("the standing default is about CONTEXT: reads, edits, runs and sweeps are a leg's work, and only one tool call stays inline", () => {
+test("the standing default is the supervisor's ROLE: it holds the objective, anything simple or mechanical goes to a leg, one tool call stays inline", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
-	assert.match(brief, /Hand off by default: your context is for judgement and synthesis; every step that reads files, edits, runs commands or sweeps a surface is a leg's work \(a leg's transcript never enters your context\)\./);
-	assert.match(brief, /Fan independent legs out in one `delegate` call \(they run in the background;/);
+	assert.match(brief, /You are the supervisor: you hold the objective, the plan and the judgement, and a leg's transcript never enters your context\. So anything simple or mechanical — reading files, editing, running commands, sweeping a surface — goes to a leg while you keep the task in view\. Fan independent legs out in one `delegate` call \(they run in the background;/);
+	assert.doesNotMatch(brief, /Hand off by default|your context is for judgement and synthesis/, "the first-round command framing is gone");
 	assert.doesNotMatch(brief, /independent, heavy, or parallel parts/, "the parallelism-only opening is gone");
-	assert.match(brief, /Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis\./);
+	assert.match(brief, /Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several\./);
+	assert.doesNotMatch(brief, /Keep inline only what fits/, "the 'only' phrasing is gone");
 	assert.doesNotMatch(brief, /trivial single-step/i, "the old inline rule invited doing things by hand");
 	const sync = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: false }) ?? "";
 	assert.match(sync, /Fan independent legs out in one `delegate` call \(the call returns when they finish\)\./);
@@ -196,9 +197,9 @@ test("a persona that cannot call `council` is not taught problem classes; a conv
 	const without = buildDelegationBrief({ ...input, council: false }) ?? "";
 	assert.match(withCouncil, /convene `council` by problem class/i);
 	assert.doesNotMatch(without, /council|contested fork/, "no class line for a tool the persona cannot call");
-	assert.match(without, /Hand off by default/, "the delegate default is untouched");
-	assert.match(withCouncil, /Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis\. A decision a council was convened on is its ruling's, not yours\./);
-	assert.match(without, /Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis\./, "the inline rule survives without council");
+	assert.match(without, /You are the supervisor: you hold the objective/, "the delegate default is untouched");
+	assert.match(withCouncil, /Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several\. A decision a council was convened on is its ruling's, not yours\./);
+	assert.match(without, /Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several\./, "the inline rule survives without council");
 });
 
 test("runtime context guidance no longer treats operator-only async status as model context", () => {
@@ -265,7 +266,7 @@ test("without operator the example uses the first listed agent", () => {
 test("no persona → soft discovery line, no standing mandate", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: false, background: true });
 	assert.ok(brief);
-	assert.equal(/Hand off by default/i.test(brief ?? ""), false);
+	assert.equal(/You are the supervisor/.test(brief ?? ""), false);
 	assert.match(brief ?? "", /delegate/);
 });
 

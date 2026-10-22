@@ -71,13 +71,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
-- Make the supervisor delegate earlier and size its legs. The standing brief now frames the hand-off as a
-  context rule (every step that reads, edits, runs or sweeps is a leg's work; only what fits in one tool
-  call stays inline) and adds one sizing rule: call `models` once at the start and give every leg a `model`
-  of the supervisor's own provider, the lightest that can do the job. `dev`, `elite` and `swarm` carry the
-  same wording. The by-hand reminder lands sooner (3 substantive calls and ~1k tokens, was 5 and ~2k),
-  names four delegate targets (those the active persona's own prompt mentions first), and lists the
-  session provider's models (up to 10, nothing persisted). `models` marks the session model with `(you)`.
+- Frame the hand-off as the supervisor's role: it holds the objective, the plan and the judgement, and
+  anything simple or mechanical goes to a leg so its context stays on the task. The standing brief says
+  so (what fits in one tool call stays inline) and adds one sizing rule: call `models` once at the start
+  and give every leg a `model` of the supervisor's own provider, the lightest that can do the job.
+  `dev`, `elite` and `swarm` carry the same wording. The by-hand reminder lands sooner (3 substantive
+  calls and ~1k tokens, was 5 and ~2k), names four delegate targets (those the active persona's own
+  prompt mentions first), and lists the session provider's models (up to 10, nothing persisted).
+  `models` marks the session model with `(you)`.
 - Esc no longer aborts an interactive `council` or `flow`: stop it from f9 (`x` on its root row, `X`) or have the supervisor `intercom stop` the run.
   A mistyped council strategy or roster now fails in the completion follow-up instead of as an immediate
   tool error. Persona `council:` defaults and the pre-turn `orchestration:` path are unchanged;
