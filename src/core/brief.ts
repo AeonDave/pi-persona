@@ -7,9 +7,10 @@
  *   - DISCOVERY: the installed agents (name + clipped description), team rosters, and flows —
  *     regenerated from the live registry every turn, so it cannot desync the way hard-coded
  *     persona prose can, and it survives however much context the turn has burned.
- *   - THE STANDING DEFAULT: hand substantive work off by default, keep only trivial steps
- *     inline — restated every turn at the prompt tail, where it wins the recency tug-of-war
- *     a top-of-prompt persona directive loses.
+ *   - THE STANDING DEFAULT: hand off every step that reads, edits, runs or sweeps (the supervisor's
+ *     context is for judgement and synthesis), keep only what fits in one tool call inline, and size
+ *     each leg's model from `models` — restated every turn at the prompt tail, where it wins the
+ *     recency tug-of-war a top-of-prompt persona directive loses.
  *
  * Pure module (no Pi imports). The caller (extension.ts) decides WHEN a brief applies
  * (capability gating, persona state); this module only renders.
@@ -82,6 +83,10 @@ const DESC_CLIP = 96;
 /** Most agents/teams/flows listed by name; beyond this the brief says "+N more". */
 const MAX_LISTED = 16;
 const MAX_TOOL_NAMES = 6;
+/** The one model-sizing rule. No model names: the supervisor learns its provider's ids from `models`
+ *  (★ = its provider) and sizes each leg from them. */
+const MODEL_SIZING =
+	"Models: call `models` once at the start (★ = your provider) and give every leg a `model` of your provider sized to its task — the lightest that can do it under your supervision, your own only for work that needs your judgement; a leg without `model` runs on your own model.";
 /** Decision class -> council strategy (a test checks every name is a registered strategy). */
 const DECISION_CLASSES = "contested fork → magi; rival complete answers → judge; rival implementations → compete; N items → map; draft + critique → critic-loop";
 
@@ -179,9 +184,8 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const council = input.council !== false;
 	const methods = council ? ` Convene \`council\` by problem class (${DECISION_CLASSES}).` : "";
 	const flowHint = input.flows.length > 0 ? " A shape an installed flow already encodes → `flow`." : "";
-	const inline = council
-		? "Keep trivial single-step work and the final synthesis inline; a decision a council was convened on is its ruling's, not yours."
-		: "Keep only trivial single-step work, decisions, and the final synthesis inline.";
+	const inlineRule = "Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis.";
+	const inline = council ? `${inlineRule} A decision a council was convened on is its ruling's, not yours.` : inlineRule;
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.background
 		? `they run in the background; results arrive as a follow-up only after your turn ends (a fan-out's once, when its last leg settles) — do independent work meanwhile; ${END_TURN_NOTE}`
@@ -200,8 +204,8 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `Hand off by default: when a task has independent, heavy, or parallel parts, fan them out FIRST in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${minimum}`
-			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).`,
+			? `Hand off by default: your context is for judgement and synthesis; every step that reads files, edits, runs commands or sweeps a surface is a leg's work (a leg's transcript never enters your context). Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${MODEL_SIZING} ${minimum}`
+			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }). Give each leg a \`model\` of your provider (\`models\`, ★ = yours) sized to its task.`,
 	);
 	return lines.join("\n");
 }

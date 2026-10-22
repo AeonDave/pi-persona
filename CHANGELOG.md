@@ -71,6 +71,13 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
+- Make the supervisor delegate earlier and size its legs. The standing brief now frames the hand-off as a
+  context rule (every step that reads, edits, runs or sweeps is a leg's work; only what fits in one tool
+  call stays inline) and adds one sizing rule: call `models` once at the start and give every leg a `model`
+  of the supervisor's own provider, the lightest that can do the job. `dev`, `elite` and `swarm` carry the
+  same wording. The by-hand reminder lands sooner (3 substantive calls and ~1k tokens, was 5 and ~2k),
+  names four delegate targets (those the active persona's own prompt mentions first), and lists the
+  session provider's models (up to 10, nothing persisted). `models` marks the session model with `(you)`.
 - Esc no longer aborts an interactive `council` or `flow`: stop it from f9 (`x` on its root row, `X`) or have the supervisor `intercom stop` the run.
   A mistyped council strategy or roster now fails in the completion follow-up instead of as an immediate
   tool error. Persona `council:` defaults and the pre-turn `orchestration:` path are unchanged;
@@ -81,7 +88,7 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   killed and the model is not woken. A council or flow run is credited per leg. The idle-timeout failure
   now says to raise the leg's `timeoutMs`.
 - Rewrite the eight bundled personas (`audit`, `dev`, `judge`, `magi`, `planner`, `researcher`, `swarm`,
-  `verify`) into one shape and size (1.2-2.2 KB bodies) and register their v1.17.1 copies as migratable.
+  `verify`) into one shape and size (1.2-2.5 KB bodies) and register their v1.17.1 copies as migratable.
   `swarm` declares `ownership` (`enforce` is opt-in), `audit` requires briefs, `verify` requires fresh verification, and
   `dev`/`planner` name real delegate targets instead of teams.
 - Show a tracked council/flow in peek by tokens only (no false "0 turns"), name the panel on council

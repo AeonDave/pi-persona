@@ -145,6 +145,33 @@ test("standing brief states the hand-off default and a minimum call using operat
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas/i);
 });
 
+test("the standing default is about CONTEXT: reads, edits, runs and sweeps are a leg's work, and only one tool call stays inline", () => {
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
+	assert.match(brief, /Hand off by default: your context is for judgement and synthesis; every step that reads files, edits, runs commands or sweeps a surface is a leg's work \(a leg's transcript never enters your context\)\./);
+	assert.match(brief, /Fan independent legs out in one `delegate` call \(they run in the background;/);
+	assert.doesNotMatch(brief, /independent, heavy, or parallel parts/, "the parallelism-only opening is gone");
+	assert.match(brief, /Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis\./);
+	assert.doesNotMatch(brief, /trivial single-step/i, "the old inline rule invited doing things by hand");
+	const sync = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: false }) ?? "";
+	assert.match(sync, /Fan independent legs out in one `delegate` call \(the call returns when they finish\)\./);
+});
+
+test("the standing brief gives ONE model-sizing sentence before the minimum call, with no model names", () => {
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
+	const sentence = "Models: call `models` once at the start (★ = your provider) and give every leg a `model` of your provider sized to its task — the lightest that can do it under your supervision, your own only for work that needs your judgement; a leg without `model` runs on your own model.";
+	assert.ok(brief.includes(sentence), "the sizing rule is carried verbatim");
+	assert.equal(brief.split(sentence).length - 1, 1, "stated exactly once");
+	assert.ok(brief.indexOf(sentence) < brief.indexOf("Minimum call:"), "the sizing rule precedes the minimum call");
+	assert.ok(brief.indexOf(sentence) > brief.indexOf("Name each leg yourself."), "…and follows the naming rule");
+	assert.doesNotMatch(brief, /\b(claude|gpt|glm|haiku|sonnet|opus|gemini|codex|z\.ai)\b/i, "no model or vendor name in the prompt");
+});
+
+test("the soft (no persona) line carries the sizing rule in short form", () => {
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: false, background: true }) ?? "";
+	assert.match(brief, /Give each leg a `model` of your provider \(`models`, ★ = yours\) sized to its task\./);
+	assert.doesNotMatch(brief, /call `models` once at the start/, "the full rule is the standing default's");
+});
+
 test("the standing brief maps decision classes to methods, and only names methods that exist", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [{ name: "deep-review" }], standing: true, background: true }) ?? "";
 	const line = brief.split("\n").find((l) => l.includes("contested fork")) ?? "";
@@ -170,8 +197,8 @@ test("a persona that cannot call `council` is not taught problem classes; a conv
 	assert.match(withCouncil, /convene `council` by problem class/i);
 	assert.doesNotMatch(without, /council|contested fork/, "no class line for a tool the persona cannot call");
 	assert.match(without, /Hand off by default/, "the delegate default is untouched");
-	assert.doesNotMatch(withCouncil, /Keep only trivial single-step work, decisions/);
-	assert.match(withCouncil, /a decision a council was convened on is its ruling's/);
+	assert.match(withCouncil, /Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis\. A decision a council was convened on is its ruling's, not yours\./);
+	assert.match(without, /Keep inline only what fits in one tool call: a decision, a one-line check, the final synthesis\./, "the inline rule survives without council");
 });
 
 test("runtime context guidance no longer treats operator-only async status as model context", () => {

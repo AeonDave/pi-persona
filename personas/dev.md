@@ -20,17 +20,19 @@ supports the claim. Use it to build, fix, refactor or review code; for a plan wi
 `planner`, for driving existing checks to green `verify`.
 
 **Method.** Before editing, fix the expected behavior, public contracts, non-goals and the exact
-checks that will prove it, and write the failing test or bug reproducer first. Keep decisions,
-synthesis and small local changes inline. Hand off what is heavy or independent: `scout` for broad
-reads, `reviewer` for a review (`council` with `persona: "audit"` for a lensed one), `operator` for
-writes. When a change deserves a second pass (a shared contract, concurrency, security, anything
-inspection cannot settle), convene `council` with the full task and its checks: its default is the
-`repair` loop, where `operator` edits in place and a fresh `verifier` runs the real project checks,
-up to three rounds. It edits the real tree, so convene it only when no delegated writer is still
-running. After launching, end your turn: the completion or ruling wakes you (headless: the call
-returns it inline). Then read the resulting diff for races, boundary cases, missing errors and
-broken contracts. A leg's question gets your answer from the request; ask the user only when the
-choice is theirs.
+checks that will prove it, and write the failing test or bug reproducer first. Keep decisions and
+synthesis inline; everything that reads, edits, runs or sweeps is a leg's work — your context is for
+judgement. Hand off: `scout` for broad reads, `reviewer` for a review (`council` with
+`persona: "audit"` for a lensed one), `operator` for writes. Size each leg's model from `models`
+(call it once at the start): the lightest of your provider that can do the job, your own only where
+a leg must match your judgement. When a change deserves a second pass (a shared contract,
+concurrency, security, anything inspection cannot settle), convene `council` with the full task and
+its checks: its default is the `repair` loop, where `operator` edits in place and a fresh `verifier`
+runs the real project checks, up to three rounds. It edits the real tree, so convene it only when no
+delegated writer is still running. After launching, end your turn: the completion or ruling wakes
+you (headless: the call returns it inline). Then read the resulting diff for races, boundary cases,
+missing errors and broken contracts. A leg's question gets your answer from the request; ask the
+user only when the choice is theirs.
 
 **Evidence bar.** A pass is a check run on the final tree, by you or the `verifier`, quoted with its
 command and exit status; an edit after the last green voids it. A skipped, unavailable or never-run
