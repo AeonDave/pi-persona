@@ -1,3 +1,4 @@
+import { stripTerminalControls } from "../core/fence.ts";
 import type { MonitorEntry, MonitorEvent } from "../core/monitor.ts";
 import type { TimerEntry } from "../core/timer.ts";
 import type { AddNodeInput, AgentNodePatch, AgentNodeStatus } from "./agent-tree.ts";
@@ -65,6 +66,20 @@ function firstLine(text: string): string {
 	return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
 
+/**
+ * One self-contained display line: terminal controls stripped, any line break that survives
+ * (`stripTerminalControls` maps a bare `\r` to `\n`) collapsed to a single visible marker.
+ *
+ * Done per stored line, NOT at render time, on purpose. `monitorOutput` joins every stored line
+ * into one buffer and the F9 overlay sanitises only that joined buffer, after the join. A child
+ * line carrying a bare `\r` would then render as two lines, the second able to pose as a genuine
+ * `[<iso>] …` event line (a forged event), and an unterminated escape in one line could swallow the
+ * genuine lines after it. Each line must already be inert before it is joined with its neighbours.
+ */
+function oneLine(text: string): string {
+	return stripTerminalControls(text).replace(/\n+/g, " ⏎ ").trim();
+}
+
 /** What a monitor remembers between its arming and its end. */
 interface MonitorState {
 	/** Description lines above the events counter (mode, command, cwd, timing). */
@@ -98,8 +113,8 @@ export class WakeRows {
 		const state: MonitorState = {
 			base: [
 				`${entry.id} · ${entry.mode} mode`,
-				clamp(`command: ${[entry.command, ...entry.args].join(" ")}`, COMMAND_LINE_MAX),
-				`cwd: ${entry.cwd}`,
+				clamp(oneLine(`command: ${[entry.command, ...entry.args].join(" ")}`), COMMAND_LINE_MAX),
+				oneLine(`cwd: ${entry.cwd}`),
 				`armed ${iso(entry.startedAtEpochMs)} · deadline ${iso(entry.expiresAtEpochMs)}`,
 			],
 			maxEvents: entry.maxEvents,
@@ -123,12 +138,12 @@ export class WakeRows {
 
 	monitorEvent(event: MonitorEvent): WakeRowEvent {
 		const state = this.monitors.get(event.id);
-		const head = firstLine(event.text);
+		const head = clamp(oneLine(firstLine(event.text)), EVENT_TEXT_MAX);
 		let observed = 1;
 		if (state) {
 			if (event.kind === "output") state.events += 1;
 			observed = state.events;
-			state.lines.push(`[${iso(event.atEpochMs)}] ${clamp(head, EVENT_TEXT_MAX)}`);
+			state.lines.push(`[${iso(event.atEpochMs)}] ${head}`);
 			if (state.lines.length > MAX_EVENT_LINES) state.lines.splice(0, state.lines.length - MAX_EVENT_LINES);
 		}
 		const max = state ? String(state.maxEvents) : "?";
