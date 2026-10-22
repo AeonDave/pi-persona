@@ -4913,6 +4913,33 @@ test("an active monitor is a row in the agent widget until it is cancelled", asy
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
 
+test("a non-terminal monitor event updates the row's k/N events detail", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
+	piPersona(m.pi);
+	const { ctx, widgets } = wakeWidgetCtx(tempDir("pi-persona-wake-monitor-event-"));
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as { execute: AnyFn };
+		const armed = await tool.execute(
+			"arm",
+			{ action: "arm", command: process.execPath, args: ["-e", "console.log('ready'); setInterval(() => {}, 1000)"], label: "watch output", mode: "output", maxEvents: 3, timeoutSeconds: 600 },
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.equal(armed.details.ok, true);
+		await waitUntil(
+			() => widgets["persona-agents"]?.some((line) => line.includes("◉ watch output") && line.includes("monitor-1 · output · 1/3 events")) ?? false,
+			"the monitor's row to count its first event",
+		);
+
+		const cancelled = await tool.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx);
+		assert.equal(cancelled.details.cancelled, true);
+		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled monitor to leave the widget");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
 test("a monitor that ends on its own leaves the widget", async () => {
 	const m = makeMockPi();
 	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
@@ -5011,6 +5038,10 @@ test("wake rows never reach telemetry", async () => {
 			},
 			"both wake rows in the widget",
 		);
+		// A second session_start with no shutdown between (resume / new session) re-seeds telemetry by replaying
+		// the tree: the armed rows are still in it and must be skipped by that replay too.
+		await m.fire("session_start", {}, ctx);
+		assert.ok(widgets["persona-agents"]?.some((line) => line.includes("wake-telemetry-timer")), "the rows survive the second session_start");
 		assert.equal((await timer.execute("cancel", { action: "cancel", id: "timer-1" }, undefined, undefined, ctx)).details.ok, true);
 		assert.equal((await monitor.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx)).details.cancelled, true);
 		await waitUntil(() => widgets["persona-agents"] === undefined, "both wake rows to leave the widget");

@@ -34,7 +34,7 @@ import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaConfigStore } from "../persona/config-store.ts";
 import { TELEMETRY_EVENT_NAME, type TelemetryEvent } from "../telemetry/contract.ts";
 import { TelemetryProducer, type TelemetryAgentInput } from "../telemetry/producer.ts";
-import type { AgentTree, AgentNode } from "../ui/agent-tree.ts";
+import { isWakeSource, type AgentTree, type AgentNode } from "../ui/agent-tree.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { ExocomInstall } from "../exocom/install.ts";
@@ -271,6 +271,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				// published — a session start that follows no teardown carries no stale projection.
 				h.lastAgentProjection.clear();
 				for (const node of h.agentTree.snapshot()) {
+					if (isWakeSource(node)) continue; // timer/monitor rows are not agents: no replay, no projection
 					h.lastAgentProjection.set(node.id, JSON.stringify(h.telemetryAgent(node)));
 					h.telemetry.publishAgentAdded(h.telemetryAgent(node));
 				}
