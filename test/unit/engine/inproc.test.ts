@@ -34,6 +34,7 @@ const agents: Record<string, AgentConfig> = {
 };
 const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
+const HOST_MODULE_ERROR = String.raw`Cannot find module 'C:\Pi\node_modules\@earendil-works\pi-coding-agent\dist\bundle\chunks\openai-responses-KCCCXI3B.js' imported from C:\Pi\node_modules\@earendil-works\pi-coding-agent\dist\bundle\chunks\chunk-66G7ITPS.js`;
 
 interface Spy {
 	aborted?: boolean;
@@ -591,6 +592,54 @@ test("inproc engine settles a PRE-aborted signal without building a session (no 
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /abort/);
 });
+
+for (const mode of ["stream", "throw"] as const) {
+	test(`inproc keeps a missing Pi host bundle chunk terminal with an actionable diagnostic (${mode})`, async () => {
+		const original = HOST_MODULE_ERROR;
+		const session = fakeSession([{
+			type: "message_end",
+			message: { role: "assistant", content: [], stopReason: "error", errorMessage: original },
+		}]);
+		if (mode === "throw") session.prompt = async () => { throw new Error(original); };
+		const engine = makeInProcessEngine({
+			resolveAgent,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			createSession: async () => session,
+		});
+		const result = await engine.run({ agent: "a", task: "probe", model: "stub/m" });
+		assert.equal(result.ok, false);
+		assert.equal(result.failureKind, "agent", "a local host module failure must never trigger model/provider recovery");
+		assert.equal(result.modelUsed, "stub/m");
+		assert.ok(result.error?.includes(original), "the original missing-module path and importer remain available");
+		assert.match(result.error ?? "", /local Pi host bundle/i);
+		assert.match(result.error ?? "", /updated in place/i);
+		assert.match(result.error ?? "", /fresh Pi process.*same provider\/model/i);
+		assert.match(result.error ?? "", /only if.*fresh process.*fails.*repair/i);
+	});
+}
+
+for (const cause of ["abort", "timeout"] as const) {
+	test(`inproc ${cause} takes precedence over a missing Pi host bundle chunk`, async () => {
+		const ac = new AbortController();
+		const session = fakeSession([{
+			type: "message_end",
+			message: { role: "assistant", content: [], stopReason: "error", errorMessage: HOST_MODULE_ERROR },
+		}]);
+		session.agent.waitForIdle = () => new Promise(() => {});
+		const engine = makeInProcessEngine({
+			resolveAgent,
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			timeoutMs: 40,
+			createSession: async () => session,
+		});
+		const result = await engine.run({ agent: "a", task: "probe" }, () => { if (cause === "abort") ac.abort(); }, ac.signal);
+		assert.equal(result.ok, false);
+		assert.equal(result.failureKind, cause);
+		assert.match(result.error ?? "", cause === "abort" ? /agent aborted/ : /agent timed out/);
+	});
+}
 
 test("inproc engine aborts a RUNNING session via signal → agent.abort() and a /abort/ error", async () => {
 	const spy: Spy = {};

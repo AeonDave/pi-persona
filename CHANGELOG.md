@@ -8,6 +8,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Added
 
+- Let an agent declare the area it alone writes with `writeSet` in its frontmatter (`research` declares
+  `[.research/]`): a write-capable `delegate` leg that names no `writeSet` inherits it, so a persona with
+  `requireDisjointWrites` no longer refuses a read-in-intent agent as an unknown writer and the supervisor
+  does not have to strip its tools. A leg's own `writeSet` still wins, and the field stays declarative.
+  The disjoint-ownership refusal now names each missing leg with the parameter to add (`writeSet`, or
+  `tools: ["read","grep","find","ls"]`) and the `concurrency: 1` alternative.
 - Show armed timers and active monitors as rows in the sticky agent widget and the F9 / `/agents` panel,
   beside sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` (an `output`
   monitor reads `k/N events` as they arrive) and `⏰ <label>  <id> · fires in <remaining>` (just
@@ -62,12 +68,28 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - Add the legacy seed digests for `elite` v1.12.2-v1.14.0, `swarm` v1.14.0-v1.14.2, the MAGI cores
   v1.11.0-v1.14.0, and v1.17.1 `dev`, `planner`, `researcher`, `verify`, `swarm`, `judge` and `magi`,
   with a release guard test that prints the missing row.
+- Add the `architect` agent: a read-only planner (`read`, `grep`, `find`, `ls`) for ONE change that
+  returns Goal, Non-goals, Steps (owner and acceptance check each), Risks and Open decisions, and
+  never edits. A new `design` team pairs it with `reviewer` as the `critic-loop` generator and critic.
+- Add a CORRECTNESS lens (logic, off-by-one, races, null handling, unhandled errors, broken invariants)
+  as the first member of the `review` team, so `audit`, `deep-review` and every `synthesize` panel
+  now run four lenses: correctness, security, performance and tests. A user copy of `teams.yaml`
+  (`~/.pi/agent/persona/teams.yaml` or project `.pi/teams.yaml`) keeps its own `review` roster, so add
+  the CORRECTNESS member there by hand; the new `design` team resolves from the builtin layer.
 
 ### Changed
 
 - Update the four Pi development SDK packages together to 1.3.0, TypeBox to 1.4.2 and the locked
   Node 22 typings to 22.20.5. Update the pinned setup-node, Scorecard, upload-artifact and CodeQL
   Actions to their reviewed upstream releases; keep the Pi 1.0.0 host floor and optional peers.
+- Frame the hand-off as the supervisor's role: it holds the objective, the plan and the judgement, and
+  anything simple or mechanical goes to a leg so its context stays on the task. The standing brief says
+  so (what fits in one tool call stays inline) and adds one sizing rule: call `models` once at the start
+  and give every leg a `model` of the supervisor's own provider, the lightest that can do the job.
+  `dev`, `elite` and `swarm` carry the same wording. The by-hand reminder lands sooner (3 substantive
+  calls and ~1k tokens, was 5 and ~2k), names four delegate targets (those the active persona's own
+  prompt mentions first), and lists the session provider's models (up to 10, nothing persisted).
+  `models` marks the session model with `(you)`.
 - Esc no longer aborts an interactive `council` or `flow`: stop it from f9 (`x` on its root row, `X`) or have the supervisor `intercom stop` the run.
   A mistyped council strategy or roster now fails in the completion follow-up instead of as an immediate
   tool error. Persona `council:` defaults and the pre-turn `orchestration:` path are unchanged;
@@ -78,7 +100,7 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   killed and the model is not woken. A council or flow run is credited per leg. The idle-timeout failure
   now says to raise the leg's `timeoutMs`.
 - Rewrite the eight bundled personas (`audit`, `dev`, `judge`, `magi`, `planner`, `researcher`, `swarm`,
-  `verify`) into one shape and size (1.2-2.2 KB bodies) and register their v1.17.1 copies as migratable.
+  `verify`) into one shape and size (1.2-2.5 KB bodies) and register their v1.17.1 copies as migratable.
   `swarm` declares `ownership` (`enforce` is opt-in), `audit` requires briefs, `verify` requires fresh verification, and
   `dev`/`planner` name real delegate targets instead of teams.
 - Show a tracked council/flow in peek by tokens only (no false "0 turns"), name the panel on council
@@ -106,8 +128,31 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - Clip a `timer` label longer than 120 characters (ending in `…`) instead of keeping it unbounded.
   The clipped label is what `timer list`, the arm receipt, the fire follow-up and the agent-tree row
   show.
+- Make `reviewer` the critic of plans and documents as well as code: a PLAN lens (a missing step, an
+  unverifiable claim, an unowned risk, a check that cannot prove its step) and a verdict rule that is
+  deliberately not strict, `LGTM` whenever nothing must-fix remains, with nits listed as optional.
+- Give `planner` a declared `council:` default, the `design` loop (`architect` drafts, `reviewer`
+  critiques, two rounds), and say so in its method; a fork evidence cannot settle still goes to
+  `council` with `strategy: "magi"`. Migrating a pristine v1.14.0-v1.17.1 `planner` seed now installs
+  the `architect` agent it needs.
+- Shorten the bundled prompts for less context per leg, keeping every rule and the pinned persona
+  structure: `dev`, `swarm`, `planner`, `researcher`, `audit`, `verify`, `magi` and `judge` now sit at
+  about 2.0-2.3 KB; `operator` (4.2 KB to 3.0 KB), `research`, `reviewer`, `verifier` and the MAGI cores
+  are tighter and say **BE BRIEF. BE CLEAR.** The two surrender markers and the runtime-scan sentence
+  in `operator` are unchanged.
 
 ### Fixed
+- Diagnose missing hashed Pi host bundle modules as local host failures on both engines, preserve
+  the original error and explain recovery in a fresh Pi process with the same provider/model.
+  These failures no longer trigger provider/model recovery; aborts and timeouts retain precedence.
+- Keep partial `synthesize` panels explicit: report failed or empty gatherers to the merger and
+  in the final output, headline and coverage metadata, so a missing review lens cannot look complete.
+- Normalize JSON-string `tasks` in the live wake smoke with the delegate tool's existing parser;
+  keep its three-scout, result-marker, single-wake and no-polling checks.
+- Keep read-only research fan-outs admissible when the agent declares a default `writeSet`:
+  only effective writers inherit that default; explicit caller ownership keeps its existing checks.
+- Keep model-sizing guidance consistent with the active persona's tool permissions and the host's
+  active tools; do not direct a supervisor to call an unavailable `models` tool.
 - Let stopping a background council or flow dismiss its initial model picker and release the run
   without saving partial or late selections. Serialize automatic model setup with checkpoint dialogs
   so concurrent runs cannot displace one another's prompts.

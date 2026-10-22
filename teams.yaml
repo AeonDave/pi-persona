@@ -4,14 +4,18 @@
 # not one .md per perspective). Referenced by a persona's `orchestration.roster` / `council.roster`.
 # Project/user copies override.
 
-# One `reviewer` agent, three complementary lenses — the role focuses each parallel pass
+# One `reviewer` agent, four complementary lenses — the role focuses each parallel pass
 # (skills load the rest). Add `model: <provider/id>` to a member for cross-model diversity.
 # Pin cheap models on WORKER members here; leave the SUPERVISOR on the session model (a weak
 # supervisor is the least able to act on its delegation reflex).
 review:
+  - { agent: reviewer, role: "Focus ONLY on the CORRECTNESS lens: wrong logic, off-by-one, races, null/undefined, unhandled errors, broken invariants, wrong API or contract use." }
   - { agent: reviewer, role: "Focus ONLY on the SECURITY lens: unsafe input flows, access control, sensitive data handling, unsafe sinks, input validation." }
   - { agent: reviewer, role: "Focus ONLY on the PERFORMANCE lens: algorithmic cost on hot paths, needless allocations/copies, repeated or N+1 I/O, unbounded work." }
   - { agent: reviewer, role: "Focus ONLY on the TESTS lens: untested branches and edge/error cases, brittle or mock-asserting tests, missing regression pins." }
+
+# design (critic-loop): `architect` drafts ONE plan, `reviewer` critiques it, revised until nothing must-fix remains.
+design: [architect, reviewer]
 
 repair: [operator, verifier]
 # Evidence assurance: execute one bounded leg, then independently replay its proof. Used by Elite's

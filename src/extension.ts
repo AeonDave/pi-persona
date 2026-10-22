@@ -39,7 +39,7 @@ import { type BriefFlow, buildDelegationBrief } from "./core/brief.ts";
 import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
-import { DelegationNudge, PersistenceNudge, PollGuard } from "./core/nudge.ts";
+import { DelegationNudge, orderByMention, PersistenceNudge, PollGuard, renderNudgeModels, renderNudgeRoster } from "./core/nudge.ts";
 import { installedPiVersion, MIN_PI_VERSION, satisfiesFloor } from "./core/pi-compat.ts";
 import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
@@ -727,7 +727,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	agentTree.onChange(publishAgentTreeChange);
 	// Delegation nudge: watches the supervisor's OWN tool-result stream and reminds it to hand off
 	// when it grinds heavy work by hand (config.nudge; gated to delegating personas at the hook).
-	const delegationNudge = new DelegationNudge();
+	// Its reminder cites the live delegate targets and the session provider's models (read when it
+	// fires: agents change on /persona reload, the session model on a switch).
+	const delegationNudge = new DelegationNudge(undefined, {
+		roster: () => renderNudgeRoster(orderByMention(delegateTargets(), controller.activePersona?.body)),
+		models: () => (lastCtx?.model ? renderNudgeModels(lastCtx.modelRegistry.getAll(), lastCtx.model) : undefined),
+	});
 	// Persistence nudge: the counterweight — when a delegated leg comes back BLOCKED/UNKNOWN, remind
 	// the supervisor not to bank a premature surrender (same config.nudge gate + hook as above).
 	const persistenceNudge = new PersistenceNudge();
@@ -2100,7 +2105,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const all = configuredModels(ctx).map((m) => `${m.provider}/${m.id}`);
 		const filtered = orderModelRefs(filterModels(all, query ?? ""), session);
 		const cap = 40;
-		const lines = filtered.slice(0, cap).map((r) => `${isSession(r) ? "★ " : "  "}${r}`);
+		const self = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+		const lines = filtered.slice(0, cap).map((r) => `${isSession(r) ? "★ " : "  "}${r}${r === self ? " (you)" : ""}`);
 		return { lines, total: filtered.length, capped: filtered.length > cap };
 	}
 
@@ -2109,10 +2115,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// persona line has no force, and regenerated from the live registry so it cannot desync.
 	// Capability-aware: a persona that denies `delegate` gets none, and the agent list is
 	// filtered to the persona's allowed targets.
+	/** The installed agents the active capabilities allow as delegate targets (all, with no persona). */
+	function delegateTargets(): AgentConfig[] {
+		const caps = controller.capabilities;
+		return caps ? agents.filter((a) => canDelegateTo(caps, a.name)) : agents;
+	}
+
 	function delegationBrief(ctx: ExtensionContext): string | undefined {
 		const caps = controller.capabilities;
 		if (caps && !canFanOut(caps)) return undefined;
-		const targets = caps ? agents.filter((a) => canDelegateTo(caps, a.name)) : agents;
+		const targets = delegateTargets();
 		const delegation = controller.activePersona?.delegation;
 		const teamAgents: Record<string, string[]> = {};
 		for (const [name, members] of Object.entries(teams)) teamAgents[name] = members.map((m) => rosterSpec(m).agent);
@@ -2130,6 +2142,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// told to convene one (the call would be refused by the capability gate).
 			flows: !caps || canCallTool(caps, "flow") ? flowCatalog(ctx.cwd) : [],
 			...(caps && !canCallTool(caps, "council") ? { council: false } : {}),
+			canListModels: pi.getActiveTools().includes("models") && (!caps || canCallTool(caps, "models")),
 			standing: controller.activePersona !== undefined,
 			// Interactive sessions ALWAYS delegate in the background; headless (`pi -p`) always
 			// blocks (the single turn must carry the result) — mirror that in the copy.

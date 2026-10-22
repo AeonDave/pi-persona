@@ -740,6 +740,53 @@ test("a v1.14.0 pristine Elite (19,312 B) migrates and installs its required evi
 	assert.deepEqual(fs.readFileSync(elite), fs.readFileSync(path.join(bundledDir, "personas/elite.md")));
 });
 
+/** A bundled layout holding only the shipped planner and the architect agent its `design` loop seats. */
+function plannerBundle(): string {
+	const bundledDir = tempDir("pi-persona-planner-bundled-");
+	fs.mkdirSync(path.join(bundledDir, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(bundledDir, "agents"), { recursive: true });
+	for (const asset of ["personas/planner.md", "agents/architect.md"]) fs.copyFileSync(path.join(REPO_ROOT, asset), path.join(bundledDir, asset));
+	return bundledDir;
+}
+
+const V1171_PLANNER = fileURLToPath(new URL("../../fixtures/personas-1.17.1/planner.md", import.meta.url));
+
+test("a pristine v1.17.1 planner migrates for both checkout EOL forms and installs its required architect", () => {
+	// The new planner's default council seats `architect`; bundled agents are only a seed source, so a migration that
+	// swapped the persona without the agent would leave an existing install with a planner whose default council fails.
+	const bundledDir = plannerBundle();
+	for (const lineEnding of ["\n", "\r\n"] as const) {
+		const label = lineEnding === "\n" ? "LF" : "CRLF";
+		const userDirForForm = userDir();
+		fs.mkdirSync(path.join(userDirForForm, "agents"), { recursive: true });
+		const planner = path.join(userDirForForm, "agents", "planner.md");
+		const architect = path.join(userDirForForm, "agents", "architect.md");
+		fs.writeFileSync(planner, withLineEnding(fs.readFileSync(V1171_PLANNER), lineEnding));
+
+		const result = migratePristineSeededDefaults(bundledDir, userDirForForm);
+		assert.deepEqual(result.warnings, [], label);
+		assert.deepEqual(result.migrated, [planner], `${label}: the planner migrates`);
+		assert.deepEqual(result.installed, [architect], `${label}: the architect it needs is installed with it`);
+		assert.deepEqual(fs.readFileSync(planner), fs.readFileSync(path.join(bundledDir, "personas", "planner.md")), `${label}: the planner now matches the shipped persona`);
+		assert.deepEqual(fs.readFileSync(architect), fs.readFileSync(path.join(bundledDir, "agents", "architect.md")), `${label}: the architect matches the shipped agent`);
+	}
+});
+
+test("a user-modified planner is left alone and installs no architect", () => {
+	const bundledDir = plannerBundle();
+	const userDirForCustom = userDir();
+	fs.mkdirSync(path.join(userDirForCustom, "agents"), { recursive: true });
+	const planner = path.join(userDirForCustom, "agents", "planner.md");
+	const customized = Buffer.concat([fs.readFileSync(V1171_PLANNER), Buffer.from("\n# local customization\n")]);
+	fs.writeFileSync(planner, customized);
+
+	const result = migratePristineSeededDefaults(bundledDir, userDirForCustom);
+	assert.deepEqual(result.migrated, []);
+	assert.deepEqual(result.installed, []);
+	assert.deepEqual(fs.readFileSync(planner), customized);
+	assert.equal(fs.existsSync(path.join(userDirForCustom, "agents", "architect.md")), false, "a planner the user owns pulls in nothing");
+});
+
 test("every shipped asset that changed since the last release tag carries that tag's digest in the legacy table", () => {
 	// Hand upkeep of LEGACY_SEEDED_DEFAULTS already failed once (1.11-1.14 shipped without rows), so a
 	// forgotten row is a red test, not a review comment. Release prep adds the previous tag's row; this
