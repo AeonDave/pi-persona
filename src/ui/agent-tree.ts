@@ -1,6 +1,8 @@
 import { compactTokens } from "../core/format.ts";
 import { formatDuration } from "../core/time.ts";
+import type { ChildUsage } from "../engine/stream.ts";
 import { compactInlineText } from "./presentation.ts";
+import { formatUsage } from "./usage.ts";
 
 /**
  * The unified agent tree — a single live model of *every* agent in flight,
@@ -144,12 +146,13 @@ export function deriveWaitingNodeIds(nodes: readonly AgentNode[], isWaiting: (id
 }
 
 /** The tree patch for one progress snapshot: every snapshot is an advance; activity wins over
- *  a bare token count as the visible detail. One helper for every progress site. */
-export function progressPatch(snap: { output?: string; activity?: string; tokens?: number }, now: number): AgentNodePatch {
+ *  usage, formatted like a completed row. Legacy aggregate-only progress stays a neutral count. */
+export function progressPatch(snap: { output?: string; activity?: string; tokens?: number; usage?: ChildUsage }, now: number): AgentNodePatch {
 	const patch: AgentNodePatch = { lastAdvanceAt: now };
 	if (snap.output) patch.output = snap.output;
 	if (snap.activity) patch.detail = snap.activity;
-	else if (snap.tokens) patch.detail = `${compactTokens(snap.tokens)} tok`;
+	else if (snap.usage) patch.detail = formatUsage(snap.usage);
+	else if (snap.tokens) patch.detail = compactTokens(snap.tokens);
 	return patch;
 }
 

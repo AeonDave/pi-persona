@@ -86,7 +86,7 @@ test("a complete coherent Pi receipt avoids repeating identity, while standalone
 	const piContext = { args, argsComplete: true, isPartial: false };
 	const originalContent = JSON.stringify(launched.content);
 	const receipt = render(afterReload.tool, launched, false, 120, piContext).trimEnd();
-	assert.equal(receipt, "↳ launched");
+	assert.equal(receipt, "launched");
 	assert.doesNotMatch(receipt, /delegate|Velvet-recon|operator|gpt-5\.4-mini|done|completed/i);
 
 	const standalone = render(afterReload.tool, launched, false, 120);
@@ -139,7 +139,7 @@ test("fanout receipt shows at most three identity rows and retains omitted and d
 	const rows = collapsed.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
 	assert.ok(rows.length <= 3, `expected at most three compact rows, got ${rows.length}: ${collapsed}`);
 	assert.deepEqual(rows, [
-		"↳ launched Velvet-recon · operator · gpt-5.4-mini",
+		"launched Velvet-recon · operator · gpt-5.4-mini",
 		"  Brooklantern · scout · glm-5.3",
 		"  Mossbridge · reviewer · sonnet-4.5 · +1 more · 2 tasks dropped · expand to see full detail",
 	]);
@@ -176,6 +176,7 @@ test("async single card persists and renders its tree alias after tracker reload
 	assert.match(expanded, /Dewglass-asyncfix · operator · sonnet/);
 	assert.match(expanded, /run-1/);
 	assert.match(expanded, /Launched async run run-1/);
+	assert.doesNotMatch(collapsed, /^↳/m, "generated launch headings have no decorative arrow");
 	assert.match(launched.content[0].text, /run-1/, "rendering leaves model-facing content untouched");
 });
 

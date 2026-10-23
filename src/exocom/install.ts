@@ -13,6 +13,7 @@ import { canCallTool, canParticipateInExocom, EXOCOM_TOOL_NAMES } from "../core/
 import type { DelegationNudge } from "../core/nudge.ts";
 import { shortModel } from "../tools/delegate.ts";
 import { boundDisplayRows } from "../ui/presentation.ts";
+import { compactWidget } from "../ui/compact-widget.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { type InstanceDescriptor, type PeerDescriptor } from "../telemetry/contract.ts";
 import type { TelemetryProducer } from "../telemetry/producer.ts";
@@ -327,7 +328,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${shortModel(model) || "?"} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}${workspaceBit}`;
 						});
 			const lines = boundDisplayRows(local, peerRows, 7, "exocom_list for the full pool");
-			host.lastCtx.ui.setWidget("persona-exocom", lines, { placement: "aboveEditor" });
+			host.lastCtx.ui.setWidget("persona-exocom", compactWidget(lines), { placement: "aboveEditor" });
 		} catch {
 			/* cosmetic — the widget is best-effort */
 		}

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { ExocomPeerRejection } from "../../../src/exocom/plane.ts";
@@ -16,6 +17,36 @@ const stubPlane = (over: any = {}) => ({
 	listPeers: () => [{ name: "dev", persona: "dev", model: "m", context_pct: 10, purpose: "", displayName: "dev", target: "dev@0123456789abcdef01234567" }],
 	send: async (target: string) => ({ msg_id: `to-${target}` }),
 	...over,
+});
+
+test("Exocom error fallbacks use bounded sanitized native-context-aware presentation", () => {
+	const m = mockPi();
+	registerExocomTools(m.pi, () => stubPlane() as never);
+	for (const name of ["exocom_list", "exocom_send", "exocom_name"]) {
+		const result = { content: [{ type: "text", text: Array.from({ length: 40 }, (_, i) => `failure row ${i}`).join("\n") + "\u001b[2J" }], details: {} };
+		const before = JSON.stringify(result);
+		const tool = m.tools.get(name);
+		const raw = tool.renderResult(result, { expanded: false }, plainTheme, { isError: true }).render(120).join("\n");
+		assert.ok(!raw.includes("\u001b[2J"), `${name} cannot replay payload terminal controls`);
+		const collapsed = stripVTControlCharacters(raw).split("\n").map((line) => line.trimEnd()).join("\n");
+		assert.ok(collapsed.split("\n").length <= 6, `${name} collapsed result must be bounded`);
+		assert.match(collapsed, /^failed\n/);
+		assert.match(collapsed, /expand/);
+		assert.doesNotMatch(collapsed, /\u001b|row 39/);
+		const expanded = tool.renderResult(result, { expanded: true }, plainTheme, { isError: true }).render(120).join("\n");
+		assert.match(expanded, /failure row 39/);
+		assert.doesNotMatch(expanded, /\u001b/);
+		assert.equal(JSON.stringify(result), before);
+	}
+});
+
+test("native Exocom error context overrides stale success-shaped receipt details", () => {
+	const m = mockPi();
+	registerExocomTools(m.pi, () => stubPlane() as never);
+	const result = { content: [{ type: "text", text: "transport failed" }], details: { msg_id: "old", target: "peer" } };
+	const text = m.tools.get("exocom_send").renderResult(result, { expanded: false }, plainTheme, { isError: true }).render(120).map((line: string) => stripVTControlCharacters(line).trimEnd()).join("\n");
+	assert.match(text, /^failed\ntransport failed/);
+	assert.doesNotMatch(text, /queued/);
 });
 
 test("registers exocom_list + exocom_send", () => {
@@ -104,7 +135,7 @@ test("exocom_list keeps full model content but caps collapsed TUI rendering", as
 	assert.match(emptyRendered, /0 peers.*no reachable peers/);
 });
 
-test("exocom tool renderers use compact call/result summaries and expand on demand", async () => {
+test("exocom short receipts do not advertise expansion when no detail is hidden", async () => {
 	const m = mockPi();
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	const tool = m.tools.get("exocom_send");
@@ -113,7 +144,7 @@ test("exocom tool renderers use compact call/result summaries and expand on dema
 	const result = await tool.execute("c", { target: "dev", message: "hi" }, undefined, undefined, {});
 	const collapsed = tool.renderResult(result, { expanded: false }, plainTheme).render(200).join("\n");
 	assert.match(collapsed, /queued.*dev/);
-	assert.match(collapsed, /expand/i);
+	assert.doesNotMatch(collapsed, /expand/i);
 	const expanded = tool.renderResult(result, { expanded: true }, plainTheme).render(200).join("\n");
 	assert.match(expanded, /msg_id=to-dev/);
 });
@@ -225,8 +256,10 @@ test("exocom_send renderer keeps an all-failed broadcast actionable when collaps
 	const tool = m.tools.get("exocom_send");
 	const result = await tool.execute("c", { target: "*", message: "hi" }, undefined, undefined, {});
 	const collapsed = tool.renderResult(result, { expanded: false }, plainTheme).render(200).join("\n");
-	assert.match(collapsed, /✗ queued 0 peers · 2 failed/);
-	assert.match(collapsed, /expand/i);
+	assert.match(collapsed, /queued 0 peers · 2 failed/);
+	assert.doesNotMatch(collapsed, /^✗/u, "generated summary heading is glyph-free");
+	assert.match(collapsed, /peer unavailable/);
+	assert.doesNotMatch(collapsed, /expand/i, "both target failures already fit in the preview");
 	const expanded = tool.renderResult(result, { expanded: true }, plainTheme).render(200).join("\n");
 	assert.match(expanded, /peer unavailable/);
 });

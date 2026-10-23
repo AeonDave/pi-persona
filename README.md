@@ -39,10 +39,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin the published npm version | `pi install npm:@aeondave/pi-persona@1.17.1` |
-| Pin 1.17.2 after npm publication | `pi install npm:@aeondave/pi-persona@1.17.2` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.3` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git tag 1.17.2 | `pi install git:github.com/AeonDave/pi-persona@v1.17.2` |
+| Git tag 1.17.3 | `pi install git:github.com/AeonDave/pi-persona@v1.17.3` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with

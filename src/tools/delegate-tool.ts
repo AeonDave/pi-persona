@@ -8,6 +8,7 @@ import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { configuredModels } from "../extension/engine.ts";
 import { compactInlineText, compactVisibleLine, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
+import { createReportBody } from "../ui/report-body.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
 import { toolUsageField } from "../ui/usage.ts";
@@ -130,7 +131,7 @@ function launchRows(
 }
 
 function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number | undefined): CollapsedLaunchLine[] {
-	if (rows.length === 0) return [{ prefix: "↳ launched ", label: "", metadata: "", suffix: "" }];
+	if (rows.length === 0) return [{ prefix: "launched ", label: "", metadata: "", suffix: "" }];
 	const visibleCount = Math.min(rows.length, COLLAPSED_LAUNCH_ROWS);
 	const omitted = rows.length - visibleCount;
 	const droppedCount = typeof dropped === "number" && Number.isFinite(dropped) ? Math.max(0, Math.floor(dropped)) : 0;
@@ -141,13 +142,13 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 	const hintText = compactInlineText(expandDetailHint(), { maxChars: 32 });
 	const rowsNeedHint = rows.slice(0, visibleCount).some((row, index) => {
 		const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
-		const prefixWidth = index === 0 ? visibleWidth("↳ launched ") : visibleWidth("  ");
+		const prefixWidth = index === 0 ? visibleWidth("launched ") : visibleWidth("  ");
 		return row.clipped || prefixWidth + visibleWidth(row.displayLabel) + (metadata ? 3 + visibleWidth(metadata) : 0) > MAX_COLLAPSED_CARD_COLUMNS;
 	});
 	if (omitted > 0 || droppedCount > 0 || rowsNeedHint) suffixParts.push(hintText);
 	const suffix = suffixParts.length > 0 ? ` · ${compactInlineText(suffixParts.join(" · "), { maxChars: 56 })}` : "";
 	return rows.slice(0, visibleCount).map((row, index) => {
-		const prefix = index === 0 ? "↳ launched " : "  ";
+		const prefix = index === 0 ? "launched " : "  ";
 		const fixedWidth = visibleWidth(prefix) + (index === visibleCount - 1 ? visibleWidth(suffix) : 0);
 		const budget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - fixedWidth);
 		const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
@@ -184,7 +185,7 @@ function matchesCompleteSingleCall(args: unknown, argsComplete: boolean, isParti
 }
 
 function singleLaunchReceipt(row: DelegateLaunchRow): string[] {
-	const prefix = "↳ launched ";
+	const prefix = "launched ";
 	const suffix = row.clipped ? ` · ${compactInlineText(expandDetailHint(), { maxChars: 32 })}` : "";
 	const labelBudget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(prefix) - visibleWidth(suffix));
 	const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
@@ -253,7 +254,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(
-			Type.String({ description: "Optional exact provider/id. Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omit to inherit the working session model when unsure. Explicit user selections win." }),
+			Type.String({ description: "Optional exact provider/id. Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omission retains saved/agent selections and defaults; an explicit current supervisor provider/id selects it deliberately, maintaining provider/billing authorization. Explicit user selections win." }),
 		),
 		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
@@ -277,7 +278,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		name: Type.Optional(Type.String({ description: LeaderNameDescription })),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
-		model: Type.Optional(Type.String({ description: "Optional exact provider/id (single mode). Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omit to inherit the working session model when unsure. Explicit user selections win." })),
+		model: Type.Optional(Type.String({ description: "Optional exact provider/id (single mode). Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omission retains saved/agent selections and defaults; an explicit current supervisor provider/id selects it deliberately, maintaining provider/billing authorization. Explicit user selections win." })),
 		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
@@ -737,6 +738,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			// or nothing (a headless call's report is its text) in `details`; the double cast just narrows
 			// Pi's opaque `details` type to that known shape for rendering.
 			const details = result.details as unknown as { runId?: string; runIds?: string[]; runs?: unknown; dropped?: number } | undefined;
+			// Native Pi supplies only content/details in result; the host owns the error flag.
+			const isError = context?.isError ?? result.isError;
 			const first = result.content[0];
 			const fallback = details?.runIds?.length
 				? `async runs ${details.runIds.join(", ")}`
@@ -746,9 +749,16 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const text = sanitizeTerminalText(first?.type === "text" ? first.text : fallback);
 			const allowTracker = context === undefined || context.isPartial === true;
 			const rows = details ? launchRows(details, d.tracker, allowTracker) : [];
-			if (expanded) return new Text(expandedLaunchDetails(text, rows), 0, 0);
+			if (expanded) {
+				if (details?.runId || details?.runIds?.length) return new Text(expandedLaunchDetails(text, rows), 0, 0);
+				// A headless report may contain failed legs and have empty details too. Only its
+				// runtime settlement envelope distinguishes that report from a host diagnostic.
+				const report = /^\[pi-persona\] \d+ async runs? settled — \d+ done, \d+ failed(?:, \d+ stopped)?(?:\n|$)/.test(text);
+				if (isError && !report) return new Text(theme.fg("toolOutput", text), 0, 0);
+				return createReportBody(text, theme, {}, context?.lastComponent);
+			}
 			if (details?.runId || details?.runIds?.length) {
-				if (rows.length > 0 && !result.isError) {
+				if (rows.length > 0 && !isError) {
 					// A one-admitted-leg fan-out is still a fan-out when maxChildren dropped
 					// declared tasks; keep its truncation count in the collapsed receipt.
 					const hasDroppedTasks = typeof details.dropped === "number"
@@ -756,12 +766,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						&& details.dropped > 0;
 					if (rows.length === 1 && !hasDroppedTasks && context
 						&& matchesCompleteSingleCall(context.args, context.argsComplete, context.isPartial || resultIsPartial, rows[0]!)) {
-						return new Text(theme.fg("accent", theme.bold("↳ launched")), 0, 0);
+						return new Text(theme.fg("accent", theme.bold("launched")), 0, 0);
 					}
 					if (rows.length === 1 && !hasDroppedTasks) {
 						const lines = singleLaunchReceipt(rows[0]!);
 						return new Text([
-							theme.fg("accent", theme.bold(lines[0] ?? "↳ launched")),
+							theme.fg("accent", theme.bold(lines[0] ?? "launched")),
 							...lines.slice(1).map((line) => theme.fg("dim", line)),
 						].join("\n"), 0, 0);
 					}
@@ -776,7 +786,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						return `${prefix}${label}${metadata}${suffix}`;
 					}).join("\n"), 0, 0);
 				}
-				if (result.isError) {
+				if (isError) {
 					const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
 					return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
 				}
@@ -785,7 +795,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				const dropped = details.dropped ? ` · ${details.dropped} task${details.dropped === 1 ? "" : "s"} dropped (max children)` : "";
 				return new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", `launched ${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
 			}
-			if (result.isError) {
+			if (isError) {
 				const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
 				return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
 			}

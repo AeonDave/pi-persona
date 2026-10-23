@@ -38,6 +38,13 @@ export interface MonitorEvent {
 	terminal: boolean;
 }
 
+/** Raw process output for UI/log observers only; never a semantic wake event. */
+export interface MonitorOutput {
+	id: string;
+	stream: "stdout" | "stderr";
+	text: string;
+}
+
 export interface MonitorProcessHandlers {
 	onStdout: (chunk: string) => void;
 	onStderr: (chunk: string) => void;
@@ -50,11 +57,16 @@ export interface MonitorProcess {
 }
 
 export interface MonitorManagerDeps {
+	/** Internal activation namespace for persisted ids; not a user-facing monitor parameter. */
+	idPrefix?: string;
 	now: () => number;
 	setTimer: (fn: () => void, ms: number) => unknown;
 	clearTimer: (handle: unknown) => void;
 	start: (spec: MonitorSpec, handlers: MonitorProcessHandlers) => MonitorProcess;
 	onEvent: (event: MonitorEvent) => void;
+	/** Accepted nonempty chunks, BEFORE semantic processing. Never called after terminal/removal.
+	 *  Observer failures are isolated: display/logging cannot change wakes or process lifetime. */
+	onOutput?: (output: MonitorOutput) => void;
 	/** Called once per admitted monitor, BEFORE its process starts (never for a rejected spec).
 	 *  Every announced monitor later reaches exactly one of: a terminal `onEvent`, or `onRemoved`. */
 	onArmed?: (entry: MonitorEntry) => void;
@@ -149,7 +161,7 @@ export class MonitorManager {
 		const timeoutMs = request.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS;
 		const maxEvents = request.maxEvents ?? MONITOR_DEFAULT_MAX_EVENTS;
 		const now = this.deps.now();
-		const id = `monitor-${++this.sequence}`;
+		const id = `${this.deps.idPrefix ?? "monitor"}-${++this.sequence}`;
 		const entry: MonitorEntry = {
 			id,
 			label: request.label.trim(),
@@ -289,6 +301,8 @@ export class MonitorManager {
 	private receiveStdout(id: string, chunk: string): void {
 		const active = this.monitors.get(id);
 		if (!active || active.terminal || !chunk) return;
+		this.observeOutput(id, "stdout", chunk);
+		if (active.terminal) return;
 		if (active.entry.mode === "exit") {
 			active.stdoutTail = appendTail(active.stdoutTail, chunk, MONITOR_MAX_DIAGNOSTIC_CHARS);
 			return;
@@ -325,8 +339,18 @@ export class MonitorManager {
 
 	private receiveStderr(id: string, chunk: string): void {
 		const active = this.monitors.get(id);
-		if (!active || active.terminal) return;
+		if (!active || active.terminal || !chunk) return;
+		this.observeOutput(id, "stderr", chunk);
+		if (active.terminal) return;
 		active.stderrTail = appendTail(active.stderrTail, chunk, MONITOR_MAX_DIAGNOSTIC_CHARS);
+	}
+
+	private observeOutput(id: string, stream: MonitorOutput["stream"], text: string): void {
+		try {
+			this.deps.onOutput?.({ id, stream, text });
+		} catch {
+			/* UI/log observers cannot suppress a semantic event or interrupt process cleanup. */
+		}
 	}
 
 	private receiveExit(id: string, code: number | null, signal?: string): void {

@@ -52,6 +52,10 @@ function theme(): Theme {
 
 function keybindings(): KeybindingsManager {
 	return {
+		getKeys: (binding: string) => {
+			const keys: Record<string, string[]> = { "tui.select.up": ["up"], "tui.select.down": ["down"], "tui.select.confirm": ["enter"], "tui.select.cancel": ["escape"] };
+			return keys[binding] ?? [];
+		},
 		matches: (data: string, binding: string) => {
 			if (binding === "tui.select.up") return data === "UP";
 			if (binding === "tui.select.down") return data === "DOWN";
@@ -171,6 +175,20 @@ test("the split detail column starts at one stable terminal column", () => {
 		const detailStart = line.indexOf(line.includes("Group:") ? "Group:" : "Active now:");
 		assert.equal(visibleWidth(line.slice(0, detailStart)), 43, `detail column drifted: ${line}`);
 	}
+});
+
+test("settings hints reflect the injected navigation and confirmation bindings", () => {
+	const bindings = keybindings();
+	const keys: Record<string, string[]> = { "tui.select.up": ["f1"], "tui.select.down": ["f2"], "tui.select.confirm": ["f3"], "tui.select.cancel": ["f4"] };
+	bindings.getKeys = (binding) => keys[binding] as ReturnType<KeybindingsManager["getKeys"]>;
+	const panel = new PersonaSettingsPanel(fakeTui(), theme(), bindings, { file: "settings.json", lastPersona: null, rows }, () => {});
+	const output = panel.render(100).join("\n");
+	assert.match(output, /f1\/f2 move/);
+	assert.match(output, /f3 edit/);
+	assert.match(output, /f4 close/);
+	assert.doesNotMatch(output, /enter edit|esc close/);
+	panel.handleInput("/");
+	assert.match(panel.render(100).join("\n"), /backspace, f3/);
 });
 
 test("model access and close hints stay discoverable on a narrow terminal", () => {

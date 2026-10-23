@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, initTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Markdown, visibleWidth } from "@earendil-works/pi-tui";
+import { sanitizeTerminalText } from "../../../src/ui/presentation.ts";
+
+initTheme("dark", false);
 
 import type { ExocomSemanticFrame } from "../../../src/exocom/envelope.ts";
 import type { LedgerState } from "../../../src/exocom/ledger.ts";
@@ -175,19 +180,90 @@ test("exocom_status reports the formatted ledger view and claim/ask counts", asy
 	assert.match(result.content[0].text, /asks waiting for you:/);
 });
 
-test("every work-tool renderer marks host failures as errors", () => {
+const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+
+for (const name of ["exocom_wait", "exocom_status"]) {
+	test(`${name} bounds long retained output but expands the full sanitized payload in its semantic format`, async () => {
+		const evidence = Array.from({ length: 12 }, (_, i) => `evidence ${i}: ${"x".repeat(140)}\u0007\u001b[2J`).join("\n");
+		const h = harness({
+			armWait: () => ({ status: "answered", answer: {
+				ask_id: "ask-long", work_key: "review-auth", requester_session: "session-a",
+				from_session: "session-b", ok: true, evidence, msg_id: "answer-long", ts: "2026-09-01T00:00:01Z",
+			} }),
+			ledger: () => ({
+				claims: Array.from({ length: 12 }, (_, i) => ({
+					work_key: `wk-${i}`, from_session: "session-a", from_name: "orion",
+					write_set: [`src/${"x".repeat(140)}-${i}.ts`], slice: `slice-${i}\u0007\u001b[2J`, msg_id: `m-${i}`, ts: "2026-09-01T00:00:00Z",
+				})),
+				asks: [], answers: [], askIds: [], seen: [],
+			}),
+		});
+		const tool = h.tools.get(name);
+		const result = await tool.execute("long", { work_key: "review-auth", ask_id: "ask-long" });
+		// A host result can contain multiple literal text blocks; do not silently drop later ones.
+		result.content.push({ type: "text", text: "FINAL_LITERAL_MARKER\u0007\u001b[2J" });
+		const before = JSON.stringify(result);
+		const collapsed = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false }).render(200).map((line: string) => line.trimEnd());
+		assert.equal(collapsed.length, 5, "four preview rows plus one conditional expansion hint");
+		assert.ok(collapsed.slice(0, 4).every((line: string) => visibleWidth(line) <= 100), "preview rows are bounded in columns");
+		assert.match(collapsed[4]!, /to expand/);
+		assert.doesNotMatch(collapsed.join("\n"), /FINAL_LITERAL_MARKER|\u0007|\u001b\[2J/);
+		const expanded = tool.renderResult(result, { expanded: true }, plainTheme, { isError: false }).render(300).map((line: string) => line.trimEnd()).join("\n");
+		const full = sanitizeTerminalText(result.content.map((part: { text: string }) => part.text).join("\n"));
+		if (name === "exocom_wait") {
+			const native = new Markdown(full, 0, 0, getMarkdownTheme()).render(300).map((line) => stripVTControlCharacters(line).trimEnd()).join("\n");
+			assert.equal(expanded.split("\n").map((line: string) => stripVTControlCharacters(line).trimEnd()).join("\n"), native, "all retained peer prose, attribution and later text blocks reach native Markdown");
+		} else {
+			assert.equal(expanded, full, "ledger metadata stays complete and literal");
+		}
+		assert.equal(JSON.stringify(result), before, "neither view changes the raw/model payload");
+	});
+}
+
+test("retained peer answers render Markdown without turning a negative answer into a tool error", async () => {
+	const h = harness({ armWait: () => ({ status: "answered", answer: {
+		ask_id: "ask-md", work_key: "review", requester_session: "session-a", from_session: "session-b",
+		ok: false, evidence: "### Peer review\n\n**Verdict:** needs work at `src/path`", msg_id: "answer-md", ts: "2026-09-01T00:00:01Z",
+	} }) });
+	const tool = h.tools.get("exocom_wait");
+	const result = await tool.execute("md", { work_key: "review", ask_id: "ask-md" });
+	const before = JSON.stringify(result);
+	const rendered = tool.renderResult(result, { expanded: true }, plainTheme, { isError: false }).render(160).map((line: string) => stripVTControlCharacters(line).trimEnd()).join("\n");
+	assert.match(rendered, /Peer review/);
+	assert.match(rendered, /Verdict/);
+	assert.match(rendered, /session-b/);
+	assert.match(rendered, /untrusted/);
+	assert.doesNotMatch(rendered, /\*\*Verdict:\*\*|`src\/path`|^failed/m);
+	assert.equal(JSON.stringify(result), before);
+});
+
+test("work receipts omit expansion hints when the complete payload fits", async () => {
+	const h = harness();
+	const tool = h.tools.get("exocom_progress");
+	const result = await tool.execute("short", { work_key: "wk", note: "done" });
+	const card = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false }).render(200).join("\n").trimEnd();
+	assert.equal(card, result.content[0].text);
+});
+
+test("every work-tool renderer marks native host failures as errors", async (t) => {
 	const h = harness();
 	const theme = {
 		fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
 		bold: (text: string) => text,
 	};
 	for (const name of ["exocom_claim", "exocom_ask", "exocom_answer", "exocom_decline", "exocom_wait", "exocom_release", "exocom_progress", "exocom_status"]) {
-		const rendered = h.tools.get(name).renderResult(
-			{ content: [{ type: "text", text: `${name} failed` }], details: {}, isError: true },
-			{ expanded: false },
-			theme,
-		).render(200).join("\n");
-		assert.match(rendered, /<error>/, `${name} must not render a failed call with the success accent`);
-		assert.doesNotMatch(rendered, /<accent>/);
+		await t.test(name, () => {
+			const tool = h.tools.get(name);
+			const result = { content: [{ type: "text", text: `${name} failed\u0007\u001b[2J` }], details: {} };
+			const before = JSON.stringify(result);
+			for (const expanded of [false, true]) {
+				const rendered = tool.renderResult(result, { expanded }, theme, { isError: true }).render(200).join("\n");
+				assert.match(rendered, /<error>/, `${name} must honor the host context error flag`);
+				assert.doesNotMatch(rendered, /<accent>|\u0007|\u001b\[2J/);
+				assert.doesNotMatch(rendered, /to expand/, "short errors do not need an expansion hint");
+			}
+			assert.equal(tool.renderShell, undefined, "Pi owns the native result shell");
+			assert.equal(JSON.stringify(result), before, "rendering leaves model-facing content untouched");
+		});
 	}
 });

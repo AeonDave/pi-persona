@@ -1,8 +1,9 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { MonitorEntry, MonitorEvent } from "../../../src/core/monitor.ts";
 import type { TimerEntry } from "../../../src/core/timer.ts";
+import { MonitorOutputTail } from "../../../src/core/monitor-output.ts";
 import { AgentTree } from "../../../src/ui/agent-tree.ts";
 import { WakeRows, wakeNodeId } from "../../../src/ui/wake-rows.ts";
 
@@ -391,6 +392,165 @@ test("timerArmed clamps a runaway label to 120 chars ending in an ellipsis", () 
 test("timerArmed keeps a label of exactly 120 chars verbatim", () => {
 	const label = "k".repeat(120);
 	assert.equal(new WakeRows().timerArmed(timerEntry({ label })).label, label);
+});
+
+test("raw chunks feed bounded tails without projecting until the shared UI frame", () => {
+	const rows = new WakeRows();
+	for (let i = 0; i < 8; i++) rows.monitorArmed(outputEntry({ id: `m${i}` }));
+	const reads = mock.getter(MonitorOutputTail.prototype, "text");
+	try {
+		for (let i = 0; i < 8; i++) rows.monitorOutput({ id: `m${i}`, stream: "stdout", text: "line\n".repeat(800) });
+		for (let j = 0; j < 1_000; j++) {
+			for (let i = 0; i < 8; i++) assert.equal(rows.monitorOutput({ id: `m${i}`, stream: "stdout", text: "x" }), true);
+		}
+		assert.equal(reads.mock.callCount(), 0, "raw callbacks must not materialize even the preview's full tail");
+		const frame = rows.flushMonitorOutput();
+		assert.equal(frame.length, 8, "8,000 chunks produce one projection per dirty monitor, not per chunk");
+		for (const change of frame) {
+			assert.match(change.patch.output ?? "", new RegExp(`stdout tail:\\n> ${"line\n".repeat(600).replace(/\n/g, "\n> ")}${"x".repeat(1_000)}$`));
+			assert.deepEqual(Object.keys(change.patch).sort(), ["detail", "output"], "no timestamps, status, deadlines or event credit");
+			assert.match(change.patch.output ?? "", /^events: 0\/5$/m);
+		}
+		assert.deepEqual(rows.flushMonitorOutput(), [], "clean frames do no projection work");
+		rows.monitorOutput({ id: "m2", stream: "stderr", text: "next frame" });
+		assert.deepEqual(rows.flushMonitorOutput().map((change) => change.id), ["monitor:m2"]);
+	} finally { reads.mock.restore(); }
+});
+
+test("terminal events and cancellation include unflushed tails immediately and consume pending work", () => {
+	for (const terminal of [false, true]) {
+		const rows = new WakeRows();
+		const entry = outputEntry();
+		rows.monitorArmed(entry);
+		rows.monitorOutput({ id: entry.id, stream: "stdout", text: "last partial" });
+		rows.monitorOutput({ id: entry.id, stream: "stderr", text: "last warning" });
+		const final = terminal ? rows.monitorEvent(event({ kind: "exit", text: "process exited with exit code 0", terminal: true })) : rows.monitorRemoved(entry);
+		assert.match(final.patch.output ?? "", /stdout tail:\n> last partial/);
+		assert.match(final.patch.output ?? "", /stderr tail:\n> last warning/);
+		assert.equal(final.patch.status, terminal ? "done" : "stopped");
+		assert.deepEqual(rows.flushMonitorOutput(), []);
+		assert.equal(rows.monitorOutput({ id: entry.id, stream: "stdout", text: "late" }), false);
+	}
+});
+
+test("semantic events absorb pending output once, and clearing monitors drops pending UI work", () => {
+	const rows = new WakeRows();
+	rows.monitorArmed(outputEntry());
+	rows.monitorOutput({ id: "monitor-3", stream: "stdout", text: "in flight" });
+	const semantic = rows.monitorEvent(event());
+	assert.match(semantic.patch.detail ?? "", /1\/5 events · stdout: in flight$/);
+	assert.match(semantic.patch.output ?? "", /> in flight/);
+	assert.deepEqual(rows.flushMonitorOutput(), [], "an event already published this tail");
+	rows.monitorOutput({ id: "monitor-3", stream: "stderr", text: "discard on shutdown" });
+	rows.clearMonitors();
+	assert.deepEqual(rows.flushMonitorOutput(), []);
+	assert.equal(rows.monitorOutput({ id: "monitor-3", stream: "stdout", text: "late" }), false);
+});
+
+test("live stdout/stderr updates are UI-only, retain mode/counter, and preserve terminal history", () => {
+	for (const entry of [exitEntry(), outputEntry()]) {
+		const rows = new WakeRows();
+		rows.monitorArmed(entry);
+		rows.monitorOutput({ id: entry.id, stream: "stdout", text: "build " });
+		const first = rows.flushMonitorOutput()[0];
+		assert.ok(first);
+		assert.equal(first.id, wakeNodeId("monitor", entry.id));
+		assert.equal(first.patch.detail, `${entry.id} · ${entry.mode}${entry.mode === "output" ? " · 0/5 events" : ""} · stdout: build`);
+		assert.deepEqual(Object.keys(first.patch).sort(), ["detail", "output"], "output never advances event time or changes status");
+		rows.monitorOutput({ id: entry.id, stream: "stdout", text: "50%\r75%" });
+		rows.monitorOutput({ id: entry.id, stream: "stderr", text: "warning (unterminated)" });
+		const warning = rows.flushMonitorOutput()[0];
+		assert.ok(warning);
+		assert.match(warning.patch.detail ?? "", /stderr: warning \(unterminated\)$/);
+		assert.match(warning.patch.output ?? "", /^stdout tail:\n> 75%$/m);
+		assert.match(warning.patch.output ?? "", /^stderr tail:\n> warning \(unterminated\)$/m);
+		assert.match(warning.patch.output ?? "", /^command: /m);
+		assert.match(warning.patch.output ?? "", /^cwd: /m);
+		const counted = rows.monitorEvent(event({ id: entry.id, text: "meaningful", terminal: false }));
+		if (entry.mode === "output") assert.match(counted.patch.detail ?? "", /1\/5 events/);
+		const end = rows.monitorEvent(event({ id: entry.id, kind: "exit", text: "process exited with exit code 0", terminal: true }));
+		assert.match(end.patch.output ?? "", /> 75%/);
+		assert.match(end.patch.output ?? "", /> warning \(unterminated\)/);
+		assert.match(end.patch.output ?? "", /\] meaningful/);
+		assert.match(end.patch.output ?? "", /\] process exited with exit code 0/);
+		assert.equal(rows.monitorOutput({ id: entry.id, stream: "stdout", text: "late" }), false);
+	}
+});
+
+test("live output cannot resurrect a removed or unknown monitor row", () => {
+	const rows = new WakeRows();
+	const entry = outputEntry();
+	assert.equal(rows.monitorOutput({ id: entry.id, stream: "stdout", text: "unknown" }), false);
+	rows.monitorArmed(entry);
+	rows.monitorRemoved(entry);
+	assert.equal(rows.monitorOutput({ id: entry.id, stream: "stderr", text: "late" }), false);
+	rows.monitorArmed(entry);
+	rows.monitorOutput({ id: entry.id, stream: "stdout", text: "fresh" });
+	const fresh = rows.flushMonitorOutput()[0];
+	assert.equal(fresh?.patch.detail, "monitor-3 · output · 0/5 events · stdout: fresh");
+	assert.doesNotMatch(fresh?.patch.output ?? "", /unknown|late/);
+});
+
+test("live output sanitizes split ANSI/OSC and CRLF independently for each stream", () => {
+	const rows = new WakeRows();
+	rows.monitorArmed(outputEntry());
+	const send = (text: string) => rows.monitorOutput({ id: "monitor-3", stream: "stdout", text });
+	for (const text of ["\u001b", "[3", "1mred", "\u001b[0m\u001b]0;hostile", " title\u001b", "\\", " ok\r", "\nnext\r", "2%\u001b[", "2K\r100%\n"]) send(text);
+	rows.monitorOutput({ id: "monitor-3", stream: "stderr", text: "\u009b32mwarning\u009b0m\u009dhidden\u009c\n" });
+	send("\u001b]unterminated");
+	const result = rows.flushMonitorOutput()[0];
+	assert.ok(result);
+	assert.match(result.patch.detail ?? "", /stdout: 100%$/);
+	assert.match(result.patch.output ?? "", /stdout tail:\n> red ok\n> 100%/);
+	assert.match(result.patch.output ?? "", /stderr tail:\n> warning/);
+	assert.doesNotMatch(result.patch.output ?? "", /hostile|title|hidden|unterminated|\[31|\[2K|[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+	assert.match(result.patch.output ?? "", /^events: 0\/5$/m);
+});
+
+test("live tail sanitization is independent of every chunk boundary", () => {
+	const text = "start\u001b[31m red\u001b[0m\u001b]8;;https://bad\u001b\\link\u001b]8;;\u0007\nold\rnew\r\nend🙂\u001bPprivate\u001b\\!";
+	const render = (chunks: string[]) => {
+		const rows = new WakeRows();
+		rows.monitorArmed(outputEntry());
+		for (const chunk of chunks) rows.monitorOutput({ id: "monitor-3", stream: "stdout", text: chunk });
+		return rows.flushMonitorOutput()[0]?.patch.output ?? "";
+	};
+	const whole = render([text]);
+	assert.match(whole, /stdout tail:\n> start redlink\n> new\n> end🙂!/);
+	for (let at = 1; at < text.length; at++) assert.equal(render([text.slice(0, at), text.slice(at)]), whole, `split ${at}`);
+	assert.equal(render(text.split("")), whole);
+});
+
+test("live output tails and latest preview stay bounded under huge and repeated chunks", () => {
+	const rows = new WakeRows();
+	rows.monitorArmed(outputEntry());
+	rows.monitorOutput({ id: "monitor-3", stream: "stdout", text: `old marker\n${"x".repeat(1_000_000)}END` });
+	let last = rows.flushMonitorOutput()[0];
+	assert.ok(last);
+	assert.match(last.patch.detail ?? "", /stdout: /);
+	assert.ok((last.patch.detail ?? "").length <= 180);
+	assert.doesNotMatch(last.patch.output ?? "", /old marker/);
+	for (let i = 0; i < 200; i++) rows.monitorOutput({ id: "monitor-3", stream: "stderr", text: `${"w".repeat(100)}\n` });
+	last = rows.flushMonitorOutput()[0];
+	assert.ok(last);
+	assert.ok((last.patch.output ?? "").length < 25_000, "both tails plus quoted lines and metadata are bounded");
+	assert.match(last.patch.output ?? "", /END/);
+	assert.match(last.patch.output ?? "", /^events: 0\/5$/m);
+});
+
+test("raw output and hostile monitor metadata cannot inject terminal controls or fake metadata lines", () => {
+	const rows = new WakeRows();
+	const row = rows.monitorArmed(outputEntry({ label: "\u001b[31mwatch\rforged", cwd: "a".repeat(100_000) }));
+	assert.doesNotMatch(row.label, /[\u001b\r\n]/);
+	assert.ok((row.output ?? "").length < 5_000, "cwd is bounded too");
+	rows.monitorOutput({ id: "monitor-3", stream: "stdout", text: "\ncommand: forged\nevents: 99/99\n\u0000\tbad\u2028break\u202eabc" });
+	const result = rows.flushMonitorOutput()[0];
+	assert.ok(result);
+	assert.doesNotMatch(result.patch.detail ?? "", /[\r\n\t\u0000\u001b\u2028\u202e]/);
+	assert.match(result.patch.output ?? "", /^command: tail -f deploy.log$/m);
+	assert.equal((result.patch.output ?? "").split("\n").filter((line) => line.startsWith("events:")).length, 1);
+	assert.match(result.patch.output ?? "", /^> command: forged$/m);
+	assert.match(result.patch.output ?? "", /^> events: 99\/99$/m);
 });
 
 // ── per-line sanitisation: every stored line must be self-contained BEFORE the lines are joined ────

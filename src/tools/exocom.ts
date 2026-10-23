@@ -19,6 +19,7 @@ import { type Static, Type } from "typebox";
 
 import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 
 import { fencePeer } from "../core/fence.ts";
 import { inventedExocomNameHint } from "../core/naming.ts";
@@ -227,12 +228,11 @@ function isSendDetails(details: unknown): details is ExocomSendDetails {
 	return Array.isArray(shape.failed) || typeof shape.msg_id === "string";
 }
 
-function renderSendResult(details: ExocomSendDetails, expanded: boolean): string {
+function renderSendResult(details: ExocomSendDetails): string {
 	if ("failed" in details) {
 		const failed = details.failedCount ?? details.failed.length;
 		const queued = details.queuedCount ?? details.msg_ids.length;
-		const summary = `${queued > 0 ? "✓" : "✗"} queued ${queued} peer${queued === 1 ? "" : "s"}${failed > 0 ? ` · ${failed} failed` : ""}`;
-		if (!expanded) return `${summary} (${keyHint("app.tools.expand", "to expand")})`;
+		const summary = `queued ${queued} peer${queued === 1 ? "" : "s"}${failed > 0 ? ` · ${failed} failed` : ""}`;
 		const lines = [summary];
 		if (details.msg_ids.length > 0) lines.push(`msg_ids: ${details.msg_ids.join(", ")}`);
 		for (const failure of details.failed) {
@@ -242,8 +242,7 @@ function renderSendResult(details: ExocomSendDetails, expanded: boolean): string
 		if ((details.omittedFailures ?? 0) > 0) lines.push(`…and ${details.omittedFailures} more failures omitted; retry only the failed targets shown above.`);
 		return lines.join("\n");
 	}
-	const summary = `✓ queued to ${details.target} · msg_id=${details.msg_id}`;
-	return expanded ? summary : `${summary} (${keyHint("app.tools.expand", "to expand")})`;
+	return `queued to ${details.target} · msg_id=${details.msg_id}`;
 }
 
 /** `getPlane` is a LIVE accessor, not a captured value: a `canUseBus` downgrade (`stopExocom`,
@@ -294,7 +293,7 @@ export function registerExocomTools(
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("Exocom List")), 0, 0);
 		},
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as {
 				peers?: ExocomPeerSummary[];
 				total?: number;
@@ -303,9 +302,8 @@ export function registerExocomTools(
 				scopeCode?: string;
 				homeWorkspace?: { label?: string; code?: string; sameAsScope?: boolean };
 			} | undefined;
-			if (!details || !Array.isArray(details.peers)) {
-				const first = result.content.find((item) => item.type === "text");
-				return new Text(theme.fg("error", first?.type === "text" ? first.text : "Exocom list failed"), 0, 0);
+			if (context?.isError || !details || !Array.isArray(details.peers)) {
+				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
 			}
 			const peers = details.peers;
 			const total = typeof details.total === "number" ? details.total : peers.length;
@@ -448,15 +446,14 @@ export function registerExocomTools(
 			const suffix = preview.length < message.length ? "…" : "";
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
 		},
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as ExocomSendDetails | undefined;
 			// pi renders this for a FAILED call too, handing us the error's empty details object — an
 			// unrecognised shape is a failure to show, not a send to congratulate the user on.
-			if (!isSendDetails(details)) {
-				const text = result.content.find((item) => item.type === "text");
-				return new Text(theme.fg("error", text?.type === "text" ? text.text : "(no result)"), 0, 0);
+			if (context?.isError || !isSendDetails(details)) {
+				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
 			}
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderSendResult(details, expanded)), 0, 0);
+			return renderLiteralToolResult({ ...result, content: [{ type: "text", text: renderSendResult(details) }] }, { expanded }, theme, context);
 		},
 	});
 
@@ -475,15 +472,14 @@ export function registerExocomTools(
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
 		},
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as { name?: string } | undefined;
-			if (!details?.name) {
-				const first = result.content.find((item) => item.type === "text");
-				return new Text(theme.fg("error", first?.type === "text" ? first.text : "Exocom name failed"), 0, 0);
+			if (context?.isError || !details?.name) {
+				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
 			}
 			const name = normalizeMetadataText(details.name, 96, "(unchanged)");
 			const text = `exocom: you are now "${name}"`;
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
+			return renderLiteralToolResult({ ...result, content: [{ type: "text", text }] }, { expanded }, theme, context);
 		},
 	});
 }

@@ -1,5 +1,5 @@
 /** Monitor events use the same idle follow-up delivery as timer and Intercom. */
-import { MonitorManager, type MonitorEntry, type MonitorEvent } from "../core/monitor.ts";
+import { MonitorManager, type MonitorEntry, type MonitorEvent, type MonitorOutput } from "../core/monitor.ts";
 import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
 import { IdleCoalescingNotifier } from "../engine/async.ts";
 import { startMonitorProcess } from "./process.ts";
@@ -11,9 +11,13 @@ export interface MonitorObserver {
 	armed(entry: MonitorEntry): void;
 	event(event: MonitorEvent): void;
 	removed(entry: MonitorEntry): void;
+	/** Raw process output for bounded local views/storage only; never a wake. */
+	output?(output: MonitorOutput): void;
 }
 
 interface MonitorSessionDeps {
+	/** Activation-unique prefix when results are persisted across reloads. */
+	idPrefix?: string;
 	isIdle(): boolean;
 	canRun(): boolean;
 	deliver(text: string): void;
@@ -41,7 +45,9 @@ export function createMonitorSession(d: MonitorSessionDeps) {
 	});
 	const manager = new MonitorManager({
 		...timerDeps, now: () => Date.now(), start: d.start ?? startMonitorProcess,
+		...(d.idPrefix ? { idPrefix: d.idPrefix } : {}),
 		...(d.observe ? { onArmed: (entry: MonitorEntry) => d.observe?.armed(entry), onRemoved: (entry: MonitorEntry) => d.observe?.removed(entry) } : {}),
+		onOutput: (output) => { d.observe?.output?.(output); },
 		onEvent: (event) => {
 			// Observed BEFORE the permission gate: a terminal event has already left the manager, so the
 			// `cancelAll` below could never announce it, and its row would stay on screen forever.

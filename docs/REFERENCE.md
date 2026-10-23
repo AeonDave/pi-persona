@@ -298,6 +298,17 @@ Reset removes only that saved key (`null` in a settings patch), revealing lower-
 such as a bare agent assignment; inline model pins remain read-only. “Other saved assignments” lets
 you remove keys outside the selected profile without exposing unsafe legacy key text.
 
+In the TUI, the picker uses Pi's native editable search field (including paste and cursor movement).
+Search matches model names, IDs and providers; an exact qualified reference takes precedence. The
+participant's current eligible model is selected initially and marked separately from the session
+provider indicator. Editing the query keeps the selected model while it still matches. Rows retain
+the qualified reference and show context, reasoning and vision hints when supplied by the same host
+catalog snapshot; missing metadata is not inferred. Pending settings choices are reflected when a
+picker is reopened, and an unresolved pending reset is not presented as an active model. RPC keeps
+its native selection dialog. These are presentation changes only: eligibility, provider pins,
+refresh policy and the `models` tool's substring search are unchanged. No favorites or recents are
+stored.
+
 The existing `/persona models [council-persona]` shortcut remains available for the active caller.
 It refreshes the model catalog before editing, and a named council profile does not change which
 persona owns the saved assignments. Use the Models action in `/persona-settings` when you need to

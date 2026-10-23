@@ -37,7 +37,8 @@ Adapters can use native file/system subscriptions, a program's streaming API, or
 polling inside the program when no subscription exists. The model does not run a polling loop.
 Print one short event per line to stdout; send diagnostic chatter to stderr. Flush output promptly
 (for Python, use `-u` or `flush=True`). Repeated identical lines are ignored for that watch.
-Keep complete logs in the program's normal log file if they are needed later.
+Monitor stdout and stderr are captured automatically within fixed limits. For a complete, unlimited
+transcript, keep using the program's own log file; monitor capture is bounded diagnostic evidence.
 
 The model can continue independent work while a monitor runs. Events wait while it is busy and
 arrive together at an idle boundary. When only the event remains, it should end its turn. Natural
@@ -50,13 +51,55 @@ An armed timer or active monitor shows as a row in the agent widget and the F9 /
 beside the sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` for a monitor
 (`<id> · output · k/N events` as events arrive), `⏰ <label>  <id> · fires in <remaining>` for a timer
 (just `⏰ <id>  fires in <remaining>` when the timer has no label).
-The countdown replaces the stall clock, so a quiet watch is never `⚠ stalled`. `⏎` opens the command,
-cwd, times and last 40 event lines (monitor) or the fire time and message (timer); `x` cancels that
+The countdown replaces the stall clock, so a quiet watch is never `⚠ stalled`. While a process runs,
+its latest useful stdout/stderr progress is displayed on its row, including partial lines and carriage-return
+progress updates. Tails ingest every chunk immediately; their display is updated at the existing UI
+frame cadence instead of rebuilding the full row for every chunk. Terminal events and cancellation
+include the final tail immediately. This is a bounded, sanitized UI projection: it does not create a
+model wake or consume an output-event allowance. `⏎` opens the command, cwd, times, bounded live output tails and last 40 event
+lines (monitor), or the fire time and message (timer); `x` cancels that
 one watch like `monitor cancel` / `timer cancel`. These are rows, not agents: no steer, `X` stop-all
 skips them (`intercom stop { to: "all" }` likewise leaves them alone; cancel with `monitor cancel` /
 `timer cancel` or `x`), and they never count in `N agents` or reach telemetry. A finished row settles
 and leaves like an async run: its final ✓/✗/■ goes to the tree change stream (telemetry excluded), not
 to the screen.
+
+## Session-owned logs and results
+
+`monitor { action: "result" }` lists retained captures, including completed jobs; add `id` to read one.
+The default read shows a short tail; `full: true` reads the complete **retained** capture, not bytes
+already discarded by the capture limit. This is retrieval, not a wait: do not poll it for completion.
+`list` still lists only active watches. IDs are activation-unique so reload cannot confuse an old log
+with a newly launched process.
+
+The archive belongs to the **whole session tree**, not only the active conversation branch.
+`result` can therefore list or retrieve a log from a sibling branch that is absent from the current
+transcript. Branch navigation changes the transcript, not archive visibility or ownership. Both
+retention budgets below are shared across all branches and remain shared after reload.
+
+A terminal event or cancellation saves one bounded stdout/stderr snapshot and outcome as a custom
+entry in the owning Pi session. An expandable operator-only log card exposes it without adding the
+raw log to model context or triggering another turn. No per-chunk session entries or sidecar files
+are written. Shutdown/reload stops processes and saves their available diagnostics; resume can read
+the snapshots but never restarts the processes. A hard crash can lose a running job's not-yet-saved
+capture. In a non-persistent session, logs remain in memory only.
+
+Deleting the owning session file removes its stored logs with it. Reload, ordinary shutdown and
+context compaction are not deletion. Forking/copying a session can copy its historical log entries;
+each copy then owns its own data, with no shared external file to orphan or delete accidentally.
+Backups and exports may also retain copies; deleting the original session is not secure erasure
+of those copies. Treat captured stdout/stderr as session data: printed credentials, signed URLs
+and other secrets can be stored in the JSONL. Sanitize/redact sensitive output in the producing
+program before capture. Display sanitization is not secret redaction; requesting `result` returns
+the selected retained text to the model, even when it originated on a sibling branch.
+
+Each capture retains the last 16,384 UTF-16 code units of stdout and stderr independently, plus at
+most 16,384 code units of status text. Live F9 tails retain 4,000 code units per stream. The journal
+admits at most 64 terminal records and a conservative 2 MiB cumulative serialized-data budget per
+session (JSON escaping, metadata and envelope allowance included). Historical entries, even unknown
+formats, consume that budget; reload does not reset it. Once exhausted, new captures remain only in
+the bounded runtime history, and `result` explicitly reports the storage limitation. Truncation and
+persistence failures never claim a complete or durable log.
 
 ## Lifetime and limits
 

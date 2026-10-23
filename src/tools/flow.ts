@@ -9,6 +9,7 @@ import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../
 import { toolUsageField } from "../ui/usage.ts";
 import { sumUsage } from "../orchestration/reducers.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { createReportBody } from "../ui/report-body.ts";
 import type { AgentResult, FailureKind } from "../orchestration/types.ts";
 import { launchReceipt, type BackgroundRuns, type TrackedRun } from "./background-run.ts";
 
@@ -126,7 +127,7 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(args.name ?? "?", { maxChars: 96 }) || "?")}`, 0, 0);
 		},
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as {
 				ok?: boolean;
 				failedPhase?: string;
@@ -138,12 +139,14 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 			};
 			const first = result.content[0];
 			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
+			const hostError = context?.isError ?? result.isError;
 			if (details.runId) {
 				// Interactive launch receipt: the outcome arrives later as the completion follow-up.
-				const launched = `${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(`launched ${details.runId} · ${details.flow ?? "?"}`, { maxChars: 120 }))}`;
+				const launched = hostError || details.ok === false ? theme.fg("error", theme.bold("flow failed"))
+					: `${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(`launched ${details.runId} · ${details.flow ?? "?"}`, { maxChars: 120 }))}`;
 				return new Text(expanded ? `${launched}\n${theme.fg("toolOutput", full)}` : launched, 0, 0);
 			}
-			const disposition = flowDisposition({ ok: details.ok !== false, stoppedAtGate: details.stoppedAtGate });
+			const disposition = flowDisposition({ ok: !hostError && details.ok !== false, stoppedAtGate: details.stoppedAtGate });
 			const failed = disposition === "failed";
 			const failureBits = failed
 				? compactInlineText(
@@ -153,15 +156,19 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 						{ maxChars: 160 },
 					)
 				: "";
-			const title = disposition === "stopped"
+			const title = () => disposition === "stopped"
 				? theme.fg("warning", theme.bold(`flow stopped · checkpoint ${compactInlineText(details.stoppedAtGate ?? "", { maxChars: 64 })}`))
 				: failed
 					? theme.fg("error", theme.bold(`flow failed${failureBits ? ` · ${failureBits}` : ""}`))
 					: theme.fg("success", theme.bold("flow complete"));
-			if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
+			if (expanded) {
+				// Real flow outcomes are fenced even after a phase fails; host/preflight errors are not.
+				if (failed && !full.startsWith("Sub-agent output (untrusted data):\n")) return new Text(`${title()}\n${theme.fg("toolOutput", full)}`, 0, 0);
+				return createReportBody(full, theme, { header: title }, context?.lastComponent);
+			}
 			const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
 			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-			return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+			return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 		},
 	});
 }

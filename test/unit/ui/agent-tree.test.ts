@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
+import { emptyUsage } from "../../../src/engine/stream.ts";
+import { formatUsage } from "../../../src/ui/usage.ts";
+
 import { AgentTree, type AgentNode, deriveWaitingNodeIds, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
@@ -264,10 +267,25 @@ test("queued descendants do not keep a waiting parent active", () => {
 	assert.equal(deriveWaitingNodeIds(allQueued, () => false).has("all-queued-parent"), false, "all-queued descendants do not imply a waiting parent");
 });
 
-test("progressPatch bumps lastAdvanceAt and prefers activity over a token count", () => {
-	assert.deepEqual(progressPatch({ output: "o", activity: "⚙ bash ls", tokens: 1500 }, 42), { lastAdvanceAt: 42, output: "o", detail: "⚙ bash ls" });
-	assert.deepEqual(progressPatch({ tokens: 164_005 }, 42), { lastAdvanceAt: 42, detail: "164k tok" });
+test("progressPatch bumps lastAdvanceAt and prefers activity over usage", () => {
+	const usage = { ...emptyUsage(), input: 1000, output: 500 };
+	assert.deepEqual(progressPatch({ output: "o", activity: "⚙ bash ls", tokens: 1500, usage }, 42), { lastAdvanceAt: 42, output: "o", detail: "⚙ bash ls" });
+	assert.deepEqual(progressPatch({ tokens: 164_005 }, 42), { lastAdvanceAt: 42, detail: "164k" }, "legacy aggregates stay neutral, not directional");
 	assert.deepEqual(progressPatch({}, 42), { lastAdvanceAt: 42 });
+	assert.deepEqual(progressPatch({ tokens: 0 }, 42), { lastAdvanceAt: 42 });
+});
+
+test("running and completed rows use identical directional usage formatting", () => {
+	const usage = { ...emptyUsage(), input: 123_000, output: 6_200, cacheRead: 2_400_000, cacheWrite: 500, cost: 0.42 };
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "alpha" });
+	tree.update("a", progressPatch({ tokens: usage.input + usage.output, usage }, 42));
+	const active = renderAgentTree(tree.snapshot())[0];
+	assert.equal(active, "⏳ alpha  ↑123k ↓6.2k R2.4M W500 $0.4200");
+	tree.update("a", { status: "done", detail: formatUsage(usage) });
+	assert.equal(renderAgentTree(tree.snapshot())[0], active?.replace("⏳", "✓"));
+	assert.equal(progressPatch({ usage: { ...emptyUsage(), cacheRead: 2_400_000 } }, 43).detail, "R2.4M", "cache-only usage is not hidden by zero input/output");
+	assert.equal(progressPatch({ usage: emptyUsage(), tokens: 0 }, 44).detail, "", "a zeroed snapshot has no invented counters");
 });
 
 test("nodeGlyph gives a running wake source its own glyph and falls back to the status glyph otherwise", () => {

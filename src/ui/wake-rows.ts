@@ -1,5 +1,6 @@
 import { stripTerminalControls } from "../core/fence.ts";
-import type { MonitorEntry, MonitorEvent } from "../core/monitor.ts";
+import type { MonitorEntry, MonitorEvent, MonitorOutput } from "../core/monitor.ts";
+import { MonitorOutputTail } from "../core/monitor-output.ts";
 import type { TimerEntry } from "../core/timer.ts";
 import type { AddNodeInput, AgentNodePatch, AgentNodeStatus } from "./agent-tree.ts";
 
@@ -10,10 +11,10 @@ import type { AddNodeInput, AgentNodePatch, AgentNodeStatus } from "./agent-tree
  * beside the sub-agents: what is armed, when it is due, what it has produced, why it ended. This
  * module turns each lifecycle callback into an `AddNodeInput` / `AgentNodePatch` and nothing more:
  * no tree, no clock, no Pi imports. Every timestamp comes from the entry or event itself, so the
- * output is deterministic. `label` and `detail` stay short and single-line (the user label passes
- * through as-is, except a timer's, which is clamped to 120 chars; the id and the mode are all that is
- * added here); anything long — the command, the timer message, the event lines — lives in `output`,
- * which only the F9 drill-in shows.
+ * output is deterministic. Monitor labels, details and metadata are sanitized and bounded;
+ * live output adds a single-line progress preview without becoming a semantic event. Anything
+ * long — command, timer message, event history and bounded stdout/stderr tails — lives in
+ * `output`, which only the F9 drill-in shows.
  */
 
 /** Longest `command: …` description line (args may total 24k chars). */
@@ -70,18 +71,26 @@ function firstLine(text: string): string {
  * One self-contained display line: terminal controls stripped, any line break that survives
  * (`stripTerminalControls` maps a bare `\r` to `\n`) collapsed to a single visible marker.
  *
- * Done per stored line, NOT at render time, on purpose. `monitorOutput` joins every stored line
+ * Done per stored line, NOT at render time, on purpose. `renderMonitorOutput` joins every stored line
  * into one buffer and the F9 overlay sanitises only that joined buffer, after the join. A child
  * line carrying a bare `\r` would then render as two lines, the second able to pose as a genuine
  * `[<iso>] …` event line (a forged event), and an unterminated escape in one line could swallow the
  * genuine lines after it. Each line must already be inert before it is joined with its neighbours.
  */
 function oneLine(text: string): string {
-	return stripTerminalControls(text).replace(/\n+/g, " ⏎ ").trim();
+	return stripTerminalControls(text).replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "").replace(/[\n\u2028\u2029]+/g, " ⏎ ").replace(/\t/g, " ").trim();
 }
 
 /** What a monitor remembers between its arming and its end. */
 interface MonitorState {
+	displayId: string;
+	mode: MonitorEntry["mode"];
+	stdout: MonitorOutputTail;
+	stderr: MonitorOutputTail;
+	preview: string;
+	latestStream: MonitorOutput["stream"];
+	/** One dirty bit per admitted monitor, never a queue of raw chunks. */
+	outputPending: boolean;
 	/** Description lines above the events counter (mode, command, cwd, timing). */
 	base: string[];
 	maxEvents: number;
@@ -93,9 +102,34 @@ interface MonitorState {
 	lines: string[];
 }
 
-function monitorOutput(state: MonitorState): string {
+function renderMonitorOutput(state: MonitorState): string {
 	const counter = state.counted || state.events > 0 ? [`events: ${state.events}/${state.maxEvents}`] : [];
-	return [...state.base, ...counter, ...state.lines].join("\n");
+	const tails: string[] = [];
+	for (const stream of ["stdout", "stderr"] as const) {
+		const text = state[stream].text.trimEnd();
+		// Quote every untrusted line: output must not impersonate the metadata or event history.
+		if (text) tails.push(`${stream} tail:\n> ${text.replace(/\n/g, "\n> ")}`);
+	}
+	return [...state.base, ...counter, ...state.lines, ...tails].join("\n");
+}
+
+/** Preview construction, like the drill-in, belongs to publication rather than raw ingestion. */
+function refreshMonitorPreview(state: MonitorState): void {
+	if (!state.outputPending) return;
+	const other = state.latestStream === "stdout" ? "stderr" : "stdout";
+	for (const stream of [state.latestStream, other] as const) {
+		const preview = clamp(state[stream].preview, SUMMARY_MAX);
+		if (preview) {
+			state.preview = `${stream}: ${preview}`;
+			break;
+		}
+	}
+	state.outputPending = false;
+}
+
+function monitorDetail(state: MonitorState): string {
+	const counter = state.counted || state.events > 0 ? ` · ${state.events}/${state.maxEvents} events` : "";
+	return `${state.displayId} · ${state.mode}${counter}${state.preview ? ` · ${state.preview}` : ""}`;
 }
 
 function terminalStatus(event: MonitorEvent): AgentNodeStatus {
@@ -110,11 +144,19 @@ export class WakeRows {
 
 	monitorArmed(entry: MonitorEntry): AddNodeInput {
 		const counted = entry.mode === "output";
+		const displayId = clamp(oneLine(entry.id), SUMMARY_MAX);
 		const state: MonitorState = {
+			displayId,
+			mode: entry.mode,
+			stdout: new MonitorOutputTail(),
+			stderr: new MonitorOutputTail(),
+			preview: "",
+			latestStream: "stdout",
+			outputPending: false,
 			base: [
-				`${entry.id} · ${entry.mode} mode`,
+				`${displayId} · ${entry.mode} mode`,
 				clamp(oneLine(`command: ${[entry.command, ...entry.args].join(" ")}`), COMMAND_LINE_MAX),
-				oneLine(`cwd: ${entry.cwd}`),
+				clamp(oneLine(`cwd: ${entry.cwd}`), COMMAND_LINE_MAX),
 				`armed ${iso(entry.startedAtEpochMs)} · deadline ${iso(entry.expiresAtEpochMs)}`,
 			],
 			maxEvents: entry.maxEvents,
@@ -125,15 +167,41 @@ export class WakeRows {
 		this.monitors.set(entry.id, state);
 		return {
 			id: wakeNodeId("monitor", entry.id),
-			label: entry.label,
+			label: clamp(oneLine(entry.label), SUMMARY_MAX),
 			kind: "monitor",
 			status: "running",
-			detail: `${entry.id} · ${entry.mode}`,
+			detail: `${displayId} · ${entry.mode}`,
 			startedAt: entry.startedAtEpochMs,
 			lastAdvanceAt: entry.startedAtEpochMs,
 			dueAt: entry.expiresAtEpochMs,
-			output: monitorOutput(state),
+			output: renderMonitorOutput(state),
 		};
+	}
+
+	/** Feed bounded tails immediately; no full-tail reads, tree patches or semantic credit per chunk. */
+	monitorOutput(output: MonitorOutput): boolean {
+		const state = this.monitors.get(output.id);
+		if (!state) return false;
+		state[output.stream].append(output.text);
+		state.latestStream = output.stream;
+		state.outputPending = true;
+		return true;
+	}
+
+	/** Called by the existing UI frame BEFORE composing the widget, once per dirty monitor. */
+	flushMonitorOutput(): WakeRowChange[] {
+		const changes: WakeRowChange[] = [];
+		for (const [id, state] of this.monitors) {
+			if (!state.outputPending) continue;
+			refreshMonitorPreview(state);
+			changes.push({ id: wakeNodeId("monitor", id), patch: { detail: monitorDetail(state), output: renderMonitorOutput(state) } });
+		}
+		return changes;
+	}
+
+	/** Shutdown owns the final archive capture, not another UI frame. Late output is ignored. */
+	clearMonitors(): void {
+		this.monitors.clear();
 	}
 
 	monitorEvent(event: MonitorEvent): WakeRowEvent {
@@ -141,28 +209,32 @@ export class WakeRows {
 		const head = clamp(oneLine(firstLine(event.text)), EVENT_TEXT_MAX);
 		let observed = 1;
 		if (state) {
+			refreshMonitorPreview(state);
 			if (event.kind === "output") state.events += 1;
 			observed = state.events;
 			state.lines.push(`[${iso(event.atEpochMs)}] ${head}`);
 			if (state.lines.length > MAX_EVENT_LINES) state.lines.splice(0, state.lines.length - MAX_EVENT_LINES);
 		}
 		const max = state ? String(state.maxEvents) : "?";
+		const displayId = state?.displayId ?? clamp(oneLine(event.id), SUMMARY_MAX);
 
 		const patch: AgentNodePatch = { lastAdvanceAt: event.atEpochMs };
 		if (event.terminal) {
 			patch.status = terminalStatus(event);
-			patch.detail = `${event.id} · ${event.kind === "output" ? `${observed}/${max} events · watch ended` : clamp(head, SUMMARY_MAX)}`;
+			patch.detail = `${displayId} · ${event.kind === "output" ? `${observed}/${max} events · watch ended` : clamp(head, SUMMARY_MAX)}`;
 		} else if (event.kind === "output") {
-			patch.detail = `${event.id} · output · ${observed}/${max} events`;
+			patch.detail = state?.preview ? monitorDetail(state) : `${displayId} · output · ${observed}/${max} events`;
 		}
-		if (state) patch.output = monitorOutput(state);
+		if (state) patch.output = renderMonitorOutput(state);
 		if (event.terminal) this.monitors.delete(event.id);
 		return { id: wakeNodeId("monitor", event.id), patch, settled: event.terminal };
 	}
 
 	monitorRemoved(entry: MonitorEntry): WakeRowChange {
+		const state = this.monitors.get(entry.id);
+		const output = state?.outputPending ? renderMonitorOutput(state) : undefined;
 		this.monitors.delete(entry.id);
-		return { id: wakeNodeId("monitor", entry.id), patch: { status: "stopped", detail: `${entry.id} · cancelled` } };
+		return { id: wakeNodeId("monitor", entry.id), patch: { status: "stopped", detail: `${clamp(oneLine(entry.id), SUMMARY_MAX)} · cancelled`, ...(output !== undefined ? { output } : {}) } };
 	}
 
 	timerArmed(entry: TimerEntry): AddNodeInput {

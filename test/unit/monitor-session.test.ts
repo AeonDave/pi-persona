@@ -72,6 +72,35 @@ test("monitor event backlog is bounded while the model stays busy", async () => 
 	} finally { h.session.cancelAll(); }
 });
 
+test("live output is observed without adding model wakes or changing terminal delivery", async () => {
+	const sources: any[] = [];
+	const output: unknown[] = [];
+	const messages: string[] = [];
+	const session = createMonitorSession({
+		isIdle: () => true, canRun: () => true,
+		deliver: (text) => { messages.push(text); },
+		start: (_spec, handlers) => { sources.push(handlers); return { stop() {} }; },
+		observe: { armed() {}, event() {}, removed() {}, output: (chunk) => { output.push(chunk); } },
+	});
+	try {
+		session.arm({ command: "node", cwd: ".", label: "build", mode: "exit" });
+		sources[0].onStdout("building\r50%");
+		sources[0].onStderr("warning\n");
+		await session.flush();
+		assert.deepEqual(output, [
+			{ id: "monitor-1", stream: "stdout", text: "building\r50%" },
+			{ id: "monitor-1", stream: "stderr", text: "warning\n" },
+		]);
+		assert.equal(messages.length, 0);
+		assert.equal(session.pendingCount(), 0);
+		sources[0].onExit(0);
+		await session.flush();
+		assert.equal(messages.length, 1);
+		sources[0].onStdout("late");
+		assert.equal(output.length, 2);
+	} finally { session.cancelAll(); }
+});
+
 // ── the observer seam the agent tree's monitor rows hang on ─────────────────────────────────────
 
 function observedHarness() {
