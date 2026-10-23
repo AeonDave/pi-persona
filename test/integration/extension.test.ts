@@ -379,6 +379,7 @@ test("models includes installed native-provider catalogs when the auth snapshot 
 			getAll: () => [native, session, { provider: "openrouter", id: "anthropic/claude-opus-4-8" }],
 			getAvailable: () => [session],
 			getRegisteredProviderIds: () => [native.provider],
+			getRegisteredProviderConfig: () => ({ models: [{ id: native.id }] }),
 		},
 	};
 	const models = m.tool("models") as { execute: AnyFn };
@@ -398,16 +399,102 @@ test("models marks the session model itself with (you), at the end of its line, 
 		model: session,
 		modelRegistry: {
 			getAll: () => [{ provider: "mine", id: "big" }, session, { provider: "mine", id: "small" }, { provider: "mine", id: "mid-2" }],
-			getAvailable: () => [session],
+			getAvailable: () => [{ provider: "mine", id: "big" }, session, { provider: "mine", id: "small" }, { provider: "mine", id: "mid-2" }],
 		},
 	};
 	const models = m.tool("models") as { execute: AnyFn };
 	const result = await models.execute("models-you", {}, undefined, undefined, ctx);
 	const lines = String(result.content?.[0]?.text ?? "").split("\n");
-	assert.ok(lines.includes("★ mine/mid (you)"), `the session model reads '★ mine/mid (you)': ${JSON.stringify(lines)}`);
-	assert.ok(lines.includes("★ mine/big"), "another model of the same provider carries ★ only");
-	assert.ok(lines.includes("★ mine/mid-2"), "an id that merely starts with the session id is not the session model");
+	assert.ok(lines.includes("★ mine/mid [cost:unknown] (you)"), `only the exact session model ends with (you): ${JSON.stringify(lines)}`);
+	assert.ok(lines.includes("★ mine/big [cost:unknown]"), "another model of the same provider carries ★ only");
+	assert.ok(lines.includes("★ mine/mid-2 [cost:unknown]"), "an id that merely starts with the session id is not the session model");
 	assert.equal(lines.filter((l) => l.endsWith("(you)")).length, 1, "exactly one line is marked");
+});
+
+test("models defaults to a current-first version shortlist but searches the full eligible catalog", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-model-shortlist-"));
+	const session = { provider: "openai", id: "gpt-6.1-sol" };
+	const old = { provider: "openai", id: "gpt-4.1" };
+	const catalog = [old, ...Array.from({ length: 458 }, (_, i) => ({ provider: "other", id: `model-${i}` })), session];
+	const ctx = { ...base, model: session, modelRegistry: { getAll: () => catalog, getAvailable: () => catalog } };
+	const models = m.tool("models") as { execute: AnyFn };
+	const result = await models.execute("default-catalog", {}, undefined, undefined, ctx);
+	const text = String(result.content?.[0]?.text ?? "");
+	const lines = text.split("\n").filter((line) => /^(★ |  )/.test(line));
+	assert.equal(lines[0], "★ openai/gpt-6.1-sol [cost:unknown] (you)", "the working model is first even beyond the original cap; no tier is invented from its name");
+	assert.ok(lines.length <= 40, "discovery stays bounded");
+	assert.match(text, new RegExp(`showing ${lines.length} `), "the actual shortlist length is reported");
+	assert.match(text, /account support/i, "provider authentication is not sold as account entitlement");
+	assert.match(text, /version/i, "version ranking is explained rather than claimed as release-date metadata");
+	const searched = await models.execute("old-catalog", { query: "gpt-4.1" }, undefined, undefined, ctx);
+	assert.match(String(searched.content?.[0]?.text ?? ""), /★ openai\/gpt-4\.1/, "an explicit search retains older eligible models");
+});
+
+test("models keeps host-filtered same-provider rows out of both discovery and search", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-model-filter-"));
+	const session = { provider: "mine", id: "working-3" };
+	const filtered = { provider: "mine", id: "excluded-4" };
+	const ctx = { ...base, model: session, modelRegistry: { getAll: () => [session, filtered], getAvailable: () => [session] } };
+	const models = m.tool("models") as { execute: AnyFn };
+	for (const params of [{}, { query: "excluded-4" }]) {
+		const result = await models.execute("filtered-catalog", params, undefined, undefined, ctx);
+		assert.doesNotMatch(String(result.content?.[0]?.text ?? ""), /★ mine\/excluded-4/);
+	}
+});
+
+test("models keeps numeric catalog hints and cost bands stable across explicit searches", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-model-prices-"));
+	const catalog = [
+		{ provider: "mine", id: "swift-2", cost: { input: 1, output: 2 } },
+		{ provider: "mine", id: "balanced-2", cost: { input: 3, output: 6 }, reasoning: true, contextWindow: 128000 },
+		{ provider: "mine", id: "deep-2", cost: { input: 10, output: 20 } },
+	];
+	const ctx = { ...base, model: catalog[1], modelRegistry: { getAll: () => catalog, getAvailable: () => catalog } };
+	const tool = m.tool("models") as { execute: AnyFn };
+	for (const params of [{}, { query: "balanced-2" }]) {
+		const result = await tool.execute("priced-models", params, undefined, undefined, ctx);
+		assert.match(String(result.content?.[0]?.text ?? ""), /mine\/balanced-2 \[cost:medium; reasoning; ctx 128k; API \$3\/\$6 per 1M in\/out\] \(you\)/);
+	}
+});
+
+test("the delegation brief refreshes model candidates only on base-model changes or explicit discovery", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	m.pi.setActiveTools([...m.activeToolNames(), "models"]);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-model-switch-"));
+	const openai = { provider: "openai", id: "gpt-6.1-sol" };
+	const zai = { provider: "zai", id: "glm-5.3" };
+	const flash = { provider: "zai", id: "glm-5.3-flash" };
+	let catalog = [openai, zai, flash];
+	let reads = 0;
+	const ctx = { ...base, model: openai, modelRegistry: { getAll: () => catalog, getAvailable: () => { reads++; return catalog; } } };
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "dev", ctx);
+	reads = 0;
+	const candidates = () => String(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt).split("\n").find((line) => line.startsWith("Cached current-provider candidates")) ?? "";
+	assert.match(candidates(), /openai\/gpt-6\.1-sol/);
+	assert.doesNotMatch(candidates(), /zai\//, "the initial shortlist belongs to the current provider");
+	assert.equal(reads, 1, "repeat turns reuse one snapshot");
+	ctx.model = zai;
+	assert.match(candidates(), /zai\/glm-5\.3-flash/, "a provider switch exposes its light candidate without an LLM discovery call");
+	assert.doesNotMatch(candidates(), /openai\//, "previous provider candidates are replaced");
+	assert.equal(reads, 2);
+	ctx.model = flash;
+	assert.match(candidates(), /zai\/glm-5\.3-flash \(you\)/);
+	assert.equal(reads, 3, "a base-model change within the same provider also refreshes once");
+	catalog = [...catalog, { provider: "zai", id: "glm-5.4-flash" }];
+	assert.doesNotMatch(candidates(), /glm-5\.4-flash/, "unchanged turns do not re-explore the registry");
+	const models = m.tool("models") as { execute: AnyFn };
+	const explicit = await models.execute("explicit-openai", { query: "gpt-6.1-sol" }, undefined, undefined, ctx);
+	assert.match(String(explicit.content?.[0]?.text ?? ""), /openai\/gpt-6\.1-sol/, "explicit searches still expose another configured provider");
+	assert.match(candidates(), /glm-5\.4-flash/, "explicit discovery refreshes the cached provider candidates too");
+	assert.equal(reads, 4);
 });
 
 test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable per-leg override)", () => {
@@ -2136,14 +2223,14 @@ test("/persona activates a persona and before_agent_start injects its prompt", a
 	// discovery), but no standing hand-off mandate — that needs an active persona.
 	const bare = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(bare.systemPrompt, /\[pi-persona\] Sub-agents:/, "no persona ⇒ discovery brief");
-	assert.doesNotMatch(bare.systemPrompt, /You are the supervisor: you hold the objective/, "no persona ⇒ no standing mandate");
+	assert.doesNotMatch(bare.systemPrompt, /You are the supervisor: you own the objective/, "no persona ⇒ no standing mandate");
 
 	await m.cmd("persona", "dev", ctx);
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /BASE/);
 	assert.match(injected.systemPrompt, /You are Dev: the engineer/);
 	// An active persona upgrades the soft discovery brief to the STANDING hand-off default.
-	assert.match(injected.systemPrompt, /You are the supervisor: you hold the objective/, "active persona ⇒ standing mandate");
+	assert.match(injected.systemPrompt, /You are the supervisor: you own the objective/, "active persona ⇒ standing mandate");
 });
 
 test("the brief teaches council and flow only to a persona that can call them", async () => {
@@ -2163,7 +2250,7 @@ test("the brief teaches council and flow only to a persona that can call them", 
 	assert.match(full, /Flows \(run with `flow`\)[\s\S]*qa-brief/);
 	await m.cmd("persona", "no-methods", ctx);
 	const limited = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt as string;
-	assert.match(limited, /You are the supervisor: you hold the objective/);
+	assert.match(limited, /You are the supervisor: you own the objective/);
 	assert.doesNotMatch(limited, /by problem class|contested fork|qa-brief|Flows \(run with/, "no method is taught that the capability gate would refuse");
 });
 
@@ -2268,7 +2355,8 @@ test("delegate has no sync/async flags: an interactive session ALWAYS background
 	assert.doesNotMatch(headless.delegate.description, /\b(?:a?sync)\b|intercom wait/i);
 	assert.match(headless.delegate.description, /NEVER sleep, poll, or arm a `timer`/);
 	assert.match(headless.delegate.description, /end your turn/i);
-	assert.match(headless.delegate.description, /^Delegate work to sub-agents — you hold the objective and the plan; anything simple or mechanical that takes more than one tool call goes to a leg\./);
+	assert.match(headless.delegate.description, /^Delegate bounded independent work to supervised sub-agents by default; you own the objective, decisions and result review\./);
+	assert.match(headless.delegate.description, /Keep quick, trivial or tightly coupled work local/);
 	assert.doesNotMatch(headless.delegate.description, /independent, heavy, or parallel parts|your default move/, "the parallelism-only framing is gone");
 	// Nothing drains a follow-up after a `pi -p` turn: every headless call returns its result inline,
 	// even from a model that still sends the retired flag.
@@ -5788,7 +5876,7 @@ test("a delegation checkpoint stays in model context and gets a durable visible 
 	assert.match(collapsed, /expand/i, "collapsed cards advertise the full detail");
 	const expanded = renderComponent(renderer(cards[0], { expanded: true }, traceTheme));
 	assert.match(expanded, /Scope: since the last successful hand-off/);
-	assert.match(expanded, /Keep local: session-bound work/);
+	assert.match(expanded, /Keep local: quick checks or coupled\/session-bound work/);
 });
 
 test("routine async check-ins append expandable operator entries without starting model turns", async () => {
@@ -6066,10 +6154,10 @@ test("the sweep reminder names the delegate targets and this session's models (s
 	const m = makeMockPi();
 	piPersona(m.pi);
 	const { ctx: base } = makeCtx(os.tmpdir());
-	const session = { provider: "mine", id: "m1" };
+	const session = { provider: "mine", id: "model-l-1" };
 	const catalog = [
 		{ provider: "theirs", id: "t1" },
-		...Array.from({ length: 12 }, (_, i) => ({ provider: "mine", id: `m${i + 1}` })),
+		...Array.from({ length: 12 }, (_, i) => ({ provider: "mine", id: `model-${String.fromCharCode(97 + i)}-1` })),
 	];
 	const ctx = { ...base, model: session, modelRegistry: { getAll: () => catalog, getAvailable: () => catalog } };
 	await m.fire("session_start", undefined, ctx);
@@ -6079,17 +6167,17 @@ test("the sweep reminder names the delegate targets and this session's models (s
 	for (let i = 0; i < 3; i++) patch = m.fire("tool_result", heavy, ctx) as typeof patch;
 	const text = patch?.content?.map((c) => c.text ?? "").join("\n") ?? "";
 	const action = text.split("\n").find((l) => l.startsWith("  Action:")) ?? "";
-	assert.match(action, /^  Action: hand the remaining breadth to a leg — .+ — with a `model` of your provider, then supervise\.$/, text);
-	const roster = action.slice(action.indexOf("— ") + 2, action.lastIndexOf(" — with"));
+	assert.match(action, /^  Action: hand remaining independent breadth to a leg — .+ — choose a known compatible model from your provider or inherit yours, then supervise\.$/, text);
+	const roster = action.slice(action.indexOf("— ") + 2, action.lastIndexOf(" — choose"));
 	assert.ok(roster.split(" · ").length <= 4, `at most four targets: ${roster}`);
 	assert.match(roster, /^[a-z][\w-]*( \(|$| · )/, "name first");
 	// Ordered by the active persona's own prompt: dev names scout, then reviewer, then operator.
 	assert.match(roster, /^scout\b/, `the roster starts with the agent dev's prompt names first: ${roster}`);
 	assert.deepEqual(roster.split(" · ").slice(0, 3).map((entry) => entry.split(" (")[0]), ["scout", "reviewer", "operator"]);
-	const models = text.split("\n").find((l) => l.startsWith("  Models (this session, your provider): ")) ?? "";
+	const models = text.split("\n").find((l) => l.startsWith("  Model candidates (your provider; account support may vary): ")) ?? "";
 	assert.equal(
 		models,
-		"  Models (this session, your provider): mine/m1 (you), mine/m2, mine/m3, mine/m4, mine/m5, mine/m6, mine/m7, mine/m8, mine/m9, mine/m10 …",
+		"  Model candidates (your provider; account support may vary): mine/model-l-1 (you), mine/model-a-1, mine/model-b-1, mine/model-c-1, mine/model-d-1, mine/model-e-1, mine/model-f-1, mine/model-g-1, mine/model-h-1, mine/model-i-1 …",
 	);
 	assert.doesNotMatch(text, /theirs\/t1/, "another provider's models are not offered");
 });
@@ -6106,7 +6194,7 @@ test("the sweep reminder omits the Models line when the session has no model, an
 	const patch = m.fire("tool_result", heavy, ctx) as { content?: Array<{ type: string; text?: string }> } | undefined;
 	const text = patch?.content?.map((c) => c.text ?? "").join("\n") ?? "";
 	assert.match(text, /delegation checkpoint/);
-	assert.doesNotMatch(text, /Models \(this session/);
+	assert.doesNotMatch(text, /Model candidates \(your provider/);
 });
 
 test("a failed delegate call does not silently reset the supervisor's by-hand nudge streak", async () => {

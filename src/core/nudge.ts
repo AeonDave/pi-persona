@@ -26,6 +26,8 @@
  *
  * The module also hosts the two call-time wake guards, {@link PollGuard} and {@link longWaitSeconds}.
  */
+import { shortlistModels } from "./model-catalog.ts";
+import { modelCostTiers, type ModelCostMetadata } from "./model-tier.ts";
 
 /** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
 export const HANDOFF_TOOL_NAMES: ReadonlySet<string> = new Set(["delegate", "council", "flow"]);
@@ -106,13 +108,13 @@ function renderNudge(reason: "dump" | "sweep", run: number, burn: number, size: 
 			: [`Trigger: ${run} substantive direct tool calls · ~${toK(burn)}k estimated output tokens.`, "Scope: since the last successful hand-off."];
 	// With a roster the action says TO WHOM (and to size the leg's model); without one it stays generic.
 	const action = hints.roster
-		? `Action: hand the remaining breadth to a leg — ${hints.roster} — with a \`model\` of your provider, then supervise.`
+		? `Action: hand remaining independent breadth to a leg — ${hints.roster} — choose a known compatible model from your provider or inherit yours, then supervise.`
 		: "Action: delegate independent work; repair weak hand-offs, then re-dispatch.";
 	return renderVisibleCheckpoint("delegation checkpoint", [
 		...signal,
 		action,
-		...(hints.models ? [`Models (this session, your provider): ${hints.models}`] : []),
-		"Keep local: session-bound work; keep it lean and grep-first.",
+		...(hints.models ? [`Model candidates (your provider; account support may vary): ${hints.models}`] : []),
+		"Keep local: quick checks or coupled/session-bound work; keep it lean and grep-first.",
 	]);
 }
 
@@ -140,7 +142,7 @@ function hint(thunk: (() => string | undefined) | undefined): string | undefined
 export interface NudgeOptions {
 	/** Who to hand the breadth to, e.g. `scout (reads) · operator (edits, runs)`. */
 	roster?: () => string | undefined;
-	/** The models this session can route a leg to, as bare ids (the session's own marked). */
+	/** Catalog candidates for this provider, not account entitlement (the session's own marked). */
 	models?: () => string | undefined;
 }
 
@@ -184,20 +186,26 @@ export function renderNudgeRoster(agents: ReadonlyArray<{ name: string; descript
 	return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-/** The reminder's model list: the SESSION provider's ids only, in catalog order, as bare
- *  `provider/id`, at most `max` of them (then ` …`), with ` (you)` on the session model. Undefined
- *  when there is no session model or the provider has no catalog entries. No names, prices or
- *  tiers: the supervisor sizes a leg from the ids themselves. */
+/** The SESSION provider's candidate shortlist: exact active model first, then version-ranked
+ *  representatives, bounded by `max`. This is discovery, not proof of account access or quality.
+ *  Undefined when there is no session model or the provider has no catalog entries. */
 export function renderNudgeModels(
-	models: ReadonlyArray<{ provider: string; id: string }>,
+	models: readonly ModelCostMetadata[],
 	session: { provider: string; id: string } | undefined,
 	max = 10,
 ): string | undefined {
 	if (!session?.provider) return undefined;
 	const own = models.filter((m) => m.provider === session.provider);
 	if (own.length === 0) return undefined;
-	const shown = own.slice(0, max).map((m) => `${m.provider}/${m.id}${m.id === session.id ? " (you)" : ""}`);
-	return `${shown.join(", ")}${own.length > max ? " …" : ""}`;
+	const selected = shortlistModels(own, session, max);
+	if (selected.length === 0) return undefined;
+	const tiers = modelCostTiers(own, shortlistModels(own, undefined, Number.MAX_SAFE_INTEGER));
+	const shown = selected.map((m) => {
+		const ref = `${m.provider}/${m.id}`;
+		const tier = tiers.get(ref);
+		return `${ref}${tier ? ` [cost:${tier}]` : ""}${m.id === session.id ? " (you)" : ""}`;
+	});
+	return `${shown.join(", ")}${new Set(own.map((m) => m.id)).size > shown.length ? " …" : ""}`;
 }
 
 export class DelegationNudge {

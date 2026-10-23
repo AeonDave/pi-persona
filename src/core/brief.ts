@@ -7,11 +7,13 @@
  *   - DISCOVERY: the installed agents (name + clipped description), team rosters, and flows —
  *     regenerated from the live registry every turn, so it cannot desync the way hard-coded
  *     persona prose can, and it survives however much context the turn has burned.
- *   - THE STANDING DEFAULT, framed as the supervisor's ROLE: it holds the objective, the plan and the
- *     judgement, and a leg's transcript never enters its context, so anything simple or mechanical
- *     (reads, edits, runs, sweeps) goes to a leg while it keeps the task in view; what fits in one
- *     tool call stays inline; each leg's model is sized from `models`. Restated every turn at the
- *     prompt tail, where it wins the recency tug-of-war a top-of-prompt persona directive loses.
+ *   - THE STANDING DEFAULT: the supervisor owns the objective and major choices; workers execute
+ *     bounded packets and return evidence. Delegate early when it saves time or enables parallel
+ *     progress, and keep trivial, session-bound or faster actions inline. Worker model selection
+ *     uses relative advertised cost only when same-provider catalog prices are available; task fit
+ *     remains the supervisor's judgement. Restated
+ *     every turn at the prompt tail, where it wins the recency tug-of-war a top-of-prompt persona
+ *     directive loses.
  *
  * Pure module (no Pi imports). The caller (extension.ts) decides WHEN a brief applies
  * (capability gating, persona state); this module only renders.
@@ -60,6 +62,8 @@ export interface BriefInput {
 	council?: boolean;
 	/** Whether this session can call the `models` tool: false keeps model-sizing advice but omits tool discovery. */
 	canListModels?: boolean;
+	/** Cached shortlist for the current provider, rendered only while the `models` tool is callable. */
+	modelCandidates?: string;
 	/** A persona is active: state the standing hand-off default, not just the roster. */
 	standing: boolean;
 	/** Interactive session: delegate always runs in the background (headless blocks) — phrases delivery. */
@@ -86,17 +90,23 @@ const DESC_CLIP = 96;
 /** Most agents/teams/flows listed by name; beyond this the brief says "+N more". */
 const MAX_LISTED = 16;
 const MAX_TOOL_NAMES = 6;
-/** The one model-sizing rule. No model names: the supervisor learns its provider's ids from `models`
- *  (★ = its provider) and sizes each leg from them. */
+const MODEL_CANDIDATE_LINE_MAX = 700;
+const MODEL_CANDIDATE_PREFIX = "Cached current-provider candidates (catalog snapshot; account support may vary): ";
+/** The one model-sizing rule. No model names: cost tiers are relative API-cost bands among recent
+ *  same-provider catalog candidates, and only numeric price metadata supports them. */
 const MODEL_SIZING =
-	"Models: call `models` once at the start (★ = your provider) and give every leg a `model` of your provider sized to its task — the lightest that can do it under your supervision, your own only for work that needs your judgement; a leg without `model` runs on your own model.";
+	"Models: reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess worker choices using refreshed candidates if supplied (★ = your session provider). Low/medium/high rank relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
 const MODEL_SIZING_WITHOUT_DISCOVERY =
-	"Model sizing: choose the lightest model of your provider you know can do each leg's task under your supervision; reserve your own model for work that needs your judgement. A leg without `model` runs on your own model.";
+	"Model sizing: choose the least expensive candidate you already know can do the task. Without catalog pricing, treat cost tier as unknown. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Do not guess stale ids or silently switch provider/billing.";
 /** Decision class -> council strategy (a test checks every name is a registered strategy). */
 const DECISION_CLASSES = "contested fork → magi; rival complete answers → judge; rival implementations → compete; N items → map; draft + critique → critic-loop";
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const oneLine = (s: string, n: number): string => clip(s.replace(/\s+/g, " ").trim(), n);
+function renderModelCandidates(candidates: string | undefined): string | undefined {
+	if (!candidates?.trim()) return undefined;
+	return MODEL_CANDIDATE_PREFIX + oneLine(candidates, MODEL_CANDIDATE_LINE_MAX - MODEL_CANDIDATE_PREFIX.length);
+}
 
 function compactNames(names: readonly string[]): string {
 	const clean = names
@@ -183,22 +193,26 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 		}
 	}
 	lines.push("Presentation: Pi already renders tool calls and their output. Do not narrate upcoming commands or stream a worklog; surface only decisions, blockers, and the final synthesis.");
+	if (input.canListModels !== false) {
+		const candidates = renderModelCandidates(input.modelCandidates);
+		if (candidates) lines.push(candidates);
+	}
 
 	// Problem class -> method: one standing line; the council tool's description carries the per-strategy detail.
 	// `flow` is a separate tool, so it gets its own sentence rather than a slot among the strategies.
 	const council = input.council !== false;
 	const methods = council ? ` Convene \`council\` by problem class (${DECISION_CLASSES}).` : "";
 	const flowHint = input.flows.length > 0 ? " A shape an installed flow already encodes → `flow`." : "";
-	const inlineRule = "Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several.";
-	const inline = council ? `${inlineRule} A decision a council was convened on is its ruling's, not yours.` : inlineRule;
+	const inlineRule = "Keep decisions and synthesis inline; delegate bounded execution when it saves supervisor time or enables parallel progress. Do one-step, trivial, session-bound, or faster work directly; do not launch a worker just to avoid one quick call.";
+	const inline = council ? `${inlineRule} A council returns the scoped ruling its method promises; you still own the objective, whether that ruling fits, and what proceeds.` : inlineRule;
 	const example = input.agents.some((a) => a.name === "operator") ? "operator" : (listed[0]?.name ?? "operator");
 	const delivery = input.background
 		? `they run in the background; results arrive as a follow-up only after your turn ends (a fan-out's once, when its last leg settles) — do independent work meanwhile; ${END_TURN_NOTE}`
 		: "the call returns when they finish";
 	const modelSizing = input.canListModels === false ? MODEL_SIZING_WITHOUT_DISCOVERY : MODEL_SIZING;
 	const softModelSizing = input.canListModels === false
-		? " Size each leg's model of your provider to its task; a leg without `model` runs on your own model."
-		: " Give each leg a `model` of your provider (`models`, ★ = yours) sized to its task.";
+		? " For worker models, choose the least expensive candidate you already know can do the task. Without catalog pricing, treat cost tier as unknown. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Do not guess stale ids or silently switch provider/billing."
+		: " For worker models, reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess from refreshed candidates if supplied. Low/medium/high are relative advertised API-cost bands among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
 	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
 	if (input.requireBrief) {
 		callFields.push(
@@ -210,10 +224,10 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	if (input.requireBrief) discipline.push("A complete brief is required for every worker, including read-only scouts. For parallel calls, put the same six fields in every tasks[].brief; the top-level brief is single-mode only. Task prose does not replace the structured brief.");
 	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. Read-only scout (or tools limited to read/grep/find/ls) may fan out without writeSet.");
 	if (input.requireFreshVerification) discipline.push("After a material mutation, start a fresh verifier sequentially against the resulting state; a verifier launched before or during the mutation cannot approve completion.");
-	const minimum = `Minimum call: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
+	const handoffShape = `Hand-off shape: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(
 		input.standing
-			? `You are the supervisor: you hold the objective, the plan and the judgement, and a leg's transcript never enters your context. So anything simple or mechanical — reading files, editing, running commands, sweeping a surface — goes to a leg while you keep the task in view. Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${modelSizing} ${minimum}`
+			? `You are the supervisor: you own the objective, plan, major choices and final synthesis. Workers execute well-bounded work — reads, writes, code, checks, independent sweeps — and return evidence; they do not own major choices. Default to an early hand-off for bounded, multi-step or parallel work; keep the task in view while workers execute. Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${modelSizing} ${handoffShape}`
 			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).${softModelSizing}`,
 	);
 	return lines.join("\n");

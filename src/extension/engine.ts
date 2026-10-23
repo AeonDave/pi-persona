@@ -8,6 +8,7 @@ import { type ContractDef, DEFAULT_CONTRACT, installedContractNames } from "../c
 import type { RunLimits } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { isThinkingLevel } from "../core/types.ts";
+import type { ModelCostMetadata } from "../core/model-tier.ts";
 import { personaModels, type PersonaConfigStore } from "../persona/config-store.ts";
 import { participantKey } from "../persona/model-participants.ts";
 import type { PersonaController, PersonaHost } from "../persona/controller.ts";
@@ -310,33 +311,59 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 	}
 }
 
-// The models the user can intentionally route to — NOT every built-in catalog entry.
-// `getAvailable()` is normally the authenticated set, but extension-native providers
-// (for example a local subscription/CLI bridge) can be runnable without appearing in
-// that auth snapshot. Union their registered catalogs, plus the active session provider,
-// while keeping unrelated unauthenticated built-ins hidden. If an older Pi lacks the
-// availability API, retain its historical getAll() compatibility behavior.
-export function configuredModels(ctx: ExtensionContext): Array<{ provider: string; id: string }> {
+// The host's model-level availability snapshot, plus the exact active model. A provider's
+// credentials do not grant every model in its catalog. Extension-native bridges can be
+// absent from an auth snapshot: restore only their explicit registered model lists in that
+// case, never every inherited model under their provider id. Older facades without an
+// availability API retain their historical getAll() fallback.
+export function configuredModels(ctx: ExtensionContext): ModelCostMetadata[] {
 	const reg = ctx.modelRegistry;
 	const all = reg.getAll();
 	let available: typeof all;
 	try {
 		available = reg.getAvailable();
 	} catch {
-		return all.map((m) => ({ provider: m.provider, id: m.id }));
+		return all;
 	}
-	const trustedProviders = new Set<string>();
-	if (ctx.model?.provider) trustedProviders.add(ctx.model.provider);
+	const byRef = new Map(available.map((m) => [`${m.provider}\0${m.id}`, m]));
+	if (ctx.model) byRef.set(`${ctx.model.provider}\0${ctx.model.id}`, ctx.model);
+	const availableProviders = new Set(available.map((m) => m.provider));
+	const declaredRefs = new Set<string>();
+	let registered: readonly string[] = [];
 	try {
-		const registered = (reg as typeof reg & { getRegisteredProviderIds?: () => string[] }).getRegisteredProviderIds?.() ?? [];
-		for (const provider of registered) trustedProviders.add(provider);
+		registered = reg.getRegisteredProviderIds?.() ?? [];
 	} catch {
 		/* a third-party/older registry facade may not expose extension provider ids */
 	}
-	const byRef = new Map(available.map((m) => [`${m.provider}\0${m.id}`, m]));
-	for (const model of all) {
-		if (trustedProviders.has(model.provider)) byRef.set(`${model.provider}\0${model.id}`, model);
+	for (const provider of registered) {
+		// A populated snapshot can intentionally exclude individual models for this credential.
+		if (availableProviders.has(provider)) continue;
+		let native: ReturnType<typeof reg.getRegisteredNativeProvider>;
+		try {
+			native = reg.getRegisteredNativeProvider?.(provider);
+			// An empty credential-filtered list is authoritative too; it need not be a stale snapshot.
+			if (reg.getProvider?.(provider)?.filterModels || native?.filterModels) continue;
+		} catch { continue; }
+		try {
+			const models = reg.getRegisteredProviderConfig?.(provider)?.models;
+			if (Array.isArray(models)) {
+				for (const model of models) {
+					if ((model.type === undefined || model.type === "chat") && typeof model.id === "string") declaredRefs.add(`${provider}\0${model.id}`);
+				}
+			}
+		} catch { /* one broken extension's metadata must not hide other providers */ }
+		try {
+			const models = native?.getModels();
+			if (Array.isArray(models)) {
+				for (const model of models) {
+					if (model.provider === provider && typeof model.id === "string") declaredRefs.add(`${provider}\0${model.id}`);
+				}
+			}
+		} catch { /* a native catalog may be temporarily unavailable */ }
 	}
-	const list = [...byRef.values()];
-	return list.map((m) => ({ provider: m.provider, id: m.id }));
+	for (const model of all) {
+		const ref = `${model.provider}\0${model.id}`;
+		if (declaredRefs.has(ref)) byRef.set(ref, model);
+	}
+	return [...byRef.values()];
 }

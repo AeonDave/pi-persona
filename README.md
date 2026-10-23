@@ -98,7 +98,7 @@ the worker has acted on it.
 | `/persona models [council-persona]` | Refresh the catalog and reselect council models for the active persona |
 | `/persona-settings` | Open pi-persona's settings in the TUI or RPC UI |
 | `/persona-settings show` | Show a read-only settings report, including in headless sessions |
-| `/models <query>` | Find an available model |
+| `/models [query]` | Show recent model candidates with cost hints, or search the full catalog |
 | `/doctor` | Check configuration and available capabilities |
 
 The settings panel also includes Mind and Flow when those updated companions are loaded; all three

@@ -40,6 +40,8 @@ import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/ca
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, orderByMention, PersistenceNudge, PollGuard, renderNudgeModels, renderNudgeRoster } from "./core/nudge.ts";
+import { orderModelCandidates, shortlistModels } from "./core/model-catalog.ts";
+import { modelCandidateDetails, modelCostTiers, type ModelCostMetadata } from "./core/model-tier.ts";
 import { installedPiVersion, MIN_PI_VERSION, satisfiesFloor } from "./core/pi-compat.ts";
 import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
@@ -731,7 +733,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// fires: agents change on /persona reload, the session model on a switch).
 	const delegationNudge = new DelegationNudge(undefined, {
 		roster: () => renderNudgeRoster(orderByMention(delegateTargets(), controller.activePersona?.body)),
-		models: () => (lastCtx?.model ? renderNudgeModels(lastCtx.modelRegistry.getAll(), lastCtx.model) : undefined),
+		models: () => (lastCtx?.model ? currentModelCatalog(lastCtx).candidates : undefined),
 	});
 	// Persistence nudge: the counterweight — when a delegated leg comes back BLOCKED/UNKNOWN, remind
 	// the supervisor not to bank a premature surrender (same config.nudge gate + hook as above).
@@ -2098,16 +2100,35 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	}
 
-	// Search/list available models (provider/id), session provider first (★).
-	function searchModels(ctx: ExtensionContext, query?: string): { lines: string[]; total: number; capped: boolean } {
+	// Discovery is acquired once per base model/session. Repeated turns and nudges reuse it;
+	// an explicit models query refreshes it. Execution preflights still consult the live registry.
+	let modelCatalog: { key: string; models: ModelCostMetadata[]; candidates: string | undefined } | undefined;
+	function currentModelCatalog(ctx: ExtensionContext, refresh = false) {
+		const key = `${ctx.sessionManager?.getSessionId?.() ?? ""}\0${ctx.model?.provider ?? ""}\0${ctx.model?.id ?? ""}`;
+		if (refresh || modelCatalog?.key !== key) {
+			const models = configuredModels(ctx);
+			modelCatalog = { key, models, candidates: renderNudgeModels(models, ctx.model) };
+		}
+		return modelCatalog;
+	}
+
+	// Default discovery is a version-ranked shortlist; explicit searches keep the full eligible catalog.
+	function searchModels(ctx: ExtensionContext, query?: string): { lines: string[]; total: number; capped: boolean; shortlist: boolean } {
 		const session = ctx.model?.provider;
 		const isSession = (ref: string): boolean => session !== undefined && ref.startsWith(`${session}/`);
-		const all = configuredModels(ctx).map((m) => `${m.provider}/${m.id}`);
-		const filtered = orderModelRefs(filterModels(all, query ?? ""), session);
+		const catalog = currentModelCatalog(ctx, true).models;
+		const metadata = new Map(catalog.map((m) => [`${m.provider}/${m.id}`, m]));
+		const tiers = modelCostTiers(catalog, shortlistModels(catalog, undefined, Number.MAX_SAFE_INTEGER));
+		const shortlist = !query?.trim();
+		const all = catalog.map((m) => `${m.provider}/${m.id}`);
+		const filtered = orderModelCandidates(filterModels(all, query ?? "").map((ref) => metadata.get(ref)!), ctx.model).map((m) => `${m.provider}/${m.id}`);
 		const cap = 40;
+		const shown = shortlist
+			? shortlistModels(catalog, ctx.model, cap).map((m) => `${m.provider}/${m.id}`)
+			: filtered.slice(0, cap);
 		const self = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-		const lines = filtered.slice(0, cap).map((r) => `${isSession(r) ? "★ " : "  "}${r}${r === self ? " (you)" : ""}`);
-		return { lines, total: filtered.length, capped: filtered.length > cap };
+		const lines = shown.map((r) => `${isSession(r) ? "★ " : "  "}${r} ${modelCandidateDetails(metadata.get(r)!, tiers.get(r))}${r === self ? " (you)" : ""}`);
+		return { lines, total: filtered.length, capped: filtered.length > lines.length, shortlist };
 	}
 
 	// The per-turn delegation brief (core/brief.ts): live roster + standing hand-off default,
@@ -2126,6 +2147,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (caps && !canFanOut(caps)) return undefined;
 		const targets = delegateTargets();
 		const delegation = controller.activePersona?.delegation;
+		const canListModels = pi.getActiveTools().includes("models") && (!caps || canCallTool(caps, "models"));
+		const candidates = canListModels && ctx.model ? currentModelCatalog(ctx).candidates : undefined;
 		const teamAgents: Record<string, string[]> = {};
 		for (const [name, members] of Object.entries(teams)) teamAgents[name] = members.map((m) => rosterSpec(m).agent);
 		return buildDelegationBrief({
@@ -2142,7 +2165,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// told to convene one (the call would be refused by the capability gate).
 			flows: !caps || canCallTool(caps, "flow") ? flowCatalog(ctx.cwd) : [],
 			...(caps && !canCallTool(caps, "council") ? { council: false } : {}),
-			canListModels: pi.getActiveTools().includes("models") && (!caps || canCallTool(caps, "models")),
+			canListModels,
+			...(candidates ? { modelCandidates: candidates } : {}),
 			standing: controller.activePersona !== undefined,
 			// Interactive sessions ALWAYS delegate in the background; headless (`pi -p`) always
 			// blocks (the single turn must carry the result) — mirror that in the copy.
@@ -2701,16 +2725,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	// ── /models + a `models` tool — discover/search model ids ─────────────────────
 	pi.registerCommand("models", {
-		description: "List or search available models (provider/id): /models [query]",
+		description: "Show model candidates or search the full catalog (provider/id): /models [query]",
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
-			const { lines, total, capped } = searchModels(ctx, args);
+			const { lines, total, capped, shortlist } = searchModels(ctx, args);
 			if (lines.length === 0) {
 				ctx.ui.notify(`models: no match for "${args.trim()}"`, "warning");
 				return;
 			}
-			const head = `models (${total}${capped ? ", showing 40" : ""})${ctx.model ? ` · session ★ ${ctx.model.provider}/${ctx.model.id}` : ""}`;
-			ctx.ui.notify(`${head}\n${lines.join("\n")}${capped ? "\n…refine with /models <query>" : ""}`, "info");
+			const head = `models (${total}${shortlist || capped ? `, showing ${lines.length}${shortlist ? " version-ranked candidates" : " matches"}` : ""})${ctx.model ? ` · session ★ ${ctx.model.provider}/${ctx.model.id}` : ""}`;
+			ctx.ui.notify(`${head}\n${lines.join("\n")}\nAccount support may vary.${shortlist || capped ? " Search the full catalog with /models <query>." : ""}`, "info");
 		},
 	});
 

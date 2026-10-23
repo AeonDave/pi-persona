@@ -160,7 +160,7 @@ test("a sweep nudge is a compact visible checkpoint with trigger, action, and lo
 	assert.match(note ?? "", /^  Trigger: 4 substantive direct tool calls · ~1k estimated output tokens\.$/m);
 	assert.match(note ?? "", /^  Scope: since the last successful hand-off\.$/m);
 	assert.match(note ?? "", /^  Action: delegate independent work; repair weak hand-offs, then re-dispatch\.$/m);
-	assert.match(note ?? "", /^  Keep local: session-bound work; keep it lean and grep-first\.$/m, "acknowledges non-delegable work");
+	assert.match(note ?? "", /^  Keep local: quick checks or coupled\/session-bound work; keep it lean and grep-first\.$/m, "acknowledges quick and non-delegable work");
 	assert.equal((note ?? "").split("\n").length, 5, "the expanded checkpoint has a stable five-line shape");
 	assert.ok((note ?? "").split("\n").every((line) => line.length <= 88), "each labelled line stays narrow enough to avoid gratuitous wrapping");
 	assert.ok((note ?? "").length <= 360, "the reminder itself must not become another wall of text");
@@ -259,7 +259,7 @@ test("a roster thunk makes the Action line name WHO to hand the breadth to, and 
 	const note = sweepWith({ roster: () => "scout (reads) · operator (edits, runs) · reviewer (review)" });
 	assert.equal(
 		lineOf(note, "Action:"),
-		"  Action: hand the remaining breadth to a leg — scout (reads) · operator (edits, runs) · reviewer (review) — with a `model` of your provider, then supervise.",
+		"  Action: hand remaining independent breadth to a leg — scout (reads) · operator (edits, runs) · reviewer (review) — choose a known compatible model from your provider or inherit yours, then supervise.",
 	);
 	assert.doesNotMatch(note ?? "", /repair weak hand-offs/, "the roster wording replaces the generic Action");
 	assert.match(note ?? "", /^  Keep local: /m, "the session-bound escape hatch stays");
@@ -268,14 +268,14 @@ test("a roster thunk makes the Action line name WHO to hand the breadth to, and 
 test("a denied models tool is never named in the nudge action while the passive model list remains available", () => {
 	const catalog = "alpha/fast (you), alpha/strong";
 	const note = sweepWith({ roster: () => "scout (reads)", models: () => catalog });
-	assert.match(lineOf(note, "Action:") ?? "", /with a `model` of your provider, then supervise\./);
+	assert.match(lineOf(note, "Action:") ?? "", /choose a known compatible model from your provider or inherit yours, then supervise\./);
 	assert.doesNotMatch(lineOf(note, "Action:") ?? "", /`models`/, "the action cannot prompt a blocked models call");
-	assert.equal(lineOf(note, "Models"), `  Models (this session, your provider): ${catalog}`, "the data list remains passive context");
+	assert.equal(lineOf(note, "Model candidates"), `  Model candidates (your provider; account support may vary): ${catalog}`, "the data list remains passive context");
 });
 
 test("the dump trigger names the roster too", () => {
 	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 99, minStepChars: 10, minSweepBurnChars: 0 }, { roster: () => "scout (reads)" });
-	assert.match(n.observe("bash", 120) ?? "", /^  Action: hand the remaining breadth to a leg — scout \(reads\) — with a `model`/m);
+	assert.match(n.observe("bash", 120) ?? "", /^  Action: hand remaining independent breadth to a leg — scout \(reads\) — choose a known compatible model/m);
 });
 
 test("no roster (no thunk, undefined, empty or whitespace) keeps the generic Action wording", () => {
@@ -307,35 +307,35 @@ test("roster text is one bounded line: newlines collapse and a long one is clipp
 test("a throwing roster or models thunk never breaks the tool_result hook", () => {
 	const note = sweepWith({ roster: () => { throw new Error("registry gone"); }, models: () => { throw new Error("registry gone"); } });
 	assert.equal(lineOf(note, "Action:"), "  Action: delegate independent work; repair weak hand-offs, then re-dispatch.");
-	assert.equal(lineOf(note, "Models"), undefined);
+	assert.equal(lineOf(note, "Model candidates"), undefined);
 	assert.equal((note ?? "").split("\n").length, 5);
 });
 
-test("a models thunk adds ONE line telling the supervisor which models this session has", () => {
+test("a models thunk adds ONE honest catalog-candidate line without claiming account support", () => {
 	const text = "z-ai/glm-a (you), z-ai/glm-b, z-ai/glm-c";
 	const note = sweepWith({ models: () => text });
-	assert.equal(lineOf(note, "Models"), `  Models (this session, your provider): ${text}`);
+	assert.equal(lineOf(note, "Model candidates"), `  Model candidates (your provider; account support may vary): ${text}`);
 	const lines = (note ?? "").split("\n");
 	assert.equal(lines.length, 6);
-	assert.ok(lines.findIndex((l) => l.startsWith("  Models")) > lines.findIndex((l) => l.startsWith("  Action:")), "after the Action");
-	assert.ok(lines.findIndex((l) => l.startsWith("  Models")) < lines.findIndex((l) => l.startsWith("  Keep local")), "before Keep local");
+	assert.ok(lines.findIndex((l) => l.startsWith("  Model candidates")) > lines.findIndex((l) => l.startsWith("  Action:")), "after the Action");
+	assert.ok(lines.findIndex((l) => l.startsWith("  Model candidates")) < lines.findIndex((l) => l.startsWith("  Keep local")), "before Keep local");
 	const both = sweepWith({ roster: () => "scout (reads)", models: () => text });
 	assert.equal(both?.split("\n").length, 6, "roster rewrites the Action line, it does not add one");
-	assert.match(both ?? "", /^  Action: hand the remaining breadth to a leg — scout \(reads\)/m);
-	assert.match(both ?? "", /^  Models \(this session, your provider\): /m);
+	assert.match(both ?? "", /^  Action: hand remaining independent breadth to a leg — scout \(reads\)/m);
+	assert.match(both ?? "", /^  Model candidates \(your provider; account support may vary\): /m);
 });
 
 test("no models thunk, or one with nothing to say, adds no Models line", () => {
 	for (const opts of [undefined, {}, { models: () => undefined }, { models: () => "" }, { models: () => "   " }]) {
 		const note = sweepWith(opts);
-		assert.equal(lineOf(note, "Models"), undefined);
+		assert.equal(lineOf(note, "Model candidates"), undefined);
 		assert.equal((note ?? "").split("\n").length, 5, "the stable five-line shape");
 	}
 });
 
 test("the models line rides the dump trigger too, and never the hand-off repair card", () => {
 	const n = new DelegationNudge({ singleHeavyChars: 100, runLength: 99, minStepChars: 10, minSweepBurnChars: 0 }, { roster: () => "scout (reads)", models: () => "p/a (you)" });
-	assert.match(n.observe("bash", 120) ?? "", /^  Models \(this session, your provider\): p\/a \(you\)$/m);
+	assert.match(n.observe("bash", 120) ?? "", /^  Model candidates \(your provider; account support may vary\): p\/a \(you\)$/m);
 	const repair = n.observe("delegate", 500, false, "unknown agent");
 	assert.match(repair ?? "", /hand-off repair/);
 	assert.doesNotMatch(repair ?? "", /Models|breadth to a leg/, "the repair card is unchanged");
@@ -390,7 +390,7 @@ test("orderByMention: case-insensitive, punctuation-delimited, and a name is mat
 	assert.deepEqual(names(orderByMention([...dotted].reverse(), "only a.b matters")), ["a.b", "axb"], "`.` does not match any character");
 });
 
-test("renderNudgeModels: the session provider's ids in catalog order, (you) on the session model, capped with …", () => {
+test("renderNudgeModels: the session provider's shortlist, active model first and capped with …", () => {
 	const catalog = [
 		{ provider: "other", id: "x1" },
 		{ provider: "mine", id: "big" },
@@ -398,15 +398,30 @@ test("renderNudgeModels: the session provider's ids in catalog order, (you) on t
 		{ provider: "other", id: "x2" },
 		{ provider: "mine", id: "small" },
 	];
-	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "mid" }), "mine/big, mine/mid (you), mine/small");
+	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "mid" }), "mine/mid (you), mine/big, mine/small");
 	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "elsewhere" }), "mine/big, mine/mid, mine/small", "no marker when the session model is not in the list");
-	const many = Array.from({ length: 12 }, (_, i) => ({ provider: "mine", id: `m${i}` }));
-	const capped = renderNudgeModels(many, { provider: "mine", id: "m0" }) ?? "";
-	assert.equal(capped, "mine/m0 (you), mine/m1, mine/m2, mine/m3, mine/m4, mine/m5, mine/m6, mine/m7, mine/m8, mine/m9 …");
-	assert.equal(renderNudgeModels(many, { provider: "mine", id: "m0" }, 3), "mine/m0 (you), mine/m1, mine/m2 …");
+	const many = Array.from({ length: 12 }, (_, i) => ({ provider: "mine", id: `model-${String.fromCharCode(97 + i)}-1` }));
+	const capped = renderNudgeModels(many, { provider: "mine", id: "model-l-1" }) ?? "";
+	assert.equal(capped, "mine/model-l-1 (you), mine/model-a-1, mine/model-b-1, mine/model-c-1, mine/model-d-1, mine/model-e-1, mine/model-f-1, mine/model-g-1, mine/model-h-1, mine/model-i-1 …");
+	assert.equal(renderNudgeModels(many, { provider: "mine", id: "model-l-1" }, 3), "mine/model-l-1 (you), mine/model-a-1, mine/model-b-1 …");
 	assert.equal(renderNudgeModels(catalog, undefined), undefined, "no session model, no provider to scope to");
 	assert.equal(renderNudgeModels(catalog, { provider: "absent", id: "a" }), undefined, "a provider with no catalog entries says nothing");
 	assert.equal(renderNudgeModels([], { provider: "mine", id: "a" }), undefined);
+});
+
+test("renderNudgeModels exposes relative cost bands from uncapped recent provider candidates", () => {
+	const catalog = [
+		{ provider: "mine", id: "small-1", cost: { input: 1, output: 1 } },
+		{ provider: "mine", id: "middle-1", cost: { input: 3, output: 3 } },
+		{ provider: "mine", id: "large-1", cost: { input: 9, output: 9 } },
+	];
+	assert.equal(renderNudgeModels(catalog, catalog[1], 1), "mine/middle-1 [cost:medium] (you) …", "the display cap must not change the reference price bands");
+});
+
+test("renderNudgeModels puts a current model beyond the old ten-row cap before newer representatives", () => {
+	const models = ["gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20", "gpt-5-mini", "gpt-5-nano", "gpt-5-sol", "gpt-5.6-sol", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"].map((id) => ({ provider: "mine", id }));
+	const rendered = renderNudgeModels(models, { provider: "mine", id: "gpt-6-sol" }, 3);
+	assert.equal(rendered, "mine/gpt-6-sol (you), mine/gpt-6.1-sol, mine/gpt-6-luna …");
 });
 
 // --- PersistenceNudge: the premature-surrender counterweight -----------------------------------
