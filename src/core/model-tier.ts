@@ -1,6 +1,11 @@
 /** Relative advertised cost within one provider; never capability, throughput, or effort. */
 export type ModelTier = "low" | "medium" | "high";
 
+/** Presentation order only: unknown prices follow known provider-relative bands. */
+export function modelCostRank(tier: ModelTier | undefined): number {
+	return tier === "low" ? 0 : tier === "medium" ? 1 : tier === "high" ? 2 : 3;
+}
+
 export interface ModelCostMetadata {
 	provider: string;
 	id: string;

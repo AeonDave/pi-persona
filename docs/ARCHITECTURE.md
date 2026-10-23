@@ -552,6 +552,10 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   aliases carry a secondary ID, and legacy receipts without a recoverable name retain their ID fallback.
   Accepted steering receipts retain the exact sent message: collapsed cards preview it, expansion
   shows all sanitized text and the diagnostic ID. A queued receipt does not prove the worker acted;
+- async failures append a `pi-persona-run-failure` entry in TUI mode, with alias, agent/model,
+  elapsed time and a concise cause. The entry stores the original diagnostic for expanded history
+  rendering; it is operator-only and adds no model context or wake. Other modes, or an append
+  failure, retain a bounded notification. The semantic completion follows its existing single-wake path;
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
   preview until expanded; terminal escape/control sequences are removed from the visible projection;
 - the sticky agent and exocom widgets have fixed row budgets — F9/`/agents` and paginated
@@ -797,9 +801,12 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
   filters to the active persona's `delegate` allowlist. It never dictates how MANY sub-agents; beyond the one class line,
   the shape is each persona's own method.
   The model snapshot is acquired once per session/base-model reference, refreshed on a base-model change
-  or explicit `models` call, and reused across turns. Numeric version ranking affects discovery only;
-  exact assignment and search retain the full eligible catalog. Relative cost hints use host prices,
-  never a model-name-to-tier table, and leave missing or zero-price metadata unknown.
+  or explicit `models` call, and reused across turns. Recommendations first stay near the current
+  model's provider, textual name root and numbered major generation, then order distinct variants by
+  relative cost band and numeric version. They do not fill spare slots with older or unrelated models.
+  This affects discovery only; exact assignment and search retain the full eligible catalog.
+  Relative cost hints use host prices against an uncapped recent-provider reference, never a
+  model-name-to-tier table, and leave missing or zero-price metadata unknown. The LLM chooses task fit.
 - The **nudges** (`core/nudge.ts`, on by default) are the REACTIVE half, landing in RECENT context on
   the event that warrants them:
   - **DelegationNudge** — a `tool_result` hook watches the supervisor's own tool stream and, when a

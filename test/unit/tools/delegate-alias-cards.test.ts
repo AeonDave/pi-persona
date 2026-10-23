@@ -10,6 +10,10 @@ import { createBackgroundRuns } from "../../../src/tools/background-run.ts";
 import { registerDelegateTool } from "../../../src/tools/delegate-tool.ts";
 
 const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+const tokenTheme = {
+	fg: (name: string, text: string) => `<${name}>${text}</${name}>`,
+	bold: (text: string) => `**${text}**`,
+};
 
 function register(overrides: Record<string, unknown> = {}): { tool: any; deps: any } {
 	let tool: any;
@@ -48,8 +52,105 @@ function ctx() {
 }
 
 function render(tool: any, result: any, expanded = false, width = 240, context?: any): string {
-	return tool.renderResult(result, { expanded }, plainTheme, context).render(width).join("\n");
+	return tool.renderResult(result, { expanded, isPartial: context?.isPartial ?? false }, plainTheme, context).render(width).join("\n");
 }
+
+function renderCall(tool: any, args: unknown, width = 240, context?: any): string {
+	return tool.renderCall(args, plainTheme, context).render(width).join("\n");
+}
+
+test("single delegate call gives the alias a title line and keeps agent plus provider-qualified model in dim metadata", async () => {
+	const h = register();
+	const args = { agent: "operator", name: "Velvet-recon", model: "openai-codex/gpt-5.4-mini", task: "PRIVATE TASK" };
+	await h.tool.execute("single", args, undefined, undefined, ctx());
+	const wide = renderCall(h.tool, args, 120);
+	assert.match(wide, /delegate Velvet-recon/);
+	assert.match(wide, /operator · openai-codex\/gpt-5\.4-mini/);
+	assert.doesNotMatch(wide, /PRIVATE TASK/);
+	const styled = h.tool.renderCall(args, tokenTheme).render(120).join("\n");
+	assert.match(styled, /<toolTitle>\*\*delegate \*\*<\/toolTitle><accent>\*\*Velvet-recon\*\*<\/accent>/);
+	assert.match(styled, /<dim>  operator · openai-codex\/gpt-5\.4-mini<\/dim>/);
+	const unnamed = renderCall(h.tool, { agent: "scout", task: "PRIVATE" }, 120);
+	assert.match(unnamed, /delegate scout/);
+
+	const narrow = renderCall(h.tool, args, 36);
+	assert.ok(narrow.split("\n").every((line) => visibleWidth(line.trimEnd()) <= 36));
+	assert.match(narrow, /Velvet/);
+});
+
+test("a complete coherent Pi receipt avoids repeating identity, while standalone history keeps it", async () => {
+	const first = register();
+	const args = { agent: "operator", name: "Velvet-recon", model: "openai-codex/gpt-5.4-mini", task: "PRIVATE TASK" };
+	const launched = await first.tool.execute("single", args, undefined, undefined, ctx());
+	const afterReload = register();
+	const piContext = { args, argsComplete: true, isPartial: false };
+	const originalContent = JSON.stringify(launched.content);
+	const receipt = render(afterReload.tool, launched, false, 120, piContext).trimEnd();
+	assert.equal(receipt, "↳ launched");
+	assert.doesNotMatch(receipt, /delegate|Velvet-recon|operator|gpt-5\.4-mini|done|completed/i);
+
+	const standalone = render(afterReload.tool, launched, false, 120);
+	assert.match(standalone, /Velvet-recon/);
+	assert.match(standalone, /operator/);
+	assert.match(standalone, /gpt-5\.4-mini/);
+	const expanded = render(afterReload.tool, launched, true, 240);
+	assert.match(expanded, /Velvet-recon/);
+	assert.match(expanded, /operator/);
+	assert.match(expanded, /gpt-5\.4-mini/);
+	assert.match(expanded, /run-1/);
+	assert.equal(JSON.stringify(launched.content), originalContent, "rendering does not alter model-facing content");
+});
+
+test("incomplete, partial, or incoherent contexts keep a full standalone receipt", async () => {
+	const first = register();
+	const args = { agent: "operator", name: "Dewglass-worker", model: "provider/model", task: "work" };
+	const launched = await first.tool.execute("single", args, undefined, undefined, ctx());
+	const afterReload = register();
+	for (const context of [
+		{ args, argsComplete: false, isPartial: false },
+		{ args, argsComplete: true, isPartial: true },
+		{ args: { ...args, agent: "scout" }, argsComplete: true, isPartial: false },
+		{ args: { ...args, model: "other/not-model" }, argsComplete: true, isPartial: false },
+	]) {
+		const card = render(afterReload.tool, launched, false, 160, context);
+		assert.match(card, /Dewglass-worker/);
+		assert.match(card, /operator/);
+		assert.match(card, /model/);
+	}
+});
+
+test("fanout receipt shows at most three identity rows and retains omitted and dropped counts", () => {
+	const h = register();
+	const result = {
+		content: [{ type: "text", text: "Launched four workers." }],
+		details: {
+			runIds: ["run-1", "run-2", "run-3", "run-4"],
+			dropped: 2,
+			runs: [
+				{ id: "run-1", label: "Velvet-recon", agent: "operator", model: "gpt-5.4-mini" },
+				{ id: "run-2", label: "Brooklantern", agent: "scout", model: "glm-5.3" },
+				{ id: "run-3", label: "Mossbridge", agent: "reviewer", model: "sonnet-4.5" },
+				{ id: "run-4", label: "Fourth-worker", agent: "scout", model: "haiku-4.5" },
+			],
+		},
+		isError: false,
+	};
+	const collapsed = render(h.tool, result, false, 120);
+	const rows = collapsed.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
+	assert.ok(rows.length <= 3, `expected at most three compact rows, got ${rows.length}: ${collapsed}`);
+	assert.deepEqual(rows, [
+		"↳ launched Velvet-recon · operator · gpt-5.4-mini",
+		"  Brooklantern · scout · glm-5.3",
+		"  Mossbridge · reviewer · sonnet-4.5 · +1 more · 2 tasks dropped · expand to see full detail",
+	]);
+	for (const value of ["Velvet-recon", "operator", "gpt-5.4-mini", "Brooklantern", "scout", "glm-5.3", "Mossbridge", "reviewer", "sonnet-4.5", "+1 more", "2 tasks dropped", "expand"]) {
+		assert.match(collapsed, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	}
+	assert.doesNotMatch(collapsed, /Fourth-worker|run-1|run-2|run-3/);
+	assert.ok(rows.every((line) => visibleWidth(line.trimEnd()) <= 100));
+	const expanded = render(h.tool, result, true, 240);
+	assert.match(expanded, /Fourth-worker.*scout.*haiku-4\.5 \[run-4\]/s);
+});
 
 test("async single card persists and renders its tree alias after tracker reload", async () => {
 	const first = register();
@@ -67,10 +168,12 @@ test("async single card persists and renders its tree alias after tracker reload
 
 	const afterReload = register();
 	const collapsed = render(afterReload.tool, launched);
-	assert.match(collapsed, /delegate launched Dewglass-asyncfix · sonnet/);
+	assert.match(collapsed, /Dewglass-asyncfix/);
+	assert.match(collapsed, /operator/);
+	assert.match(collapsed, /sonnet/);
 	assert.doesNotMatch(collapsed, /run-1/);
 	const expanded = render(afterReload.tool, launched, true);
-	assert.match(expanded, /Dewglass-asyncfix · sonnet/);
+	assert.match(expanded, /Dewglass-asyncfix · operator · sonnet/);
 	assert.match(expanded, /run-1/);
 	assert.match(expanded, /Launched async run run-1/);
 	assert.match(launched.content[0].text, /run-1/, "rendering leaves model-facing content untouched");
@@ -110,13 +213,33 @@ test("fanout card shows only launched aliases and accounts for dropped tasks", a
 	assert.match(expanded, /Dropped-worker|1 task/);
 });
 
+test("one-row fanout receipt still reports dropped tasks in a complete Pi context", async () => {
+	const first = register({ RUN_LIMITS: { maxConcurrency: 4, maxChildren: 1, timeoutMs: 1000 } });
+	const args = {
+		tasks: [
+			{ agent: "operator", name: "Dewglass", task: "first" },
+			{ agent: "scout", name: "Dropped-worker", task: "second" },
+		],
+	};
+	const launched = await first.tool.execute("fanout", args, undefined, undefined, ctx());
+	const afterReload = register();
+	for (const context of [undefined, { args, argsComplete: true, isPartial: false }]) {
+		const collapsed = render(afterReload.tool, launched, false, 120, context);
+		assert.match(collapsed, /Dewglass/);
+		assert.match(collapsed, /operator/);
+		assert.match(collapsed, /1 task dropped/);
+		assert.match(collapsed, /expand to see full detail/);
+	}
+});
+
 test("legacy launch details use a tracked alias when available and retain id diagnostics otherwise", () => {
 	const h = register();
 	h.deps.tracker.launch({ agent: "scout", task: "old launch", label: "Acornrail-retentionfix", model: "haiku" }, async () => ({
 		agent: "scout", output: "done", usage: emptyUsage(), ok: true,
 	}));
 	const known = { content: [{ type: "text", text: "Launched async run run-1 (scout)." }], details: { runId: "run-1" }, isError: false };
-	assert.match(render(h.tool, known), /Acornrail-retentionfix · haiku/);
+	assert.match(render(h.tool, known), /Acornrail-retentionfix/);
+	assert.match(render(h.tool, known), /scout · haiku/);
 	assert.doesNotMatch(render(h.tool, known), /run-1/);
 
 	const unknown = { content: [{ type: "text", text: "Launched async run run-legacy (scout)." }], details: { runId: "run-legacy" }, isError: false };
@@ -157,7 +280,7 @@ test("legacy fanout keeps every id when only part of the batch is still tracked"
 	assert.match(collapsed, /\+1 more/);
 	assert.match(collapsed, /expand/i);
 	const expanded = render(h.tool, result, true);
-	assert.match(expanded, /Tracked-worker \[run-1\]/);
+	assert.match(expanded, /Tracked-worker · scout \[run-1\]/);
 	assert.match(expanded, /run-old-2 \[run-old-2\]/);
 	assert.match(expanded, /run-old-3 \[run-old-3\]/);
 	assert.match(expanded, /run-old-4 \[run-old-4\]/);
@@ -189,9 +312,9 @@ test("alias rendering sanitizes terminal controls and bounds labels on wide term
 	const first = register();
 	const launched = await first.tool.execute("wide", { agent: "operator", name: alias, task: "inspect" }, undefined, undefined, ctx());
 	const afterReload = register();
-	const collapsed = render(afterReload.tool, launched, false, 500).trimEnd();
-	assert.doesNotMatch(collapsed, /\u001b|[\u0000-\u001f]/);
-	assert.ok(visibleWidth(collapsed) <= 100, "wide aliases are clipped to the collapsed card's column bound");
+	const collapsed = render(afterReload.tool, launched, false, 500).split("\n").map((line) => line.trimEnd()).join("\n");
+	assert.doesNotMatch(collapsed, /\u001b|[\u0000-\u0009\u000b-\u001f]/);
+	assert.ok(collapsed.split("\n").every((line) => visibleWidth(line) <= 100), "wide aliases are clipped to the collapsed card's column bound");
 	assert.match(collapsed, /expand/i, "a clipped alias tells the operator how to expand the full name");
 	const expanded = render(afterReload.tool, launched, true, 500);
 	assert.doesNotMatch(expanded, /\u001b|[\u0000-\u0009\u000b-\u001f]/);
@@ -210,12 +333,13 @@ test("expanded launch metadata includes admitted snapshots beyond 128 rows", () 
 		isError: false,
 	};
 	const expanded = render(h.tool, result, true, 180);
-	assert.match(expanded, /worker-129 \[run-129\]/);
+	assert.match(expanded, /worker-129 · operator \[run-129\]/);
 	assert.doesNotMatch(expanded, /launch records omitted/);
-	const collapsed = render(h.tool, result).trimEnd();
+	const collapsed = render(h.tool, result).split("\n").map((line) => line.trimEnd()).join("\n");
 	assert.match(collapsed, /\+127 more/);
 	assert.match(collapsed, /expand/i);
-	assert.ok(visibleWidth(collapsed) <= 100);
+	assert.ok(collapsed.split("\n").length <= 3);
+	assert.ok(collapsed.split("\n").every((line) => visibleWidth(line) <= 100));
 });
 
 test("only a background launch arms the status monitor; a headless leg runs inline with nobody to read a card", async () => {

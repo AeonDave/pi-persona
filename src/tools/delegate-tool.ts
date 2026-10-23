@@ -6,7 +6,7 @@ import { END_TURN_NOTE } from "../core/brief.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { configuredModels } from "../extension/engine.ts";
-import { compactInlineText, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
+import { compactInlineText, compactVisibleLine, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
@@ -38,10 +38,20 @@ interface DelegateLaunchSnapshot {
 
 interface DelegateLaunchRow {
 	id: string;
-	fullName: string;
-	displayName: string;
+	label: string;
+	detailLabel: string;
+	agent: string;
+	model?: string;
+	displayLabel: string;
 	clipped: boolean;
 	hasAlias: boolean;
+}
+
+interface CollapsedLaunchLine {
+	prefix: string;
+	label: string;
+	metadata: string;
+	suffix: string;
 }
 
 const COLLAPSED_LAUNCH_ROWS = 3;
@@ -97,49 +107,91 @@ function launchRows(
 	});
 	const named = entries.map(({ run, hasAlias }) => ({
 		id: compactInlineText(run.id, { maxChars: 64 }) || "run",
+		label: sanitizeTerminalText(run.label),
+		agent: sanitizeTerminalText(run.agent),
+		...(run.model ? { model: sanitizeTerminalText(run.model) } : {}),
 		fullName: runDisplayName(run),
 		hasAlias,
 	}));
 	const counts = new Map<string, number>();
 	for (const row of named) counts.set(row.fullName, (counts.get(row.fullName) ?? 0) + 1);
 	return named.map((row) => {
-		const displayName = counts.get(row.fullName)! > 1
-			? `${compactInlineText(row.fullName, { maxChars: 56 })} [${compactInlineText(row.id, { maxChars: 16 })}]`
-			: row.fullName;
+		const duplicateSuffix = counts.get(row.fullName)! > 1 ? ` [${compactInlineText(row.id, { maxChars: 16 })}]` : "";
+		const detailLabel = `${row.label}${duplicateSuffix}`;
+		const displayLabel = compactInlineText(detailLabel, { maxChars: 80 });
+		const displayMetadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
 		return {
 			...row,
-			displayName,
-			clipped: compactInlineText(displayName, { maxChars: 80 }) !== displayName,
+			detailLabel,
+			displayLabel,
+			clipped: displayLabel !== detailLabel || compactInlineText(displayMetadata, { maxChars: 80 }) !== displayMetadata,
 		};
 	});
 }
 
-function collapsedLaunchSummary(rows: readonly DelegateLaunchRow[], dropped: number | undefined): string {
-	const prefix = "delegate launched ";
-	const dropNote = dropped && dropped > 0 ? ` · ${dropped} task${dropped === 1 ? "" : "s"} dropped` : "";
-	const maxVisible = Math.min(rows.length, COLLAPSED_LAUNCH_ROWS);
-	for (let count = maxVisible; count >= 1; count--) {
-		const names = rows.slice(0, count).map((row) => row.displayName);
-		const omitted = rows.length - names.length;
-		const suffix = omitted > 0 ? `, +${omitted} more` : "";
-		const body = `${prefix}${names.join(", ")}${suffix}${dropNote}`;
-		const needsHint = omitted > 0 || rows.slice(0, count).some((row) => row.clipped) || body.length > MAX_COLLAPSED_CARD_COLUMNS || visibleWidth(body) > MAX_COLLAPSED_CARD_COLUMNS;
-		const candidate = `${body}${needsHint ? ` · ${expandDetailHint()}` : ""}`;
-		if (candidate.length <= MAX_COLLAPSED_CARD_COLUMNS && visibleWidth(candidate) <= MAX_COLLAPSED_CARD_COLUMNS) return candidate;
-	}
-	const omitted = rows.length - 1;
-	const suffix = omitted > 0 ? `, +${omitted} more` : "";
-	const hint = ` · ${expandDetailHint()}`;
-	const fixed = `${prefix}${suffix}${dropNote}${hint}`;
-	const aliasLimit = Math.max(16, Math.min(MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(fixed), MAX_COLLAPSED_CARD_COLUMNS - fixed.length));
-	const first = compactInlineText(rows[0]!.displayName, { maxChars: aliasLimit });
-	return compactInlineText(`${prefix}${first}${suffix}${dropNote}${hint}`, { maxChars: MAX_COLLAPSED_CARD_COLUMNS });
+function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number | undefined): CollapsedLaunchLine[] {
+	if (rows.length === 0) return [{ prefix: "↳ launched ", label: "", metadata: "", suffix: "" }];
+	const visibleCount = Math.min(rows.length, COLLAPSED_LAUNCH_ROWS);
+	const omitted = rows.length - visibleCount;
+	const droppedCount = typeof dropped === "number" && Number.isFinite(dropped) ? Math.max(0, Math.floor(dropped)) : 0;
+	const suffixParts = [
+		...(omitted > 0 ? [`+${omitted} more`] : []),
+		...(droppedCount > 0 ? [`${droppedCount} task${droppedCount === 1 ? "" : "s"} dropped`] : []),
+	];
+	const hintText = compactInlineText(expandDetailHint(), { maxChars: 32 });
+	const rowsNeedHint = rows.slice(0, visibleCount).some((row, index) => {
+		const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+		const prefixWidth = index === 0 ? visibleWidth("↳ launched ") : visibleWidth("  ");
+		return row.clipped || prefixWidth + visibleWidth(row.displayLabel) + (metadata ? 3 + visibleWidth(metadata) : 0) > MAX_COLLAPSED_CARD_COLUMNS;
+	});
+	if (omitted > 0 || droppedCount > 0 || rowsNeedHint) suffixParts.push(hintText);
+	const suffix = suffixParts.length > 0 ? ` · ${compactInlineText(suffixParts.join(" · "), { maxChars: 56 })}` : "";
+	return rows.slice(0, visibleCount).map((row, index) => {
+		const prefix = index === 0 ? "↳ launched " : "  ";
+		const fixedWidth = visibleWidth(prefix) + (index === visibleCount - 1 ? visibleWidth(suffix) : 0);
+		const budget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - fixedWidth);
+		const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+		const metadataBudget = Math.min(36, visibleWidth(metadata));
+		const labelBudget = Math.max(16, budget - (metadata ? metadataBudget + 3 : 0));
+		const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
+		const separator = metadata && budget - visibleWidth(label) >= 19 ? " · " : "";
+		const availableMetadata = budget - visibleWidth(label) - visibleWidth(separator);
+		const shownMetadata = separator && availableMetadata >= 16
+			? compactInlineText(metadata, { maxChars: availableMetadata })
+			: "";
+		const lineSuffix = index === visibleCount - 1 ? suffix : "";
+		return { prefix, label, metadata: shownMetadata, suffix: lineSuffix };
+	});
 }
 
 function expandedLaunchDetails(text: string, rows: readonly DelegateLaunchRow[]): string {
 	if (rows.length === 0 || !rows.some((row) => row.hasAlias)) return text;
-	const diagnostics = rows.map((row) => `- ${row.fullName} [${row.id}]`).join("\n");
+	const diagnostics = rows.map((row) => `- ${[row.detailLabel, row.agent, row.model].filter((value): value is string => !!value).join(" · ")} [${row.id}]`).join("\n");
 	return `${text}\n\nLaunched workers:\n${diagnostics}`;
+}
+
+function matchesCompleteSingleCall(args: unknown, argsComplete: boolean, isPartial: boolean, row: DelegateLaunchRow): boolean {
+	if (!argsComplete || isPartial || !row.hasAlias) return false;
+	const coerced = coerceDelegateParams(args);
+	if (!coerced.ok || coerced.params.tasks || !coerced.params.agent || !coerced.params.task?.trim()) return false;
+	const params = coerced.params;
+	const agent = params.agent;
+	if (typeof agent !== "string") return false;
+	const expectedLabel = nameFor({ agent, ...(params.name ? { name: params.name } : {}) }, 0);
+	return row.label === expectedLabel
+		&& row.agent === agent
+		&& (row.model ?? "") === shortModel(params.model);
+}
+
+function singleLaunchReceipt(row: DelegateLaunchRow): string[] {
+	const prefix = "↳ launched ";
+	const suffix = row.clipped ? ` · ${compactInlineText(expandDetailHint(), { maxChars: 32 })}` : "";
+	const labelBudget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(prefix) - visibleWidth(suffix));
+	const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
+	const rows = [compactVisibleLine(`${prefix}${label}${suffix}`, MAX_COLLAPSED_CARD_COLUMNS)];
+	const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+	if (metadata) rows.push(compactVisibleLine(`  ${compactInlineText(metadata, { maxChars: MAX_COLLAPSED_CARD_COLUMNS - 2 })}`, MAX_COLLAPSED_CARD_COLUMNS));
+	return rows;
 }
 
 export interface DelegateToolDeps {
@@ -201,7 +253,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
 		model: Type.Optional(
-			Type.String({ description: "Model override (exact provider/id — call the `models` tool to find one)" }),
+			Type.String({ description: "Optional exact provider/id. Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omit to inherit the working session model when unsure. Explicit user selections win." }),
 		),
 		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
@@ -225,7 +277,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		name: Type.Optional(Type.String({ description: LeaderNameDescription })),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
-		model: Type.Optional(Type.String({ description: "Model override (single mode)" })),
+		model: Type.Optional(Type.String({ description: "Optional exact provider/id (single mode). Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omit to inherit the working session model when unsure. Explicit user selections win." })),
 		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
@@ -669,13 +721,18 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			if (typeof args.tasks === "string" && args.tasks.trim()) {
 				return new Text(`${title}${theme.fg("accent", "parallel")}`, 0, 0);
 			}
-			const identity = [view?.name ?? args.name, view?.agent ?? args.agent ?? "?"].filter(Boolean).join(" · ");
+			const aliasValue = (view?.name?.trim() ? view.name : undefined) ?? view?.agent ?? (typeof args.name === "string" ? args.name : undefined) ?? (typeof args.agent === "string" ? args.agent : "?");
+			const alias = compactInlineText(aliasValue || "?", { maxChars: 80 }) || "?";
 			const modelValue = view?.model ?? args.model;
-			const model = typeof modelValue === "string" && modelValue.trim() ? theme.fg("dim", ` · ${compactInlineText(shortModel(modelValue), { maxChars: 48 })}`) : "";
-			return new Text(`${title}${theme.fg("accent", compactInlineText(identity, { maxChars: 96 }) || "?")}${model}`, 0, 0);
+			const agent = compactInlineText(view?.agent ?? (typeof args.agent === "string" ? args.agent : ""), { maxChars: 40 });
+			const model = typeof modelValue === "string" && modelValue.trim() ? compactInlineText(modelValue, { maxChars: 80 }) : "";
+			const titleLine = `${title}${theme.fg("accent", theme.bold(compactVisibleLine(alias, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth("delegate "))))}`;
+			const metadata = [agent, model].filter(Boolean).join(" · ");
+			const metadataLine = metadata ? theme.fg("dim", compactVisibleLine(`  ${metadata}`, MAX_COLLAPSED_CARD_COLUMNS)) : "";
+			return new Text([titleLine, metadataLine].filter(Boolean).join("\n"), 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme, context) {
+		renderResult(result, { expanded, isPartial: resultIsPartial }, theme, context) {
 			// Safe: the delegate `execute` above stores `{ runId | runIds, runs, dropped }` (interactive launch)
 			// or nothing (a headless call's report is its text) in `details`; the double cast just narrows
 			// Pi's opaque `details` type to that known shape for rendering.
@@ -692,7 +749,32 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			if (expanded) return new Text(expandedLaunchDetails(text, rows), 0, 0);
 			if (details?.runId || details?.runIds?.length) {
 				if (rows.length > 0 && !result.isError) {
-					return new Text(theme.fg("accent", collapsedLaunchSummary(rows, details.dropped)), 0, 0);
+					// A one-admitted-leg fan-out is still a fan-out when maxChildren dropped
+					// declared tasks; keep its truncation count in the collapsed receipt.
+					const hasDroppedTasks = typeof details.dropped === "number"
+						&& Number.isFinite(details.dropped)
+						&& details.dropped > 0;
+					if (rows.length === 1 && !hasDroppedTasks && context
+						&& matchesCompleteSingleCall(context.args, context.argsComplete, context.isPartial || resultIsPartial, rows[0]!)) {
+						return new Text(theme.fg("accent", theme.bold("↳ launched")), 0, 0);
+					}
+					if (rows.length === 1 && !hasDroppedTasks) {
+						const lines = singleLaunchReceipt(rows[0]!);
+						return new Text([
+							theme.fg("accent", theme.bold(lines[0] ?? "↳ launched")),
+							...lines.slice(1).map((line) => theme.fg("dim", line)),
+						].join("\n"), 0, 0);
+					}
+					const lines = collapsedLaunchRows(rows, details.dropped);
+					return new Text(lines.map((line, index) => {
+						const prefix = index === 0
+							? theme.fg("toolTitle", theme.bold(line.prefix))
+							: theme.fg("dim", line.prefix);
+						const label = line.label ? theme.fg("accent", theme.bold(line.label)) : "";
+						const metadata = line.metadata ? theme.fg("dim", ` · ${line.metadata}`) : "";
+						const suffix = line.suffix ? theme.fg("dim", line.suffix) : "";
+						return `${prefix}${label}${metadata}${suffix}`;
+					}).join("\n"), 0, 0);
 				}
 				if (result.isError) {
 					const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });

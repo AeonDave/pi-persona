@@ -316,18 +316,24 @@ for (const mode of ["stream", "stderr"] as const) {
 for (const cause of ["abort", "timeout"] as const) {
 	test(`child adapter ${cause} takes precedence over a missing Pi host bundle chunk`, async () => {
 		const ac = new AbortController();
-		const event = { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: HOST_MODULE_ERROR } };
+		const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: HOST_MODULE_ERROR }], stopReason: "error", errorMessage: HOST_MODULE_ERROR } };
 		const script = `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")}); setInterval(() => {}, 1000);`;
+		let sawError = false;
 		const engine = makeEngine({
 			resolveAgent,
 			childOptions: {
 				timeoutMs: 200,
+				// The idle deadline must test silence AFTER the diagnostic, not cold process
+				// scheduling under suite load. The hard cap still bounds a broken fixture.
+				isBlocked: () => !sawError,
+				hardTimeoutMs: 10_000,
 				killGraceMs: 20,
 				resolveInvocation: (args) => ({ command: process.execPath, args: ["-e", script, "--", ...args] }),
 			},
 		});
-		let sawError = false;
-		const result = await engine.run({ agent: "a", task: "probe" }, () => {
+		const result = await engine.run({ agent: "a", task: "probe" }, (progress) => {
+			// A final empty progress tick also fires on death; it is not evidence of the error.
+			if (sawError || !progress.output.includes(HOST_MODULE_ERROR)) return;
 			sawError = true;
 			if (cause === "abort") ac.abort();
 		}, ac.signal);

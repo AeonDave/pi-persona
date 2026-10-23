@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { orderModelCandidates, shortlistModels } from "../../../src/core/model-catalog.ts";
+import { orderModelCandidates, recommendModels, shortlistModels } from "../../../src/core/model-catalog.ts";
+import { modelCostTiers, type ModelCostMetadata } from "../../../src/core/model-tier.ts";
 import type { ModelLite } from "../../../src/core/models.ts";
 
 const model = (id: string, provider = "mine"): ModelLite => ({ provider, id });
@@ -161,4 +162,90 @@ test("provider priority remains outside root rotation, with fair admission even 
 	const other = model("independent-1", "aaa");
 	assert.ok(shortlistModels([other, ...early, ...tail, active], active, 3).every((m) => m.provider === "gateway"), "root balancing never displaces the preferred provider");
 	assert.deepEqual(refs(shortlistModels([other, ...early, ...tail], undefined, 3)), ["aaa/independent-1", "gateway/alpha/lane-aa-1", "gateway/beta/line-1"], "each provider balances against its remaining slots");
+});
+
+const priced = (id: string, price: number, provider = "mine"): ModelCostMetadata => ({ provider, id, cost: { input: price / 2, output: price / 2 } });
+
+test("recommendations keep the working model and nearby generations, then order cost bands before recency", () => {
+	const current = priced("gpt-6-astra", 9);
+	const models = [
+		priced("gpt-5.4-mini", 0.25), priced("gpt-6-luna", 1), priced("gpt-6-sol", 2),
+		priced("gpt-6.1-sol", 3), current, model("gpt-6.9-unknown"),
+		priced("gpt-6-luna", 0.01, "other"), model("o6-mini"),
+	];
+	const before = [...models];
+	const selected = recommendModels(Object.freeze(models), current);
+	assert.deepEqual(refs(selected), ["mine/gpt-6-astra", "mine/gpt-6-luna", "mine/gpt-6.1-sol", "mine/gpt-6.9-unknown"]);
+	assert.strictEqual(selected[0], current, "the exact current model remains visible even when expensive");
+	assert.strictEqual(selected[1], models[1], "metadata and original model identity survive discovery");
+	assert.deepEqual(recommendModels([...models].reverse(), current), selected);
+	assert.deepEqual(models, before, "recommendations cannot mutate or remove the full catalog");
+	assert.ok(orderModelCandidates(models, current).some((m) => m.id === "gpt-5.4-mini"), "explicit searches retain the older lane");
+	assert.deepEqual(recommendModels(models, current, 1), [current]);
+	assert.deepEqual(refs(recommendModels(models, current, 2)), ["mine/gpt-6-astra", "mine/gpt-6-luna"]);
+	assert.deepEqual(recommendModels(models, current, 0), []);
+});
+
+test("recommendations find the current generation before collapsing newer versions of each lane", () => {
+	const current = model("gpt-5-sol");
+	const models = [current, model("gpt-5.2-sol"), model("gpt-6-sol"), model("gpt-5-luna"), model("gpt-6-luna")];
+	assert.deepEqual(refs(recommendModels(models, current)), ["mine/gpt-5-sol", "mine/gpt-5.2-sol", "mine/gpt-5-luna"]);
+	assert.deepEqual(recommendModels([current, model("gpt-4-mini"), model("gpt-6-luna")], current), [current], "older lanes never fill unused slots");
+});
+
+test("recommendations fall back to the textual family for unversioned supervisors without inventing refs", () => {
+	const current = model("suite-current");
+	const models = [current, model("suite-fast-2"), model("suite-slow-3"), model("foreign-99")];
+	assert.deepEqual(refs(recommendModels(models, current)), ["mine/suite-current", "mine/suite-slow-3", "mine/suite-fast-2"]);
+	assert.deepEqual(recommendModels(models, model("absent")), [], "an unrelated family is not a guessed substitute");
+	assert.deepEqual(recommendModels([], current), []);
+	assert.deepEqual(recommendModels(models, undefined, 2), shortlistModels(models, undefined, 2), "unanchored discovery retains general root rotation");
+});
+
+test("recommendations ignore snapshot dates as generations and retain distinct numeric size lanes", () => {
+	const current = model("vendor.line-4-5-20250929-v1:0", "gateway");
+	const models = [current, model("vendor.line-4-6-20240101-v1:0", "gateway"), model("vendor.line-5-20250101-v1:0", "gateway")];
+	assert.deepEqual(refs(recommendModels(models, current)), ["gateway/vendor.line-4-5-20250929-v1:0", "gateway/vendor.line-4-6-20240101-v1:0"]);
+	const small = model("llama-3.1-8b-instruct");
+	assert.deepEqual(new Set(refs(recommendModels([small, model("llama-3.2-8b-instruct"), model("llama-3.1-70b-instruct"), model("llama-2-70b-instruct")], small))), new Set(["mine/llama-3.1-8b-instruct", "mine/llama-3.2-8b-instruct", "mine/llama-3.1-70b-instruct"]));
+});
+
+test("recommendations retain the uncapped provider cost reference and put missing or zero prices last", () => {
+	const current = model("line-6-current");
+	const models = [current, priced("line-6-cheap", 1), priced("line-6.2-costly", 5), priced("line-5-legacy", 0.1), model("line-6.9-missing"), priced("line-6.8-zero", 0)];
+	const reference = shortlistModels(models, undefined, Number.MAX_SAFE_INTEGER);
+	const tiers = modelCostTiers(models, reference);
+	assert.equal(tiers.get("mine/line-6-cheap"), "medium", "the legacy reference price still contributes to provider-relative bands");
+	assert.equal(tiers.get("mine/line-6.2-costly"), "high");
+	assert.deepEqual(refs(recommendModels(models, current)), ["mine/line-6-current", "mine/line-6-cheap", "mine/line-6.2-costly", "mine/line-6.9-missing", "mine/line-6.8-zero"]);
+	assert.deepEqual(refs(recommendModels(models, current, 2)), ["mine/line-6-current", "mine/line-6-cheap"], "capping cannot recompute cost bands");
+});
+
+test("recommendation families distinguish actual model names both directly and behind gateway namespaces", () => {
+	for (const namespace of ["", "openai/"]) {
+		const current = model(`${namespace}gpt-4.1`);
+		const nearby = model(`${namespace}gpt-4.2-sol`);
+		const otherFamily = model(`${namespace}o4-mini`);
+		const otherVendor = model("another/gpt-4.2-sol");
+		const models = [current, nearby, otherFamily, otherVendor];
+		assert.deepEqual(recommendModels(models, current), [current, nearby], namespace || "direct model ids");
+		assert.ok(orderModelCandidates(models, current).includes(otherFamily), "family recommendations do not shrink full searches");
+	}
+});
+
+test("recommendation families retain dotted gateway vendor and region namespaces", () => {
+	const current = model("us.anthropic.claude-opus-4-5-20251101-v1:0");
+	const nearby = model("us.anthropic.claude-sonnet-4-6-v1:0");
+	const models = [current, nearby,
+		model("us.anthropic.other-4-7-v1:0"),
+		model("us.another.claude-sonnet-4-7-v1:0"),
+		model("eu.anthropic.claude-sonnet-4-7-v1:0"),
+	];
+	assert.deepEqual(recommendModels(models, current), [current, nearby]);
+});
+
+test("numeric gateway namespaces cannot replace the actual model generation", () => {
+	const current = model("01-vendor/gpt-6-astra");
+	const nearby = model("01-vendor/gpt-6-luna");
+	assert.deepEqual(recommendModels([current, nearby, model("01-vendor/gpt-5.4-mini")], current), [current, nearby]);
 });

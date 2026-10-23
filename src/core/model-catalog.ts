@@ -1,6 +1,7 @@
 /** Compact discovery only: version-shaped ids are a display heuristic, not release dates,
  * account entitlement or model quality. Keep the full catalog for queries and exact-pin resolution. */
 import type { ModelLite } from "./models.ts";
+import { modelCostRank, modelCostTiers, type ModelCostMetadata } from "./model-tier.ts";
 
 interface CatalogEntry {
 	model: ModelLite;
@@ -133,4 +134,38 @@ export function shortlistModels(models: readonly ModelLite[], session?: ModelLit
 		selected.push(...balanced.slice(0, remaining).map((candidate) => candidate.model));
 	}
 	return selected;
+}
+
+/** Recommendation families use the model name after a namespace, unlike rotation's vendor root.
+ * Dots before letters delimit namespace segments; numeric version dots stay in the model name. */
+function recommendationGroup(model: ModelLite): { family: string; major: string | undefined } {
+	const id = model.id.toLowerCase();
+	let nameStart = 0;
+	for (const separator of id.matchAll(/\/|\.(?=\p{L})/gu)) nameStart = separator.index + 1;
+	const name = entry({ provider: model.provider, id: id.slice(nameStart) });
+	return { family: `${id.slice(0, nameStart)}\0${name.root}`, major: name.version[0] };
+}
+
+/** Advisory neighbors of the current model; full queries and exact pins use the full catalog. */
+export function recommendModels(models: readonly ModelCostMetadata[], session?: ModelLite, max = 40): ModelCostMetadata[] {
+	if (!session) return shortlistModels(models, undefined, max);
+	const limit = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 40;
+	if (limit === 0) return [];
+	const anchor = recommendationGroup(session);
+	const neighbors = models.filter((model) => {
+		if (model.provider !== session.provider) return false;
+		const candidate = recommendationGroup(model);
+		return candidate.family === anchor.family && (anchor.major === undefined || candidate.major === anchor.major);
+	});
+	// Filter before latest-per-lane selection: a newer generation must not erase a neighbor
+	// of an older working supervisor. Price bands keep the full uncapped provider reference.
+	const selected = shortlistModels(neighbors, session, Number.MAX_SAFE_INTEGER).map(entry);
+	const tiers = modelCostTiers(models, shortlistModels(models, undefined, Number.MAX_SAFE_INTEGER));
+	const active = refKey(session);
+	selected.sort((a, b) =>
+		Number(refKey(a.model) !== active) - Number(refKey(b.model) !== active)
+		|| modelCostRank(tiers.get(`${a.model.provider}/${a.model.id}`)) - modelCostRank(tiers.get(`${b.model.provider}/${b.model.id}`))
+		|| candidateOrder(a, b, session),
+	);
+	return selected.slice(0, limit).map((candidate) => candidate.model);
 }

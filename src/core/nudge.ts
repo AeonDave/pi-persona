@@ -26,7 +26,7 @@
  *
  * The module also hosts the two call-time wake guards, {@link PollGuard} and {@link longWaitSeconds}.
  */
-import { shortlistModels } from "./model-catalog.ts";
+import { recommendModels, shortlistModels } from "./model-catalog.ts";
 import { modelCostTiers, type ModelCostMetadata } from "./model-tier.ts";
 
 /** Tools that mean "the operator handed work off" — they end (reset) a by-hand run. */
@@ -186,8 +186,8 @@ export function renderNudgeRoster(agents: ReadonlyArray<{ name: string; descript
 	return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-/** The SESSION provider's candidate shortlist: exact active model first, then version-ranked
- *  representatives, bounded by `max`. This is discovery, not proof of account access or quality.
+/** Nearby naming/generation candidates: exact active model first, then provider-relative cost
+ *  bands and version-ranked representatives. This does not prove account access or quality.
  *  Undefined when there is no session model or the provider has no catalog entries. */
 export function renderNudgeModels(
 	models: readonly ModelCostMetadata[],
@@ -197,15 +197,17 @@ export function renderNudgeModels(
 	if (!session?.provider) return undefined;
 	const own = models.filter((m) => m.provider === session.provider);
 	if (own.length === 0) return undefined;
-	const selected = shortlistModels(own, session, max);
+	const limit = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 40;
+	if (limit === 0) return undefined;
+	const recommendations = recommendModels(own, session, Number.MAX_SAFE_INTEGER);
+	const selected = recommendations.slice(0, limit);
 	if (selected.length === 0) return undefined;
 	const tiers = modelCostTiers(own, shortlistModels(own, undefined, Number.MAX_SAFE_INTEGER));
 	const shown = selected.map((m) => {
 		const ref = `${m.provider}/${m.id}`;
-		const tier = tiers.get(ref);
-		return `${ref}${tier ? ` [cost:${tier}]` : ""}${m.id === session.id ? " (you)" : ""}`;
+		return `${ref} [cost:${tiers.get(ref) ?? "unknown"}]${m.id === session.id ? " (you)" : ""}`;
 	});
-	return `${shown.join(", ")}${new Set(own.map((m) => m.id)).size > shown.length ? " …" : ""}`;
+	return `${shown.join(", ")}${recommendations.length > shown.length ? " …" : ""}`;
 }
 
 export class DelegationNudge {

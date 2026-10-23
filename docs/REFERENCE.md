@@ -50,12 +50,17 @@ hard-fail.
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
 `models` without a query shows up to 40 entries total, including the current model when available,
-with the current model first and the remaining candidates ranked by numeric versions within model
-families. It keeps distinct variants and removes older generations and dated snapshots from that
-default view; explicit searches and model assignments retain the full eligible catalog. Version
-names are recency hints, not release-date metadata. If a provider's candidates exceed the remaining
-slots, the shortlist rotates between model roots, starting with the active model's root when present;
-gateway vendors therefore share the cap. `★` identifies the session
+with the current model first. Recommendations stay within its provider, textual name root and
+numbered major generation, retaining the newest representative of each distinct variant. Remaining
+candidates are ordered `cost:low` → `medium` → `high` → `unknown`, then by numeric version within
+each band. For example, a `gpt-6-astra` supervisor sees available `gpt-6-luna` and `gpt-6.1-sol`
+neighbors before considering older models. The rule reads catalog IDs, without a model-name table;
+gateway vendor/region namespaces remain distinct from the model's family and generation.
+If the current name has no numeric version, only provider and textual root constrain the list.
+The list is not filled with older or unrelated models just to reach the cap; explicit searches and
+model assignments retain the full eligible catalog. With no current model, discovery falls back to
+a general shortlist sharing each provider's cap across name roots. Names are proximity hints,
+not release-date metadata or proof of task fit. `★` identifies the session
 provider; authentication alone does not prove that an account supports every model in its catalog.
 
 Model details expose host metadata for context and reasoning support. `cost:low`, `cost:medium` and
@@ -73,8 +78,11 @@ explicit worker-model request may select another configured provider. The LLM re
 
 The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reaches both engine
 backends, keeping a caller-provided run label available in the live tree and runtime result. Every
-settled async run also emits an immediate UI banner with that name and its terminal outcome. The
-model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
+settled async run also emits immediate UI feedback with that name and its terminal outcome. TUI
+failures persist an expandable card with the agent, model, elapsed time and a concise cause; expansion
+retains the full technical diagnostic. Other modes use a concise notification. These operator-only
+cards do not inject context or start a second turn. The model-facing report remains independently
+idle-gated; a UI notification failure cannot discard it.
 
 ### Pi 1.0 codemode
 

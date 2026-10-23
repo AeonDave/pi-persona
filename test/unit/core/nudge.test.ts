@@ -393,17 +393,17 @@ test("orderByMention: case-insensitive, punctuation-delimited, and a name is mat
 test("renderNudgeModels: the session provider's shortlist, active model first and capped with …", () => {
 	const catalog = [
 		{ provider: "other", id: "x1" },
-		{ provider: "mine", id: "big" },
-		{ provider: "mine", id: "mid" },
+		{ provider: "mine", id: "model-big" },
+		{ provider: "mine", id: "model-mid" },
 		{ provider: "other", id: "x2" },
-		{ provider: "mine", id: "small" },
+		{ provider: "mine", id: "model-small" },
 	];
-	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "mid" }), "mine/mid (you), mine/big, mine/small");
-	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "elsewhere" }), "mine/big, mine/mid, mine/small", "no marker when the session model is not in the list");
+	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "model-mid" }), "mine/model-mid [cost:unknown] (you), mine/model-big [cost:unknown], mine/model-small [cost:unknown]");
+	assert.equal(renderNudgeModels(catalog, { provider: "mine", id: "model-elsewhere" }), "mine/model-big [cost:unknown], mine/model-mid [cost:unknown], mine/model-small [cost:unknown]", "an unversioned supervisor uses its textual family without inventing its exact ref");
 	const many = Array.from({ length: 12 }, (_, i) => ({ provider: "mine", id: `model-${String.fromCharCode(97 + i)}-1` }));
 	const capped = renderNudgeModels(many, { provider: "mine", id: "model-l-1" }) ?? "";
-	assert.equal(capped, "mine/model-l-1 (you), mine/model-a-1, mine/model-b-1, mine/model-c-1, mine/model-d-1, mine/model-e-1, mine/model-f-1, mine/model-g-1, mine/model-h-1, mine/model-i-1 …");
-	assert.equal(renderNudgeModels(many, { provider: "mine", id: "model-l-1" }, 3), "mine/model-l-1 (you), mine/model-a-1, mine/model-b-1 …");
+	assert.equal(capped, "mine/model-l-1 [cost:unknown] (you), mine/model-a-1 [cost:unknown], mine/model-b-1 [cost:unknown], mine/model-c-1 [cost:unknown], mine/model-d-1 [cost:unknown], mine/model-e-1 [cost:unknown], mine/model-f-1 [cost:unknown], mine/model-g-1 [cost:unknown], mine/model-h-1 [cost:unknown], mine/model-i-1 [cost:unknown] …");
+	assert.equal(renderNudgeModels(many, { provider: "mine", id: "model-l-1" }, 3), "mine/model-l-1 [cost:unknown] (you), mine/model-a-1 [cost:unknown], mine/model-b-1 [cost:unknown] …");
 	assert.equal(renderNudgeModels(catalog, undefined), undefined, "no session model, no provider to scope to");
 	assert.equal(renderNudgeModels(catalog, { provider: "absent", id: "a" }), undefined, "a provider with no catalog entries says nothing");
 	assert.equal(renderNudgeModels([], { provider: "mine", id: "a" }), undefined);
@@ -415,13 +415,29 @@ test("renderNudgeModels exposes relative cost bands from uncapped recent provide
 		{ provider: "mine", id: "middle-1", cost: { input: 3, output: 3 } },
 		{ provider: "mine", id: "large-1", cost: { input: 9, output: 9 } },
 	];
-	assert.equal(renderNudgeModels(catalog, catalog[1], 1), "mine/middle-1 [cost:medium] (you) …", "the display cap must not change the reference price bands");
+	assert.equal(renderNudgeModels(catalog, catalog[1], 1), "mine/middle-1 [cost:medium] (you)", "unrelated roots affect price bands but cannot imply hidden recommendations");
 });
 
 test("renderNudgeModels puts a current model beyond the old ten-row cap before newer representatives", () => {
 	const models = ["gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20", "gpt-5-mini", "gpt-5-nano", "gpt-5-sol", "gpt-5.6-sol", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"].map((id) => ({ provider: "mine", id }));
 	const rendered = renderNudgeModels(models, { provider: "mine", id: "gpt-6-sol" }, 3);
-	assert.equal(rendered, "mine/gpt-6-sol (you), mine/gpt-6.1-sol, mine/gpt-6-luna …");
+	assert.equal(rendered, "mine/gpt-6-sol [cost:unknown] (you), mine/gpt-6.1-sol [cost:unknown], mine/gpt-6-luna [cost:unknown]");
+});
+
+test("renderNudgeModels recommends nearby generations by cost and never fills with cheaper legacy lanes", () => {
+	const current = { provider: "mine", id: "gpt-6-astra", cost: { input: 4, output: 5 } };
+	const models = [current,
+		{ provider: "mine", id: "gpt-5.4-mini", cost: { input: 0.1, output: 0.15 } },
+		{ provider: "mine", id: "gpt-6.1-sol", cost: { input: 1, output: 2 } },
+		{ provider: "mine", id: "gpt-6-luna", cost: { input: 0.5, output: 0.5 } },
+	];
+	assert.equal(renderNudgeModels(models, current), "mine/gpt-6-astra [cost:high] (you), mine/gpt-6-luna [cost:low], mine/gpt-6.1-sol [cost:medium]");
+});
+
+test("renderNudgeModels shows no hidden-candidates ellipsis when only the working model is nearby", () => {
+	const current = { provider: "mine", id: "line-6-current" };
+	const models = [current, { provider: "mine", id: "line-5-mini" }, { provider: "mine", id: "line-4-small" }];
+	assert.equal(renderNudgeModels(models, current, 1), "mine/line-6-current [cost:unknown] (you)");
 });
 
 // --- PersistenceNudge: the premature-surrender counterweight -----------------------------------

@@ -162,7 +162,7 @@ test("the standing default delegates bounded multi-step execution while keeping 
 
 test("the standing brief gives ONE task-tier model-sizing sentence before the hand-off shape, with no model names", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
-	const sentence = "Models: reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess worker choices using refreshed candidates if supplied (★ = your session provider). Low/medium/high rank relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
+	const sentence = "Models: reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess worker choices using refreshed candidates if supplied (★ = your session provider). Low/medium/high rank relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. An insufficient comparison set is also unknown. Prefer candidates near your current model's name and numbered generation before comparing cost; an older model is not preferred merely because it is cheaper. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
 	assert.ok(brief.includes(sentence), "the sizing rule is carried verbatim");
 	assert.equal(brief.split(sentence).length - 1, 1, "stated exactly once");
 	assert.ok(brief.indexOf(sentence) < brief.indexOf("Hand-off shape:"), "the sizing rule precedes the example hand-off");
@@ -208,6 +208,19 @@ test("the soft (no persona) line carries the sizing rule in short form", () => {
 	assert.match(brief, /Catalog visibility is not account support/i);
 	assert.match(brief, /omit `model` and inherit your current working supervisor model/);
 	assert.doesNotMatch(brief, /lightest|cheapest|fast, current-generation/i, "the model rule uses task tiers instead of reflex speed/price cues");
+});
+
+test("model sizing prioritizes neighbors before cost without treating naming or price as account support", () => {
+	for (const standing of [true, false]) {
+		const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing, background: true }) ?? "";
+		assert.match(brief, /Prefer candidates near your current model's name and numbered generation before comparing cost/);
+		assert.match(brief, /an older model is not preferred merely because it is cheaper/);
+		assert.match(brief, /An insufficient comparison set is also unknown/);
+		assert.match(brief, /If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model/);
+		assert.match(brief, /do not scan again just because the brief reappears/);
+		const withoutDiscovery = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing, background: true, canListModels: false }) ?? "";
+		assert.match(withoutDiscovery, /Prefer known candidates near your current model's name and numbered generation/);
+	}
 });
 
 test("when the models tool is unavailable, preserve task-sized model guidance without naming that tool", () => {

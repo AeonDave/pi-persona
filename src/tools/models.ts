@@ -17,13 +17,14 @@ export function registerModelsTool(pi: ExtensionAPI, d: ModelsToolDeps): void {
 		label: "Models",
 		description: [
 			"Discover model candidates (provider/id). With no query: the current model first, then a compact",
-			"version-ranked shortlist; versions are naming hints, not verified release dates. A query searches",
+			"shortlist of nearby family/version candidates from the same provider, ordered cost:low → medium → high → unknown.",
+			"Family and version names are proximity hints, not verified release dates or account support. A query searches",
 			"the full eligible catalog, including older models and snapshots. Use exact refs; ★ marks your",
 			"session provider, not account support. Authentication does not guarantee access to every listed model.",
 			"cost:low/medium/high ranks advertised API prices relative to recent candidates of the same provider;",
 			"cost:unknown means insufficient price data. These are cost bands, not quality, speed or reasoning-effort ratings; choose task fit yourself.",
 			"Context, reasoning support and API prices are host catalog metadata; API prices do not describe subscription billing.",
-			"Prefer a suitable recent model known to work with this account; when unsure, omit a delegate's",
+			"Prefer these nearby candidates before older or unrelated models merely because they are cheap; when unsure, omit a delegate's",
 			"model to inherit the working session model. Keep the provider/billing route unless a change is authorized.",
 		].join(" "),
 		parameters: Type.Object({
@@ -32,7 +33,7 @@ export function registerModelsTool(pi: ExtensionAPI, d: ModelsToolDeps): void {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			d.lastCtx = ctx;
 			const { lines, total, capped, shortlist } = d.searchModels(ctx, params.query);
-			const showing = shortlist || capped ? ` (showing ${lines.length} ${shortlist ? "version-ranked candidates" : "matches"})` : "";
+			const showing = shortlist || capped ? ` (showing ${lines.length} ${shortlist ? "nearby family/version candidates" : "matches"})` : "";
 			const text = lines.length
 				? `${total} catalog model(s)${showing}; ★ = session provider, (you) = current model. Account support may vary.${shortlist || capped ? " Query searches the full catalog." : ""}\n${lines.join("\n")}`
 				: `no models match "${params.query ?? ""}"`;
