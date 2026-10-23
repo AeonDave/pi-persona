@@ -325,6 +325,14 @@ Running engines retain their captured assignments. Missing credentials are class
 adapter boundary; only the SDK decides whether a main-model recovery is admissible. This separation
 avoids a global reset or automatic repinning that could silently change billing and panel diversity.
 
+The extension owns the derived candidate cache, keyed by session and base provider/model. Ordinary
+turns reuse it; explicit catalog refresh invalidates the initiating key even after partial provider
+failure. The settings UI supplies the refresh deadline and reporting, while the extension's refresh
+adapter captures the key before awaiting the host. Briefs and nudges share the same callable-`models`
+gate. Automatic model setup for tools, commands and mandated orchestration shares the checkpoint
+dialog queue; each run registers its stop handle before entering that queue. Aborting setup discards
+its unsaved choices and removes only prompt markers created by that attempt, so it can be retried.
+
 **Unified settings.** `/persona-settings` is independent of Pi's `/settings`: full-page TUI, native
 RPC dialogs, and a read-only `show` report. `core/settings.ts` is the public preference registry and
 validator; the UI and environment precedence consume it rather than maintaining duplicate field lists.

@@ -16,17 +16,20 @@ const refKey = (model: ModelLite): string => `${model.provider}\0${model.id}`;
 function entry(model: ModelLite): CatalogEntry {
 	let base = model.id.toLowerCase();
 	let snapshot: string | undefined;
-	const date = /[-_@]((?:19|20)\d{2})-?(\d{2})-?(\d{2})$/.exec(base);
-	if (date) {
-		const year = Number(date[1]);
-		const month = Number(date[2]);
-		const day = Number(date[3]);
+	// Snapshot tokens can precede adapter suffixes (e.g. -20250514-v1:0). Dots stay
+	// version separators; validate the calendar so arbitrary eight-digit versions survive.
+	base = base.replace(/(^|[-_@/:])((?:19|20)\d{2})-?(\d{2})-?(\d{2})(?=$|[-_@/:])/g, (match: string, prefix: string, yearText: string, monthText: string, dayText: string) => {
+		const year = Number(yearText);
+		const month = Number(monthText);
+		const day = Number(dayText);
 		const parsed = new Date(Date.UTC(year, month - 1, day));
 		if (parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day) {
-			snapshot = `${date[1]}${date[2]}${date[3]}`;
-			base = base.slice(0, date.index);
+			const date = `${yearText}${monthText}${dayText}`;
+			if (snapshot === undefined || date > snapshot) snapshot = date;
+			return prefix;
 		}
-	}
+		return match;
+	});
 	// Keep quantity tokens such as 8b/70b/128k as distinct lanes; they are not release versions.
 	const tokens = base.match(/\d+(?:\.\d+)?[bkmt]\b|[\p{L}]+|\d+(?:[._]\d+)*/gu) ?? [];
 	const words = tokens.filter((token) => /\p{L}/u.test(token));
@@ -69,6 +72,27 @@ function candidateOrder(a: CatalogEntry, b: CatalogEntry, session?: ModelLite): 
 		|| representativeOrder(a, b);
 }
 
+/** Share a truncated provider's slots across roots; names identify groups, not capabilities. */
+function rotateRoots(candidates: readonly CatalogEntry[], preferredRoot?: string): CatalogEntry[] {
+	const byRoot = new Map<string, CatalogEntry[]>();
+	for (const candidate of candidates) {
+		const group = byRoot.get(candidate.root) ?? [];
+		group.push(candidate);
+		byRoot.set(candidate.root, group);
+	}
+	const groups = [...byRoot.entries()].sort(([a], [b]) =>
+		Number(a !== preferredRoot) - Number(b !== preferredRoot) || textOrder(a, b),
+	).map(([, group]) => group);
+	const rotated: CatalogEntry[] = [];
+	for (let row = 0; rotated.length < candidates.length; row++) {
+		for (const group of groups) {
+			const candidate = group[row];
+			if (candidate) rotated.push(candidate);
+		}
+	}
+	return rotated;
+}
+
 /** Rank full-catalog search matches without collapsing versions or snapshots. */
 export function orderModelCandidates(models: readonly ModelLite[], session?: ModelLite): ModelLite[] {
 	const unique = new Map(models.map((model) => [refKey(model), model]));
@@ -77,7 +101,8 @@ export function orderModelCandidates(models: readonly ModelLite[], session?: Mod
 
 /** One representative per provider/version-line/tier, plus the exact active model even when older.
  * Named tiers remain separate without a table of model releases. Opaque ids retain lexical order;
- * within a textual root, numeric generations precede older generations across all its lanes. */
+ * within a textual root, numeric generations precede older generations across all its lanes.
+ * Only a provider that exceeds its remaining slots rotates roots, with the active root first. */
 export function shortlistModels(models: readonly ModelLite[], session?: ModelLite, max = 40): ModelLite[] {
 	const limit = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 40;
 	if (limit === 0) return [];
@@ -91,5 +116,21 @@ export function shortlistModels(models: readonly ModelLite[], session?: ModelLit
 		if (!previous || representativeOrder(candidate, previous) < 0) representatives.set(key, candidate);
 	}
 	const ordered = [...representatives.values()].sort((a, b) => candidateOrder(a, b, session));
-	return [...(active ? [active] : []), ...ordered.filter((candidate) => !active || refKey(candidate.model) !== refKey(active)).map((candidate) => candidate.model)].slice(0, limit);
+	const byProvider = new Map<string, CatalogEntry[]>();
+	for (const candidate of ordered) {
+		if (active && refKey(candidate.model) === refKey(active)) continue;
+		const group = byProvider.get(candidate.model.provider) ?? [];
+		group.push(candidate);
+		byProvider.set(candidate.model.provider, group);
+	}
+	const selected = active ? [active] : [];
+	for (const [provider, candidates] of byProvider) {
+		const remaining = limit - selected.length;
+		if (remaining === 0) break;
+		const balanced = candidates.length > remaining
+			? rotateRoots(candidates, provider === active?.provider ? entry(active).root : undefined)
+			: candidates;
+		selected.push(...balanced.slice(0, remaining).map((candidate) => candidate.model));
+	}
+	return selected;
 }

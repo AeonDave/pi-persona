@@ -497,6 +497,139 @@ test("the delegation brief refreshes model candidates only on base-model changes
 	assert.equal(reads, 4);
 });
 
+test("a suspended model refresh cannot invalidate a newer cache through live context getters", async (t) => {
+	for (const command of ["persona", "persona-settings"] as const) {
+		for (const change of ["model", "session"] as const) {
+			await t.test(`${command}: ${change} changes during refresh`, async () => {
+				const m = makeMockPi();
+				piPersona(m.pi);
+				m.pi.setActiveTools([...m.activeToolNames(), "models"]);
+				const cwd = tempDir("pi-persona-refresh-live-getters-");
+				const { ctx: base } = makeCtx(cwd);
+				let model = { provider: "mine", id: "base-1" };
+				let manager = { getSessionId: () => `${cwd}:old` };
+				let catalog = [model, { provider: "mine", id: "fast-1" }];
+				let reads = 0;
+				let refreshStarted = false;
+				let settleRefresh!: () => void;
+				const refreshing = new Promise<void>((resolve) => { settleRefresh = resolve; });
+				let settingsVisits = 0;
+				let modelVisits = 0;
+				const ctx = {
+					...base, hasUI: true, mode: "rpc",
+					get model() { return model; },
+					get sessionManager() { return manager; },
+					ui: { ...base.ui, select: async (title: string, options: string[]) => {
+						if (title === "Persona settings") return ++settingsVisits === 1 ? "Models" : "Close";
+						if (title === "Persona model owner" || title === "Council profile") return options[0];
+						if (title.startsWith("Model settings")) return ++modelVisits === 1 ? "Refresh available model catalog" : "Done";
+						return undefined;
+					} },
+					modelRegistry: {
+						getAll: () => catalog,
+						getAvailable: () => { reads++; return catalog; },
+						refresh: async () => {
+							refreshStarted = true;
+							await refreshing;
+							return { aborted: false, errors: new Map() };
+						},
+					},
+				};
+				let commandRun: Promise<unknown> | undefined;
+				try {
+					await m.fire("session_start", undefined, ctx);
+					await m.cmd("persona", "dev", ctx);
+					const candidates = () => String(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt).split("\n").find((line) => line.startsWith("Cached current-provider candidates")) ?? "";
+					assert.match(candidates(), /mine\/fast-1/);
+					commandRun = Promise.resolve(m.cmd(command, command === "persona" ? "models" : "", ctx));
+					await waitUntil(() => refreshStarted, "the manual refresh to suspend");
+					if (change === "model") model = { provider: "mine", id: "base-2" };
+					else manager = { getSessionId: () => `${cwd}:new` };
+					catalog = [model, { provider: "mine", id: "fast-2" }];
+					assert.match(candidates(), /mine\/fast-2/, "the changed live getter creates the new snapshot before refresh settles");
+					settleRefresh();
+					await commandRun;
+					const afterSettlement = reads;
+					assert.match(candidates(), /mine\/fast-2/);
+					assert.equal(reads, afterSettlement, "settling the old refresh must not invalidate the newer model/session cache");
+				} finally {
+					settleRefresh();
+					await commandRun;
+					await m.fire("session_shutdown", undefined, ctx);
+				}
+			});
+		}
+	}
+});
+
+test("manual model refresh invalidates cached candidates even after a partial provider refresh", async () => {
+	for (const { command, partial } of ["persona", "persona-settings"].flatMap((command) => [false, true].map((partial) => ({ command, partial })))) {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		m.pi.setActiveTools([...m.activeToolNames(), "models"]);
+		const cwd = tempDir("pi-persona-candidate-refresh-");
+		const { ctx: base } = makeCtx(cwd);
+		const current = { provider: "mine", id: "base-1" };
+		let catalog = [current, { provider: "mine", id: "fast-1" }];
+		let reads = 0;
+		let settingsVisits = 0;
+		let modelVisits = 0;
+		const ctx = { ...base, hasUI: true, mode: "rpc", model: current, sessionManager: { getSessionId: () => cwd }, ui: { ...base.ui, select: async (title: string, options: string[]) => {
+			if (title === "Persona settings") return ++settingsVisits === 1 ? "Models" : "Close";
+			if (title === "Persona model owner" || title === "Council profile") return options[0];
+			if (title.startsWith("Model settings")) return ++modelVisits === 1 ? "Refresh available model catalog" : "Done";
+			return undefined;
+		} }, modelRegistry: {
+			getAll: () => catalog,
+			getAvailable: () => { reads++; return catalog; },
+			refresh: async () => {
+				catalog = [current, { provider: "mine", id: "fast-2" }];
+				return { aborted: false, errors: partial ? new Map([["unrelated", new Error("offline")]]) : new Map() };
+			},
+		} };
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", "dev", ctx);
+		const candidates = () => String(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt).split("\n").find((line) => line.startsWith("Cached current-provider candidates")) ?? "";
+		assert.match(candidates(), /mine\/fast-1/);
+		await m.cmd(command, command === "persona" ? "models" : "", ctx);
+		assert.match(candidates(), /mine\/fast-2/, "the next brief must use the refreshed provider snapshot");
+		const afterRefresh = reads;
+		candidates();
+		assert.equal(reads, afterRefresh, "later turns still reuse the replacement snapshot");
+		await m.fire("session_shutdown", undefined, ctx);
+	}
+});
+
+test("brief and nudge both hide candidate discovery when models is inactive or denied", async () => {
+	for (const denied of [false, true]) {
+		const cwd = tempDir("pi-persona-candidate-gate-");
+		if (denied) {
+			fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+			fs.writeFileSync(path.join(cwd, ".pi", "agents", "catalog-denied.md"), "---\nname: catalog-denied\npersona: true\ntools:\n  allow: [read, delegate]\n---\nSupervise the task.");
+		}
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx: base } = makeCtx(cwd);
+		const current = { provider: "mine", id: "base-1" };
+		let reads = 0;
+		const ctx = { ...base, model: current, modelRegistry: { getAll: () => [current], getAvailable: () => { reads++; return [current]; } } };
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("persona", denied ? "catalog-denied" : "dev", ctx);
+		if (denied) m.pi.setActiveTools([...m.activeToolNames(), "models"]); // host activation cannot bypass persona denial
+		reads = 0;
+		const prompt = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt;
+		assert.doesNotMatch(prompt, /Cached current-provider candidates/);
+		const heavy = { toolName: "read", content: [{ type: "text", text: "x".repeat(2000) }] };
+		let patch: { content?: Array<{ text?: string }> } | undefined;
+		for (let i = 0; i < 3; i++) patch = m.fire("tool_result", heavy, ctx);
+		const text = patch?.content?.map((c) => c.text ?? "").join("\n") ?? "";
+		assert.match(text, /delegation checkpoint/);
+		assert.doesNotMatch(text, /Model candidates|mine\/base-1/);
+		assert.equal(reads, 0, "disabled discovery does not acquire a hidden snapshot");
+		await m.fire("session_shutdown", undefined, ctx);
+	}
+});
+
 test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable per-leg override)", () => {
 	// This pins model-facing discoverability. The canonical field mapping is tested against
 	// `specOf()` in the delegate unit suite, while background scheduling is exercised below through
@@ -6153,6 +6286,7 @@ test("switching persona clears the by-hand delegation run instead of billing it 
 test("the sweep reminder names the delegate targets and this session's models (session provider only, capped, (you) marked)", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
+	m.pi.setActiveTools([...m.activeToolNames(), "models"]);
 	const { ctx: base } = makeCtx(os.tmpdir());
 	const session = { provider: "mine", id: "model-l-1" };
 	const catalog = [
@@ -6546,6 +6680,177 @@ test("a background council parked at the first-run model picker reads 'waiting f
 		await m.fire("session_shutdown", {}, pickCtx);
 	} finally {
 		answer(undefined);
+		if (prev) process.env.PI_AGENT_DIR = prev;
+		else delete process.env.PI_AGENT_DIR;
+	}
+});
+
+for (const command of ["orchestrate", "flow"] as const) {
+	test(`/${command} model setup queues behind checkpoints, can be stopped there, and never repeats settled questions`, async () => {
+		const fresh = tempDir(`pi-persona-command-pick-${command}-`);
+		seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
+		const cwd = tempDir(`pi-persona-command-gate-${command}-`);
+		fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+		fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, ".pi", "agents", "command-models.md"), "---\nname: command-models\npersona: true\norchestration:\n  mode: strategy\n  strategy: fanout\n  roster: pickers\n---\nCommand model setup.");
+		fs.writeFileSync(path.join(cwd, ".pi", "teams.yaml"), "ready:\n  - { agent: reviewer, model: alpha/one }\npickers: [operator, scout]\n");
+		fs.writeFileSync(path.join(cwd, ".pi", "flows", "gate-blocker.flow.json"), JSON.stringify({ name: "gate-blocker", phases: [{ id: "plan", strategy: "fanout", roster: "ready", gate: true }] }));
+		fs.writeFileSync(path.join(cwd, ".pi", "flows", "command-pick.flow.json"), JSON.stringify({ name: "command-pick", phases: [{ id: "work", strategy: "fanout", roster: "pickers" }] }));
+		const prev = process.env.PI_AGENT_DIR;
+		process.env.PI_AGENT_DIR = fresh;
+		const prompts: Array<{ title: string; answer(choice: string | undefined): void }> = [];
+		const commands: Array<Promise<unknown>> = [];
+		let cleanup = false;
+		let livePrompts = 0;
+		let maxPending = 0;
+		const m = makeMockPi();
+		const calls: string[] = [];
+		const engine: StrategyEngine = { run: async (spec) => {
+			calls.push(spec.agent);
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		} };
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+		const { ctx: base } = makeCtx(cwd);
+		const frames: number[] = [];
+		const ctx = {
+			...base, hasUI: true, mode: "rpc", model: { provider: "alpha", id: "one" },
+			sessionManager: { getSessionId: () => `command-gate-${command}` },
+			modelRegistry: { getAll: () => [{ provider: "alpha", id: "one" }, { provider: "beta", id: "two" }] },
+			ui: { ...base.ui,
+				setWidget: (_id: string, lines: string[] | undefined) => frames.push(lines?.length ?? 0),
+				select: (title: string, _options: string[], options?: { signal?: AbortSignal }) => {
+					if (cleanup) return Promise.resolve(undefined);
+					livePrompts++;
+					maxPending = Math.max(maxPending, livePrompts);
+					return new Promise<string | undefined>((resolve) => {
+						let settled = false;
+						const answer = (choice: string | undefined): void => {
+							if (settled) return;
+							settled = true;
+							livePrompts--;
+							resolve(choice);
+						};
+						prompts.push({ title, answer });
+						options?.signal?.addEventListener("abort", () => answer(undefined), { once: true });
+					});
+				},
+			},
+		};
+		const launch = (task: string): Promise<unknown> => {
+			const run = Promise.resolve(m.cmd(command, command === "flow" ? `command-pick ${task}` : task, ctx));
+			commands.push(run);
+			return run;
+		};
+		try {
+			await m.fire("session_start", undefined, ctx);
+			await m.cmd("persona", "command-models", ctx);
+			await (m.tool("flow") as { execute: AnyFn }).execute("gate-blocker", { name: "gate-blocker", task: "hold the checkpoint" }, undefined, undefined, ctx);
+			await waitUntil(() => prompts.length === 1, "the blocking checkpoint");
+			assert.match(prompts[0]!.title, /^Checkpoint/);
+			let stopped = false;
+			void launch("cancelled command").then(() => { stopped = true; });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(prompts.length, 1, "automatic command setup must not displace the checkpoint");
+
+			// Use the real overlay's public stop action: a command needs a stoppable root BEFORE setup.
+			const target = command === "flow" ? /▸.*flow command-pick/ : /▸.*fanout/;
+			await m.cmd("agents", "", { ...ctx, mode: "tui", ui: { ...ctx.ui, custom: async (factory: AnyFn) => {
+				const overlay = factory({ requestRender() {} }, { fg: (_role: string, text: string) => text, bold: (text: string) => text }, undefined, () => {}) as { render(width: number): string[]; handleInput(input: string): void; dispose(): void };
+				try {
+					let found = false;
+					for (let index = 0; index < 12; index++) {
+						if (overlay.render(160).some((line) => target.test(line))) { found = true; break; }
+						overlay.handleInput("j");
+					}
+					assert.equal(found, true, "the queued command's root is visible and stoppable");
+					overlay.handleInput("x");
+				} finally { overlay.dispose(); }
+			} } });
+			await waitUntil(() => stopped, "the queued command stop to settle without checkpoint approval");
+			assert.deepEqual(calls, ["reviewer"], "the stopped command starts no workers");
+
+			void launch("surviving command A");
+			void launch("surviving command B");
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(prompts.length, 1);
+			prompts[0]!.answer("Reject");
+			await waitUntil(() => prompts.length === 2, "the first command model question");
+			prompts[1]!.answer("alpha/one");
+			await waitUntil(() => prompts.length === 3, "the second command model question");
+			prompts[2]!.answer("alpha/one");
+			await Promise.all(commands);
+			assert.equal(prompts.length, 3, "queued commands reuse assigned participants without asking twice");
+			assert.equal(maxPending, 1, "only one checkpoint or automatic picker is pending at once");
+			assert.equal(calls.length, 5, "only the checkpoint phase and two surviving two-member commands run");
+			await waitUntil(() => frames.at(-1) === 0, "all command and flow roots to be removed");
+		} finally {
+			cleanup = true;
+			for (const prompt of prompts) prompt.answer(undefined);
+			await m.fire("session_shutdown", {}, ctx);
+			await Promise.all(commands);
+			if (prev) process.env.PI_AGENT_DIR = prev;
+			else delete process.env.PI_AGENT_DIR;
+		}
+	});
+}
+
+test("an aborted automatic model setup retries its unsaved participants while preserving earlier dismissals", async () => {
+	const fresh = tempDir("pi-persona-pickretry-");
+	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
+	const prev = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	let pendingPick: ((choice: string | undefined) => void) | undefined;
+	try {
+		const m = makeMockPi();
+		const engine: StrategyEngine = { run: async (spec) => ({ agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true }) };
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+		const { ctx } = makeCtx(os.tmpdir());
+		const titles: string[] = [];
+		let phase: "dismiss" | "abort" | "retry" = "dismiss";
+		let abortPrompts = 0;
+		const pickCtx = {
+			...ctx,
+			hasUI: true,
+			mode: "rpc",
+			model: { provider: "alpha", id: "one" },
+			modelRegistry: { getAll: () => [{ provider: "alpha", id: "one" }, { provider: "beta", id: "two" }] },
+			ui: { ...ctx.ui, select: async (title: string, options: string[], dialogOptions?: { signal?: AbortSignal }) => {
+				titles.push(title);
+				if (phase === "dismiss") return undefined;
+				if (phase === "retry") return options[1];
+				if (++abortPrompts === 1) return options[0];
+				return new Promise<string | undefined>((resolve) => {
+					pendingPick = resolve;
+					dialogOptions?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+				});
+			} },
+		};
+		await m.fire("session_start", undefined, pickCtx);
+		await m.cmd("persona", "magi", pickCtx);
+		const council = m.tool("council") as { execute: AnyFn };
+		await council.execute("dismiss-one", { question: "dismiss one", strategy: "fanout", members: ["melchior"] }, undefined, undefined, pickCtx);
+		await waitUntil(() => m.sentMessages().length === 1, "the deliberately dismissed setup to complete");
+		assert.equal(titles.length, 1);
+
+		phase = "abort";
+		const receipt = await council.execute("abort-setup", { question: "abort setup", strategy: "fanout", members: ["melchior", "balthasar", "casper"] }, undefined, undefined, pickCtx);
+		await waitUntil(() => abortPrompts === 2, "the second new participant's picker");
+		await (m.tool("intercom") as { execute: AnyFn }).execute("stop-setup", { action: "stop", to: receipt.details.runId }, undefined, undefined, pickCtx);
+		await waitUntil(() => m.sentMessages().length === 2, "the stopped setup completion");
+		pendingPick?.("beta/two");
+		const settingsFile = path.join(fresh, "persona", "settings.json");
+		const saved = (): Record<string, string> => fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, "utf8")).personas.magi?.models ?? {} : {};
+		assert.deepEqual(saved(), {}, "aborted setup saves neither its first answer nor a late answer");
+
+		phase = "retry";
+		await council.execute("retry-setup", { question: "retry setup", strategy: "fanout", members: ["melchior", "balthasar", "casper"] }, undefined, undefined, pickCtx);
+		await waitUntil(() => m.sentMessages().length === 3, "the retried setup completion");
+		assert.equal(titles.length, 5, "both unsaved participants are offered again after abort");
+		assert.equal(titles.filter((title) => title.includes('"melchior"')).length, 1, "an earlier deliberate dismissal remains remembered");
+		assert.deepEqual(saved(), { balthasar: "beta/two", casper: "beta/two" });
+		await m.fire("session_shutdown", {}, pickCtx);
+	} finally {
+		pendingPick?.(undefined);
 		if (prev) process.env.PI_AGENT_DIR = prev;
 		else delete process.env.PI_AGENT_DIR;
 	}

@@ -4,6 +4,7 @@
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ModelsRefreshResult } from "@earendil-works/pi-ai";
 
 import type { ModelParticipant } from "../persona/model-participants.ts";
 import { compactInlineText } from "../ui/presentation.ts";
@@ -34,6 +35,8 @@ export interface PersonaModelSettingsDeps {
 	write: (owner: string, patch: Record<string, string | null>) => void;
 	/** Session/persona liveness guard supplied by the extension. */
 	isCurrent?: (ctx: ExtensionContext) => boolean;
+	/** Refresh adapter supplied by the catalog owner to keep derived discovery caches consistent. */
+	refreshCatalog?: (signal: AbortSignal) => Promise<ModelsRefreshResult | undefined>;
 }
 
 const DONE = "Done";
@@ -124,7 +127,7 @@ export async function openPersonaModelSettings(ctx: ExtensionContext, deps: Pers
 			return;
 		}
 		if (choice === REFRESH) {
-			if (!(await refreshCatalog(ctx, isCurrent))) return;
+			if (!(await refreshCatalog(ctx, isCurrent, deps.refreshCatalog))) return;
 			continue;
 		}
 		if (otherAssignmentsOption && choice === otherAssignmentsOption) {
@@ -260,7 +263,7 @@ function availableModelRefs(ctx: ExtensionContext): string[] {
 	}
 }
 
-async function refreshCatalog(ctx: ExtensionContext, isCurrent: () => boolean): Promise<boolean> {
+async function refreshCatalog(ctx: ExtensionContext, isCurrent: () => boolean, refresh?: PersonaModelSettingsDeps["refreshCatalog"]): Promise<boolean> {
 	if (!ctx.modelRegistry.refresh) {
 		ctx.ui.notify("This Pi host cannot explicitly refresh the model catalog; existing assignments were kept.", "warning");
 		return true;
@@ -268,7 +271,7 @@ async function refreshCatalog(ctx: ExtensionContext, isCurrent: () => boolean): 
 	const deadline = AbortSignal.timeout(20_000);
 	const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
 	try {
-		const result = await ctx.modelRegistry.refresh({ signal });
+		const result = await (refresh ? refresh(signal) : ctx.modelRegistry.refresh({ signal }));
 		if (ctx.signal?.aborted) {
 			ctx.ui.notify("Model catalog refresh was cancelled; saved assignments were kept.", "info");
 			return false;
