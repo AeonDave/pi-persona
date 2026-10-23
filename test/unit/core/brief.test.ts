@@ -134,9 +134,9 @@ test("no flows → no Flows block", () => {
 	assert.equal(/Flows/.test(brief ?? ""), false);
 });
 
-test("standing brief states the hand-off default and a minimum call using operator", () => {
+test("standing brief states the hand-off default and an example call using operator", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true });
-	assert.match(brief ?? "", /You are the supervisor: you hold the objective, the plan and the judgement/);
+	assert.match(brief ?? "", /You are the supervisor: you own the objective, plan, major choices and final synthesis/);
 	assert.match(brief ?? "", /delegate\(\{ agent: "operator"/);
 	assert.match(brief ?? "", /council/);
 	assert.ok((brief ?? "").includes(CALL_SIGN_PROMPT), "standing brief must reuse the shared call-sign invitation");
@@ -145,41 +145,79 @@ test("standing brief states the hand-off default and a minimum call using operat
 	assert.doesNotMatch(brief ?? "", /orion|hermes|vega|atlas/i);
 });
 
-test("the standing default is the supervisor's ROLE: it holds the objective, anything simple or mechanical goes to a leg, one tool call stays inline", () => {
+test("the standing default delegates bounded multi-step execution while keeping decisions and trivial work local", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
-	assert.match(brief, /You are the supervisor: you hold the objective, the plan and the judgement, and a leg's transcript never enters your context\. So anything simple or mechanical — reading files, editing, running commands, sweeping a surface — goes to a leg while you keep the task in view\. Fan independent legs out in one `delegate` call \(they run in the background;/);
+	assert.match(brief, /You are the supervisor: you own the objective, plan, major choices and final synthesis/);
+	assert.match(brief, /Default to an early hand-off for bounded, multi-step or parallel work/);
+	assert.match(brief, /Workers execute well-bounded work.*they do not own major choices/);
+	assert.match(brief, /Do one-step, trivial, session-bound, or faster work directly/);
+	assert.match(brief, /Fan independent legs out in one `delegate` call \(they run in the background;/);
 	assert.doesNotMatch(brief, /Hand off by default|your context is for judgement and synthesis/, "the first-round command framing is gone");
 	assert.doesNotMatch(brief, /independent, heavy, or parallel parts/, "the parallelism-only opening is gone");
-	assert.match(brief, /Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several\./);
-	assert.doesNotMatch(brief, /Keep inline only what fits/, "the 'only' phrasing is gone");
-	assert.doesNotMatch(brief, /trivial single-step/i, "the old inline rule invited doing things by hand");
+	assert.match(brief, /Keep decisions and synthesis inline; delegate bounded execution when it saves supervisor time or enables parallel progress/);
+	assert.match(brief, /do not launch a worker just to avoid one quick call/i);
 	const sync = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: false }) ?? "";
 	assert.match(sync, /Fan independent legs out in one `delegate` call \(the call returns when they finish\)\./);
 });
 
-test("the standing brief gives ONE model-sizing sentence before the minimum call, with no model names", () => {
+test("the standing brief gives ONE task-tier model-sizing sentence before the hand-off shape, with no model names", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
-	const sentence = "Models: call `models` once at the start (★ = your provider) and give every leg a `model` of your provider sized to its task — the lightest that can do it under your supervision, your own only for work that needs your judgement; a leg without `model` runs on your own model.";
+	const sentence = "Models: reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess worker choices using refreshed candidates if supplied (★ = your session provider). Low/medium/high rank relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. If support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model. Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
 	assert.ok(brief.includes(sentence), "the sizing rule is carried verbatim");
 	assert.equal(brief.split(sentence).length - 1, 1, "stated exactly once");
-	assert.ok(brief.indexOf(sentence) < brief.indexOf("Minimum call:"), "the sizing rule precedes the minimum call");
+	assert.ok(brief.indexOf(sentence) < brief.indexOf("Hand-off shape:"), "the sizing rule precedes the example hand-off");
 	assert.ok(brief.indexOf(sentence) > brief.indexOf("Name each leg yourself."), "…and follows the naming rule");
 	assert.doesNotMatch(brief, /\b(claude|gpt|glm|haiku|sonnet|opus|gemini|codex|z\.ai)\b/i, "no model or vendor name in the prompt");
+	assert.doesNotMatch(brief, /lightest|cheapest|fast, current-generation/i, "the model rule uses task tiers instead of reflex speed/price cues");
+	assert.match(brief, /relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown/i);
+	assert.match(brief, /Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it/i);
+	assert.doesNotMatch(brief, /medium for ordinary implementation|higher cost only when breadth/i, "cost tier is not a capability label");
+	assert.doesNotMatch(brief, /throughput|capability tier|reasoning setting/i);
+});
+
+test("live provider candidates are included and refresh guidance follows current model changes", () => {
+	const candidates = "zai/glm-5.3-flash [cost:low], zai/glm-5.3 [cost:medium] (you)";
+	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true, modelCandidates: candidates }) ?? "";
+	assert.match(brief, /^Cached current-provider candidates \(catalog snapshot; account support may vary\): /m);
+	assert.match(brief, /Cached current-provider candidates \(catalog snapshot; account support may vary\): zai\/glm-5\.3-flash \[cost:low\], zai\/glm-5\.3 \[cost:medium\] \(you\)/);
+	assert.match(brief, /After a base model\/provider change, reassess worker choices using refreshed candidates if supplied/);
+	assert.match(brief, /reuse supplied cached current-provider candidates across turns and tasks until the base model changes/);
+	assert.match(brief, /Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears/);
+	assert.match(brief, /use another configured provider\/model for a leg only if the user explicitly requests or authorizes it/i);
+	const withoutCandidates = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
+	assert.doesNotMatch(withoutCandidates, /^Cached current-provider candidates /m, "omit the line when no cached candidates are supplied");
+});
+
+test("live provider candidates are capability-gated and the full line stays within 700 characters", () => {
+	const common = { agents: AGENTS, teams: {}, flows: [], standing: true, background: true, modelCandidates: `  provider/${"x".repeat(900)}\nforged-line ` };
+	const visible = buildDelegationBrief(common) ?? "";
+	const candidateLine = visible.split("\n").find((line) => line.startsWith("Cached current-provider candidates "));
+	assert.ok(candidateLine);
+	assert.ok(candidateLine.length <= 700);
+	assert.match(candidateLine, /provider\/x+…$/);
+	assert.equal(visible.includes("forged-line"), false, "embedded newlines cannot forge another prompt line");
+	const hidden = buildDelegationBrief({ ...common, canListModels: false }) ?? "";
+	assert.doesNotMatch(hidden, /^Cached current-provider candidates /m, "do not render candidates when models is unavailable");
 });
 
 test("the soft (no persona) line carries the sizing rule in short form", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: false, background: true }) ?? "";
-	assert.match(brief, /Give each leg a `model` of your provider \(`models`, ★ = yours\) sized to its task\./);
-	assert.doesNotMatch(brief, /call `models` once at the start/, "the full rule is the standing default's");
+	assert.match(brief, /Low\/medium\/high are relative advertised API-cost bands among recent candidates from the same provider only when numeric prices exist/i);
+	assert.match(brief, /Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it/i);
+	assert.doesNotMatch(brief, /medium for ordinary implementation|higher cost only when breadth/i, "cost tier is not a capability label");
+	assert.match(brief, /Catalog visibility is not account support/i);
+	assert.match(brief, /omit `model` and inherit your current working supervisor model/);
+	assert.doesNotMatch(brief, /lightest|cheapest|fast, current-generation/i, "the model rule uses task tiers instead of reflex speed/price cues");
 });
 
 test("when the models tool is unavailable, preserve task-sized model guidance without naming that tool", () => {
 	for (const standing of [true, false]) {
 		const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing, background: true, canListModels: false }) ?? "";
 		assert.doesNotMatch(brief, /`models`/, "must not direct the supervisor to call an unavailable tool");
-		assert.match(brief, /model.{0,80}(sized|size|task)/i, "keep guidance to size each worker's model to its task");
-		assert.match(brief, /model.{0,80}of your provider/i, "retain same-provider sizing without the unavailable catalog tool");
-		assert.match(brief, /leg without `model` runs on your own model/i);
+		assert.match(brief, /choose the least expensive candidate you already know can do the task/i);
+		assert.match(brief, /Without catalog pricing, treat cost tier as unknown/i);
+		assert.match(brief, /if support is uncertain or a model is unsupported, omit `model` and inherit your current working supervisor model/i);
+		assert.match(brief, /do not guess stale ids or silently switch provider\/billing/i);
 	}
 });
 
@@ -201,15 +239,15 @@ test("the standing brief maps decision classes to methods, and only names method
 	assert.doesNotMatch(soft, /contested fork/, "the soft discovery line stays a single sentence");
 });
 
-test("a persona that cannot call `council` is not taught problem classes; a convened council's ruling is not the supervisor's to redo", () => {
+test("a persona that cannot call `council` is not taught problem classes; supervisor retains the objective", () => {
 	const input = { agents: AGENTS, teams: {}, flows: [], standing: true, background: true };
 	const withCouncil = buildDelegationBrief(input) ?? "";
 	const without = buildDelegationBrief({ ...input, council: false }) ?? "";
 	assert.match(withCouncil, /convene `council` by problem class/i);
 	assert.doesNotMatch(without, /council|contested fork/, "no class line for a tool the persona cannot call");
-	assert.match(without, /You are the supervisor: you hold the objective/, "the delegate default is untouched");
-	assert.match(withCouncil, /Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several\. A decision a council was convened on is its ruling's, not yours\./);
-	assert.match(without, /Keep inline what fits in one tool call: a decision, a one-line check, the final synthesis; hand off what would take several\./, "the inline rule survives without council");
+	assert.match(without, /You are the supervisor: you own the objective/, "the delegate default is untouched");
+	assert.match(withCouncil, /Keep decisions and synthesis inline; delegate bounded execution when it saves supervisor time or enables parallel progress\. Do one-step, trivial, session-bound, or faster work directly; do not launch a worker just to avoid one quick call\. A council returns the scoped ruling its method promises; you still own the objective, whether that ruling fits, and what proceeds\./);
+	assert.match(without, /Keep decisions and synthesis inline; delegate bounded execution when it saves supervisor time or enables parallel progress\./, "the inline rule survives without council");
 });
 
 test("runtime context guidance no longer treats operator-only async status as model context", () => {
@@ -256,8 +294,8 @@ test("a read-only minimum call does not request write ownership", () => {
 		agents: [{ name: "scout", tools: ["read", "grep", "find", "ls"] }],
 		teams: {}, flows: [], standing: true, background: true, requireDisjointWrites: true,
 	});
-	const call = brief?.match(/Minimum call: (delegate\(\{.*?\}\))\./)?.[1];
-	assert.ok(call, "the supervisor needs a complete minimum-call example");
+	const call = brief?.match(/Hand-off shape: (delegate\(\{.*?\}\))\./)?.[1];
+	assert.ok(call, "the supervisor needs a complete hand-off example");
 	assert.doesNotMatch(call, /writeSet:/, "read-only workers must not be prompted to invent writable paths");
 	assert.match(brief ?? "", /Parallel writers.*writeSet/);
 });

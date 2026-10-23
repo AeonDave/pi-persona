@@ -111,6 +111,9 @@ const PLANNER_REQUIRED_ADDITIONS = ["agents/architect.md"] as const;
 
 export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>> = {
 	"personas/dev.md": [
+		// v1.17.2 pristine seed (LF and CRLF checkout variants).
+		{ size: 2712, sha256: "2dff44e3c6626d5eb35c5a9d74d77e345c95319bb6d310101ba53f6f330165b4" },
+		{ size: 2757, sha256: "afdafb105c14a4e4ed960969779f4059491d85bf463739cf01079fe9831ace5b" },
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 5907, sha256: "1d7abbc482a26c452e2588e405bdcb60af536df1f81aa0b709dcff70554915d2" },
 		{ size: 5977, sha256: "a1b46938316636bc90f525d031490eef3ee46363abe3aa199b267449b8bff06a" },
@@ -226,6 +229,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 1058, sha256: "78d7c9e7e6d961b0005d216968196dea28b8ef09a8ccd52b0f7a4de97754a800" },
 	],
 	"personas/elite.md": [
+		// v1.17.2 pristine seed (LF and CRLF checkout variants).
+		{ size: 17580, sha256: "5a45759f0c94ea090c8a537c59a6549449ed089d0f02fac9a09ba14b01a09ff2", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
+		{ size: 17835, sha256: "425e0f4fbeb855a788706eb278db4ed4c1026c59bedcca9768c258966ede1654", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
 		{
 			// v1.0.0
 			size: 10489,
@@ -312,6 +318,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 	// Live-peer collaboration landed in v1.12.2. Without these, a seeded copy from 1.7–1.12.1
 	// (and the two earlier untouched hashes) keeps the pre-collaboration prompt forever.
 	"personas/swarm.md": [
+		// v1.17.2 pristine seed (LF and CRLF checkout variants).
+		{ size: 2694, sha256: "72d17416941edb6f31ca86cff1de6fa6d85c5ba7ae0cd269d104c770c9e42bf2" },
+		{ size: 2737, sha256: "303ddc6bd44f2f909765d99d8f753136dae9d8a635616d6e65523814e06131a1" },
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 2729, sha256: "3d5060277ecaec717e87beb8d95b0fe9f3dc70fe5f0192823aa79b55f9e49507" },
 		{ size: 2768, sha256: "b81910521e05d62e06abaf0f2a89bd18ad252ba968bb296cc85dea973028e7a5" },

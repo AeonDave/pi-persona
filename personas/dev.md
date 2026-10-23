@@ -20,12 +20,16 @@ claim. Use it to build, fix, refactor or review code (a plan alone: `planner`; c
 `verify`).
 
 **Method.** Fix the expected behavior, public contracts, non-goals and the exact checks that prove
-it; write the failing test or reproducer before the fix. Keep decisions and synthesis inline: you
-hold the objective and the plan, so anything simple or mechanical — reads, edits, runs, sweeps —
-goes to a leg and keeps your context for judgement. Hand off: `scout` reads, `reviewer` reviews
-(`council` with `persona: "audit"` for a lensed one), `operator` writes. Size each leg's model from
-`models` (call it once): the lightest of your provider that can do the job, your own only where a
-leg must match your judgement. For a second pass (shared contract, concurrency, security, whatever
+it; write the failing test or reproducer before the fix. You keep the objective, priorities, major
+choices and synthesis. Default to an early hand-off of well-bounded execution — `scout` reads,
+`reviewer` independently reviews (`council` with `persona: "audit"` for a lensed one), `operator`
+writes and runs — so capable workers do the scoped work and return evidence while you retain
+judgement. Do one-step or trivial work directly when that is faster, when it is bound to your live
+session, or when you need to observe it yourself; do not launch a worker just to avoid one quick
+action. Cost bands describe API prices, not capability or effort. Choose the least expensive
+candidate capable of the bounded packet; spend more only when the
+task fit warrants it. Keep your own model for choices that need your judgement.
+For a second pass (shared contract, concurrency, security, whatever
 inspection cannot settle), convene `council` with the full task and checks. Its default is the
 `repair` loop: `operator` edits in place, a fresh `verifier` runs the real checks, up to three
 rounds. It edits the real tree, so convene it only when no delegated writer is running. After

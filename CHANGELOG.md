@@ -6,6 +6,28 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Changed
+
+- Show the current model first in `models`, followed by a compact shortlist ranked by model-version
+  naming, preserving separate worker tiers. Explicit queries still search the full eligible catalog.
+  Numeric host prices determine relative `cost:low`/`cost:medium`/`cost:high` bands per provider;
+  missing/zero prices stay unknown. Context and reasoning support accompany them without equating
+  price with capability, speed or effort. No model-name-to-tier table is used.
+- Make supervised delegation the normal choice for bounded independent work, while keeping quick,
+  trivial or tightly coupled work available to the supervisor. The supervisor owns decisions and
+  reviews results; model selection favors suitable recent candidates without forcing an explicit
+  alternative when only the current model is known to work.
+- Cache current-provider model candidates for the supervisor. Acquire them once, refresh when the
+  base provider/model changes or `models` is explicitly called, and reuse them across ordinary turns.
+  Explicit user choices can still select another configured provider; the LLM chooses worker task fit.
+
+### Fixed
+
+- Respect the host's per-model availability filters instead of restoring every model of an active or
+  registered provider. Curated native-extension catalogs and the exact current model remain discoverable.
+  Delegation reminders use the same eligible catalog and preserve the current model within their cap.
+  Provider authentication is no longer presented as a guarantee of account access to every model.
+
 ## [1.17.2](https://github.com/AeonDave/pi-persona/tree/v1.17.2) - 2026-10-22
 
 ### Added

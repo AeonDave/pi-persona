@@ -40,7 +40,7 @@ hard-fail.
 | `timer` tool | read the fresh clock with `now`, or schedule an idle wake with `arm`, `cancel`, and `list`; alarms are one-shot and in-memory per session; an armed alarm shows as a row in the agent widget and F9 until it fires or is cancelled |
 | `monitor` tool | run a bounded job (`mode: exit`) or event-producing program (`mode: output`) and wake the supervisor; an active monitor shows as a row in the agent widget and F9 until it ends or is cancelled; see [`MONITORS.md`](./MONITORS.md) |
 | `flow` tool and `/flow` | run a journaled DAG of strategies, resumable only for the same flow, task and project; `gate: true` creates an approval checkpoint, shown with the gated output and what runs next (Reject is the default). The `flow` tool runs in the background interactively (receipt, then ONE follow-up when it ends; a checkpoint waits for the operator, peek reads `waiting for operator at checkpoint <id>`, and no wake happens there) and inline headless, where every checkpoint is rejected. A rejected checkpoint is a stop (`flow stopped · checkpoint <id>`, the gated plan is kept), not a failure. `/flow` and `/orchestrate` stay inline and operator-driven, and their results also reach the supervisor's next turn. `/flow` alone lists flows with descriptions; the supervisor brief lists them too, tagging gated flows as needing a human in headless sessions |
-| `models` tool | list or search authenticated model ids in `provider/id` form; the session provider is marked |
+| `models` tool | current-first model shortlist with relative cost bands; a query searches the full eligible catalog in `provider/id` form |
 | persona `mode:` | choose `solo`, `parallel`, `pipeline`, `strategy:<name>`, or `flow:<name>` |
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
 | persona `delegation:` | require briefs, set an output contract, schedule disjoint writes, and order fresh verification |
@@ -48,6 +48,25 @@ hard-fail.
 | agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute and `../` paths are dropped. Declarative, not a sandbox |
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
+
+`models` without a query shows the current model first, then up to 40 candidates ranked by numeric
+versions within model families. It keeps distinct variants and removes older generations and dated
+snapshots from that default view; explicit searches and model assignments retain the full eligible
+catalog. Version names are recency hints, not release-date metadata. `★` identifies the session
+provider; authentication alone does not prove that an account supports every model in its catalog.
+
+Model details expose host metadata for context and reasoning support. `cost:low`, `cost:medium` and
+`cost:high` are relative advertised API-cost bands among recent candidates of the same provider,
+using equal input/output token quantities. They are not quality, throughput or reasoning-effort
+ratings, and do not describe subscription billing. Missing/zero prices or an insufficient comparison
+set yield `cost:unknown`. The supervisor chooses task fit using these hints and the task's difficulty;
+thinking effort remains the separate delegated-thinking preference (inherited by default).
+
+The supervisor brief reuses a cached current-provider candidate list. Discovery runs on first use,
+when the base model changes (provider or model id), or on an explicit `models` query; ordinary turns
+do not rescan. Switching to another provider therefore replaces the cached candidates, including
+its lighter variants when present. The current provider is a default, not a user restriction: an
+explicit worker-model request may select another configured provider. The LLM retains the choice.
 
 The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reaches both engine
 backends, keeping a caller-provided run label available in the live tree and runtime result. Every

@@ -94,7 +94,8 @@ test("an unrestricted persona keeps model discovery guidance when the host tool 
 		name: "open-host",
 		activeTools: ["read", "grep", "delegate", "models"],
 	});
-	assert.match(prompt, /call `models` once at the start/);
+	assert.match(prompt, /Use `models` for targeted lookup or explicit refresh/);
+	assert.match(prompt, /reuse supplied cached current-provider candidates across turns and tasks until the base model changes/);
 });
 
 test("the persona capability gate suppresses model discovery even if the host marks the tool active", async () => {

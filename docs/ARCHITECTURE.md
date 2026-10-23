@@ -781,20 +781,24 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
 
 - The **delegation brief** (`core/brief.ts`) is the STANDING half: live roster (agents + teams + flows, with descriptions;
   gated flows are tagged in headless sessions) and the hand-off default (the supervisor's role: it holds the
-  objective, the plan and the judgement, so anything simple or mechanical goes to a leg and only what fits in one
-  tool call stays inline; one decision-class →
-  method line that a test checks against the strategy registry; one model-sizing rule that sends the supervisor
-  to the `models` tool once and carries no model names), appended to the system-prompt TAIL every turn, where recency wins the
+  objective, the plan and the judgement, normally handing bounded independent work to supervised legs;
+  quick, trivial or tightly coupled work can stay inline when hand-off overhead would outweigh the benefit; one decision-class →
+  method line that a test checks against the strategy registry; model-sizing guidance and a cached provider
+  candidate list), appended to the system-prompt TAIL every turn, where recency wins the
   tug-of-war a top-of-prompt line loses. It regenerates from the live registry (so it can't desync) and
   filters to the active persona's `delegate` allowlist. It never dictates how MANY sub-agents; beyond the one class line,
   the shape is each persona's own method.
+  The model snapshot is acquired once per session/base-model reference, refreshed on a base-model change
+  or explicit `models` call, and reused across turns. Numeric version ranking affects discovery only;
+  exact assignment and search retain the full eligible catalog. Relative cost hints use host prices,
+  never a model-name-to-tier table, and leave missing or zero-price metadata unknown.
 - The **nudges** (`core/nudge.ts`, on by default) are the REACTIVE half, landing in RECENT context on
   the event that warrants them:
   - **DelegationNudge** — a `tool_result` hook watches the supervisor's own tool stream and, when a
     delegating persona grinds heavy work by hand (output burn since the last `delegate`/`council`/`flow`
     crosses a threshold: 3 substantive calls and ~1k tokens), appends a compact labelled checkpoint
     (`Trigger` / `Scope` / `Action`, with four delegate targets named in the action, those the persona's own prompt mentions first, and a
-    `Models` line for the session provider) to
+    `Model candidates` line for the session provider) to
     that command's result for the model and mirrors it into a durable, expandable
     `pi-persona-nudge` custom entry for the operator. The entry is TUI-only (no duplicate model
     context or turn) and guarantees visibility even when a built-in/custom tool renderer suppresses
