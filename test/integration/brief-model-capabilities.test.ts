@@ -106,7 +106,7 @@ test("the persona capability gate suppresses model discovery even if the host ma
 		activateModelsAfterPersona: true,
 	});
 	assert.doesNotMatch(prompt, /`models`/, "the effective persona gate wins even if the host lists the tool active");
-	assert.match(prompt, /model.{0,80}(sized|size|task)/i, "model sizing advice remains");
+	assert.match(prompt, /Model sizing:[\s\S]*least expensive candidate[\s\S]*task/i, "model sizing advice remains");
 });
 
 test("an inactive host models tool is omitted for an unrestricted persona", async () => {
@@ -115,5 +115,5 @@ test("an inactive host models tool is omitted for an unrestricted persona", asyn
 		activeTools: ["read", "grep", "delegate"],
 	});
 	assert.doesNotMatch(prompt, /`models`/, "an inactive host tool is not presented as callable");
-	assert.match(prompt, /model.{0,80}(sized|size|task)/i, "model sizing advice remains");
+	assert.match(prompt, /Model sizing:[\s\S]*least expensive candidate[\s\S]*task/i, "model sizing advice remains");
 });

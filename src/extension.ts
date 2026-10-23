@@ -40,7 +40,9 @@ import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/ca
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, orderByMention, PersistenceNudge, PollGuard, renderNudgeModels, renderNudgeRoster } from "./core/nudge.ts";
-import { orderModelCandidates, shortlistModels } from "./core/model-catalog.ts";
+import { orderModelCandidates, recommendModels, shortlistModels } from "./core/model-catalog.ts";
+import { formatDuration } from "./core/time.ts";
+import { summarizeFailure } from "./ui/failure-summary.ts";
 import { modelCandidateDetails, modelCostTiers, type ModelCostMetadata } from "./core/model-tier.ts";
 import { installedPiVersion, MIN_PI_VERSION, satisfiesFloor } from "./core/pi-compat.ts";
 import { type EngineAdapterBroker } from "./engine/adapter.ts";
@@ -194,8 +196,17 @@ interface CheckInEntry {
 	kind?: "routine" | "stall";
 }
 
+interface RunFailureEntry {
+	id: string;
+	label: string;
+	agent: string;
+	model?: string;
+	durationMs?: number;
+	error: string;
+}
+
 /**
- * Keep the immediate operator-facing settlement toast and the semantic completion delivery on one
+ * Keep the immediate operator-facing settlement feedback and the semantic completion delivery on one
  * path. A supervisor-requested abort is terminal, but it is not an execution error: the tracker
  * classifies it as `stopped`, so the UI reports it at info level while the completion still reaches
  * the supervisor exactly once through the normal notifier.
@@ -204,13 +215,20 @@ export function announceAsyncRunSettlement(
 	run: AsyncRun,
 	notify: ((message: string, level: "info" | "error") => void) | undefined,
 	enqueue: (run: AsyncRun) => void,
+	presentFailure?: (run: AsyncRun) => void,
 ): void {
 	const id = compactInlineText(run.id, { maxChars: 80 }) || "run";
 	const agent = compactInlineText(run.label ?? run.agent, { maxChars: 80 }) || compactInlineText(run.agent, { maxChars: 80 }) || "agent";
 	try {
 		if (run.status === "done") notify?.(`async run ${id} (${agent}) completed`, "info");
 		else if (run.status === "stopped") notify?.(`async run ${id} (${agent}) stopped`, "info");
-		else if (run.status === "failed") notify?.(`async run ${id} (${agent}) failed: ${compactInlineText(run.error ?? "(no detail)", { maxChars: 240 })}`, "error");
+		else if (run.status === "failed") {
+			const toast = () => notify?.(`async run ${id} (${agent}) failed: ${summarizeFailure(run.error ?? "(no detail)")}`, "error");
+			if (presentFailure) {
+				try { presentFailure(run); }
+				catch { toast(); }
+			} else toast();
+		}
 	} catch {
 		// Cosmetic notification only: a broken UI must never swallow the terminal report.
 	}
@@ -329,6 +347,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// external peer messages; expanding the card reveals the exact sanitized payload.
 	registerFollowUpRenderer("pi-persona", "pi-persona · update");
 	registerFollowUpRenderer("exocom_received", "exocom · inbound");
+	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded }, theme) => {
+		const data = entry.data;
+		if (!data) return undefined;
+		const label = compactInlineText(data.label || data.agent, { maxChars: 80 });
+		const title = `${theme.fg("error", "✕ ")}${theme.fg("accent", theme.bold(label))}${theme.fg("error", " · failed")}`;
+		const metadata = [
+			compactInlineText(data.agent, { maxChars: 48 }),
+			...(data.model ? [compactInlineText(data.model, { maxChars: 96 })] : []),
+			...(data.durationMs !== undefined ? [formatDuration(data.durationMs)] : []),
+		].join(" · ");
+		const body = expanded
+			? `Run ${compactInlineText(data.id)}\n${sanitizeTerminalText(data.error)}`
+			: summarizeFailure(data.error);
+		return new Text([
+			title,
+			theme.fg("dim", metadata),
+			theme.fg("toolOutput", body),
+			...(!expanded ? [theme.fg("dim", expandDetailHint())] : []),
+		].join("\n"), 0, 0);
+	});
 	pi.registerEntryRenderer("pi-persona-result", (entry, { expanded }, theme) => {
 		const data = entry.data as CommandResultEntry;
 		const full = sanitizeTerminalText(data.content || "(no output)");
@@ -1316,11 +1354,21 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		stopRequested.delete(`async:${run.id}`);
 		if (disposed) return; // instance torn down — don't notify the next session or re-arm a cancelled timer
 		// Immediate human feedback + one semantic completion. Explicit stops are informational,
-		// while natural failures retain the error toast and every terminal result is still delivered.
+		// while failures get an expandable TUI card (a toast elsewhere). Every result is still delivered.
 		announceAsyncRunSettlement(
 			run,
 			lastCtx ? (message, level) => lastCtx?.ui.notify(message, level) : undefined,
 			(settled) => completionNotifier.notify(settled),
+			lastCtx?.hasUI && lastCtx.mode === "tui" ? (failed) => {
+				const model = failed.result?.modelUsed ?? failed.model;
+				const durationMs = failed.startedAt !== undefined && failed.settledAt !== undefined
+					? Math.max(0, failed.settledAt - failed.startedAt) : undefined;
+				pi.appendEntry("pi-persona-run-failure", {
+					id: failed.id, label: failed.label ?? failed.agent, agent: failed.agent,
+					...(model ? { model } : {}), ...(durationMs !== undefined ? { durationMs } : {}),
+					error: failed.error ?? "(no detail)",
+				} satisfies RunFailureEntry);
+			} : undefined,
 		);
 		if (tracker.running().length === 0) stopPeek(); // no live runs → stop the idle peek
 	});
@@ -2142,7 +2190,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return modelCatalog;
 	}
 
-	// Default discovery is a version-ranked shortlist; explicit searches keep the full eligible catalog.
+	// Default discovery stays near the base model; explicit searches keep the full eligible catalog.
 	function searchModels(ctx: ExtensionContext, query?: string): { lines: string[]; total: number; capped: boolean; shortlist: boolean } {
 		const session = ctx.model?.provider;
 		const isSession = (ref: string): boolean => session !== undefined && ref.startsWith(`${session}/`);
@@ -2154,7 +2202,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const filtered = orderModelCandidates(filterModels(all, query ?? "").map((ref) => metadata.get(ref)!), ctx.model).map((m) => `${m.provider}/${m.id}`);
 		const cap = 40;
 		const shown = shortlist
-			? shortlistModels(catalog, ctx.model, cap).map((m) => `${m.provider}/${m.id}`)
+			? recommendModels(catalog, ctx.model, cap).map((m) => `${m.provider}/${m.id}`)
 			: filtered.slice(0, cap);
 		const self = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 		const lines = shown.map((r) => `${isSession(r) ? "★ " : "  "}${r} ${modelCandidateDetails(metadata.get(r)!, tiers.get(r))}${r === self ? " (you)" : ""}`);
@@ -2764,7 +2812,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				ctx.ui.notify(`models: no match for "${args.trim()}"`, "warning");
 				return;
 			}
-			const head = `models (${total}${shortlist || capped ? `, showing ${lines.length}${shortlist ? " version-ranked candidates" : " matches"}` : ""})${ctx.model ? ` · session ★ ${ctx.model.provider}/${ctx.model.id}` : ""}`;
+			const head = `models (${total}${shortlist || capped ? `, showing ${lines.length}${shortlist ? " nearby family/version candidates" : " matches"}` : ""})${ctx.model ? ` · session ★ ${ctx.model.provider}/${ctx.model.id}` : ""}`;
 			ctx.ui.notify(`${head}\n${lines.join("\n")}\nAccount support may vary.${shortlist || capped ? " Search the full catalog with /models <query>." : ""}`, "info");
 		},
 	});

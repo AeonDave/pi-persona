@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import piPersona, {
 	announceAsyncRunSettlement,
 	canDeliverPersonaNotification,
@@ -406,7 +407,7 @@ test("models marks the session model itself with (you), at the end of its line, 
 	const result = await models.execute("models-you", {}, undefined, undefined, ctx);
 	const lines = String(result.content?.[0]?.text ?? "").split("\n");
 	assert.ok(lines.includes("★ mine/mid [cost:unknown] (you)"), `only the exact session model ends with (you): ${JSON.stringify(lines)}`);
-	assert.ok(lines.includes("★ mine/big [cost:unknown]"), "another model of the same provider carries ★ only");
+	assert.ok(!lines.some((line) => line.includes("mine/big")), "an unrelated family is kept out of the default recommendations");
 	assert.ok(lines.includes("★ mine/mid-2 [cost:unknown]"), "an id that merely starts with the session id is not the session model");
 	assert.equal(lines.filter((l) => l.endsWith("(you)")).length, 1, "exactly one line is marked");
 });
@@ -444,6 +445,31 @@ test("models keeps host-filtered same-provider rows out of both discovery and se
 		const result = await models.execute("filtered-catalog", params, undefined, undefined, ctx);
 		assert.doesNotMatch(String(result.content?.[0]?.text ?? ""), /★ mine\/excluded-4/);
 	}
+});
+
+test("Astra discovers nearby generation workers by cost before legacy variants", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(tempDir("pi-persona-nearby-models-"));
+	const current = { provider: "openai", id: "gpt-6-astra", cost: { input: 10, output: 20 } };
+	const catalog = [
+		{ provider: "openai", id: "gpt-5.4-mini" },
+		{ provider: "openai", id: "gpt-6.1-sol", cost: { input: 3, output: 6 } },
+		current,
+		{ provider: "openai", id: "gpt-6-luna", cost: { input: 1, output: 2 } },
+		{ provider: "openai", id: "o4-mini" },
+	];
+	const ctx = { ...base, model: current, modelRegistry: { getAll: () => catalog, getAvailable: () => catalog } };
+	const tool = m.tool("models") as { execute: AnyFn };
+	const result = await tool.execute("nearby", {}, undefined, undefined, ctx);
+	const text = String(result.content[0].text);
+	assert.doesNotMatch(text, /gpt-5\.4-mini|o4-mini/);
+	const lines = text.split("\n").filter((line) => line.startsWith("★ "));
+	assert.match(lines[0]!, /gpt-6-astra.*\(you\)/);
+	assert.match(lines[1]!, /gpt-6-luna.*cost:low/);
+	assert.match(lines[2]!, /gpt-6\.1-sol.*cost:medium/);
+	const legacy = await tool.execute("explicit-legacy", { query: "gpt-5.4-mini" }, undefined, undefined, ctx);
+	assert.match(String(legacy.content[0].text), /gpt-5\.4-mini/, "an explicit search remains unrestricted");
 });
 
 test("models keeps numeric catalog hints and cost bands stable across explicit searches", async () => {
@@ -486,7 +512,7 @@ test("the delegation brief refreshes model candidates only on base-model changes
 	assert.doesNotMatch(candidates(), /openai\//, "previous provider candidates are replaced");
 	assert.equal(reads, 2);
 	ctx.model = flash;
-	assert.match(candidates(), /zai\/glm-5\.3-flash \(you\)/);
+	assert.match(candidates(), /zai\/glm-5\.3-flash \[cost:unknown\] \(you\)/);
 	assert.equal(reads, 3, "a base-model change within the same provider also refreshes once");
 	catalog = [...catalog, { provider: "zai", id: "glm-5.4-flash" }];
 	assert.doesNotMatch(candidates(), /glm-5\.4-flash/, "unchanged turns do not re-explore the registry");
@@ -506,9 +532,9 @@ test("a suspended model refresh cannot invalidate a newer cache through live con
 				m.pi.setActiveTools([...m.activeToolNames(), "models"]);
 				const cwd = tempDir("pi-persona-refresh-live-getters-");
 				const { ctx: base } = makeCtx(cwd);
-				let model = { provider: "mine", id: "base-1" };
+				let model = { provider: "mine", id: "family-1-base" };
 				let manager = { getSessionId: () => `${cwd}:old` };
-				let catalog = [model, { provider: "mine", id: "fast-1" }];
+				let catalog = [model, { provider: "mine", id: "family-1.1-fast" }];
 				let reads = 0;
 				let refreshStarted = false;
 				let settleRefresh!: () => void;
@@ -540,17 +566,17 @@ test("a suspended model refresh cannot invalidate a newer cache through live con
 					await m.fire("session_start", undefined, ctx);
 					await m.cmd("persona", "dev", ctx);
 					const candidates = () => String(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt).split("\n").find((line) => line.startsWith("Cached current-provider candidates")) ?? "";
-					assert.match(candidates(), /mine\/fast-1/);
+					assert.match(candidates(), /mine\/family-1\.1-fast/);
 					commandRun = Promise.resolve(m.cmd(command, command === "persona" ? "models" : "", ctx));
 					await waitUntil(() => refreshStarted, "the manual refresh to suspend");
-					if (change === "model") model = { provider: "mine", id: "base-2" };
+					if (change === "model") model = { provider: "mine", id: "family-1.1-base" };
 					else manager = { getSessionId: () => `${cwd}:new` };
-					catalog = [model, { provider: "mine", id: "fast-2" }];
-					assert.match(candidates(), /mine\/fast-2/, "the changed live getter creates the new snapshot before refresh settles");
+					catalog = [model, { provider: "mine", id: "family-1.2-fast" }];
+					assert.match(candidates(), /mine\/family-1\.2-fast/, "the changed live getter creates the new snapshot before refresh settles");
 					settleRefresh();
 					await commandRun;
 					const afterSettlement = reads;
-					assert.match(candidates(), /mine\/fast-2/);
+					assert.match(candidates(), /mine\/family-1\.2-fast/);
 					assert.equal(reads, afterSettlement, "settling the old refresh must not invalidate the newer model/session cache");
 				} finally {
 					settleRefresh();
@@ -569,8 +595,8 @@ test("manual model refresh invalidates cached candidates even after a partial pr
 		m.pi.setActiveTools([...m.activeToolNames(), "models"]);
 		const cwd = tempDir("pi-persona-candidate-refresh-");
 		const { ctx: base } = makeCtx(cwd);
-		const current = { provider: "mine", id: "base-1" };
-		let catalog = [current, { provider: "mine", id: "fast-1" }];
+		const current = { provider: "mine", id: "family-1-base" };
+		let catalog = [current, { provider: "mine", id: "family-1.1-fast" }];
 		let reads = 0;
 		let settingsVisits = 0;
 		let modelVisits = 0;
@@ -583,16 +609,16 @@ test("manual model refresh invalidates cached candidates even after a partial pr
 			getAll: () => catalog,
 			getAvailable: () => { reads++; return catalog; },
 			refresh: async () => {
-				catalog = [current, { provider: "mine", id: "fast-2" }];
+				catalog = [current, { provider: "mine", id: "family-1.2-fast" }];
 				return { aborted: false, errors: partial ? new Map([["unrelated", new Error("offline")]]) : new Map() };
 			},
 		} };
 		await m.fire("session_start", undefined, ctx);
 		await m.cmd("persona", "dev", ctx);
 		const candidates = () => String(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt).split("\n").find((line) => line.startsWith("Cached current-provider candidates")) ?? "";
-		assert.match(candidates(), /mine\/fast-1/);
+		assert.match(candidates(), /mine\/family-1\.1-fast/);
 		await m.cmd(command, command === "persona" ? "models" : "", ctx);
-		assert.match(candidates(), /mine\/fast-2/, "the next brief must use the refreshed provider snapshot");
+		assert.match(candidates(), /mine\/family-1\.2-fast/, "the next brief must use the refreshed provider snapshot");
 		const afterRefresh = reads;
 		candidates();
 		assert.equal(reads, afterRefresh, "later turns still reuse the replacement snapshot");
@@ -662,7 +688,10 @@ test("legacy delegate and steer cards omit redundant boilerplate but preserve ex
 	assert.doesNotMatch(call, /\b(?:a?sync)\b/i, "the call line carries no sync/async tag: delegate has no such mode");
 	assert.doesNotMatch(call, /PRIVATE TASK/);
 	const unsafeModelCall = renderComponent(delegate.renderCall({ agent: "researcher", model: "provider/model\u001b[2J\nspoof", task: "hidden" }, traceTheme));
-	assert.doesNotMatch(unsafeModelCall, /\u001b|\n/, "model labels must remain sanitized single-line metadata");
+	assert.doesNotMatch(unsafeModelCall, /\u001b/, "model labels cannot inject terminal controls");
+	assert.deepEqual(unsafeModelCall.split("\n").map((line) => line.trimEnd()), [
+		"delegate researcher", "  researcher · provider/model spoof",
+	], "only the renderer's title/metadata break survives; the model label stays on one line");
 	const plainCall = renderComponent(delegate.renderCall({ agent: "reviewer", task: "PLAIN TASK SECRET" }, traceTheme));
 	assert.match(plainCall, /reviewer/);
 	assert.doesNotMatch(plainCall, /\b(?:a?sync)\b/i);
@@ -681,7 +710,7 @@ test("legacy delegate and steer cards omit redundant boilerplate but preserve ex
 	const batchBody = "Launched 4 background legs as one batch (r1, r2, r3, r4); you will be woken ONCE when the batch settles (never sleep, poll, peek, or arm a timer for it; end your turn if only it remains). 2 task(s) beyond the max-children limit (4) were dropped.";
 	const batch = { content: [{ type: "text", text: batchBody }], details: { runIds: ["r1", "r2", "r3", "r4"], dropped: 2 }, isError: false };
 	const batchCard = renderComponent(delegate.renderResult(batch, { expanded: false }, traceTheme));
-	assert.match(batchCard, /r1, r2, r3, \+1 more/);
+	assert.match(batchCard, /r1[\s\S]*r2[\s\S]*r3[\s\S]*\+1 more/);
 	assert.match(batchCard, /2 tasks dropped/);
 	assert.doesNotMatch(batchCard, /background|wakes you|peek|keep working/i);
 	assert.equal(renderComponent(delegate.renderResult(batch, { expanded: true }, traceTheme), 500).trimEnd(), batchBody);
@@ -1830,6 +1859,45 @@ test("/peek reports no async runs initially", async () => {
 	assert.match(notes.join("\n"), /No async runs/);
 });
 
+test("TUI delegate failure persists an expandable human cause without duplicating the wake", async () => {
+	const m = makeMockPi();
+	const error = `[operator · openai/gpt-5.4-mini +dyn(model)] OpenAI API error (400): 400 {"detail":"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account."}`;
+	piPersona(m.pi, { engineFactories: {
+		makeInProcessEngine: () => ({ run: async (spec) => ({ agent: spec.agent, ok: false, output: "", error, failureKind: "provider", modelUsed: "openai/gpt-5.4-mini", usage: emptyUsage() }) }),
+		makeEngine: () => { throw new Error("unexpected child engine"); },
+	} });
+	const { ctx: base, notes } = makeCtx(tempDir("pi-persona-failure-card-"), { hasUI: true });
+	const current = { provider: "openai", id: "gpt-6-astra" };
+	const legacy = { provider: "openai", id: "gpt-5.4-mini" };
+	const ctx = { ...base, mode: "tui", model: current, modelRegistry: { getAll: () => [current, legacy], getAvailable: () => [current, legacy] } };
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		await delegate.execute("failure-card", { agent: "operator", name: "Velvet-recon", model: "openai/gpt-5.4-mini", task: "inspect" }, undefined, undefined, ctx);
+		await waitUntil(() => m.sentMessages().some((sent) => (sent.options as { triggerTurn?: boolean })?.triggerTurn), "the one semantic completion wake");
+		const cards = m.entries().filter((entry) => entry.customType === "pi-persona-run-failure");
+		assert.equal(cards.length, 1, "one durable operator card replaces the raw error toast");
+		assert.ok(!notes.some((note) => note.includes("OpenAI API error")));
+		const renderer = m.entryRenderer("pi-persona-run-failure");
+		assert.ok(renderer);
+		const collapsed = renderComponent(renderer(cards[0], { expanded: false }, traceTheme), 100);
+		assert.match(collapsed, /Velvet-recon/);
+		assert.match(collapsed, /operator/);
+		assert.match(collapsed, /openai\/gpt-5\.4-mini/);
+		assert.match(collapsed, /not supported.*ChatGPT account/i);
+		assert.match(collapsed, /expand/i);
+		assert.doesNotMatch(collapsed, /\{"detail"|\+dyn\(model\)|async run run-/);
+		const expanded = renderComponent(renderer(cards[0], { expanded: true }, traceTheme), 240);
+		assert.ok(expanded.includes(error), "expanded history retains the original sanitized provider diagnostic");
+		for (const width of [30, 50, 80, 120]) {
+			assert.ok(renderer(cards[0], { expanded: false }, traceTheme).render(width).every((line: string) => visibleWidth(line) <= width));
+		}
+		const wakes = m.sentMessages().filter((sent) => (sent.options as { triggerTurn?: boolean })?.triggerTurn);
+		assert.equal(wakes.length, 1, "an operator card must not add another supervisor turn");
+		assert.ok(JSON.stringify(wakes[0]!.message).includes("not supported when using Codex"), "the model still receives the semantic failure");
+	} finally { await m.fire("session_shutdown", undefined, ctx); }
+});
+
 test("explicit async stop is informational, enqueues one terminal completion, and does not poison the ledger", () => {
 	const notices: Array<{ message: string; level: "info" | "error" }> = [];
 	const completions: string[] = [];
@@ -1871,6 +1939,22 @@ test("natural async failures retain their error toast, completion, and ledger ac
 	assert.deepEqual(completions, ["run-3"]);
 	assert.equal(shouldRecordDelegationOutcome({ failureKind: "provider" }), true);
 	assert.equal(shouldRecordDelegationOutcome({}), true);
+});
+
+test("a failed TUI card append falls back to a concise toast and still delivers one completion", () => {
+	const notices: string[] = [];
+	const completions: string[] = [];
+	announceAsyncRunSettlement({
+		id: "run-card-failure", agent: "operator", label: "Velvet-recon", task: "inspect",
+		status: "failed", progress: { output: "", turns: 0, tokens: 0 },
+		error: `400 {"detail":"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account."}`,
+	}, (message) => notices.push(message), (run) => completions.push(run.id), () => {
+		throw new Error("session entry unavailable");
+	});
+	assert.equal(notices.length, 1);
+	assert.match(notices[0]!, /Velvet-recon.*Model not supported by this ChatGPT account/);
+	assert.doesNotMatch(notices[0]!, /\{"detail"/);
+	assert.deepEqual(completions, ["run-card-failure"]);
 });
 
 test("successful async completion immediately announces the worker name while retaining one semantic completion", () => {
@@ -6311,7 +6395,7 @@ test("the sweep reminder names the delegate targets and this session's models (s
 	const models = text.split("\n").find((l) => l.startsWith("  Model candidates (your provider; account support may vary): ")) ?? "";
 	assert.equal(
 		models,
-		"  Model candidates (your provider; account support may vary): mine/model-l-1 (you), mine/model-a-1, mine/model-b-1, mine/model-c-1, mine/model-d-1, mine/model-e-1, mine/model-f-1, mine/model-g-1, mine/model-h-1, mine/model-i-1 …",
+		"  Model candidates (your provider; account support may vary): mine/model-l-1 [cost:unknown] (you), mine/model-a-1 [cost:unknown], mine/model-b-1 [cost:unknown], mine/model-c-1 [cost:unknown], mine/model-d-1 [cost:unknown], mine/model-e-1 [cost:unknown], mine/model-f-1 [cost:unknown], mine/model-g-1 [cost:unknown], mine/model-h-1 [cost:unknown], mine/model-i-1 [cost:unknown] …",
 	);
 	assert.doesNotMatch(text, /theirs\/t1/, "another provider's models are not offered");
 });

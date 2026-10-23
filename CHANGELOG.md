@@ -8,8 +8,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
-- Show the current model first in `models`, followed by a compact shortlist ranked by model-version
-  naming, preserving separate worker tiers. Explicit queries still search the full eligible catalog.
+- Show the current model first in `models`, followed by nearby candidates from its provider, textual
+  name root and numbered generation, ordered by cost band then numeric version. Preserve distinct
+  worker variants without filling the list with cheap legacy models. Explicit queries still search the full eligible catalog.
   Numeric host prices determine relative `cost:low`/`cost:medium`/`cost:high` bands per provider;
   missing/zero prices stay unknown. Context and reasoning support accompany them without equating
   price with capability, speed or effort. No model-name-to-tier table is used.
@@ -23,6 +24,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - Cache current-provider model candidates for the supervisor. Acquire them once, refresh when the
   base provider/model changes or the catalog is explicitly queried/refreshed, and reuse them across ordinary turns.
   Explicit user choices can still select another configured provider; the LLM chooses worker task fit.
+- Give delegate launches a compact alias-led header with agent/model metadata and a brief receipt.
+  Persist async TUI failures as expandable cards: concise cause first, full technical diagnostic on
+  expansion, with the existing single supervisor completion wake. Use the active theme's semantic colors.
 
 ### Fixed
 
