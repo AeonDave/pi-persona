@@ -333,6 +333,31 @@ test("explicit refresh uses a bounded signal and preserves assignments on provid
 	assert.ok(ui.notifications.some((item) => /refresh incomplete|provider/i.test(item.message)));
 });
 
+test("explicit refresh uses the catalog owner's adapter through success, partial refresh, or failure", async () => {
+	for (const outcome of ["success", "partial", "throw"] as const) {
+		let invalidations = 0;
+		let settled = false;
+		const ui = context({ refresh: async () => {
+			settled = true;
+			if (outcome === "throw") throw new Error("provider unavailable");
+			return { aborted: false, errors: outcome === "partial" ? new Map([["provider", new Error("offline")]]) : new Map() };
+		}, select: chooseByTitle({
+			"Persona model owner": ({ options }) => options[0],
+			"Council profile": ({ options }) => options[0],
+			"Model settings": chooseActionThenDone((item) => item.includes("Refresh available")),
+		}) });
+		const d = deps({ refreshCatalog: async (signal) => {
+			assert.ok(signal instanceof AbortSignal);
+			try { return await ui.ctx.modelRegistry.refresh({ signal }); }
+			finally { assert.ok(settled); invalidations++; }
+		} });
+		await openPersonaModelSettings(ui.ctx, d.value);
+		assert.equal(invalidations, 1, `${outcome} may have changed the host's provider snapshot`);
+		assert.equal(ui.refreshCalls, 1, "the owner adapter replaces the default refresh instead of duplicating it");
+		assert.equal(d.writes.length, 0);
+	}
+});
+
 test("explicit refresh failure keeps earlier staged model changes available to Done", async () => {
 	let settingsMenus = 0;
 	let suppliedSignal: AbortSignal | undefined;

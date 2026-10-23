@@ -733,7 +733,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// fires: agents change on /persona reload, the session model on a switch).
 	const delegationNudge = new DelegationNudge(undefined, {
 		roster: () => renderNudgeRoster(orderByMention(delegateTargets(), controller.activePersona?.body)),
-		models: () => (lastCtx?.model ? currentModelCatalog(lastCtx).candidates : undefined),
+		models: () => (canDiscoverModels() && lastCtx?.model ? currentModelCatalog(lastCtx).candidates : undefined),
 	});
 	// Persistence nudge: the counterweight — when a delegated leg comes back BLOCKED/UNKNOWN, remind
 	// the supervisor not to bank a premature surrender (same config.nudge gate + hook as above).
@@ -1534,35 +1534,33 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	 * Only a live UI ever sees a dialog (`ctx.hasUI`), and only when there is more than one
 	 * authenticated model to choose between.
 	 */
-	async function ensurePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], tracked?: TrackedRun): Promise<void> {
+	async function ensurePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], signal: AbortSignal, rootId: string, tracked?: TrackedRun): Promise<void> {
 		const scope = modelSelectionScope(ctx);
-		if (!scope || !ctx.hasUI || tracked?.signal.aborted) return;
+		if (!scope || !ctx.hasUI || signal.aborted) return;
 		const missing = pendingParticipants(participants, { prompted: promptedFor(scope.persona, participants) });
 		if (missing.length === 0) return;
 		const available = configuredModels(ctx);
 		if (available.length < 2) return; // automatic setup cannot diversify a single model
 		// A tracked run parked at this picker is waiting on the OPERATOR: say so, or it reads "queued" and,
 		// past the stall window, "possibly stuck".
-		if (tracked) {
-			tracked.onAwaiting("waiting for operator to pick models");
-			agentTree.update(tracked.rootId, { detail: "waiting for operator to pick models" });
-		}
+		tracked?.onAwaiting("waiting for operator to pick models");
+		agentTree.update(rootId, { detail: "waiting for operator to pick models" });
 		try {
 			const choose = async (): Promise<void> => {
-				if (tracked?.signal.aborted || !scope.isCurrent()) return;
+				if (signal.aborted || !scope.isCurrent()) return;
 				// A concurrent run may have assigned or dismissed these participants while this one waited.
 				const assigned = personaModels(personaConfigs, scope.persona);
 				const pending = pendingParticipants(participants, { prompted: promptedFor(scope.persona, participants) })
 					.filter((p) => !assigned[p.key] && !assigned[p.agent]);
-				const chosen = await choosePersonaModels(ctx, pending, available, scope, tracked?.signal);
-				if (!tracked?.signal.aborted && chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
+				const chosen = await choosePersonaModels(ctx, pending, available, scope, signal);
+				if (!signal.aborted && chosen && Object.keys(chosen).length > 0) savePersonaModels(ctx, scope.persona, chosen);
 			};
-			// Automatic setup shares the checkpoint dialog line: parallel background runs cannot displace
-			// one another's prompt. The run's stop closes the active picker or removes it from the line.
-			if (tracked) await inGateLine(tracked.signal, undefined, choose);
-			else await choose();
+			// Every automatic setup shares the checkpoint dialog line, including commands and mandatory
+			// orchestration. The run's stop closes the active picker or removes it from the line.
+			await inGateLine(signal, undefined, choose);
 		} finally {
 			tracked?.onAwaiting(undefined);
+			agentTree.update(rootId, { detail: "", lastAdvanceAt: Date.now() });
 		}
 	}
 
@@ -1604,12 +1602,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const { persona } = scope;
 		const options = orderModelRefs(available.map((m) => `${m.provider}/${m.id}`), ctx.model?.provider);
 		const chosen: Record<string, string> = {};
+		const addedPromptKeys = new Set<string>();
 		try {
 			for (const p of participants) {
 				if (signal?.aborted) return;
 				// Recorded BEFORE the prompt: a dismissal (or a picker that dies) must not be retried
-				// for this session, exactly like an answer is not asked twice.
-				promptedParticipants.add(`${persona}\0${p.key}`);
+				// for this session, exactly like an answer is not asked twice. Aborted setup discards
+				// all its picks, so only its newly added markers are rolled back below.
+				const promptKey = `${persona}\0${p.key}`;
+				if (!promptedParticipants.has(promptKey)) addedPromptKeys.add(promptKey);
+				promptedParticipants.add(promptKey);
 				// Name the core's verticalization in the picker too: choosing a model for "the
 				// Conservatore" is a different judgement than choosing one for a bare "balthasar".
 				// An auxiliary actor names the param that declared it ("arbiter judge").
@@ -1649,6 +1651,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 		} catch {
 			/* dismissed / no UI → fall back to the default model */
+		} finally {
+			if (signal?.aborted) for (const key of addedPromptKeys) promptedParticipants.delete(key);
 		}
 		if (signal?.aborted) return;
 		if (!scope.isCurrent()) {
@@ -1864,21 +1868,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = resolveOrchestrationMembers(orch, teams);
 		const participants = runParticipants(ctx, { strategy: label, ...(orch.params ? { params: orch.params } : {}), members: roster });
-		await ensurePersonaModels(ctx, participants, tracked);
 		const participantsByNode = participantByNode(participants);
 		const { rootId, signal, live } = visibleRoot(`${idPrefix}:${label}`, tracked);
 		agentTree.add({ id: rootId, label, status: "running", kind: "council", ...live });
-		// Seed the whole roster at once (cores show by name immediately); "queued" until the
-		// engine actually starts each one — an honest view under the concurrency limit.
-		const seedKeys = rosterNodeKeys(roster);
-		roster.forEach((m, i) => {
-			const a = rosterSpec(m).agent;
-			const key = seedKeys[i] ?? a;
-			const participant = participantForNode(participantsByNode, key);
-			const assignmentKey = participant?.key ?? bareAssignmentKey(key);
-			agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key, assignmentKey, participant), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, a, assignmentKey, participant), detail: "queued" });
-		});
 		try {
+			await ensurePersonaModels(ctx, participants, signal, rootId, tracked);
+			if (signal.aborted) {
+				agentTree.update(rootId, { status: "stopped" });
+				const cancelled: AgentResult = { agent: label, output: "cancelled before orchestration started", usage: emptyUsage(), ok: false, error: "cancelled", failureKind: "abort" };
+				return cancelled;
+			}
+			// Seed the whole roster at once (cores show by name immediately); "queued" until the
+			// engine actually starts each one — an honest view under the concurrency limit.
+			const seedKeys = rosterNodeKeys(roster);
+			roster.forEach((m, i) => {
+				const a = rosterSpec(m).agent;
+				const key = seedKeys[i] ?? a;
+				const participant = participantForNode(participantsByNode, key);
+				const assignmentKey = participant?.key ?? bareAssignmentKey(key);
+				agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key, assignmentKey, participant), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, a, assignmentKey, participant), detail: "queued" });
+			});
 			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
 			// cooperatively between rounds, so an aborted run stops convening instead of running every
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
@@ -1989,17 +1998,20 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return [phase.id, { members, participants }] as const;
 			}),
 		);
-		await ensurePersonaModels(ctx, spec.phases.flatMap((p) => phasePlans.get(p.id)?.participants ?? []), tracked);
-
 		const { rootId: flowRoot, signal, live } = visibleRoot(`flow:${spec.name}`, tracked);
 		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running", kind: "flow", ...live });
-		for (const p of spec.phases) {
-			const pid = `${flowRoot}/${p.id}`;
-			const node: AddNodeInput = { id: pid, label: `${p.id} · ${p.strategy}`, parentId: flowRoot, status: resume[p.id] ? "done" : "running", kind: "phase" };
-			if (resume[p.id]) node.detail = "resumed";
-			agentTree.add(node);
-		}
 		try {
+			await ensurePersonaModels(ctx, spec.phases.flatMap((p) => phasePlans.get(p.id)?.participants ?? []), signal, flowRoot, tracked);
+			if (signal.aborted) {
+				agentTree.update(flowRoot, { status: "stopped" });
+				return { ok: false, results: {}, output: "cancelled before flow started", error: "cancelled", failureKind: "abort", cancelled: true };
+			}
+			for (const p of spec.phases) {
+				const pid = `${flowRoot}/${p.id}`;
+				const node: AddNodeInput = { id: pid, label: `${p.id} · ${p.strategy}`, parentId: flowRoot, status: resume[p.id] ? "done" : "running", kind: "phase" };
+				if (resume[p.id]) node.detail = "resumed";
+				agentTree.add(node);
+			}
 			// Yield so a concurrent flow can seed its own tree before we fail-closed on refs —
 			// the check still runs BEFORE any phase/engine work.
 			await Promise.resolve();
@@ -2101,10 +2113,28 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	// Discovery is acquired once per base model/session. Repeated turns and nudges reuse it;
-	// an explicit models query refreshes it. Execution preflights still consult the live registry.
+	// explicit discovery/refresh replaces it. Execution preflights still consult the live registry.
 	let modelCatalog: { key: string; models: ModelCostMetadata[]; candidates: string | undefined } | undefined;
+	function modelCatalogKey(ctx: ExtensionContext): string {
+		return `${ctx.sessionManager?.getSessionId?.() ?? ""}\0${ctx.model?.provider ?? ""}\0${ctx.model?.id ?? ""}`;
+	}
+	async function refreshModelCatalog(ctx: ExtensionContext, signal: AbortSignal) {
+		// Pi contexts have live getters: capture before awaiting so an old refresh cannot
+		// discard the snapshot acquired after a session or base-model switch.
+		const key = modelCatalogKey(ctx);
+		try {
+			return await ctx.modelRegistry.refresh?.({ signal });
+		} finally {
+			// A failed/aborted refresh may still have updated some providers.
+			if (modelCatalog?.key === key) modelCatalog = undefined;
+		}
+	}
+	function canDiscoverModels(): boolean {
+		const caps = controller.capabilities;
+		return pi.getActiveTools().includes("models") && (!caps || canCallTool(caps, "models"));
+	}
 	function currentModelCatalog(ctx: ExtensionContext, refresh = false) {
-		const key = `${ctx.sessionManager?.getSessionId?.() ?? ""}\0${ctx.model?.provider ?? ""}\0${ctx.model?.id ?? ""}`;
+		const key = modelCatalogKey(ctx);
 		if (refresh || modelCatalog?.key !== key) {
 			const models = configuredModels(ctx);
 			modelCatalog = { key, models, candidates: renderNudgeModels(models, ctx.model) };
@@ -2147,7 +2177,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (caps && !canFanOut(caps)) return undefined;
 		const targets = delegateTargets();
 		const delegation = controller.activePersona?.delegation;
-		const canListModels = pi.getActiveTools().includes("models") && (!caps || canCallTool(caps, "models"));
+		const canListModels = canDiscoverModels();
 		const candidates = canListModels && ctx.model ? currentModelCatalog(ctx).candidates : undefined;
 		const teamAgents: Record<string, string[]> = {};
 		for (const [name, members] of Object.entries(teams)) teamAgents[name] = members.map((m) => rosterSpec(m).agent);
@@ -2538,6 +2568,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					personaConfigs = savedSettings.personas;
 				},
 				isCurrent: () => !disposed && (session === undefined || lastCtx?.sessionManager?.getSessionId?.() === session),
+				refreshCatalog: (signal) => refreshModelCatalog(ctx, signal),
 			});
 		},
 	});
@@ -2570,7 +2601,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					const panel = resolveOrchestrationMembers({ roster, ...(members ? { members } : {}) }, teams);
 					const deadline = AbortSignal.timeout(20_000);
 					const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
-					const result = await ctx.modelRegistry.refresh?.({ signal });
+					const result = await refreshModelCatalog(ctx, signal);
 					if (!scope.isCurrent()) {
 						ctx.ui.notify("persona models: persona or session changed; no assignments changed.", "warning");
 						return;

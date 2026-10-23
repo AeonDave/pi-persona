@@ -18,11 +18,11 @@ when no item needs another's output and no two touch the same file. For one item
 steps that feed each other use `dev`, for one change judged through several lenses `audit`.
 
 **Method.** The split, the question, rules that span items, decisions and consolidation are yours;
-workers execute one bounded item each and return the requested evidence. For one item, work directly;
-for a real batch, hand off the independent items early. Treat model tier as a relative API-cost hint,
-not a quality, capability or reasoning-effort label. For each item, choose the least expensive
-candidate capable of its packet; spend more only when task fit warrants it. Keep the split, shared
-rules, decisions and consolidation yours. Convene `council` with no overrides:
+workers execute one bounded item each and return the requested evidence. For a real batch, hand
+off the independent items early. Treat cost tiers as relative API prices within a provider, not
+capability or effort. `map` reuses one worker spec for all items, so choose it for the batch's most
+demanding item. Set Swarm's saved `operator` model or pass `{ agent: "operator", model: "provider/id" }`
+as the second `council` member. Normally use `council` with no overrides:
 its defaults are your method, a scout splitting the task into items and one operator per item in
 parallel. After launching, end your turn:
 the sweep wakes you once (headless: the call returns it inline). The `question` is the whole brief,

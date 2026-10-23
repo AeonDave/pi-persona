@@ -93,3 +93,72 @@ test("candidate ordering preserves exact snapshots and uses the same numeric/pro
 	assert.deepEqual(orderModelCandidates([], active), []);
 	assert.deepEqual(refs(orderModelCandidates([model("gpt-2-sol"), model("gpt-10-sol")], model("missing"))), ["mine/gpt-10-sol", "mine/gpt-2-sol"], "an absent active ref is not inserted");
 });
+
+test("embedded valid snapshot dates never outrank model generations or erase adapter versions", () => {
+	const older = model("anthropic.claude-sonnet-4-20250514-v1:0", "gateway");
+	const newer = model("anthropic.claude-sonnet-4-5-20250929-v1:0", "gateway");
+	assert.deepEqual(shortlistModels([older, newer]), [newer]);
+	assert.deepEqual(orderModelCandidates([older, newer]), [newer, older], "full search retains both exact refs");
+	const adapterV2 = model("anthropic.claude-sonnet-4-5-20240101-v2:0", "gateway");
+	assert.deepEqual(shortlistModels([newer, adapterV2]), [adapterV2], "the v2:0 suffix remains part of the version tuple");
+	const prefixedV2 = model("v2:0-line-4-20240101");
+	const prefixedV1 = model("v1:0-line-4-20250101");
+	assert.deepEqual(shortlistModels([prefixedV1, prefixedV2]), [prefixedV2], "numeric adapter prefixes remain intact too");
+});
+
+test("embedded snapshot dates rank only after versions and keep undated aliases preferred", () => {
+	const older = model("line-4-2024-01-01-v1:0");
+	const newer = model("line-4-20250101-v1:0");
+	const alias = model("line-4-v1:0");
+	assert.deepEqual(shortlistModels([older, newer]), [newer]);
+	assert.deepEqual(shortlistModels([older, newer, alias]), [alias]);
+	assert.deepEqual(orderModelCandidates([older, alias, newer]), [alias, newer, older]);
+	assert.deepEqual(shortlistModels([model("20250101-line-4-v1:0"), model("line-5-v1:0")]), [model("line-5-v1:0")], "a leading date token cannot become the primary version");
+});
+
+test("invalid calendar dates and ordinary dotted numeric versions remain version tokens", () => {
+	for (const id of ["line-4-20250229-v1:0", "line-4-20251301-v1:0", "line-4-2025-04-31-v1:0"]) {
+		const invalid = model(id);
+		assert.deepEqual(shortlistModels([model("line-4-10-v1:0"), invalid]), [invalid], id);
+	}
+	const dotted = model("line-2025.05.14-v1:0");
+	assert.deepEqual(shortlistModels([model("line-5-v1:0"), dotted]), [dotted], "a dotted release tuple is not a calendar-date token");
+});
+
+test("a truncated provider shortlist favors the active root then rotates roots instead of filling an alphabetical chunk", () => {
+	const alpha = Array.from({ length: 45 }, (_, i) => model(`alpha/lane-${String.fromCharCode(97 + Math.floor(i / 26), 97 + i % 26)}-1`, "gateway"));
+	const active = model("zeta/working-1", "gateway");
+	const models = [...alpha, model("beta/line-1", "gateway"), model("zeta/working-2", "gateway"), model("zeta/other-1", "gateway"), active];
+	const before = [...models];
+	const selected = shortlistModels(Object.freeze(models), active, 6);
+	assert.deepEqual(refs(selected), [
+		"gateway/zeta/working-1", "gateway/zeta/working-2", "gateway/alpha/lane-aa-1",
+		"gateway/beta/line-1", "gateway/zeta/other-1", "gateway/alpha/lane-ab-1",
+	]);
+	assert.deepEqual(shortlistModels([...models].reverse(), active, 6), selected, "root admission is shuffle-stable");
+	assert.deepEqual(models, before, "rotating roots does not mutate the catalog");
+	const forty = refs(shortlistModels(models, active));
+	assert.equal(forty.length, 40);
+	assert.ok(forty.includes("gateway/beta/line-1"), "a large alphabetically early root cannot consume all forty slots");
+	assert.ok(forty.includes("gateway/zeta/working-2"), "the active vendor's latest representative is admitted too");
+	assert.deepEqual(new Set(refs(orderModelCandidates(models, active))), new Set(refs(models)), "full query ordering still retains every original model");
+});
+
+test("root rotation keeps native ordering when it fits and defines active-first behavior under small caps", () => {
+	const active = model("gpt-6.1-sol");
+	const models = [model("o4-mini"), model("gpt-5-mini"), model("gpt-6-astra"), active];
+	assert.deepEqual(refs(shortlistModels(models, active)), ["mine/gpt-6.1-sol", "mine/gpt-6-astra", "mine/gpt-5-mini", "mine/o4-mini"], "an unsaturated native catalog retains its established numeric ordering");
+	assert.deepEqual(refs(shortlistModels(models, active, 1)), ["mine/gpt-6.1-sol"]);
+	assert.deepEqual(refs(shortlistModels(models, active, 2)), ["mine/gpt-6.1-sol", "mine/gpt-6-astra"]);
+	assert.deepEqual(refs(shortlistModels(models, active, 3)), ["mine/gpt-6.1-sol", "mine/gpt-6-astra", "mine/o4-mini"], "a saturated multi-root native catalog shares the same generic fairness policy");
+});
+
+test("provider priority remains outside root rotation, with fair admission even without an active model", () => {
+	const early = Array.from({ length: 45 }, (_, i) => model(`alpha/lane-${String.fromCharCode(97 + Math.floor(i / 26), 97 + i % 26)}-1`, "gateway"));
+	const tail = [model("beta/line-1", "gateway"), model("zeta/line-1", "gateway")];
+	assert.deepEqual(refs(shortlistModels([...early, ...tail], undefined, 3)), ["gateway/alpha/lane-aa-1", "gateway/beta/line-1", "gateway/zeta/line-1"]);
+	const active = model("zeta/working-1", "gateway");
+	const other = model("independent-1", "aaa");
+	assert.ok(shortlistModels([other, ...early, ...tail, active], active, 3).every((m) => m.provider === "gateway"), "root balancing never displaces the preferred provider");
+	assert.deepEqual(refs(shortlistModels([other, ...early, ...tail], undefined, 3)), ["aaa/independent-1", "gateway/alpha/lane-aa-1", "gateway/beta/line-1"], "each provider balances against its remaining slots");
+});

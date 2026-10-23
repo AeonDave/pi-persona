@@ -49,10 +49,13 @@ hard-fail.
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
-`models` without a query shows the current model first, then up to 40 candidates ranked by numeric
-versions within model families. It keeps distinct variants and removes older generations and dated
-snapshots from that default view; explicit searches and model assignments retain the full eligible
-catalog. Version names are recency hints, not release-date metadata. `★` identifies the session
+`models` without a query shows up to 40 entries total, including the current model when available,
+with the current model first and the remaining candidates ranked by numeric versions within model
+families. It keeps distinct variants and removes older generations and dated snapshots from that
+default view; explicit searches and model assignments retain the full eligible catalog. Version
+names are recency hints, not release-date metadata. If a provider's candidates exceed the remaining
+slots, the shortlist rotates between model roots, starting with the active model's root when present;
+gateway vendors therefore share the cap. `★` identifies the session
 provider; authentication alone does not prove that an account supports every model in its catalog.
 
 Model details expose host metadata for context and reasoning support. `cost:low`, `cost:medium` and

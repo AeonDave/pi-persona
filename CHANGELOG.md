@@ -17,12 +17,22 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   trivial or tightly coupled work available to the supervisor. The supervisor owns decisions and
   reviews results; model selection favors suitable recent candidates without forcing an explicit
   alternative when only the current model is known to work.
+- Rewrite the Dev, Elite and Swarm prompts in `c475341` around task-fit delegation and direct-work
+  exceptions. Migrate recognized pristine v1.17.2 copies to the new defaults while preserving
+  user-edited copies. Swarm now documents that one worker model serves the whole `map` batch.
 - Cache current-provider model candidates for the supervisor. Acquire them once, refresh when the
-  base provider/model changes or `models` is explicitly called, and reuse them across ordinary turns.
+  base provider/model changes or the catalog is explicitly queried/refreshed, and reuse them across ordinary turns.
   Explicit user choices can still select another configured provider; the LLM chooses worker task fit.
 
 ### Fixed
 
+- Share capped gateway shortlists across model roots, starting with the active model's root, instead
+  of letting alphabetically early vendors fill the list. Recognize snapshot dates inside model IDs,
+  including Bedrock adapter suffixes, without treating those dates as release versions.
+- Invalidate cached candidates after explicit model refresh, including partially successful refreshes.
+  Apply the same `models` capability gate to the standing brief and delegation reminders.
+- Retry unsaved automatic model choices after a stopped picker. Serialize `/orchestrate` and `/flow`
+  setup with checkpoint dialogs, and allow stopping a command while its setup is still queued.
 - Respect the host's per-model availability filters instead of restoring every model of an active or
   registered provider. Curated native-extension catalogs and the exact current model remain discoverable.
   Delegation reminders use the same eligible catalog and preserve the current model within their cap.
