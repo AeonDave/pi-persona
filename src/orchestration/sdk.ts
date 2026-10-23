@@ -6,7 +6,7 @@
  */
 
 import type { RunLimits } from "../core/capabilities.ts";
-import { emptyUsage, type ToolEvent } from "../engine/stream.ts";
+import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { planModelRecovery } from "./model-retry.ts";
 import { mapWithConcurrency, Semaphore } from "./parallel.ts";
@@ -65,6 +65,8 @@ export interface AgentProgress {
 	output: string;
 	/** Tokens consumed so far (best-effort). */
 	tokens?: number;
+	/** Copied cumulative counters for display, when supplied by the engine. */
+	usage?: ChildUsage;
 	/** The tool the agent is currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
 	/** One authoritative runtime tool lifecycle transition; never contains tool args or output. */

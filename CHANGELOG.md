@@ -6,7 +6,24 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.17.3](https://github.com/AeonDave/pi-persona/tree/v1.17.3) - 2026-10-23
+
+### Added
+
+- Show bounded, sanitized live stdout/stderr tails for monitors without adding semantic events or
+  model wakes. Recover terminal captures with `monitor result`, including after reload, from the
+  owning session JSONL rather than sidecar files. Session-wide visibility includes sibling branches;
+  record/byte budgets remain global across navigation and reload. Document secret retention and copies.
+
 ### Changed
+
+- Use native Input and fuzzy search in model pickers, preserve exact qualified references and current
+  selection, and show useful model metadata. Keep catalog eligibility and provider routing unchanged.
+- Consolidate plugin-owned session cards, bounded literal tool previews and width-aware widgets.
+  Expanded prose uses native Markdown; logs and operational diagnostics remain literal. Reuse active
+  theme colors and host-owned tool shells. Settings hints follow configured keybindings.
+- Display active and completed agent usage through the same directional input/output/cache/cost
+  formatter, using copied existing counters without changing accounting or budgets.
 
 - Show the current model first in `models`, followed by nearby candidates from its provider, textual
   name root and numbered generation, ordered by cost band then numeric version. Preserve distinct
@@ -30,6 +47,16 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Describe omitted model selection truthfully: saved and agent-configured choices remain in force.
+  Selecting the supervisor deliberately requires its exact qualified reference and authorization.
+- Respect staged shared model assignments while preserving direct and inline overrides.
+- Read tool failures from the native host render context; preserve literal host diagnostics and retain
+  Markdown for real reports with failed legs. Bound Exocom previews and show expansion hints only when needed.
+- Neutralize bidi and Unicode separators in recovered monitor logs and both archive-card views without
+  rewriting raw captures. Coalesce full monitor projection into the existing UI frame instead of rebuilding
+  it per chunk; terminal events, cancellation and teardown preserve the last tail and clear pending work.
+- Qualify the settings SDK smoke against the intended narrow-picker truncation contract while requiring
+  complete qualified references at wider widths and cancellation without writes.
 - Share capped gateway shortlists across model roots, starting with the active model's root, instead
   of letting alphabetically early vendors fill the list. Recognize snapshot dates inside model IDs,
   including Bedrock adapter suffixes, without treating those dates as release versions.

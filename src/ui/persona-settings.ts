@@ -225,8 +225,14 @@ export class PersonaSettingsPanel implements Component {
 		const title = this.theme.fg("accent", this.theme.bold("Persona settings"));
 		const file = fitLine(this.theme.fg("dim", `Configuration file: ${compactInlineText(this.data.file, { maxChars: 240 })}`), pageWidth);
 		const remembered = fitLine(this.theme.fg("dim", `Remembered persona: ${this.data.lastPersona ? compactInlineText(this.data.lastPersona, { maxChars: 120 }) : "none"}`), pageWidth);
+		// Show the configured primary binding; listing every alias would hide close/edit on narrow screens.
+		const keys = (action: "tui.select.up" | "tui.select.down" | "tui.select.confirm" | "tui.select.cancel"): string =>
+			this.keybindings.getKeys(action).slice(0, 1).map((key) => key === "escape" ? "esc" : key).join("/") || "unbound";
+		const move = `${keys("tui.select.up")}/${keys("tui.select.down")}`;
+		const confirm = keys("tui.select.confirm");
+		const cancel = keys("tui.select.cancel");
 		const filter = this.searchMode
-			? this.theme.fg("accent", `Filter (type, backspace, enter): ${compactInlineText(this.query, { maxChars: 120 })}▌`)
+			? this.theme.fg("accent", `Filter (type, backspace, ${confirm}): ${compactInlineText(this.query, { maxChars: 120 })}▌`)
 			: this.query
 				? this.theme.fg("dim", `Filter: ${compactInlineText(this.query, { maxChars: 120 })}`)
 				: this.theme.fg("dim", "Filter: press / to search");
@@ -234,8 +240,8 @@ export class PersonaSettingsPanel implements Component {
 		const footer = [
 			...(this.data.notice ? [fitLine(this.theme.fg("warning", compactInlineText(this.data.notice, { maxChars: 200 })), pageWidth)] : []),
 			...(pageWidth < 76
-				? ["↑↓ move  enter edit  r reset", "/ filter  m models  d info  esc close"]
-				: ["↑↓ move  enter edit  r reset  / filter  m models  d diagnostics  esc close"])
+				? [`${move} move  ${confirm} edit  r reset`, `/ filter  m models  d info  ${cancel} close`]
+				: [`${move} move  ${confirm} edit  r reset  / filter  m models  d diagnostics  ${cancel} close`])
 				.map((hint) => fitLine(this.theme.fg("dim", hint), pageWidth)),
 		];
 		const bodyHeight = Math.max(1, terminalRows - header.length - footer.length);

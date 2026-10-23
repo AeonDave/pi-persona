@@ -8,7 +8,7 @@ import type { ModelsRefreshResult } from "@earendil-works/pi-ai";
 
 import type { ModelParticipant } from "../persona/model-participants.ts";
 import { compactInlineText } from "../ui/presentation.ts";
-import { ModelPicker, orderModelRefs } from "../ui/model-picker.ts";
+import { ModelPicker, orderModelRefs, type ModelPickerMetadata } from "../ui/model-picker.ts";
 
 export interface PersonaModelOwner {
 	name: string;
@@ -170,20 +170,26 @@ export async function openPersonaModelSettings(ctx: ExtensionContext, deps: Pers
 		}
 		if (action !== actions[0]) continue;
 
-		const modelRefs = availableModelRefs(ctx);
+		const models = availableModels(ctx);
+		const modelRefs = orderModelRefs(models.map((model) => `${model.provider}/${model.id}`), ctx.model?.provider);
 		if (modelRefs.length === 0) {
 			ctx.ui.notify("No authenticated models are available. Use /login, then choose Set or change again; saved assignments were kept.", "warning");
 			continue;
 		}
+		const current = rows[rowIndex]!;
 		const modelTitle = compactInlineText(
-			`Model for ${participant.label} · current: ${participant.model ?? "none"} (${participant.source})`,
+			`Model for ${participant.label} · current: ${current.model} (${current.source})`,
 			{ maxChars: 180 },
 		);
 		let modelChoice: string | undefined;
 		try {
 			modelChoice = ctx.mode === "tui"
 				? await ctx.ui.custom<string | undefined>(
-						(tui, theme, _keybindings, done) => new ModelPicker(tui, theme, modelTitle, modelRefs, ctx.model?.provider, done),
+						(tui, theme, keybindings, done) => new ModelPicker(tui, theme, modelTitle, modelRefs, ctx.model?.provider, done, {
+							models,
+							...(current.currentRef !== undefined ? { currentRef: current.currentRef } : {}),
+							...(keybindings ? { keybindings } : {}),
+						}),
 						{ overlay: false },
 					)
 				: await select(ctx, modelTitle, modelRefs);
@@ -202,7 +208,7 @@ function participantRow(
 	saved: Readonly<Record<string, string>>,
 	staged: Readonly<Record<string, string | null>>,
 	index: number,
-): { option: string } {
+): { option: string; model: string; source: string; currentRef?: string } {
 	const hasPendingDirect = Object.prototype.hasOwnProperty.call(staged, participant.key);
 	const pendingDirect = hasPendingDirect ? staged[participant.key] : undefined;
 	const hasPendingShared = participant.key !== participant.agent && Object.prototype.hasOwnProperty.call(staged, participant.agent);
@@ -211,22 +217,30 @@ function participantRow(
 	const sharedSaved = participant.key !== participant.agent ? effectiveSavedValue(participant.agent, saved, staged) : undefined;
 	let model: string;
 	let source: string;
+	let currentRef: string | undefined;
 	if (typeof pendingDirect === "string") {
 		model = pendingDirect;
+		currentRef = pendingDirect;
 		source = "assignment (pending)";
 	} else if (pendingDirect === null) {
 		if (sharedSaved) {
 			model = sharedSaved;
+			currentRef = sharedSaved;
 			source = "shared assignment (pending fallback)";
 		} else {
 			model = "resolve lower precedence next run";
 			source = "pending reset";
 		}
+	} else if (typeof pendingShared === "string" && !directSaved && participant.source !== "inline") {
+		model = pendingShared;
+		currentRef = pendingShared;
+		source = "shared assignment (pending)";
 	} else if (hasPendingShared && pendingShared === null && !directSaved) {
 		model = "resolve lower precedence next run";
 		source = "shared reset pending";
 	} else {
 		model = participant.model ?? "none";
+		currentRef = participant.model;
 		source = participant.source;
 	}
 	const sharedNote = !directSaved && sharedSaved
@@ -238,7 +252,8 @@ function participantRow(
 		: hasPendingShared && pendingShared === null ? " · shared reset pending"
 			: "";
 	const option = `${index + 1}. ${safeInline(participant.label, 80)} · ${safeInline(model, 90)} (${safeInline(source, 24)})${sharedNote}${pendingNote}`;
-	return { option: compactInlineText(option, { maxChars: 200 }) };
+	return { option: compactInlineText(option, { maxChars: 200 }), model, source,
+		...(currentRef !== undefined ? { currentRef } : {}) };
 }
 
 function effectiveSavedValue(
@@ -250,14 +265,14 @@ function effectiveSavedValue(
 	return saved[key];
 }
 
-function availableModelRefs(ctx: ExtensionContext): string[] {
+function availableModels(ctx: ExtensionContext): ModelPickerMetadata[] {
 	try {
-		const unique = new Set<string>();
+		const unique = new Map<string, ModelPickerMetadata>();
 		for (const model of ctx.modelRegistry.getAvailable()) {
 			if (typeof model.provider !== "string" || !model.provider.trim() || typeof model.id !== "string" || !model.id.trim()) continue;
-			unique.add(`${model.provider}/${model.id}`);
+			unique.set(`${model.provider}/${model.id}`, model);
 		}
-		return orderModelRefs([...unique], ctx.model?.provider);
+		return [...unique.values()];
 	} catch {
 		return [];
 	}

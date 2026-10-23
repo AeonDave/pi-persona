@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { type Static, Type } from "typebox";
 
-import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 import { attributePeer } from "../core/fence.ts";
@@ -15,6 +15,8 @@ import type { ExocomPlane } from "../exocom/plane.ts";
 import type { ExocomSemanticFrame } from "../exocom/envelope.ts";
 import { EXOCOM_WAIT_MAX_MS, waitTimeoutMs } from "../exocom/wait.ts";
 import { normalizeMetadataText } from "../exocom/registry.ts";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
+import { createReportBody } from "../ui/report-body.ts";
 
 const TOKEN = { minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$" } as const;
 
@@ -90,11 +92,6 @@ function result(text: string, details: Record<string, unknown>) {
 	return { content: [{ type: "text" as const, text }], details };
 }
 
-function workToolFailed(renderedResult: unknown): boolean {
-	return !!renderedResult && typeof renderedResult === "object"
-		&& (renderedResult as { isError?: unknown }).isError === true;
-}
-
 export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps): void {
 	const identity = () => {
 		const plane = deps.getPlane();
@@ -122,12 +119,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Claim "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom claim failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
@@ -161,12 +153,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom ask failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
@@ -191,12 +178,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Answer "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom answer failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
@@ -221,12 +203,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Decline "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom decline failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
@@ -250,11 +227,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Wait "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom wait failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
+		renderResult(res, options, theme, context) {
+			// A retained answer is peer prose, not the literal receipt for arming a wait.
+			// Its ok=false can be a valid negative answer; only the host error flag is failure.
+			if (options.expanded && !(context?.isError ?? res.isError) && res.details?.status === "answered") {
+				const text = res.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+				return createReportBody(text, theme, {}, context?.lastComponent);
+			}
+			return renderLiteralToolResult(res, options, theme, context);
 		},
 	});
 
@@ -274,12 +254,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Release "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom release failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
@@ -298,12 +273,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Progress "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom progress failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
@@ -318,11 +288,6 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("Exocom Status")), 0, 0);
 		},
-		renderResult(res, { expanded }, theme) {
-			const first = res.content.find((item) => item.type === "text");
-			const text = first?.type === "text" ? first.text : "Exocom status failed";
-			if (workToolFailed(res)) return new Text(theme.fg("error", text), 0, 0);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", expanded ? text : `${text} (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
-		},
+		renderResult: renderLiteralToolResult,
 	});
 }

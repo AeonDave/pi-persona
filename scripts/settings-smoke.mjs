@@ -486,7 +486,13 @@ try {
 				const lines = component.render(width);
 				assert.ok(lines.length > 0, `The model picker rendered no lines at width ${width}`);
 				assert.ok(lines.every((line) => piTui.visibleWidth(line) <= width), `The model picker overflowed width ${width}`);
-				assert.ok(lines.some((line) => piTui.stripTerminalSequences(line).includes("local")), `The model ref was not visible at width ${width}`);
+				const visible = lines.map((line) => piTui.stripTerminalSequences(line));
+				const ref = `${model.provider}/${model.id}`;
+				// Current/provider badges intentionally spend columns: a long qualified ref is
+				// visibly truncated at 40 columns, but must be complete in the wider viewports.
+				assert.ok(visible.some((line) => line.includes(ref)
+					|| (width === 40 && line.includes(`${model.provider}/`) && line.includes("…"))),
+					`The model ref was neither complete nor visibly truncated at width ${width}`);
 				tuiRenderWidths.push(width);
 			}
 			component.handleInput("\u001b");

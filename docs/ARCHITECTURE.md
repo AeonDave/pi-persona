@@ -558,7 +558,25 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   failure, retain a bounded notification. The semantic completion follows its existing single-wake path;
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
   preview until expanded; terminal escape/control sequences are removed from the visible projection;
-- the sticky agent and exocom widgets have fixed row budgets — F9/`/agents` and paginated
+- custom follow-ups and operator-only entries share `ui/session-cards.ts`: glyph-free generated
+  headings, explicit textual state, one width-aware layout and semantic theme backgrounds. Neutral
+  information/unknown state uses `customMessageBg`, verified completion `toolSuccessBg`, attention
+  (nudge/stall/stopped) `toolPendingBg`, and verified failure `toolErrorBg`. Only runtime-owned status
+  evidence selects chrome, never peer/child prose. Colors are resolved from the active theme at render
+  time (including pi-theme-1337); normal tools keep Pi's own shell rather than gaining a duplicate box.
+  Expanded prose reports use the native Markdown projection in `ui/report-body.ts` (including visible
+  trust blockquotes); receipts, live output, monitor/timer notices and raw diagnostics stay literal.
+  Source payloads and fences remain intact. The native Markdown component is retained per report and
+  invalidated for theme/layout changes, without a global transcript cache. Rendering never rewrites
+  stored or model-facing payloads, nor creates a wake;
+- literal control receipts and fallback errors share `ui/literal-tool-result.ts`: bounded collapsed
+  text, an expansion hint only when detail is hidden, and full sanitized expansion. Tool errors use
+  the host's `ToolRenderContext.isError`, not a presumed result field; semantic negative peer answers
+  remain successful retrievals. Retained `exocom_wait` answers are prose reports and render Markdown
+  when expanded. Native tool shells remain host-owned;
+- the sticky agent and exocom widgets have fixed physical-row budgets: the shared width-aware
+  `ui/compact-widget.ts` clips each already-budgeted row instead of letting native Text wrap it.
+  F9/`/agents` and paginated
   `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot push the
   editor off screen or dump an entire peer registry into model context. Agent-tree deltas share one
   16 ms widget composition per terminal frame; identical lines/status are not republished, hierarchy
@@ -579,7 +597,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   keys never refuse;
 - every agent-tree node carries `startedAt`/`lastAdvanceAt`; `LiveClock` (`src/ui/live-clock.ts`)
   repaints the sticky widget and the F9 overlay once a second while any node is running and stops
-  itself once nothing is. A running row shows elapsed time until it goes `STALL_FLAG_MS` (90s) quiet,
+  itself once nothing is. Running/completed usage shares `formatUsage`: `↑` input and `↓` output,
+  using copied existing cumulative usage snapshots, never context occupancy. A legacy progress source
+  providing only an aggregate shows a neutral compact count without `tok` or a fabricated direction. A running row shows elapsed time until it goes `STALL_FLAG_MS` (90s) quiet,
   then the same `⚠ stalled <duration>` badge the async peek watchdog uses. `x` marks the target
   `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,
   already settled) surfaces as a one-line notice instead of silently no-op'ing;
@@ -592,7 +612,20 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   `N agents` in-flight status, and from telemetry (`agent.*` events are agents only). They settle and
   leave like an async row: the final ✓/✗/■ goes to the tree change stream (telemetry excluded), not to
   the screen, because the update and the removal are synchronous and the widget frame is coalesced. They
-  live only in the arming session, never restored.
+  live only in the arming session, never restored. Raw monitor stdout/stderr has a separate passive
+  observer: raw chunks feed bounded sanitized tails immediately, but full row/preview projection is
+  coalesced per dirty monitor into the existing 16 ms widget frame, before its tree snapshot. Terminal
+  events and cancellation publish the pending final tail synchronously; teardown clears pending state.
+  This updates the widget and F9 without semantic events, model wakes, event-budget consumption or
+  stall-clock credit. The same observer feeds a bounded session-native log
+  archive (`src/monitor/archive.ts`): one plain custom entry per terminal/cancelled run, no sidecars or
+  per-chunk writes. `monitor result` retrieves retained captures across reload/resume from the whole
+  session tree, including sibling conversation branches: this archive is session-wide, deliberately
+  not a projection of the active branch. Branch navigation changes neither visibility nor the shared
+  lifetime budget. Restored logs never restore processes. Activation-unique monitor ids avoid historical result collisions. A finite
+  lifetime serialized-byte/count budget includes all previous entries of the archive type, even
+  unreadable versions. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
+  not deletes them. Operator-only expandable log entries do not create model context or extra wakes.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.

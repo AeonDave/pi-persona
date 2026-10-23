@@ -213,6 +213,23 @@ test("snapshot exposes a compact progress view of the accumulating state", () =>
 	assert.equal(snap.tokens, 6);
 });
 
+test("snapshot copies separate usage counters without changing aggregate tokens", () => {
+	const state = createStreamState();
+	applyEvent(state, {
+		type: "message_end",
+		message: { role: "assistant", usage: { input: 123_000, output: 6_200, cacheRead: 2_400_000, cacheWrite: 500, cost: { total: 0.42 }, totalTokens: 99 } },
+	});
+	const first = snapshot(state);
+	const expected = { input: 123_000, output: 6_200, cacheRead: 2_400_000, cacheWrite: 500, cost: 0.42, contextTokens: 99, turns: 1 };
+	assert.deepEqual(first.usage, expected);
+	assert.notEqual(first.usage, state.usage, "the mutable accumulator must not escape");
+	assert.equal(first.tokens, 129_200, "aggregate excludes cache counters as before");
+	applyEvent(state, { type: "message_end", message: { role: "assistant", usage: { input: 10, output: 5 } } });
+	assert.deepEqual(first.usage, expected, "later events cannot mutate an earlier snapshot");
+	assert.deepEqual(snapshot(state).usage, state.usage);
+	assert.equal(snapshot(state).tokens, 129_215);
+});
+
 test("applyEvent ignores non-message_end events, non-assistant roles, and malformed input", () => {
 	const s = createStreamState();
 	applyEvent(s, { type: "turn_start" });
@@ -301,7 +318,7 @@ test("feedLines: empty chunk preserves buffer as rest; consecutive newlines yiel
 });
 
 test("snapshot of a brand-new stream state is zeroed", () => {
-	assert.deepEqual(snapshot(createStreamState()), { output: "", turns: 0, tokens: 0 });
+	assert.deepEqual(snapshot(createStreamState()), { output: "", turns: 0, tokens: 0, usage: emptyUsage() });
 });
 
 test("raw tool output updates are not progress: the snapshot, transcript and answer stay put", () => {

@@ -24,6 +24,7 @@ import {
 	ORCHESTRATION_TOOLS,
 	withOrchestrationToolsExcluded,
 } from "../../../src/engine/inproc.ts";
+import type { AgentProgress } from "../../../src/orchestration/sdk.ts";
 
 // A stub registry: one model, resolvable by provider/id or bare id.
 const stubModel = { provider: "stub", id: "m" };
@@ -155,6 +156,60 @@ test("inproc engine never forwards raw tool-output text through the progress sea
 	assert.equal(result.output, "answer");
 	assert.ok(progress.length > 0);
 	assert.equal(progress.some((snap) => snap.output.includes("secret tool output")), false, "tool contents never cross the progress seam");
+});
+
+test("inproc engine forwards copied directional usage in progress", async () => {
+	const progress: AgentProgress[] = [];
+	const engine = makeInProcessEngine({
+		resolveAgent,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		createSession: fakeSessions([
+			msgEnd("first", { input: 123_000, output: 6_200, cacheRead: 2_400_000, cacheWrite: 500, cost: { total: 0.42 } }),
+			msgEnd("done", { input: 10, output: 5 }),
+		]),
+	});
+	const result = await engine.run({ agent: "a", task: "inspect" }, (snap) => progress.push(snap));
+	assert.equal(result.ok, true);
+	assert.deepEqual(progress[0]?.usage, { input: 123_000, output: 6_200, cacheRead: 2_400_000, cacheWrite: 500, cost: 0.42, contextTokens: 0, turns: 1 });
+	assert.deepEqual(progress.at(-1)?.usage, result.usage);
+	assert.notEqual(progress[0]?.usage, result.usage, "later events leave retained progress unchanged");
+	assert.equal(progress.at(-1)?.tokens, 129_215);
+});
+
+test("omitting an inproc leg model preserves saved/frontmatter choices; an explicit supervisor pin overrides them", async () => {
+	const models = [
+		{ provider: "saved", id: "worker" },
+		{ provider: "frontmatter", id: "worker" },
+		{ provider: "supervisor", id: "current" },
+	];
+	const registry = {
+		find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+		getAll: () => models,
+	} as unknown as ModelRegistry;
+	const resolveConfiguredAgent = (): AgentConfig => ({
+		name: "configured",
+		model: "frontmatter/worker",
+		systemPrompt: "configured worker",
+		source: "test",
+	});
+	const createEngine = (modelFor: () => string | undefined) => makeInProcessEngine({
+		resolveAgent: resolveConfiguredAgent,
+		modelRegistry: registry,
+		defaultModel: "supervisor/current",
+		modelFor,
+		cwd: ".",
+		createSession: fakeSessions([msgEnd("done")]),
+	});
+
+	const saved = await createEngine(() => "saved/worker").run({ agent: "configured", task: "task" });
+	assert.equal(saved.modelUsed, "saved/worker", "omission keeps the saved per-persona assignment ahead of frontmatter");
+
+	const frontmatter = await createEngine(() => undefined).run({ agent: "configured", task: "task" });
+	assert.equal(frontmatter.modelUsed, "frontmatter/worker", "omission keeps the agent's configured model ahead of the engine default");
+
+	const explicit = await createEngine(() => "saved/worker").run({ agent: "configured", task: "task", model: "supervisor/current" });
+	assert.equal(explicit.modelUsed, "supervisor/current", "an explicit provider/id pin overrides the saved and frontmatter selections");
 });
 
 test("inproc engine folds the session event stream into output + usage (no live model)", async () => {

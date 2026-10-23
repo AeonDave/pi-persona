@@ -12,7 +12,7 @@ import { type ContractDef, contractInstructions, parseAndValidate, pinContract, 
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
+import { type AgentProgress, type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./child.ts";
 import { looksLikeProviderError } from "./errors.ts";
@@ -20,7 +20,6 @@ import { piHostModuleHint } from "./host-module.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
-import type { ToolEvent } from "./stream.ts";
 
 /** The engine-side face of the cross-process broker (spec B3/B4/B7) — a child-engine
  *  spawn's connection to the supervisor-hosted relay. The concrete implementation
@@ -107,7 +106,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 	return {
 		async run(
 			spec: AgentRunSpec,
-			onProgress?: (p: { output: string; tokens?: number; activity?: string; toolEvent?: ToolEvent }) => void,
+			onProgress?: (p: AgentProgress) => void,
 			callSignal?: AbortSignal,
 			/** Called once with a steer handle when the broker is on (in-process parity). */
 			onSteerable?: (steer: SteerFn) => void,
@@ -154,7 +153,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (isPositiveFiniteMs(spec.timeoutMs)) childOptions.timeoutMs = spec.timeoutMs;
 			if (onProgress) {
 				childOptions.onProgress = (snap) =>
-					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
 			}
 			// The run aborts if EITHER the whole-run signal or this agent's own (UI stop) fires.
 			const signal = combineSignals(deps.signal, callSignal);

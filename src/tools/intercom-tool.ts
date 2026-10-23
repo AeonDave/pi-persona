@@ -5,6 +5,7 @@ import { failureDetails } from "../extension/shared.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
+import { createReportBody } from "../ui/report-body.ts";
 import { coachingDisabledHint, expandDetailHint, reconcileAnsweredAsk } from "../extension/shared.ts";
 import {
 	type AsyncRun, AsyncRunTracker, buildPeekDigest,
@@ -332,9 +333,9 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			}
 			const first = result.content[0];
 			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
-			const failed = details.ok === false;
+			const failed = (context?.isError ?? result.isError) || details.ok === false;
 			const prefix = failed ? `${theme.fg("error", theme.bold("failed"))}\n` : "";
-			if (details.action === "steer" && details.ok === true) {
+			if (!failed && details.action === "steer" && details.ok === true) {
 				const target = compactInlineText(details.target ?? state?.target?.label ?? (legacyCompleted && typeof savedId === "string" ? sanitizeDisplayLabel(savedId, "run") : details.runId ? displayRunTarget(details.runId) : ""), { maxChars: 80 });
 				const message = typeof details.message === "string" ? details.message : context?.args?.message;
 				// Old persisted receipts may predate message snapshots. Keep their original content
@@ -352,7 +353,14 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const showTitle = !state?.callText || !preview;
 				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}` : ""}`, 0, 0);
 			}
-			if (expanded) return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
+			if (expanded) {
+				// Explicit report/message actions only; missing/running diagnostics and control
+				// receipts remain literal. Older history with no action is not guessed from prose.
+				if (!failed && ["result", "message", "inbox"].includes(action ?? "")) {
+					return createReportBody(full, theme, {}, context?.lastComponent);
+				}
+				return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
+			}
 			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
 			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
 			return new Text(`${prefix}${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);

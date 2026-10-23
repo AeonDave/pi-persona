@@ -89,13 +89,16 @@ async function delegationPrompt(options: {
 	}
 }
 
-test("an unrestricted persona keeps model discovery guidance when the host tool is active", async () => {
+test("an unrestricted persona keeps model discovery and truthful omission guidance when the host tool is active", async () => {
 	const prompt = await delegationPrompt({
 		name: "open-host",
 		activeTools: ["read", "grep", "delegate", "models"],
 	});
 	assert.match(prompt, /Use `models` for targeted lookup or explicit refresh/);
 	assert.match(prompt, /reuse supplied cached current-provider candidates across turns and tasks until the base model changes/);
+	assert.match(prompt, /Omitting `model` preserves the configured choice: a saved per-persona role\/agent assignment, then the agent's frontmatter model, then the engine default/);
+	assert.match(prompt, /To intentionally override a configured choice with that supervisor model, pass its exact provider\/id as `model` only when explicitly authorized/);
+	assert.doesNotMatch(prompt, /omit `model` and inherit your current working supervisor model/);
 });
 
 test("the persona capability gate suppresses model discovery even if the host marks the tool active", async () => {
@@ -107,6 +110,8 @@ test("the persona capability gate suppresses model discovery even if the host ma
 	});
 	assert.doesNotMatch(prompt, /`models`/, "the effective persona gate wins even if the host lists the tool active");
 	assert.match(prompt, /Model sizing:[\s\S]*least expensive candidate[\s\S]*task/i, "model sizing advice remains");
+	assert.match(prompt, /Omitting `model` preserves the configured choice/);
+	assert.doesNotMatch(prompt, /omit `model` and inherit your current working supervisor model/);
 });
 
 test("an inactive host models tool is omitted for an unrestricted persona", async () => {
@@ -116,4 +121,6 @@ test("an inactive host models tool is omitted for an unrestricted persona", asyn
 	});
 	assert.doesNotMatch(prompt, /`models`/, "an inactive host tool is not presented as callable");
 	assert.match(prompt, /Model sizing:[\s\S]*least expensive candidate[\s\S]*task/i, "model sizing advice remains");
+	assert.match(prompt, /Omitting `model` preserves the configured choice/);
+	assert.doesNotMatch(prompt, /omit `model` and inherit your current working supervisor model/);
 });

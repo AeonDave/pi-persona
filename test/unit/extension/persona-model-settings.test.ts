@@ -15,7 +15,8 @@ interface MockOptions {
 	mode?: "tui" | "rpc";
 	select?: (request: SelectRequest) => string | undefined;
 	customPick?: string | undefined;
-	available?: Array<{ provider: string; id: string }>;
+	available?: Array<{ provider: string; id: string; name?: string; contextWindow?: number; reasoning?: boolean; input?: string[] }>;
+	drivePicker?: (picker: ModelPicker) => void;
 	refresh?: (options: { signal?: AbortSignal }) => Promise<{ aborted: boolean; errors: Map<string, Error> }>;
 	signal?: AbortSignal;
 }
@@ -49,17 +50,19 @@ function context(options: MockOptions = {}) {
 			},
 			custom: async (factory: unknown, pickerOptions: { overlay?: boolean }) => {
 				customOptions.push(pickerOptions);
+				let choice = options.customPick;
 				if (options.mode === "tui") {
 					const render = factory as (tui: unknown, theme: unknown, keybindings: unknown, done: (value: string | undefined) => void) => unknown;
 					const picker = render(
 						{ requestRender() {} },
 						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
 						undefined,
-						() => {},
+						(value) => { choice = value; },
 					);
 					assert.ok(picker instanceof ModelPicker, "TUI model selection uses the focusable model picker");
+					options.drivePicker?.(picker);
 				}
-				return options.customPick;
+				return choice;
 			},
 			notify: (message: string, level: string) => notifications.push({ message, level }),
 		},
@@ -258,6 +261,73 @@ test("opening performs no catalog refresh; TUI model choices use ModelPicker wit
 	assert.equal(ui.customOptions.length, 1);
 	assert.equal(ui.customOptions[0]?.overlay, false);
 	assert.deepEqual(d.writes[0]?.patch, { "reviewer#0123456789abcdef0123456789abcdef": "provider/model" });
+});
+
+test("TUI picker receives one eligible metadata snapshot and selects the participant's model", async () => {
+	let rendered = "";
+	const ui = context({ mode: "tui", available: [
+		{ provider: "provider", id: "alpha" },
+		{ provider: "provider", id: "zeta", name: "Optical model", contextWindow: 200_000, reasoning: true, input: ["text", "image"] },
+	], drivePicker(picker) {
+		rendered = picker.render(120).join("\n");
+		picker.handleInput("\r");
+	}, select: chooseByTitle({
+		"Persona model owner": ({ options }) => options[0],
+		"Council profile": ({ options }) => options[0],
+		"Model settings": visitParticipantThenDone((item) => item.includes("reviewer")),
+		"Edit participant": ({ options }) => options.find((item) => item.includes("Set or change")),
+	}) });
+	const d = deps({ participants: () => [participant({ model: "provider/zeta" })] });
+	await openPersonaModelSettings(ui.ctx, d.value);
+	assert.match(rendered, /200k/);
+	assert.match(rendered, /reasoning/);
+	assert.match(rendered, /vision/);
+	assert.equal(ui.availableReads, 1, "metadata and eligibility share one unchanged snapshot");
+	assert.equal(ui.refreshCalls, 0);
+	assert.deepEqual(d.writes[0]?.patch, { [participant().key]: "provider/zeta" });
+});
+
+test("reopening a TUI participant picker highlights its staged selection rather than stale saved state", async () => {
+	let visits = 0;
+	let picks = 0;
+	const ui = context({ mode: "tui", available: [
+		{ provider: "provider", id: "alpha" }, { provider: "provider", id: "zeta", name: "Optical model" },
+	], drivePicker(picker) {
+		if (picks++ === 0) picker.handleInput("\u001b[200~Optical model\u001b[201~");
+		picker.handleInput("\r");
+	}, select: ({ title, options }) => {
+		if (title === "Persona model owner" || title === "Council profile") return options[0];
+		if (title.startsWith("Model settings")) return visits++ < 2 ? options.find((s) => s.includes("reviewer")) : "Done";
+		if (title.startsWith("Edit participant")) return options.find((s) => s.includes("Set or change"));
+		return undefined;
+	} });
+	const d = deps({ participants: () => [participant({ model: "provider/alpha" })] });
+	await openPersonaModelSettings(ui.ctx, d.value);
+	assert.equal(picks, 2);
+	assert.deepEqual(d.writes[0]?.patch, { [participant().key]: "provider/zeta" });
+});
+
+test("staged shared choices update role pickers without overriding a direct role assignment", async () => {
+	for (const direct of [false, true]) {
+		let visits = 0;
+		let picks = 0;
+		const ui = context({ mode: "tui", available: ["alpha", "beta", "zeta"].map((id) => ({ provider: "p", id })),
+			drivePicker(picker) {
+				if (picks++ === 0) picker.handleInput("\u001b[200~p/zeta\u001b[201~");
+				picker.handleInput("\r");
+			}, select: ({ title, options }) => {
+				if (title === "Persona model owner" || title === "Council profile") return options[0];
+				if (title.startsWith("Model settings")) return visits < 2 ? options[visits++] : "Done";
+				if (title.startsWith("Edit participant")) return options.find((s) => s.includes("Set or change"));
+				return undefined;
+			} });
+		const role = participant({ model: direct ? "p/beta" : "p/alpha" });
+		const bare: ModelParticipant = { agent: "reviewer", key: "reviewer", label: "reviewer", origin: "roster", model: "p/alpha", source: "assignment", assigned: true };
+		const d = deps({ participants: () => [bare, role], saved: () => ({ reviewer: "p/alpha", ...(direct ? { [role.key]: "p/beta" } : {}) }) });
+		await openPersonaModelSettings(ui.ctx, d.value);
+		assert.equal(picks, 2);
+		assert.deepEqual(d.writes[0]?.patch, { reviewer: "p/zeta", [role.key]: direct ? "p/beta" : "p/zeta" });
+	}
 });
 
 test("cancelled model selection discards every staged change", async () => {

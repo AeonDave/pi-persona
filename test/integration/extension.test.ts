@@ -8,8 +8,14 @@ import * as path from "node:path";
 
 import { fileURLToPath } from "node:url";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI, type ExtensionUIContext, type Theme } from "@earendil-works/pi-coding-agent";
+
+initTheme("dark", false);
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { sanitizeTerminalText } from "../../src/ui/presentation.ts";
+import { AgentTree } from "../../src/ui/agent-tree.ts";
+import { WakeRows } from "../../src/ui/wake-rows.ts";
+import type { MonitorEvent, MonitorOutput } from "../../src/core/monitor.ts";
 import piPersona, {
 	announceAsyncRunSettlement,
 	canDeliverPersonaNotification,
@@ -278,6 +284,16 @@ const traceTheme = {
 
 function renderComponent(component: { render(width: number): string[] }, width = 120): string {
 	return component.render(width).join("\n");
+}
+
+type WidgetFactory = NonNullable<Parameters<ExtensionUIContext["setWidget"]>[1]>;
+type WidgetContent = string[] | WidgetFactory | undefined;
+
+/** Capture public widget content as physical rows, including component-factory publications. */
+function widgetLines(content: WidgetContent, width = 200): string[] | undefined {
+	if (typeof content !== "function") return content;
+	const tui = { requestRender() {} } as Parameters<WidgetFactory>[0];
+	return content(tui, traceTheme as Theme).render(width);
 }
 
 /** Walk TypeBox/JSON-schema unions so discoverability pins survive `anyOf` (jsonish string branches). */
@@ -4787,6 +4803,35 @@ test("peek/runtime wakes use a race-safe follow-up send", () => {
 	]);
 });
 
+test("custom session cards use semantic backgrounds and glyph-free headers without changing payloads", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const backgrounds: string[] = [];
+	const theme = { ...traceTheme, bg: (token: string, text: string) => { backgrounds.push(token); return text; } };
+	const cases = [
+		{ type: "pi-persona", message: true, data: { content: "1 async run settled — 1 done, 0 failed\n> error in child prose" }, bg: "toolSuccessBg", status: "complete" },
+		{ type: "pi-persona", message: true, data: { content: "2 async runs settled — 1 done, 1 failed" }, bg: "toolErrorBg", status: "failed" },
+		{ type: "pi-persona", message: true, data: { content: "Monitor events — observed data\n> process exited with exit code 0" }, bg: "customMessageBg", status: "info" },
+		{ type: "exocom_received", message: true, data: { content: "ERROR: peer says complete" }, bg: "customMessageBg", status: "inbound" },
+		{ type: "pi-persona-nudge", message: false, data: { content: "⟢ pi-persona · checkpoint\nTrigger: local work\nAction: hand off" }, bg: "toolPendingBg", status: "checkpoint" },
+		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "stall" },
+		{ type: "pi-persona-result", message: false, data: { label: "flow", content: "error in child prose", ok: true }, bg: "toolSuccessBg", status: "complete" },
+		{ type: "pi-persona-run-failure", message: false, data: { id: "r1", label: "worker", agent: "scout", error: "diagnostic" }, bg: "toolErrorBg", status: "failed" },
+	];
+	for (const item of cases) {
+		backgrounds.length = 0;
+		const before = JSON.stringify(item.data);
+		const renderer = item.message ? m.messageRenderer(item.type) : m.entryRenderer(item.type);
+		assert.ok(renderer);
+		const rendered = renderComponent(renderer(item.message ? item.data : { data: item.data }, { expanded: false, outputPad: 0 }, theme));
+		assert.ok(backgrounds.length > 0, `${item.type} must paint its semantic background`);
+		assert.ok(backgrounds.every((token) => token === item.bg), `${item.type}: ${backgrounds}`);
+		assert.match(rendered.split("\n")[0] ?? "", new RegExp(item.status));
+		assert.doesNotMatch(rendered.split("\n")[0] ?? "", /^[⟢✕❌⚠✓]/u);
+		assert.equal(JSON.stringify(item.data), before, "rendering never mutates stored/model content");
+	}
+});
+
 test("follow-up messages are compact by default and preserve full detail on expansion", () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
@@ -4876,6 +4921,86 @@ test("a flow stopped at a rejected checkpoint is titled 'stopped', never 'comple
 	assert.doesNotMatch(card, /complete|failed|not approved/, "the stop is not dressed as an outcome or an error cause");
 });
 
+test("expanded prose reports use native Markdown without changing payloads or receipt formats", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const report = fenceUntrusted("### Review\n\n**Verdict:** accept `src/ui`\n\n- first\n- second\n\n```text\nraw_code()\n```\n\n> quoted evidence");
+	for (const name of ["delegate", "intercom", "council", "flow"]) {
+		const tool = m.tool(name) as { renderResult: AnyFn };
+		const result = { content: [{ type: "text", text: report }], details: { ok: true, action: "result", body: report } };
+		const before = JSON.stringify(result);
+		const expanded = sanitizeTerminalText(renderComponent(tool.renderResult(result, { expanded: true }, traceTheme)));
+		assert.doesNotMatch(expanded, /\*\*Verdict|`src\/ui`/, name);
+		assert.match(expanded, /Verdict:.*accept src\/ui/, name);
+		assert.match(expanded, /Sub-agent output \(untrusted data\):/, name);
+		assert.match(expanded, /│.*Review/, "trust fence is rendered as a quote, never unwrapped");
+		assert.match(expanded, /raw_code\(\)/, name);
+		assert.equal(JSON.stringify(result), before, "stored/model payload is byte-identical");
+	}
+	for (const action of ["message", "inbox"]) {
+		const tool = m.tool("intercom") as { renderResult: AnyFn };
+		const result = { content: [{ type: "text", text: report }], details: { ok: true, action } };
+		const before = JSON.stringify(result);
+		const rendered = sanitizeTerminalText(renderComponent(tool.renderResult(result, { expanded: true }, traceTheme)));
+		assert.match(rendered, /│.*Verdict:/, action);
+		assert.doesNotMatch(rendered, /\*\*Verdict|`src\/ui`/, action);
+		assert.equal(JSON.stringify(result), before);
+	}
+	for (const action of ["steer", "stop", "list", "peek", "send", "reply"]) {
+		const tool = m.tool("intercom") as { renderResult: AnyFn };
+		const result = { content: [{ type: "text", text: "**literal_receipt**" }], details: { ok: true, action } };
+		assert.match(renderComponent(tool.renderResult(result, { expanded: true }, traceTheme)), /\*\*literal_receipt\*\*/, action);
+	}
+	for (const name of ["delegate", "council", "flow"]) {
+		const tool = m.tool(name) as { renderResult: AnyFn };
+		assert.match(renderComponent(tool.renderResult({ content: [{ type: "text", text: "**launch_receipt**" }], details: { runId: "r1" } }, { expanded: true }, traceTheme)), /\*\*launch_receipt\*\*/, name);
+	}
+});
+
+test("report tools honor host errors without details in collapsed and expanded native-shaped results", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	for (const name of ["intercom", "council", "flow"]) {
+		const tool = m.tool(name) as { renderResult: AnyFn };
+		for (const expanded of [false, true]) {
+			const result = { content: [{ type: "text", text: "host **failure**" }], details: {} };
+			const before = JSON.stringify(result);
+			const card = sanitizeTerminalText(renderComponent(tool.renderResult(result, { expanded }, traceTheme, { isError: true })));
+			assert.match(card.split("\n")[0] ?? "", /failed/, `${name}, expanded=${expanded}`);
+			assert.doesNotMatch(card, /flow complete|launched/);
+			assert.equal(JSON.stringify(result), before);
+		}
+	}
+});
+
+test("failed council/flow launch receipts never claim a launch succeeded when the host flags an error", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	for (const name of ["council", "flow"]) {
+		const tool = m.tool(name) as { renderResult: AnyFn };
+		for (const expanded of [false, true]) {
+			const result = { content: [{ type: "text", text: "Launch **failed**" }], details: { runId: "r1" } };
+			const card = renderComponent(tool.renderResult(result, { expanded }, traceTheme, { isError: true }));
+			assert.match(card.split("\n")[0] ?? "", /failed/, name);
+			assert.doesNotMatch(card, /launched|complete/, name);
+			if (expanded) assert.match(card, /\*\*failed\*\*/, "launch diagnostics remain literal");
+		}
+	}
+});
+
+test("delegate launch failure uses the native host context error flag, not the stripped result envelope", () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const tool = m.tool("delegate") as { renderResult: AnyFn };
+	const result = { content: [{ type: "text", text: "Launch failed: **literal diagnostic**" }], details: { runId: "r1", runs: [{ id: "r1", label: "worker", agent: "scout" }] } };
+	const before = JSON.stringify(result);
+	const card = renderComponent(tool.renderResult(result, { expanded: false }, traceTheme, { isError: true }));
+	assert.match(card, /failed/);
+	assert.doesNotMatch(card, /launched/);
+	assert.match(card, /\*\*literal diagnostic\*\*/);
+	assert.equal(JSON.stringify(result), before);
+});
+
 test("delegate, intercom, council, and flow cards bound collapsed output and prioritize failures", () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
@@ -4963,7 +5088,7 @@ test("the council SUCCESS card bounds and strips member-authored headline/status
 			traceTheme,
 		),
 	);
-	assert.doesNotMatch(card, /\u001b/, "a member-authored headline cannot smuggle terminal escapes onto the card");
+	assert.doesNotMatch(card, /\u001b(?!\[[0-9;]*m)/, "member-authored terminal controls are stripped; native expand hints may emit theme SGR");
 	assert.ok(card.split("\n").every((line) => line.length < 240), `success card line was not bounded: ${card}`);
 	assert.match(card, /verdict/, "the ruling headline still reaches the operator");
 	assert.match(card, /consensus reached/, "…with the status");
@@ -4991,8 +5116,8 @@ test("dynamic tool chrome sanitizes and bounds hostile labels and causes", () =>
 		renderComponent(entry!({ data: { label: hostile, content: "ok", ok: true } }, { expanded: false }, traceTheme)),
 	];
 	for (const surface of surfaces) {
-		assert.doesNotMatch(surface, /\u001b/);
-		assert.ok(surface.split("\n").every((line) => line.length < 240), `renderer chrome line was not bounded: ${surface}`);
+		assert.doesNotMatch(surface, /\u001b(?!\[[0-9;]*m)/, "hostile controls are removed; native hints may contain theme SGR");
+		assert.ok(surface.split("\n").every((line) => visibleWidth(line) < 240), `renderer chrome line was not bounded: ${surface}`);
 	}
 });
 
@@ -5320,8 +5445,8 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 		...base,
 		ui: {
 			...base.ui,
-			setWidget: (id: string, lines: string[] | undefined) => {
-				widgets[id] = lines;
+			setWidget: (id: string, content: WidgetContent) => {
+				widgets[id] = widgetLines(content);
 			},
 		},
 	};
@@ -5364,7 +5489,7 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 // ── wake sources (monitors, timers) are rows in the sticky agent widget, never agents ────
 
 /** A TUI-ish ctx that records the sticky `persona-agents` widget frames and every "N agents" status. */
-function wakeWidgetCtx(cwd: string) {
+function wakeWidgetCtx(cwd: string, width = 200) {
 	const widgets: Record<string, string[] | undefined> = {};
 	const statuses: Array<string | undefined> = [];
 	const { ctx: base } = makeCtx(cwd, { hasUI: true });
@@ -5372,7 +5497,7 @@ function wakeWidgetCtx(cwd: string) {
 		...base,
 		ui: {
 			...base.ui,
-			setWidget: (id: string, lines: string[] | undefined) => { widgets[id] = lines; },
+			setWidget: (id: string, content: WidgetContent) => { widgets[id] = widgetLines(content, width); },
 			setStatus: (id: string, text: string | undefined) => { if (id === "persona-agents") statuses.push(text); },
 		},
 	};
@@ -5380,6 +5505,165 @@ function wakeWidgetCtx(cwd: string) {
 }
 
 const HOLD_OPEN = ["-e", "setInterval(() => {}, 1000)"];
+
+test("monitor raw output projects and publishes on the SAME shared UI frame, never on each chunk", { timeout: 10_000 }, async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor"]);
+	piPersona(m.pi);
+	const { ctx: base, widgets, statuses } = wakeWidgetCtx(tempDir("pi-persona-monitor-frame-"));
+	const ctx = { ...base, isIdle: () => false };
+	const updates = mock.method(AgentTree.prototype, "update");
+	const original = WakeRows.prototype.monitorOutput;
+	const frames = mock.method(WakeRows.prototype, "flushMonitorOutput");
+	let received = "";
+	let complete!: () => void;
+	const rawDone = new Promise<void>((resolve) => { complete = resolve; });
+	const output = mock.method(WakeRows.prototype, "monitorOutput", function (this: WakeRows, chunk: MonitorOutput) {
+		const result = original.call(this, chunk);
+		received += chunk.text;
+		if (received.endsWith("\nFRAME_END")) complete();
+		return result;
+	});
+	try {
+		await m.fire("session_start", {}, ctx);
+		mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+		const tool = m.tool("monitor") as { execute: AnyFn };
+		const script = "let n=200; function write(){if(n-- > 0){process.stdout.write('x'); setImmediate(write)}else{process.stdout.write('\\nFRAME_END');setInterval(()=>{},1000)}} write()";
+		const armed = await tool.execute("arm", { action: "arm", command: process.execPath, args: ["-e", script], label: "frame fixture", mode: "exit" }, undefined, undefined, ctx);
+		assert.equal(armed.details.ok, true);
+		await rawDone;
+		const changes = () => updates.mock.calls.filter((call) => call.arguments[0] === `monitor:${armed.details.id}`).map((call) => call.arguments[1]);
+		assert.equal(changes().length, 0, "raw process callbacks must not project or patch the tree before a frame");
+		const live = await tool.execute("result", { action: "result", id: armed.details.id, full: true }, undefined, undefined, ctx);
+		assert.match(live.content[0].text, /FRAME_END/, "archive capture is immediate, independent of UI frames");
+		mock.timers.tick(15);
+		assert.equal(changes().length, 0);
+		mock.timers.tick(1);
+		assert.equal(changes().length, 1, "all received chunks share one monitor projection");
+		assert.match(changes()[0]?.output ?? "", new RegExp(`> ${"x".repeat(200)}\\n> FRAME_END$`));
+		assert.ok(widgets["persona-agents"]?.some((line) => line.includes("FRAME_END")), "projection is composed in this frame, not the next one");
+		assert.equal(frames.mock.callCount(), 1);
+		mock.timers.tick(16);
+		assert.equal(frames.mock.callCount(), 1, "publishing a projection must not schedule a redundant frame");
+		assert.equal(changes().length, 1);
+		assert.deepEqual(statuses.filter((status) => status !== undefined), []);
+		assert.equal(m.sentMessages().length, 0, "raw progress produces no wake");
+		await tool.execute("cancel", { action: "cancel", id: armed.details.id }, undefined, undefined, ctx);
+		const stored = m.entries().find((entry) => entry.customType === "pi-persona-monitor-log")?.data as { stdout: string };
+		assert.equal(stored.stdout, received, "archive preserves every original byte independently of projection batching");
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		mock.timers.reset();
+		output.mock.restore();
+		frames.mock.restore();
+		updates.mock.restore();
+	}
+});
+
+test("pending monitor tails settle immediately on exit, cancel, permission loss and shutdown", { timeout: 20_000 }, async (t) => {
+	for (const ending of ["exit", "cancel", "permission", "shutdown"] as const) await t.test(ending, async () => {
+		const cwd = tempDir("pi-persona-monitor-frame-end-");
+		fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, ".pi", "agents", "no-watch.md"), "---\nname: no-watch\npersona: true\ntools:\n  deny: [bash]\n---\nRead only.");
+		const m = makeMockPi();
+		m.pi.setActiveTools(["read", "bash", "monitor"]);
+		piPersona(m.pi);
+		const { ctx: base, widgets } = wakeWidgetCtx(cwd);
+		const ctx = { ...base, isIdle: () => false };
+		const updates = mock.method(AgentTree.prototype, "update");
+		const originalOutput = WakeRows.prototype.monitorOutput;
+		const originalEvent = WakeRows.prototype.monitorEvent;
+		let rows: WakeRows | undefined;
+		let rawReady!: () => void;
+		let exited!: () => void;
+		const rawDone = new Promise<void>((resolve) => { rawReady = resolve; });
+		const exitDone = new Promise<void>((resolve) => { exited = resolve; });
+		const output = mock.method(WakeRows.prototype, "monitorOutput", function (this: WakeRows, chunk: MonitorOutput) {
+			rows = this;
+			const result = originalOutput.call(this, chunk);
+			rawReady();
+			return result;
+		});
+		const event = mock.method(WakeRows.prototype, "monitorEvent", function (this: WakeRows, notice: MonitorEvent) {
+			const result = originalEvent.call(this, notice);
+			if (notice.terminal) exited();
+			return result;
+		});
+		try {
+			await m.fire("session_start", {}, ctx);
+			mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+			const tool = m.tool("monitor") as { execute: AnyFn };
+			const script = `process.stdout.write('LAST_TAIL');${ending === "exit" ? "" : "setInterval(()=>{},1000)"}`;
+			const armed = await tool.execute("arm", { action: "arm", command: process.execPath, args: ["-e", script], label: "pending tail", mode: "exit" }, undefined, undefined, ctx);
+			assert.equal(armed.details.ok, true);
+			await rawDone;
+			if (ending === "exit") await exitDone;
+			else if (ending === "cancel") await tool.execute("cancel", { action: "cancel", id: armed.details.id }, undefined, undefined, ctx);
+			else if (ending === "permission") await m.cmd("persona", "no-watch", ctx);
+			else await m.fire("session_shutdown", {}, ctx);
+			const changes = updates.mock.calls.filter((call) => call.arguments[0] === `monitor:${armed.details.id}`).map((call) => call.arguments[1]);
+			if (ending !== "shutdown") {
+				assert.equal(changes.length, 1, "only the immediate terminal projection is published; raw chunks were deferred");
+				assert.match(changes[0]?.output ?? "", /> LAST_TAIL/);
+				assert.equal(changes[0]?.status, ending === "exit" ? "done" : "stopped");
+			}
+			assert.deepEqual(rows?.flushMonitorOutput(), [], "terminal/removal/shutdown clears pending projection work");
+			const stored = m.entries().find((entry) => entry.customType === "pi-persona-monitor-log")?.data as { stdout: string };
+			assert.equal(stored.stdout, "LAST_TAIL");
+			const settledCount = updates.mock.calls.length;
+			mock.timers.tick(1_000);
+			assert.equal(updates.mock.calls.length, settledCount, "a late frame cannot recreate or patch the removed row");
+			assert.equal(widgets["persona-agents"], undefined);
+			assert.equal(m.sentMessages().length, 0, "only semantic delivery could wake, and the supervisor remains busy");
+		} finally {
+			await m.fire("session_shutdown", {}, ctx);
+			mock.timers.reset();
+			event.mock.restore();
+			output.mock.restore();
+			updates.mock.restore();
+		}
+	});
+});
+
+test("monitor live output stays UI-only and its session log survives reload without reviving a process", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "monitor"]);
+	piPersona(m.pi);
+	const { ctx: base, widgets } = wakeWidgetCtx(tempDir("pi-persona-monitor-log-"));
+	const ctx = { ...base, isIdle: () => false, sessionManager: { getEntries: () => m.entries().map((e) => ({ ...e, type: "custom" })) } };
+	let id = "";
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("monitor") as { execute: AnyFn };
+		const armed = await tool.execute("arm", { action: "arm", command: process.execPath,
+			args: ["-e", "process.stdout.write('PROGRESS_42%'); process.stderr.write('log warning\\n'); setInterval(() => {}, 1000)"],
+			label: "log fixture", mode: "exit", timeoutSeconds: 60 }, undefined, undefined, ctx);
+		assert.equal(armed.details.ok, true);
+		id = armed.details.id;
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => /PROGRESS_42%|log warning/.test(line)) ?? false, "live process output in the widget");
+		assert.equal(m.sentMessages().length, 0, "raw output never wakes the model");
+		const live = await tool.execute("result", { action: "result", id }, undefined, undefined, ctx);
+		assert.match(live.content[0].text, /PROGRESS_42%/);
+		assert.equal(m.entries().filter((e) => e.customType === "pi-persona-monitor-log").length, 0, "no per-chunk session writes");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+	const stored = m.entries().filter((e) => e.customType === "pi-persona-monitor-log");
+	assert.equal(stored.length, 1);
+	assert.equal(m.sentMessages().length, 0, "shutdown log is operator-only");
+	const resumed = makeMockPi();
+	resumed.pi.setActiveTools(["read", "bash", "monitor"]);
+	piPersona(resumed.pi);
+	const resumeCtx = { ...base, sessionManager: { getEntries: () => m.entries().map((e) => ({ ...e, type: "custom" })) } };
+	try {
+		await resumed.fire("session_start", {}, resumeCtx);
+		const tool = resumed.tool("monitor") as { execute: AnyFn };
+		const result = await tool.execute("result", { action: "result", id }, undefined, undefined, resumeCtx);
+		assert.equal(result.details.ok, true);
+		assert.match(result.content[0].text, /PROGRESS_42%[\s\S]*log warning/);
+		assert.equal((await tool.execute("list", { action: "list" }, undefined, undefined, resumeCtx)).details.count, 0);
+		const newRun = await tool.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "next", mode: "exit" }, undefined, undefined, resumeCtx);
+		assert.notEqual(newRun.details.id, id, "reload cannot reuse a historical result id");
+	} finally { await resumed.fire("session_shutdown", {}, resumeCtx); }
+});
 
 test("an active monitor is a row in the agent widget until it is cancelled", async () => {
 	const m = makeMockPi();
@@ -5392,12 +5676,12 @@ test("an active monitor is a row in the agent widget until it is cancelled", asy
 		const armed = await tool.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "qualify batch1", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx);
 		assert.equal(armed.details.ok, true);
 		await waitUntil(
-			() => widgets["persona-agents"]?.some((line) => line.includes("◉ qualify batch1") && line.includes("monitor-1 · exit") && line.includes("deadline in")) ?? false,
+			() => widgets["persona-agents"]?.some((line) => line.includes("◉ qualify batch1") && line.includes(`${armed.details.id} · exit`) && line.includes("deadline in")) ?? false,
 			"the armed monitor's row in the widget",
 		);
 		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "a lone wake row publishes no \"N agents\" count");
 
-		const cancelled = await tool.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx);
+		const cancelled = await tool.execute("cancel", { action: "cancel", id: armed.details.id }, undefined, undefined, ctx);
 		assert.equal(cancelled.details.cancelled, true);
 		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled monitor to leave the widget");
 		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "no count was ever published for the monitor");
@@ -5421,11 +5705,11 @@ test("a non-terminal monitor event updates the row's k/N events detail", async (
 		);
 		assert.equal(armed.details.ok, true);
 		await waitUntil(
-			() => widgets["persona-agents"]?.some((line) => line.includes("◉ watch output") && line.includes("monitor-1 · output · 1/3 events")) ?? false,
+			() => widgets["persona-agents"]?.some((line) => line.includes("◉ watch output") && line.includes(`${armed.details.id} · output · 1/3 events`)) ?? false,
 			"the monitor's row to count its first event",
 		);
 
-		const cancelled = await tool.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx);
+		const cancelled = await tool.execute("cancel", { action: "cancel", id: armed.details.id }, undefined, undefined, ctx);
 		assert.equal(cancelled.details.cancelled, true);
 		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled monitor to leave the widget");
 	} finally { await m.fire("session_shutdown", {}, ctx); }
@@ -5521,7 +5805,8 @@ test("wake rows never reach telemetry", async () => {
 		const timer = m.tool("timer") as { execute: AnyFn };
 		const monitor = m.tool("monitor") as { execute: AnyFn };
 		assert.equal((await timer.execute("arm", { action: "arm", message: "wake-telemetry-message", delaySeconds: 600, label: "wake-telemetry-timer" }, undefined, undefined, ctx)).details.ok, true);
-		assert.equal((await monitor.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "wake-telemetry-monitor", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx)).details.ok, true);
+		const armedMonitor = await monitor.execute("arm", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "wake-telemetry-monitor", mode: "exit", timeoutSeconds: 600 }, undefined, undefined, ctx);
+		assert.equal(armedMonitor.details.ok, true);
 		await waitUntil(
 			() => {
 				const lines = widgets["persona-agents"] ?? [];
@@ -5534,7 +5819,7 @@ test("wake rows never reach telemetry", async () => {
 		await m.fire("session_start", {}, ctx);
 		assert.ok(widgets["persona-agents"]?.some((line) => line.includes("wake-telemetry-timer")), "the rows survive the second session_start");
 		assert.equal((await timer.execute("cancel", { action: "cancel", id: "timer-1" }, undefined, undefined, ctx)).details.ok, true);
-		assert.equal((await monitor.execute("cancel", { action: "cancel", id: "monitor-1" }, undefined, undefined, ctx)).details.cancelled, true);
+		assert.equal((await monitor.execute("cancel", { action: "cancel", id: armedMonitor.details.id }, undefined, undefined, ctx)).details.cancelled, true);
 		await waitUntil(() => widgets["persona-agents"] === undefined, "both wake rows to leave the widget");
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 
@@ -5565,7 +5850,7 @@ test("an async fan-out shows one batch header with k/N settled and the status co
 		...base,
 		ui: {
 			...base.ui,
-			setWidget: (id: string, lines: string[] | undefined) => { widgets[id] = lines; },
+			setWidget: (id: string, content: WidgetContent) => { widgets[id] = widgetLines(content); },
 			setStatus: (id: string, text: string | undefined) => { if (id === "persona-agents") statuses.push(text); },
 		},
 	};
@@ -5662,8 +5947,8 @@ function makeTreeFrameCtx(base: ReturnType<typeof makeCtx>["ctx"]) {
 		...base,
 		ui: {
 			...base.ui,
-			setWidget: (_id: string, lines: string[] | undefined) => {
-				sizes.push(lines?.length ?? 0);
+			setWidget: (_id: string, content: WidgetContent) => {
+				sizes.push(widgetLines(content)?.length ?? 0);
 			},
 		},
 	};
@@ -5765,7 +6050,8 @@ test("an aborted flow PHASE reaches its strategy's own cooperative check, not ju
 				// roster cores; unlike a coalesced widget frame, it is safe as an execution witness.
 				if (id === "persona-agents" && value === "3") ac.abort();
 			},
-			setWidget: (_id: string, lines: string[] | undefined) => {
+			setWidget: (_id: string, content: WidgetContent) => {
+				const lines = widgetLines(content);
 				if (!lines) return;
 				frames.push(lines);
 			},
@@ -6801,7 +7087,7 @@ for (const command of ["orchestrate", "flow"] as const) {
 			sessionManager: { getSessionId: () => `command-gate-${command}` },
 			modelRegistry: { getAll: () => [{ provider: "alpha", id: "one" }, { provider: "beta", id: "two" }] },
 			ui: { ...base.ui,
-				setWidget: (_id: string, lines: string[] | undefined) => frames.push(lines?.length ?? 0),
+				setWidget: (_id: string, content: WidgetContent) => frames.push(widgetLines(content)?.length ?? 0),
 				select: (title: string, _options: string[], options?: { signal?: AbortSignal }) => {
 					if (cleanup) return Promise.resolve(undefined);
 					livePrompts++;
@@ -6985,6 +7271,45 @@ test("a model picker that dies partway keeps — and persists — the picks the 
 	}
 });
 
+test("explicit participant model picker receives eligible metadata and the participant's effective ref", async () => {
+	const cwd = tempDir("pi-persona-picker-ux-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "picker-ux.md"), "---\nname: picker-ux\npersona: true\ncouncil:\n  strategy: fanout\n  roster: picker-ux-team\n---\nPicker test.");
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "picker-worker.md"), "---\nname: picker-worker\nmodel: provider/zeta\n---\nWorker.");
+	fs.writeFileSync(path.join(cwd, ".pi", "teams.yaml"), "picker-ux-team: [picker-worker]\n");
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx: base } = makeCtx(cwd, { hasUI: true });
+	const available = [
+		{ provider: "provider", id: "alpha" },
+		{ provider: "provider", id: "zeta", name: "Optical", contextWindow: 200_000, reasoning: true, input: ["text", "image"] },
+	];
+	let selected: string | undefined;
+	let rendered = "";
+	let reads = 0;
+	const ctx = { ...base, mode: "tui", model: available[0],
+		modelRegistry: { getAll: () => available, getAvailable: () => { reads++; return available; } },
+		ui: { ...base.ui, custom: async (factory: AnyFn) => {
+			const picker = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, undefined,
+				(value: string | undefined) => { selected = value; });
+			rendered = picker.render(120).join("\n");
+			picker.handleInput("\r");
+			return undefined; // exercise the selection without persisting a settings edit
+		} },
+	};
+	try {
+		await m.fire("session_start", {}, ctx);
+		await m.cmd("persona", "picker-ux", ctx);
+		const readsBefore = reads;
+		await m.cmd("persona", "models", ctx);
+		assert.equal(selected, "provider/zeta", "the participant, not the supervisor/first row, is selected");
+		assert.match(rendered, /200k/);
+		assert.match(rendered, /reasoning/);
+		assert.match(rendered, /vision/);
+		assert.equal(reads - readsBefore, 1, "metadata reuses the eligible availability snapshot");
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
 test("the model picker names the core's verticalization, so the choice is made for a ROLE", async () => {
 	// Choosing a model "for the Conservatore" is a different judgement than choosing one for a bare
 	// "balthasar" — the picker title is the other place, besides the tree, where a human meets a core.
@@ -7046,7 +7371,8 @@ test("an aborted run reaches the strategy's own cooperative check — no member 
 			setStatus: (id: string, value?: string) => {
 				if (id === "persona-agents" && value === "3") ac.abort();
 			},
-			setWidget: (_id: string, lines: string[] | undefined) => {
+			setWidget: (_id: string, content: WidgetContent) => {
+				const lines = widgetLines(content);
 				if (lines) frames.push(lines);
 			},
 		},
@@ -7068,7 +7394,7 @@ function exocomWorkspace(): string {
 	return tempDir("pi-persona-exo-");
 }
 
-function makeExocomCtx(cwd: string, sessionId: string) {
+function makeExocomCtx(cwd: string, sessionId: string, width = 200) {
 	const { ctx, notes } = makeCtx(cwd);
 	const widgets: Record<string, string[] | undefined> = {};
 	const exocomCtx = {
@@ -7077,13 +7403,58 @@ function makeExocomCtx(cwd: string, sessionId: string) {
 		getContextUsage: () => ({ percent: 7 }),
 		ui: {
 			...ctx.ui,
-			setWidget: (id: string, lines: string[] | undefined) => {
-				widgets[id] = lines;
+			setWidget: (id: string, content: WidgetContent) => {
+				widgets[id] = widgetLines(content, width);
 			},
 		},
 	};
 	return { ctx: exocomCtx, notes, widgets };
 }
+
+test("sticky agent and Exocom widgets cap physical rows at 8 and 7 with long labels at 80 columns", async (t) => {
+	const previous = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "timer", "monitor"]);
+	const { ctx: base, widgets } = makeExocomCtx(cwd, "physical-row-caps", 80);
+	const ctx = { ...base, hasUI: true };
+	try {
+		for (let i = 0; i < 10; i++) {
+			const sessionId = `physical-peer-${i}`;
+			writeEntry(agentDir, hash, registryEntryFixture({
+				session_id: sessionId, name: `Peer-${i}-${"界".repeat(35)}`,
+				persona: "long-role-".repeat(6), model: `provider/${"long-model-".repeat(10)}`,
+				pid: process.pid, endpoint: endpointFor(agentDir, hash, sessionId, process.platform),
+				cwd, heartbeat_at: new Date().toISOString(),
+			}));
+		}
+		piPersona(m.pi);
+		await m.fire("session_start", {}, ctx);
+		const timer = m.tool("timer") as { execute: AnyFn };
+		for (let i = 0; i < 10; i++) {
+			const armed = await timer.execute(`arm-${i}`, { action: "arm", message: "not yet", delaySeconds: 600, label: `Long timer ${i} ${"界".repeat(50)}` }, undefined, undefined, ctx);
+			assert.equal(armed.details.ok, true);
+		}
+		await waitUntil(() => widgets["persona-agents"]?.length === 8, "the capped agent widget frame");
+		for (const [id, cap, detail] of [["persona-agents", 8, /F9/], ["persona-exocom", 7, /exocom_list/]] as const) {
+			const rows = widgets[id] ?? [];
+			assert.equal(rows.length, cap, `${id} uses the full row budget and retains an overflow row`);
+			assert.match(rows.at(-1)!, detail, "overflow still points to the complete detail surface");
+			assert.ok(rows.some((row) => row.endsWith("…")), "long wide labels exercise real horizontal clipping");
+			assert.ok(rows.every((row) => visibleWidth(row) <= 80), "no logical row wraps beyond the terminal width");
+			const physicalRows = rows.reduce((total, row) => total + Math.max(1, Math.ceil(visibleWidth(row) / 80)), 0);
+			assert.equal(physicalRows, cap, `${id} obeys its physical row cap`);
+			t.diagnostic(`${id}: ${physicalRows} physical rows at 80 columns (cap ${cap})`);
+		}
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		if (previous === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = previous;
+	}
+});
 
 function entryFileFor(cwd: string, sessionId: string): string {
 	return registryPath(process.env.PI_AGENT_DIR as string, workspaceHash(cwd), sessionKey(sessionId));
@@ -9425,9 +9796,9 @@ test("session_shutdown with many armed wake sources clears the widget once inste
 		...base,
 		ui: {
 			...base.ui,
-			setWidget: (id: string, lines: string[] | undefined) => {
-				base.ui.setWidget(id, lines);
-				if (id === "persona-agents") widgetCalls.push(lines);
+			setWidget: (id: string, content: WidgetContent) => {
+				base.ui.setWidget(id, content);
+				if (id === "persona-agents") widgetCalls.push(widgetLines(content));
 			},
 		},
 	};

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
 import { makeEngine } from "../../../src/engine/adapter.ts";
+import type { AgentProgress } from "../../../src/orchestration/sdk.ts";
 
 const FAKE = fileURLToPath(new URL("../../fixtures/fake-pi.mjs", import.meta.url));
 const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAKE, ...args] });
@@ -41,6 +42,53 @@ test("child adapter propagates each authoritative tool lifecycle event once with
 	]);
 	assert.equal(JSON.stringify(events).includes("secret.txt"), false, "tool args are not propagated");
 	assert.equal(JSON.stringify(events).includes("sensitive"), false, "tool output is not propagated");
+});
+
+test("child adapter forwards copied directional usage in progress", async () => {
+	const progress: AgentProgress[] = [];
+	const emitScript = `
+		const emit = (usage) => process.stdout.write(JSON.stringify({type:"message_end", message:{role:"assistant", content:[{type:"text", text:"done"}], usage, stopReason:"end"}}) + "\\n");
+		emit({input:123000, output:6200, cacheRead:2400000, cacheWrite:500, cost:{total:0.42}});
+		emit({input:10, output:5});
+	`;
+	const engine = makeEngine({
+		resolveAgent,
+		childOptions: { resolveInvocation: (args) => ({ command: process.execPath, args: ["-e", emitScript, "--", ...args] }) },
+	});
+	const result = await engine.run({ agent: "a", task: "inspect" }, (snap) => progress.push(snap));
+	assert.equal(result.ok, true);
+	const first = progress.find((snap) => snap.tokens === 129_200);
+	assert.deepEqual(first?.usage, { input: 123_000, output: 6_200, cacheRead: 2_400_000, cacheWrite: 500, cost: 0.42, contextTokens: 0, turns: 1 });
+	assert.deepEqual(progress.at(-1)?.usage, result.usage);
+	assert.notEqual(first?.usage, result.usage, "later events leave retained progress unchanged");
+	assert.equal(progress.at(-1)?.tokens, 129_215);
+});
+
+test("child adapter preserves saved/frontmatter model choices on omission and accepts an explicit supervisor pin", async () => {
+	const configuredAgent = (model: string): AgentConfig => ({ name: "configured", model, systemPrompt: "worker", source: "test" });
+	const runAndCaptureModel = async (options: {
+		frontmatterModel: string;
+		assignedModel?: string;
+		specModel?: string;
+	}): Promise<string | undefined> => {
+		const argsSeen: string[] = [];
+		const engine = makeEngine({
+			resolveAgent: () => configuredAgent(options.frontmatterModel),
+			modelFor: () => options.assignedModel,
+			childOptions: { resolveInvocation: (args) => { argsSeen.push(...args); return resolveFake(args); } },
+		});
+		await engine.run({ agent: "configured", task: "task", ...(options.specModel ? { model: options.specModel } : {}) });
+		const modelAt = argsSeen.indexOf("--model");
+		return modelAt >= 0 ? argsSeen[modelAt + 1] : undefined;
+	};
+
+	assert.equal(await runAndCaptureModel({ frontmatterModel: "frontmatter/worker", assignedModel: "saved/worker" }), "saved/worker");
+	assert.equal(await runAndCaptureModel({ frontmatterModel: "frontmatter/worker" }), "frontmatter/worker");
+	assert.equal(await runAndCaptureModel({
+		frontmatterModel: "frontmatter/worker",
+		assignedModel: "saved/worker",
+		specModel: "supervisor/current",
+	}), "supervisor/current", "an explicit provider/id pin wins over saved and frontmatter choices");
 });
 
 test("child adapter appends the contract format to the task (and only when one is requested)", async () => {

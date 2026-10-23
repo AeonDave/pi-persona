@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { MonitorManager, type MonitorEvent, type MonitorProcessHandlers, type MonitorSpec } from "../../../src/core/monitor.ts";
+import { MonitorManager, type MonitorEvent, type MonitorOutput, type MonitorProcessHandlers, type MonitorSpec } from "../../../src/core/monitor.ts";
 
 interface FakeProcess {
 	handlers: MonitorProcessHandlers;
 	stopped: number;
 }
 
-function harness(startNow = 1_000_000) {
+function harness(startNow = 1_000_000, onOutput?: (output: MonitorOutput) => void) {
 	let now = startNow;
 	let nextHandle = 0;
 	const timers = new Map<number, { fn: () => void; at: number }>();
@@ -28,6 +28,7 @@ function harness(startNow = 1_000_000) {
 			return { stop: () => process.stopped++ };
 		},
 		onEvent: (event) => events.push(event),
+		...(onOutput ? { onOutput } : {}),
 	});
 	return {
 		manager,
@@ -292,6 +293,105 @@ test("a synchronous start error rejects arm without queuing a duplicate error wa
 	assert.match(result.error, /bad cwd/);
 	assert.equal(stopped, 1);
 	assert.deepEqual(events, []);
+});
+
+test("raw output is observed before semantic events without adding wakes or counting stderr/partials", () => {
+	for (const mode of ["exit", "output"] as const) {
+		const observations: Array<{ output: MonitorOutput; events: number }> = [];
+		const h = harness(1_000_000, (output) => observations.push({ output, events: h.events.length }));
+		h.manager.arm(spec({ mode, maxEvents: 2 }));
+		const handlers = h.processes[0]!.handlers;
+		handlers.onStdout("");
+		handlers.onStderr("");
+		handlers.onStdout("par");
+		handlers.onStderr("warning\r50%");
+		assert.equal(h.events.length, 0);
+		handlers.onStdout("tial\npartial\n");
+		assert.equal(h.events.length, mode === "exit" ? 0 : 1, "duplicate semantic lines stay deduplicated");
+		handlers.onStdout("next\n");
+		assert.deepEqual(observations, [
+			{ output: { id: "monitor-1", stream: "stdout", text: "par" }, events: 0 },
+			{ output: { id: "monitor-1", stream: "stderr", text: "warning\r50%" }, events: 0 },
+			{ output: { id: "monitor-1", stream: "stdout", text: "tial\npartial\n" }, events: 0 },
+			{ output: { id: "monitor-1", stream: "stdout", text: "next\n" }, events: mode === "exit" ? 0 : 1 },
+		]);
+		handlers.onExit(0);
+		handlers.onStdout("late\n");
+		handlers.onStderr("late error");
+		assert.equal(observations.length, 4, "no raw output after exit or maxEvents terminal");
+		assert.equal(h.events.length, mode === "exit" ? 1 : 2);
+	}
+});
+
+test("raw output callbacks stop on cancel, timeout and error", () => {
+	for (const ending of ["cancel", "cancelAll", "timeout", "error"] as const) {
+		const outputs: MonitorOutput[] = [];
+		const h = harness(1_000_000, (output) => outputs.push(output));
+		h.manager.arm(spec({ mode: "exit", timeoutMs: 1_000 }));
+		const handlers = h.processes[0]!.handlers;
+		handlers.onStderr("before");
+		if (ending === "cancel") h.manager.cancel("monitor-1");
+		if (ending === "cancelAll") h.manager.cancelAll();
+		if (ending === "timeout") h.advance(1_000);
+		if (ending === "error") handlers.onError(new Error("broken"));
+		handlers.onStdout("after");
+		handlers.onStderr("after");
+		assert.deepEqual(outputs, [{ id: "monitor-1", stream: "stderr", text: "before" }], ending);
+	}
+});
+
+test("a throwing output observer cannot suppress events or change process lifetime", () => {
+	let observed = 0;
+	const h = harness(1_000_000, () => { observed++; throw new Error("UI observer failed"); });
+	h.manager.arm(spec());
+	assert.doesNotThrow(() => h.processes[0]!.handlers.onStderr("warning"));
+	assert.doesNotThrow(() => h.processes[0]!.handlers.onStdout("ready\n"));
+	assert.equal(h.events.length, 1);
+	assert.equal(h.events[0]?.text, "ready");
+	assert.equal(observed, 2);
+	assert.equal(h.processes[0]?.stopped, 1);
+	assert.equal(h.pendingTimers(), 0);
+});
+
+test("output observation during synchronous start follows arming and precedes termination", () => {
+	const order: string[] = [];
+	const manager = new MonitorManager({
+		now: () => 1,
+		setTimer: () => 1,
+		clearTimer: () => {},
+		onArmed: () => order.push("armed"),
+		onOutput: (output) => order.push(`${output.stream}:${output.text}`),
+		onEvent: () => order.push("event"),
+		start: (_spec, handlers) => {
+			handlers.onStdout("ready\n");
+			handlers.onStderr("late");
+			return { stop: () => order.push("stop") };
+		},
+	});
+	assert.equal(manager.arm(spec()).ok, true);
+	assert.deepEqual(order, ["armed", "stdout:ready\n", "event", "stop"]);
+});
+
+test("an internal activation prefix namespaces ids without changing per-manager sequence", () => {
+	const make = (idPrefix?: string) => new MonitorManager({
+		now: () => 1,
+		setTimer: () => 1,
+		clearTimer: () => {},
+		start: () => ({ stop: () => {} }),
+		onEvent: () => {},
+		...(idPrefix !== undefined ? { idPrefix } : {}),
+	});
+	const armId = (manager: MonitorManager) => {
+		const result = manager.arm(spec());
+		assert.ok(result.ok);
+		return result.entry.id;
+	};
+	const first = make("monitor-activationA");
+	assert.equal(armId(first), "monitor-activationA-1");
+	assert.equal(armId(first), "monitor-activationA-2");
+	assert.equal(armId(make("monitor-activationB")), "monitor-activationB-1");
+	assert.equal(armId(make()), "monitor-1");
+	first.cancelAll();
 });
 
 // ── admission/removal hooks: the seam the agent tree's monitor rows hang on ──────────────────────

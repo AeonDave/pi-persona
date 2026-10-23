@@ -12,6 +12,7 @@ import { resolveCouncilInvocation } from "../persona/persona.ts";
 import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { createReportBody } from "../ui/report-body.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { toolUsageField } from "../ui/usage.ts";
 import { emptyUsage } from "../engine/stream.ts";
@@ -206,7 +207,7 @@ ${strategyCatalog()}`,
 			const roster = resolved.ok ? panelLabel(resolved.value) : (args.roster ?? args.persona ?? "?");
 			return new Text(theme.fg("toolTitle", theme.bold(formatCouncilCallLabel(strategy, roster))), 0, 0);
 		},
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			const d = (result.details ?? {}) as {
 				ok?: boolean;
 				headline?: string;
@@ -221,27 +222,32 @@ ${strategyCatalog()}`,
 				runId?: string;
 			};
 			const first = result.content[0];
+			const failed = (context?.isError ?? result.isError) || d.ok === false || !!d.error;
 			if (d.runId) {
 				// Interactive launch receipt: the ruling arrives later as the completion follow-up.
-				const launched = `${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", compactInlineText(`launched ${d.runId} · ${d.strategy ?? "?"} · ${d.roster ?? "?"}`, { maxChars: 120 }))}`;
+				const launched = failed ? theme.fg("error", theme.bold("council failed"))
+					: `${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", compactInlineText(`launched ${d.runId} · ${d.strategy ?? "?"} · ${d.roster ?? "?"}`, { maxChars: 120 }))}`;
 				return new Text(expanded && first?.type === "text" ? `${launched}\n${theme.fg("toolOutput", sanitizeTerminalText(first.text))}` : launched, 0, 0);
 			}
 			const body = sanitizeTerminalText(d.body || (first && first.type === "text" ? first.text : ""));
-			const failed = d.ok === false || !!d.error;
 			if (failed) {
 				const cause = compactInlineText([d.failureKind, d.error].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
-				const title = theme.fg("error", theme.bold(`council failed${cause ? ` · ${cause}` : ""}`));
-				if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", body || "(no ruling)")}`, 0, 0);
+				const title = () => theme.fg("error", theme.bold(`council failed${cause ? ` · ${cause}` : ""}`));
+				if (expanded) {
+					// Only a completed council retains a ruling body; preflight/host errors are literal.
+					if (typeof d.body === "string") return createReportBody(body || "(no ruling)", theme, { header: title }, context?.lastComponent);
+					return new Text(`${title()}\n${theme.fg("toolOutput", body || "(no ruling)")}`, 0, 0);
+				}
 				const preview = compactVisibleText(body || "(no ruling)", { maxLines: 3, maxLineChars: 100 });
 				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-				return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+				return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 			}
 			const text = formatCouncilResult(
 				{ headline: d.headline, status: d.status, tally: d.tally, usedFallback: d.usedFallback, body },
 				expanded,
 				expandDetailHint(),
 			);
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", text), 0, 0);
+			return expanded ? createReportBody(text, theme, {}, context?.lastComponent) : new Text(theme.fg("accent", text), 0, 0);
 		},
 	});
 }

@@ -339,6 +339,8 @@ export interface ProgressSnapshot {
 	output: string;
 	turns: number;
 	tokens: number;
+	/** Copied cumulative counters for display; optional for legacy/custom progress sources. */
+	usage?: ChildUsage;
 	/** The tool currently running (e.g. "grep src/…"), if any. */
 	activity?: string;
 	/** One authoritative runtime tool lifecycle transition, when this snapshot is event-driven. */
@@ -352,6 +354,7 @@ export function snapshot(state: StreamState, toolEvent?: ToolEvent): ProgressSna
 		output: [state.transcript, state.partial].filter((s) => s).join("\n\n") || state.output,
 		turns: state.usage.turns,
 		tokens: state.usage.input + state.usage.output,
+		usage: { ...state.usage },
 	};
 	if (state.activity !== undefined) snap.activity = state.activity;
 	if (toolEvent !== undefined) snap.toolEvent = toolEvent;

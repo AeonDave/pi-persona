@@ -14,9 +14,10 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { registerSessionCards } from "./ui/session-cards.ts";
 
 import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
@@ -41,7 +42,6 @@ import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, orderByMention, PersistenceNudge, PollGuard, renderNudgeModels, renderNudgeRoster } from "./core/nudge.ts";
 import { orderModelCandidates, recommendModels, shortlistModels } from "./core/model-catalog.ts";
-import { formatDuration } from "./core/time.ts";
 import { summarizeFailure } from "./ui/failure-summary.ts";
 import { modelCandidateDetails, modelCostTiers, type ModelCostMetadata } from "./core/model-tier.ts";
 import { installedPiVersion, MIN_PI_VERSION, satisfiesFloor } from "./core/pi-compat.ts";
@@ -89,7 +89,8 @@ import { formatLedgerStatus } from "./exocom/status.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
 import { describeRuns, registerIntercomTool } from "./tools/intercom-tool.ts";
 import { registerTimerTool } from "./tools/timer.ts";
-import { registerMonitorTool } from "./tools/monitor.ts";
+import { registerMonitorTool, renderMonitorLog } from "./tools/monitor.ts";
+import { MonitorArchive } from "./monitor/archive.ts";
 import { createMonitorSession, type MonitorSession } from "./monitor/session.ts";
 import { createBackgroundRuns, type TrackedRun } from "./tools/background-run.ts";
 import { registerCouncilTool } from "./tools/council.ts";
@@ -134,8 +135,9 @@ import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isWakeSource, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
-import { filterModels, ModelPicker, orderModelRefs } from "./ui/model-picker.ts";
-import { compactInlineText, compactVisibleText, gateReviewText, sanitizeTerminalText } from "./ui/presentation.ts";
+import { filterModels, ModelPicker, orderModelRefs, type ModelPickerMetadata } from "./ui/model-picker.ts";
+import { compactInlineText, gateReviewText } from "./ui/presentation.ts";
+import { compactWidget } from "./ui/compact-widget.ts";
 import { ChildUsageLedger, formatPersonaCostStatus, formatUsage, PERSONA_COST_STATUS_KEY } from "./ui/usage.ts";
 
 export const RUN_LIMITS: RunLimits = {
@@ -322,101 +324,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let config = resolveConfig(process.env);
 	if (config.disabled) return;
 	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
-	const registerFollowUpRenderer = (customType: "pi-persona" | "exocom_received", label: string): void => {
-		pi.registerMessageRenderer(customType, (message, { expanded, outputPad }, theme) => {
-			const raw = typeof message.content === "string"
-				? message.content
-				: message.content.map((part) => part.type === "text" ? part.text : "[image]").join("\n");
-			const full = sanitizeTerminalText(raw);
-			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
-			const firstLine = full.split("\n", 1)[0] ?? "";
-			// External peer text is data and must never choose our UI chrome. Internal follow-ups own
-			// their first status line; parse only that line and do not turn a healthy "0 failed" red.
-			const isFailure = customType === "pi-persona"
-				&& !/\b0 failed\b/i.test(firstLine)
-				&& /\b(?:failed|failure|error|rejected|unresolved)\b/i.test(firstLine);
-			const titleColor = isFailure ? "error" : customType === "exocom_received" ? "accent" : "success";
-			const title = theme.fg(titleColor, theme.bold(label));
-			if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full || "(no output)")}`, outputPad, 0);
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-			return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, outputPad, 0);
-		});
-	};
-	// These follow-ups remain complete in the model context, but the human-facing card starts as a
-	// bounded digest. This is the central progressive-disclosure boundary for async completions and
-	// external peer messages; expanding the card reveals the exact sanitized payload.
-	registerFollowUpRenderer("pi-persona", "pi-persona · update");
-	registerFollowUpRenderer("exocom_received", "exocom · inbound");
-	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded }, theme) => {
-		const data = entry.data;
-		if (!data) return undefined;
-		const label = compactInlineText(data.label || data.agent, { maxChars: 80 });
-		const title = `${theme.fg("error", "✕ ")}${theme.fg("accent", theme.bold(label))}${theme.fg("error", " · failed")}`;
-		const metadata = [
-			compactInlineText(data.agent, { maxChars: 48 }),
-			...(data.model ? [compactInlineText(data.model, { maxChars: 96 })] : []),
-			...(data.durationMs !== undefined ? [formatDuration(data.durationMs)] : []),
-		].join(" · ");
-		const body = expanded
-			? `Run ${compactInlineText(data.id)}\n${sanitizeTerminalText(data.error)}`
-			: summarizeFailure(data.error);
-		return new Text([
-			title,
-			theme.fg("dim", metadata),
-			theme.fg("toolOutput", body),
-			...(!expanded ? [theme.fg("dim", expandDetailHint())] : []),
-		].join("\n"), 0, 0);
-	});
-	pi.registerEntryRenderer("pi-persona-result", (entry, { expanded }, theme) => {
-		const data = entry.data as CommandResultEntry;
-		const full = sanitizeTerminalText(data.content || "(no output)");
-		const cause = compactVisibleText(
-			[data.failureKind, data.error].filter((part): part is string => !!part).join(" · "),
-			{ maxLines: 1, maxLineChars: 80 },
-		).text;
-		const stopped = flowDisposition({ ok: data.ok === true, stoppedAtGate: data.stoppedAtGate }) === "stopped";
-		const status = stopped
-			? `stopped · checkpoint ${compactInlineText(data.stoppedAtGate ?? "", { maxChars: 32 })}`
-			: data.ok ? "complete" : "failed";
-		const label = compactInlineText(data.label, { maxChars: 96 }) || "result";
-		const title = theme.fg(
-			stopped ? "warning" : data.ok ? "success" : "error",
-			theme.bold(`${label} · ${status}${!data.ok && !stopped && cause !== "(no output)" ? ` · ${cause}` : ""}`),
-		);
-		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
-		const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
-		const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
-	});
-	pi.registerEntryRenderer("pi-persona-nudge", (entry, { expanded }, theme) => {
-		const data = entry.data as NudgeEntry;
-		const full = sanitizeTerminalText(data.content || "⟢ pi-persona · checkpoint");
-		const lines = full.split("\n").map((line) => line.trim()).filter(Boolean);
-		const header = compactInlineText(lines[0]?.replace(/^⟢\s*/, "") ?? "", { maxChars: 96 }) || "pi-persona · checkpoint";
-		const details = lines.slice(1);
-		const title = theme.fg("warning", theme.bold(`⟢ ${header}`));
-		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", details.join("\n") || "(no detail)")}`, 0, 0);
-		const trigger = details.find((line) => line.startsWith("Trigger:"));
-		const action = details.find((line) => /^(?:Action|Verify|Otherwise):/.test(line));
-		const selected = [trigger, action].filter((line): line is string => line !== undefined);
-		const previewLines = selected.length > 0 ? selected : details.slice(0, 2);
-		const preview = compactVisibleText(previewLines.join("\n"), { maxLines: 2, maxLineChars: 100 });
-		const hasMore = preview.truncated || details.some((line) => !previewLines.includes(line));
-		const hint = hasMore ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
-	});
-	pi.registerEntryRenderer("pi-persona-status", (entry, { expanded }, theme) => {
-		const data = entry.data as CheckInEntry;
-		const full = sanitizeTerminalText(data.content || "Async activity · routine check-in");
-		const title = theme.fg(data.kind === "stall" ? "warning" : "accent", theme.bold(data.kind === "stall" ? "pi-persona · possible stall" : "pi-persona · async status"));
-		if (expanded) return new Text(`${title}\n${theme.fg("toolOutput", full)}`, 0, 0);
-		// The entry title already labels this as async status. Spend the compact preview on the
-		// aggregate and first run row so the operator sees the selected alias and usage label.
-		const digestLines = full.split("\n").slice(1).filter((line) => line.trim().length > 0);
-		const preview = compactVisibleText(digestLines.slice(0, 2).join("\n") || full, { maxLines: 2, maxLineChars: 140 });
-		const hasMore = preview.truncated || digestLines.length > 2;
-		const hint = hasMore ? `\n${theme.fg("dim", expandDetailHint())}` : "";
-		return new Text(`${title}\n${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
+	registerSessionCards(pi, {
+		detailHint: expandDetailHint,
+		monitorLog: (record) => renderMonitorLog(record, true),
 	});
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
@@ -654,6 +564,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
+	const wakeRows = new WakeRows();
 	// Explicit telemetry is the public observability seam consumed by pi-persona-flow. It is
 	// session-scoped and starts only after persona + exocom reconciliation in session_start.
 	let telemetry: TelemetryProducer | undefined;
@@ -836,6 +747,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const WIDGET_RENDER_DELAY_MS = 16;
 	let widgetTimer: ReturnType<typeof setTimeout> | undefined;
 	let widgetRenderPending = false;
+	let publishingMonitorOutput = false;
 	let widgetLinesInitialized = false;
 	let lastWidgetLines: readonly string[] | undefined;
 	let widgetStatusInitialized = false;
@@ -852,14 +764,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const agents = nodes.filter((node) => !isWakeSource(node));
 		return agents.length === 0 ? undefined : String(inFlightAgentCount(agents));
 	}
-	function renderAgentWidget(nodes: readonly AgentNode[] = agentTree.snapshot()): void {
+	function renderAgentWidget(): void {
 		if (!lastCtx) return;
+		// Publish dirty monitor tails into the tree BEFORE this frame takes its snapshot. The tree's
+		// overlay listeners still see the patches, but our own listener must not request a second frame.
+		if (!disposed) {
+			publishingMonitorOutput = true;
+			try {
+				for (const change of wakeRows.flushMonitorOutput()) agentTree.update(change.id, change.patch);
+			} finally { publishingMonitorOutput = false; }
+		}
+		const nodes = agentTree.snapshot();
 		const empty = nodes.length === 0;
 		const lines = empty ? undefined : renderAgentTreeSummary([...nodes], 8, { now: Date.now(), stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingTreeIds(nodes) });
 		const status = agentCountStatus(nodes);
 		try {
 			if (!widgetLinesInitialized || !sameWidgetLines(lastWidgetLines, lines)) {
-				lastCtx.ui.setWidget("persona-agents", lines, { placement: "aboveEditor" });
+				lastCtx.ui.setWidget("persona-agents", lines ? compactWidget(lines) : undefined, { placement: "aboveEditor" });
 				lastWidgetLines = lines;
 				widgetLinesInitialized = true;
 			}
@@ -940,6 +861,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// elapsed time and the stall badge moving without a progress event, and stops itself when idle.
 	const widgetClock = new LiveClock({ intervalMs: 1_000, isLive: () => agentTree.hasRunning(), onTick: renderAgentWidget });
 	agentTree.onChange((change) => {
+		if (publishingMonitorOutput) return;
 		const refreshStatus = widgetStatusMayHaveChanged(change);
 		if (disposed) {
 			// session_shutdown clears the tree after marking this activation disposed. Keep teardown
@@ -1266,7 +1188,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// events, settled like an async run. The final update and the removal are synchronous and the
 	// widget composition is coalesced, so the final status reaches the tree change stream, never the
 	// screen; the row simply leaves, together with its stop handle.
-	const wakeRows = new WakeRows();
 	function settleWakeRow(change: WakeRowChange): void {
 		// session_shutdown clears the tree and both registries itself right after cancelAll, so
 		// settling rows one by one would only repaint a widget it is about to clear (the tree
@@ -1301,22 +1222,42 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return active.includes("monitor") && active.includes("bash")
 			&& (!caps || (canCallTool(caps, "monitor") && canCallTool(caps, "bash")));
 	};
+	// Session-native custom entries own the bounded logs: they are not model messages and
+	// deleting the session removes them without orphan sidecars. Shutdown persists, never deletes.
+	const monitorArchive = new MonitorArchive({
+		entries: () => lastCtx?.sessionManager?.getEntries?.() ?? [],
+		append: (customType, data) => pi.appendEntry(customType, data),
+	});
 	monitors = createMonitorSession({
+		idPrefix: `monitor-${randomUUID().slice(0, 8)}`,
 		isIdle: idleDelivery.isIdle,
 		deliver: (text) => sendPersonaFollowUp(pi, text),
 		canRun: canRunMonitor,
 		observe: {
 			armed: (entry) => {
+				monitorArchive.armed(entry);
+				if (disposed) return;
 				const row = wakeRows.monitorArmed(entry);
 				stopRegistry.set(row.id, () => { monitors?.cancel(entry.id); });
 				agentTree.add(row);
 			},
+			output: (output) => {
+				monitorArchive.output(output);
+				if (disposed) return;
+				if (wakeRows.monitorOutput(output)) requestAgentWidgetRender(false);
+			},
 			event: (event) => {
+				monitorArchive.event(event);
+				if (disposed) return;
 				const change = wakeRows.monitorEvent(event);
 				if (change.settled) settleWakeRow(change);
 				else agentTree.update(change.id, change.patch);
 			},
-			removed: (entry) => settleWakeRow(wakeRows.monitorRemoved(entry)),
+			removed: (entry) => {
+				monitorArchive.removed(entry);
+				if (disposed) return;
+				settleWakeRow(wakeRows.monitorRemoved(entry));
+			},
 		},
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
@@ -1646,7 +1587,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	/** UI adapter shared by setup and editing; callers own eligibility and availability policy. */
-	async function choosePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], available: Array<{ provider: string; id: string }>, scope: ModelSelectionScope, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
+	async function choosePersonaModels(ctx: ExtensionContext, participants: ModelParticipant[], available: ModelPickerMetadata[], scope: ModelSelectionScope, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
 		const { persona } = scope;
 		const options = orderModelRefs(available.map((m) => `${m.provider}/${m.id}`), ctx.model?.provider);
 		const chosen: Record<string, string> = {};
@@ -1677,12 +1618,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				try {
 					pick = ctx.mode === "tui"
 						? await ctx.ui.custom<string | undefined>(
-								(tui, theme, _kb, done) => {
+								(tui, theme, keybindings, done) => {
 									// custom() has no signal option: its factory's done callback owns dismissal.
 									cancelPicker = () => done(undefined);
 									if (signal?.aborted) cancelPicker();
 									else signal?.addEventListener("abort", cancelPicker, { once: true });
-									return new ModelPicker(tui, theme, title, options, ctx.model?.provider, (ref) => done(ref));
+									return new ModelPicker(tui, theme, title, options, ctx.model?.provider, (ref) => done(ref), {
+										models: available,
+										...(p.model !== undefined ? { currentRef: p.model } : {}),
+										...(keybindings ? { keybindings } : {}),
+									});
 								},
 								{ overlay: true },
 								)
@@ -2355,7 +2300,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		get lastCtx() { return lastCtx; },
 		set lastCtx(value) { lastCtx = value; },
 		get disposed() { return disposed; },
-		set disposed(value) { disposed = value; },
+		set disposed(value) {
+			disposed = value;
+			if (value) {
+				cancelAgentWidgetRender();
+				widgetClock.stop();
+				wakeRows.clearMonitors();
+			}
+		},
 		get orchestrating() { return orchestrating; },
 		set orchestrating(value) { orchestrating = value; },
 		get processingDeferredOrchestration() { return processingDeferredOrchestration; },
@@ -2523,6 +2475,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		set lastCtx(value) { lastCtx = value; },
 		canRun: canRunMonitor,
 		monitors,
+		archive: monitorArchive,
 	});
 
 	registerCouncilTool(pi, {

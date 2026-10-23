@@ -24,8 +24,10 @@ export function registerModelsTool(pi: ExtensionAPI, d: ModelsToolDeps): void {
 			"cost:low/medium/high ranks advertised API prices relative to recent candidates of the same provider;",
 			"cost:unknown means insufficient price data. These are cost bands, not quality, speed or reasoning-effort ratings; choose task fit yourself.",
 			"Context, reasoning support and API prices are host catalog metadata; API prices do not describe subscription billing.",
-			"Prefer these nearby candidates before older or unrelated models merely because they are cheap; when unsure, omit a delegate's",
-			"model to inherit the working session model. Keep the provider/billing route unless a change is authorized.",
+			"Prefer these nearby candidates before older or unrelated models merely because they are cheap. Omitting `model` preserves",
+			"saved per-persona role/agent assignments, then the agent frontmatter model and engine defaults; it does not necessarily select the supervisor model.",
+			"To intentionally choose the supervisor's current model over a configured choice, pass its exact provider/id as `model` only when explicitly authorized.",
+			"Never silently switch providers or billing routes.",
 		].join(" "),
 		parameters: Type.Object({
 			query: Type.Optional(Type.String({ description: "Search the full catalog by substring (provider or id), e.g. 'sonnet'; omit for the current-first shortlist" })),
