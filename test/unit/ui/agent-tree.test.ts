@@ -8,6 +8,20 @@ import { formatUsage } from "../../../src/ui/usage.ts";
 
 import { AgentTree, type AgentNode, type AgentNodeStatus, deriveWaitingNodeIds, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
 
+test("tree upserts preserve omitted metadata and clear explicitly reset attempt fields", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "leg", label: "leg", model: "first/model", thinking: "xhigh", thinkingEffective: "high" });
+	tree.add({ id: "leg", label: "same leg" });
+	assert.equal(tree.snapshot()[0]!.model, "first/model");
+	assert.equal(tree.snapshot()[0]!.thinkingEffective, "high");
+	tree.add({ id: "leg", label: "retry", model: "retry/model", thinking: undefined, thinkingEffective: undefined });
+	assert.equal(tree.snapshot()[0]!.model, "retry/model");
+	assert.equal(tree.snapshot()[0]!.thinking, undefined);
+	assert.equal(tree.snapshot()[0]!.thinkingEffective, undefined);
+	tree.update("leg", { model: undefined });
+	assert.equal(Object.hasOwn(tree.snapshot()[0]!, "model"), false);
+});
+
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
 		{ id: "magi", label: "magi", parentId: undefined, status: "running", detail: undefined },

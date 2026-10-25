@@ -41,6 +41,14 @@ test("isFrame accepts send", () => {
 	assert.equal(isFrame({ t: "send", to: "a1", kind: "progress", text: "hi", msgId: "m1", expectsReply: false }), true);
 });
 
+test("sent receipts match send message ids and carry only a boolean admission result", () => {
+	for (const delivered of [true, false]) assert.equal(isFrame({ t: "sent", msgId: reqId, delivered }), true);
+	assert.equal(isFrame({ t: "sent", msgId: "m1", delivered: true }), true, "every valid send id can be acknowledged");
+	for (const patch of [{ msgId: 1 }, { msgId: null }, { delivered: "true" }, { delivered: undefined }, { text: "not a reply" }]) {
+		assert.equal(isFrame({ t: "sent", msgId: reqId, delivered: true, ...patch }), false);
+	}
+});
+
 test("isFrame accepts deliver", () => {
 	assert.equal(isFrame({ t: "deliver", from: "a1", kind: "decision", text: "hi", msgId: "m1", expectsReply: true }), true);
 	assert.equal(isFrame({ t: "deliver", from: "a1", fromLabel: "coder", kind: "interview", text: "hi", msgId: "m1", expectsReply: true }), true);

@@ -13,6 +13,7 @@ import { planModelRecovery } from "./model-retry.ts";
 import { mapWithConcurrency, Semaphore } from "./parallel.ts";
 import { aggregateResults, sumUsage } from "./reducers.ts";
 import { roleHint, type RosterMember } from "./roster.ts";
+import { agentAttemptIdentity, type AgentAttemptIdentity } from "./agent-attempt.ts";
 import type { AgentResult, ModelRecovery } from "./types.ts";
 import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 
@@ -199,17 +200,17 @@ export interface SDKDeps {
 	/** Per-agent lifecycle, for live UI. The result is passed on done/failed so the
 	 *  UI can capture each agent's output/usage. `key` is a run-unique display id (the
 	 *  `agent` name for a solo member, disambiguated by role/occurrence when the same agent
-	 *  runs several times in one roster) — key the UI node by it, not by `agent`, or three
-	 *  same-agent roster-role members collapse into one node. Falls back to `agent`. */
-	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult, key?: string) => void;
+	 *  runs several times in one roster). The frozen `attempt` carries exact full-role/model/effort
+	 *  identity: never recover those fields by parsing this shortened display key. */
+	onAgentStatus?: (agent: string, status: AgentStatus, result: AgentResult | undefined, key: string, attempt: AgentAttemptIdentity) => void;
 	/** One final logical leg after model recovery, never intermediate attempts. Storage is non-fatal. */
-	onAgentResult?: (result: AgentResult, key: string) => void;
+	onAgentResult?: (result: AgentResult, key: string, attempt: AgentAttemptIdentity) => void;
 	/** Per-agent streaming progress (rolling output), for live UI. See `onAgentStatus.key`. */
-	onAgentProgress?: (agent: string, progress: AgentProgress, key?: string) => void;
+	onAgentProgress?: (agent: string, progress: AgentProgress, key: string, attempt: AgentAttemptIdentity) => void;
 	/** Called as each agent starts with a handle to abort just that agent (for UI stop). */
-	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
+	onAgentStart?: (agent: string, abort: () => void, key: string, attempt: AgentAttemptIdentity) => void;
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
-	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
+	onAgentSteerable?: (agent: string, steer: SteerFn, key: string, attempt: AgentAttemptIdentity) => void;
 	/** Emitted immediately BEFORE a leg is re-run on the main model after a model-caused failure,
 	 *  so live UI can say so while it happens (`key` is the same logical node as the attempt it
 	 *  replaces). Purely cosmetic: a throw here is contained and can never discard the billed
@@ -303,8 +304,9 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 			// seam via `withResultRefs`, which runs BELOW this layer).
 			const spec = requested.resultRefs === undefined ? requested : stripResultRefs(requested);
 			const key = uiKeyFor(spec);
+			let currentAttempt = agentAttemptIdentity(spec);
 			const finish = (result: AgentResult): AgentResult => {
-				try { deps.onAgentResult?.(result, key); } catch { /* storage must not discard a completed leg */ }
+				try { deps.onAgentResult?.(result, key, currentAttempt); } catch { /* storage must not discard a completed leg */ }
 				return result;
 			};
 			if (deps.canSpawn && !deps.canSpawn(spec.agent)) {
@@ -338,6 +340,8 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				const detachRoot: Array<() => void> = [];
 				let announcedStart = false;
 				const attempt = async (aSpec: AgentRunSpec): Promise<AgentResult> => {
+					const identity = agentAttemptIdentity(aSpec);
+					currentAttempt = identity;
 					const ac = current ?? new AbortController();
 					current = ac;
 					if (deps.signal) {
@@ -348,9 +352,9 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					}
 					if (!announcedStart) {
 						announcedStart = true;
-						deps.onAgentStart?.(aSpec.agent, () => current?.abort(), key);
+						deps.onAgentStart?.(aSpec.agent, () => current?.abort(), key, identity);
 					}
-					deps.onAgentStatus?.(aSpec.agent, "running", undefined, key);
+					deps.onAgentStatus?.(aSpec.agent, "running", undefined, key, identity);
 					// A slot grant is not an engine start. Root or local cancellation in a lifecycle
 					// callback must prevent the engine invocation, not merely hand it an aborted signal.
 					if (ac.signal.aborted) {
@@ -366,9 +370,9 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					try {
 						result = await deps.engine.run(
 							aSpec,
-							onProgress ? (p) => onProgress(aSpec.agent, p, key) : undefined,
+							onProgress ? (p) => onProgress(aSpec.agent, p, key, identity) : undefined,
 							ac.signal,
-							deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(aSpec.agent, steer, key) : undefined,
+							deps.onAgentSteerable ? (steer) => deps.onAgentSteerable?.(aSpec.agent, steer, key, identity) : undefined,
 						);
 					} catch (err) {
 						// PER-LEG failure — contained, never rethrown: one blown engine call must not discard
@@ -385,7 +389,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				};
 				try {
 					const first = await attempt(spec);
-					deps.onAgentStatus?.(spec.agent, first.ok ? "done" : "failed", first, key);
+					deps.onAgentStatus?.(spec.agent, first.ok ? "done" : "failed", first, key, currentAttempt);
 
 					// ── Main-only model recovery ──────────────────────────────────────────────
 					// A model-caused failure (`provider`/`unknown-model`) gets exactly ONE re-run on the
@@ -427,7 +431,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					// a fresh controller or spend another child slot after it has been stopped.
 					if (deps.signal?.aborted || current?.signal.aborted) {
 						const stopped = { ...abortedLeg(spec.agent), usage: first.usage };
-						deps.onAgentStatus?.(spec.agent, "failed", stopped, key);
+						deps.onAgentStatus?.(spec.agent, "failed", stopped, key, currentAttempt);
 						return stopped;
 					}
 					// The retry is a REAL attempt: admitted and charged like any other child, but inside
@@ -444,7 +448,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 						modelRecovery: recovery,
 						...(!second.ok ? { error: `Initial model ${plan.from ?? "(unresolved)"} failed: ${first.error ?? first.failureKind ?? "unknown cause"}; main model ${plan.to} failed: ${second.error ?? second.failureKind ?? "unknown cause"}` } : {}),
 					};
-					deps.onAgentStatus?.(spec.agent, settled.ok ? "done" : "failed", settled, key);
+					deps.onAgentStatus?.(spec.agent, settled.ok ? "done" : "failed", settled, key, currentAttempt);
 					return settled;
 				} finally {
 					for (const detach of detachRoot) detach();

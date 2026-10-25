@@ -373,7 +373,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 				}
 				case "send": {
 					if (!handle) {
-						write({ t: "error", reason: "send before register" });
+						write({ t: "error", reason: "send before register", msgId: frame.msgId });
 						return;
 					}
 					const from = handle;
@@ -395,8 +395,12 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 							forgetAsk(frame.msgId, ac);
 							write({ t: "error", reason: errorReason(error), msgId: frame.msgId });
 						}
-					} else if (!bus.send(from, frame.to, frame.text, frame.kind)) {
-						write({ t: "error", reason: `unknown peer: ${frame.to}` });
+					} else {
+						// Admission is not an answer. Unknown/full inboxes both return false;
+						// never label a full inbox "unknown peer" or a socket write "delivered".
+						let delivered = false;
+						try { delivered = bus.send(from, frame.to, frame.text, frame.kind); } catch { /* no confirmation */ }
+						write({ t: "sent", msgId: frame.msgId, delivered });
 					}
 					return;
 				}

@@ -300,9 +300,9 @@ export interface AddNodeInput {
 	status?: AgentNodeStatus;
 	kind?: AgentNodeKind;
 	agent?: string;
-	model?: string;
-	thinking?: ThinkingLevel;
-	thinkingEffective?: ThinkingLevel;
+	model?: string | undefined;
+	thinking?: ThinkingLevel | undefined;
+	thinkingEffective?: ThinkingLevel | undefined;
 	detail?: string;
 	output?: string;
 	startedAt?: number;
@@ -314,9 +314,9 @@ export interface AgentNodePatch {
 	status?: AgentNodeStatus;
 	kind?: AgentNodeKind;
 	agent?: string;
-	model?: string;
-	thinking?: ThinkingLevel;
-	thinkingEffective?: ThinkingLevel;
+	model?: string | undefined;
+	thinking?: ThinkingLevel | undefined;
+	thinkingEffective?: ThinkingLevel | undefined;
 	detail?: string;
 	output?: string;
 	startedAt?: number;
@@ -330,9 +330,19 @@ function applyPatch(node: AgentNode, patch: AgentNodePatch): void {
 	if (patch.status) node.status = patch.status;
 	if (patch.kind !== undefined) node.kind = patch.kind;
 	if (patch.agent !== undefined) node.agent = patch.agent;
-	if (patch.model !== undefined) node.model = patch.model;
-	if (patch.thinking !== undefined) node.thinking = patch.thinking;
-	if (patch.thinkingEffective !== undefined) node.thinkingEffective = patch.thinkingEffective;
+	// Omission preserves metadata; explicit undefined clears a previous attempt's intent/observation.
+	if (Object.hasOwn(patch, "model")) {
+		if (patch.model === undefined) delete node.model;
+		else node.model = patch.model;
+	}
+	if (Object.hasOwn(patch, "thinking")) {
+		if (patch.thinking === undefined) delete node.thinking;
+		else node.thinking = patch.thinking;
+	}
+	if (Object.hasOwn(patch, "thinkingEffective")) {
+		if (patch.thinkingEffective === undefined) delete node.thinkingEffective;
+		else node.thinkingEffective = patch.thinkingEffective;
+	}
 	if (patch.detail !== undefined) node.detail = patch.detail;
 	if (patch.output !== undefined) node.output = patch.output;
 	if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;

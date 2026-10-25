@@ -27,7 +27,7 @@ export class SessionResults {
 	private owner: Owner | undefined;
 	private disposed = false;
 	private readonly captures = new Map<AsyncRun, CaptureResult>();
-	private readonly detach: Array<() => void> = [];
+	private readonly tracked = new WeakSet<AsyncRunTracker>();
 
 	constructor(privateApi: Pick<ExtensionAPI, "appendEntry">) {
 		this.append = (type, data) => privateApi.appendEntry(type, data);
@@ -35,13 +35,10 @@ export class SessionResults {
 	private readonly append: (type: string, data: unknown) => void;
 
 	activate(ctx: ExtensionContext): TerminalResultArchive {
-		// A session_shutdown revokes the previous owner; a later session_start in the same process
-		// (the documented multi-activation lifecycle) starts a FRESH owner, never a zombie.
+		// Shutdown revokes the previous owner. Reusing this factory for another activation starts
+		// a fresh owner even when the native session id and manager are unchanged.
 		if (this.disposed) {
 			this.disposed = false;
-			for (const off of this.detach.splice(0)) {
-				try { off(); } catch { /* teardown must not block a new activation */ }
-			}
 		}
 		const manager = ctx.sessionManager;
 		// A context without a session manager (e.g. --no-session / UI-less runs) still gets an
@@ -110,8 +107,15 @@ export class SessionResults {
 
 	/** Register before the ordinary completion listener. onCreate precedes even a synchronous thunk failure. */
 	track(tracker: AsyncRunTracker): void {
-		this.detach.push(tracker.onCreate((run) => this.captures.set(run, this.bind("tracker"))));
-		this.detach.push(tracker.onComplete((run) => {
+		if (this.tracked.has(tracker)) return;
+		this.tracked.add(tracker);
+		// These two observers belong to the tracker/factory, not to an individual owner. Keeping
+		// their original position guarantees the receipt exists before notification listeners on
+		// every activation. Neither observer retains a revoked owner after dispose clears captures.
+		tracker.onCreate((run) => {
+			if (!this.disposed && this.owner) this.captures.set(run, this.bind("tracker"));
+		});
+		tracker.onComplete((run) => {
 			const capture = this.captures.get(run);
 			this.captures.delete(run);
 			if (!capture) return;
@@ -122,15 +126,13 @@ export class SessionResults {
 				partial: run.progress.output,
 			});
 			if (run.result) run.result.resultReceipt = { ...run.resultReceipt };
-		}));
+		});
 	}
 
+	/** Revoke the current activation; tracker observers retain their factory-lifetime ordering. */
 	dispose(): void {
 		this.disposed = true;
 		this.owner = undefined;
 		this.captures.clear();
-		for (const off of this.detach.splice(0)) {
-			try { off(); } catch { /* best-effort teardown */ }
-		}
 	}
 }

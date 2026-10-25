@@ -20,7 +20,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { type BrokerClient, type DeliverEvent, makeBrokerClient, type MakeBrokerClientDeps } from "./bus/broker/client.ts";
 import { makeContactSupervisorTool } from "./bus/contact.ts";
-import { InProcessBus, type MsgKind } from "./bus/inproc.ts";
+import type { MsgKind } from "./bus/inproc.ts";
+import type { ContactTransport } from "./bus/contact-transport.ts";
 import { makeContactPeerTool, type PeerInfo } from "./bus/peers.ts";
 import { attributeInbound } from "./core/fence.ts";
 import { isReaderToken } from "./bus/broker/messages.ts";
@@ -49,30 +50,22 @@ export function isBridgeMode(env: Env = process.env): boolean {
 	return !!env.PI_PERSONA_BUS;
 }
 
-/** Routes `InProcessBus.send`/`ask` over a `BrokerClient` instead of a local mailbox — the
- *  thin adapter the bus-bound `contact_supervisor`/`contact_peer` factories need to run
- *  unmodified against a remote target. A real `InProcessBus` subclass (not a duck-typed
- *  object) so it satisfies the factories' concrete parameter type without touching them.
- *  `connected` gates both overrides so the tools' existing "no supervisor reachable" /
- *  "dropped" wording stays honest before the handshake completes — the client's own
- *  `send`/`ask` can't report that (a write to a not-yet-open socket silently no-ops, per
- *  spec's "sends report undelivered"). */
-class BrokerBus extends InProcessBus {
+/** Contact transport over the broker. A connected socket is not delivery evidence:
+ * send resolves only after the host acknowledges admission to its local bus. */
+class BrokerBus implements ContactTransport {
 	private readonly client: BrokerClient;
 	connected = false;
 
 	constructor(client: BrokerClient) {
-		super();
 		this.client = client;
 	}
 
-	override send(_from: string, to: string, text: string, kind: MsgKind = "progress"): boolean {
+	send(_from: string, to: string, text: string, kind: MsgKind = "progress", signal?: AbortSignal): boolean | Promise<boolean> {
 		if (!this.connected) return false;
-		this.client.send(to, kind, text);
-		return true;
+		return this.client.send(to, kind, text, signal);
 	}
 
-	override ask(
+	ask(
 		_from: string,
 		to: string,
 		text: string,

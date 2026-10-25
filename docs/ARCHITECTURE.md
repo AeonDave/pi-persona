@@ -288,13 +288,18 @@ up to 16 names. Same idea, two layers, two caps — see docs/REFERENCE.md's exam
 
 `isolation: worktree` is fail-closed. It requires a clean Git checkout so the detached `HEAD` view
 cannot silently omit staged/unstaged/untracked supervisor work; a non-repository, dirty checkout,
-worktree creation failure, missing diff artifact, or an artifact over the return limit fails the leg —
-the base engine is never invoked against the real tree as a fallback. The created worktree's initial
-commit is pinned before the worker starts. Export compares the final file state against that immutable
-commit, so worker commits, later unstaged changes and new files are included together. The diff is
-captured before the temporary tree is removed and then returned to the supervisor; commit history is
-not applied to the main checkout. Every git call is asynchronous so the extension host keeps rendering,
-ticking timers, and serving broker sockets while a large checkout runs.
+worktree creation failure, or a successful leg with neither a captured diff nor a returned unified
+patch fails the leg — the base engine is never invoked against the real tree as a fallback. The
+created worktree starts from the committed `HEAD` only: local ignored files are not copied into it,
+and untracked ignored outputs are not exported. The original checkout's ignored files remain
+untouched; tasks that need local-only inputs must recreate or provide them explicitly. The
+worktree's initial commit is pinned before the worker starts. Export compares the final file state
+against that immutable commit, so worker commits, later unstaged changes and new files are included
+together. The diff is captured before the temporary tree is removed, then returned to the supervisor;
+commit history is not applied to the main checkout. If Git cannot capture the diff but the worker
+returned a unified patch, that patch is retained with a warning that it was worker-provided and not
+verified against the worktree state. Every git call is asynchronous so the extension host keeps
+rendering, ticking timers, and serving broker sockets while a large checkout runs.
 
 Transient retries inside one agent session belong to the host **Pi runtime**'s `retry.*` settings, not
 a persona contract — pi-persona neither parses retry notation nor schedules its own backoff. Both
@@ -317,10 +322,19 @@ models, repeated same-model attempts, stop/timeout/contract/agent/infrastructure
 child/token budgets do not recover. Both attempts are accounted, and a warning plus result metadata
 identify the switch. A per-role model assignment can supplement the legacy per-agent assignment;
 preflight model selection includes external arbiters and other declared agent-valued parameters.
-Live tree and telemetry labels use those participant identities for auxiliary actors too, with
-inline model pins taking precedence. If distinct full roles share a short display hint, the display
-keeps the hint (with `#N` suffixes for repeated node keys) but omits the uncertain model label rather
-than borrowing another role's choice. Routing still resolves the full role key, not the display hint.
+Live tree and telemetry labels resolve auxiliary actors and every repeated roster occurrence from
+the SDK's exact, immutable attempt identity (`agent`, full `role`, explicit `model` and `thinking`),
+alongside its unique node key. Short role hints and `#N` suffixes are presentation only: colliding
+hints never discard a known model or borrow another occurrence's inline pins. Model assignments
+and agent defaults are copied after setup when the engine is constructed, so a queued leg's display
+cannot change with later persona/settings edits. Seeds use each actual roster member; lifecycle
+updates use the actual attempt, including custom strategy calls and auxiliary actors in any order.
+A recovery keeps the node key, changes its requested model, and clears the preceding attempt's Pi
+effort observation. Terminal `modelUsed` and validated effort observations override intent only when
+reported; an absent observation retains the current attempt's intent. Initial effort remains the
+explicit spec request, never inferred provider cognition. Clearing an unknown model emits an empty
+`model` string in a telemetry update, preserving the existing string patch contract without leaving
+a stale previous model in consumers.
 
 **Model assignment repair is configuration, not execution recovery.** `/persona models [profile]`
 is an explicit user edit in the Pi adapter: it reuses `resolveCouncilInvocation`,
@@ -539,10 +553,14 @@ events and cannot route, reply, steer, or otherwise control agents.
   notifier, f9, peek) is unchanged by construction. Off ⇒ the host never starts and the child spawns
   byte-identical to pre-broker pi-persona. Ask failures echo the originating `msgId` so the client
   rejects the right request immediately, and a client cancellation propagates only to that connection's
-  own host ask. `extension/broker-host.ts`'s `SupervisorBroker` owns the lifecycle: it starts the host
-  lazily on the first child-engine build, warns once on a failed bind (children built while it's down
-  spawn without a bus endpoint, so they never burn connect backoff against a dead socket), and the next
-  build retries; `/doctor` surfaces its state on one line. A dropped client connection flips the
+  own host ask. A one-way send gets a UUID-correlated host receipt; `delivered: true` means admitted
+  to the bus, not read or acted on by the peer. Each child is limited to 64 pending receipts with a
+  maximum 10-second wait. Abort, disconnect, a full or missing inbox, or a lost receipt reports
+  `delivered: false`. It never waits for a recipient answer or approval and does not replay.
+  `extension/broker-host.ts`'s `SupervisorBroker` owns the lifecycle: it starts
+  the host lazily on the first child-engine build and warns once on a failed bind. Children built while
+  it's down spawn without a bus endpoint, so they never burn connect backoff against a dead socket;
+  the next build retries; `/doctor` surfaces its state on one line. A dropped client connection flips the
   child-side bridge to `⇄ offline` and fails a fresh ask fast rather than hanging.
   A connected child exposes `contact_supervisor` when `canUseBus` is allowed; `contact_peer` also
   requires the run's peer opt-in. Granted custom tool names join a nonempty plain allowlist so Pi's
@@ -659,7 +677,16 @@ retention is labelled as such. Retrieval is read-only: `intercom results` lists,
 { ref, offset, limit }` pages (8,000 default / 16,000 max units, surrogate-safe), with no respawn,
 rebilling, collection or extra wake; reading a page never returns the whole run hidden in metadata.
 A saved result is not a live worker: the restore notice says runtime handles are gone while retained
-reports remain readable.
+reports remain readable. Archive listeners belong to the extension factory/tracker lifetime and are
+installed exactly once. `session_shutdown` revokes that session's archive owner and clears its
+captures. A later activation creates a fresh owner and capture context before the ordinary completion
+listener observes terminal results for that activation; a late callback bound to the old owner cannot
+append into the new session.
+
+Flow reference handoff needs durable session-entry storage when a phase's result feeds a dependent
+phase. In a no-session run, a source phase can finish with a memory-only receipt, but the dependent's
+reader preflight rejects it before that dependent is spawned. Use a persisted session for reference
+handoff across phases, or use inline handoff when no durable reader is available.
 
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.

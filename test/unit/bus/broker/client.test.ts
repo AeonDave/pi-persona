@@ -279,10 +279,11 @@ test("register retries the connect with capped exponential backoff, then succeed
 	}
 });
 
-test("send writes a well-formed send frame with expectsReply false", async () => {
+test("send confirms host admission by exact message id, without waiting for an answer", async () => {
 	const { client, host } = await connectedClient();
 	try {
-		client.send("supervisor", "progress", "halfway there");
+		let settled = false;
+		const receipt = client.send("supervisor", "progress", "halfway there").then((value) => { settled = true; return value; });
 		await waitFor(() => host.frames.some((f) => f.t === "send"));
 		const sendFrame = host.frames.find((f) => f.t === "send");
 		assert.ok(sendFrame && sendFrame.t === "send");
@@ -292,9 +293,58 @@ test("send writes a well-formed send frame with expectsReply false", async () =>
 		assert.equal(sendFrame.expectsReply, false);
 		assert.equal(typeof sendFrame.msgId, "string");
 		assert.ok(sendFrame.msgId.length > 0);
+		host.send({ t: "sent", msgId: "12345678-1234-1234-1234-123456789abc", delivered: true });
+		await Promise.resolve();
+		assert.equal(settled, false, "a socket write or unrelated acknowledgement is not delivery evidence");
+		host.send({ t: "sent", msgId: sendFrame.msgId, delivered: true });
+		assert.equal(await receipt, true);
+		const rejected = client.send("supervisor", "progress", "full inbox");
+		const next = host.frames.filter((f) => f.t === "send").at(-1)!;
+		assert.ok(next.t === "send");
+		host.send({ t: "sent", msgId: next.msgId, delivered: false });
+		assert.equal(await rejected, false);
 	} finally {
 		client.close();
 	}
+});
+
+test("send cancellation, host error, disconnect and missing receipt never become delivery", async (t) => {
+	const { client, host, hostSide } = await connectedClient();
+	try {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const pre = AbortSignal.abort();
+		assert.equal(await client.send("supervisor", "progress", "pre", pre), false);
+		assert.equal(host.frames.filter((f) => f.t === "send").length, 0);
+		const ac = new AbortController();
+		const cancelled = client.send("supervisor", "progress", "cancel", ac.signal);
+		ac.abort();
+		assert.equal(await cancelled, false);
+		const error = client.send("supervisor", "progress", "error");
+		const frame = host.frames.filter((f) => f.t === "send").at(-1)!;
+		assert.ok(frame.t === "send");
+		host.send({ t: "error", msgId: frame.msgId, reason: "send unavailable" });
+		assert.equal(await error, false);
+		const timeout = client.send("supervisor", "progress", "timeout");
+		t.mock.timers.tick(10_000);
+		assert.equal(await timeout, false);
+		const lost = client.send("supervisor", "progress", "lost");
+		hostSide.destroy();
+		assert.equal(await lost, false);
+		assert.equal(await client.send("supervisor", "progress", "offline"), false);
+		assert.equal(host.frames.filter((f) => f.t === "send").length, 4, "no aborted/offline replay");
+	} finally { client.close(); t.mock.timers.reset(); }
+});
+
+test("pending send receipts are bounded and close settles every admitted request", async () => {
+	const { client, host } = await connectedClient();
+	try {
+		const pending = Array.from({ length: 64 }, () => client.send("supervisor", "progress", "status"));
+		assert.equal(await client.send("supervisor", "progress", "overflow"), false);
+		assert.equal(host.frames.filter((f) => f.t === "send").length, 64);
+		client.close();
+		assert.deepEqual(await Promise.all(pending), Array(64).fill(false));
+		assert.equal(await client.send("supervisor", "progress", "closed"), false);
+	} finally { client.close(); }
 });
 
 test("ask resolves when a replied frame with a matching askId arrives", async () => {

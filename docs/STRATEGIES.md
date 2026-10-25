@@ -80,6 +80,12 @@ Same-agent members are disambiguated in the live `f9` tree by a role hint (`revi
 `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`). If you touch either, keep
 the seeding loop and the SDK key derivation in lockstep, and inject any per-run protocol via the TASK
 text, never `role` (or the derived tree key drifts from the seeded one).
+The short hint is never used to recover a participant's model or effort. SDK lifecycle callbacks
+carry a frozen `AgentAttemptIdentity` beside that key, containing only the actual agent, full role,
+explicit model and requested thinking. This preserves distinct inline selections for repeated roles,
+auxiliary actors and custom strategies that invoke members in a different order. Recovery updates the
+same logical key with the new attempt's model; observed terminal metadata remains separate from the
+request. Tasks and result grants are excluded from this display identity.
 
 ## The built-in strategies
 

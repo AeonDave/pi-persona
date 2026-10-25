@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import piPersona, { type EngineFactories } from "../../src/extension.ts";
+import { AgentTree } from "../../src/ui/agent-tree.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
 import { emptyUsage } from "../../src/engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../../src/orchestration/sdk.ts";
@@ -183,25 +184,102 @@ test("inline role models and bare auxiliary assignments remain visible at their 
 	}
 });
 
-test("colliding role hints omit an uncertain display model while preserving each inline route", async () => {
+test("colliding and repeated role hints preserve each inline model and effort on its tree occurrence", async () => {
 	const h = await boot((_title, options) => options[0] ?? "");
+	const additions: Array<Parameters<AgentTree["add"]>[0]> = [];
+	const original = AgentTree.prototype.add;
+	const add = mock.method(AgentTree.prototype, "add", function (this: AgentTree, input: Parameters<AgentTree["add"]>[0]) {
+		additions.push({ ...input });
+		return original.call(this, input);
+	});
 	try {
 		const result = await convene(h, "colliding-role-hints", {
 			question: "review",
 			strategy: "fanout",
 			members: [
-				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for auth", model: "alpha/one" },
-				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for storage", model: "beta/two" },
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for auth", model: "alpha/one", thinking: "low" },
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for storage", model: "beta/two", thinking: "high" },
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for storage", model: "gamma/three", thinking: "xhigh" },
 			],
 		});
 		assert.notEqual(result.isError, true);
 
 		const reviewers = actorEvents(h, "reviewer");
-		assert.equal(reviewers.length, 2);
-		assert.ok(reviewers.every((entry) => entry.model === undefined), JSON.stringify(reviewers));
-		assert.ok(reviewers.every((entry) => !/ · (?:one|two)$/.test(entry.label)), JSON.stringify(reviewers));
-		assert.deepEqual(h.runs.map((run) => run.model).sort(), ["alpha/one", "beta/two"], "each distinct full role keeps its original inline engine model");
+		assert.equal(reviewers.length, 3);
+		assert.deepEqual(reviewers.map((entry) => entry.model).sort(), ["alpha/one", "beta/two", "gamma/three"], JSON.stringify(reviewers));
+		assert.deepEqual(h.runs.map((run) => run.model).sort(), ["alpha/one", "beta/two", "gamma/three"], "each occurrence keeps its original inline engine model");
+		assert.deepEqual(h.runs.map((run) => run.thinking).sort(), ["high", "low", "xhigh"]);
+		const firstRoot = [...new Set(additions.filter((input) => input.kind === "subagent").map((input) => input.parentId))][0];
+		assert.ok(firstRoot, "the first call has a tree root");
+		for (const [key, model, thinking] of [
+			["reviewer · SECURITY", "alpha/one", "low"],
+			["reviewer · SECURITY#2", "beta/two", "high"],
+			["reviewer · SECURITY#3", "gamma/three", "xhigh"],
+		] as const) {
+			const occurrence: Array<Parameters<AgentTree["add"]>[0]> = additions.filter((input: Parameters<AgentTree["add"]>[0]) => input.kind === "subagent" && input.parentId === firstRoot && input.id.endsWith(`/${key}`));
+			assert.equal(occurrence.length, 2, `${key} is seeded and re-added when live`);
+			assert.ok(occurrence.every((input) => input.model === model && input.thinking === thinking), `${key} shows its own inline model/effort in both frames: ${JSON.stringify(occurrence)}`);
+		}
+
+		const beforeReordered = h.runs.length;
+		const reordered = await convene(h, "colliding-role-hints-reordered", {
+			question: "review again",
+			strategy: "fanout",
+			members: [
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for storage", model: "beta/reordered", thinking: "medium" },
+				{ agent: "reviewer", role: "Focus ONLY on the SECURITY lens for auth", model: "alpha/reordered", thinking: "max" },
+			],
+		});
+		assert.notEqual(reordered.isError, true);
+		assert.deepEqual(h.runs.slice(beforeReordered).map((run) => run.model).sort(), ["alpha/reordered", "beta/reordered"]);
+		assert.deepEqual(h.runs.slice(beforeReordered).map((run) => run.thinking).sort(), ["max", "medium"]);
+		const roots = [...new Set(additions.filter((input) => input.kind === "subagent").map((input) => input.parentId))];
+		assert.equal(roots.length, 2);
+		for (const [key, model, thinking] of [
+			["reviewer · SECURITY", "beta/reordered", "medium"],
+			["reviewer · SECURITY#2", "alpha/reordered", "max"],
+		] as const) {
+			const occurrence: Array<Parameters<AgentTree["add"]>[0]> = additions.filter((input: Parameters<AgentTree["add"]>[0]) => input.kind === "subagent" && input.parentId === roots[1] && input.id.endsWith(`/${key}`));
+			assert.equal(occurrence.length, 2, `${key} is seeded and re-added in the reordered call`);
+			assert.ok(occurrence.every((input) => input.model === model && input.thinking === thinking), `${key} follows the reordered inline participant, not the prior call: ${JSON.stringify(occurrence)}`);
+		}
+		assert.deepEqual(actorEvents(h, "reviewer").map((entry) => entry.model).sort(), ["alpha/one", "alpha/reordered", "beta/reordered", "beta/two", "gamma/three"]);
 	} finally {
+		add.mock.restore();
 		await h.m.fire("session_shutdown", {}, h.ctx);
+	}
+});
+
+test("same-role auxiliary generator and critic keep distinct inline model/effort metadata", async () => {
+	const h = await boot((_title, options) => options[0] ?? "");
+	const additions: Array<Parameters<AgentTree["add"]>[0]> = [];
+	const original = AgentTree.prototype.add;
+	const add = mock.method(AgentTree.prototype, "add", function (this: AgentTree, input: Parameters<AgentTree["add"]>[0]) {
+		additions.push({ ...input });
+		return original.call(this, input);
+	});
+	try {
+		const result = await runCriticLoop(h, {
+			generator: { agent: "arbiter", role: SECURITY, model: "alpha/generator", thinking: "low" },
+			critic: { agent: "arbiter", role: SECURITY, model: "beta/critic", thinking: "xhigh" },
+			rounds: 1,
+		}) as { isError?: boolean; content?: Array<{ text?: string }> };
+		assert.notEqual(result.isError, true, JSON.stringify(result));
+		assert.deepEqual(h.runs.map((run) => [run.model, run.thinking]), [["alpha/generator", "low"], ["beta/critic", "xhigh"]]);
+		for (const [key, model, thinking] of [
+			["arbiter · SECURITY", "alpha/generator", "low"],
+			["arbiter · SECURITY#2", "beta/critic", "xhigh"],
+		] as const) {
+			const row = additions.filter((input) => input.kind === "subagent" && input.id.endsWith(`/${key}`));
+			assert.equal(row.length, 1, `${key} is an auxiliary live row, not a roster seed`);
+			assert.equal(row[0]?.model, model, `${key} shows its own inline model`);
+			assert.equal(row[0]?.thinking, thinking, `${key} shows its own requested effort`);
+		}
+		const events = actorEvents(h, "arbiter");
+		assert.equal(events.length, 2);
+		assert.deepEqual(events.map((event) => event.model), ["alpha/generator", "beta/critic"]);
+	} finally {
+		add.mock.restore();
+		await h.m.fire("session_shutdown", undefined, h.ctx);
 	}
 });

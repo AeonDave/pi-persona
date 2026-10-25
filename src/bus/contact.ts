@@ -21,7 +21,8 @@ import { Text } from "@earendil-works/pi-tui";
 
 import { compactInlineText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
-import type { InProcessBus, MsgKind } from "./inproc.ts";
+import type { MsgKind } from "./inproc.ts";
+import type { ContactTransport } from "./contact-transport.ts";
 
 const ContactParams = Type.Object({
 	kind: Type.Union([Type.Literal("progress"), Type.Literal("decision"), Type.Literal("interview")], {
@@ -94,7 +95,7 @@ function result(t: string, details: ContactDetails): { content: [{ type: "text";
  *  the supervisor is busy (a sync run holds the turn), so the question is posted one-way and
  *  returns unresolved. This prevents a sync delegate/council from deadlocking on a child ask. */
 export function makeContactSupervisorTool(
-	bus: InProcessBus,
+	bus: ContactTransport,
 	fromHandle: string,
 	supervisorHandle: string,
 	opts: { allowBlocking?: boolean } = {},
@@ -125,7 +126,8 @@ export function makeContactSupervisorTool(
 			const message = boundContactMessage(params.message);
 			if (kind === "progress") {
 				try {
-					const delivered = bus.send(fromHandle, supervisorHandle, message, "progress");
+					const delivered = await bus.send(fromHandle, supervisorHandle, message, "progress", signal);
+					if (signal?.aborted) return result("The progress update was cancelled; delivery could not be confirmed.", { kind, delivered: false, outcome: "cancelled" });
 					return result(
 						delivered ? "Progress reported to the supervisor." : "(no supervisor listening or progress delivery could not be confirmed; progress dropped)",
 						{ kind, delivered, outcome: delivered ? "reported" : "unavailable" },
@@ -140,13 +142,14 @@ export function makeContactSupervisorTool(
 			if (!allowBlocking) {
 				let delivered: boolean;
 				try {
-					delivered = bus.send(fromHandle, supervisorHandle, message, kind);
+					delivered = await bus.send(fromHandle, supervisorHandle, message, kind, signal);
 				} catch {
 					return result(
 						`The question could not be sent; no answer is possible in this path. ${unresolvedGuidance(kind)}`,
 						{ kind, delivered: false, outcome: "failed" },
 					);
 				}
+				if (signal?.aborted) return result(`The request was cancelled. ${unresolvedGuidance(kind)}`, { kind, delivered: false, outcome: "cancelled" });
 				const delivery = delivered ? "question sent one-way" : "question delivery could not be confirmed";
 				return result(
 					`The supervisor is busy right now; ${delivery}, and no answer is possible in this path. ${unresolvedGuidance(kind)}`,

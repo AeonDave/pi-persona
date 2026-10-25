@@ -19,6 +19,38 @@ const engineRejectingFor = (...bad: string[]): StrategyEngine => ({
 	},
 });
 
+test("SDK lifecycle carries frozen exact attempt identity through same-hint legs and model recovery", async () => {
+	const seen: Array<{ phase: string; key: string; identity: any }> = [];
+	const record = (phase: string, args: unknown[]): void => {
+		const identity = args[args.length - 1];
+		assert.ok(identity && typeof identity === "object", `${phase} includes the actual attempt identity`);
+		assert.equal(Object.isFrozen(identity), true);
+		assert.deepEqual(Object.keys(identity).sort(), ["agent", "model", "role", "thinking"]);
+		seen.push({ phase, key: args[args.length - 2] as string, identity });
+	};
+	const sdk = makeSDK({ engine: { run: async (spec, progress, _signal, steer) => {
+		progress?.({ output: "progress" });
+		steer?.(() => true);
+		return spec.model === "broken/model" ? { ...ok(spec.agent), ok: false, failureKind: "provider", modelUsed: spec.model }
+			: { ...ok(spec.agent), modelUsed: spec.model! };
+	} }, roster: { team: () => [] }, limits: LIMITS, sessionModel: "main/model",
+		onAgentStart: (...args: unknown[]) => record("start", args),
+		onAgentStatus: (...args: unknown[]) => record(String(args[1]), args),
+		onAgentProgress: (...args: unknown[]) => record("progress", args),
+		onAgentSteerable: (...args: unknown[]) => record("steer", args),
+		onAgentResult: (...args: unknown[]) => record("result", args),
+	});
+	await sdk.agent({ agent: "reviewer", role: "PI_PERSONA_RESULT_READER_TOKEN", model: "broken/model", thinking: "xhigh", task: "private task", resultRefs: ["private grant"] });
+	await sdk.agent({ agent: "reviewer", role: "HEAD", model: "inline/second", thinking: "low", task: "other task" });
+	const running = seen.filter((e) => e.phase === "running");
+	assert.deepEqual(running.map((e) => [e.identity.role, e.identity.model, e.identity.thinking]), [
+		["PI_PERSONA_RESULT_READER_TOKEN", "broken/model", "xhigh"], ["PI_PERSONA_RESULT_READER_TOKEN", "main/model", "xhigh"], ["HEAD", "inline/second", "low"],
+	]);
+	assert.equal(running[0]!.key, running[1]!.key, "recovery repairs the same logical node");
+	assert.notEqual(running[1]!.key, running[2]!.key, "different occurrences remain distinct despite the same neutral hint");
+	assert.equal(seen.find((e) => e.phase === "result")!.identity, running[1]!.identity, "terminal capture names the last attempt");
+});
+
 // The per-leg vs. run-fatal boundary: an engine rejection is THIS leg's failure (the fan-out keeps
 // its siblings' completed work), while a run-scoped limit breach still stops the whole run.
 
