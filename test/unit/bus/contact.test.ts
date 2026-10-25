@@ -6,6 +6,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 
 import { InProcessBus, type MsgKind } from "../../../src/bus/inproc.ts";
 import { makeContactSupervisorTool } from "../../../src/bus/contact.ts";
+import type { ContactTransport } from "../../../src/bus/contact-transport.ts";
 
 // The tool's execute(toolCallId, params, signal, onUpdate, ctx) — ctx is unused by this
 // tool, so the unit test passes a stub. The bus is the real (pure) InProcessBus.
@@ -137,6 +138,67 @@ test("contact_supervisor progress_update sends a one-way message and returns imm
 	assert.equal(inbox[0]?.text, "read 3 of 6 files");
 });
 
+test("contact_supervisor does not call a false progress receipt proof that the message was dropped", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const transport: ContactTransport = {
+		async send(from, to, text, kind = "progress") {
+			assert.equal(bus.send(from, to, text, kind), true, "the real bus admitted the update before the receipt was lost");
+			return false;
+		},
+		ask: bus.ask.bind(bus),
+	};
+	const tool = makeContactSupervisorTool(transport, "scout", "supervisor");
+	const r = await tool.execute("t1b", { kind: "progress", message: "finished compile" }, undefined, undefined, CTX);
+	assert.equal(details(r).delivered, false, "a false receipt cannot confirm delivery");
+	assert.equal(details(r).outcome, "unavailable");
+	assert.equal(textOf(r), "Progress delivery could not be confirmed. The supervisor may already have received the update.");
+	assert.doesNotMatch(textOf(r), /dropped|not sent|not delivered/i, "the false receipt cannot prove the bus rejected the update");
+	assert.deepEqual(bus.take("supervisor").map(({ from, kind, text }) => ({ from, kind, text })), [
+		{ from: "scout", kind: "progress", text: "finished compile" },
+	]);
+});
+
+test("contact_supervisor does not call an observer failure proof that an admitted progress update was not sent", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.onMessage(() => { throw new Error("observer failed after admission"); });
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
+	const r = await tool.execute("t1c", { kind: "progress", message: "published report" }, undefined, undefined, CTX);
+	assert.equal(details(r).delivered, false);
+	assert.equal(details(r).outcome, "failed");
+	assert.equal(textOf(r), "Progress delivery could not be confirmed. The supervisor may already have received the update.");
+	assert.doesNotMatch(textOf(r), /could not be sent|not sent|dropped/i);
+	assert.deepEqual(bus.take("supervisor").map(({ from, kind, text }) => ({ from, kind, text })), [
+		{ from: "scout", kind: "progress", text: "published report" },
+	]);
+});
+
+test("contact_supervisor sync questions keep unresolved guidance when an admitted send observer throws", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.onMessage(() => { throw new Error("observer failed after admission"); });
+	const tool = makeContactSupervisorTool(bus, "scout", "supervisor", { allowBlocking: false });
+	for (const kind of ["decision", "interview"] as const) {
+		const message = kind === "decision" ? "choose strategy" : "clarify acceptance";
+		const r = await tool.execute(`t-sync-${kind}`, { kind, message }, undefined, undefined, CTX);
+		const text = textOf(r);
+		assert.equal(details(r).delivered, false);
+		assert.equal(details(r).outcome, "failed");
+		assert.match(text, /delivery of the question could not be confirmed/i);
+		assert.match(text, /supervisor may already have received/i);
+		assert.match(text, /no answer is possible in this path/i);
+		assert.match(text, /remains unresolved/i);
+		assert.match(text, /independent work already authorized/i);
+		assert.match(text, /blocked\/partial/i);
+		assert.doesNotMatch(text, /could not be sent|not sent|dropped/i);
+	}
+	assert.deepEqual(bus.take("supervisor").map(({ from, kind, text, expectsReply }) => ({ from, kind, text, expectsReply })), [
+		{ from: "scout", kind: "decision", text: "choose strategy", expectsReply: false },
+		{ from: "scout", kind: "interview", text: "clarify acceptance", expectsReply: false },
+	]);
+});
+
 test("contact_supervisor need_decision blocks until the supervisor replies, returning the answer", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");
@@ -221,7 +283,7 @@ test("contact_supervisor reports a progress delivery failure as unavailable", as
 	const tool = makeContactSupervisorTool(bus, "scout", "supervisor");
 	const r = await tool.execute("t4", { kind: "progress", message: "fyi" }, undefined, undefined, CTX);
 	const text = textOf(r);
-	assert.match(text, /no supervisor|not listening|dropped/i);
+	assert.equal(text, "Progress delivery could not be confirmed. The supervisor may already have received the update.");
 	assert.equal(details(r).outcome, "unavailable");
 	assert.equal(details(r).delivered, false);
 });
@@ -231,6 +293,8 @@ test("contact_supervisor reports a thrown progress send as failed without exposi
 	const r = await tool.execute("t4b", { kind: "progress", message: "fyi" }, undefined, undefined, CTX);
 	assert.equal(details(r).outcome, "failed");
 	assert.equal(details(r).delivered, false);
+	assert.equal(textOf(r), "Progress delivery could not be confirmed. The supervisor may already have received the update.");
+	assert.doesNotMatch(textOf(r), /could not be sent|not sent|dropped/i);
 	assert.doesNotMatch(textOf(r), /secret synchronous send failure/i);
 });
 

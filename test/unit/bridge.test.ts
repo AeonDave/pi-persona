@@ -306,7 +306,7 @@ test("contact_supervisor degrades cleanly (no hang, no crash) when the broker ne
 	const r = await tool.execute("t1", { kind: "progress", message: "fyi" }, undefined, undefined, FAKE_CTX);
 	assert.equal(fake.sends.length, 0, "never written to a broker that has not registered yet");
 	const text = r.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
-	assert.match(text, /no supervisor|not listening|dropped/i);
+	assert.equal(text, "Progress delivery could not be confirmed. The supervisor may already have received the update.");
 });
 
 test("contact_peer's first list awaits and coalesces the broker roster refresh", async () => {
@@ -361,5 +361,5 @@ test("after the broker connection drops, the bridge marks the bus offline and pr
 	const tool = pi.tool("contact_supervisor")!;
 	const r = await tool.execute("t1", { kind: "progress", message: "halfway" }, undefined, undefined, ctx);
 	const text = r.content.map((c: { type: string; text?: string }) => (c.type === "text" ? c.text : "")).join("");
-	assert.match(text, /no supervisor listening|dropped/i);
+	assert.equal(text, "Progress delivery could not be confirmed. The supervisor may already have received the update.");
 });

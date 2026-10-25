@@ -199,3 +199,37 @@ contact trial completed in 27.5 seconds with one successful leg and terminal rec
 broker tests, rather than the supervisor's prose, prove delivery admission. Logs and telemetry
 evidence are in `C:/Users/novad/AppData/Local/Temp/pi-persona-tree-metadata-UL8nKA/`.
 These are focused live checks, not an exhaustive terminal/theme or long-duration stress test.
+
+## Critical follow-up on the remaining observations
+
+The independent recheck of `5bb691b` confirmed the five fixes. Its three optional observations
+were then checked against their reachable inputs, rather than accepted solely as "non-blocking":
+
+- The occurrence/index join belongs to the launch snapshot, not the picker. A malformed internal
+  roster could misalign it, but runtime members are rejected by `parseMembersBlock` before the
+  snapshot, and named teams are normalized by `parseTeams` before either projection. No supported
+  input reproduced the claimed shift. Auxiliary rows do not advance the roster index.
+- The second assignment lookup repeats the first only when no role exists. For a role without
+  its own assignment it supplies the required agent assignment fallback. Removing it would be a
+  regression; it is not dead code.
+- The exact identity-key assertion is an intentional allowlist that excludes tasks, grants and
+  result references from lifecycle metadata. A future added field should require explicit review.
+
+One additional defect was reproduced: the progress text concluded "progress dropped" after an
+unconfirmed broker send, although the host may already have admitted the message. The exception
+paths likewise said a message could not be sent even when an observer threw after inbox insertion.
+These three messages now report uncertainty. Wire fields, delivery booleans and unresolved-decision
+guidance are unchanged. Regressions prove real inbox admission with an unconfirmed receipt and with
+a throwing observer; they also retain the no-answer/authorized-independent-work boundary for both
+decision and interview requests. Tests failed before the text correction.
+
+Luna xhigh implemented the small correction; Sol 6.1 independently reviewed its semantics.
+Node 22.23.3 full suite: **2,902 tests; 2,900 passed, two accepted Windows skips, zero failures or
+cancellations**, in 46.093 seconds. Typecheck passes. The log is
+`C:/Users/novad/AppData/Local/Temp/pi-persona-tree-metadata-UL8nKA/unconfirmed-delivery-suite.log`.
+This follow-up changes receipt wording only; the preceding installed-artifact hash describes the
+earlier candidate, not these updated source bytes. No package publication is represented here.
+
+The evidence supports the corrected contracts and tested scenarios. It does not establish flawless
+UX across every terminal/theme, long-running swarm reliability, or comparative superiority over
+another orchestration package. Those broader product claims remain unproven.
