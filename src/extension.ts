@@ -38,6 +38,7 @@ import {
 } from "./core/seed.ts";
 import { type BriefFlow, buildDelegationBrief } from "./core/brief.ts";
 import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
+import { isAllowed } from "./core/permissions.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
 import { DelegationNudge, orderByMention, PersistenceNudge, PollGuard, renderNudgeModels, renderNudgeRoster } from "./core/nudge.ts";
@@ -49,6 +50,10 @@ import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
 import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type EngineFactories } from "./extension/engine.ts";
 import { installHooks, type HookHost } from "./extension/hooks.ts";
+import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
+import { installMemoryOwner } from "./extension/memory-owner.ts";
+import { installMindWorker } from "./extension/mind-worker.ts";
+import { inheritedMemoryPersona, MEMORY_PERSONA_ENV } from "./core/companion.ts";
 import {
 	canDeliverPersonaNotification,
 	compactNameList,
@@ -146,7 +151,7 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isWakeSource, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isNonAgentNode, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
 import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs, type ModelPickerMetadata } from "./ui/model-picker.ts";
@@ -265,7 +270,7 @@ export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?:
 	}
 	let count = 0;
 	for (const node of nodes) {
-		if (node.status === "running" && node.kind !== "delegate" && !isWakeSource(node) && !parents.has(node.id)) count++;
+		if (node.status === "running" && node.kind !== "delegate" && !isNonAgentNode(node) && !parents.has(node.id)) count++;
 	}
 	return count;
 }
@@ -313,14 +318,27 @@ export interface PiPersonaOptions {
 }
 
 export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = {}): void {
+	// Loaded-extension capabilities must be discoverable even in a real delegated leg. This is a
+	// local host contract, not settings/file inference; disabled supervisors explicitly deny use.
+	const bridgeMode = isBridgeMode();
+	const role = bridgeMode || process.env.PI_PERSONA_LEG === "1" ? "leg" : resolveConfig(process.env).disabled ? "disabled" : "supervisor";
+	installCompanionPresence(pi, role);
+	if (role === "leg") {
+		const inherited = inheritedMemoryPersona(process.env[MEMORY_PERSONA_ENV]);
+		if (inherited !== undefined) {
+			const owner = installMemoryOwner(pi, () => inherited.persona);
+			pi.on("session_start", (_event, ctx) => owner.start(ctx.sessionManager)());
+			pi.on("session_shutdown", () => owner.stop());
+		}
+	}
 	// Cross-process broker (v0.5, spec B3): a child spawned with `PI_PERSONA_BUS` set is a
 	// broker-connected sub-agent, not a supervisor — load ONLY the bridge (comm-plane tools +
 	// inbound follow-ups) and skip the entire persona/delegate/orchestration surface. Checked
-	// before anything else (even config resolution) so bridge mode can never be shadowed by
+	// after the lean companion responders and before the main disabled guard, so it cannot be shadowed by
 	// the fork-bomb guard's `PI_PERSONA_DISABLE=1` short-circuit below, or by any other early
 	// return. `PI_PERSONA_BUS` unset (the default, and every existing test) ⇒ this branch never
 	// runs — zero behavior change.
-	if (isBridgeMode()) {
+	if (bridgeMode) {
 		pi.on("session_start", (_event, ctx) => installBridge(pi, ctx));
 		return;
 	}
@@ -571,6 +589,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// The unified live tree of every in-flight agent — strategy cores, delegate
 	// sub-agents, dynamic specialists — rendered as one sticky widget above the input.
 	const agentTree = new AgentTree();
+	const companionActivities = installActivityIngress(pi, agentTree);
+	const memoryOwner = installMemoryOwner(pi, () => controller.activePersona?.name ?? null);
 	const wakeRows = new WakeRows();
 	// Explicit telemetry is the public observability seam consumed by pi-persona-flow. It is
 	// session-scoped and starts only after persona + exocom reconciliation in session_start.
@@ -663,7 +683,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (!producer) return;
 		// Wake rows (timers, monitors) are not agents, and their labels are free text the telemetry
 		// contract never persists: they stay on the local widget and never reach the bus.
-		if ((change.type === "added" || change.type === "updated") && isWakeSource(change.node)) return;
+		if ((change.type === "added" || change.type === "updated") && isNonAgentNode(change.node)) return;
 		if (change.type === "added") {
 			lastAgentProjection.set(change.node.id, JSON.stringify(telemetryAgent(change.node)));
 			producer.publishAgentAdded(telemetryAgent(change.node));
@@ -674,13 +694,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			return;
 		}
 		if (change.type === "removed") {
-			for (const node of change.nodes.filter((n) => !isWakeSource(n))) {
+			for (const node of change.nodes.filter((n) => !isNonAgentNode(n))) {
 				lastAgentProjection.delete(node.id);
 				const status = node.status === "running" ? "stopped" : telemetryStatus(node);
 				producer.publish("agent.removed", { id: node.id, status });
 			}
 			return;
 		}
+		if (change.nodes.every(isNonAgentNode)) return;
 		lastAgentProjection.clear();
 		producer.publish("agent.cleared", {});
 	}
@@ -770,7 +791,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	/** The "N agents" status answers how many agents are working, so a tree holding only wake rows
 	 *  (timers, monitors) publishes none, while the widget lines still show them. */
 	function agentCountStatus(nodes: readonly AgentNode[]): string | undefined {
-		const agents = nodes.filter((node) => !isWakeSource(node));
+		const agents = nodes.filter((node) => !isNonAgentNode(node));
 		return agents.length === 0 ? undefined : String(inFlightAgentCount(agents));
 	}
 	function renderAgentWidget(): void {
@@ -925,6 +946,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	};
 	const persist = (name: string | undefined): void => {
+		// An explicit selection revokes the old companion scope even when persistence is off.
+		// Worker runs keep their frozen owners; only the local activity projection is reset.
+		if (!disposed && lastCtx) companionActivities.start(lastCtx);
 		if (!config.persist) return;
 		try {
 			savedSettings = patchPersonaSettings(settingsFile, { lastPersona: name ?? null });
@@ -1104,6 +1128,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 		},
 		setStatus: (text) => {
+			if (!disposed) memoryOwner.changed();
 			try {
 				lastCtx?.ui.setStatus("persona", text === undefined ? undefined : compactInlineText(text, { maxChars: 80 }));
 			} catch {
@@ -1312,7 +1337,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		announceAsyncRunSettlement(
 			run,
 			lastCtx ? (message, level) => lastCtx?.ui.notify(message, level) : undefined,
-			(settled) => completionNotifier.notify(settled),
+			(settled) => { if (settled.delivery !== "companion") completionNotifier.notify(settled); },
 			lastCtx?.hasUI && lastCtx.mode === "tui" ? (failed) => {
 				const model = failed.result?.modelUsed ?? failed.model;
 				const durationMs = failed.startedAt !== undefined && failed.settledAt !== undefined
@@ -2326,6 +2351,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	const hookHost: HookHost = {
+		companionActivities,
+		memoryOwner,
 		identity,
 		results,
 		get config() { return config; },
@@ -2411,6 +2438,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// ONE launch pool for every background run: a delegate leg, a `council` and a `flow` each take a slot
 	// (maxConcurrency). The strategy SDK's own per-run semaphore gates the legs INSIDE a council or flow.
 	const launchPool = new Semaphore(RUN_LIMITS.maxConcurrency);
+	installMindWorker(pi, {
+		context: () => disposed ? undefined : lastCtx,
+		canLaunch: () => {
+			const caps = controller.capabilities;
+			if (caps && (!canFanOut(caps) || !canCallTool(caps, "memory"))) return "persona denies memory or delegation tools";
+			return isAllowed("mind", controller.activePersona?.delegate, config.delegateDefaultAllow) || "persona denies delegation to mind; the delegate target rules must allow mind";
+		},
+		tracker, tree: agentTree, slots: launchPool, stopRegistry, steerRegistry, buildEngine, startPeek,
+	});
 	const backgroundRuns = createBackgroundRuns({
 		tracker,
 		agentTree,

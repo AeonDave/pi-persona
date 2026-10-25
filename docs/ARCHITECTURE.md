@@ -511,8 +511,9 @@ never simultaneously a telemetry event, a routed message, and a UI source of tru
   usage`). Feeds derived UI; never routed as an agent message.
 - **Bus Msg** — semantic agent↔agent communication (`progress · decision · interview`, and sibling
   peer sends). `src/bus`. `progress_update` is a Bus message only, not an EngineEvent.
-- **ProgressView** — a derived, read-only UI view computed *from* EngineEvents. Never authored, never
-  a source of truth. The `f9` agent tree and `peek` digest are ProgressViews.
+- **ProgressView** — a derived, read-only UI view computed from observed runtime lifecycles:
+  EngineEvents, wake-source lifecycles, or the bounded local companion lifecycle below. Never a
+  source of truth. The `f9` agent tree and `peek` digest are ProgressViews.
 
 Steering is a supervisor-to-child control action, distinct from semantic Bus messages; requesting
 steering does not establish that a blocking headless delegate call has been interrupted. The peek digest is
@@ -521,6 +522,69 @@ always a read-only ProgressView.
 External telemetry is not a fourth communication plane: it is a generic observer/export contract that
 future plugins may consume or produce, not an exclusive pi-persona protocol. It observes projected
 events and cannot route, reply, steer, or otherwise control agents.
+
+### Loaded companions and local activity
+
+The local EventBus request `pi-persona:companion:v1` accepts `{ version: 1, respond }` and calls
+`respond` synchronously with `{ version: 1, provider: "pi-persona", role, capabilities }`.
+`role` is `supervisor`, `leg`, or `disabled`; `capabilities.memory` is `1` for a loaded supervisor or
+delegated leg and `false` for a disabled supervisor. `capabilities.activity` is `1` only for an enabled
+supervisor. Persona registers this responder before its bridge and disable guards. Pi owns the
+subscription lifetime and revokes it on disposal/reload. Companions query the loaded extension;
+settings files, package installation, and environment flags cannot establish its presence. This is
+a cooperative local extension contract, not authentication or an OS permission boundary. The
+contract is available from Persona 1.17.5, paired with Mind 0.8.4 or later; qualify both together.
+
+Memory ownership is queried through `pi-persona:memory-owner:v1` with
+`{ version: 1, sessionId, respond }`. Its synchronous response is
+`{ version: 1, provider: "pi-persona", sessionId, ready, persona }`, where `persona` is the actual
+live selection or `null` for Persona off. The native manager/id/file must still match, and `ready`
+remains false until Persona's session startup finishes. `pi-persona:memory-owner-changed:v1`
+broadcasts that same descriptor on readiness, selection and shutdown. A companion loaded first
+must not wait inside its startup hook for a later extension's hook; it can activate on the readiness
+broadcast or its next fresh query. Canonical settings retain startup preferences, not live ownership:
+`persist: false` selections still change this descriptor. Unavailable ownership never authorizes a
+fallback to another persona's saved selection.
+
+Each engine freezes the parent's memory persona when it is built. In-process children receive a
+private ResourceLoader factory and their own native manager/EventBus responder; child processes
+receive the versioned `PI_PERSONA_MEMORY_PERSONA` record only in that spawn's environment. Inherited
+values are scrubbed before spawning. Neither route mutates a shared process-wide persona value.
+Delegated legs expose this frozen owner while retaining their lean memory-only role, including an
+explicit `null` owner when the parent had Persona off.
+
+`pi-persona:activity:v1` contributes operator-only local-work rows through a closed record:
+`{ version: 1, producerId: "pi-persona-mind", activityId, sessionId, phase, state, target }`.
+`phase` is `inspect|stage|apply`, `state` is `running|staged|done|failed`, and `target` is
+`project|persona|shared`; `staged` is valid only for `stage`. No memory text, paths, models, token
+counts, or free-form output are accepted. Ingress matches the active native session and checks its
+manager's current id/file. The producer also captures its native owner and scope across awaits.
+The resulting `Mind` row uses `kind: "activity"`: it has no agent count, steer/stop handle, wake,
+stall badge, or `agent.*` telemetry. The F9 drill-in explains the local phase. Up to eight rows are
+retained, with completed/staged rows evicted before live work; teardown and explicit persona
+selection revoke old rows without cancelling workers. A staged row states that a proposal was
+prepared and requires explicit apply; it does not claim that the plan remains valid indefinitely or
+that model review is running.
+Receipts remain in Mind's session-native cards; local activity events are not replayed on restart.
+
+Mind may request one real async maintenance worker through `pi-persona:mind-worker:v1` with
+the closed record `{ version: 1, sessionId, persona, task, respond }` (task at most 48,000 characters).
+Persona checks the current native session and ready memory owner, actual persona, delegation and
+memory permissions, the persona's raw delegate target rules for `mind`, and idle/no-pending-message
+state. A strict target allowlist must include `mind`; explicit memory/delegate/target denies win.
+No installed agent is required. Accepted
+responses are synchronous `{ ok: true, runId, model, thinking, completion, cancel }`; rejection is
+`{ ok: false, reason }`. `completion` resolves with `{ ok, output, error?, resultRef?, model?, thinking? }`.
+Output remains untrusted data for Mind's bounded proposal parser, never executable code.
+
+This is an ordinary tracked `Mind` sub-agent in the tree and F9, sharing the launch pool, usage,
+progress, stop/steer controls and terminal-result archive. Its private definition has an explicit empty
+tool allowlist and no worker spine. Provider/model and thinking are pinned to the accepting session;
+provider fallback is disabled. The worker has a 180-second cancellation ceiling; owner readiness or
+selection changes cancel it. Mind can also cancel through its accepted handle. Settlement returns
+to the requesting companion and retains operator failure reporting, but never wakes a supervisor
+model turn. Native session teardown cancels it through the ordinary stop registry. Local inspect,
+stage and apply operations continue to use activity rows; model work uses the real agent view.
 
 ## The comm plane in practice
 

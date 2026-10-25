@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEventBus, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
@@ -19,7 +19,7 @@ function makeMockPi(initialActive: string[]) {
 	const pi = {
 		on: (event: string, handler: AnyFn) => { hooks[event] = handler; },
 		registerTool: (definition: { name: string }) => { tools[definition.name] = definition; },
-		events: { emit: () => {} },
+		events: createEventBus(),
 		registerMessageRenderer: () => {},
 		registerEntryRenderer: () => {},
 		appendEntry: () => {},

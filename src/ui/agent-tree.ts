@@ -15,7 +15,7 @@ import { formatUsage } from "./usage.ts";
  */
 
 export type AgentNodeStatus = "running" | "done" | "failed" | "stopped";
-export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase" | "monitor" | "timer";
+export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase" | "monitor" | "timer" | "activity";
 
 export interface AgentNode {
 	id: string;
@@ -78,10 +78,16 @@ export function isWakeSource(node: Pick<AgentNode, "kind">): boolean {
 	return node.kind === "monitor" || node.kind === "timer";
 }
 
+/** Local companion work shares the view but is neither an agent nor a wake source. */
+export function isNonAgentNode(node: Pick<AgentNode, "kind">): boolean {
+	return isWakeSource(node) || node.kind === "activity";
+}
+
 /** The kind-aware glyph shared by every surface (tree, overlay): a running timer is ⏰, a running
  *  monitor ◉; everything else, settled wake rows included, uses the ordinary status glyph. */
 export function nodeGlyph(node: Pick<AgentNode, "status" | "kind">): string {
 	if (node.status === "running") {
+		if (node.kind === "activity") return "◈";
 		if (node.kind === "timer") return "⏰";
 		if (node.kind === "monitor") return "◉";
 	}
@@ -136,6 +142,7 @@ export function isQueuedMarker(detail: string | undefined): boolean {
 export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail" | "kind" | "dueAt">, now: number, stallMs: number, waitingForSupervisor = false): string | undefined {
 	if (node.status !== "running" || node.startedAt === undefined) return undefined;
 	if (isQueuedMarker(node.detail)) return undefined;
+	if (node.kind === "activity") return formatDuration(now - node.startedAt);
 	if (waitingForSupervisor) return "waiting for supervisor";
 	if (node.dueAt !== undefined) {
 		const left = node.dueAt - now;
@@ -236,6 +243,8 @@ function wakeDigestLine(hidden: readonly AgentNode[], now: number | undefined): 
 	const monitors = hidden.filter((node) => node.kind === "monitor").length;
 	const timers = hidden.filter((node) => node.kind === "timer").length;
 	const parts: string[] = [];
+	const activities = hidden.filter((node) => node.kind === "activity");
+	if (activities.length > 0) parts.push(`◈ Mind · ${safeInline(activities[activities.length - 1]!.detail ?? "local memory work")}`);
 	if (monitors > 0) parts.push(`${nodeGlyph({ status: "running", kind: "monitor" })} ${monitors} monitor${monitors === 1 ? "" : "s"}`);
 	if (timers > 0) parts.push(`${nodeGlyph({ status: "running", kind: "timer" })} ${timers} timer${timers === 1 ? "" : "s"}`);
 	if (now !== undefined) {
@@ -277,7 +286,7 @@ export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: Re
 	// same parent→children order, so a row's flat index doubles as its position in the rendered list.
 	const flat = flattenTree(nodes);
 	const hiddenWake = (from: number): AgentNode[] =>
-		flat.slice(from).map((row) => row.node).filter((node) => isWakeSource(node) && node.status === "running");
+		flat.slice(from).map((row) => row.node).filter((node) => node.kind === "activity" || (isWakeSource(node) && node.status === "running"));
 	let visibleCount = Math.max(0, limit - (failureLine !== undefined ? 2 : 1));
 	let hidden = hiddenWake(visibleCount);
 	if (hidden.length > 0) {

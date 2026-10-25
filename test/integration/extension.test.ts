@@ -14,6 +14,8 @@ initTheme("dark", false);
 import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { sanitizeTerminalText } from "../../src/ui/presentation.ts";
 import { AgentTree } from "../../src/ui/agent-tree.ts";
+import { ACTIVITY_EVENT, COMPANION_EVENT, MEMORY_OWNER_EVENT, type CompanionPresence, type CompanionMemoryOwner } from "../../src/core/companion.ts";
+import { MIND_WORKER_EVENT, type MindWorkerResponse } from "../../src/extension/mind-worker.ts";
 import { WakeRows } from "../../src/ui/wake-rows.ts";
 import type { MonitorEvent, MonitorOutput } from "../../src/core/monitor.ts";
 import piPersona, {
@@ -1001,7 +1003,8 @@ test("telemetry diagnostics remain visible and non-fatal with debug disabled", a
 	const previous = process.env.PI_PERSONA_DEBUG;
 	delete process.env.PI_PERSONA_DEBUG;
 	const m = makeMockPi();
-	(m.pi as unknown as { events: { emit: () => void } }).events = { emit: () => { throw new Error("diagnostic-sentinel\u001b[2J"); } };
+	const originalEvents = m.pi.events;
+	(m.pi as unknown as { events: unknown }).events = { ...originalEvents, emit: () => { throw new Error("diagnostic-sentinel\u001b[2J"); } };
 	piPersona(m.pi);
 	const cwd = tempDir("pi-persona-telemetry-diagnostics-");
 	const { ctx: base, notes } = makeCtx(cwd);
@@ -2075,6 +2078,70 @@ test("TUI delegate failure persists an expandable human cause without duplicatin
 		assert.equal(wakes.length, 1, "an operator card must not add another supervisor turn");
 		assert.ok(JSON.stringify(wakes[0]!.message).includes("not supported when using Codex"), "the model still receives the semantic failure");
 	} finally { await m.fire("session_shutdown", undefined, ctx); }
+});
+
+test("Mind's companion worker uses the normal engine and archive without waking the supervisor", async () => {
+	const m = makeMockPi();
+	const specs: AgentRunSpec[] = [];
+	piPersona(m.pi, { engineFactories: {
+		makeInProcessEngine: (deps) => {
+			assert.equal(deps.resolveAgent("mind")?.source, "internal:pi-persona-mind");
+			assert.deepEqual(deps.resolveAgent("mind")?.tools, []);
+			assert.deepEqual(deps.resolveAgent("mind")?.excludeTools, ["*"]);
+			assert.equal(deps.canUseBus, false);
+			assert.equal(deps.resolveAgent("mind")?.spine, false);
+			return { run: async (spec) => {
+				specs.push(spec);
+				return { agent: spec.agent, ok: true, output: '{"operations":[]}', modelUsed: spec.model!, thinkingEffective: "max", usage: emptyUsage() };
+			} };
+		},
+		makeEngine: () => { throw new Error("unexpected child engine"); },
+	} });
+	const { ctx: base } = makeCtx(tempDir("pi-persona-mind-worker-"), { hasUI: true });
+	const ctx = { ...base, thinkingLevel: "max", model: { provider: "native", id: "current" } };
+	try {
+		await m.fire("session_start", undefined, ctx);
+		let response: MindWorkerResponse | undefined;
+		m.pi.events.emit(MIND_WORKER_EVENT, { version: 1, sessionId: ctx.sessionManager.getSessionId(), persona: null, task: "Return JSON consolidation operations", respond: (value: MindWorkerResponse) => { response = value; } });
+		assert.equal(response?.ok, true, JSON.stringify(response));
+		if (!response?.ok) return;
+		const result = await response.completion;
+		assert.equal(result.ok, true);
+		assert.equal(result.output, '{"operations":[]}');
+		assert.match(result.resultRef ?? "", /^result:/);
+		assert.equal(specs[0]?.model, "native/current");
+		assert.equal(specs[0]?.thinking, "max");
+		assert.deepEqual(specs[0]?.tools, []);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		assert.equal(m.sentMessages().filter((sent) => (sent.options as { triggerTurn?: boolean })?.triggerTurn).length, 0);
+		const tool = m.tool("intercom") as { execute: AnyFn };
+		const archived = await tool.execute("mind-report", { action: "result", ref: result.resultRef }, undefined, undefined, ctx);
+		assert.match(JSON.stringify(archived), /operations/);
+	} finally { await m.fire("session_shutdown", undefined, ctx); }
+});
+
+test("Mind's internal worker honors memory, delegate-tool and delegate-target permissions", async () => {
+	for (const rule of ["delegate:\n  deny: [mind]", "delegate:\n  allow: [scout]", "tools:\n  deny: [memory]", "tools:\n  deny: [delegate]"]) {
+		const cwd = tempDir("pi-persona-mind-denied-");
+		fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, ".pi", "agents", "restricted.md"), `---\nname: restricted\npersona: true\n${rule}\n---\nRestricted supervisor.`);
+		const m = makeMockPi();
+		let calls = 0;
+		piPersona(m.pi, { engineFactories: {
+			makeInProcessEngine: () => { calls++; throw new Error("denied worker reached the engine"); },
+			makeEngine: () => { calls++; throw new Error("denied worker reached the engine"); },
+		} });
+		const ctx = { ...makeCtx(cwd, { hasUI: true }).ctx, thinkingLevel: "max", model: { provider: "native", id: "current" } };
+		try {
+			await m.fire("session_start", undefined, ctx);
+			await m.cmd("persona", "restricted", ctx);
+			let response: MindWorkerResponse | undefined;
+			m.pi.events.emit(MIND_WORKER_EVENT, { version: 1, sessionId: ctx.sessionManager.getSessionId(), persona: "restricted", task: "Return consolidation JSON", respond: (value: MindWorkerResponse) => { response = value; } });
+			assert.equal(response?.ok, false, rule);
+			if (response && !response.ok) assert.match(response.reason, /denies/);
+			assert.equal(calls, 0);
+		} finally { await m.fire("session_shutdown", undefined, ctx); }
+	}
 });
 
 test("an explicit stop enqueues one terminal completion with no duplicate banner", () => {
@@ -10382,4 +10449,49 @@ test("session_shutdown with many armed wake sources clears the widget once inste
 		assert.ok(during.length <= 1, `shutdown clears the widget once, not once per cancelled row: ${JSON.stringify(during)}`);
 		assert.equal(widgets["persona-agents"], undefined, "the widget ends cleared");
 	} finally { if (!shutDown) await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("loaded supervisor exposes companion capabilities and Mind activity shares the widget without agent telemetry or wakes", async () => {
+	const cwd = tempDir("pi-persona-companion-widget-");
+	const m = makeMockPi(); piPersona(m.pi);
+	let presence: CompanionPresence | undefined;
+	m.pi.events.emit(COMPANION_EVENT, { version: 1, respond: (value: CompanionPresence) => { presence = value; } });
+	assert.equal(presence?.role, "supervisor");
+	assert.deepEqual(presence?.capabilities, { memory: 1, activity: 1 });
+	const { ctx, widgets, statuses } = wakeWidgetCtx(cwd, 80);
+	const currentOwner = (): CompanionMemoryOwner | undefined => {
+		let result: CompanionMemoryOwner | undefined;
+		m.pi.events.emit(MEMORY_OWNER_EVENT, { version: 1, sessionId: ctx.sessionManager.getSessionId(), respond: (value: CompanionMemoryOwner) => { result = value; } });
+		return result;
+	};
+	assert.equal(currentOwner()?.ready, false);
+	const event = { version: 1, producerId: "pi-persona-mind", activityId: "local-inspection", sessionId: ctx.sessionManager.getSessionId(), phase: "inspect", state: "running", target: "project" };
+	try {
+		await m.fire("session_start", {}, ctx);
+		assert.equal(currentOwner()?.ready, true);
+		m.pi.events.emit(ACTIVITY_EVENT, { ...event, sessionId: "foreign-session" });
+		assert.equal(widgets["persona-agents"], undefined);
+		m.pi.events.emit(ACTIVITY_EVENT, event);
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => /Mind.*inspecting/.test(line)) === true, "Mind local work in the real widget");
+		assert.ok(statuses.every((status) => status === undefined), "local activity never contributes to N agents");
+		m.pi.events.emit(ACTIVITY_EVENT, { ...event, state: "done" });
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => /inspection complete/.test(line)) === true, "honest completion retained in widget");
+		m.pi.events.emit(ACTIVITY_EVENT, { ...event, activityId: "old-persona-work" });
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => /inspecting/.test(line)) === true, "old persona local work");
+		const settingsPath = path.join(PERSONA_DIR, "settings.json");
+		const saved = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8") : undefined;
+		await m.cmd("persona", "researcher", ctx);
+		assert.equal(currentOwner()?.persona, "researcher", "live owner follows a persist=off selection");
+		assert.equal(fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8") : undefined, saved, "selection was not inferred from a saved-marker write");
+		await waitUntil(() => widgets["persona-agents"] === undefined, "explicit persona selection revokes old Mind projection");
+		m.pi.events.emit(ACTIVITY_EVENT, { ...event, activityId: "new-persona-work" });
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => /inspecting/.test(line)) === true, "new scope can contribute local work");
+		assert.equal(m.sentMessages().length, 0, "activity is display-only, never a wake");
+		await m.fire("session_shutdown", {}, ctx);
+		assert.equal(currentOwner()?.ready, false);
+		assert.equal(widgets["persona-agents"], undefined);
+		m.pi.events.emit(ACTIVITY_EVENT, { ...event, activityId: "late-after-shutdown" });
+		assert.equal(widgets["persona-agents"], undefined);
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+	assert.equal(readTelemetryEvents(cwd).filter((entry) => entry.type.startsWith("agent.")).length, 0, "local activity is never an agent telemetry event");
 });

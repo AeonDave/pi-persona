@@ -66,6 +66,10 @@ export type BuildEngine = (
 		 *  `false`: there the SDK's own main-model recovery is the ONE reroute, so an arbitrary
 		 *  provider must not be substituted underneath a member the user pinned. */
 		providerFallback?: boolean;
+		/** Trusted companion worker definition, scoped to this engine build; never installed/discovered. */
+		agentOverride?: AgentConfig;
+		/** Internal tool-less maintenance may revoke communication even for a coaching persona. */
+		canUseBus?: false;
 	},
 ) => StrategyEngine;
 
@@ -76,7 +80,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			engineFactories, makeBrokerDeps, userAgentDir, childPiSettingsEnv, runLimits: RUN_LIMITS,
 			bus, supervisorHandle: SUPERVISOR, onFallback, resultArchive,
 		} = d();
-			const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
+			const resolveAgent = (n: string): AgentConfig | undefined => engOpts?.agentOverride?.name === n ? engOpts.agentOverride : agents.find((a) => a.name === n);
 			// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
 			const contracts = (n: string): ContractDef | undefined => contractDefs[n] ?? (n === "default" ? DEFAULT_CONTRACT : undefined);
 			const contractNames = (): string[] => installedContractNames(contractDefs);
@@ -125,7 +129,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			// A child-process engine pinned to a specific cwd — the seam worktree isolation runs
 			// through (a worktree needs its own working dir, i.e. a separate process).
 			const childEngineAt = (cwd: string): StrategyEngine => {
-				const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd };
+				const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, cwd, memoryPersona: persona ?? null };
 				deps.listAgents = () => agents.map((a) => a.name);
 				deps.listContracts = contractNames;
 				if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
@@ -148,7 +152,8 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
 				// only for async runs — same guards as the inproc engine below (spec B7 / §4.9).
 				const caps = controller.capabilities;
-				if (caps) deps.canUseBus = caps.canUseBus;
+				if (engOpts?.canUseBus === false) deps.canUseBus = false;
+				else if (caps) deps.canUseBus = caps.canUseBus;
 				if (engOpts?.async) deps.allowBlocking = true;
 				return engineFactories.makeEngine(deps);
 			};
@@ -157,7 +162,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			let base: StrategyEngine;
 			if (config.engine === "inproc" && lastCtx) {
 				if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
-				const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir() };
+				const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir(), memoryPersona: persona ?? null };
 				ideps.listAgents = () => agents.map((a) => a.name);
 				ideps.listContracts = contractNames;
 				if (legSpine) ideps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
@@ -176,12 +181,13 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				if (controller.activePersona?.coaching) ideps.coaching = true;
 				// Peer messaging obeys the persona's bus capability (canUseBus; Task: sibling peer comm).
 				const caps = controller.capabilities;
-				if (caps) ideps.canUseBus = caps.canUseBus;
+				if (engOpts?.canUseBus === false) ideps.canUseBus = false;
+				else if (caps) ideps.canUseBus = caps.canUseBus;
 				if (engOpts?.async) ideps.allowBlocking = true;
 				base = engineFactories.makeInProcessEngine(ideps);
 			} else {
 				if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=child\n");
-				const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking };
+				const deps: EngineAdapterDeps = { resolveAgent, contracts, modelFor, childThinking, memoryPersona: persona ?? null };
 				deps.listAgents = () => agents.map((a) => a.name);
 				deps.listContracts = contractNames;
 				if (legSpine) deps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
@@ -200,7 +206,8 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
 				// only for async runs — same guards as the inproc engine above (spec B7 / §4.9).
 				const caps = controller.capabilities;
-				if (caps) deps.canUseBus = caps.canUseBus;
+				if (engOpts?.canUseBus === false) deps.canUseBus = false;
+				else if (caps) deps.canUseBus = caps.canUseBus;
 				if (engOpts?.async) deps.allowBlocking = true;
 				base = engineFactories.makeEngine(deps);
 			}

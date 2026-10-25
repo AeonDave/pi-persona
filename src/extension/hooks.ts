@@ -36,7 +36,9 @@ import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaConfigStore } from "../persona/config-store.ts";
 import { TELEMETRY_EVENT_NAME } from "../telemetry/contract.ts";
 import { TelemetryProducer, type TelemetryAgentInput } from "../telemetry/producer.ts";
-import { isWakeSource, type AgentTree, type AgentNode } from "../ui/agent-tree.ts";
+import { isNonAgentNode, type AgentTree, type AgentNode } from "../ui/agent-tree.ts";
+import type { ActivityIngress } from "./companion.ts";
+import type { MemoryOwnerControl } from "./memory-owner.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { ExocomInstall } from "../exocom/install.ts";
@@ -47,6 +49,8 @@ import { resultReceiptHint, type ResultReceipt } from "../results/retrieval.ts";
 type MandatoryOutcome = { label: string; output: string; ok: boolean; error?: string; failureKind?: FailureKind; resultReceipt?: ResultReceipt };
 
 export interface HookHost {
+	readonly companionActivities: ActivityIngress;
+	readonly memoryOwner: MemoryOwnerControl;
 	readonly identity: SessionIdentity;
 	readonly results: SessionResults;
 	config: PiPersonaConfig;
@@ -181,6 +185,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
+		const memoryOwnerReady = h.memoryOwner.start(ctx.sessionManager);
+		h.companionActivities.start(ctx);
 		clearInFlight();
 		h.lastCtx = ctx;
 		h.results.activate(ctx);
@@ -273,16 +279,19 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				// published — a session start that follows no teardown carries no stale projection.
 				h.lastAgentProjection.clear();
 				for (const node of h.agentTree.snapshot()) {
-					if (isWakeSource(node)) continue; // timer/monitor rows are not agents: no replay, no projection
+					if (isNonAgentNode(node)) continue; // local activity/wake rows are not agent telemetry
 					h.lastAgentProjection.set(node.id, JSON.stringify(h.telemetryAgent(node)));
 					h.telemetry.publishAgentAdded(h.telemetryAgent(node));
 				}
 				exocom.publishTelemetryPeers();
 			}
 		}
+		memoryOwnerReady();
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		h.memoryOwner.stop();
+		h.companionActivities.stop(false); // revoke now; the single tree.clear below owns the final repaint
 		clearInFlight();
 		h.lastCtx = ctx;
 		recordLostWork(ctx); // before the notifiers/timers/runs below are torn down

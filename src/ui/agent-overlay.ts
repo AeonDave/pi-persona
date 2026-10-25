@@ -23,7 +23,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, flattenTree, isWakeSource, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, flattenTree, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
@@ -234,7 +234,7 @@ export class AgentOverlay extends Container {
 	 */
 	private selectedLeaf(leaves: FlatRow[]): FlatRow | undefined {
 		const anchored = this.selectedId !== undefined ? leaves.find((r) => r.node.id === this.selectedId) : undefined;
-		const leaf = anchored ?? leaves.find((r) => !isWakeSource(r.node)) ?? leaves[0];
+		const leaf = anchored ?? leaves.find((r) => !isNonAgentNode(r.node)) ?? leaves[0];
 		if (this.selectedId !== undefined && anchored === undefined && leaf !== undefined) this.aimLost = true;
 		this.selectedId = leaf?.node.id;
 		return leaf;
@@ -305,7 +305,7 @@ export class AgentOverlay extends Container {
 		}
 		this.addChild(new Spacer(1));
 		const stoppable = selected !== undefined && this.canStopNode(selected);
-		const steerable = selected !== undefined && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false);
+		const steerable = selected !== undefined && !isNonAgentNode(selected) && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false);
 		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
 		this.renderNotice();
 	}
@@ -383,8 +383,9 @@ export class AgentOverlay extends Container {
 		// A wake source is armed, not a live agent: it has no steer handle, so the agent-only "● live"
 		// badge and the steer-unavailable hint below would both be wrong for it.
 		const wake = isWakeSource(node);
+		const localActivity = node.kind === "activity";
 		this.addChild(
-			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", wake ? "  ● armed" : "  ● live") : ""}`, 1, 0),
+			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", localActivity ? "  ● local work" : wake ? "  ● armed" : "  ● live") : ""}`, 1, 0),
 		);
 		if (node.detail) this.addChild(new Text(t.fg("dim", safeInline(node.detail)), 1, 0));
 		// The drill-in has room for FULL effort names (the rows stay compact): an observed level
@@ -409,7 +410,7 @@ export class AgentOverlay extends Container {
 		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
 
-		const steerable = live && (this.actions.canSteer?.(node.id) ?? false);
+		const steerable = live && !isNonAgentNode(node) && (this.actions.canSteer?.(node.id) ?? false);
 		const stoppable = this.canStopNode(node);
 		if (this.steering && !steerable) this.steering = false; // agent finished mid-compose
 		this.addChild(new Spacer(1));
@@ -421,7 +422,7 @@ export class AgentOverlay extends Container {
 		} else {
 			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
 			this.renderNotice();
-			if (live && !steerable && !wake) {
+			if (live && !steerable && !isNonAgentNode(node)) {
 				this.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
 			}
 		}
@@ -456,7 +457,8 @@ export class AgentOverlay extends Container {
 				} else if (hadNotice) this.refresh();
 				return;
 			}
-			if (keyData === "s" && (this.actions.canSteer?.(this.detailId) ?? false)) {
+			const detailNode = this.tree.snapshot().find((node) => node.id === this.detailId);
+			if (keyData === "s" && detailNode && !isNonAgentNode(detailNode) && (this.actions.canSteer?.(this.detailId) ?? false)) {
 				this.steering = true;
 				this.steerBuffer = "";
 				this.refresh();
@@ -492,7 +494,7 @@ export class AgentOverlay extends Container {
 			// Steer straight from the list: drill into the selected agent with the
 			// compose line already open (same gate as the detail view's `s`).
 			const leaf = this.aimedLeaf(leaves);
-			if (leaf && leaf.node.status === "running" && (this.actions.canSteer?.(leaf.node.id) ?? false)) {
+			if (leaf && !isNonAgentNode(leaf.node) && leaf.node.status === "running" && (this.actions.canSteer?.(leaf.node.id) ?? false)) {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0;
 				this.steering = true;
@@ -512,8 +514,8 @@ export class AgentOverlay extends Container {
 	/** Whether an agent can be stopped right now: it must be running, and the caller's `canStop`
 	 *  gate (defaulting to "yes" when omitted) must agree. Shared by both hints and `tryStop`, so
 	 *  the hint that advertises "x stop" and the handler that actually gates it never diverge. */
-	private canStopNode(node: Pick<AgentNode, "id" | "status">): boolean {
-		return node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
+	private canStopNode(node: Pick<AgentNode, "id" | "status" | "kind">): boolean {
+		return node.kind !== "activity" && node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
 	}
 
 	/** The agents `X` would stop: every leaf that `x` could stop, wake sources excluded. `X` means
@@ -521,7 +523,7 @@ export class AgentOverlay extends Container {
 	 *  only by an explicit `x` on its own row. One list feeds the hint count, the confirmation prompt
 	 *  and the bulk stop, so the three always agree. */
 	private stoppableIds(snap: AgentNode[] = this.tree.snapshot()): string[] {
-		return this.leafRows(snap).filter((r) => !isWakeSource(r.node) && this.canStopNode(r.node)).map((r) => r.node.id);
+		return this.leafRows(snap).filter((r) => !isNonAgentNode(r.node) && this.canStopNode(r.node)).map((r) => r.node.id);
 	}
 
 	/** The trailing "x stop"/"X stop all"/"s steer" hint fragment for an action line — the list's

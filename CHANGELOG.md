@@ -4,7 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
-## Unreleased
+## [1.17.5](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.5) - 2026-10-25
+
+### Added
+
+- A visible asynchronous Mind maintenance worker, pinned to the current session model and effort.
+  It shares normal concurrency, F9 controls and result archival, has no tools or model fallback,
+  and returns its completion to Mind without starting another supervisor turn.
+- Loaded-companion presence, live memory ownership and bounded `Mind` activity rows. Mind can
+  require the actual loaded Persona partner and follow persona changes even with persistence off;
+  both engines freeze that owner for delegated legs. Activity stays separate from agents, controls,
+  wakes and model usage. These paired contracts require the updated Mind and Persona together.
 
 ### Fixed
 
