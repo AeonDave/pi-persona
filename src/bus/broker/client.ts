@@ -82,13 +82,6 @@ const ASK_TIMEOUT_MS = 600_000;
 // let a half-open broker pin `contact_peer list/send` until the child idle watchdog fires.
 const LIST_TIMEOUT_MS = 10_000;
 
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => {
-		const t = setTimeout(resolve, ms);
-		t.unref?.();
-	});
-}
-
 export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	const netImpl = deps.net ?? nodeNet;
 
@@ -98,6 +91,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	let registerStarted = false;
 	let registered = false;
 	let cancelConnect: (() => void) | undefined;
+	let cancelBackoff: (() => void) | undefined;
 	const pendingReads = new Map<string, { request: ResultReadRequest; resolve: (result: ReadReply) => void }>();
 	let registerSettle: { resolve: () => void; reject: (err: Error) => void } | undefined;
 
@@ -238,9 +232,21 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 			try {
 				return await connectOnce();
 			} catch (err) {
+				// Local cancellation is terminal. Waiting on an unref'ed retry timer here
+				// can leave register() pending after the process has no live handles.
+				if (closed) throw new Error("broker client closed");
 				lastErr = err;
 				if (attempt < CONNECT_MAX_ATTEMPTS - 1) {
-					await delay(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS));
+					await new Promise<void>((resolve) => {
+						const finish = (): void => {
+							clearTimeout(timer);
+							cancelBackoff = undefined;
+							resolve();
+						};
+						const timer = setTimeout(finish, Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS));
+						timer.unref?.();
+						cancelBackoff = finish;
+					});
 				}
 			}
 		}
@@ -448,6 +454,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		closed = true;
 		registered = false;
 		cancelConnect?.();
+		cancelBackoff?.();
 		const s = socket;
 		if (s) {
 			write({ t: "bye" });

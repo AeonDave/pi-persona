@@ -84,7 +84,11 @@ test("child adapter forwards copied directional usage in progress", async () => 
 	const emitScript = `
 		const emit = (usage) => process.stdout.write(JSON.stringify({type:"message_end", message:{role:"assistant", content:[{type:"text", text:"done"}], usage, stopReason:"end"}}) + "\\n");
 		emit({input:123000, output:6200, cacheRead:2400000, cacheWrite:500, cost:{total:0.42}});
+		// Force a semantic progress boundary: ordinary usage snapshots are coalesced per stdout
+		// chunk, but a tool lifecycle event is intentionally delivered immediately by the engine.
+		process.stdout.write(JSON.stringify({type:"tool_execution_start", toolCallId:"usage-boundary", toolName:"read", args:{}}) + "\\n");
 		emit({input:10, output:5});
+		process.stdout.write(JSON.stringify({type:"tool_execution_end", toolCallId:"usage-boundary", toolName:"read", result:{content:""}, isError:false}) + "\\n");
 	`;
 	const engine = makeEngine({
 		resolveAgent,

@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import { captureWorktreeArtifact, withWorktree, type GitExec } from "../../src/engine/worktree.ts";
 
@@ -115,7 +115,8 @@ test("worktree export applies worker commits, uncommitted edits and new binary f
 		assert.deepEqual(await readFile(join(repo, "committed.txt")), Buffer.from("baseline committed file\n"));
 		assert.deepEqual(await readFile(join(repo, "uncommitted.txt")), Buffer.from("baseline uncommitted file\n"));
 		const listed = await gitOk(exec, "-C", repo, "worktree", "list", "--porcelain");
-		assert.deepEqual(listed.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => resolve(line.slice("worktree ".length))), [resolve(repo)], "the temporary worktree is removed");
+		// Git may expand a Windows 8.3 temporary path; compare native filesystem identities.
+		assert.deepEqual(listed.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => realpathSync.native(line.slice("worktree ".length))), [realpathSync.native(repo)], "the temporary worktree is removed");
 
 		const appliedRepo = await applyArtifact(exec, repo, tempRoot, artifact.diff, "applied-mixed-artifact");
 		for (const [name, bytes] of expected) {
@@ -169,7 +170,7 @@ test("withWorktree removes the real worktree when resolving its baseline fails",
 		assert.ok(worktreeDir, "the real worktree was created before baseline resolution failed");
 		assert.equal(existsSync(worktreeDir!), false, "the temporary worktree directory is removed");
 		const listed = await gitOk(exec, "-C", repo, "worktree", "list", "--porcelain");
-		assert.deepEqual(listed.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => resolve(line.slice("worktree ".length))), [resolve(repo)], "the worktree registration is removed");
+		assert.deepEqual(listed.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => realpathSync.native(line.slice("worktree ".length))), [realpathSync.native(repo)], "the worktree registration is removed");
 	} finally {
 		await rm(tempRoot, { recursive: true, force: true });
 	}

@@ -106,3 +106,34 @@ successful cancellation and awaited shutdown. Artifacts and the final suite log 
 `C:/Users/novad/AppData/Local/Temp/pi-persona-package-qualification-Q3K2Q9/`.
 The real-provider behavioral evidence above remains applicable: these final corrections affect
 presentation snapshots and labels, not engine execution or communication authority.
+
+## Node 22 CI follow-through
+
+The first pushed candidate (`51406e2`) failed CI on Node 22.23.3. Publication was held.
+This exposed a real broker cancellation defect: closing during initial connection was treated as
+a retryable failure, leaving registration behind an unref'ed backoff timer. A local close now
+terminates that path immediately and interrupts an already scheduled backoff. Frozen-clock tests
+prove settlement without advancing the retry clock or redialing; the uncancellable helper is removed.
+
+Two independent fixture assumptions were also corrected without weakening their assertions:
+directional-usage progress uses a semantic tool-event boundary instead of assuming stdout writes
+arrive in separate chunks; worktree cleanup compares canonical native paths so Windows short and
+long spellings of the same temporary directory agree. Binary export, checkout cleanliness and
+exact remaining-registration checks remain intact. No skips or production timeout increases were added.
+
+Independent review passed 73 focused checks on the official Node 22.23.3 Windows binary, verified
+against its published SHA-256 manifest. The fresh complete suite on that runtime passed **2,883
+tests: 2,881 passed, two accepted Windows skips, zero failures or cancellations**, in 48.227 seconds.
+Typecheck and whitespace checks pass. A fresh real-provider child-engine trial with
+`openai/gpt-6-luna` at `xhigh` completed in 57.7 seconds, exit zero: one leg completed and the
+supervisor retrieved its exact `LIVE-COMM-OK` archived result through Intercom. The supervisor also
+reported the progress message; the real broker/SDK regression supplies the direct transport proof.
+
+This **supersedes the preceding candidate artifact**. Final qualification ran under Node 22.23.3
+with registry and installed Pi 1.4.0, both engines: four passes, zero runtime network calls, empty
+credential stores, successful stop and joined shutdown. All 204 package files match the source.
+SHA-256: `59cd306414bc90f40675fdc9dc20d3d1bc61e5e337a06bb623e3a909891f0abd`.
+The final artifact/report/suite log are in
+`C:/Users/novad/AppData/Local/Temp/pi-persona-package-qualification-BxRAHN/`;
+the first CI logs and live child transcript remain in the preceding `Q3K2Q9` directory.
+GitHub publication remains gated on a fresh passing Windows/Linux CI run of the corrective commit.
