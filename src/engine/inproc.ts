@@ -26,21 +26,28 @@ import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { makeContactPeerTool } from "../bus/peers.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { resolveLegThinking } from "../core/leg-thinking.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
+import { makeReadResultTool } from "../tools/read-result.ts";
+import { admitResultReadTool, referenceHandoffFailure } from "./result-grant.ts";
+import { makeScopedResultReader, type ResultArchiveView } from "../results/retrieval.ts";
 import { looksLikeProviderError } from "./errors.ts";
 import { piHostModuleHint } from "./host-module.ts";
 import { nextChildHandle } from "./handles.ts";
 import { combineSignals } from "./signals.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
+import { mergeSessionToolAllowlist } from "./session-tools.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
 
 /** The minimal slice of Pi's AgentSession the engine drives — also the test seam. */
 export interface InProcSession {
+	/** Host readback after Pi applies its capability clamp; injected test sessions may omit it. */
+	readonly thinkingLevel?: unknown;
 	subscribe(listener: (event: unknown) => void): () => void;
 	prompt(input: string): Promise<void>;
 	agent: { abort(): void; waitForIdle(): Promise<void>; steer(message: unknown): void };
@@ -49,12 +56,11 @@ export interface InProcSession {
 
 export interface CreateSessionOptions {
 	model: unknown;
-	modelRegistry: ModelRegistry;
 	/** Cooperative cancellation for resource/session initialization. Pi's loader does not
 	 * currently accept a signal itself, but injected factories can stop promptly and the
 	 * default factory checks it before/after each uncancellable Pi operation. */
 	signal?: AbortSignal;
-	/** The host's canonical runtime (Pi >=0.81); shared so auth/provider registrations survive. */
+	/** The host's canonical runtime; shared so auth/provider registrations survive. */
 	modelRuntime?: unknown;
 	cwd: string;
 	/** Pi's global agent dir (~/.pi/agent) for the sub-agent's resource loader. */
@@ -71,12 +77,9 @@ export interface CreateSessionOptions {
 export type CreateInProcSession = (opts: CreateSessionOptions) => Promise<InProcSession>;
 
 /**
- * Pi 0.81 moved the canonical auth/provider state from the extension-facing
- * ModelRegistry to a ModelRuntime passed directly to createAgentSession. The
- * compatibility facade still owns that runtime, but intentionally keeps it
- * private in its public TypeScript API. Read the runtime only when the expected
- * methods are present; old Pi versions and test facades then retain the legacy
- * modelRegistry path.
+ * The current Pi ModelRegistry facade owns the canonical ModelRuntime privately.
+ * Recover that runtime only when its expected methods are present, so native provider
+ * registrations and in-memory credentials remain shared with delegated sessions.
  */
 function sharedModelRuntime(registry: ModelRegistry): unknown {
 	const candidate = (registry as unknown as { runtime?: unknown }).runtime;
@@ -157,6 +160,11 @@ export interface InProcessDeps {
 	 *  there, and this deadline aborts such a leg outright (failureKind "timeout"); the idle
 	 *  watchdog would not, because any event at all re-arms it. */
 	startupTimeoutMs?: number;
+	/** The owning session's terminal archive (a GETTER — the owner can change across sessions).
+	 *  Required by any leg carrying `resultRefs` (flow reference handoff): the scoped
+	 *  `read_result` tool pages THIS archive, after a zero-usage preflight verified every
+	 *  granted ref is durably stored. Absent ⇒ such legs fail closed before the session factory. */
+	resultArchive?: () => ResultArchiveView | undefined;
 }
 
 // The sub-agent must never re-enter the supervisor's orchestration surface. This is the SECOND
@@ -170,15 +178,6 @@ export const ORCHESTRATION_TOOLS = ["delegate", "council", "orchestrate", "flow"
  *  agent's own config additionally excludes. */
 export function withOrchestrationToolsExcluded(extra: readonly string[] | undefined): string[] {
 	return [...new Set([...ORCHESTRATION_TOOLS, ...(extra ?? [])])];
-}
-
-/** Preserve the semantic difference between an absent allowlist (Pi defaults) and an explicit
- * empty one (no tools). Custom communication tools join only a non-empty allowlist; an empty
- * grant must not quietly grow capabilities during session construction. */
-export function mergeSessionToolAllowlist(tools: readonly string[] | undefined, customNames: readonly string[]): string[] | undefined {
-	if (tools === undefined) return undefined;
-	if (tools.length === 0) return [];
-	return [...new Set([...tools, ...customNames])];
 }
 
 /** Default factory: a real in-process Pi session. The resource loader appends the
@@ -199,14 +198,8 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	// otherwise the allowlist would filter them out of the child's active set.
 	const customNames = (opts.customTools ?? []).map((t) => t.name);
 	const tools = mergeSessionToolAllowlist(opts.tools, customNames);
-	// Forward-compat with the model-runtime migration (pi > 0.80.7). pi <= 0.80.7 reads
-	// `CreateAgentSessionOptions.modelRegistry` to share the host's auth/model registry with the
-	// sub-session; newer pi takes the canonical `modelRuntime` instead. The extension-facing
-	// ModelRegistry keeps that runtime private in its type surface, so `sharedModelRuntime()` above
-	// recovers it only when the runtime shape is present. Passing it is important even when auth is
-	// on disk: native providers and runtime credentials can exist only in the supervisor's memory.
-	// `agentDir` remains a valid fallback for older/standalone SDKs, and the legacy key stays outside
-	// the object literal so current SDK types do not reject it.
+	// Current Pi consumes the canonical modelRuntime. Sharing it also preserves native providers
+	// and credentials that exist only in the supervisor's memory.
 	const sessionOptions: NonNullable<Parameters<typeof createAgentSession>[0]> = {
 		model: opts.model as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["model"]>,
 		sessionManager: SessionManager.inMemory(opts.cwd),
@@ -219,14 +212,9 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		excludeTools: withOrchestrationToolsExcluded(opts.excludeTools),
 		...(tools !== undefined ? { tools } : {}),
 		...(opts.customTools && opts.customTools.length > 0 ? { customTools: opts.customTools } : {}),
-		// `opts.thinkingLevel` is our local ThinkingLevel superset — cast to pi's field type at the
-		// boundary (same rationale as PersonaHost.setThinkingLevel: a `max`-style level only reaches
-		// here on a pi that supports it, and pi clamps an unknown level regardless).
-		...(opts.thinkingLevel
-			? { thinkingLevel: opts.thinkingLevel as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]> }
-			: {}),
+		// Pi owns capability clamping (which can move effort up as well as down).
+		...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
 	};
-	(sessionOptions as { modelRegistry?: unknown }).modelRegistry = opts.modelRegistry;
 	const { session } = await createAgentSession(sessionOptions);
 	if (opts.signal?.aborted) {
 		try {
@@ -237,6 +225,10 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		throw new DOMException("Session initialization aborted", "AbortError");
 	}
 	return {
+		get thinkingLevel() {
+			const level: unknown = session.thinkingLevel;
+			return isThinkingLevel(level) ? level : undefined;
+		},
 		subscribe: (l) => session.subscribe(l as Parameters<typeof session.subscribe>[0]),
 		prompt: async (input) => {
 			await session.prompt(input);
@@ -316,6 +308,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
+			let thinkingRequested: ThinkingLevel | undefined;
+			try {
+				thinkingRequested = resolveLegThinking(spec, cfg, deps.childThinking);
+			} catch (error) {
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` };
+			}
+			const thinkingMetadata = thinkingRequested !== undefined ? { thinkingRequested } : {};
 			const tools = spec.tools ?? cfg.tools;
 			const invalidTools = toolModifierFailure(spec.agent, tools);
 			if (invalidTools) return invalidTools;
@@ -333,7 +332,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				// Make the failure self-correcting: name a few real registry refs (nearest
 				// matches first) so the supervisor's retry can pick a valid model at once.
 				const all = deps.modelRegistry.getAll().map((m) => `${m.provider}/${m.id}`);
-				const frag = (ref ?? "").split("/").pop()?.split(":")[0]?.toLowerCase() ?? "";
+				const frag = (ref ?? "").split("/").pop()?.toLowerCase() ?? "";
 				const near = frag ? all.filter((r) => r.toLowerCase().includes(frag)) : [];
 				const hint = (near.length > 0 ? near : all).slice(0, 5);
 				return {
@@ -342,15 +341,39 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					usage: emptyUsage(),
 					ok: false,
 					error: `[${spec.agent} · ${ref ?? "(no model)"}] model not found in registry (from ${src})${hint.length > 0 ? ` — try e.g.: ${hint.join(", ")}` : ""}`,
-						failureKind: "unknown-model",
+					failureKind: "unknown-model",
+					...thinkingMetadata,
 				};
 			}
 			// The canonical provider/id this run resolved to — surfaced on every result (for the
 			// UI/cost) and, on a provider failure, used as the seed of the fallback chain.
 			const rm = model as { provider?: string; id?: string };
 			const resolvedRef = rm.provider && rm.id ? `${rm.provider}/${rm.id}` : ref;
-			const thinkingLevel = isThinkingLevel(deps.childThinking) ? deps.childThinking : undefined;
 			const excludeTools = cfg.excludeTools;
+
+			// ── reference handoff preflight (contract 3/4) — BEFORE the session factory, after every
+			// cheap zero-usage rejection above it. Admission uses the SAME shared rule as the child
+			// engine; storage is verified durable (session-entry); a failure is a zero-usage
+			// contract failure and the factory is never called. The revoke rides `releaseHandle()`
+			// (every exit path from here on drains it), so the scoped reader dies with the leg.
+			const legCleanups: Array<() => void> = [];
+			let resultReadTool: ToolDefinition | undefined;
+			let admittedTools = tools;
+			if (spec.resultRefs !== undefined && spec.resultRefs.length > 0) {
+				const grant = admitResultReadTool({
+					specTools: spec.tools, cfgTools: cfg.tools, excludeTools: cfg.excludeTools,
+					canUseBus: deps.canUseBus ?? true,
+				});
+				if (!grant.ok) return referenceHandoffFailure(spec.agent, grant.error);
+				const archive = deps.resultArchive?.();
+				if (archive === undefined) return referenceHandoffFailure(spec.agent, "terminal result archive unavailable for reference handoff");
+				const scoped = makeScopedResultReader(archive, spec.resultRefs);
+				const { missing } = scoped.preflight();
+				if (missing.length > 0) return referenceHandoffFailure(spec.agent, `archived results unavailable: ${missing.join(", ")}`);
+				resultReadTool = makeReadResultTool(scoped);
+				admittedTools = grant.tools;
+				legCleanups.push(() => scoped.revoke());
+			}
 
 			// Diagnostic tag: which agent + which model ref + whether it was dynamically
 			// specialised (skills / model / tools override on the spec). Users need this
@@ -368,20 +391,19 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// Already cancelled (e.g. a queued async run stopped before its slot came up):
 			// don't build a session or burn a model call — settle as aborted right away.
 			if (signal?.aborted) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted`, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), failureKind: "abort" };
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted`, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), ...thinkingMetadata, failureKind: "abort" };
 			}
 
 			const modelRuntime = sharedModelRuntime(deps.modelRegistry);
 			const sessionOpts: CreateSessionOptions = {
 				model,
-				modelRegistry: deps.modelRegistry,
 				...(modelRuntime !== undefined ? { modelRuntime } : {}),
 				cwd: deps.cwd,
 				agentDir: deps.agentDir ?? deps.cwd,
 			};
-			if (tools !== undefined) sessionOpts.tools = tools;
+			if (admittedTools !== undefined) sessionOpts.tools = admittedTools;
 			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
-			if (thinkingLevel) sessionOpts.thinkingLevel = thinkingLevel;
+			if (thinkingRequested !== undefined) sessionOpts.thinkingLevel = thinkingRequested;
 			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
 			// on-the-fly `role` specialisation from the spec. All three reach the session as the
 			// loader's `appendSystemPrompt`, so a leg keeps Pi's full base prompt either way — the
@@ -398,20 +420,21 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (spec.peers === true && !wantsPeers && process.env.PI_PERSONA_DEBUG) {
 				process.stderr.write(`[pi-persona] peers requested for ${spec.agent} but bus/capability unavailable — running without contact_peer\n`);
 			}
-			if (deps.bus && (deps.coaching || wantsPeers)) {
+			const customTools: ToolDefinition[] = [];
+			const wantsCoaching = deps.coaching === true && (deps.canUseBus ?? true);
+			if (deps.bus && (wantsCoaching || wantsPeers)) {
 				childHandle = nextChildHandle(spec.agent);
 				deps.bus.register(supervisorHandle);
 				deps.bus.register(childHandle);
-				const customTools: ToolDefinition[] = [];
-				if (deps.coaching) {
+				if (wantsCoaching) {
 					customTools.push(
 						makeContactSupervisorTool(deps.bus, childHandle, supervisorHandle, { allowBlocking: deps.allowBlocking ?? false }),
 					);
 				}
 				if (wantsPeers) {
 					const label = spec.name?.trim()
-						? sanitizeDisplayLabel(spec.name, childHandle)
-						: spec.role ? `${childHandle} (${roleHint(spec.role)})` : childHandle;
+					? sanitizeDisplayLabel(spec.name, childHandle)
+					: spec.role ? `${childHandle} (${roleHint(spec.role)})` : childHandle;
 					peerLabels.set(childHandle, label);
 					const self = childHandle;
 					customTools.push(
@@ -420,8 +443,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 						}),
 					);
 				}
-				sessionOpts.customTools = customTools;
 			}
+			// A granted reference-handoff reader joins the SAME custom-tools surface (contract 3):
+			// literal `read_result` already admitted into a nonempty allowlist above; an absent
+			// allowlist stays absent and the injected tool rides Pi's session defaults.
+			if (resultReadTool !== undefined) customTools.push(resultReadTool);
+			if (customTools.length > 0) sessionOpts.customTools = customTools;
 
 			// The handle is live on the SESSION-LONG bus from here on, while the only unregister sits
 			// in the run's own finally below. Anything that throws before we reach it must release
@@ -429,6 +456,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// for the rest of the supervisor's session.
 			let handleReleased = false;
 			const releaseHandle = (): void => {
+				// Leg-scoped cleanups FIRST — the reference reader revoke must run even on a leg that
+				// never owned a bus handle (non-coaching, peer-less).
+				for (const cleanup of legCleanups.splice(0)) {
+					try { cleanup(); } catch { /* a throwing cleanup must never strand its siblings */ }
+				}
 				if (!childHandle || handleReleased) return;
 				handleReleased = true;
 				peerLabels.delete(childHandle);
@@ -578,6 +610,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					error: `${tag} agent aborted`,
 					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
 					failureKind: "abort",
+					...thinkingMetadata,
 				};
 			}
 
@@ -649,6 +682,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					error: `${initError}${cleanupHint}`,
 					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
 					failureKind: hardTimedOut || timedOut || startupTimedOut ? "timeout" : "abort",
+					...thinkingMetadata,
 				};
 			}
 			session = initializationOutcome.session;
@@ -774,6 +808,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// folded into the AgentResult below. Otherwise the stream state stays empty
 			// and the user sees an opaque "agent failed (unknown)".
 			let thrownError: string | undefined;
+			let thinkingEffective: ThinkingLevel | undefined;
 			try {
 				armIdle(); // start the idle clock (reset on every session event)
 				armHard(); // start the lifetime ceiling (never reset)
@@ -796,6 +831,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				releaseHandle();
 				unsub?.();
 				steerable = false;
+				const observed = session.thinkingLevel;
+				if (isThinkingLevel(observed)) thinkingEffective = observed;
 				session.dispose();
 			}
 
@@ -824,7 +861,11 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 			}
 
-			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}) };
+			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), ...thinkingMetadata };
+			// The final message describes the effort of that request; session readback is the
+			// observed setting when a host emits no effort field. Neither proves provider cognition.
+			const observed = state.thinkingEffective ?? thinkingEffective;
+			if (observed !== undefined) result.thinkingEffective = observed;
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
 			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms (raise this leg's timeoutMs if its tool is legitimately silent)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			// The deadline cannot tell the two causes apart, so the message names both: claiming

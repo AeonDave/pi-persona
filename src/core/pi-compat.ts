@@ -1,12 +1,11 @@
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Oldest supported Pi host. The release is qualified against Pi 1.0's SDK and tool lifecycle;
- *  pre-1.0 hosts are unsupported. Keep in sync with README.md;
- *  npm host peers use "*" because Pi supplies them through its extension loader. */
-export const MIN_PI_VERSION = "1.0.0";
+/** API baseline of the current stable Pi target. Update with the four pinned development
+ * packages and qualify the installed artifact; historical host releases are not maintained.
+ * Keep README.md aligned. Host peers remain "*" because Pi supplies them through its loader. */
+export const MIN_PI_VERSION = "1.4.0";
 
 function parse(v: string): [number, number, number] | undefined {
 	const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
@@ -21,15 +20,9 @@ export function satisfiesFloor(version: string, floor: string): boolean {
 }
 
 function resolveHostEntry(): string | undefined {
-	// The host package is ESM-only (no CJS `main`), so `createRequire(...).resolve` throws
-	// ERR_PACKAGE_PATH_NOT_EXPORTED for it — `import.meta.resolve` is tried first because it
-	// follows an `exports` map with no `main`/`require` condition. `createRequire` stays as a
-	// fallback for any host build that does publish one.
+	// The current host exposes its entry through the ESM import condition.
 	try {
 		return fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-	} catch { /* fall through */ }
-	try {
-		return createRequire(import.meta.url).resolve("@earendil-works/pi-coding-agent");
 	} catch { /* unresolved host */ }
 	return undefined;
 }

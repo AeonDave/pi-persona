@@ -17,7 +17,8 @@ you can inspect workers, redirect them, or stop a run while it is in progress.
 
 ## Install
 
-Requires **Pi ≥ 1.0.0**, **Node.js ≥ 22.19**, and **Git**. Configure a model provider in Pi first.
+Requires **the latest stable Pi (currently 1.4.0)**, **Node.js ≥ 22.19**, and **Git**.
+Update Pi together with this plugin; historical Pi releases are not maintained. Configure a model provider in Pi first.
 
 Run in your terminal:
 
@@ -39,9 +40,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.3` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.4` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git tag 1.17.3 | `pi install git:github.com/AeonDave/pi-persona@v1.17.3` |
+| Git tag 1.17.4 | `pi install git:github.com/AeonDave/pi-persona@v1.17.4` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with
@@ -52,7 +53,8 @@ then install the npm package. Keep only one source configured to avoid loading t
 
 | Capability | What you get |
 |---|---|
-| **Async workers** | Specialists with their own roles, skills, and models; results return while the supervisor continues other work |
+| **Async workers** | Specialists with their own roles, skills, models, and thinking levels; results return while the supervisor continues other work |
+| **Retained results** | Bounded reports remain available after reload and can be read in pages without restarting workers |
 | **Live steering** | Inspect a worker, send guidance, or stop a run from the agent panel |
 | **Cross-session collaboration** | Exocom connects independent Pi sessions to exchange findings and coordinate work |
 | **Councils and flows** | Compare perspectives, run repair-and-check loops, or organize work into stages |
@@ -119,8 +121,9 @@ To enable Exocom, open two terminals in the same workspace and start each with:
 pi --exocom --persona dev
 ```
 
-Then ask one session to consult the other or agree who handles which files.
-Use `/exocom` to inspect the connection and workspace code.
+Use `/exocom` to inspect the connection and workspace code. Sessions can exchange one-way messages,
+record a voluntary task, or share a bounded evidence excerpt. Creating a task does not start work in
+the other session; a peer chooses whether to take it.
 
 A session in another workspace can join using that exact, case-sensitive code:
 
@@ -129,10 +132,11 @@ pi --exocom=Ab0T --persona researcher
 ```
 
 Replace `Ab0T` with the code shown by `/exocom`. Both sessions must run on the same machine and
-share a Pi agent directory. A peer joining from another workspace can advise and exchange results;
-it cannot claim files in the joined workspace.
+share a Pi agent directory. A peer joining from another workspace can advise, exchange results, and
+take read-only tasks; it cannot claim or take tasks that declare write paths in the joined workspace.
 
-See the [collaboration guide](docs/EXPERIENCE.md#work-with-another-pi-through-exocom) for day-to-day use.
+See the [cross-session collaboration guide](docs/COLLABORATION.md) for the task, invitation, ask and
+evidence workflows.
 
 ## Choose a persona
 
@@ -170,8 +174,11 @@ See [the reference](docs/REFERENCE.md) for an inline council example and recover
 Edit installed personas and agents in `~/.pi/agent/persona/agents/`, or add project-specific
 overrides in `.pi/agents/`. Run `/persona reload` after editing.
 
-`/persona seed` preserves existing files. **`/persona restore` replaces bundled defaults**, so use it
-only when you intend to discard customizations to those files.
+`/persona seed` preserves existing files. **`/persona restore` overwrites all bundled defaults**
+(personas, agents, teams, flows, contracts, presets and shared prompts), discarding customizations
+to those files. It does not delete additional custom files: a persona `pippo.md` or an agent
+`pluto.md` remains untouched. A custom file using the same destination as a bundled default is
+replaced. Settings, credentials, sessions and project-local overrides are not reset.
 
 For optional long-term memory, add [pi-persona-mind](https://github.com/AeonDave/pi-persona-mind).
 
@@ -186,6 +193,7 @@ refreshes persona definitions. Model changes apply to future runs. See [configur
 | Guide | What's inside |
 |---|---|
 | [Everyday use](docs/EXPERIENCE.md) | Choosing a persona, following work, and reading results |
+| [Cross-session collaboration](docs/COLLABORATION.md) | Voluntary tasks, optional offers, asks, evidence and presence between Pi sessions |
 | [Customization reference](docs/REFERENCE.md) | Tool APIs, configuration, and copyable recipes |
 | [Strategies](docs/STRATEGIES.md) | Teams, councils, flows, and orchestration options |
 | [Timers and monitors](docs/MONITORS.md) | Reminders and programs that wake the supervisor |
@@ -205,8 +213,10 @@ npm test
 ```
 
 Pi loads the TypeScript extension directly; there is no build step.
-To qualify a separately installed Pi 1.3.0 host without cloud calls or your profile, run
-`node --import tsx scripts/qualify-host.mjs <absolute-path-to-pi-coding-agent-package>`.
+Qualify the installed tarball on the current host without provider traffic or your profile with
+`node scripts/qualify-package.mjs --host <absolute-path-to-pi-coding-agent-package>`.
+The narrower source-SDK contract check is
+`node --import tsx scripts/qualify-host.mjs <absolute-path-to-pi-coding-agent-package>`; both reject historical host versions.
 The [CI workflow](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) runs strict
 typechecking, dependency auditing and the test suite on Linux and Windows. The OpenSSF badge links to the project's
 scored supply-chain checks; it is not a certification that the code is free of vulnerabilities.

@@ -10,11 +10,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import type { ThinkingLevel } from "../core/types.ts";
 import { applyEvent, type ChildUsage, createStreamState, feedLines, type ProgressSnapshot, snapshot } from "./stream.ts";
 
 export interface ChildRunSpec {
 	task: string;
 	model?: string;
+	thinking?: ThinkingLevel;
 	tools?: string[];
 	excludeTools?: string[];
 	systemPrompt?: string;
@@ -32,6 +34,7 @@ export interface ChildRunResult {
 	/** True when the idle watchdog OR the hard wall-clock cap fired. Disjoint from `aborted`. */
 	timedOut: boolean;
 	model?: string;
+	thinkingEffective?: ThinkingLevel;
 	stopReason?: string;
 	errorMessage?: string;
 }
@@ -166,6 +169,7 @@ export async function runChildAgent(
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (spec.model) args.push("--model", spec.model);
+	if (spec.thinking !== undefined) args.push("--thinking", spec.thinking);
 	if (spec.tools !== undefined) {
 		if (spec.tools.length > 0) args.push("--tools", spec.tools.join(","));
 		else args.push("--no-tools");
@@ -201,13 +205,16 @@ export async function runChildAgent(
 			const inv = resolveInvocation(args);
 			// A stale broker wiring in the SUPERVISOR's own environment must not leak into a
 			// plain child: PI_PERSONA_BUS would boot the child's bridge against a dead (or
-			// foreign) endpoint. The adapter re-adds these deliberately via opts.env when a
-			// broker is actually live for THIS run.
+			// foreign) endpoint, and a stale reader token would arm a read_result tool nobody
+			// granted. The adapter re-adds these deliberately via opts.env when a broker (and a
+			// result-reader grant) is actually live for THIS run.
 			const inherited = { ...process.env };
 			delete inherited.PI_PERSONA_BUS;
 			delete inherited.PI_PERSONA_HANDLE;
 			delete inherited.PI_PERSONA_PEERS;
 			delete inherited.PI_PERSONA_ALLOW_BLOCKING;
+			delete inherited.PI_PERSONA_BUS_TOOLS;
+			delete inherited.PI_PERSONA_RESULT_READER_TOKEN;
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
@@ -496,6 +503,7 @@ export async function runChildAgent(
 			timedOut: timedOut || hardTimedOut || startupTimedOut,
 		};
 		if (state.model !== undefined) result.model = state.model;
+		if (state.thinkingEffective !== undefined) result.thinkingEffective = state.thinkingEffective;
 		if (state.stopReason !== undefined) result.stopReason = state.stopReason;
 		// errorMessage precedence: a timeout/abort is the *cause of death*, so label
 		// it explicitly and fold in any stream-level error rather than letting the

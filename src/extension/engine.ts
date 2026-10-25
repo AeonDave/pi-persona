@@ -21,6 +21,7 @@ import { emptyUsage, type ProgressSnapshot } from "../engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
+import type { ResultArchiveView } from "../results/retrieval.ts";
 
 export interface EngineFactories {
 	makeEngine: typeof makeEngine;
@@ -45,6 +46,10 @@ export interface BuildEngineDeps {
 	runLimits: RunLimits;
 	bus: InProcessBus;
 	supervisorHandle: string;
+	/** The live terminal-result archive (a GETTER: the owning session can change across runs).
+	 *  Feeds both engines' reference-handoff preflight + scoped `read_result` readers.
+	 *  Absent ⇒ reference-handoff legs fail closed on both engines (no archive to page). */
+	resultArchive?: () => ResultArchiveView | undefined;
 	/** Breadcrumb for a provider reroute (toast + log); absent ⇒ silent, as before. */
 	onFallback?: (info: { from: string; to: string; agent: string }) => void;
 	/** Injected git runner for the non-worktree files-changed report (tests only); defaults to
@@ -69,7 +74,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 		const {
 			agents, contractDefs, controller, host, config, personaConfigs, lastCtx, workerSpineText,
 			engineFactories, makeBrokerDeps, userAgentDir, childPiSettingsEnv, runLimits: RUN_LIMITS,
-			bus, supervisorHandle: SUPERVISOR, onFallback,
+			bus, supervisorHandle: SUPERVISOR, onFallback, resultArchive,
 		} = d();
 			const resolveAgent = (n: string): AgentConfig | undefined => agents.find((a) => a.name === n);
 			// A named contract file (contracts/<name>.contract.json) wins; "default" is the built-in.
@@ -111,7 +116,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			const getBrokerDeps = (): EngineAdapterBroker | undefined => {
 				if (!brokerDepsBuilt) {
 					brokerDepsBuilt = true;
-					const sessionId = (lastCtx as { sessionManager?: { getSessionId?: () => string } } | undefined)?.sessionManager?.getSessionId?.();
+					const sessionId = lastCtx?.sessionManager.getSessionId();
 					if (config.broker && lastCtx && sessionId) brokerDepsMemo = makeBrokerDeps(lastCtx);
 				}
 				return brokerDepsMemo;
@@ -137,6 +142,9 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				if (onProgress) deps.childOptions.onProgress = onProgress;
 				const brokerDeps = getBrokerDeps();
 				if (brokerDeps) deps.broker = brokerDeps;
+				// Reference-handoff legs page the owning session's terminal archive (strict preflight
+				// + scoped reader); the getter is read at LEG time so a mid-run session switch is seen.
+				if (resultArchive !== undefined) deps.resultArchive = resultArchive;
 				// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
 				// only for async runs — same guards as the inproc engine below (spec B7 / §4.9).
 				const caps = controller.capabilities;
@@ -164,6 +172,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				// can't answer, so blocking there would deadlock; the tool downgrades to one-way).
 				ideps.bus = bus;
 				ideps.supervisorHandle = SUPERVISOR;
+				if (resultArchive !== undefined) ideps.resultArchive = resultArchive;
 				if (controller.activePersona?.coaching) ideps.coaching = true;
 				// Peer messaging obeys the persona's bus capability (canUseBus; Task: sibling peer comm).
 				const caps = controller.capabilities;
@@ -187,6 +196,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				if (onProgress) deps.childOptions.onProgress = onProgress;
 				const brokerDeps = getBrokerDeps();
 				if (brokerDeps) deps.broker = brokerDeps;
+				if (resultArchive !== undefined) deps.resultArchive = resultArchive;
 				// Peer messaging obeys the persona's bus capability, and blocking asks are honoured
 				// only for async runs — same guards as the inproc engine above (spec B7 / §4.9).
 				const caps = controller.capabilities;
@@ -248,9 +258,9 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 						const preflight = await worktreePreflight(root, defaultGitExec);
 						if (!preflight.ok) return isolatedWorktreeFailure(spec, preflight.error);
 						try {
-							return await withWorktree(root, defaultGitExec, async (dir) => {
+							return await withWorktree(root, defaultGitExec, async (dir, baseCommit) => {
 								const result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
-								const artifact = await captureWorktreeArtifact(dir, defaultGitExec);
+								const artifact = await captureWorktreeArtifact(dir, baseCommit, defaultGitExec);
 								const hasOutputArtifact = hasUnifiedDiff(result.output);
 								if (!result.ok) {
 									return artifact.ok && artifact.diff.trim().length > 0
@@ -314,38 +324,27 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 // The host's model-level availability snapshot, plus the exact active model. A provider's
 // credentials do not grant every model in its catalog. Extension-native bridges can be
 // absent from an auth snapshot: restore only their explicit registered model lists in that
-// case, never every inherited model under their provider id. Older facades without an
-// availability API retain their historical getAll() fallback.
+// case, never every inherited model under their provider id.
 export function configuredModels(ctx: ExtensionContext): ModelCostMetadata[] {
 	const reg = ctx.modelRegistry;
 	const all = reg.getAll();
-	let available: typeof all;
-	try {
-		available = reg.getAvailable();
-	} catch {
-		return all;
-	}
+	const available = reg.getAvailable();
 	const byRef = new Map(available.map((m) => [`${m.provider}\0${m.id}`, m]));
 	if (ctx.model) byRef.set(`${ctx.model.provider}\0${ctx.model.id}`, ctx.model);
 	const availableProviders = new Set(available.map((m) => m.provider));
 	const declaredRefs = new Set<string>();
-	let registered: readonly string[] = [];
-	try {
-		registered = reg.getRegisteredProviderIds?.() ?? [];
-	} catch {
-		/* a third-party/older registry facade may not expose extension provider ids */
-	}
+	const registered = reg.getRegisteredProviderIds();
 	for (const provider of registered) {
 		// A populated snapshot can intentionally exclude individual models for this credential.
 		if (availableProviders.has(provider)) continue;
 		let native: ReturnType<typeof reg.getRegisteredNativeProvider>;
 		try {
-			native = reg.getRegisteredNativeProvider?.(provider);
+			native = reg.getRegisteredNativeProvider(provider);
 			// An empty credential-filtered list is authoritative too; it need not be a stale snapshot.
-			if (reg.getProvider?.(provider)?.filterModels || native?.filterModels) continue;
+			if (reg.getProvider(provider)?.filterModels || native?.filterModels) continue;
 		} catch { continue; }
 		try {
-			const models = reg.getRegisteredProviderConfig?.(provider)?.models;
+			const models = reg.getRegisteredProviderConfig(provider)?.models;
 			if (Array.isArray(models)) {
 				for (const model of models) {
 					if ((model.type === undefined || model.type === "chat") && typeof model.id === "string") declaredRefs.add(`${provider}\0${model.id}`);

@@ -27,6 +27,7 @@ import {
 	sanitizePeerField,
 	sendPersonaFollowUp,
 	shouldReportHeartbeatFailure,
+	toastCause,
 	type ExocomQueuedToast,
 } from "../extension/shared.ts";
 import { SeenMessages, SenderBudget } from "./guards.ts";
@@ -54,6 +55,9 @@ import type { ExocomSemanticFrame } from "./envelope.ts";
 import { prune as pruneExocom, type RegistryEntry } from "./registry.ts";
 import { registerExocomTools } from "../tools/exocom.ts";
 import { registerExocomWorkTools } from "../tools/exocom-work.ts";
+import { registerExocomCollaborationTools } from "../tools/exocom-collaboration.ts";
+import { registerExocomProfileTool } from "../tools/exocom-profile.ts";
+import { collaborationWriteIntent, deliverCollaborationOffer } from "./collaboration-delivery.ts";
 import type { SessionIdentity } from "../extension/identity.ts";
 import { WriteWarnings } from "./write-guard.ts";
 
@@ -237,28 +241,23 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	}
 
 	function telemetrySessionId(ctx: ExtensionContext): string {
-		return (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? `legacy-${process.pid}`;
+		return ctx.sessionManager.getSessionId();
 	}
 
 	function currentTelemetryInstance(ctx: ExtensionContext): InstanceDescriptor {
-		const runtimeCtx = ctx as ExtensionContext & {
-			sessionManager?: { getSessionId?: () => string };
-			isIdle?: () => boolean;
-			getContextUsage?: () => { percent?: number } | undefined;
-		};
 		const personaName = host.controller.activePersona?.name ?? "";
 		const displayName = exocomSelfStatusLabel(host.identity.chosen, host.identity.name, personaName);
 		return {
 			displayName,
 			persona: host.controller.activePersona?.name ?? "",
 			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
-			status: runtimeCtx.isIdle?.() === true ? "idle" : "active",
+			status: ctx.isIdle() ? "idle" : "active",
 			pid: process.pid,
 			// Clamped HERE, not merely in the producer's `sanitizeInstance`: that one runs only for
 			// `instance.started`, so an out-of-range reading would ride `instance.updated` and
 			// `instance.heartbeat` out to consumers, where the contract rejects the WHOLE event over
 			// the one bad field.
-			contextPercent: Math.max(0, Math.min(100, Math.round(runtimeCtx.getContextUsage?.()?.percent ?? 0))),
+			contextPercent: Math.max(0, Math.min(100, Math.round(ctx.getContextUsage()?.percent ?? 0))),
 			exocomEnabled: exocomPlane !== undefined,
 			color: exocomColorFor(displayName),
 		};
@@ -412,7 +411,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
 			exocomLedgerFile = ledgerPath(agentDir, hash);
 			exocomWaitNotifier = new IdleCoalescingNotifier<string>({
-				isIdle: () => canDeliverPersonaNotification(host.orchestrating, host.processingDeferredOrchestration, host.lastCtx?.isIdle?.() === true),
+				isIdle: () => canDeliverPersonaNotification(host.orchestrating, host.processingDeferredOrchestration, host.lastCtx?.isIdle() === true),
 				deliver: (message) => sendPersonaFollowUp(pi, message, "pi-persona"),
 				render: (items) => items.join("\n\n"),
 				setTimer: (fn, ms) => { const h = setTimeout(fn, ms); h.unref?.(); return h; },
@@ -423,7 +422,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
 			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
 			exocomNotifier = new IdleCoalescingNotifier<string>({
-				isIdle: () => canDeliverPersonaNotification(host.orchestrating, host.processingDeferredOrchestration, host.lastCtx?.isIdle?.() === true),
+				isIdle: () => canDeliverPersonaNotification(host.orchestrating, host.processingDeferredOrchestration, host.lastCtx?.isIdle() === true),
 				deliver: (message) => sendPersonaFollowUp(pi, message, "exocom_received"),
 				// A burst of independent peers must not turn one idle wake into an unbounded model
 				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;
@@ -536,7 +535,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				if (!plane) throw new Error("exocom is not active for this persona");
 				if (!exocomLedgerFile) throw new Error("exocom ledger is not available");
 				let target: DisplayPeer | undefined;
-				if (frame.kind === "ask") {
+				if (frame.kind === "ask" || (frame.kind === "offer" && frame.to_session !== undefined)) {
 					target = plane.listPeers().find((peer) => peer.session_id === frame.to_session);
 					if (!target) throw new Error(`exocom: unknown peer session "${frame.to_session}"`);
 				} else if (frame.kind === "answer") {
@@ -550,7 +549,14 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					}
 				}
 				const prune = currentLedgerPruneOptions();
-				const applied = commitLedgerEvent(exocomLedgerFile, frame, prune ? { prune } : {});
+				if (collaborationWriteIntent(frame, currentLedgerState())
+					&& (exocomScope?.joined === true || (host.controller.capabilities && !canCallTool(host.controller.capabilities, "exocom_claim")))) {
+					throw new Error("exocom: this session cannot claim write paths in the selected scope");
+				}
+				const applied = commitLedgerEvent(exocomLedgerFile, frame, {
+					...(prune ? { prune } : {}),
+					canClaim: exocomScope?.joined !== true && (!host.controller.capabilities || canCallTool(host.controller.capabilities, "exocom_claim")),
+				});
 				if (!applied.ok) throw new Error(`exocom: ${applied.error}`);
 				if (applied.duplicate === true) return { msg_id: frame.msg_id };
 				// Claims/progress/releases are authoritative in the shared ledger and need no postcard.
@@ -562,7 +568,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					} catch { /* the durable result is still recoverable from the ledger */ }
 					return { msg_id: frame.msg_id, peerWakeDeferred: true };
 				}
-				if (target && (frame.kind === "ask" || frame.kind === "answer")) {
+				if (target && (frame.kind === "ask" || frame.kind === "answer" || frame.kind === "offer")) {
 					try {
 						await plane.sendSemantic(target.target, frame);
 					} catch {
@@ -657,7 +663,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						exocomNotifier?.notify(decision.deliver);
 						// Never inject peer text into a live model turn. A compact human-only toast makes
 						// receipt visible while a long tool loop keeps the follow-up idle-gated.
-						if (host.lastCtx?.isIdle?.() !== true) {
+						if (host.lastCtx?.isIdle() !== true) {
 							exocomToastNotifier?.notify({ label, inReplyTo: msg.in_reply_to });
 						}
 					}
@@ -692,7 +698,15 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						return { accepted: false, reason: error instanceof Error ? error.message : "ledger unavailable" };
 					}
 					const label = exocomPlane?.humanDisplayLabelFor(fromEntry) ?? fromEntry.session_id;
-					if (frame.kind === "ask") {
+					if (fromEntry.workspace_id !== undefined && fromEntry.workspace_id !== scope.scopeWorkspaceId && collaborationWriteIntent(frame, state)) {
+						exocomSeen?.forget(frame.from_session, frame.msg_id);
+						return { accepted: false, reason: "external-workspace peers cannot take write tasks in the selected scope" };
+					}
+					if (frame.kind === "offer") {
+						const delivery = deliverCollaborationOffer(frame, state, sessionId, label, Date.now());
+						if (!delivery.accepted) { exocomSeen?.forget(frame.from_session, frame.msg_id); return delivery; }
+						if (delivery.notice) exocomNotifier?.notify(delivery.notice);
+					} else if (frame.kind === "ask") {
 						if (frame.to_session !== sessionId) {
 							exocomSeen?.forget(frame.from_session, frame.msg_id);
 							return { accepted: false, reason: "ask addressed to another session" };
@@ -740,7 +754,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					if (shouldReportHeartbeatFailure(exocomHeartbeatFailures)) {
 						try {
 							host.lastCtx?.ui.notify(
-								`exocom: heartbeat failed ${exocomHeartbeatFailures}× in a row (${message}) — peers drop this instance from the pool until it recovers.`,
+								`exocom: heartbeat failed ${exocomHeartbeatFailures}× in a row (${toastCause(message)}) — peers drop this instance from the pool until it recovers.`,
 								"warning",
 							);
 						} catch {
@@ -775,6 +789,19 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				ledger: () => currentLedgerState(),
 				labelFor: peerLabelFor,
 			});
+			registerExocomCollaborationTools(pi, {
+				getPlane: () => exocomPlane,
+				sessionId: () => sessionId, name: () => host.identity.name, now: () => Date.now(),
+				canClaim: () => exocomScope?.joined !== true,
+				canCallTool: (name) => !host.controller.capabilities || canCallTool(host.controller.capabilities, name),
+				resolveTarget: (target) => {
+					if (!exocomPlane) throw new Error("exocom is not active for this persona");
+					return exocomPlane.resolvePeer(target).session_id;
+				},
+				dispatch: dispatchSemantic, ledger: currentLedgerState, labelFor: peerLabelFor,
+				targetForSession: (id) => exocomPlane?.listPeers().find((peer) => peer.session_id === id)?.target,
+			});
+			registerExocomProfileTool(pi, () => exocomPlane);
 		} catch (err) {
 			// `plane.start()` may have bound its server before a later registry write failed.
 			// Teardown while the reference is still owned; this also cancels notifier/timers.
@@ -783,7 +810,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			let surfacedInUi = false;
 			if (ctx.hasUI) {
 				try {
-					ctx.ui.notify(`exocom failed to start: ${message}`, "error");
+					ctx.ui.notify(`exocom failed to start: ${toastCause(message)}`, "error");
 					surfacedInUi = true;
 				} catch {
 					/* the session may already be tearing down; stderr remains available */
@@ -891,6 +918,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				const workKeys = new Set([
 					...state.claims.filter((claim) => claim.from_session === exocomSessionId).map((claim) => claim.work_key),
 					...state.asks.filter((ask) => ask.from_session === exocomSessionId).map((ask) => ask.work_key),
+					...(state.collaboration?.tasks.filter((task) => !task.finished && (task.taken?.from_session ?? task.created.from_session) === exocomSessionId).map((task) => task.created.work_key) ?? []),
 				]);
 				for (const work_key of workKeys) {
 					const prune = currentLedgerPruneOptions();

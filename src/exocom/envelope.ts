@@ -31,13 +31,20 @@ export interface ExocomAnswer {
 }
 export interface ExocomProgress {
 	kind: "progress"; work_key: string; from_session: string; from_name: string;
-	note: string; msg_id: string; ts: string; signature?: string;
+	note: string; msg_id: string; ts: string; signature?: string; task_id?: string;
 }
 export interface ExocomRelease {
 	kind: "release"; work_key: string; from_session: string; from_name: string;
 	msg_id: string; ts: string; signature?: string;
 }
-export type ExocomSemanticFrame = ExocomClaim | ExocomAsk | ExocomAnswer | ExocomProgress | ExocomRelease;
+interface CollaborationFrame { work_key: string; from_session: string; from_name: string; msg_id: string; ts: string; signature?: string; }
+export interface ExocomTaskCreate extends CollaborationFrame { kind: "task_create"; description: string; write_set: string[]; }
+export interface ExocomTaskTake extends CollaborationFrame { kind: "task_take"; task_id: string; }
+export interface ExocomTaskFinish extends CollaborationFrame { kind: "task_finish"; task_id: string; outcome: "done" | "abandoned"; note: string; }
+export interface ExocomOffer extends CollaborationFrame { kind: "offer"; task_id: string; offer_id: string; to_session?: string; expires_at: string; }
+export interface ExocomPublish extends CollaborationFrame { kind: "publish"; task_id: string; title: string; excerpt: string; }
+export type ExocomCollaborationFrame = ExocomTaskCreate | ExocomTaskTake | ExocomTaskFinish | ExocomOffer | ExocomPublish;
+export type ExocomSemanticFrame = ExocomClaim | ExocomAsk | ExocomAnswer | ExocomProgress | ExocomRelease | ExocomCollaborationFrame;
 export type ExocomFrame = ExocomMessage | ExocomBye | ExocomAck | ExocomNack | ExocomSemanticFrame;
 
 const str = (v: unknown): v is string => typeof v === "string";
@@ -73,10 +80,27 @@ export function isSemanticFrame(v: unknown): v is ExocomSemanticFrame {
 		case "progress":
 			return token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
 				&& bounded(o.note, 4_096) && token(o.msg_id) && timestamp(o.ts)
-				&& optionalBounded(o.signature, 512);
+				&& optionalBounded(o.signature, 512) && (o.task_id === undefined || token(o.task_id));
 		case "release":
 			return token(o.work_key) && token(o.from_session) && metadata(o.from_name, 256)
 				&& token(o.msg_id) && timestamp(o.ts) && optionalBounded(o.signature, 512);
+		case "task_create":
+		case "task_take":
+		case "task_finish":
+		case "offer":
+		case "publish": {
+			if (!token(o.work_key) || !token(o.from_session) || !metadata(o.from_name, 256)
+				|| !token(o.msg_id) || !timestamp(o.ts) || !optionalBounded(o.signature, 512)) return false;
+			if (o.kind === "task_create") return bounded(o.description, 2_048) && Array.isArray(o.write_set)
+				&& (o.write_set.length === 0 || writeSet(o.write_set));
+			if (!token(o.task_id)) return false;
+			if (o.kind === "task_finish") return (o.outcome === "done" || o.outcome === "abandoned") && bounded(o.note, 4_096);
+			if (o.kind === "offer") return token(o.offer_id) && (o.to_session === undefined || token(o.to_session))
+				&& timestamp(o.expires_at) && Date.parse(o.expires_at) > Date.parse(o.ts)
+				&& Date.parse(o.expires_at) - Date.parse(o.ts) <= 86_400_000;
+			if (o.kind === "publish") return bounded(o.title, 160) && bounded(o.excerpt, 4_096) && Buffer.byteLength(o.excerpt, "utf8") <= 8_192;
+			return true;
+		}
 		default:
 			return false;
 	}
@@ -102,6 +126,11 @@ export function isExocomFrame(v: unknown): v is ExocomFrame {
 		case "answer":
 		case "progress":
 		case "release":
+		case "task_create":
+		case "task_take":
+		case "task_finish":
+		case "offer":
+		case "publish":
 			return isSemanticFrame(v);
 		default: return false;
 	}
@@ -127,9 +156,19 @@ export function frameSigningPayload(frame: ExocomFrame): string {
 				frame.ok, frame.evidence, frame.ts]);
 		case "progress":
 			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.from_session, frame.from_name,
-				frame.note, frame.ts]);
+				frame.note, frame.ts, frame.task_id ?? null]);
 		case "release":
 			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.from_session, frame.from_name, frame.ts]);
+		case "task_create":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.from_session, frame.from_name, frame.description, frame.write_set, frame.ts]);
+		case "task_take":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.task_id, frame.from_session, frame.from_name, frame.ts]);
+		case "task_finish":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.task_id, frame.from_session, frame.from_name, frame.outcome, frame.note, frame.ts]);
+		case "offer":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.offer_id, frame.work_key, frame.task_id, frame.from_session, frame.from_name, frame.to_session ?? null, frame.expires_at, frame.ts]);
+		case "publish":
+			return JSON.stringify([frame.kind, frame.msg_id, frame.work_key, frame.task_id, frame.from_session, frame.from_name, frame.title, frame.excerpt, frame.ts]);
 	}
 }
 

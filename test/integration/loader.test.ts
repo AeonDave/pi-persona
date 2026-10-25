@@ -97,6 +97,14 @@ test("loadContracts keys by filename and warns on malformed files and name misma
 	assert.ok(warnings.some((w) => w.includes("renamed.contract.json") && w.includes("other")), "name mismatch warned");
 });
 
+test("loadDefinitions diagnoses malformed agent thinking and never falls back to a shadowed agent", () => {
+	const user = tmp({ "a.md": "---\nname: a\nthinking: low\n---\nworker" });
+	const project = tmp({ "a.md": "---\nname: a\nthinking: ultra\n---\nworker" });
+	const result = loadDefinitions([{ path: user, scope: "user" }, { path: project, scope: "project" }]);
+	assert.deepEqual(result.agents, []);
+	assert.match(result.warnings.join("\n"), /a\.md.*thinking.*off.*max/);
+});
+
 test("loadTeams merges teams.yaml files (later wins)", () => {
 	const dir = tmp({ "teams.yaml": "review: [a, b]\nmagi: [m, b, c]" });
 	const teams = loadTeams([path.join(dir, "teams.yaml")]);

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 
 import { legFailure } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { coerceDelegateParams, DelegationLedger, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, shortModel, shouldRecordDelegationOutcome, unknownAgentError, unknownContractError, type DelegationBrief, specOf, validateDelegationBrief, findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/tools/delegate.ts";
+import { findWriteSetOverlaps, validateParallelWriteSets } from "../../../src/core/ownership.ts";
+import { coerceDelegateParams, DelegationLedger, MAX_IDENTICAL_FAILURES, nameFor, normalizeDelegateConcurrency, shortModel, shouldRecordDelegationOutcome, unknownAgentError, unknownContractError, type DelegationBrief, specOf, validateDelegationBrief } from "../../../src/tools/delegate.ts";
 
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 
@@ -14,6 +15,33 @@ const completeBrief = (): DelegationBrief => ({
 	constraints: ["Do not modify files"],
 	requiredArtifacts: ["Evidence with file and line references"],
 	stopConditions: ["Stop when the root cause is proven or the evidence is exhausted"],
+});
+
+test("delegate preserves mixed thinking in decoded batches and single specs", () => {
+	const levels = ["low", "high", "xhigh"] as const;
+	const raw = { tasks: JSON.stringify(levels.map((thinking) => ({ agent: "a", task: thinking, thinking }))) };
+	const batch = coerceDelegateParams(raw);
+	assert.equal(batch.ok, true);
+	if (!batch.ok) return;
+	assert.deepEqual(batch.params.tasks?.map((t) => specOf(t).thinking), levels);
+	const single = coerceDelegateParams({ agent: "a", task: "t", thinking: "off" });
+	assert.equal(single.ok, true);
+	if (single.ok) assert.equal(specOf({ ...single.params, agent: "a", task: "t" }).thinking, "off");
+	assert.ok(!("thinking" in specOf({ agent: "a", task: "t" })));
+});
+
+test("delegate refuses malformed explicit thinking in single, arrays and JSON tasks", () => {
+	for (const thinking of ["ultra", "HIGH", "", null, 7, true, ["high"]]) {
+		for (const raw of [
+			{ agent: "a", task: "t", thinking },
+			{ tasks: [{ agent: "a", task: "t", thinking }] },
+			{ tasks: JSON.stringify([{ agent: "a", task: "t", thinking }]) },
+		]) {
+			const result = coerceDelegateParams(raw);
+			assert.equal(result.ok, false, JSON.stringify(raw));
+			if (!result.ok) assert.match(result.error, /thinking.*off.*xhigh.*max/);
+		}
+	}
 });
 
 test("specOf renders a complete delegation brief deterministically", () => {
@@ -246,9 +274,9 @@ test("normalizeDelegateConcurrency floors fractions, clamps bounds, and serializ
 	assert.equal(normalizeDelegateConcurrency(Number.POSITIVE_INFINITY, 4), 1);
 });
 
-test("shortModel drops provider, claude- prefix and thinking suffix; nameFor numbers extra operators", () => {
+test("shortModel drops provider and claude- prefix but preserves opaque colons; nameFor numbers extra operators", () => {
 	assert.equal(shortModel("anthropic/claude-sonnet-4-6"), "sonnet-4-6");
-	assert.equal(shortModel("openrouter/openrouter/owl-alpha:high"), "owl-alpha");
+	assert.equal(shortModel("openrouter/openrouter/owl-alpha:high"), "owl-alpha:high");
 	assert.equal(nameFor({ agent: "operator" }, 1), "operator-2", "unnamed extra operators are numbered, not catalog-named");
 });
 

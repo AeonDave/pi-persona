@@ -29,17 +29,23 @@
  */
 
 import { existsSync, unlinkSync } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import nodeNet from "node:net";
 import type net from "node:net";
 
 import { createFrameReader, encodeFrame } from "./framing.ts";
 import { type Frame, isFrame } from "./messages.ts";
 import type { InProcessBus } from "../inproc.ts";
+import { isReadReplyFor, readFailure, RESULT_READ_MAX_FRAME_BYTES, RESULT_READ_MAX_PENDING,
+	RESULT_READ_MAX_REQUESTS, RESULT_READ_TIMEOUT_MS, type PreparedResultReader, type ReadReply,
+	type ScopedReader } from "../result-reader.ts";
 
 export interface BrokerHost {
 	endpoint: string;
 	close(): Promise<void>;
 	connectedHandles(): string[];
+	/** Parent-only preflight. Reserve before bus/adapter registration or spawning. */
+	prepareResultReader(handle: string, reader: ScopedReader, signal?: AbortSignal): Promise<PreparedResultReader>;
 	/** Pushes a `steer` frame directly to a connected handle (spec B4) — the supervisor's own
 	 *  live voice, NOT a bus envelope (it bypasses `bus.send`/the outbound drain entirely, so
 	 *  it can't be mistaken for a peer/child message on the wire). Returns false (a harmless
@@ -158,6 +164,39 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 	const sockets = new Set<net.Socket>();
 	const expected = new Set<string>();
 	const pendingSteer = new Map<string, string[]>();
+	type Grant = { token: Buffer; reader: ScopedReader; active: boolean; bound: boolean; stop?: () => void; revoke: () => void };
+	const grants = new Map<string, Grant>();
+	let closed = false;
+
+	function revokeReader(reader: ScopedReader): void {
+		try { reader.revoke(); } catch { /* cleanup cannot leak callback errors or strand siblings */ }
+	}
+
+	async function prepareResultReader(handle: string, reader: ScopedReader, signal?: AbortSignal): Promise<PreparedResultReader> {
+		if (closed || signal?.aborted || !handle || handle.length > 256 || handle === deps.supervisorHandle
+			|| connections.has(handle) || grants.has(handle) || expected.has(handle) || bus.participants().includes(handle)) {
+			revokeReader(reader);
+			throw new Error("Result reader preparation refused.");
+		}
+		const token = randomBytes(32);
+		const grant: Grant = { token, reader, active: true, bound: false, revoke: () => {
+			if (!grant.active) return;
+			grant.active = false;
+			signal?.removeEventListener("abort", grant.revoke);
+			if (grants.get(handle) === grant) {
+				grants.delete(handle);
+				expected.delete(handle);
+				pendingSteer.delete(handle);
+			}
+			token.fill(0);
+			grant.stop?.();
+			revokeReader(reader);
+		} };
+		grants.set(handle, grant);
+		expected.add(handle);
+		signal?.addEventListener("abort", grant.revoke, { once: true });
+		return { token: token.toString("hex"), revoke: grant.revoke, wasBound: () => grant.bound };
+	}
 
 	function flushPendingSteer(handle: string): void {
 		const conn = connections.get(handle);
@@ -207,10 +246,19 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		let handle: string | undefined;
 		let group: string | undefined;
 		const pendingAsks = new Map<string, AbortController>();
+		let ended = false;
+		let boundGrant: Grant | undefined;
+		const seenReads = new Set<string>();
+		const pendingReads = new Map<string, { ac: AbortController; finish: (result?: ReadReply) => void }>();
 
 		const write = (frame: Frame): void => {
 			try {
-				socket.write(encodeFrame(frame));
+				const encoded = encodeFrame(frame);
+				if (frame.t === "result_read_reply" && encoded.length > RESULT_READ_MAX_FRAME_BYTES) {
+					socket.write(encodeFrame({ t: "result_read_reply", reqId: frame.reqId, result: readFailure("protocol") }));
+					return;
+				}
+				socket.write(encoded);
 			} catch {
 				/* peer went away mid-write */
 			}
@@ -220,6 +268,11 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		const conn = { write };
 
 		const cleanup = (): void => {
+			if (ended) return;
+			ended = true;
+			for (const pending of pendingReads.values()) { pending.finish(); pending.ac.abort(); }
+			seenReads.clear();
+			boundGrant?.revoke();
 			for (const ac of pendingAsks.values()) ac.abort();
 			pendingAsks.clear();
 			// `bye` releases the handle while `handle` stays set (the socket's own `close`
@@ -233,10 +286,55 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		const errorReason = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 		const dispatch = (frame: Frame): void => {
+			if (ended) return;
 			switch (frame.t) {
+				case "result_read": {
+					const grant = boundGrant;
+					const respond = (result: ReadReply): void => write({ t: "result_read_reply", reqId: frame.reqId, result });
+					if (!handle || connections.get(handle) !== conn || !grant?.active) { respond(readFailure("denied")); return; }
+					if (seenReads.has(frame.reqId)) {
+						const pending = pendingReads.get(frame.reqId);
+						pending?.finish();
+						pending?.ac.abort();
+						respond(readFailure("protocol"));
+						return;
+					}
+					if (seenReads.size >= RESULT_READ_MAX_REQUESTS) { grant.revoke(); return; }
+					seenReads.add(frame.reqId);
+					if (pendingReads.size >= RESULT_READ_MAX_PENDING) { respond(readFailure("busy")); return; }
+					const { t: _t, reqId, ...request } = frame;
+					const ac = new AbortController();
+					const finish = (result?: ReadReply): void => {
+						if (pendingReads.get(reqId)?.ac !== ac) return;
+						pendingReads.delete(reqId);
+						clearTimeout(timer);
+						if (result && !ended && grant.active && handle && connections.get(handle) === conn) respond(result);
+					};
+					const timer = setTimeout(() => { finish(readFailure("timeout")); ac.abort(); }, RESULT_READ_TIMEOUT_MS);
+					timer.unref?.();
+					pendingReads.set(reqId, { ac, finish });
+					void Promise.resolve().then(() => {
+						if (ac.signal.aborted || !grant.active) return readFailure("revoked");
+						return grant.reader.read(request, ac.signal);
+					}).then((result) => {
+						try { finish(isReadReplyFor(result, request) ? result : readFailure("protocol")); }
+						catch { finish(readFailure("protocol")); }
+					}, () => finish(readFailure("unavailable")));
+					return;
+				}
+				case "result_read_cancel": {
+					const pending = pendingReads.get(frame.reqId);
+					pending?.finish(readFailure("cancelled"));
+					pending?.ac.abort();
+					return;
+				}
 				case "register": {
+					const reject = (reason: string): void => {
+						write({ t: "error", reason });
+						if (frame.readerToken !== undefined || grants.has(frame.handle)) socket.destroy();
+					};
 					if (frame.handle === deps.supervisorHandle) {
-						write({ t: "error", reason: "reserved handle" });
+						reject("reserved handle");
 						return;
 					}
 					// Registration is one-shot per socket and exclusive per handle: a
@@ -244,19 +342,31 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					// would then unregister a handle it no longer owns (or leak the one it
 					// silently abandoned).
 					if (handle) {
-						write({ t: "error", reason: "already registered" });
+						reject("already registered");
 						return;
 					}
 					if (connections.has(frame.handle)) {
-						write({ t: "error", reason: `handle already connected: ${frame.handle}` });
+						reject("handle already connected");
 						return;
+					}
+					const grant = grants.get(frame.handle);
+					// A supplied unknown/expired token never falls through to ordinary registration.
+					if (grant || frame.readerToken !== undefined) {
+						if (!grant?.active || grant.bound || !frame.readerToken
+							|| !timingSafeEqual(grant.token, Buffer.from(frame.readerToken, "hex"))) {
+							reject("result reader authentication failed");
+							return;
+						}
+						grant.bound = true;
+						boundGrant = grant;
+						grant.stop = () => { if (!ended) { cleanup(); socket.destroy(); } };
 					}
 					handle = frame.handle;
 					group = frame.group;
 					bus.register(handle);
 					connections.set(handle, conn);
 					if (frame.peers) peerRegistry.set(handle, { handle, label: frame.label ?? handle, group: frame.group ?? "" });
-					write({ t: "registered", handle });
+					write({ t: "registered", handle, ...(frame.readerToken ? { readerToken: frame.readerToken } : {}) });
 					drain(handle);
 					flushPendingSteer(handle);
 					return;
@@ -324,6 +434,8 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		const handleFrame = (raw: unknown): void => {
 			if (!isFrame(raw)) {
 				write({ t: "error", reason: "invalid frame" });
+				if (boundGrant || (typeof raw === "object" && raw !== null
+					&& ("readerToken" in raw || ("t" in raw && String(raw.t).startsWith("result_read"))))) socket.destroy();
 				return;
 			}
 			try {
@@ -337,8 +449,9 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			}
 		};
 
-		socket.on("data", createFrameReader(handleFrame, (e) => {
-			write({ t: "error", reason: e.message });
+		socket.on("data", createFrameReader(handleFrame, () => {
+			// JSON parser diagnostics can contain the private registration token.
+			write({ t: "error", reason: "invalid frame" });
 			socket.destroy();
 		}));
 		socket.on("error", () => socket.destroy());
@@ -350,9 +463,9 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 
 	const server = await bindServer(netImpl, deps.endpoint, handleConnection);
 
-	let closed = false;
 	return {
 		endpoint: deps.endpoint,
+		prepareResultReader,
 		connectedHandles: () => [...connections.keys()],
 		steer(handle: string, text: string): boolean {
 			const conn = connections.get(handle);
@@ -370,12 +483,14 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			expected.add(handle);
 		},
 		forget(handle: string): void {
+			grants.get(handle)?.revoke();
 			expected.delete(handle);
 			pendingSteer.delete(handle);
 		},
 		async close(): Promise<void> {
 			if (closed) return;
 			closed = true;
+			for (const grant of grants.values()) grant.revoke();
 			unsubBus();
 			expected.clear();
 			pendingSteer.clear();

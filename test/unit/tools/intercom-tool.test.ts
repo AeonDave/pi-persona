@@ -72,6 +72,19 @@ test("the intercom contract has no wait action and no join parameters", () => {
 	assert.doesNotMatch(String(schema.properties.to.description), /\bwait\b|pending completions/i);
 });
 
+test("live completed result retains the observed model after provider recovery", async () => {
+	const h = intercomDeps();
+	const { tool } = registeredTool(h.deps);
+	const id = h.launch();
+	h.tracker.peek(id)!.model = "requested";
+	const settled = h.whenSettled(id);
+	h.runs[0]!.resolve({ agent: "worker", output: "verified result", usage: emptyUsage(), ok: true, modelUsed: "provider/resolved" });
+	await settled;
+	const result = await tool.execute("read", { action: "result", to: id }, undefined, undefined, {});
+	assert.equal(result.details.modelUsed, "provider/resolved");
+	assert.match(result.content[0].text, /Observed model: provider\/resolved/);
+});
+
 test("intercom description states the background contract and child steer queuing", () => {
 	const { tool } = registeredTool();
 	const description = String(tool.description);
@@ -86,9 +99,33 @@ test("intercom description states the background contract and child steer queuin
 test("the schema rejects a legacy wait call and still accepts every remaining action", () => {
 	const { tool } = registeredTool();
 	assert.equal(Check(tool.parameters, { action: "wait", to: "run-1" }), false);
-	for (const action of ["peek", "result", "steer", "stop", "list", "inbox", "message", "reply", "send"]) {
+	for (const action of ["peek", "result", "results", "steer", "stop", "list", "inbox", "message", "reply", "send"]) {
 		assert.equal(Check(tool.parameters, { action }), true, `${action} stays callable`);
 	}
+});
+
+test("live result pages do not collect or suppress completion until whole-body delivery or acknowledgement", async () => {
+	const h = intercomDeps();
+	let discarded = 0;
+	h.completionNotifier.discard = () => { discarded++; };
+	const { tool } = registeredTool(h.deps);
+	const id = h.launch();
+	const settled = h.whenSettled(id);
+	h.runs[0]!.resolve({ agent: "worker", output: `${"a".repeat(20_000)}HIDDEN_TAIL_MUST_NOT_LEAK`, structured: { secret: "HIDDEN_STRUCTURED_MUST_NOT_LEAK" }, usage: emptyUsage(), ok: true });
+	await settled;
+	const first = await tool.execute("page", { action: "result", to: id, limit: 100 }, undefined, undefined, {});
+	assert.equal(h.tracker.peek(id)?.collected, undefined);
+	assert.equal(discarded, 0);
+	assert.equal(first.details.page.nextOffset, 100);
+	assert.ok(JSON.stringify(first).length < 1500, "page budget is real, not a whole run hidden in details");
+	assert.doesNotMatch(JSON.stringify(first.details), /HIDDEN_TAIL|HIDDEN_STRUCTURED|task|progress|structured/);
+	assert.equal(first.details.result, undefined);
+	const second = await tool.execute("page2", { action: "result", to: id, offset: 100, limit: 100 }, undefined, undefined, {});
+	assert.equal(second.details.page.offset, 100);
+	assert.equal(h.tracker.peek(id)?.collected, undefined);
+	await tool.execute("ack", { action: "result", to: id, collect: true }, undefined, undefined, {});
+	assert.equal(h.tracker.peek(id)?.collected, true);
+	assert.equal(discarded, 1);
 });
 
 test("result on a running child points to its completion follow-up instead of a wait", async () => {

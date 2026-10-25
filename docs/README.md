@@ -16,6 +16,8 @@ introduced a behavior. An `Unreleased` entry is not yet part of a published rele
   - Vendor-neutral observer contract, privacy boundary, persistence, and consumer conformance.
 - [`EXPERIENCE.md`](./EXPERIENCE.md)
   - Choosing a persona, supervising background work, and collaborating through Exocom.
+- [`COLLABORATION.md`](./COLLABORATION.md)
+  - Intercom supervision, voluntary peer tasks, invitations, evidence, retention and runtime contracts.
 - [`MONITORS.md`](./MONITORS.md)
   - Clock snapshots, timers, and background event sources that wake the supervisor.
 - [`REFERENCE.md`](./REFERENCE.md)
@@ -27,6 +29,16 @@ introduced a behavior. An `Unreleased` entry is not yet part of a published rele
 - **For contributors:** begin at `ARCHITECTURE.md`, then `REFERENCE.md` for runtime surfaces and `STRATEGIES.md` for implementation details.
 - **For behavior-layer changes:** consult `SPINE.md` and `src/core` / `src/persona/spine.ts` together.
 - **For telemetry producers or consumers:** start with `TELEMETRY.md` and its conformance corpus.
+
+## Research and verification records
+
+- [`The pi-subagents comparison`](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-24-pi-subagents.md) records the bounded source
+  study and links its evidence and source notes.
+- [`Current-host cleanup and final requalification`](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-25-current-host-cleanup.md)
+  is the latest qualification report and links the preceding implementation review for its distinct
+  behavioral and live-run evidence.
+- [`ROADMAP.md`](https://github.com/AeonDave/pi-persona/blob/main/ROADMAP.md) tracks the remaining work, including the unqualified
+  [compaction proposal](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md).
 
 ## Documentation maintenance notes
 

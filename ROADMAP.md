@@ -5,6 +5,35 @@ Items marked **🔒** are committed; **🔍** need design/research; **💡** are
 
 ---
 
+## Priority 0 — Essential supervised-work package
+
+**Status: implemented and locally verified (2026-10-25).** This package was the first
+implementation priority, ahead of companion integrations. Release state is tracked in the changelog
+and package metadata.
+
+Keep the existing supervised-session architecture and address concrete correctness and usability
+problems, without importing a persistent daemon, script runtime, scheduler or default context fork.
+
+Sources: [comparative study](docs/reviews/2026-10-24-pi-subagents.md) ·
+[verified findings](docs/reviews/2026-10-24-pi-subagents-evidence.json) ·
+[essential-package verification](docs/reviews/2026-10-25-essential-package-verification.md) ·
+[current-host cleanup and final requalification](docs/reviews/2026-10-25-current-host-cleanup.md).
+
+| Order | Deliverable | Acceptance gate | Status |
+|---|---|---|---|
+| 1 | Stable worktree export baseline | Real Git fixture reconstructs committed, uncommitted and new-file changes from the pinned initial commit; main checkout untouched | Verified |
+| 2 | Unanswered decisions never imply approval | Explicit answered/unavailable/timed-out/cancelled outcomes; no synthetic permission and no headless deadlock | Verified |
+| 3 | Per-leg thinking/effort | Typed per-run/agent/roster selection; both engines preserve precedence and report unsupported/observed levels honestly | Verified |
+| 4 | Bounded durable terminal results | Session-owned results survive reload; bounded/paged retrieval and reference hand-offs, no respawn or duplicate completion | Verified, including hardened flow resume |
+| 5 | Installed-package qualification | Clean-profile tarball checks on Pi 1.4.0 from registry and installed host; both engines and shutdown, no runtime provider network | Verified |
+| 6 — after 1–5 | Intercom/Exocom collaboration follow-through | Voluntary generation-bound tasks, atomic pickup/claims, optional expiring offers, bounded evidence, progress and self-reported presence on existing planes; real two-session smoke | Implemented and verified |
+
+All six outcomes are implemented. The review records the regression-first evidence, final suite,
+installed-package qualification, live communication checks and their limits. The package retained
+the supervised-session architecture without adding a daemon, scheduler or default context fork.
+
+---
+
 ## 1.17.1 — Unified settings and stall-detection fixes
 
 **Status: released.**
@@ -31,7 +60,7 @@ Files: `stream.ts`, `async.ts`, `inproc.ts`, `child.ts`, `adapter.ts`, `sdk.ts`,
 
 ### 🔒 1. `pi-persona-policy` adapter — `@gotgenes/pi-permission-system` integration
 
-**Priority: highest.** The permission system is the natural enforcement complement to
+**Priority: after the Priority 0 essential package.** The permission system is the natural enforcement complement to
 pi-persona's capability/visibility layer.
 
 #### The two-layer model (already documented by the permission system)
@@ -201,6 +230,7 @@ No code changes planned until the audit completes.
 | **Configurable `STALL_FLAG_MS`** | `PI_PERSONA_STALL_MS` env var for operators with unusual workloads | Low (1.17.1 fixes the root causes) |
 | **Progress contract redesign** | Replace length-based output comparison with structured liveness states (queued/initializing/generating/executing/waiting) | Medium |
 | **`context: fork`** | Child context forking (deliberately deferred per AGENTS.md) | Deferred |
+| **Compaction and continuity evaluation** | The [open proposal](docs/plans/2026-10-20-compaction-evaluation-proposal.md) separates native timing, runtime continuity checkpoints and structured summaries; native compaction remains the default | Deferred pending separate authorization and paired quality/cost evidence |
 | **Token-budget alerting** | Operator-visible warning when a child approaches its token budget | Low |
 | **Permission system built-in presets** | Ship `permission:` blocks in bundled persona seed files | Blocked on `pi-persona-policy` |
 
@@ -211,7 +241,7 @@ No code changes planned until the audit completes.
 - Patch (`x.y.z+1`): bugfixes, doc updates, no new features
 - Minor (`x.y+1.0`): new features, new integrations, backward-compatible
 - The project follows [Keep a Changelog](https://keepachangelog.com/) in `CHANGELOG.md`
-- Pi host floor: ≥ 1.0.0 (`MIN_PI_VERSION`)
+- Host policy: qualify the latest stable Pi together with plugin updates (currently 1.4.0); do not maintain historical-host compatibility branches.
 - Node.js floor: ≥ 22.19
 
 ## References

@@ -33,6 +33,7 @@ import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
 import { frameSigningPayload, isExocomFrame, isSemanticFrame, nextHops, parseExocomArtifactDescriptor, truncateForInject, type AgentCard, type ExocomAck, type ExocomArtifactDescriptor, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack, type ExocomSemanticFrame } from "./envelope.ts";
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
+import { normalizeExocomProfile, type ExocomProfile } from "./profile.ts";
 import { isAlive, normalizePeerName, prune, readAll, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
 
 export interface ExocomIdentity {
@@ -398,6 +399,9 @@ export class ExocomPlane {
 	private server: net.Server | undefined;
 	private readonly unlinkEndpoint: () => void;
 	private endpointOwned = false;
+	private profile: ExocomProfile | undefined;
+	/** Last successfully published metadata, so editing a profile cannot restore startup labels. */
+	private presence: RegistryEntry | undefined;
 	/** Ownership of the registry entry successfully written by this plane.  A plane
 	 * may share a session_id with a replacement, so session_id alone is not enough
 	 * to clean up safely. */
@@ -443,6 +447,17 @@ export class ExocomPlane {
 		return normalizePeerName(this.deps.identity.name);
 	}
 
+	/** The plane owns this transient, optional self-report for its live session. */
+	getProfile(): ExocomProfile | undefined {
+		return this.profile ? { ...this.profile, capabilities: [...this.profile.capabilities] } : undefined;
+	}
+
+	/** Update the live registry immediately; `undefined` withdraws the entire self-report. */
+	setProfile(profile: ExocomProfile | undefined): void {
+		this.profile = profile === undefined ? undefined : normalizeExocomProfile(profile);
+		if (this.registeredOwnership) this.heartbeat({ ...(this.presence ?? this.buildEntry()), heartbeat_at: new Date(this.now()).toISOString() });
+	}
+
 	/** Messages this instance has successfully `send()`'d TO the given peer (ack settled), keyed by
 	 *  the peer's session_id — 0 for a peer never sent to. The plane is the SINGLE source of these
 	 *  counters — the widget reads them, it never keeps its own. */
@@ -480,6 +495,7 @@ export class ExocomPlane {
 			prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
 			const entry = this.buildEntry();
 			writeEntry(agentDir, hash, entry);
+			this.presence = entry;
 			this.registeredOwnership = {
 				session_id: entry.session_id,
 				endpoint: entry.endpoint,
@@ -524,6 +540,7 @@ export class ExocomPlane {
 				workspace_code: identity.workspace.code,
 				workspace_label: identity.workspace.label,
 			} : {}),
+			...(this.profile ? { profile: this.getProfile()! } : {}),
 		};
 	}
 
@@ -535,8 +552,15 @@ export class ExocomPlane {
 	 *  key exists only in this process. `session_id` is ours by construction, never the caller's. */
 	heartbeat(entry: Omit<RegistryEntry, "public_key">): void {
 		const { agentDir, hash, identity } = this.deps;
-		const owned = { ...entry, session_id: identity.session_id, public_key: this.publicKey };
+		const { profile: _callerProfile, ...entryWithoutProfile } = entry;
+		const owned = {
+			...entryWithoutProfile,
+			session_id: identity.session_id,
+			public_key: this.publicKey,
+			...(this.profile ? { profile: this.getProfile()! } : {}),
+		};
 		writeEntry(agentDir, hash, owned);
+		this.presence = owned;
 		this.registeredOwnership = { session_id: owned.session_id, endpoint: owned.endpoint, public_key: owned.public_key };
 	}
 
@@ -864,6 +888,11 @@ export class ExocomPlane {
 					return;
 				}
 				case "claim":
+				case "task_create":
+				case "task_take":
+				case "task_finish":
+				case "offer":
+				case "publish":
 				case "ask":
 				case "answer":
 				case "progress":
@@ -1112,5 +1141,7 @@ export class ExocomPlane {
 		// spill. In a scope where Exocom is never enabled again, that is never: sweeping on the
 		// way out bounds the retention without touching anything still inside its TTL.
 		this.cleanupArtifacts();
+		this.profile = undefined;
+		this.presence = undefined;
 	}
 }

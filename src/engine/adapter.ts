@@ -10,6 +10,8 @@ import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { resolveLegThinking } from "../core/leg-thinking.ts";
+import type { ThinkingLevel } from "../core/types.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentProgress, type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
@@ -18,8 +20,13 @@ import { type ChildEngineOptions, type ChildRunSpec, runChildAgent } from "./chi
 import { looksLikeProviderError } from "./errors.ts";
 import { piHostModuleHint } from "./host-module.ts";
 import { nextChildHandle } from "./handles.ts";
+import { admitResultReadTool, referenceHandoffFailure } from "./result-grant.ts";
+import { makeScopedResultReader, type ResultArchiveView } from "../results/retrieval.ts";
+import type { PreparedResultReader, ScopedReader } from "../bus/result-reader.ts";
 import { combineSignals } from "./signals.ts";
+import { emptyUsage } from "./stream.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
+import { mergeSessionToolAllowlist } from "./session-tools.ts";
 
 /** The engine-side face of the cross-process broker (spec B3/B4/B7) — a child-engine
  *  spawn's connection to the supervisor-hosted relay. The concrete implementation
@@ -40,6 +47,10 @@ export interface EngineAdapterBroker {
 	 *  parent-side idle/startup watchdogs consult this before killing a silent leg (R9): a leg
 	 *  blocked on the supervisor is re-armed, not killed. */
 	hasPendingAskFrom(handle: string): boolean;
+	/** Strict, AWAITED result-reader preflight for a reference-handoff leg (the broker host binds
+	 *  a single-use token to this handle). Must complete BEFORE `register` and the spawn — a
+	 *  missing broker/binding fails the leg closed with zero usage instead of degrading bus-less. */
+	prepareResultReader(handle: string, reader: ScopedReader, signal?: AbortSignal): Promise<PreparedResultReader>;
 }
 
 export interface EngineAdapterDeps {
@@ -55,8 +66,7 @@ export interface EngineAdapterDeps {
 	 *  the on-the-fly role this run carries, when it has one, so a member's own assignment key
 	 *  (`agent#hash`) resolves ahead of the bare agent's. */
 	modelFor?: (agent: string, role?: string) => string | undefined;
-	/** Explicit thinking level appended to the child model (`model:level`) so it can't
-	 *  fall into a model's default "adaptive" mode, which some models reject. */
+	/** Configured/inherited child effort, below explicit leg and agent selections. */
 	childThinking?: string;
 	/** The shared behavioral layer (docs/SPINE.md), prepended to every leg's prompt. This is the
 	 *  WORKER variant (`prompts/spine.worker.md`), not the supervisor text — a leg runs headless
@@ -80,6 +90,11 @@ export interface EngineAdapterDeps {
 	 *  blocking would deadlock: default false, mirroring `inproc.ts`'s `allowBlocking`
 	 *  default. Forwarded to the child as `PI_PERSONA_ALLOW_BLOCKING` (bridge.ts). */
 	allowBlocking?: boolean;
+	/** The owning session's terminal archive (a GETTER — the owner can change across sessions).
+	 *  Required by any leg carrying `resultRefs` (flow reference handoff): the scoped reader
+	 *  handed to the broker pages THIS archive, after a zero-usage preflight verified every
+	 *  granted ref is durably stored. Absent ⇒ such legs fail closed before any spawn. */
+	resultArchive?: () => ResultArchiveView | undefined;
 }
 
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
@@ -113,9 +128,37 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 		): Promise<AgentResult> {
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
+			let thinkingRequested: ThinkingLevel | undefined;
+			try {
+				thinkingRequested = resolveLegThinking(spec, cfg, deps.childThinking);
+			} catch (error) {
+				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` };
+			}
 			const tools = spec.tools ?? cfg.tools;
 			const invalidTools = toolModifierFailure(spec.agent, tools);
 			if (invalidTools) return invalidTools;
+
+			// ── reference handoff preflight (contract 3/4) — BEFORE any broker work or spawn ──
+			// Admission uses the SAME shared rule as the in-process engine; storage is verified
+			// durable (session-entry); the broker binding is AWAITED before registration/spawn.
+			// Any miss is a zero-usage contract failure and the child is never invoked.
+			let admittedTools = tools;
+			let resultReader: ScopedReader | undefined;
+			if (spec.resultRefs !== undefined && spec.resultRefs.length > 0) {
+				const grant = admitResultReadTool({
+					specTools: spec.tools, cfgTools: cfg.tools, excludeTools: cfg.excludeTools,
+					canUseBus: deps.canUseBus ?? true,
+				});
+				if (!grant.ok) return referenceHandoffFailure(spec.agent, grant.error);
+				const archive = deps.resultArchive?.();
+				if (archive === undefined) return referenceHandoffFailure(spec.agent, "terminal result archive unavailable for reference handoff");
+				const scoped = makeScopedResultReader(archive, spec.resultRefs);
+				const { missing } = scoped.preflight();
+				if (missing.length > 0) return referenceHandoffFailure(spec.agent, `archived results unavailable: ${missing.join(", ")}`);
+				if (deps.broker === undefined) return referenceHandoffFailure(spec.agent, "cross-process broker reader unavailable for reference handoff");
+				resultReader = scoped;
+				admittedTools = grant.tools;
+			}
 
 			// Resolved (and pinned) up front: the SAME def both instructs the member and
 			// validates its output — an instruction/validation drift is impossible. A named
@@ -130,12 +173,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					: spec.task;
 			const task = contractDef ? `${withSkills}\n\n${contractInstructions(contractDef)}` : withSkills;
 			const childSpec: ChildRunSpec = { task };
-			let model = spec.model ?? deps.modelFor?.(spec.agent, spec.role) ?? cfg.model;
-			// Append an explicit thinking level (model:level) unless one is already present —
-			// a child without it defaults to "adaptive", which some models reject.
-			if (model && deps.childThinking && !model.includes(":")) model = `${model}:${deps.childThinking}`;
+			const model = spec.model ?? deps.modelFor?.(spec.agent, spec.role) ?? cfg.model;
 			if (model) childSpec.model = model;
-			if (tools !== undefined) childSpec.tools = tools;
+			if (thinkingRequested !== undefined) childSpec.thinking = thinkingRequested;
+			if (admittedTools !== undefined) childSpec.tools = admittedTools;
 			if (cfg.excludeTools && cfg.excludeTools.length > 0) childSpec.excludeTools = cfg.excludeTools;
 			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
 			// on-the-fly `role` specialisation from the spec. All three go out as
@@ -160,27 +201,46 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 
 			// Cross-process comm plane (spec B1-B7): absent broker ⇒ none of this runs, so
 			// the spawn env + behaviour stay byte-identical to pre-broker pi-persona.
-			// Present ⇒ mint a handle, register it with the host BEFORE
-			// spawn, wire the child's env, and give the caller a steer function.
+			// Present ⇒ mint a handle, (for a reference-handoff leg) AWAIT the strict reader
+			// binding BEFORE registration, register the handle with the host BEFORE spawn, wire
+			// the child's env, and give the caller a steer function.
 			let handle: string | undefined;
+			let preparedReader: PreparedResultReader | undefined;
 			if (deps.broker) {
-				handle = nextChildHandle(spec.agent);
+				const broker = deps.broker;
+			handle = nextChildHandle(spec.agent);
 				const wantsPeers = spec.peers === true && (deps.canUseBus ?? true);
-				const label = spec.name?.trim()
+				const busTools = (deps.canUseBus ?? true) ? ["contact_supervisor", ...(wantsPeers ? ["contact_peer"] : [])] : [];
+				const mergedTools = mergeSessionToolAllowlist(admittedTools, busTools);
+				if (mergedTools !== undefined) childSpec.tools = mergedTools;
+			const label = spec.name?.trim()
 					? sanitizeDisplayLabel(spec.name, handle)
 					: spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
-				deps.broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
+				if (resultReader !== undefined) {
+					try {
+						preparedReader = await broker.prepareResultReader(handle, resultReader, signal);
+					} catch (error) {
+						return referenceHandoffFailure(spec.agent, `broker result reader preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+					}
+					childOptions.env = {
+						...childOptions.env,
+						// Private spawn credential for the child's bridge (bridge.ts installs read_result
+						// only when this is set); scrubbed from the inherited env inside child.ts.
+						PI_PERSONA_RESULT_READER_TOKEN: preparedReader.token,
+					};
+				}
+				broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
 				childOptions.env = {
 					...childOptions.env,
-					PI_PERSONA_BUS: deps.broker.endpoint,
+					PI_PERSONA_BUS: broker.endpoint,
 					PI_PERSONA_HANDLE: handle,
+					PI_PERSONA_BUS_TOOLS: (deps.canUseBus ?? true) ? "on" : "off",
 					...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
 					...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),
 				};
 				// The parent-side watchdogs must not kill a leg that is genuinely waiting on the
 				// supervisor's answer (R9, inproc parity) — ask the bus, don't guess from a static flag.
-				childOptions.isBlocked = () => deps.broker!.hasPendingAskFrom(handle!);
-				const broker = deps.broker;
+				childOptions.isBlocked = () => broker.hasPendingAskFrom(handle!);
 				const h = handle;
 				const steer: SteerFn = Object.assign((text: string) => broker.steerFrame(h, text), {
 					isWaitingForSupervisor: () => broker.hasPendingAskFrom(h),
@@ -192,17 +252,21 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			try {
 				child = await runChildAgent(childSpec, signal, childOptions);
 			} finally {
-				// Unregister on EVERY settle path (success, failure, or an unexpected throw) —
-				// a leaked handle would otherwise linger in the host's registries forever.
+				// Revoke the reader grant and unregister on EVERY settle path (success, failure, or
+				// an unexpected throw) — a leaked grant would outlive its leg; a leaked handle would
+				// otherwise linger in the host's registries forever.
+				preparedReader?.revoke();
 				if (deps.broker && handle) deps.broker.unregister(handle);
 			}
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };
-			// The provider/id the child ran on (drop any `:thinking` suffix) — for the UI and
+			if (thinkingRequested !== undefined) result.thinkingRequested = thinkingRequested;
+			if (child.thinkingEffective !== undefined) result.thinkingEffective = child.thinkingEffective;
+			// The opaque provider/id the child ran on — for the UI and
 			// as the seed of the provider-fallback chain on a provider failure. The child's
 			// STREAM-REPORTED model wins over the requested spec: a resolved alias or a
 			// provider-side redirect must seed the fallback chain with what actually ran.
-			const modelUsed = (child.model ?? childSpec.model ?? spec.model ?? cfg.model)?.split(":")[0];
+			const modelUsed = child.model ?? childSpec.model ?? spec.model ?? cfg.model;
 			if (modelUsed) result.modelUsed = modelUsed;
 			// Diagnostic tag: agent · model ref · dynamic overrides. Same shape as inproc engine,
 			// so failed follow-ups always say WHICH agent+model died and WHY.

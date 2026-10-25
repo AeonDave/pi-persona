@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import piPersona, { type EngineFactories } from "../../src/extension.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
@@ -106,9 +106,14 @@ async function boot(selectModel: (title: string, options: string[]) => string): 
 		hasUI: true,
 		mode: "rpc",
 		model: { provider: "gamma", id: "main" },
-		modelRegistry: { getAll: () => MODELS, getAvailable: () => MODELS },
-		sessionManager: { getSessionId: () => "aux-model-display-session" },
+		modelRegistry: {
+			getAll: () => MODELS, getAvailable: () => MODELS,
+			getRegisteredProviderIds: () => [], getRegisteredNativeProvider: () => undefined,
+			getRegisteredProviderConfig: () => undefined, getProvider: () => undefined,
+		},
+		sessionManager: SessionManager.inMemory(),
 		isIdle: () => true,
+		getContextUsage: () => undefined,
 		hasPendingMessages: () => false,
 		ui: {
 			setStatus: () => {},

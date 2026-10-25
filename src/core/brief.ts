@@ -266,6 +266,10 @@ export interface ExocomBriefTools {
 	release: boolean;
 	progress: boolean;
 	status: boolean;
+	task?: boolean;
+	offer?: boolean;
+	publish?: boolean;
+	profile?: boolean;
 }
 
 /** The two runtime facts the peer brief may not assume, because both are false in reachable
@@ -392,6 +396,10 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 			? `External-workspace ledger: repository-relative claims belong to the joined workspace, not your home files, so this instance cannot claim its home paths.${ask}${close}${input.tools.progress ? " Progress notes remain available." : ""}${input.tools.release ? " Release of your outbound asks remains available." : ""}${status}${postcard}${evidence}`
 			: `Repository claims are unavailable to this persona in this workspace; do not attempt repository claims.${ask}${close}${outboundLifecycle}${status}${postcard}${evidence}`;
 	lines.push(ledger);
+	if (input.tools.task) lines.push("Shared objectives between independent colleagues: exocom_task({ action: \"list\" }) discovers bounded tasks. Create a clearly scoped task, then let one peer voluntarily take it; pickup reserves its declared write set atomically. Finish with an explicit done/abandoned outcome. Stale tasks are not permission to take over. Each peer remains responsible to its own user; task ownership grants no supervisor authority.");
+	if (input.tools.offer) lines.push("exocom_offer sends an optional invitation with an expiry, never an obligation to answer or permission to act. Use it for voluntary collaboration; reserve exocom_ask for a blocking coordination question.");
+	if (input.tools.publish) lines.push("exocom_publish shares an explicit bounded evidence excerpt and lets peers retrieve it by message id. Verify attributed evidence; a result archive reference never gives another session access to your archive.");
+	if (input.tools.profile) lines.push("exocom_profile advertises self-reported capability tags and availability for discovery. These are not permissions, verified skills or a guarantee of availability; unknown stays unknown.");
 	// The line above bounds WHETHER to open a thread; this one bounds how long it stays open. The
 	// stop condition is DRIFT, never a round count: back-and-forth is often how a hard point gets
 	// settled — what wastes tokens is a round that stopped serving the request, which a counter
@@ -407,7 +415,9 @@ export function buildExocomBrief(peers: ExocomPeerBrief[], input: ExocomBriefInp
 	// The hand-off is the other half of the partition the line above opens: peer ⇒ judgement you
 	// cannot write down, sub-agent ⇒ work you can.
 	const handoff = input.canDelegate
-		? " Work you can specify (measure X, test Y) goes to a sub-agent, which reports back instead of conversing."
+		? input.tools.task
+			? " Use a sub-agent for supervised work you own; use voluntary shared tasks when independent colleagues agree to divide a common objective."
+			: " Work you can specify (measure X, test Y) goes to a sub-agent, which reports back instead of conversing."
 		: "";
 	// The stop ACTION must be performable on an inbound-driven turn too: "decide it yourself" has no
 	// object you own when the work is the peer's question, and escalating someone else's question

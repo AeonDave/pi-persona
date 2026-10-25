@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
 import { tempDir } from "../setup/temp-dir.ts";
@@ -30,14 +30,15 @@ function boot(t: TestContext, prepare?: (dir: string, file: string) => void) {
 	const flags = new Map<string, string | boolean>();
 	const ctx = {
 		cwd: dir, mode: "print", hasUI: true,
-		sessionManager: { getSessionId: () => "settings-integration" },
+		sessionManager: SessionManager.inMemory(dir),
 		model: undefined,
-		modelRegistry: { getAll: () => [], getAvailable: () => [] },
+		modelRegistry: { getAll: () => [], getAvailable: () => [], refresh: async () => undefined },
 		isIdle: () => true, hasPendingMessages: () => false,
 		ui: { setStatus: () => {}, notify: (message: string) => notes.push(message),
 			select: async () => undefined, custom: async () => undefined },
 	};
 	const pi = {
+		events: { emit: () => {}, on: () => () => {} },
 		on: (event: string, handler: Handler) => { hooks.set(event, [...hooks.get(event) ?? [], handler]); },
 		registerCommand: (name: string, def: { handler: Handler }) => commands.set(name, def),
 		registerTool: (def: { name: string }) => tools.set(def.name, def),

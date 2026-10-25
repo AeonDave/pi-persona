@@ -15,18 +15,21 @@
  * roster cache, and endless reconnect-after-disconnect "storm" are dropped — YAGNI here,
  * see spec B6/Task 4 brief). An unexpected disconnect (host died
  * mid-run) is NOT auto-reconnected: sends silently go nowhere, while in-flight asks/lists
- * reject promptly and clean up their timers — the child keeps executing, mute, never crashing.
+ * reject promptly and clean up their timers. Authenticated result readers are stricter:
+ * one connect attempt, bounded handshake/reads, closed failure replies, never mute success.
  *
  * Pure over an injected socket factory (`net`), mirroring `host.ts`'s `net` param — same
  * transport-injection seam, opposite side of the same fake in tests.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import nodeNet from "node:net";
 import type net from "node:net";
 
 import { createFrameReader, encodeFrame } from "./framing.ts";
-import { type Frame, isFrame } from "./messages.ts";
+import { type Frame, isFrame, isReaderToken } from "./messages.ts";
+import { isReadRequest, isReadReplyFor, readFailure, RESULT_READ_MAX_PENDING, RESULT_READ_TIMEOUT_MS,
+	type ReadReply, type ResultReadRequest } from "../result-reader.ts";
 import type { MsgKind } from "../inproc.ts";
 
 export interface DeliverEvent {
@@ -39,8 +42,10 @@ export interface DeliverEvent {
 }
 
 export interface BrokerClient {
-	/** Connect (capped backoff) and complete the register handshake. */
+	/** Register once. Ordinary comms back off on initial connect; reader grants never retry. */
 	register(): Promise<void>;
+	/** Authenticated bounded read. Failures are fixed closed replies; never a mute success. */
+	read(request: ResultReadRequest, signal?: AbortSignal): Promise<ReadReply>;
 	/** Fire-and-forget; a dead connection silently drops it (spec: "sends report undelivered"). */
 	send(to: string, kind: MsgKind, text: string): void;
 	/** Blocking request; resolves on a matching `replied`, rejects on `signal` abort or the
@@ -63,6 +68,8 @@ export interface MakeBrokerClientDeps {
 	label?: string;
 	group?: string;
 	peers?: boolean;
+	/** Private, one-shot parent grant. Never log this or pass it to a model. */
+	readerToken?: string;
 	/** Injected transport (tests use a paired in-memory fake); defaults to real `node:net`. */
 	net?: typeof import("node:net");
 }
@@ -88,6 +95,10 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	let socket: net.Socket | undefined;
 	let closed = false;
 	let disconnected = false;
+	let registerStarted = false;
+	let registered = false;
+	let cancelConnect: (() => void) | undefined;
+	const pendingReads = new Map<string, { request: ResultReadRequest; resolve: (result: ReadReply) => void }>();
 	let registerSettle: { resolve: () => void; reject: (err: Error) => void } | undefined;
 
 	const deliverListeners = new Set<(evt: DeliverEvent) => void>();
@@ -122,9 +133,21 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	function handleFrame(frame: Frame): void {
 		switch (frame.t) {
 			case "registered":
-				registerSettle?.resolve();
+				if (!registerSettle) return;
+				if (frame.handle !== deps.handle || (deps.readerToken !== undefined && (!frame.readerToken
+					|| !timingSafeEqual(Buffer.from(deps.readerToken, "hex"), Buffer.from(frame.readerToken, "hex"))))) {
+					failReaderProtocol();
+					return;
+				}
+				registered = true;
+				registerSettle.resolve();
 				registerSettle = undefined;
 				return;
+			case "result_read_reply": {
+				const pending = pendingReads.get(frame.reqId);
+				if (pending) pending.resolve(isReadReplyFor(frame.result, pending.request) ? frame.result : readFailure("protocol"));
+				return;
+			}
 			case "error":
 				// A correlated error belongs to one request on this connection. Do not let an
 				// unknown/stale correlation id affect the register handshake or another ask.
@@ -132,9 +155,8 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 					pendingAsks.get(frame.msgId)?.reject(new Error(frame.reason));
 					return;
 				}
-				// A bare error is reserved for the register handshake. Older hosts emit this
-				// shape, so keep accepting it for protocol compatibility.
-				registerSettle?.reject(new Error(frame.reason));
+				// A bare error belongs to the register handshake, not an outstanding read.
+				registerSettle?.reject(new Error(deps.readerToken !== undefined ? "Result reader authentication failed." : frame.reason));
 				registerSettle = undefined;
 				return;
 			case "deliver": {
@@ -167,25 +189,43 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		}
 	}
 
+	function failReaderProtocol(): void {
+		registerSettle?.reject(new Error("Result reader protocol failure."));
+		registerSettle = undefined;
+		for (const pending of pendingReads.values()) pending.resolve(readFailure("protocol"));
+		socket?.destroy();
+	}
+
 	function connectOnce(): Promise<net.Socket> {
 		return new Promise((resolve, reject) => {
 			const s = netImpl.connect(deps.endpoint);
 			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (): void => { clearTimeout(timer); cancelConnect = undefined; };
 			const onConnect = (): void => {
 				if (settled) return;
 				settled = true;
+				finish();
 				s.removeListener("error", onError);
 				resolve(s);
 			};
 			const onError = (err: Error): void => {
 				if (settled) return;
 				settled = true;
+				finish();
 				s.removeListener("connect", onConnect);
 				s.destroy();
 				reject(err);
 			};
 			s.once("connect", onConnect);
 			s.once("error", onError);
+			// Permanent sink also covers cancellation before the eventual connect event.
+			s.on("error", () => {});
+			cancelConnect = () => onError(new Error("broker client closed"));
+			if (deps.readerToken !== undefined) {
+				timer = setTimeout(() => onError(new Error("Result reader connection deadline exceeded.")), RESULT_READ_TIMEOUT_MS);
+				timer.unref?.();
+			}
 		});
 	}
 
@@ -208,6 +248,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function rejectAllPending(reason: string): void {
+		for (const p of pendingReads.values()) p.resolve(readFailure("unavailable"));
 		for (const p of pendingAsks.values()) p.reject(new Error(reason));
 		pendingAsks.clear();
 		for (const p of pendingLists.values()) p.reject(new Error(reason));
@@ -215,7 +256,11 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	async function register(): Promise<void> {
-		const s = await connectWithBackoff();
+		if (registerStarted || closed) throw new Error("broker register is one-shot or closed");
+		registerStarted = true;
+		if (deps.readerToken !== undefined && !isReaderToken(deps.readerToken)) throw new Error("Result reader protocol failure.");
+		// Ordinary comms retain initial-connect backoff. A result grant never reconnects/replays.
+		const s = await (deps.readerToken !== undefined ? connectOnce() : connectWithBackoff());
 		if (closed) {
 			s.destroy();
 			throw new Error("broker client closed");
@@ -226,16 +271,19 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 			createFrameReader(
 				(raw) => {
 					if (isFrame(raw)) handleFrame(raw);
+					else if (deps.readerToken !== undefined) failReaderProtocol();
 				},
-				() => s.destroy(),
+				() => { if (deps.readerToken !== undefined) failReaderProtocol(); else s.destroy(); },
 			),
 		);
 		s.on("error", () => {
+			if (deps.readerToken !== undefined) s.destroy();
 			/* The close event rejects in-flight requests; this listener only prevents an
 			 * unhandled socket error from taking down the child. */
 		});
 		s.once("close", () => {
-			socket = undefined;
+			if (socket === s) socket = undefined;
+			registered = false;
 			// A peer-initiated drop (host teardown/crash) between connect and the handshake
 			// reply would otherwise leave register() pending for the child's whole life.
 			registerSettle?.reject(new Error("connection closed during register"));
@@ -248,14 +296,55 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		});
 
 		return new Promise<void>((resolve, reject) => {
-			registerSettle = { resolve, reject };
+			const timer = deps.readerToken !== undefined ? setTimeout(() => {
+				registerSettle?.reject(new Error("Result reader handshake deadline exceeded."));
+				registerSettle = undefined;
+				s.destroy();
+			}, RESULT_READ_TIMEOUT_MS) : undefined;
+			timer?.unref?.();
+			registerSettle = {
+				resolve: () => { clearTimeout(timer); resolve(); },
+				reject: (error) => { clearTimeout(timer); reject(error); },
+			};
 			write({
 				t: "register",
 				handle: deps.handle,
+				...(deps.readerToken !== undefined ? { readerToken: deps.readerToken } : {}),
 				...(deps.label !== undefined ? { label: deps.label } : {}),
 				...(deps.group !== undefined ? { group: deps.group } : {}),
 				...(deps.peers !== undefined ? { peers: deps.peers } : {}),
 			});
+		});
+	}
+
+	function read(request: ResultReadRequest, signal?: AbortSignal): Promise<ReadReply> {
+		if (signal?.aborted) return Promise.resolve(readFailure("cancelled"));
+		if (!isReadRequest(request)) return Promise.resolve(readFailure("invalid"));
+		if (deps.readerToken === undefined) return Promise.resolve(readFailure("denied"));
+		if (closed || disconnected || !registered || !socket) return Promise.resolve(readFailure("unavailable"));
+		if (pendingReads.size >= RESULT_READ_MAX_PENDING) return Promise.resolve(readFailure("busy"));
+		const reqId = randomUUID();
+		// Snapshot caller data so mutation after dispatch cannot alter correlation checks.
+		const snapshot = { ...request };
+		return new Promise((resolve) => {
+			const finish = (result: ReadReply): void => {
+				if (!pendingReads.delete(reqId)) return;
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				resolve(result);
+			};
+			const cancel = (result: ReadReply): void => {
+				finish(result);
+				write({ t: "result_read_cancel", reqId });
+			};
+			const onAbort = (): void => cancel(readFailure("cancelled"));
+			const timer = setTimeout(() => cancel(readFailure("timeout")), RESULT_READ_TIMEOUT_MS);
+			timer.unref?.();
+			pendingReads.set(reqId, { request: snapshot, resolve: finish });
+			signal?.addEventListener("abort", onAbort, { once: true });
+			try {
+				socket!.write(encodeFrame({ t: "result_read", reqId, ...snapshot }));
+			} catch { finish(readFailure("unavailable")); socket?.destroy(); }
 		});
 	}
 
@@ -357,6 +446,8 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	function close(): void {
 		if (closed) return;
 		closed = true;
+		registered = false;
+		cancelConnect?.();
 		const s = socket;
 		if (s) {
 			write({ t: "bye" });
@@ -375,5 +466,5 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		rejectAllPending("broker client closed");
 	}
 
-	return { register, send, ask, reply, list, onDeliver, onSteer, onClose, close };
+	return { register, read, send, ask, reply, list, onDeliver, onSteer, onClose, close };
 }

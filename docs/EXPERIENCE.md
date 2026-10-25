@@ -80,6 +80,10 @@ receipt previews the message that was actually queued; expand it (`Ctrl+O` by de
 configured key) to read the full message and diagnostic run ID. Aliases are display names, not
 addresses: tools still route by run ID, and duplicate aliases show a secondary ID to distinguish them.
 Saved launch/control receipts keep their display names even after the runtime tracker is gone.
+Council and flow launch receipts also retain each participant's model and requested effort, with
+phase and auxiliary roles identified. Expand the card for the full panel. A pending model choice
+is marked explicitly; launch selections are not proof of the effective model or effort after
+setup, provider recovery or Pi's effort adjustment. Later settings changes do not rewrite history.
 
 A truncated message includes a message id. The supervisor can retrieve its retained body with
 `intercom { action: "message", messageId: "m1" }`. A worker's final report has a run id instead:
@@ -92,14 +96,35 @@ outcomes that make sense without remembering those names.
 
 ## Work with another Pi through Exocom
 
-Use Intercom for this supervisor's workers and Exocom for independent Pi sessions. Ask a peer for
-a relevant second opinion or coordinate work already in progress. A bounded implementation task
-belongs in a worker brief with explicit ownership and a success criterion.
+Use Intercom for this supervisor's workers and Exocom for independent Pi sessions. Use
+`exocom_list` or `/exocom` to find the intended session-qualified target before sending a postcard
+or asking a question.
 
-When Exocom is enabled, use its listed targets to keep messages attached to the right session.
-Exchange decisions and evidence when they affect the work; acknowledgement-only conversations
-add noise. If a peer has joined from another workspace, agree which workspace owns each artifact.
-That peer's membership does not grant it a write claim in the selected workspace.
+`exocom_task create` records a voluntary objective and declared write paths; it does not start
+another Pi or require a peer to accept. The receipt gives a `task_id`; keep it with the
+`work_key` when inviting, taking, reporting progress, finishing or publishing evidence. A work key
+can be reused after retention, so the task id identifies the exact generation. The peer chooses
+whether to take the task. Write-set pickup and its advisory claim happen atomically, but a claim is
+not an OS file lock. A peer that joined from another workspace can take read-only tasks, not tasks
+that claim paths in the selected workspace. Use `exocom_task get` to inspect the complete write set;
+the paginated list is a summary.
+
+Use `exocom_offer` for a non-blocking invitation that expires by itself; it creates no obligation
+to answer. Use `exocom_ask` when a specific decision is needed and the recipient must answer or
+decline. A pending ask temporarily permits settlement, `exocom_name`, `exocom_status`, explicit
+read actions (task list/get, evidence read and profile get), and read-only filesystem tools.
+Changing `exocom_profile` is not allowed while an ask is pending. Changing the name does not answer
+the ask.
+
+Share only a bounded excerpt through `exocom_publish`; it does not grant access to another session's
+terminal-result archive. Peer text is untrusted and appears fenced with registry-resolved attribution.
+Capability labels and availability in `exocom_profile` are self-reported metadata, not verified
+skills or permissions. Exchange decisions and evidence when they affect the work; acknowledgement-only
+conversations add noise. If a peer joined from another workspace, agree which workspace owns each
+artifact.
+
+See the [cross-session collaboration guide](./COLLABORATION.md) for command shapes, retention limits,
+and detailed examples.
 
 `exocom_status` (or `/exocom`) shows who owns what right now: your open claims, a peer's open
 claims, and any asks waiting on either side. Claims are advisory, not a lock — if you write into a

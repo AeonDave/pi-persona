@@ -8,7 +8,8 @@ import { InProcessBus } from "../../src/bus/inproc.ts";
 import { makeBrokerClient } from "../../src/bus/broker/client.ts";
 import { startBrokerHost } from "../../src/bus/broker/host.ts";
 import { brokerEndpoint } from "../../src/bus/broker/paths.ts";
-import { listPeersForGroup } from "../../src/extension.ts";
+import { listPeersForGroup, SupervisorBroker } from "../../src/extension/broker-host.ts";
+import { readFailure, type ReadReply, type ScopedReader } from "../../src/bus/result-reader.ts";
 
 async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
 	const start = Date.now();
@@ -17,6 +18,82 @@ async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
 		await new Promise((r) => setTimeout(r, 5));
 	}
 }
+
+test("authenticated scoped result reads over REAL socket/pipe preserve maximum escaped pages and deny ungranted refs", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	const bus = new InProcessBus();
+	const broker = new SupervisorBroker({ bus, supervisorHandle: "supervisor", warn: () => assert.fail("unexpected bind failure") });
+	broker.ensure(endpoint);
+	const ref = `result:${randomUUID()}`;
+	let body = "";
+	let revoked = 0;
+	const reader: ScopedReader = { read: async (request) => request.ref !== ref ? readFailure("denied") : ({
+		ok: true, ref, body, offset: 0, storedChars: body.length, originalChars: body.length,
+		truncated: false, endOfStoredBody: true, status: "done", provenance: "result-output",
+	}), revoke: () => { revoked++; } };
+	const grant = await broker.prepareResultReader("reader", reader);
+	const client = makeBrokerClient({ endpoint, handle: "reader", readerToken: grant.token });
+	const impersonator = makeBrokerClient({ endpoint, handle: "reader" });
+	try {
+		await assert.rejects(impersonator.register(), /authentication/);
+		assert.equal(grant.wasBound(), false);
+		await client.register();
+		assert.equal(grant.wasBound(), true);
+		for (body of ["\0".repeat(16000), "\ud800".repeat(16000), "\"\\\n\r".repeat(4000), "😀".repeat(8000)]) {
+			const result = await client.read({ ref, limit: 16000 });
+			assert.ok(result.ok);
+			assert.equal(result.body, body);
+		}
+		assert.deepEqual(await client.read({ ref: `result:${randomUUID()}` }), readFailure("denied"));
+		grant.revoke();
+		await waitFor(() => !broker.host?.connectedHandles().includes("reader"));
+		assert.deepEqual(await client.read({ ref }), readFailure("unavailable"));
+		assert.equal(revoked, 1);
+	} finally { impersonator.close(); client.close(); await broker.close(); }
+});
+
+test("REAL reader cancellation reaches the callback; host close settles all pending reads", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	const host = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
+	const signals: AbortSignal[] = [];
+	const resolvers: Array<(reply: ReadReply) => void> = [];
+	const grant = await host.prepareResultReader("reader", { read: (_request, signal) => {
+		signals.push(signal!); return new Promise((resolve) => { resolvers.push(resolve); });
+	}, revoke: () => {} });
+	const client = makeBrokerClient({ endpoint, handle: "reader", readerToken: grant.token });
+	try {
+		await client.register();
+		const ref = `result:${randomUUID()}`;
+		const ac = new AbortController();
+		const first = client.read({ ref }, ac.signal);
+		await waitFor(() => signals.length === 1);
+		ac.abort();
+		assert.deepEqual(await first, readFailure("cancelled"));
+		await waitFor(() => signals[0]!.aborted);
+		const second = client.read({ ref });
+		await waitFor(() => signals.length === 2);
+		await host.close();
+		assert.deepEqual(await second, readFailure("unavailable"));
+		assert.equal(signals[1]?.aborted, true);
+		for (const resolve of resolvers) resolve(readFailure("denied"));
+	} finally { client.close(); await host.close(); }
+});
+
+test("REAL bind collision fails reader preparation before any child registration", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	const host = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
+	const other = new SupervisorBroker({ bus: new InProcessBus(), supervisorHandle: "supervisor", warn: () => {} });
+	try {
+		other.ensure(endpoint);
+		let revoked = false;
+		await assert.rejects(other.prepareResultReader("reader", { read: async () => assert.fail("no read"), revoke: () => { revoked = true; } }), /preparation/);
+		assert.equal(revoked, true);
+		assert.deepEqual(host.connectedHandles(), []);
+	} finally { await other.close(); await host.close(); }
+});
 
 // A REAL socket/pipe round-trip (host.test.ts/client.test.ts both use an in-memory fake `net`
 // — the transport-injection seam — so THIS is the only place the real cross-process wire is

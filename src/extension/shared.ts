@@ -172,6 +172,23 @@ export function shouldReportHeartbeatFailure(consecutiveFailures: number): boole
 	return consecutiveFailures === 1 || consecutiveFailures % 10 === 0;
 }
 
+/** One bounded, terminal-safe cause line for an operator toast. Error `message`s interpolate raw
+ *  provider/filesystem text (multi-line, ANSI-capable) — every toast that embeds one goes through
+ *  this so the notification stays a single sanitized line. The untruncated text keeps its other
+ *  surface (stderr, /doctor, the tool result). */
+export function toastCause(message: string, maxChars = 160): string {
+	return compactInlineText(message, { maxChars });
+}
+
+/** A fair prefix of a name list, bounded for one toast line: `"a, b, c, +N more"`. Discovery
+ *  reports (collisions, seeded files, installed personas) grow with the user's own directory, so
+ *  an unbounded `join(", ")` would let the toast wrap over many terminal rows. */
+export function compactNameList(names: readonly string[], max = 8): string {
+	const clean = names.map((name) => compactInlineText(name, { maxChars: 80 })).filter((name) => name.length > 0);
+	if (clean.length <= max) return clean.join(", ");
+	return `${clean.slice(0, max).join(", ")}, +${clean.length - max} more`;
+}
+
 export function fenceIntercomOutcome(out: { text: string; details: { action: string; messages?: unknown[] } }, fence: (t: string) => string): string {
 	const untrusted = out.details.action === "inbox" && (out.details.messages?.length ?? 0) > 0;
 	return untrusted ? fence(out.text) : out.text;

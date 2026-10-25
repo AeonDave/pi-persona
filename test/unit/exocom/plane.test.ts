@@ -147,6 +147,36 @@ test("a message from one plane lands as inbound on another; list shows the peer"
 	} finally { await a.stop(); await b.stop(); }
 });
 
+test("self-reported profile survives normal heartbeats and clears when the plane stops", async () => {
+	const plane = planeFor("profile-owner", () => {});
+	plane.setProfile({ capabilities: ["TypeScript"], availability: "busy" });
+	assert.deepEqual(plane.getProfile(), { capabilities: ["TypeScript"], availability: "busy" });
+	await plane.start();
+	try {
+		const registered = readAll(dir, "h").find((entry) => entry.session_id.includes("profile-owner"));
+		assert.deepEqual(registered?.profile, { capabilities: ["TypeScript"], availability: "busy" });
+		assert.ok(registered);
+		const { public_key: _publicKey, profile: _profile, ...heartbeat } = registered;
+		plane.heartbeat(heartbeat);
+		assert.deepEqual(readAll(dir, "h").find((entry) => entry.session_id === registered.session_id)?.profile,
+			{ capabilities: ["TypeScript"], availability: "busy" }, "ordinary heartbeat preserves transient self-report");
+		plane.heartbeat({ ...heartbeat, persona: "latest-persona", model: "latest-model", purpose: "current task" });
+		plane.setProfile({ capabilities: ["review"], availability: "available" });
+		const refreshed = readAll(dir, "h").find((entry) => entry.session_id === registered.session_id);
+		assert.equal(refreshed?.persona, "latest-persona", "profile updates preserve fresh presence identity");
+		assert.equal(refreshed?.model, "latest-model");
+		assert.equal(refreshed?.purpose, "current task");
+
+		plane.setProfile(undefined);
+		assert.equal(plane.getProfile(), undefined);
+		assert.equal(readAll(dir, "h").find((entry) => entry.session_id === registered.session_id)?.profile, undefined,
+			"clearing profile immediately removes it from the registry");
+	} finally {
+		await plane.stop();
+	}
+	assert.equal(plane.getProfile(), undefined, "profile cannot survive plane shutdown");
+});
+
 test("resolvePeer canonicalizes the public session-pinned target to the registry session id", async () => {
 	const a = planeFor("resolver-a", () => {});
 	const b = planeFor("resolver-b", () => {});

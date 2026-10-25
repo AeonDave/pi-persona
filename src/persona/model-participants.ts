@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 
 import { memberBaseLabel, parseRosterMember, type RosterMember, type RosterSpec } from "../orchestration/roster.ts";
 import { knownParams } from "../orchestration/strategy.ts";
+import type { ThinkingLevel } from "../core/types.ts";
 import type { StrategyParam } from "../orchestration/sdk.ts";
 
 /** Where a participant's effective model came from — in precedence order. */
@@ -58,6 +59,12 @@ export interface ModelParticipant {
 	model?: string;
 	/** Which step of the precedence supplied `model`. */
 	source: ModelSource;
+	/** The member's SPEC-level effort — exactly the value that lands in `AgentRunSpec.thinking`
+	 *  when a strategy spreads `rosterSpec(member)`. Never resolved against agent defaults or the
+	 *  configured child effort (the engines own that precedence): the row shows what the launch
+	 *  spec carried, the same rule the delegate launch rows follow. Absent when none was declared
+	 *  (absence renders nothing); an explicit `off` is a declared value and is kept. */
+	thinking?: ThinkingLevel;
 	/** Someone already chose this participant's model (inline, a saved assignment, or the agent's own
 	 *  frontmatter) ⇒ never a picker candidate. The session default is deliberately NOT counted. */
 	assigned: boolean;
@@ -135,6 +142,7 @@ function fromSpec(spec: RosterSpec, origin: "roster" | "param", param: string | 
 		...(param ? { param } : {}),
 		...(model ? { model } : {}),
 		source,
+		...(spec.thinking ? { thinking: spec.thinking } : {}),
 		assigned: source === "inline" || source === "assignment" || source === "agent",
 	};
 }
@@ -191,16 +199,13 @@ function isAgentName(value: unknown): boolean {
 	return typeof value === "string" && value.trim().length > 0 && !/\s/.test(value.trim());
 }
 
-/** Every participant a run really spawns: the roster first (in run order), then auxiliary actors. */
-export function collectModelParticipants(input: ParticipantInput): ModelParticipant[] {
+/** Every declared execution occurrence, including repeated assignment keys with different pins. */
+export function collectModelParticipantOccurrences(input: ParticipantInput): ModelParticipant[] {
 	const out: ModelParticipant[] = [];
-	const seen = new Set<string>();
 	for (const raw of input.members ?? []) {
 		const spec = toSpec(raw);
 		if (!spec) continue;
 		const p = fromSpec(spec, "roster", undefined, input);
-		if (seen.has(p.key)) continue;
-		seen.add(p.key);
 		out.push(p);
 	}
 	const schema = input.schema ?? (input.strategy ? knownParams(input.strategy) : undefined);
@@ -210,12 +215,20 @@ export function collectModelParticipants(input: ParticipantInput): ModelParticip
 			const spec = auxActorSpec(input, paramName, param);
 			if (!spec) continue;
 			const p = fromSpec(spec, "param", paramName, input);
-			if (seen.has(p.key)) continue;
-			seen.add(p.key);
 			out.push(p);
 		}
 	}
 	return out;
+}
+
+/** One row per assignment key for model setup. Repeated execution occurrences share that choice. */
+export function collectModelParticipants(input: ParticipantInput): ModelParticipant[] {
+	const seen = new Set<string>();
+	return collectModelParticipantOccurrences(input).filter((p) => {
+		if (seen.has(p.key)) return false;
+		seen.add(p.key);
+		return true;
+	});
 }
 
 /** The participants a picker may still ask about: nobody has chosen a model for them, and this

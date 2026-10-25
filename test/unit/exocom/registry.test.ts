@@ -47,6 +47,25 @@ test("workspace identity is all-or-none and malformed metadata fails closed", ()
 	assert.ok(readAll(dir, H).some((candidate) => candidate.session_id === "legacy-no-workspace-metadata"));
 });
 
+test("registry profiles round-trip with no fabricated availability and are bounded", () => {
+	writeEntry(dir, H, entry({
+		session_id: "profile-entry",
+		profile: { capabilities: ["TypeScript"], availability: "busy" },
+	} as any));
+	const stored = readAll(dir, H).find((candidate) => candidate.session_id === "profile-entry");
+	assert.deepEqual(stored?.profile, { capabilities: ["TypeScript"], availability: "busy" });
+
+	writeEntry(dir, H, entry({ session_id: "profile-unknown", profile: { capabilities: ["Rust"] } } as any));
+	const unknown = readAll(dir, H).find((candidate) => candidate.session_id === "profile-unknown");
+	const availability = unknown?.profile?.availability;
+	assert.deepEqual(unknown?.profile, { capabilities: ["Rust"] });
+	assert.equal(availability, undefined);
+
+	writeEntry(dir, H, entry({ session_id: "profile-legacy" }));
+	const legacy = readAll(dir, H).find((candidate) => candidate.session_id === "profile-legacy");
+	assert.equal(legacy?.profile, undefined);
+});
+
 test("prune drops a dead pid AND a stale heartbeat, keeps the live one", () => {
 	writeEntry(dir, H, entry({ session_id: "live", name: "live", pid: process.pid, heartbeat_at: new Date(1_000_000).toISOString() }));
 	writeEntry(dir, H, entry({ session_id: "dead", name: "dead", pid: 999_999, heartbeat_at: new Date(1_000_000).toISOString() }));

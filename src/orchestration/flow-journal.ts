@@ -59,7 +59,13 @@ export function parseJournal(content: string, hash: string): Record<string, Resu
 		if (e.hash !== hash || typeof e.phase !== "string") continue;
 		if (e.ok) {
 			const prior = out[e.phase];
-			out[e.phase] = { agent: e.phase, output: e.output ?? "", usage: emptyUsage(), ok: true };
+			out[e.phase] = {
+				agent: e.phase, output: e.output ?? "", usage: emptyUsage(), ok: true,
+				...(typeof e.resultRef === "string" ? { resultRef: e.resultRef } : {}),
+				...(e.resultVersion === 1 ? { resultVersion: 1 as const } :
+					e.resultRef !== undefined || e.resultVersion !== undefined
+						? { refUnavailable: "unsupported or missing archived result journal version" } : {}),
+			};
 			// Preserve an approval from either this line or an earlier line for the same phase.
 			if (e.gateApproved || prior?.gateApproved) out[e.phase]!.gateApproved = true;
 		} else delete out[e.phase];

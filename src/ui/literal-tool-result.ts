@@ -5,7 +5,7 @@ import { compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
 
 interface LiteralResult {
 	content: readonly { type: string; text?: string }[];
-	/** Legacy direct renderer calls may carry this; the native host passes it in context. */
+	/** Direct internal renderer calls carry this; Pi passes it in the render context. */
 	isError?: boolean;
 }
 

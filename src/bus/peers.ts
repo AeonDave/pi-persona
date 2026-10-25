@@ -20,7 +20,10 @@
 import { type Static, Type } from "typebox";
 
 import { defineTool } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
+import { compactInlineText } from "../ui/presentation.ts";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import type { InProcessBus } from "./inproc.ts";
 
 /** Anti ping-pong budget: after this many sends the tool tells the member to finalize. */
@@ -109,6 +112,18 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 					: `Peer "${params.to}" is gone — it may have already finalized. Proceed with your own judgement.`,
 				{ action: "send", delivered },
 			);
+		},
+		// Compact purpose line only — same rule as contact_supervisor: no note body in the call
+		// card (the host fallback would echo raw args).
+		renderCall(args, theme) {
+			const action = compactInlineText(args.action ?? "", { maxChars: 12 });
+			return new Text(theme.fg("toolTitle", theme.bold(action ? `peer ${action}` : "peer")), 0, 0);
+		},
+		// One shared literal receipt: a send receipt is one compact line; a long peer list stays
+		// bounded collapsed (expansion hint) and shows every peer expanded. The error heading comes
+		// only from the host's isError flag, never from the semantic content.
+		renderResult(result, { expanded }, theme, context) {
+			return renderLiteralToolResult(result, { expanded }, theme, context);
 		},
 	});
 }

@@ -1,6 +1,6 @@
 {
   "name": "@aeondave/pi-persona",
-  "version": "1.17.3",
+  "version": "1.17.4",
   "private": false,
   "type": "module",
   "description": "Supervised multi-agent orchestration for Pi — async workers, live steering, cross-session collaboration, and switchable personas.",
@@ -42,6 +42,7 @@
     "docs/README.md",
     "docs/ARCHITECTURE.md",
     "docs/EXPERIENCE.md",
+    "docs/COLLABORATION.md",
     "docs/MONITORS.md",
     "docs/REFERENCE.md",
     "docs/SPINE.md",
@@ -94,18 +95,23 @@
     "node": ">=22.19.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "1.3.0",
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@earendil-works/pi-tui": "1.3.0",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@types/node": "^22.20.4",
     "fast-check": "^4.10.2",
     "tsx": "^4.23.13",
     "typebox": "1.4.2",
     "typescript": "^7.0.2"
   },
+  "overrides": {
+    "@earendil-works/pi-coding-agent@1.4.0": {
+      "undici": "8.12.3"
+    }
+  },
   "pi": {
-    "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.17.3/assets/banner.png",
+    "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.17.4/assets/banner.png",
     "video": "https://cdn.jsdelivr.net/gh/AeonDave/pi-persona@6655d281ce7965a75303dd704bd29db73db04070/assets/demo1.mp4",
     "extensions": [
       "./src/extension.ts"

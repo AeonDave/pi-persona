@@ -5,8 +5,11 @@ import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
-import { makeEngine } from "../../../src/engine/adapter.ts";
-import type { AgentProgress } from "../../../src/orchestration/sdk.ts";
+import { makeEngine, type EngineAdapterDeps } from "../../../src/engine/adapter.ts";
+import { TerminalResultArchive } from "../../../src/results/archive.ts";
+import type { AgentProgress, AgentRunSpec } from "../../../src/orchestration/sdk.ts";
+import { specOf } from "../../../src/tools/delegate.ts";
+import { parseAgent } from "../../../src/agents/agent.ts";
 
 const FAKE = fileURLToPath(new URL("../../fixtures/fake-pi.mjs", import.meta.url));
 const resolveFake = (args: string[]) => ({ command: process.execPath, args: [FAKE, ...args] });
@@ -17,6 +20,38 @@ const agents: Record<string, AgentConfig> = {
 const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
 const HOST_MODULE_ERROR = "Cannot find module '/opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/openai-responses-KCCCXI3B.js' imported from /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-66G7ITPS.js";
+
+test("child adapter forwards mixed effort separately from opaque model ids and reads only observed Pi message effort", async () => {
+	const configured = parseAgent("---\nname: a\nmodel: prov/opaque:version\nthinking: medium\n---\nworker", "a.md")!;
+	const invocations: string[][] = [];
+	const script = `const i=process.argv.indexOf('--thinking'); const requested=process.argv[i+1]; const thinkingLevel=requested==='low'?'medium':requested==='xhigh'?'high':undefined; process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', model:'opaque:actual', thinkingLevel, content:[{type:'text',text:'done'}],stopReason:'stop'}})+'\\n');`;
+	const engine = makeEngine({ resolveAgent: () => configured, childThinking: "minimal", childOptions: { resolveInvocation: (args) => { invocations.push([...args]); return { command: process.execPath, args: ["-e", script, "--", ...args] }; } } });
+	const results = await Promise.all((["low", "high", "xhigh"] as const).map((thinking) => engine.run(specOf({ agent: "a", task: "t", thinking }))));
+	assert.deepEqual(invocations.map((args) => args[args.indexOf("--thinking") + 1]).sort(), ["high", "low", "xhigh"]);
+	assert.ok(invocations.every((args) => args[args.indexOf("--model") + 1] === "prov/opaque:version"));
+	assert.deepEqual(results.map((r) => r.thinkingRequested), ["low", "high", "xhigh"]);
+	assert.deepEqual(results.map((r) => r.thinkingEffective), ["medium", undefined, "high"]);
+	assert.ok(!("thinkingEffective" in results[1]!));
+	assert.ok(results.every((r) => r.modelUsed === "opaque:actual"));
+	assert.equal((await engine.run({ agent: "a", task: "t" })).thinkingRequested, "medium");
+});
+
+test("child adapter rejects malformed explicit thinking before invocation", async () => {
+	let invoked = false;
+	const engine = makeEngine({ resolveAgent, childOptions: { resolveInvocation: (args) => { invoked = true; return resolveFake(args); } } });
+	const result = await engine.run({ agent: "a", task: "t", thinking: "ultra" } as unknown as AgentRunSpec);
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /thinking/);
+	assert.equal(invoked, false);
+});
+
+test("child adapter preserves omission: no request or observation when neither is known", async () => {
+	const seen: string[] = [];
+	const result = await makeEngine({ resolveAgent, childOptions: { resolveInvocation: (args) => { seen.push(...args); return resolveFake(args); } } }).run({ agent: "a", task: "t" });
+	assert.ok(!seen.includes("--thinking"));
+	assert.ok(!("thinkingRequested" in result));
+	assert.ok(!("thinkingEffective" in result));
+});
 
 test("child adapter propagates each authoritative tool lifecycle event once without args or output", async () => {
 	const events: unknown[] = [];
@@ -425,6 +460,7 @@ test("child adapter steer metadata mirrors broker pending-ask state for its regi
 		register: ({ handle }: { handle: string }) => { registeredHandle = handle; },
 		unregister: (handle: string) => { if (handle === registeredHandle) registeredHandle = ""; },
 		steerFrame: () => true,
+		prepareResultReader: async () => { throw new Error("no reader grant"); },
 		hasPendingAskFrom: (handle: string) => handle === registeredHandle && pending,
 	};
 	const ac = new AbortController();
@@ -449,7 +485,7 @@ test("child adapter steer metadata mirrors broker pending-ask state for its regi
 });
 
 test("child adapter re-arms the idle watchdog while the broker reports a pending ask from this leg", { timeout: 3000 }, async () => {
-	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => true };
+	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => true , prepareResultReader: async () => { throw new Error("no reader grant"); } };
 	const ac = new AbortController();
 	setTimeout(() => ac.abort(), 400);
 	const engine = makeEngine({
@@ -465,7 +501,7 @@ test("child adapter re-arms the idle watchdog while the broker reports a pending
 });
 
 test("child adapter idle-kills once the broker reports no pending ask from this leg", { timeout: 3000 }, async () => {
-	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => false };
+	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => false , prepareResultReader: async () => { throw new Error("no reader grant"); } };
 	const engine = makeEngine({
 		resolveAgent,
 		contracts,
@@ -474,4 +510,152 @@ test("child adapter idle-kills once the broker reports no pending ask from this 
 	});
 	const r = await engine.run({ agent: "a", task: "wait [sleep]" });
 	assert.equal(r.failureKind, "timeout", "no pending ask ⇒ the silence is real");
+});
+
+// ── reference-mode handoff (frozen contract): strict child preflight + token wiring ──
+
+const REF_OK = "result:00000000-0000-4000-8000-0000000000aa";
+const REF_OTHER = "result:00000000-0000-4000-8000-0000000000bb";
+
+function referenceArchiveFixture() {
+	const entries: unknown[] = [];
+	const archive = new TerminalResultArchive({
+		entries: () => entries,
+		persistent: true,
+		makeRef: () => REF_OK,
+		append: (type, data) => { entries.push({ type: "custom", customType: type, data: structuredClone(data) }); },
+	});
+	const outcome = archive.save({ originKey: "origin:one", status: "done", agent: "reviewer", body: "ARCHIVED REPORT BODY", provenance: "result-output" });
+	assert.equal(outcome.ok, true, JSON.stringify(outcome));
+	return archive;
+}
+
+const fullBroker = (log: string[], token = "a".repeat(64), revoked: { count: number } = { count: 0 }) => ({
+	endpoint: "pipe",
+	register: (info: { handle: string }) => { log.push(`register:${info.handle}`); },
+	unregister: (handle: string) => { log.push(`unregister:${handle}`); },
+	steerFrame: () => true,
+	hasPendingAskFrom: () => false,
+	prepareResultReader: async (handle: string) => {
+		log.push(`prepare:${handle}`);
+		return { token, revoke: () => { revoked.count += 1; }, wasBound: () => false };
+	},
+});
+
+const envDump = (marker: string) => {
+	const script = `const NL=String.fromCharCode(10);const t=process.env.PI_PERSONA_RESULT_READER_TOKEN??'unset';process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'${marker} token='+t+' busTools='+(process.env.PI_PERSONA_BUS_TOOLS??'unset')}],stopReason:'stop'}})+NL);`;
+	return (args: string[]) => ({ command: process.execPath, args: ["-e", script, "--", ...args] });
+};
+
+test("child broker admits granted communication tools into a nonempty plain allowlist", async () => {
+	for (const peers of [false, true]) {
+		let seen: string[] = [];
+		const engine = makeEngine({ resolveAgent: () => ({ ...agents.a!, tools: ["read"], source: "x" }), broker: fullBroker([]),
+			childOptions: { resolveInvocation: (args) => { seen = [...args]; return envDump("comms")(args); } } });
+		const result = await engine.run({ agent: "a", task: "t", peers });
+		assert.equal(result.ok, true);
+		assert.match(result.output, /busTools=on/);
+		assert.equal(seen[seen.indexOf("--tools") + 1], peers ? "read,contact_supervisor,contact_peer" : "read,contact_supervisor");
+	}
+});
+
+test("bus denial and explicit empty tools never acquire a bridge tool grant", async () => {
+	for (const empty of [false, true]) {
+		let seen: string[] = [];
+		const engine = makeEngine({ resolveAgent: () => ({ ...agents.a!, tools: empty ? [] : ["read"], source: "x" }),
+			broker: fullBroker([]), canUseBus: false,
+			childOptions: { resolveInvocation: (args) => { seen = [...args]; return envDump("denied")(args); } } });
+		const result = await engine.run({ agent: "a", task: "t", peers: true });
+		assert.equal(result.ok, true);
+		assert.match(result.output, /busTools=off/);
+		if (empty) assert.ok(seen.includes("--no-tools"));
+		else assert.equal(seen[seen.indexOf("--tools") + 1], "read");
+	}
+});
+
+test("child reference preflight makes ZERO spawns when broker, binding, storage or refs are missing", { timeout: 10000 }, async () => {
+	const cases: Array<{ label: string; broker?: ReturnType<typeof fullBroker>; refs: string[]; match: RegExp; canUseBus?: boolean }> = [
+		{ label: "broker absent", refs: [REF_OK], match: /broker/, canUseBus: true },
+		{ label: "reader binding refused", broker: (() => { const log: string[] = []; return { ...fullBroker(log), prepareResultReader: async () => { throw new Error("Result reader preparation failed."); } }; })(), refs: [REF_OK], match: /broker result reader/, canUseBus: true },
+		{ label: "ref unavailable in the archive", broker: fullBroker([]), refs: [REF_OTHER], match: new RegExp(REF_OTHER), canUseBus: true },
+		{ label: "parent bus capability denied", broker: fullBroker([]), refs: [REF_OK], match: /bus/, canUseBus: false },
+	];
+	for (const { label, broker, refs, match, canUseBus } of cases) {
+		let invoked = false;
+		const deps: EngineAdapterDeps = {
+			resolveAgent,
+			childOptions: { resolveInvocation: (args) => { invoked = true; return envDump("case")(args); } },
+			resultArchive: () => referenceArchiveFixture(),
+			...(broker ? { broker } : {}),
+			...(canUseBus === false ? { canUseBus: false } : {}),
+		};
+		const r = await makeEngine(deps).run({ agent: "a", task: "t", resultRefs: refs });
+		assert.equal(r.ok, false, label);
+		assert.equal(r.failureKind, "contract", label);
+		assert.deepEqual(r.usage, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }, `${label}: zero usage`);
+		assert.match(r.error ?? "", match, label);
+		assert.equal(invoked, false, `${label}: no child may spawn`);
+	}
+});
+
+test("child reference handoff prepares the reader before registration, passes the token env, admits read_result and revokes on settle", { timeout: 10000 }, async () => {
+	const log: string[] = [];
+	const revoked = { count: 0 };
+	const token = "b".repeat(64);
+	const broker = fullBroker(log, token, revoked);
+	let argsSeen: string[] = [];
+	const engine = makeEngine({
+		resolveAgent: () => ({ ...agents.a!, tools: ["read"], source: "x" }),
+		broker,
+		resultArchive: () => referenceArchiveFixture(),
+		childOptions: { resolveInvocation: (args) => { argsSeen = [...args]; return envDump("wire")(args); } },
+	});
+	const r = await engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] });
+	assert.equal(r.ok, true, r.error);
+	assert.match(r.output ?? "", new RegExp(`token=${token}`), "the child received the reader token in its environment");
+	const toolsAt = argsSeen.indexOf("--tools");
+	assert.ok(toolsAt >= 0, "an allowlist was forwarded");
+	assert.equal(argsSeen[toolsAt + 1], "read,read_result,contact_supervisor", "the scoped reader and granted supervisor contact join the admitted tools");
+	const firstPrepare = log.findIndex((e) => e.startsWith("prepare:"));
+	const firstRegister = log.findIndex((e) => e.startsWith("register:"));
+	assert.ok(firstPrepare >= 0 && firstRegister >= 0);
+	assert.ok(firstPrepare < firstRegister, "prepareResultReader completes BEFORE registration");
+	assert.ok(log.some((e) => e.startsWith("unregister:")), "the leg unregisters on settle");
+	assert.equal(revoked.count, 1, "the broker reader grant is revoked when the leg settles");
+});
+
+test("child reference handoff keeps an absent allowlist absent (no --tools) and does not double-revoke", { timeout: 10000 }, async () => {
+	const log: string[] = [];
+	const revoked = { count: 0 };
+	let argsSeen: string[] = [];
+	const engine = makeEngine({
+		resolveAgent,
+		broker: fullBroker(log, "c".repeat(64), revoked),
+		resultArchive: () => referenceArchiveFixture(),
+		childOptions: { resolveInvocation: (args) => { argsSeen = [...args]; return envDump("absent")(args); } },
+	});
+	const r = await engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] });
+	assert.equal(r.ok, true, r.error);
+	assert.ok(!argsSeen.includes("--tools"), "an absent allowlist stays absent — the bridge injects read_result itself");
+	assert.equal(revoked.count, 1);
+});
+
+test("child engine scrubs a stale supervisor PI_PERSONA_RESULT_READER_TOKEN from a plain leg's environment", { timeout: 10000 }, async () => {
+	process.env.PI_PERSONA_RESULT_READER_TOKEN = "stale-supervisor-token";
+	process.env.PI_PERSONA_BUS_TOOLS = "off";
+	try {
+		let dumped = "";
+		const engine = makeEngine({
+			resolveAgent,
+			childOptions: { resolveInvocation: envDump("scrub") },
+		});
+		const r = await engine.run({ agent: "a", task: "t" });
+		dumped = r.output;
+		assert.equal(r.ok, true, r.error);
+		assert.match(dumped, /token=unset/, "a stale supervisor token must never leak into a plain child");
+		assert.match(dumped, /busTools=unset/, "a stale bus-tool grant/deny must never leak into a plain child");
+	} finally {
+		delete process.env.PI_PERSONA_RESULT_READER_TOKEN;
+		delete process.env.PI_PERSONA_BUS_TOOLS;
+	}
 });

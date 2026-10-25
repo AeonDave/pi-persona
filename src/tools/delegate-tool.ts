@@ -2,6 +2,10 @@
 import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../agents/agent.ts";
 import { Type } from "typebox";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { THINKING_LEVELS, isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
+import { validateParallelWriteSets } from "../core/ownership.ts";
+import { effortFullName } from "../core/leg-thinking.ts";
 import { END_TURN_NOTE } from "../core/brief.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
@@ -16,7 +20,7 @@ import { expandDetailHint, failureDetails, isInline } from "../extension/shared.
 import {
 	DelegationLedger, type DelegateParams as DelegateCall, keyInputOf, nameFor, normalizeDelegateConcurrency,
 	shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError, unknownContractError,
-	validateDelegationBrief, validateParallelWriteSets, coerceDelegateParams,
+	validateDelegationBrief, coerceDelegateParams,
 } from "./delegate.ts";
 import { Semaphore } from "../orchestration/parallel.ts";
 import type { AgentRunSpec, SteerFn, StrategyEngine } from "../orchestration/sdk.ts";
@@ -24,7 +28,7 @@ import type { AgentResult } from "../orchestration/types.ts";
 import { sanitizeLabel } from "../extension/shared.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import type { AgentTree } from "../ui/agent-tree.ts";
-import { buildCompletionReport, runDisplayName, type AsyncRunTracker } from "../engine/async.ts";
+import { buildCompletionReport, observedRunModel, runDisplayName, type AsyncRunTracker } from "../engine/async.ts";
 import type { BackgroundRuns } from "./background-run.ts";
 import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "../engine/stream.ts";
 import { progressPatch } from "../ui/agent-tree.ts";
@@ -35,6 +39,8 @@ interface DelegateLaunchSnapshot {
 	label: string;
 	agent: string;
 	model?: string;
+	/** Effort THIS call declared in its args (spec-level); absent when the call declared none. */
+	thinking?: ThinkingLevel;
 }
 
 interface DelegateLaunchRow {
@@ -43,6 +49,7 @@ interface DelegateLaunchRow {
 	detailLabel: string;
 	agent: string;
 	model?: string;
+	thinking?: ThinkingLevel;
 	displayLabel: string;
 	clipped: boolean;
 	hasAlias: boolean;
@@ -56,6 +63,12 @@ interface CollapsedLaunchLine {
 }
 
 const COLLAPSED_LAUNCH_ROWS = 3;
+
+/** One formatter for every launch-card metadata line: agent · model · FULL effort name —
+ * only the effort this call declared; `off` renders nothing (absence means off). */
+function launchRowMetadata(row: { agent?: string; model?: string; thinking?: ThinkingLevel }): string {
+	return [row.agent, row.model, row.thinking ? effortFullName(row.thinking) : ""].filter((value): value is string => !!value).join(" · ");
+}
 
 /** Prefer session-persisted identity, then recover old launch cards from the live tracker. */
 function launchRows(
@@ -74,6 +87,7 @@ function launchRows(
 				label: run.label,
 				agent: run.agent,
 				...(typeof run.model === "string" ? { model: run.model } : {}),
+				...(isThinkingLevel(run.thinking) ? { thinking: run.thinking } : {}),
 			});
 		}
 	}
@@ -111,6 +125,7 @@ function launchRows(
 		label: sanitizeTerminalText(run.label),
 		agent: sanitizeTerminalText(run.agent),
 		...(run.model ? { model: sanitizeTerminalText(run.model) } : {}),
+		...(run.thinking ? { thinking: run.thinking } : {}),
 		fullName: runDisplayName(run),
 		hasAlias,
 	}));
@@ -120,7 +135,7 @@ function launchRows(
 		const duplicateSuffix = counts.get(row.fullName)! > 1 ? ` [${compactInlineText(row.id, { maxChars: 16 })}]` : "";
 		const detailLabel = `${row.label}${duplicateSuffix}`;
 		const displayLabel = compactInlineText(detailLabel, { maxChars: 80 });
-		const displayMetadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+		const displayMetadata = launchRowMetadata(row);
 		return {
 			...row,
 			detailLabel,
@@ -141,7 +156,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 	];
 	const hintText = compactInlineText(expandDetailHint(), { maxChars: 32 });
 	const rowsNeedHint = rows.slice(0, visibleCount).some((row, index) => {
-		const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+		const metadata = launchRowMetadata(row);
 		const prefixWidth = index === 0 ? visibleWidth("launched ") : visibleWidth("  ");
 		return row.clipped || prefixWidth + visibleWidth(row.displayLabel) + (metadata ? 3 + visibleWidth(metadata) : 0) > MAX_COLLAPSED_CARD_COLUMNS;
 	});
@@ -151,7 +166,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 		const prefix = index === 0 ? "launched " : "  ";
 		const fixedWidth = visibleWidth(prefix) + (index === visibleCount - 1 ? visibleWidth(suffix) : 0);
 		const budget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - fixedWidth);
-		const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+		const metadata = launchRowMetadata(row);
 		const metadataBudget = Math.min(36, visibleWidth(metadata));
 		const labelBudget = Math.max(16, budget - (metadata ? metadataBudget + 3 : 0));
 		const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
@@ -167,7 +182,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 
 function expandedLaunchDetails(text: string, rows: readonly DelegateLaunchRow[]): string {
 	if (rows.length === 0 || !rows.some((row) => row.hasAlias)) return text;
-	const diagnostics = rows.map((row) => `- ${[row.detailLabel, row.agent, row.model].filter((value): value is string => !!value).join(" · ")} [${row.id}]`).join("\n");
+	const diagnostics = rows.map((row) => `- ${[row.detailLabel, row.agent, row.model, row.thinking ? effortFullName(row.thinking) : ""].filter((value): value is string => !!value).join(" · ")} [${row.id}]`).join("\n");
 	return `${text}\n\nLaunched workers:\n${diagnostics}`;
 }
 
@@ -190,7 +205,7 @@ function singleLaunchReceipt(row: DelegateLaunchRow): string[] {
 	const labelBudget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(prefix) - visibleWidth(suffix));
 	const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
 	const rows = [compactVisibleLine(`${prefix}${label}${suffix}`, MAX_COLLAPSED_CARD_COLUMNS)];
-	const metadata = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+	const metadata = launchRowMetadata(row);
 	if (metadata) rows.push(compactVisibleLine(`  ${compactInlineText(metadata, { maxChars: MAX_COLLAPSED_CARD_COLUMNS - 2 })}`, MAX_COLLAPSED_CARD_COLUMNS));
 	return rows;
 }
@@ -221,6 +236,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
 	const JsonString = Type.String({
 		description: "JSON text of the same value — accepted when a client stringifies nested args",
+	});
+	const ThinkingSchema = StringEnum(THINKING_LEVELS, {
+		description: "Requested effort for this leg (off, minimal, low, medium, high, xhigh, max). Overrides the agent and shared child defaults; Pi clamps to the selected model's capabilities. Results distinguish requested from observed Pi effort, not provider cognition.",
 	});
 	const SkillsSchema = Type.Array(Type.String(), {
 		description: "Skills the sub-agent loads first — spawns a dynamic specialist (skills are inherited from the host)",
@@ -253,6 +271,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
+		thinking: Type.Optional(ThinkingSchema),
 		model: Type.Optional(
 			Type.String({ description: "Optional exact provider/id. Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omission retains saved/agent selections and defaults; an explicit current supervisor provider/id selects it deliberately, maintaining provider/billing authorization. Explicit user selections win." }),
 		),
@@ -278,6 +297,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		name: Type.Optional(Type.String({ description: LeaderNameDescription })),
 		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
 		role: Type.Optional(RoleSchema),
+		thinking: Type.Optional(ThinkingSchema),
 		model: Type.Optional(Type.String({ description: "Optional exact provider/id (single mode). Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omission retains saved/agent selections and defaults; an explicit current supervisor provider/id selects it deliberately, maintaining provider/billing authorization. Explicit user selections win." })),
 		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" }), JsonString])),
 		isolation: Type.Optional(
@@ -476,6 +496,10 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			kind: "subagent",
 			agent,
 			...(runSpec.model ? { model: runSpec.model } : {}),
+			// The requested effort rides the SAME launch seam as the model above — spec-level, what
+			// the launch row carried. Rendered as the compact sigla after the model; the drill-in
+			// uses full names. Absent ⇒ nothing. Nothing observed is claimed here.
+			...(runSpec.thinking ? { thinking: runSpec.thinking } : {}),
 			detail: "queued",
 		});
 		// Arm the async-run status/stall monitor (no-op if both cadences are disabled). A headless leg runs
@@ -494,9 +518,14 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		const dropped = droppedNote && `
 
 [pi-persona]${droppedNote}`;
+		const settledRuns = runs.map((run) => {
+			const modelUsed = observedRunModel(run);
+			return { id: run.id, agent: run.agent, ...(run.label ? { label: run.label } : {}),
+				...(run.model ? { requestedModel: run.model } : {}), ...(modelUsed ? { modelUsed } : {}) };
+		});
 		return {
 			content: [{ type: "text" as const, text: `${buildCompletionReport(runs, fenceUntrusted, { bounded: false })}${dropped}${d.drainBusBlock()}` }],
-			details: ok ? {} : failureDetails({}),
+			details: ok ? { settledRuns } : failureDetails({ settledRuns }),
 			isError: !ok,
 			...toolUsageField(usage),
 		};
@@ -513,7 +542,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
 			"Assign each worker's name before launch so it sees the same identity from its first turn; omitted names keep the generic fallback.",
 			"A `model` may be a loose name ('sonnet', 'opus-4.6', 'claude-pro-max-native/opus-4-6') — it resolves to YOUR provider's id; ambiguous names return",
-			"candidates. Other options: name, tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
+			"candidates. Other options: name, thinking (per-leg effort; Pi clamps), tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
@@ -665,7 +694,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					const label = nameFor(t, nameOffset + i);
 					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut);
 					const model = shortModel(spec.model);
-					return { id, label, agent: t.agent, ...(model ? { model } : {}) };
+					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(spec.thinking ? { thinking: spec.thinking } : {}) };
 				});
 				const ids = runs.map((run) => run.id);
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${d.RUN_LIMITS.maxChildren}) were dropped.` : "";
@@ -700,7 +729,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							text: `Launched async run ${id} (${agent}) — runs in the background and wakes you on completion (${END_TURN_NOTE}).`,
 						},
 					],
-					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}) }] },
+					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}), ...(runSpec.thinking ? { thinking: runSpec.thinking } : {}) }] },
 					isError: false,
 				};
 			}
@@ -716,8 +745,13 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const coerced = coerceDelegateParams(args);
 			const view = coerced.ok ? coerced.params : undefined;
 			if (view?.tasks && view.tasks.length > 0) {
-				// Names live in the tree / final card — keep the call line itself minimal.
-				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})`)}`, 0, 0);
+				// Names live in the tree / final card — keep the call line itself minimal. A UNIFORM
+				// declared effort rides along (every leg declares the same level; mixed or undeclared
+				// stays silent — no re-parsing of stringified tasks); per-leg rows carry their own.
+				const first = view.tasks[0]!;
+				const uniform = view.tasks.every((task) => task.thinking === first.thinking) ? first.thinking : undefined;
+				const effort = uniform ? effortFullName(uniform) : "";
+				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})${effort ? ` · ${effort}` : ""}`)}`, 0, 0);
 			}
 			if (typeof args.tasks === "string" && args.tasks.trim()) {
 				return new Text(`${title}${theme.fg("accent", "parallel")}`, 0, 0);
@@ -728,7 +762,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const agent = compactInlineText(view?.agent ?? (typeof args.agent === "string" ? args.agent : ""), { maxChars: 40 });
 			const model = typeof modelValue === "string" && modelValue.trim() ? compactInlineText(modelValue, { maxChars: 80 }) : "";
 			const titleLine = `${title}${theme.fg("accent", theme.bold(compactVisibleLine(alias, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth("delegate "))))}`;
-			const metadata = [agent, model].filter(Boolean).join(" · ");
+			// Only the effort THIS call's args declare — never a value inherited from agent config.
+			const thinking = view?.thinking ?? (isThinkingLevel(args.thinking) ? args.thinking : undefined);
+			const metadata = [agent, model, thinking ? effortFullName(thinking) : ""].filter(Boolean).join(" · ");
 			const metadataLine = metadata ? theme.fg("dim", compactVisibleLine(`  ${metadata}`, MAX_COLLAPSED_CARD_COLUMNS)) : "";
 			return new Text([titleLine, metadataLine].filter(Boolean).join("\n"), 0, 0);
 		},

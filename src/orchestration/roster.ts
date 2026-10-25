@@ -3,7 +3,7 @@
  * Referenced by a persona's `orchestration.roster` or `council.roster`.
  *
  * A member is either a bare agent name (`- scout`) OR a map that specialises ONE
- * agent inline — `{ agent, role?, model?, skills? }` — so an ensemble of distinct
+ * agent inline — `{ agent, role?, model?, thinking?, skills? }` — so an ensemble of distinct
  * perspectives can be built from a SINGLE agent (e.g. one `reviewer` run three times
  * with different `role`s and models) instead of one .md file per perspective. That is
  * the "skills + role provide specialisation, not files" principle applied to rosters.
@@ -14,6 +14,9 @@
  */
 
 import { asBoolean, asStringArray, parseYamlSubset } from "../core/frontmatter.ts";
+import { stripTerminalControls } from "../core/fence.ts";
+import { parseLegThinking } from "../core/leg-thinking.ts";
+import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../core/types.ts";
 import type { Roster } from "./sdk.ts";
 
 /** A roster member: a bare agent name, or an inline specialisation of one agent. `tools`/
@@ -21,13 +24,14 @@ import type { Roster } from "./sdk.ts";
  *  knobs (see `tools/delegate.ts`'s `DelegateTask`). */
 export type RosterMember =
 	| string
-	| { agent: string; role?: string; model?: string; skills?: string[]; tools?: string[]; isolation?: "none" | "worktree"; mcp?: boolean };
+	| RosterSpec;
 
 /** The normalised run-spec fields a member contributes (agent + any specialisation). */
 export interface RosterSpec {
 	agent: string;
 	role?: string;
 	model?: string;
+	thinking?: ThinkingLevel;
 	skills?: string[];
 	tools?: string[];
 	isolation?: "none" | "worktree";
@@ -43,6 +47,8 @@ export function rosterSpec(member: RosterMember): RosterSpec {
 	const spec: RosterSpec = { agent: member.agent };
 	if (member.role?.trim()) spec.role = member.role.trim();
 	if (member.model?.trim()) spec.model = member.model.trim();
+	const thinking = parseLegThinking(member.thinking);
+	if (thinking !== undefined) spec.thinking = thinking;
 	if (member.skills && member.skills.length > 0) spec.skills = member.skills;
 	if (member.tools !== undefined) spec.tools = member.tools;
 	if (member.isolation !== undefined) spec.isolation = member.isolation;
@@ -57,19 +63,56 @@ const ROLE_STOPWORDS = new Set([
 	"ON", "IN", "OF", "TO", "IS", "IT", "BE", "DO", "AS", "AT", "BY", "AN", "A",
 ]);
 
+const GIT_REF = /^(?:HEAD|ORIG_HEAD|FETCH_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REBASE_HEAD)(?:[~^].*)?$/i;
+const HASH = /^(?:0x)?[\da-f]{7,40}$/i;
+
+function technicalRoleToken(token: string): boolean {
+	const trimmed = token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+	return token.includes("_")
+		|| token.includes("/")
+		|| token.includes("\\")
+		|| token.includes("$")
+		|| token.includes("=")
+		|| (trimmed.includes(":") && !trimmed.endsWith(":"))
+		|| GIT_REF.test(trimmed)
+		|| HASH.test(trimmed)
+		|| /^[\p{L}\p{N}_.-]+\.[\p{L}\p{N}]{1,8}$/u.test(trimmed);
+}
+
+function roleWords(role: string): string[] {
+	// Inline/fenced code is not a role label. An unmatched opening fence also hides the
+	// remainder instead of leaking its contents into the fallback label.
+	const withoutCode = role.replace(/(`{1,3})[\s\S]*?\1/g, " ").replace(/`{1,3}[\s\S]*$/g, " ");
+	return withoutCode.split(/\s+/).flatMap((raw) => {
+		const word = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+		return word && !technicalRoleToken(raw) && !technicalRoleToken(word) ? [word] : [];
+	});
+}
+
+function boundedRoleHint(text: string): string {
+	const points = Array.from(text);
+	return points.length > 20 ? `${points.slice(0, 19).join("")}…` : text;
+}
+
 /** A short emphasis hint from a member's role text — the first salient ALL-CAPS keyword
- *  (e.g. "SECURITY" from "Focus ONLY on the SECURITY lens…"), else the first few words.
- *  Used to disambiguate same-agent roster-role members in the UI tree. Pure. */
+ *  (e.g. "SECURITY" from "Focus ONLY on the SECURITY lens…"), else a short human-readable
+ *  prefix. Technical identifiers, code, paths, hashes and generic Git refs are omitted; a
+ *  role with no readable words gets the neutral "role" hint. Used by presentation and
+ *  run-unique UI keys, with roster seeding and SDK keys sharing this exact function. Pure. */
 export function roleHint(role: string): string {
-	const words = role.split(/\s+/);
+	// Roles become picker/tree chrome. Strip terminal sequences before token parsing so their
+	// numeric parameters cannot be mistaken for visible prose, then remove bidi formatting
+	// controls that could visually reorder or disguise the resulting label.
+	const readable = stripTerminalControls(role).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u206f]/gu, "");
+	const words = roleWords(readable);
 	for (const w of words) {
-		const clean = w.replace(/[^A-Za-z0-9]/g, "");
-		if (clean.length >= 3 && /[A-Z]/.test(clean) && clean === clean.toUpperCase() && !ROLE_STOPWORDS.has(clean)) {
-			return clean;
+		if (/^\p{L}{3,}$/u.test(w) && w === w.toUpperCase() && !ROLE_STOPWORDS.has(w)) {
+			return boundedRoleHint(w);
 		}
 	}
-	const brief = words.slice(0, 4).join(" ").replace(/[:.,;].*$/, "").trim();
-	return brief.length > 20 ? `${brief.slice(0, 20)}…` : brief || "role";
+	const brief = words.slice(0, 4);
+	while (brief.length && ROLE_STOPWORDS.has(brief[brief.length - 1]!.toUpperCase())) brief.pop();
+	return boundedRoleHint(brief.join(" ")) || "role";
 }
 
 /** The base UI label for a member: `agent`, or `agent · HINT` when it carries a role —
@@ -99,6 +142,7 @@ export function rosterNodeKeys(members: RosterMember[]): string[] {
  *  LENIENT, and deliberately so: this is the STATIC `teams.yaml` path (authored, trusted project
  *  data), where a member with a badly-typed field is normalised, not rejected — a bad `model`
  *  is dropped and a numeric `tools` entry is coerced to its string, so the panel still runs.
+ *  Explicit `thinking` is always strict: a typo must never inherit a different effort.
  *  Anything RUNTIME-supplied (a `council` call's `members`, an aux actor param) must go through
  *  {@link parseRuntimeRosterMember} instead: there, a dropped `tools` silently WIDENS a leg to
  *  the agent's default tool permissions, so a malformed field has to be refused, not normalised.
@@ -108,11 +152,13 @@ export function parseRosterMember(raw: unknown): RosterMember | undefined {
 	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 		const o = raw as Record<string, unknown>;
 		if (typeof o.agent !== "string" || !o.agent.trim()) return undefined;
-		const m: { agent: string; role?: string; model?: string; skills?: string[]; tools?: string[]; isolation?: "none" | "worktree"; mcp?: boolean } = {
+		const m: RosterSpec = {
 			agent: o.agent.trim(),
 		};
 		if (typeof o.role === "string" && o.role.trim()) m.role = o.role.trim();
 		if (typeof o.model === "string" && o.model.trim()) m.model = o.model.trim();
+		const thinking = parseLegThinking(o.thinking);
+		if (thinking !== undefined) m.thinking = thinking;
 		const skills = asStringArray(o.skills);
 		if (skills) m.skills = skills;
 		const tools = asStringArray(o.tools);
@@ -126,7 +172,7 @@ export function parseRosterMember(raw: unknown): RosterMember | undefined {
 }
 
 /** Every field a member map may carry — anything else is a typo, not a silent no-op. */
-const MEMBER_FIELDS = new Set(["agent", "role", "model", "skills", "tools", "isolation", "mcp"]);
+const MEMBER_FIELDS = new Set(["agent", "role", "model", "thinking", "skills", "tools", "isolation", "mcp"]);
 
 export type RuntimeMember = { ok: true; member: RosterMember } | { ok: false; error: string };
 
@@ -155,17 +201,13 @@ export function parseRuntimeRosterMember(raw: unknown): RuntimeMember {
 	}
 	const unknownKeys = Object.keys(o).filter((k) => !MEMBER_FIELDS.has(k));
 	if (unknownKeys.length > 0) {
-		return { ok: false, error: `unknown member field(s) ${unknownKeys.join(", ")} — expected agent, role, model, skills, tools, isolation, mcp` };
+		return { ok: false, error: `unknown member field(s) ${unknownKeys.join(", ")} — expected agent, role, model, thinking, skills, tools, isolation, mcp` };
 	}
-	const member: {
-		agent: string;
-		role?: string;
-		model?: string;
-		skills?: string[];
-		tools?: string[];
-		isolation?: "none" | "worktree";
-		mcp?: boolean;
-	} = { agent: o.agent.trim() };
+	const member: RosterSpec = { agent: o.agent.trim() };
+	if (o.thinking !== undefined) {
+		if (!isThinkingLevel(o.thinking)) return { ok: false, error: `"thinking" must be one of: ${THINKING_LEVELS.join(", ")}` };
+		member.thinking = o.thinking;
+	}
 	// A blank string is "unset" (the lenient path's own reading); a non-string is a type error.
 	for (const key of ["role", "model"] as const) {
 		const value = o[key];
@@ -199,7 +241,13 @@ export function parseTeams(yaml: string): Record<string, RosterMember[]> {
 	const teams: Record<string, RosterMember[]> = {};
 	for (const [name, value] of Object.entries(raw)) {
 		const items: unknown[] = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
-		const members = items.map(parseRosterMember).filter((m): m is RosterMember => m !== undefined);
+		const members = items.map((item, index) => {
+			try {
+				return parseRosterMember(item);
+			} catch (error) {
+				throw new Error(`team ${name}[${index}]: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}).filter((m): m is RosterMember => m !== undefined);
 		if (members.length > 0) teams[name] = members;
 	}
 	return teams;

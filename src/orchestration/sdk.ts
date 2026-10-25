@@ -5,6 +5,7 @@
  * exact same surface as future user-authored strategy files.
  */
 
+import type { ThinkingLevel } from "../core/types.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
@@ -22,6 +23,8 @@ export interface AgentRunSpec {
 	name?: string;
 	task: string;
 	model?: string;
+	/** Requested per-leg effort, before Pi applies the selected model's capability clamp. */
+	thinking?: ThinkingLevel;
 	tools?: string[];
 	/** Skills the sub-agent must load first (dynamic specialisation). */
 	skills?: string[];
@@ -49,6 +52,22 @@ export interface AgentRunSpec {
 	peers?: boolean;
 	/** Declared ownership (from delegate `writeSet`), used only to annotate the files-changed report. */
 	writeSet?: string[];
+	/** INTERNAL (flow reference handoff): the archived `result:<UUID>` refs granted to THIS leg
+	 *  — exactly its phase's DIRECT upstream needs, nothing more. Not a public delegate
+	 *  argument: the SDK strips any strategy-supplied value (strategies cannot enlarge a
+	 *  grant); only the trusted engine-seam wrapper (`withResultRefs`, set by the flow wiring)
+	 *  or an equivalently trusted host path may set it. Both engines preflight + scope the
+	 *  `read_result` tool on it. */
+	resultRefs?: readonly string[];
+}
+
+/** Pin a leg's granted result refs at the ENGINE seam — the trusted wiring path for flow
+ *  reference mode. Overrides (never unions) whatever the caller passed, so a strategy cannot
+ *  smuggle extra refs past the SDK's strip. An empty array is an explicit "none". */
+export function withResultRefs(engine: StrategyEngine, resultRefs: readonly string[]): StrategyEngine {
+	return {
+		run: (spec, onProgress, signal, onSteer) => engine.run({ ...spec, resultRefs }, onProgress, signal, onSteer),
+	};
 }
 
 /** Is `x` a genuine positive, finite `timeoutMs` override — vs. absent/junk (undefined, NaN,
@@ -183,6 +202,8 @@ export interface SDKDeps {
 	 *  runs several times in one roster) — key the UI node by it, not by `agent`, or three
 	 *  same-agent roster-role members collapse into one node. Falls back to `agent`. */
 	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult, key?: string) => void;
+	/** One final logical leg after model recovery, never intermediate attempts. Storage is non-fatal. */
+	onAgentResult?: (result: AgentResult, key: string) => void;
 	/** Per-agent streaming progress (rolling output), for live UI. See `onAgentStatus.key`. */
 	onAgentProgress?: (agent: string, progress: AgentProgress, key?: string) => void;
 	/** Called as each agent starts with a handle to abort just that agent (for UI stop). */
@@ -241,6 +262,13 @@ function abortedLeg(agent: string): AgentResult {
 	return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
 }
 
+/** Copy of a spec with its `resultRefs` removed — the SDK's one strip point, so a strategy's
+ *  own value never reaches an engine (only `withResultRefs`-style trusted wiring sets it). */
+function stripResultRefs(spec: AgentRunSpec): AgentRunSpec {
+	const { resultRefs: _untrusted, ...rest } = spec;
+	return rest;
+}
+
 export function makeSDK(deps: SDKDeps): StrategySDK {
 	// Run-scoped enforcement of the declared limits — applied here so NO strategy can
 	// exceed them, however it calls agent() (I2: safety from runtime limits, not isolation).
@@ -269,18 +297,26 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 	};
 
 	return {
-		agent: async (spec, options) => {
+		agent: async (requested, options) => {
+			// Reference-handoff grants are trusted wiring, never strategy input: drop any
+			// strategy-supplied `resultRefs` here (the flow path re-pins them at the engine
+			// seam via `withResultRefs`, which runs BELOW this layer).
+			const spec = requested.resultRefs === undefined ? requested : stripResultRefs(requested);
+			const key = uiKeyFor(spec);
+			const finish = (result: AgentResult): AgentResult => {
+				try { deps.onAgentResult?.(result, key); } catch { /* storage must not discard a completed leg */ }
+				return result;
+			};
 			if (deps.canSpawn && !deps.canSpawn(spec.agent)) {
-				return {
+				return finish({
 					agent: spec.agent,
 					output: "",
 					usage: emptyUsage(),
 					ok: false,
 					error: `persona may not spawn "${spec.agent}"`,
 					failureKind: "contract",
-				};
+				});
 			}
-			const key = uiKeyFor(spec);
 			const pending = Symbol();
 			pendingAgents.add(pending);
 			let started = false;
@@ -415,11 +451,13 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				}
 			};
 			try {
-				return await agentSlots.with(run, deps.signal);
+				return finish(await agentSlots.with(run, deps.signal));
 			} catch (error) {
 				// A queued leg has no engine result to report. Settle it as an abort when the
 				// run signal removed its waiter; all other errors retain their terminal semantics.
-				if (!started && deps.signal?.aborted) return abortedLeg(spec.agent);
+				if (!started && deps.signal?.aborted) {
+					return finish(abortedLeg(spec.agent));
+				}
 				throw error;
 			} finally {
 				pendingAgents.delete(pending);

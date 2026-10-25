@@ -9,6 +9,8 @@
  * Mirrors the canonical recipe in Pi's reference subagent example.
  */
 
+import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
+
 export interface ChildUsage {
 	input: number;
 	output: number;
@@ -53,6 +55,8 @@ export interface StreamState {
 	deltaTail: number;
 	usage: ChildUsage;
 	model?: string;
+	/** Final assistant-message Pi effort, not provider cognition. Unknown stays absent. */
+	thinkingEffective?: ThinkingLevel;
 	stopReason?: string;
 	errorMessage?: string;
 	sawAssistant: boolean;
@@ -306,6 +310,8 @@ export function applyEvent(state: StreamState, event: unknown): ToolEvent | unde
 	resetDeltaParts(state); // the next message's deltas start from an empty slate
 	state.sawAssistant = true;
 	state.usage.turns++;
+	if (isThinkingLevel(msg.thinkingLevel)) state.thinkingEffective = msg.thinkingLevel;
+	else delete state.thinkingEffective;
 
 	const text = firstText(msg.content);
 	if (text !== undefined) state.output = text;

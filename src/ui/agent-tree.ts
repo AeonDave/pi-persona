@@ -1,5 +1,7 @@
 import { compactTokens } from "../core/format.ts";
+import { effortFullName, effortSigla } from "../core/leg-thinking.ts";
 import { formatDuration } from "../core/time.ts";
+import type { ThinkingLevel } from "../core/types.ts";
 import type { ChildUsage } from "../engine/stream.ts";
 import { compactInlineText } from "./presentation.ts";
 import { formatUsage } from "./usage.ts";
@@ -25,6 +27,13 @@ export interface AgentNode {
 	/** Configured agent definition (operator/reviewer/…), if known. */
 	agent?: string;
 	model?: string;
+	/** Requested per-leg thinking effort, known at launch (the spec-level value the launch row
+	 *  carried). Rendered as the compact sigla right after the model; absent/off render nothing. */
+	thinking?: ThinkingLevel;
+	/** Observed effective Pi effort from the terminal result. Set ONLY from a real
+	 *  AgentResult.thinkingEffective (never invented); when it diverges from `thinking`, the row
+	 *  renders the honest `xh→h` form. */
+	thinkingEffective?: ThinkingLevel;
 	/** A short trailing annotation (usage, current activity), shown after the label. */
 	detail: string | undefined;
 	/** The agent's output buffer, shown when the user drills into the node. */
@@ -86,6 +95,28 @@ export interface RenderOptions {
 	stallMs?: number;
 	/** Live ids whose exact engine handle currently has a pending supervisor ask. */
 	waitingForSupervisor?: ReadonlySet<string>;
+}
+
+/** The frozen compact effort tag for a tree/overlay row: ` · xh` after the model, or ` · xh→h`
+ *  when the terminal result reported a DIFFERENT observed effective level. `off`/absent render
+ *  nothing — absence means off, and an observation is never invented: the divergence form shows
+ *  only when both sides are known and genuinely differ (an observed `off` never leaves a dangling
+ *  `→`). Pure. */
+export function effortTag(requested: ThinkingLevel | undefined, effective?: ThinkingLevel): string {
+	const req = requested !== undefined ? effortSigla(requested) : "";
+	if (!req) return "";
+	const obs = effective !== undefined ? effortSigla(effective) : "";
+	return obs && obs !== req ? ` · ${req}→${obs}` : ` · ${req}`;
+}
+
+/** The F9 drill-in line for a leg's effort — FULL names, the drill-in has the room (the compact
+ *  siglas live only on the rows): `thinking: requested xhigh → observed high`. Same honesty rules
+ *  as {@link effortTag}; the line is omitted entirely when nothing was requested. Pure. */
+export function thinkingDetailLine(requested: ThinkingLevel | undefined, effective?: ThinkingLevel): string {
+	const req = requested !== undefined ? effortFullName(requested) : "";
+	if (!req) return "";
+	const obs = effective !== undefined && effective !== requested ? effortFullName(effective) : "";
+	return obs ? `thinking: requested ${req} → observed ${obs}` : `thinking: requested ${req}`;
 }
 
 /** Whether `detail` is the literal "queued" marker a seeded-but-not-yet-live leg carries — shared
@@ -179,7 +210,10 @@ export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): s
 			const isRoot = parentId === undefined;
 			const isLast = i === kids.length - 1;
 			const branch = isRoot ? "" : isLast ? "└─ " : "├─ ";
-			const label = safeInline(node.label) || safeInline(node.id) || "agent";
+			const base = safeInline(node.label) || safeInline(node.id) || "agent";
+			// The compact effort sigla rides AFTER the label clamp — the existing per-part clipping is
+			// untouched; the appended field is at most ` · xh→h` wide.
+			const label = `${base}${effortTag(node.thinking, node.thinkingEffective)}`;
 			const detailText = node.detail ? safeInline(node.detail) : "";
 			const clock = opts.now !== undefined ? runningAnnotation(node, opts.now, opts.stallMs ?? 0, opts.waitingForSupervisor?.has(node.id) ?? false) : undefined;
 			const tail = [detailText, clock].filter((s): s is string => Boolean(s)).join(" · ");
@@ -267,6 +301,8 @@ export interface AddNodeInput {
 	kind?: AgentNodeKind;
 	agent?: string;
 	model?: string;
+	thinking?: ThinkingLevel;
+	thinkingEffective?: ThinkingLevel;
 	detail?: string;
 	output?: string;
 	startedAt?: number;
@@ -279,6 +315,8 @@ export interface AgentNodePatch {
 	kind?: AgentNodeKind;
 	agent?: string;
 	model?: string;
+	thinking?: ThinkingLevel;
+	thinkingEffective?: ThinkingLevel;
 	detail?: string;
 	output?: string;
 	startedAt?: number;
@@ -293,6 +331,8 @@ function applyPatch(node: AgentNode, patch: AgentNodePatch): void {
 	if (patch.kind !== undefined) node.kind = patch.kind;
 	if (patch.agent !== undefined) node.agent = patch.agent;
 	if (patch.model !== undefined) node.model = patch.model;
+	if (patch.thinking !== undefined) node.thinking = patch.thinking;
+	if (patch.thinkingEffective !== undefined) node.thinkingEffective = patch.thinkingEffective;
 	if (patch.detail !== undefined) node.detail = patch.detail;
 	if (patch.output !== undefined) node.output = patch.output;
 	if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
@@ -333,6 +373,8 @@ export class AgentTree {
 			...(input.kind !== undefined ? { kind: input.kind } : {}),
 			...(input.agent !== undefined ? { agent: input.agent } : {}),
 			...(input.model !== undefined ? { model: input.model } : {}),
+			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
+			...(input.thinkingEffective !== undefined ? { thinkingEffective: input.thinkingEffective } : {}),
 			...(input.output !== undefined ? { output: input.output } : {}),
 			...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
 		};

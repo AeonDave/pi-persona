@@ -1,9 +1,12 @@
 /** Session timer tool — arm a wall-clock wake. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { formatRemaining, type TimerScheduler } from "../core/timer.ts";
-import { parseInstant } from "../core/time.ts";
+import { formatDuration, parseInstant } from "../core/time.ts";
+import { compactInlineText } from "../ui/presentation.ts";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import { readClockSnapshot } from "../extension/clock.ts";
 
 export interface TimerToolDeps {
@@ -97,7 +100,25 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			}
 			const e = r.entry;
 			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(r.remainingMs ?? e.fireAtEpochMs - e.armedAtEpochMs)} [${new Date(e.fireAtEpochMs).toISOString()}]. ${armWakeAdvice(ctx, "alarm", "time-gated step", "You can end this turn now; keep the session open for the alarm.")}`;
-			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, ok: true }, isError: false };
+			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, label: compactInlineText(e.label, { maxChars: 120 }), ok: true }, isError: false };
+		},
+		renderCall(args, theme) {
+			const action = compactInlineText(args.action ?? "", { maxChars: 12 });
+			const label = compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 });
+			return new Text(`${theme.fg("toolTitle", theme.bold(`timer ${action}`))}${label ? ` ${theme.fg("dim", label)}` : ""}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			const details = (result.details ?? {}) as { action?: string; ok?: boolean; id?: string; label?: string; fireAtEpochMs?: number };
+			const failed = context?.isError ?? result.isError ?? false;
+			const fireAt = typeof details.fireAtEpochMs === "number" ? details.fireAtEpochMs : undefined;
+			const isArm = !failed && details.action === "arm" && details.ok === true && fireAt !== undefined;
+			// Failures and every now/list/cancel receipt share the one literal renderer:
+			// error heading, bounded sanitized preview, expansion hint.
+			if (!isArm || expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
+			const left = fireAt - Date.now();
+			const due = left > 0 ? `fires in ${formatDuration(left)}` : "due now";
+			const summary = compactInlineText(`${details.label ?? details.id ?? "alarm"} · ${due}`, { maxChars: 140 });
+			return new Text(`${theme.fg("toolTitle", theme.bold("armed "))}${theme.fg("accent", summary)}`, 0, 0);
 		},
 	});
 }

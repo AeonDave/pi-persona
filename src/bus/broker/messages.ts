@@ -5,14 +5,28 @@
  * `messages.ts` validation STYLE (structural per-field checks, one explicit assert per
  * case) but drops presence/sessions/attachments/broadcasts entirely (YAGNI here).
  *
+ * Authenticated result_read/result_read_reply/result_read_cancel frames extend the same
+ * connection with a closed bounded page contract. No archive summaries or client grants.
  * Pure module: no Pi imports, unit-tested.
  */
 
 import type { MsgKind } from "../inproc.ts";
+import { closedRecord, isReadReply, isReadRequest, type ReadReply, type ResultReadRequest } from "../result-reader.ts";
+
+export function isReaderToken(value: unknown): value is string {
+	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isRequestId(value: unknown): value is string {
+	return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
 
 export type Frame =
-	| { t: "register"; handle: string; label?: string; group?: string; peers?: boolean }
-	| { t: "registered"; handle: string }
+	| { t: "register"; handle: string; label?: string; group?: string; peers?: boolean; readerToken?: string }
+	| { t: "registered"; handle: string; readerToken?: string }
+	| ({ t: "result_read"; reqId: string } & ResultReadRequest)
+	| { t: "result_read_reply"; reqId: string; result: ReadReply }
+	| { t: "result_read_cancel"; reqId: string }
 	| { t: "send"; to: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
 	| { t: "cancel"; msgId: string }
 	| { t: "deliver"; from: string; fromLabel?: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
@@ -39,14 +53,27 @@ function isPeerEntry(value: unknown): value is { handle: string; label: string }
 export function isFrame(value: unknown): value is Frame {
 	if (!isRecord(value)) return false;
 	switch (value.t) {
+		case "result_read": {
+			if (!closedRecord(value, ["t", "reqId", "ref", "offset", "limit"]) || !isRequestId(value.reqId)) return false;
+			const { t: _t, reqId: _id, ...request } = value;
+			return isReadRequest(request);
+		}
+		case "result_read_reply":
+			return closedRecord(value, ["t", "reqId", "result"]) && isRequestId(value.reqId) && isReadReply(value.result);
+		case "result_read_cancel":
+			return closedRecord(value, ["t", "reqId"]) && isRequestId(value.reqId);
 		case "register": {
-			if (typeof value.handle !== "string") return false;
+			if (!closedRecord(value, ["t", "handle", "label", "group", "peers", "readerToken"])) return false;
+			if ("readerToken" in value && !isReaderToken(value.readerToken)) return false;
+			if (typeof value.handle !== "string" || value.handle.length === 0 || value.handle.length > 256) return false;
 			if (value.label !== undefined && typeof value.label !== "string") return false;
 			if (value.group !== undefined && typeof value.group !== "string") return false;
 			return value.peers === undefined || typeof value.peers === "boolean";
 		}
 		case "registered":
-			return typeof value.handle === "string";
+			return closedRecord(value, ["t", "handle", "readerToken"]) && typeof value.handle === "string"
+				&& value.handle.length > 0 && value.handle.length <= 256
+				&& (!("readerToken" in value) || isReaderToken(value.readerToken));
 		case "send":
 			return (
 				typeof value.to === "string" &&

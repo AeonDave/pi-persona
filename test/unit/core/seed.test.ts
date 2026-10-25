@@ -269,6 +269,91 @@ test("force=false keeps a user edit; force=true restores the bundled original", 
 	assert.equal(read(path.join(u, "agents", "sample.md")), "PERSONA sample", "restore overwrites with the original");
 });
 
+test("force restore refreshes every bundled resource while preserving additional user resources and settings", () => {
+	const b = bundled();
+	const u = userDir();
+	const addBundled = (relative: string, contents: string): void => {
+		const file = path.join(b, relative);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, contents);
+	};
+	addBundled("personas/new-persona.md", "---\npersona: true\n---\nSHIPPED PERSONA\n");
+	addBundled("agents/customized-agent.md", "---\nname: shipped-agent\n---\nSHIPPED AGENT\n");
+	addBundled("agents/new-agent.md", "---\nname: new-agent\n---\nNEW SHIPPED AGENT\n");
+	addBundled("flows/new.flow.json", '{"shipped":true}\n');
+	addBundled("contracts/new.contract.json", '{"shipped":true}\n');
+	addBundled("presets/new.preset.json", '{"shipped":true}\n');
+
+	const userAgents = path.join(u, "agents");
+	fs.mkdirSync(userAgents, { recursive: true });
+	fs.writeFileSync(path.join(userAgents, "sample.md"), "EDITED PERSONA DEFAULT");
+	fs.writeFileSync(path.join(userAgents, "reviewer.md"), "EDITED COLLIDING DEFAULT");
+	fs.writeFileSync(path.join(userAgents, "customized-agent.md"), "EDITED AGENT DEFAULT");
+	const pippo = Buffer.from("---\npersona: true\n---\nCUSTOM PERSONA pippo\n");
+	const pluto = Buffer.from("---\nname: pluto\n---\nCUSTOM AGENT pluto\n");
+	fs.writeFileSync(path.join(userAgents, "pippo.md"), pippo);
+	fs.writeFileSync(path.join(userAgents, "pluto.md"), pluto);
+
+	for (const [directory, name, contents] of [
+		["flows", "deep.flow.json", "EDITED FLOW DEFAULT"],
+		["contracts", "v.contract.json", "EDITED CONTRACT DEFAULT"],
+		["presets", "p.preset.json", "EDITED PRESET DEFAULT"],
+	] as const) {
+		fs.mkdirSync(path.join(u, directory), { recursive: true });
+		fs.writeFileSync(path.join(u, directory, name), contents);
+	}
+	fs.writeFileSync(path.join(u, "spine.md"), "EDITED SUPERVISOR SPINE");
+	fs.writeFileSync(path.join(u, "teams.yaml"), "EDITED TEAMS");
+	const extraFlow = Buffer.from("CUSTOM FLOW\n");
+	const extraContract = Buffer.from("CUSTOM CONTRACT\n");
+	const extraPreset = Buffer.from("CUSTOM PRESET\n");
+	fs.writeFileSync(path.join(u, "flows", "custom.flow.json"), extraFlow);
+	fs.writeFileSync(path.join(u, "contracts", "custom.contract.json"), extraContract);
+	fs.writeFileSync(path.join(u, "presets", "custom.preset.json"), extraPreset);
+	const settings = Buffer.from('{"keep":"user settings"}\n');
+	fs.writeFileSync(path.join(u, "settings.json"), settings);
+
+	const shipped = [
+		["personas/sample.md", "agents/sample.md"],
+		["personas/reviewer.md", "agents/reviewer.md"],
+		["personas/new-persona.md", "agents/new-persona.md"],
+		["agents/scout.md", "agents/scout.md"],
+		["agents/customized-agent.md", "agents/customized-agent.md"],
+		["agents/new-agent.md", "agents/new-agent.md"],
+		["flows/deep.flow.json", "flows/deep.flow.json"],
+		["flows/new.flow.json", "flows/new.flow.json"],
+		["contracts/v.contract.json", "contracts/v.contract.json"],
+		["contracts/new.contract.json", "contracts/new.contract.json"],
+		["presets/p.preset.json", "presets/p.preset.json"],
+		["presets/new.preset.json", "presets/new.preset.json"],
+		["prompts/spine.md", "spine.md"],
+		["prompts/spine.worker.md", "spine.worker.md"],
+		["teams.yaml", "teams.yaml"],
+	] as const;
+	const assertRestoreState = (): void => {
+		for (const [source, destination] of shipped) {
+			assert.deepEqual(
+				fs.readFileSync(path.join(u, destination)),
+				fs.readFileSync(path.join(b, source)),
+				`${destination} is restored byte-for-byte from ${source}`,
+			);
+		}
+		assert.deepEqual(fs.readFileSync(path.join(userAgents, "pippo.md")), pippo, "custom persona remains byte-identical");
+		assert.match(read(path.join(userAgents, "pippo.md")), /persona: true/, "custom persona remains discoverable as a persona");
+		assert.deepEqual(fs.readFileSync(path.join(userAgents, "pluto.md")), pluto, "custom agent remains byte-identical");
+		assert.match(read(path.join(userAgents, "pluto.md")), /name: pluto/, "custom agent metadata remains available");
+		assert.deepEqual(fs.readFileSync(path.join(u, "flows", "custom.flow.json")), extraFlow);
+		assert.deepEqual(fs.readFileSync(path.join(u, "contracts", "custom.contract.json")), extraContract);
+		assert.deepEqual(fs.readFileSync(path.join(u, "presets", "custom.preset.json")), extraPreset);
+		assert.deepEqual(fs.readFileSync(path.join(u, "settings.json")), settings, "restore does not reset settings");
+	};
+
+	seedDefaults(b, u, true);
+	assertRestoreState();
+	seedDefaults(b, u, true);
+	assertRestoreState();
+});
+
 test("force restore replaces a hard-linked destination entry without modifying the other link", () => {
 	const b = bundled();
 	const u = userDir();

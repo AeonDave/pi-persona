@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { inFlightAgentCount } from "../../../src/extension.ts";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
@@ -50,8 +50,24 @@ function harness() {
 	// A headless call joins its runs through the shared launcher, wired exactly as the extension wires it.
 	deps.runs = createBackgroundRuns({ tracker, agentTree: tree, stopRegistry: deps.stopRegistry, slots: new Semaphore(8), completionNotifier: deps.completionNotifier, startPeek: deps.startPeek, childUsage: deps.childUsage, publishPersonaCost: deps.publishPersonaCost });
 	registerDelegateTool({ registerTool: (definition: unknown) => { tool = definition; } } as unknown as ExtensionAPI, deps);
-	const launch = (tasks: number, hasUI = true) =>
-		tool.execute("batch", { tasks: Array.from({ length: tasks }, (_, i) => ({ agent: "scout", task: `leg-${i}` })) }, undefined, undefined, { hasUI, modelRegistry: { getAll: () => [], getAvailable: () => [] } });
+	const launch = (tasks: number, hasUI = true) => {
+		const sessionManager = SessionManager.inMemory(process.cwd());
+		sessionManager.newSession({ id: "delegate-batch-row" });
+		return tool.execute("batch", { tasks: Array.from({ length: tasks }, (_, i) => ({ agent: "scout", task: `leg-${i}` })) }, undefined, undefined, {
+			hasUI,
+			modelRegistry: {
+				getAll: () => [],
+				getAvailable: () => [],
+				getRegisteredProviderIds: () => [],
+				getProvider: () => undefined,
+				getRegisteredNativeProvider: () => undefined,
+				getRegisteredProviderConfig: () => undefined,
+			},
+			sessionManager,
+			isIdle: () => true,
+			getContextUsage: () => undefined,
+		});
+	};
 	const settle = async (task: string) => {
 		gates.get(task)!.resolve();
 		await new Promise<void>((resolve) => setImmediate(resolve));

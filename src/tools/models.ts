@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { compactInlineText } from "../ui/presentation.ts";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 
 export interface ModelsToolDeps {
 	get lastCtx(): ExtensionContext | undefined;
@@ -44,6 +45,20 @@ export function registerModelsTool(pi: ExtensionAPI, d: ModelsToolDeps): void {
 		renderCall(args, theme) {
 			const query = compactInlineText(args.query ?? "(shortlist)", { maxChars: 96 }) || "(shortlist)";
 			return new Text(`${theme.fg("toolTitle", theme.bold("models "))}${theme.fg("dim", query)}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			// The catalog itself is literal data: the shared renderer bounds it collapsed and
+			// shows the complete sanitized listing expanded.
+			if (expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
+			const failed = context?.isError ?? result.isError ?? false;
+			if (failed) return renderLiteralToolResult(result, { expanded: false }, theme, context);
+			const details = (result.details ?? {}) as { total?: number; shown?: number; shortlist?: boolean };
+			const total = typeof details.total === "number" && Number.isFinite(details.total) ? details.total : 0;
+			const shown = typeof details.shown === "number" && Number.isFinite(details.shown) ? details.shown : 0;
+			const summary = shown === 0
+				? "no catalog matches"
+				: `${total} catalog models · showing ${shown}${details.shortlist ? " nearby candidates" : " matches"}`;
+			return new Text(`${theme.fg("toolTitle", theme.bold("models · "))}${theme.fg("accent", compactInlineText(summary, { maxChars: 96 }))}`, 0, 0);
 		},
 	});
 }

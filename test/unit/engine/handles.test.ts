@@ -33,6 +33,7 @@ test("the child engine and the inproc engine mint bus handles from ONE sequence 
 			register: (info) => minted.push(info.handle),
 			unregister: () => {},
 			steerFrame: () => true,
+			prepareResultReader: async () => { throw new Error("no reader grant"); },
 			hasPendingAskFrom: () => false,
 		},
 	});

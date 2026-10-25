@@ -25,6 +25,7 @@ import { fencePeer } from "../core/fence.ts";
 import { inventedExocomNameHint } from "../core/naming.ts";
 import { MAX_IDENTITY_NAME_CHARS } from "../core/session-identity.ts";
 import { ExocomPeerRejection, type DisplayPeer, type ExocomPlane } from "../exocom/plane.ts";
+import { normalizeExocomProfile, type ExocomProfile } from "../exocom/profile.ts";
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 import type { ExocomScope } from "../exocom/scope.ts";
 import { compactInlineText } from "../ui/presentation.ts";
@@ -86,6 +87,7 @@ type ExocomPeerSummary = Pick<DisplayPeer, "displayName" | "persona" | "model" |
 	workspace_code?: string;
 	workspace_label?: string;
 	sameWorkspace?: boolean;
+	profile?: ExocomProfile;
 };
 
 function peerWord(count: number): string {
@@ -96,6 +98,14 @@ function peerWord(count: number): string {
  * model so it can retain useful detail without turning one peer into a 300-column wall. */
 function peerRows(peer: ExocomPeerSummary, expanded: boolean): string[] {
 	const context = `${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}%`;
+	const availability = peer.profile?.availability ?? "unknown";
+	const capabilities = peer.profile?.capabilities ?? [];
+	const visibleCapabilities = capabilities.slice(0, expanded ? 8 : 2).join(" · ")
+		|| "capabilities not reported";
+	const omittedCapabilities = Math.max(0, capabilities.length - (expanded ? 8 : 2));
+	const profileLine = expanded
+		? `  self-reported availability: ${availability} · capabilities: ${compactInlineText(visibleCapabilities, { maxChars: 420 })}${omittedCapabilities ? ` · +${omittedCapabilities} more` : ""}`
+		: `  self-reported: ${availability} · ${compactInlineText(visibleCapabilities, { maxChars: 44 })}${omittedCapabilities ? ` · +${omittedCapabilities} more` : ""}`;
 	const workspace = peer.workspace_code && peer.workspace_label
 		? `  workspace: ${compactInlineText(peer.workspace_label, { maxChars: expanded ? 64 : 40 }) || "workspace"} [${peer.workspace_code}] · ${peer.sameWorkspace === false ? "external" : "same"}`
 		: undefined;
@@ -103,12 +113,12 @@ function peerRows(peer: ExocomPeerSummary, expanded: boolean): string[] {
 		const name = compactInlineText(peer.displayName, { maxChars: 48 }) || "peer";
 		const persona = compactInlineText(peer.persona, { maxChars: 32 }) || "unknown";
 		const model = compactInlineText(peer.model, { maxChars: 88 }) || "unknown";
-		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${model}`, ...(workspace ? [workspace] : [])];
+		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${model}`, profileLine, ...(workspace ? [workspace] : [])];
 	}
 	const name = compactInlineText(peer.displayName, { maxChars: 24 }) || "peer";
 	const persona = compactInlineText(peer.persona, { maxChars: 18 }) || "unknown";
 	const model = compactInlineText(peer.model, { maxChars: 36 }) || "unknown";
-	return [`- ${name} · ${persona} · ${model} · ctx ${context}`, ...(workspace ? [workspace] : [])];
+	return [`- ${name} · ${persona} · ${model} · ctx ${context}`, profileLine, ...(workspace ? [workspace] : [])];
 }
 
 /** The model-facing row carries the ROUTE as well as the human label: a display name is
@@ -118,10 +128,15 @@ function modelPeerRow(peer: ExocomPeerSummary): string {
 	const workspace = peer.workspace_code && peer.workspace_label
 		? ` · workspace: ${normalizeMetadataText(peer.workspace_label, 80, "workspace")} [${peer.workspace_code}] · ${peer.sameWorkspace === false ? "external workspace" : "same workspace"}`
 		: "";
-	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}% · target: ${normalizeMetadataText(peer.target, 80, "peer")}${workspace}`;
+	const availability = peer.profile?.availability ?? "unknown";
+	const capabilities = peer.profile?.capabilities.length
+		? peer.profile.capabilities.join(", ")
+		: "not reported";
+	return `- ${normalizeMetadataText(peer.displayName, 80, "peer")} · ${normalizeMetadataText(peer.persona, 64, "unknown")} · ${normalizeMetadataText(peer.model, 160, "unknown")} · ctx ${Math.max(0, Math.min(100, Number(peer.context_pct) || 0))}% · target: ${normalizeMetadataText(peer.target, 80, "peer")} · self-reported availability: ${availability} · capabilities: ${capabilities}${workspace}`;
 }
 
 function summarizePeer(peer: DisplayPeer, scope: ExocomScope | undefined): ExocomPeerSummary {
+	const profile = normalizeExocomProfile(peer.profile);
 	if (!scope) {
 		return {
 			displayName: normalizeMetadataText(peer.displayName, 80, "peer"),
@@ -129,6 +144,7 @@ function summarizePeer(peer: DisplayPeer, scope: ExocomScope | undefined): Exoco
 			persona: normalizeMetadataText(peer.persona, 64, "unknown"),
 			model: normalizeMetadataText(peer.model, 160, "unknown"),
 			context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
+			...(profile ? { profile } : {}),
 		};
 	}
 	// Legacy peers predate workspace metadata. Their registry location still proves they belong
@@ -147,6 +163,7 @@ function summarizePeer(peer: DisplayPeer, scope: ExocomScope | undefined): Exoco
 		...(workspaceCode ? { workspace_code: workspaceCode } : {}),
 		workspace_label: normalizeMetadataText(workspaceLabel, 80, "workspace"),
 		sameWorkspace: workspaceId === scope.homeWorkspaceId,
+		...(profile ? { profile } : {}),
 	};
 }
 

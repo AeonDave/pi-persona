@@ -120,8 +120,12 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 	const agents: AgentConfig[] = [];
 	for (const f of agentMerge.resolved) {
 		if (collisionNames.has(f.name)) continue;
-		const agent = parseAgent(content.get(f.path) ?? "", f.path);
-		if (agent) agents.push(agent);
+		try {
+			const agent = parseAgent(content.get(f.path) ?? "", f.path);
+			if (agent) agents.push(agent);
+		} catch (error) {
+			warnings.push(`${f.path}: ${error instanceof Error ? error.message : String(error)} — skipped`);
+		}
 	}
 
 	return { personas, agents, shadowed: [...personaMerge.shadowed, ...agentMerge.shadowed], collisions, warnings };
@@ -212,7 +216,11 @@ export function loadTeams(files: string[]): Record<string, RosterMember[]> {
 		} catch {
 			continue;
 		}
-		Object.assign(merged, parseTeams(content));
+		try {
+			Object.assign(merged, parseTeams(content));
+		} catch (error) {
+			throw new Error(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 	return merged;
 }

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { BrokerHost } from "../../../src/bus/broker/host.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { SupervisorBroker } from "../../../src/extension/broker-host.ts";
+import { readFailure, type ScopedReader } from "../../../src/bus/result-reader.ts";
 
 function fakeHost(endpoint: string) {
 	const expected: string[] = [];
@@ -15,6 +16,7 @@ function fakeHost(endpoint: string) {
 		steer: (h, t) => { steers.push([h, t]); return true; },
 		expect: (h) => { expected.push(h); },
 		forget: () => {},
+		prepareResultReader: async (_handle, reader) => ({ token: "a".repeat(64), revoke: () => reader.revoke(), wasBound: () => false }),
 	};
 	return { host, expected, steers };
 }
@@ -32,6 +34,65 @@ function make(start: () => Promise<BrokerHost>) {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
+
+function scopedReader() {
+	let revoked = 0;
+	const reader: ScopedReader = { read: async () => readFailure("denied"), revoke: () => { revoked++; } };
+	return { reader, revocations: () => revoked };
+}
+
+test("reader preflight awaits readiness; bind failure cannot return a false preparation", async () => {
+	let resolve!: (host: BrokerHost) => void;
+	const { broker } = make(() => new Promise((r) => { resolve = r; }));
+	broker.ensure("/x");
+	let done = false;
+	const r = scopedReader();
+	const prepared = broker.prepareResultReader("child", r.reader).then((value) => { done = true; return value; });
+	await Promise.resolve();
+	assert.equal(done, false);
+	resolve(fakeHost("/x").host);
+	assert.equal((await prepared).wasBound(), false);
+	await broker.close();
+	const failed = make(async () => { throw new Error("SECRET bind failure"); });
+	failed.broker.ensure("/x");
+	const denied = scopedReader();
+	await assert.rejects(failed.broker.prepareResultReader("child", denied.reader), /^Error: Result reader preparation failed\.$/);
+	assert.equal(denied.revocations(), 1);
+	await failed.broker.close();
+});
+
+test("reader preflight abort/owner close/deadline revoke immediately while bind is unresolved", async (t) => {
+	for (const action of ["abort", "close", "timeout"] as const) {
+		let resolve!: (host: BrokerHost) => void;
+		const { broker } = make(() => new Promise((r) => { resolve = r; }));
+		broker.ensure("/x");
+		const r = scopedReader();
+		const ac = new AbortController();
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const pending = broker.prepareResultReader("child", r.reader, ac.signal);
+		const assertion = assert.rejects(pending, /Result reader preparation/);
+		let closing: Promise<void> | undefined;
+		if (action === "abort") ac.abort();
+		if (action === "close") closing = broker.close();
+		if (action === "timeout") t.mock.timers.tick(10000);
+		assert.equal(r.revocations(), 1, action);
+		await assertion;
+		let preparations = 0;
+		const { host } = fakeHost("/x");
+		host.prepareResultReader = async () => { preparations++; throw new Error("must not attach"); };
+		resolve(host);
+		await Promise.resolve(); await Promise.resolve();
+		assert.equal(preparations, 0);
+		await closing;
+		await broker.close();
+		t.mock.timers.reset();
+	}
+});
+
+test("reader preflight without an ensured endpoint fails closed", async () => {
+	const { broker } = make(async () => fakeHost("/x").host);
+	await assert.rejects(broker.prepareResultReader("child", scopedReader().reader), /preparation/);
+});
 
 test("a failed host start warns the user once, withholds the endpoint from children, and reports in doctor", async () => {
 	const { broker, warnings, starts } = make(async () => { throw new Error("broker host: failed to listen on /x (EADDRINUSE)"); });

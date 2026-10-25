@@ -15,7 +15,10 @@ import { ChildUsageLedger } from "../../../src/ui/usage.ts";
 const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 const FLOW = { name: "gated-build", phases: [{ id: "plan", strategy: "magi", gate: true }, { id: "build", strategy: "fanout", needs: ["plan"] }] };
 
-function register(outcome: FlowOutcome | ((run?: TrackedRun) => Promise<FlowOutcome>)) {
+function register(
+	outcome: FlowOutcome | ((run?: TrackedRun) => Promise<FlowOutcome>),
+	options: { launchSnapshot?: (ctx: unknown, spec: unknown) => unknown } = {},
+) {
 	let tool: any;
 	const tracker = new AsyncRunTracker();
 	const stopRegistry = new Map<string, () => void>();
@@ -35,6 +38,7 @@ function register(outcome: FlowOutcome | ((run?: TrackedRun) => Promise<FlowOutc
 		lastCtx: undefined,
 		loadFlow: () => ({ ok: true, flow: FLOW }),
 		listFlows: () => ["gated-build"],
+		launchSnapshot: options.launchSnapshot ?? (() => ({ participants: [] })),
 		runFlowVisible: async (_ctx: unknown, _spec: unknown, _task: string, run?: TrackedRun) => {
 			if (run) tracked.push(run);
 			return typeof outcome === "function" ? outcome(run) : outcome;
@@ -58,6 +62,61 @@ const STOPPED: FlowOutcome = {
 	error: "blocked: a checkpoint gate was not approved",
 	stoppedAtGate: "plan",
 };
+
+test("flow receipts persist an immutable phase-scoped launch snapshot and render it without rereading", async () => {
+	const participant = {
+		key: "plan:reviewer · SECURITY", label: "reviewer · SECURITY", agent: "reviewer",
+		model: "openai/original", modelSource: "inline", thinkingRequested: "high", setupPending: false, phase: "plan",
+	};
+	const snapshot = { participants: [participant] };
+	let reads = 0;
+	let trackerRef: AsyncRunTracker | undefined;
+	const harness = register({ ok: true, results: {}, output: "finished" }, {
+		launchSnapshot: (_ctx, spec) => {
+			reads++;
+			assert.deepEqual(spec, FLOW);
+			assert.equal(trackerRef?.list().length, 0, "snapshot is captured before the tracked run launches");
+			return snapshot;
+		},
+	});
+	trackerRef = harness.tracker;
+	const receipt = await runInteractive(harness.tool);
+	assert.equal(reads, 1);
+	assert.deepEqual(receipt.details.launch.participants, [{ ...participant }]);
+
+	participant.model = "changed/later";
+	const expanded = harness.tool.renderResult(receipt, { expanded: true }, plainTheme).render(240).join("\n");
+	assert.match(expanded, /plan \/ reviewer · SECURITY/);
+	assert.match(expanded, /openai\/original/);
+	assert.match(expanded, /requested effort high/);
+	assert.doesNotMatch(expanded, /changed\/later/);
+	assert.equal(reads, 1, "history rendering only uses the persisted launch snapshot");
+});
+
+test("headless and pending flow launches retain their request-time metadata", async () => {
+	const snapshot = { participants: [{
+		key: "build:operator", label: "operator", agent: "operator", model: "openai/default",
+		modelSource: "session", thinkingRequested: "xhigh", setupPending: true, phase: "build",
+	}] };
+	const harness = register({ ok: true, results: {}, output: "inline answer" }, { launchSnapshot: () => snapshot });
+	const result = await run(harness.tool);
+	assert.deepEqual(result.details.launch.participants, snapshot.participants);
+	const card = harness.tool.renderResult(result, { expanded: false }, plainTheme).render(240).join("\n");
+	assert.match(card, /build \/ operator/);
+	assert.match(card, /model pending/);
+	assert.match(card, /openai\/default/);
+	assert.match(card, /requested effort xhigh/);
+});
+
+test("missing flow launch metadata is explicit and never blocks the run", async () => {
+	const harness = register({ ok: true, results: {}, output: "finished" }, {
+		launchSnapshot: () => { throw new Error("model lookup failed"); },
+	});
+	const receipt = await runInteractive(harness.tool);
+	assert.equal(receipt.isError, false);
+	assert.deepEqual(receipt.details.launch, { participants: [], unavailable: true });
+	assert.match(render(harness.tool, receipt), /Launch metadata unavailable/);
+});
 
 test("a flow stopped at a checkpoint is a result, not a tool error: the plan is delivered and the card says 'stopped'", async () => {
 	const { tool } = register(STOPPED);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { initTheme, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
@@ -45,9 +45,21 @@ function register(overrides: Record<string, unknown> = {}): { tool: any; deps: a
 }
 
 function ctx() {
+	const sessionManager = SessionManager.inMemory(process.cwd());
+	sessionManager.newSession({ id: "delegate-alias-cards" });
 	return {
 		hasUI: true,
-		modelRegistry: { getAll: () => [], getAvailable: () => [] },
+		modelRegistry: {
+			getAll: () => [],
+			getAvailable: () => [],
+			getRegisteredProviderIds: () => [],
+			getProvider: () => undefined,
+			getRegisteredNativeProvider: () => undefined,
+			getRegisteredProviderConfig: () => undefined,
+		},
+		sessionManager,
+		isIdle: () => true,
+		getContextUsage: () => undefined,
 	};
 }
 
@@ -350,4 +362,86 @@ test("only a background launch arms the status monitor; a headless leg runs inli
 	assert.equal(armed, 0);
 	await h.tool.execute("interactive", { agent: "operator", task: "t" }, undefined, undefined, ctx());
 	assert.equal(armed, 1);
+});
+
+test("headless delegate completion persists observed model metadata independently of its launch model", async () => {
+	initTheme("dark");
+	const h = register({ buildEngine: () => ({ run: async (spec: any) => ({ agent: spec.agent, output: "verified", usage: emptyUsage(), ok: true, modelUsed: "provider/resolved" }) }) });
+	const result = await h.tool.execute("headless", { agent: "operator", task: "t", model: "provider/requested" }, undefined, undefined, { ...ctx(), hasUI: false });
+	assert.equal(result.details.settledRuns[0].modelUsed, "provider/resolved");
+	assert.match(result.content[0].text, /Observed model: provider\/resolved/);
+	assert.match(render(h.tool, result, true, 180), /provider\/resolved/);
+});
+
+test("delegate launch cards surface the declared effort in FULL, collapsed and expanded", async () => {
+	const h = register();
+	const args = { agent: "operator", name: "AshCoral-view", model: "zai/glm-5.3-flash", task: "PRIVATE TASK", thinking: "xhigh" };
+	const launched = await h.tool.execute("single", args, undefined, undefined, ctx());
+	const details = launched.details as { runs: Array<{ thinking?: string }> };
+	assert.equal(details.runs[0]?.thinking, "xhigh", "the launch snapshot carries the args-declared effort");
+
+	const collapsed = render(h.tool, launched, false, 120);
+	assert.match(collapsed, /operator · glm-5\.3-flash · xhigh/);
+	const expanded = render(h.tool, launched, true, 240);
+	assert.match(expanded, /operator · glm-5\.3-flash · xhigh/);
+	const call = renderCall(h.tool, args, 120);
+	assert.match(call, /operator · zai\/glm-5\.3-flash · xhigh/);
+
+	// No declared thinking, nothing appended — args-level only, no invented display.
+	const plain = renderCall(h.tool, { agent: "scout", name: "Plain-worker", task: "t" }, 120);
+	assert.doesNotMatch(plain, /off|minimal|low|medium|high|xhigh|max/);
+	const plainLaunch = await h.tool.execute("single", { agent: "scout", name: "Plain-two", task: "t" }, undefined, undefined, ctx());
+	const plainCard = render(h.tool, plainLaunch, false, 120);
+	assert.doesNotMatch(plainCard, / · (off|minimal|low|medium|high|xhigh|max)/);
+
+	// A declared `off` selection still renders nothing.
+	const offLaunch = await h.tool.execute("single", { agent: "operator", name: "Off-worker", task: "t", thinking: "off" }, undefined, undefined, ctx());
+	assert.equal((offLaunch.details as { runs: Array<{ thinking?: string }> }).runs[0]?.thinking, "off");
+	assert.match(render(h.tool, offLaunch, false, 120), /Off-worker/);
+	assert.doesNotMatch(render(h.tool, offLaunch, false, 120), /· off/);
+	assert.doesNotMatch(render(h.tool, offLaunch, true, 240), /· off/);
+});
+
+test("launch rendering never mutates the model-facing payload, launch details, or call args", async () => {
+	const h = register();
+	const args = { agent: "operator", name: "AshCoral-view", model: "zai/glm-5.3-flash", task: "PRIVATE TASK", thinking: "xhigh" };
+	const launched = await h.tool.execute("single", args, undefined, undefined, ctx());
+	const before = JSON.stringify([launched.content, launched.details]);
+	const argsBefore = JSON.stringify(args);
+	render(h.tool, launched, false, 120);
+	render(h.tool, launched, true, 240);
+	renderCall(h.tool, args, 120);
+	assert.equal(JSON.stringify([launched.content, launched.details]), before, "payload and details unchanged by rendering");
+	assert.equal(JSON.stringify(args), argsBefore, "renderCall does not mutate the call args");
+});
+
+test("fanout rows show each declared effort in full; undeclared legs stay bare; a uniform batch names it in the header", async () => {
+	const h = register();
+	const launched = await h.tool.execute("fanout", {
+		tasks: [
+			{ agent: "operator", name: "Hot-leg", task: "a", thinking: "xhigh" },
+			{ agent: "scout", name: "Cool-leg", task: "b" },
+			{ agent: "operator", name: "Mid-leg", task: "c", thinking: "medium" },
+		],
+	}, undefined, undefined, ctx());
+	const collapsed = render(h.tool, launched, false, 200);
+	assert.match(collapsed, /Hot-leg · operator · xhigh/);
+	assert.match(collapsed, /Cool-leg · scout(?!\s·)/);
+	assert.match(collapsed, /Mid-leg · operator · medium/);
+	const expanded = render(h.tool, launched, true, 240);
+	assert.match(expanded, /· xhigh \[run-1\]/);
+	assert.match(expanded, /· medium \[run-3\]/);
+	assert.doesNotMatch(expanded, /Cool-leg · scout · (xhigh|medium)/);
+
+	const uniform = renderCall(h.tool, { tasks: [
+		{ agent: "operator", task: "a", thinking: "high" },
+		{ agent: "scout", task: "b", thinking: "high" },
+	] }, 120);
+	assert.match(uniform, /parallel \(2\) · high/);
+	const mixed = renderCall(h.tool, { tasks: [
+		{ agent: "operator", task: "a", thinking: "high" },
+		{ agent: "scout", task: "b" },
+	] }, 120);
+	assert.match(mixed, /parallel \(2\)/);
+	assert.doesNotMatch(mixed, /· high/);
 });

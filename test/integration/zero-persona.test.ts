@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
@@ -20,6 +20,7 @@ function makeMockPi() {
 	const pi = {
 		on: (name: string, handler: AnyFn) => { hooks[name] = handler; },
 		registerTool: () => {},
+		events: { emit: () => {} },
 		registerMessageRenderer: () => {},
 		registerEntryRenderer: () => {},
 		appendEntry: () => {},
@@ -45,12 +46,24 @@ function makeMockPi() {
 
 function makeCtx(hasUI: boolean) {
 	const notes: string[] = [];
+	const cwd = tempDir("pi-persona-zero-persona-cwd-");
+	const sessionManager = SessionManager.inMemory(cwd);
+	sessionManager.newSession({ id: "zero-persona-test" });
 	const ctx = {
-		cwd: tempDir("pi-persona-zero-persona-cwd-"),
+		cwd,
 		hasUI,
 		model: undefined,
-		modelRegistry: { getAll: () => [] },
+		modelRegistry: {
+			getAll: () => [],
+			getAvailable: () => [],
+			getRegisteredProviderIds: () => [],
+			getProvider: () => undefined,
+			getRegisteredNativeProvider: () => undefined,
+			getRegisteredProviderConfig: () => undefined,
+		},
+		sessionManager,
 		isIdle: () => true,
+		getContextUsage: () => undefined,
 		hasPendingMessages: () => false,
 		ui: { setStatus: () => {}, notify: (message: string) => { notes.push(message); }, select: async () => undefined },
 	};

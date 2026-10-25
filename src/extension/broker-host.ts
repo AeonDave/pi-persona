@@ -2,7 +2,8 @@
  * Supervisor-side broker lifecycle (spec B1-B7): the ONE cross-process host every child-engine
  * leg connects to. Started lazily on the first child-engine build; a failed bind is reported to
  * the user ONCE, children built while it is failed spawn without a bus endpoint (so they never
- * burn the connect backoff against a dead socket), and the next build retries.
+ * burn the connect backoff against a dead socket), and the next build retries. Result readers
+ * use the separate strict awaited preflight on this SAME host, never bus-less degradation.
  */
 
 import { mkdirSync } from "node:fs";
@@ -11,6 +12,7 @@ import { dirname } from "node:path";
 import type { EngineAdapterBroker } from "../engine/adapter.ts";
 import { type BrokerHost, startBrokerHost } from "../bus/broker/host.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
+import { RESULT_READ_TIMEOUT_MS, type PreparedResultReader, type ScopedReader } from "../bus/result-reader.ts";
 
 export interface SupervisorBrokerDeps {
 	bus: InProcessBus;
@@ -49,6 +51,8 @@ export class SupervisorBroker {
 	private readonly expected = new Set<string>();
 	private readonly preHostSteers = new Map<string, string[]>();
 	private readonly deps: SupervisorBrokerDeps;
+	private generation = 0;
+	private readonly preparingReaders = new Set<() => void>();
 
 	constructor(deps: SupervisorBrokerDeps) {
 		this.deps = deps;
@@ -82,6 +86,7 @@ export class SupervisorBroker {
 			}
 		}
 		const start = this.deps.startHost ?? startBrokerHost;
+		const generation = this.generation;
 		this.promise = start({
 			bus: this.deps.bus,
 			supervisorHandle: this.deps.supervisorHandle,
@@ -90,6 +95,7 @@ export class SupervisorBroker {
 		});
 		this.promise.then(
 			(h) => {
+				if (generation !== this.generation) return; // close() owns the late host's teardown
 				this.hostRef = h;
 				this.lastError = undefined;
 				this.warned = false;
@@ -98,6 +104,7 @@ export class SupervisorBroker {
 				this.preHostSteers.clear();
 			},
 			(err) => {
+				if (generation !== this.generation) return;
 				this.promise = undefined; // a later build retries
 				this.lastError = err instanceof Error ? err.message : String(err);
 				const dropped = [...this.preHostSteers.values()].reduce((n, texts) => n + texts.length, 0);
@@ -110,6 +117,46 @@ export class SupervisorBroker {
 				}
 			},
 		);
+	}
+
+	/** Strict reader preflight, unlike ordinary bus-less degradation. Call ensure(endpoint)
+	 * first, then await this BEFORE adapter registration/spawn. The owner must revoke on
+	 * settlement/spawn failure and close this broker when the owning session changes. */
+	async prepareResultReader(handle: string, reader: ScopedReader, signal?: AbortSignal): Promise<PreparedResultReader> {
+		const generation = this.generation;
+		let revoked = false;
+		const revoke = (): void => {
+			if (revoked) return;
+			revoked = true;
+			try { reader.revoke(); } catch { /* fixed diagnostic, even if cleanup throws */ }
+		};
+		const fail = (): Error => new Error("Result reader preparation failed.");
+		const hostPromise = this.promise;
+		if (!hostPromise || signal?.aborted) { revoke(); throw fail(); }
+		return new Promise<PreparedResultReader>((resolve, reject) => {
+			let settled = false;
+			const cleanup = (): void => {
+				settled = true;
+				clearTimeout(timer);
+				this.preparingReaders.delete(cancel);
+				signal?.removeEventListener("abort", cancel);
+			};
+			const cancel = (): void => {
+				if (settled) return;
+				revoke(); cleanup(); reject(fail());
+			};
+			const timer = setTimeout(cancel, RESULT_READ_TIMEOUT_MS);
+			timer.unref?.();
+			this.preparingReaders.add(cancel);
+			signal?.addEventListener("abort", cancel, { once: true });
+			void hostPromise.then(async (host) => {
+				if (settled) return;
+				const grant = await host.prepareResultReader(handle, { read: (request, s) => reader.read(request, s), revoke }, signal);
+				if (settled || generation !== this.generation || signal?.aborted) { grant.revoke(); cancel(); return; }
+				cleanup();
+				resolve(grant);
+			}).catch(cancel);
+		});
 	}
 
 	/** The adapter-facing deps, or undefined while the last start failed (children spawn bus-less). */
@@ -141,6 +188,7 @@ export class SupervisorBroker {
 				return true;
 			},
 			hasPendingAskFrom: (handle) => this.deps.bus.hasPendingAskFrom(handle),
+			prepareResultReader: (handle, reader, signal) => this.prepareResultReader(handle, reader, signal),
 		};
 	}
 
@@ -164,18 +212,22 @@ export class SupervisorBroker {
 	}
 
 	async close(): Promise<void> {
-		if (this.promise) {
-			try {
-				const h = await this.promise;
-				await h.close();
-			} catch {
-				/* best-effort — never block shutdown on a broker teardown error */
-			}
-		}
+		this.generation++;
+		for (const cancel of this.preparingReaders) cancel();
+		const host = this.hostRef;
+		const pending = this.promise;
 		this.hostRef = undefined;
 		this.promise = undefined;
+		this.lastError = undefined;
 		this.peers.clear();
 		this.expected.clear();
 		this.preHostSteers.clear();
+		try {
+			// Invoke immediately: bound readers revoke before the first await.
+			if (host) await host.close();
+			else if (pending) await (await pending).close();
+		} catch {
+			/* best-effort — never block shutdown on a broker teardown error */
+		}
 	}
 }

@@ -51,9 +51,11 @@ import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type Eng
 import { installHooks, type HookHost } from "./extension/hooks.ts";
 import {
 	canDeliverPersonaNotification,
+	compactNameList,
 	expandDetailHint,
 	sanitizePeerField,
 	sendPersonaFollowUp,
+	toastCause,
 	type PendingAsk,
 } from "./extension/shared.ts";
 export {
@@ -61,6 +63,7 @@ export {
 	canDeliverPersonaNotification,
 	canonicalExocomTelemetryTargets,
 	coachingDisabledHint,
+	compactNameList,
 	exocomInboundBatchSize,
 	EXOCOM_INBOX_MAX,
 	exocomInboundDisposition,
@@ -76,6 +79,7 @@ export {
 	sanitizePeerField,
 	sendPersonaFollowUp,
 	shouldReportHeartbeatFailure,
+	toastCause,
 	type ExocomQueuedToast,
 	type PendingAsk,
 } from "./extension/shared.ts";
@@ -108,13 +112,21 @@ import { Semaphore } from "./orchestration/parallel.ts";
 import { flowDisposition, type FlowOutcome } from "./orchestration/flow-run.ts";
 import { type RosterMember, roleHint, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
 import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts";
+import { withResultRefs } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
 import { compactMemberResult } from "./orchestration/render.ts";
+import { sumUsage } from "./orchestration/reducers.ts";
 import type { AgentResult, FailureKind } from "./orchestration/types.ts";
+import { isThinkingLevel, type ThinkingLevel } from "./core/types.ts";
+import { snapshotOrchestrationParticipants, type OrchestrationLaunchSnapshot } from "./ui/orchestration-launch.ts";
+import { SessionResults } from "./extension/results.ts";
+import { readArchivedBody, resultReceiptHint, type ResultReceipt } from "./results/retrieval.ts";
+type SavedFlowOutcome = FlowOutcome & { resultReceipt?: ResultReceipt };
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, resolveOrchestrationMembers, runPersonaStrategy } from "./persona/orchestrate.ts";
 import {
 	collectModelParticipants,
+	collectModelParticipantOccurrences,
 	pendingParticipants,
 	type ModelParticipant,
 } from "./persona/model-participants.ts";
@@ -166,19 +178,6 @@ function personaDataDir(): string {
 	return join(userAgentDir(), DATA_DIR);
 }
 
-/** Cross-process `contact_peer` roster (spec B7): scopes `brokerPeers` — the process-wide,
- *  pre-spawn registry keyed by handle (populated in `SupervisorBroker.adapterDeps`'s `register`,
- *  see below) — to the SAME per-engine group as the caller `self`, mirroring `engine/inproc.ts`'s
- *  per-engine-instance `peerLabels` map. `self`'s OWN recorded group is the source of truth
- *  here, NOT the wire's `group` argument the host would otherwise pass: the child's env
- *  carries no group (spec B6, the wire `register` frame stays minimal), so every wire group
- *  is "" and scoping by it would either always come back empty (this scope) or leak every
- *  concurrent run's peers into one flat list (the host's own default `group=""` scoping).
- *  `self` not found (not registered with `peers: true`) ⇒ empty roster, never a leak.
- *  Exported for direct unit/integration testing — `extension.ts`'s activation closure itself
- *  isn't a testable unit. Implementation lives in `./extension/broker-host.ts` now. */
-export { listPeersForGroup } from "./extension/broker-host.ts";
-
 interface CommandResultEntry {
 	label: string;
 	content: string;
@@ -222,9 +221,12 @@ export function announceAsyncRunSettlement(
 	const id = compactInlineText(run.id, { maxChars: 80 }) || "run";
 	const agent = compactInlineText(run.label ?? run.agent, { maxChars: 80 }) || compactInlineText(run.agent, { maxChars: 80 }) || "agent";
 	try {
-		if (run.status === "done") notify?.(`async run ${id} (${agent}) completed`, "info");
-		else if (run.status === "stopped") notify?.(`async run ${id} (${agent}) stopped`, "info");
-		else if (run.status === "failed") {
+		// done/stopped announce ONCE: the idle-gated follow-up card is the single completion
+		// surface (the agent-tree row already settles immediately), so an extra toast here would
+		// report the same event twice. A failure keeps its immediate operator surface — the durable
+		// TUI card, or the sanitized error toast when no card can be presented — because it deserves
+		// attention even while the supervisor stays busy.
+		if (run.status === "failed") {
 			const toast = () => notify?.(`async run ${id} (${agent}) failed: ${summarizeFailure(run.error ?? "(no detail)")}`, "error");
 			if (presentFailure) {
 				try { presentFailure(run); }
@@ -253,7 +255,7 @@ export function renderOperatorResult(label: string, output: string, ok: boolean,
  *  run is a leaf that has none, and a settled leg still sits in the tree until its root is torn
  *  down. A fan-out's `delegate` header row is a container even in the beat after its last leg
  *  left, so it never counts. A wake source (a timer or monitor row) is not an agent at all and
- *  never counts, running or not. Exported for direct unit testing (mirrors `listPeersForGroup` above). */
+ *  never counts, running or not. Exported for direct unit testing. */
 export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus; kind?: NonNullable<AgentNode["kind"]> }>): number {
 	const parents = new Set<string>();
 	for (const node of nodes) {
@@ -323,6 +325,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	let config = resolveConfig(process.env);
 	if (config.disabled) return;
+	const results = new SessionResults(pi);
 	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
 	registerSessionCards(pi, {
 		detailHint: expandDetailHint,
@@ -361,8 +364,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	};
 	/** `/flow` and `/orchestrate` result card; `ok` stays honest, a rejected checkpoint is "stopped". */
-	const appendFlowResult = (flow: string, outcome: FlowOutcome): void =>
-		appendOperatorResult(`flow ${flow}`, outcome.output || "(flow produced no output)", outcome.ok, {
+	const appendFlowResult = (flow: string, outcome: SavedFlowOutcome): void =>
+		appendOperatorResult(`flow ${flow}`, `${outcome.output || "(flow produced no output)"}${outcome.resultReceipt ? `\n\n${resultReceiptHint(outcome.resultReceipt)}` : ""}`, outcome.ok, {
 			...(outcome.stoppedAtGate !== undefined ? { stoppedAtGate: outcome.stoppedAtGate } : {}),
 			...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}),
 			...(outcome.error ? { error: outcome.error } : {}),
@@ -422,8 +425,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			else process.stderr.write(`${message}\n`);
 		}
 		for (const warning of dataRootMigration.warnings) {
-			if (ctx.hasUI) ctx.ui.notify(warning, "warning");
-			else process.stderr.write(`${warning}\n`);
+			const message = `pi-persona: ${toastCause(warning, 300)}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+			else process.stderr.write(`${message}\n`);
 		}
 	};
 	const migrateSeededDefaults = (): SeedMigrationResult => {
@@ -450,18 +454,19 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	};
 	const reportSeedMigration = (ctx: ExtensionContext, result: SeedMigrationResult): void => {
 		if (result.migrated.length > 0) {
-			const message = `pi-persona: upgraded ${result.migrated.length} exact pristine seeded default(s): ${result.migrated.join(", ")}`;
+			const message = `pi-persona: upgraded ${result.migrated.length} exact pristine seeded default(s): ${compactNameList(result.migrated)}`;
 			if (ctx.hasUI) ctx.ui.notify(message, "info");
 			else process.stderr.write(`${message}\n`);
 		}
 		if (result.installed.length > 0) {
-			const message = `pi-persona: installed ${result.installed.length} required default dependency file(s): ${result.installed.join(", ")}`;
+			const message = `pi-persona: installed ${result.installed.length} required default dependency file(s): ${compactNameList(result.installed)}`;
 			if (ctx.hasUI) ctx.ui.notify(message, "info");
 			else process.stderr.write(`${message}\n`);
 		}
 		for (const warning of result.warnings) {
-			if (ctx.hasUI) ctx.ui.notify(warning, "warning");
-			else process.stderr.write(`${warning}\n`);
+			const message = `pi-persona: ${toastCause(warning, 300)}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+			else process.stderr.write(`${message}\n`);
 		}
 	};
 	// v1.8.1 rewrote the spine pair, but `on` deliberately prefers a seeded user copy and the
@@ -1014,13 +1019,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	function reportDefinitionCollisions(ctx: ExtensionContext): void {
 		if (definitionCollisions.length > 0) {
-			const names = definitionCollisions.map((collision) => collision.name).join(", ");
+			const names = compactNameList(definitionCollisions.map((collision) => collision.name));
 			const message = `pi-persona: ${definitionCollisions.length} persona/agent definition collision(s) were omitted: ${names}. Run /doctor for source paths.`;
 			if (ctx.hasUI) ctx.ui.notify(message, "warning");
 			else process.stderr.write(`${message}\n`);
 		}
 		if (definitionWarnings.length > 0) {
-			const shown = definitionWarnings.slice(0, 5).join("; ");
+			const shown = definitionWarnings.slice(0, 5).map((warning) => toastCause(warning, 160)).join("; ");
 			const more = definitionWarnings.length > 5 ? ` (+${definitionWarnings.length - 5} more)` : "";
 			const message = `pi-persona: ${definitionWarnings.length} definition problem(s): ${shown}${more}. Run /doctor for details.`;
 			if (ctx.hasUI) ctx.ui.notify(message, "warning");
@@ -1030,7 +1035,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	function reportSeedSourceCollisions(ctx: ExtensionContext, result: SeedResult): void {
 		if (!result.collisions?.length) return;
-		const message = `pi-persona: bundled persona/agent name collision(s): ${result.collisions.join(", ")}. The persona file was seeded; the ambiguous agent was omitted.`;
+		const message = `pi-persona: bundled persona/agent name collision(s): ${compactNameList(result.collisions)}. The persona file was seeded; the ambiguous agent was omitted.`;
 		if (ctx.hasUI) ctx.ui.notify(message, "warning");
 		else process.stderr.write(`${message}\n`);
 	}
@@ -1134,7 +1139,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// the supervisor as a fresh turn instead of stranding as orphaned "sticky" follow-ups in pi's
 	// queue (pi only drains that queue from an active turn, one-at-a-time, skipping errored turns).
 	const idleDelivery = {
-		isIdle: () => canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true),
+		isIdle: () => canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle() === true),
 		deliver: (message: string) => sendPersonaFollowUp(pi, message),
 		setTimer: (fn: () => void, ms: number) => {
 			const h = setTimeout(fn, ms);
@@ -1225,7 +1230,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// Session-native custom entries own the bounded logs: they are not model messages and
 	// deleting the session removes them without orphan sidecars. Shutdown persists, never deletes.
 	const monitorArchive = new MonitorArchive({
-		entries: () => lastCtx?.sessionManager?.getEntries?.() ?? [],
+		entries: () => lastCtx?.sessionManager.getEntries() ?? [],
 		append: (customType, data) => pi.appendEntry(customType, data),
 	});
 	monitors = createMonitorSession({
@@ -1261,6 +1266,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		},
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
+	results.track(tracker); // archive before ordinary notification, including synchronous launch failure
 	// The premature-surrender counterweight rides the SAME kill switch as the by-hand nudge
 	// (PI_PERSONA_NUDGE=off). The background completion follow-up goes through here, so "off" means
 	// off there too, not just on the synchronous tool_result hook.
@@ -1273,7 +1279,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (tracker.wasDropped(id)) {
 			return (
 				`Async run "${display}" settled, but its full payload is gone: more runs settled than the ${tracker.retention}-run retention bound keeps. ` +
-				"Its summary is, or will be, in the completion follow-up. Raise PI_PERSONA_ASYNC_RETAIN, or fan out in narrower waves and collect as you go, to keep more."
+				"Its summary is, or will be, in the completion follow-up. Use intercom { action:'results' } to find any saved terminal reference; read that ref without restarting work. Raise PI_PERSONA_ASYNC_RETAIN to retain more live handles."
 			);
 		}
 		// Never existed, or ended with the session that launched it (a call-sign is not an address either):
@@ -1281,14 +1287,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const settled = tracker.list().filter((run) => run.status !== "running").reverse().sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0));
 		return (
 			`No retained async run "${display}". Runs live only in the session that launched them (a restart, /new or reload ends them; collected results are evicted first once retention is full). ` +
-			`Known runs: ${describeRuns([...tracker.running(), ...settled], { status: true })}.`
+			`Known runs: ${describeRuns([...tracker.running(), ...settled], { status: true })}. Use intercom { action:'results' } for retained terminal reports; historical run ids are not archive addresses.`
 		);
 	}
 	// Turns the periodic peek from a poll into an exception signal: it surfaces a leg only when it
 	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
 	const peekWatcher = new PeekWatcher();
 	tracker.onComplete((run) => {
-		agentTree.update(`async:${run.id}`, { status: run.status, detail: run.error ?? run.result?.error ?? "" });
+		// Stamp the observed effort BEFORE the node leaves the tree: the removal right below makes
+		// this the settle flash's one frame. Only a real AgentResult observation, same rule as the
+		// strategy rows; when nothing was observed the patch stays without the field.
+		agentTree.update(`async:${run.id}`, { status: run.status, detail: run.error ?? run.result?.error ?? "", ...(run.result?.thinkingEffective ? { thinkingEffective: run.result.thinkingEffective } : {}) });
 		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
@@ -1399,7 +1408,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			}
 			// A stall is operator-only (appended above) and never costs a model turn; unread non-ask
 			// messages keep their actionable route.
-			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle?.() === true) || lastCtx?.hasPendingMessages?.() === true) return;
+			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle() === true) || lastCtx?.hasPendingMessages() === true) return;
 			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
 			if (unread.length === 0) return;
 			try {
@@ -1426,7 +1435,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		},
 	});
 	function makeBrokerDeps(ctx: ExtensionContext): EngineAdapterBroker | undefined {
-		const sessionId = (ctx as ExtensionContext & { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.() ?? "";
+		const sessionId = ctx.sessionManager.getSessionId();
 		return broker.adapterDeps(brokerEndpoint(sessionId));
 	}
 
@@ -1470,9 +1479,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		runLimits: RUN_LIMITS,
 		bus,
 		supervisorHandle: SUPERVISOR,
+		resultArchive: () => results.archive,
 		onFallback: (info) => {
 			try {
-				lastCtx?.ui.notify(`${info.agent}: ${info.from} failed, retrying on ${info.to}`, "warning");
+				lastCtx?.ui.notify(toastCause(`${info.agent}: ${info.from} failed, retrying on ${info.to}`, 120), "warning");
 			} catch {
 				/* cosmetic — a toast must never break a run */
 			}
@@ -1511,6 +1521,42 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			agentModel: (agent) => agents.find((a) => a.name === agent)?.model,
 			...(ctx.model ? { sessionModel: `${ctx.model.provider}/${ctx.model.id}` } : {}),
 		});
+	}
+	function launchParticipantSnapshot(ctx: ExtensionContext, participants: ModelParticipant[]): OrchestrationLaunchSnapshot {
+		const persona = controller.activePersona?.name;
+		const assignments = new Map<string, ModelParticipant>();
+		for (const p of participants) if (!assignments.has(p.key)) assignments.set(p.key, p);
+		const pending = ctx.hasUI && persona ? pendingParticipants([...assignments.values()], { prompted: promptedFor(persona, participants) }) : [];
+		const mayChoose = pending.length > 0 && configuredModels(ctx).length > 1;
+		const supervisorThinking = host.getThinkingLevel();
+		return snapshotOrchestrationParticipants(participants, {
+			agentThinking: (agent) => agents.find((a) => a.name === agent)?.thinking,
+			childThinking: config.childThinking ?? (isThinkingLevel(supervisorThinking) ? supervisorThinking : "high"),
+			pendingKeys: new Set(mayChoose ? pending.map((p) => p.key) : []),
+		});
+	}
+	function councilLaunchSnapshot(ctx: ExtensionContext, orch: OrchestrationGrammar): OrchestrationLaunchSnapshot {
+		const strategy = resolveStrategyName(orch) ?? "strategy";
+		const members = resolveOrchestrationMembers(orch, teams);
+		const persona = controller.activePersona?.name;
+		const participants = collectModelParticipantOccurrences({ strategy, members, ...(orch.params ? { params: orch.params } : {}),
+			...(persona ? { assigned: personaModels(personaConfigs, persona) } : {}),
+			agentModel: (agent) => agents.find((a) => a.name === agent)?.model,
+			...(ctx.model ? { sessionModel: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+		});
+		const snapshot = launchParticipantSnapshot(ctx, participants);
+		const keys = rosterNodeKeys(members);
+		let index = 0;
+		return { participants: snapshot.participants.map((p) => {
+			const occurrenceKey = p.param ? `param:${p.param}:${p.key}` : keys[index++] ?? p.key;
+			return { ...p, key: occurrenceKey, label: p.param ? p.label : occurrenceKey };
+		}) };
+	}
+	function flowLaunchSnapshot(ctx: ExtensionContext, spec: FlowSpec): OrchestrationLaunchSnapshot {
+		return { participants: spec.phases.flatMap((phase) => {
+			const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, roster: phase.roster ?? "", ...(phase.params ? { params: phase.params } : {}) };
+			return councilLaunchSnapshot(ctx, orch).participants.map((p) => ({ ...p, key: `${phase.id}:${p.key}`, phase: phase.id }));
+		}) };
 	}
 
 	/**
@@ -1557,9 +1603,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	function modelSelectionScope(ctx: ExtensionContext): ModelSelectionScope | undefined {
 		const active = controller.activePersona;
 		if (!active) return undefined;
-		const sessionId = ctx.sessionManager?.getSessionId?.();
+		const sessionId = ctx.sessionManager.getSessionId();
 		return { persona: active.name, isCurrent: () => !disposed && controller.activePersona === active &&
-			(sessionId === undefined || lastCtx?.sessionManager?.getSessionId?.() === sessionId) };
+			lastCtx?.sessionManager.getSessionId() === sessionId };
 	}
 
 	/** An explicit user edit is allowed to replace defaults, unlike automatic first-run setup. */
@@ -1708,9 +1754,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const configured = persona ? personaModels(personaConfigs, persona) : {};
 		return configured[assignmentKey] ?? configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
 	}
-	function coreTelemetryMeta(ctx: ExtensionContext, agent: string, assignmentKey?: string, participant?: ModelParticipant | null): { agent: string; model?: string } {
+	function coreTelemetryMeta(ctx: ExtensionContext, agent: string, assignmentKey?: string, participant?: ModelParticipant | null): { agent: string; model?: string; thinking?: ThinkingLevel } {
 		const model = coreModel(ctx, agent, assignmentKey, participant);
-		return { agent, ...(model ? { model } : {}) };
+		// The member's explicit spec-level effort rides the SAME participant channel as the model, so
+		// every strategy-seeded row (queued seed, live re-add, flow phase) names its effort from the
+		// first frame — the delegate launch rows' own rule. An ambiguous/null participant identifies
+		// no single lens, so it carries nothing, and absence renders nothing.
+		return { agent, ...(model ? { model } : {}), ...(participant?.thinking ? { thinking: participant.thinking } : {}) };
 	}
 	function coreLabel(ctx: ExtensionContext, agent: string, key: string = agent, assignmentKey?: string, participant?: ModelParticipant | null): string {
 		const short = shortModel(coreModel(ctx, agent, assignmentKey, participant));
@@ -1807,11 +1857,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				}
 				stopRegistry.delete(id);
 				steerRegistry.delete(id);
-				const patch: { status: AgentNodeStatus; detail?: string; output?: string } = { status: st };
+				const patch: { status: AgentNodeStatus; detail?: string; output?: string; thinkingEffective?: ThinkingLevel } = { status: st };
 				if (result) {
 					const u = formatUsage(result.usage);
 					if (u) patch.detail = u;
 					if (result.output || result.structured) patch.output = compactMemberResult(result);
+					// Settle stamp: only a REAL terminal observation, never an invention. While the run
+					// stays up (siblings still going) the row honestly reads `xh→h`; once the run ends the
+					// removal makes it a one-frame flash. effortTag renders the divergence only when the
+					// requested side exists and differs, so an unstamped request shows nothing extra.
+					if (result.thinkingEffective) patch.thinkingEffective = result.thinkingEffective;
 				}
 				agentTree.update(id, patch);
 			},
@@ -1862,14 +1917,21 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const roster = resolveOrchestrationMembers(orch, teams);
 		const participants = runParticipants(ctx, { strategy: label, ...(orch.params ? { params: orch.params } : {}), members: roster });
 		const participantsByNode = participantByNode(participants);
+		results.activate(ctx);
 		const { rootId, signal, live } = visibleRoot(`${idPrefix}:${label}`, tracked);
+		const capture = results.bind(rootId);
+		const finish = (result: AgentResult): AgentResult => {
+			if (!tracked) result.resultReceipt = capture("root", result, { label });
+			return result;
+		};
+		const onAgentResult = (result: AgentResult, key: string): void => { result.resultReceipt = capture(`leg:${key}`, result); };
 		agentTree.add({ id: rootId, label, status: "running", kind: "council", ...live });
 		try {
 			await ensurePersonaModels(ctx, participants, signal, rootId, tracked);
 			if (signal.aborted) {
 				agentTree.update(rootId, { status: "stopped" });
 				const cancelled: AgentResult = { agent: label, output: "cancelled before orchestration started", usage: emptyUsage(), ok: false, error: "cancelled", failureKind: "abort" };
-				return cancelled;
+				return finish(cancelled);
 			}
 			// Seed the whole roster at once (cores show by name immediately); "queued" until the
 			// engine actually starts each one — an honest view under the concurrency limit.
@@ -1884,10 +1946,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
 			// cooperatively between rounds, so an aborted run stops convening instead of running every
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
-			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), signal, ...strategyTreeDeps(ctx, rootId, participantsByNode, tracked), ...strategySpawnGate(), ...modelFallbackDep(ctx) });
+			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), signal, ...strategyTreeDeps(ctx, rootId, participantsByNode, tracked), onAgentResult, ...strategySpawnGate(), ...modelFallbackDep(ctx) });
 			agentTree.update(rootId, { status: signal.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
-			return result ?? undefined;
+			return finish(result ?? { agent: label, output: "", ok: false, usage: emptyUsage(), error: "No strategy result", failureKind: "contract" });
 		} catch (error) {
+			finish({ agent: label, output: "", ok: false, usage: emptyUsage(), error: error instanceof Error ? error.message : String(error), failureKind: signal.aborted ? "abort" : "agent" });
 			agentTree.update(rootId, { status: signal.aborted ? "stopped" : "failed" });
 			throw error;
 		} finally {
@@ -1964,7 +2027,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// Run a flow's DAG with the unified tree (phases as nodes, cores beneath) + journaled
 	// resume: a prior run's journal (keyed by flow + task + cwd) skips already-done phases; the
 	// journal is cleared on a fully-successful run.
-	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, tracked?: TrackedRun): Promise<FlowOutcome> {
+	async function runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, baseTask: string, tracked?: TrackedRun): Promise<SavedFlowOutcome> {
+		results.activate(ctx);
+		const capture = results.bind(`flow:${randomUUID()}`);
+		const finish = (outcome: FlowOutcome): SavedFlowOutcome => {
+			if (tracked) return outcome;
+			const result: AgentResult = { agent: `flow ${spec.name}`, output: outcome.output, ok: outcome.ok, usage: sumUsage(Object.values(outcome.results).map((result) => result.usage)), ...(outcome.error ? { error: outcome.error } : {}), ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}) };
+			return { ...outcome, resultReceipt: capture("root", result, { status: outcome.stoppedAtGate || outcome.cancelled ? "stopped" : outcome.ok ? "done" : "failed" }) };
+		};
 		const hash = flowRunHash(spec, baseTask, ctx.cwd);
 		const journalDir = join(personaDataDir(), "flows");
 		try {
@@ -1997,7 +2067,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			await ensurePersonaModels(ctx, spec.phases.flatMap((p) => phasePlans.get(p.id)?.participants ?? []), signal, flowRoot, tracked);
 			if (signal.aborted) {
 				agentTree.update(flowRoot, { status: "stopped" });
-				return { ok: false, results: {}, output: "cancelled before flow started", error: "cancelled", failureKind: "abort", cancelled: true };
+				return finish({ ok: false, results: {}, output: "cancelled before flow started", error: "cancelled", failureKind: "abort", cancelled: true });
 			}
 			for (const p of spec.phases) {
 				const pid = `${flowRoot}/${p.id}`;
@@ -2022,12 +2092,18 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					failureKind: "contract",
 				};
 				if (spec.phases[0]?.id) failed.failedPhase = spec.phases[0].id;
-				return failed;
+				return finish(failed);
 			}
 			const outcome = await runFlow(spec, baseTask, {
 				hash,
 				resume,
 				signal,
+				// Reference handoff: a resume rebuilds a done phase's body from the owning session's
+				// terminal archive (inline mode keeps its historical inline-only resume).
+				...(spec.handoff === "reference" ? { readArchivedResult: (ref: string) => {
+					const archive = results.archive;
+					return archive ? readArchivedBody(archive, ref) : { ok: false as const, error: "terminal result archive unavailable" };
+				} } : {}),
 				journal: journalWriter(journalPath),
 				onPhase: (id, status, result) => {
 					const patch: { status: AgentNodeStatus; output?: string; detail?: string } = {
@@ -2037,7 +2113,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					if (result?.error) patch.detail = result.error;
 					agentTree.update(`${flowRoot}/${id}`, patch);
 				},
-				runPhase: async ({ phase, task }) => {
+				runPhase: async ({ phase, task, resultRefs }) => {
 					const pid = `${flowRoot}/${phase.id}`;
 					const plan = phasePlans.get(phase.id) ?? { members: [], participants: [] };
 					const roster = plan.members;
@@ -2052,17 +2128,26 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					});
 					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
 					if (phase.roster) orch.roster = phase.roster;
+					// Reference handoff (trusted grant wiring): the phase's legs get EXACTLY the direct
+					// upstream refs flow-run threaded through `runPhase` - pinned at the engine seam, so
+					// a strategy can neither enlarge nor smuggle refs (the SDK strips its own attempts).
+					const phaseEngine = spec.handoff === "reference"
+						? withResultRefs(buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }), resultRefs)
+						: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true });
 					const r = await runPersonaStrategy(orch, task, {
-						engine: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }),
+						engine: phaseEngine,
 						teams,
 						limits: RUN_LIMITS,
 						...sessionModelDep(ctx),
 						signal, // cooperative per-round abort inside the phase's strategy, not just the engine
 						...strategyTreeDeps(ctx, pid, participantsByNode, tracked),
+						onAgentResult: (result, key) => { result.resultReceipt = capture(`phase:${phase.id}:leg:${key}`, result); },
 						...strategySpawnGate(),
 						...modelFallbackDep(ctx),
 					});
-					return r ?? { agent: phase.id, output: `unknown strategy: ${phase.strategy}`, usage: emptyUsage(), ok: false, error: "unknown strategy" };
+					const result = r ?? { agent: phase.id, output: `unknown strategy: ${phase.strategy}`, usage: emptyUsage(), ok: false, error: "unknown strategy" };
+					result.resultReceipt = capture(`phase:${phase.id}:root`, result);
+					return result;
 				},
 				// Checkpoint gate: only an explicit interactive approval may release dependents.
 				// Headless, dismissal, and UI failure all reject: a human checkpoint is a safety
@@ -2094,8 +2179,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// A rejected checkpoint is a pause the operator chose, not a failure (same call as the flow tool).
 			const disposition = flowDisposition(outcome);
 			agentTree.update(flowRoot, { status: disposition === "failed" && signal.aborted ? "stopped" : disposition });
-			return outcome;
+			return finish(outcome);
 		} catch (error) {
+			finish({ ok: false, results: {}, output: "", error: error instanceof Error ? error.message : String(error), failureKind: signal.aborted ? "abort" : "agent" });
 			agentTree.update(flowRoot, { status: signal.aborted ? "stopped" : "failed" });
 			throw error;
 		} finally {
@@ -2109,14 +2195,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// explicit discovery/refresh replaces it. Execution preflights still consult the live registry.
 	let modelCatalog: { key: string; models: ModelCostMetadata[]; candidates: string | undefined } | undefined;
 	function modelCatalogKey(ctx: ExtensionContext): string {
-		return `${ctx.sessionManager?.getSessionId?.() ?? ""}\0${ctx.model?.provider ?? ""}\0${ctx.model?.id ?? ""}`;
+		return `${ctx.sessionManager.getSessionId()}\0${ctx.model?.provider ?? ""}\0${ctx.model?.id ?? ""}`;
 	}
 	async function refreshModelCatalog(ctx: ExtensionContext, signal: AbortSignal) {
 		// Pi contexts have live getters: capture before awaiting so an old refresh cannot
 		// discard the snapshot acquired after a session or base-model switch.
 		const key = modelCatalogKey(ctx);
 		try {
-			return await ctx.modelRegistry.refresh?.({ signal });
+			return await ctx.modelRegistry.refresh({ signal });
 		} finally {
 			// A failed/aborted refresh may still have updated some providers.
 			if (modelCatalog?.key === key) modelCatalog = undefined;
@@ -2208,10 +2294,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// `resolveStrategyName` fails loudly on a grammar that names a MODE without naming what to run
 	// (`mode: strategy` with no `strategy:`, `mode: flow` with no `flow:`) — a persona-file error,
 	// not a runtime one. Every entry point that calls it as a guard renders this instead of letting
-	// it propagate out of a hook or command handler.
+	// it propagate out of a hook or command handler. Bounded: a toast or a stderr line, one line.
 	function personaGrammarError(err: unknown): string {
 		const who = controller.activePersona?.name ?? "(none)";
-		return `pi-persona: persona "${who}" has an invalid orchestration — ${err instanceof Error ? err.message : String(err)}`;
+		return toastCause(`pi-persona: persona "${who}" has an invalid orchestration — ${err instanceof Error ? err.message : String(err)}`, 300);
 	}
 
 	function doctorReport(): string {
@@ -2294,6 +2380,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	const hookHost: HookHost = {
 		identity,
+		results,
 		get config() { return config; },
 		get controller() { return controller; },
 		get personaHost() { return host; },
@@ -2444,6 +2531,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	registerIntercomTool(pi, {
+		archive: (ctx) => results.activate(ctx),
 		get lastCtx() { return lastCtx; },
 		set lastCtx(value) { lastCtx = value; },
 		tracker,
@@ -2483,6 +2571,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		set lastCtx(value) { lastCtx = value; },
 		controller,
 		get personas() { return personas; },
+		launchSnapshot: councilLaunchSnapshot,
 		runStrategyVisible,
 		runs: backgroundRuns,
 		drainBusBlock,
@@ -2493,6 +2582,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		set lastCtx(value) { lastCtx = value; },
 		loadFlow,
 		listFlows,
+		launchSnapshot: flowLaunchSnapshot,
 		runFlowVisible,
 		runs: backgroundRuns,
 	});
@@ -2529,13 +2619,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			personaConfigs = savedSettings.personas;
 		},
 		isCurrent: (ctx) => !disposed && !ctx.signal?.aborted &&
-			(ctx.sessionManager?.getSessionId?.() === undefined ||
-				lastCtx?.sessionManager?.getSessionId?.() === ctx.sessionManager.getSessionId()),
+			lastCtx?.sessionManager.getSessionId() === ctx.sessionManager.getSessionId(),
 		diagnostics: doctorReport,
 		models: async (ctx) => {
 			lastCtx = ctx;
 			personaConfigs = readConfigStore();
-			const session = ctx.sessionManager?.getSessionId?.();
+			const session = ctx.sessionManager.getSessionId();
 			await openPersonaModelSettings(ctx, {
 				owners: () => personas.map((persona) => ({ name: persona.name, label: persona.label })),
 				activeOwner: () => controller.activePersona?.name,
@@ -2568,7 +2657,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					savedSettings = patchPersonaSettings(settingsFile, { models: { [owner]: models } });
 					personaConfigs = savedSettings.personas;
 				},
-				isCurrent: () => !disposed && (session === undefined || lastCtx?.sessionManager?.getSessionId?.() === session),
+				isCurrent: () => !disposed && lastCtx?.sessionManager.getSessionId() === session,
 				refreshCatalog: (signal) => refreshModelCatalog(ctx, signal),
 			});
 		},
@@ -2594,7 +2683,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const profile = arg.slice("models".length).trim();
 				const resolved = resolveCouncilInvocation(personas, caller, profile ? { persona: profile } : {});
 				if (!resolved.ok) {
-					ctx.ui.notify(`persona models: ${resolved.error}`, "error");
+					ctx.ui.notify(`persona models: ${toastCause(resolved.error)}`, "error");
 					return;
 				}
 				try {
@@ -2618,11 +2707,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					}
 					await editPersonaModels(ctx, runParticipants(ctx, { strategy, members: panel, params }), scope);
 				} catch (err) {
-					ctx.ui.notify(`persona models: refresh failed (${err instanceof Error ? err.message : String(err)}); previous assignments kept.`, "error");
+					ctx.ui.notify(`persona models: refresh failed (${toastCause(err instanceof Error ? err.message : String(err))}); previous assignments kept.`, "error");
 				}
 				return;
 			}
-			if (arg === "off" || arg === "none") {
+			if (arg === "off") {
 				await controller.deactivate();
 				persist(undefined);
 				await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
@@ -2650,7 +2739,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return;
 			}
 			// seed = copy any MISSING bundled defaults into the user dir (pull new ones);
-			// restore = force-overwrite them back to the bundled originals (discards your edits).
+			// restore = force-overwrite bundled destinations (discards their edits), not prune the
+			// user directory: additional custom personas/agents/resources must remain untouched.
 			if (arg === "seed" || arg === "restore") {
 				const force = arg === "restore";
 				const r = runSeed(force);
@@ -2835,7 +2925,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const result = await runStrategyVisible(ctx, orch, task, "orchestrate");
 				appendOperatorResult(
 					`orchestrate ${strategyName}`,
-					result?.output || "(no output)",
+					`${result?.output || "(no output)"}${result?.resultReceipt ? `\n\n${resultReceiptHint(result.resultReceipt)}` : ""}`,
 					result?.ok ?? false,
 					{
 						...(result?.failureKind ? { failureKind: result.failureKind } : {}),

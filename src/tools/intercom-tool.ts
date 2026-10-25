@@ -5,12 +5,13 @@ import { failureDetails } from "../extension/shared.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { coachingDisabledHint, expandDetailHint, reconcileAnsweredAsk } from "../extension/shared.ts";
 import {
 	type AsyncRun, AsyncRunTracker, buildPeekDigest,
 	dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier,
-	isAsyncRunStalled, runDisplayName, runDurationLabel,
+	isAsyncRunStalled, observedRunModel, runDisplayName, runDurationLabel,
 } from "../engine/async.ts";
 import type { PollGuard } from "../core/nudge.ts";
 import { fenceUntrusted } from "../core/fence.ts";
@@ -21,11 +22,14 @@ import type { InProcessBus } from "../bus/inproc.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { emptyUsage } from "../engine/stream.ts";
 import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
+import type { TerminalResultArchive } from "../results/archive.ts";
+import { pageLiveResult, projectResultPage, resultReceiptHint } from "../results/retrieval.ts";
 
 export interface IntercomToolDeps {
 	get lastCtx(): ExtensionContext | undefined;
 	set lastCtx(value: ExtensionContext | undefined);
 	tracker: AsyncRunTracker;
+	archive(ctx: ExtensionContext): TerminalResultArchive;
 	completionNotifier: IdleCoalescingNotifier<AsyncRun>;
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
 	controller: PersonaController;
@@ -131,6 +135,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			[
 				Type.Literal("peek"),
 				Type.Literal("result"),
+				Type.Literal("results"),
 				Type.Literal("steer"),
 				Type.Literal("stop"),
 				Type.Literal("list"),
@@ -141,10 +146,15 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			],
 			{
 				description:
-					"peek = status of async sub-agents · result = retrieve one complete settled result by run id · steer = soft redirect into one by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = coaching messages (needs a coaching persona)",
+					"peek = status of async sub-agents · results = bounded archive summaries (cursor/limit) · result = page a settled live result by to:run-id or a saved report by ref:result-UUID · steer = soft redirect into one by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = coaching messages (needs a coaching persona)",
 			},
 		),
 		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek: the async run id (e.g. 'run-1'); stop: \"all\" cancels every running run · send: the child handle (from `list`)" })),
+		ref: Type.Optional(Type.String({ maxLength: 43, description: "result: opaque result:<UUID> archive reference; never a run id. Mutually exclusive with to." })),
+		offset: Type.Optional(Type.Integer({ minimum: 0, description: "result: stored-body UTF-16 offset (default 0); use nextOffset, never split a surrogate pair." })),
+		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000, description: "result: 2..16000 UTF-16 units (default 8000). results: 1..50 summaries (default 20)." })),
+		cursor: Type.Optional(Type.Integer({ minimum: 0, description: "results: nextCursor from the prior bounded summary page; omit for the first page." })),
+		collect: Type.Optional(Type.Boolean({ description: "result with live to only: true acknowledges the whole report and suppresses its pending completion. Paging alone does not collect." })),
 		messageId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "message: the drained bus message id shown by `inbox`" })),
 		askId: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "reply: the message id of the child's pending question" })),
 		message: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_MESSAGE_CHARS, description: "steer/reply/send: the text to deliver" })),
@@ -154,7 +164,10 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		label: "Intercom",
 		description: [
 			"Steer, stop and inspect your background sub-agents; a finished run or batch wakes you with a completion follow-up.",
-			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` retrieves one complete settled payload by run id.",
+			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` pages a live settled payload by run id (8000 units default, 16000 maximum).",
+			"`results { cursor?, limit? }` lists saved terminal summaries across this session's branches (20 default, 50 maximum); pass nextCursor for the next page.",
+			"`result { ref: 'result:<UUID>', offset?, limit? }` reads a saved report, including after reload, without collecting, billing, restarting a worker or waking the model. Memory-only references last only for this activation. Run ids route only the current runtime; never guess a historical run by id.",
+			"Use nextOffset for more UTF-16 pages. Only a whole live body returned in one read, or explicit live collect:true, suppresses a pending completion. Archive ref reads reject collect.",
 			"`steer` sends a soft course-correction to one (by run id); in-process async runs can receive it mid-run,",
 			"while child-engine (MCP/worktree) async runs receive it as a brokered follow-up. After remaining tools return, Pi can consume steering; arbitrary active tool work is not promised to stop immediately.",
 			"`message` retrieves a drained bus message by its message id; `list`/`inbox`/`reply`/`send` exchange coaching messages (a child reaches you via `contact_supervisor`)",
@@ -180,8 +193,29 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				if (refusal) return refusal;
 				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(waiting ? { waitingForSupervisor: waiting } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot }, isError: false };
 			}
+			if (params.action === "results" || (params.action === "result" && params.ref !== undefined)) {
+				const invalid = params.to !== undefined || params.collect !== undefined || (params.action === "results" && (params.ref !== undefined || params.offset !== undefined)) || (params.action === "result" && params.cursor !== undefined);
+				if (invalid) return { content: [{ type: "text", text: "Archive reads accept ref/offset/limit; results accepts cursor/limit. to and collect are live-only." }], details: failureDetails({ action: params.action }), isError: true };
+				const archive = d.archive(ctx);
+				if (params.action === "results") {
+					const page = archive.list({ ...(params.cursor !== undefined ? { cursor: params.cursor } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) });
+					const text = page.ok ? ["Saved terminal reports (not live workers):", ...page.results.map((r) => `${r.ref} · ${sanitizeDisplayLabel(r.label ?? r.agent)} · ${r.status} · ${r.storage}${r.truncated ? " · truncated" : ""}`), ...(page.nextCursor !== undefined ? [`nextCursor: ${page.nextCursor}`] : []), ...(page.warnings.length ? [`Storage warnings: ${page.warnings.join(", ")}`] : [])].join("\n") : page.message;
+					return { content: [{ type: "text", text }], details: { action: "results", ...page }, isError: !page.ok };
+				}
+				const page = archive.read({ ref: params.ref!, ...(params.offset !== undefined ? { offset: params.offset } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) });
+				if (!page.ok) {
+					return { content: [{ type: "text", text: page.message }], details: { action: "result", ...page }, isError: true };
+				}
+				// Bounded-page rule: the fenced body is delivered once, in content; details stay
+				// bounded metadata exactly like the live result path (no whole page hidden there).
+				const { body: _pageBody, ...pageMeta } = page;
+				return {
+					content: [{ type: "text", text: `${page.summary.ref} · ${page.summary.status} · ${page.summary.storage}${page.summary.truncated ? " · saved body truncated" : ""}\n${projectResultPage(page, page.summary.error)}` }],
+					details: { action: "result", ...pageMeta }, isError: false,
+				};
+			}
 			if (params.action === "result") {
-				if (!params.to) {
+				if (!params.to || params.cursor !== undefined) {
 					return { content: [{ type: "text", text: "intercom result needs { to: <run id> }." }], details: failureDetails({ action: "result", ok: false }), isError: true };
 				}
 				const run = d.tracker.peek(params.to);
@@ -199,14 +233,17 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// same result cannot appear again as a follow-up a moment later. Telling the tracker too
 				// makes this retained copy the first thing retention evicts — the supervisor has read it,
 				// so it is the cheapest payload in the map to lose.
-				d.completionNotifier.discard((pending) => pending.id === run.id);
-				d.tracker.markCollected(run.id);
 				const full = getFullRunOutput(run);
-				const body = full === "(no output)" ? full : fenceUntrusted(full);
-				// The cause is engine/child-authored text too. Keep the run id/status as trusted compact
-				// metadata, but put the diagnostic inside the same untrusted fence as the payload.
-				const cause = run.error ? `\nFailure detail:\n${fenceUntrusted(run.error)}` : "";
-				const displayRun = sanitizeDisplayLabel(run.label ?? run.agent);
+				const page = pageLiveResult(full, params.offset, params.limit);
+				if (!page) return { content: [{ type: "text", text: "Invalid result offset/limit; use nextOffset and 2..16000 units." }], details: failureDetails({ action: "result", ...targetSnapshot }), isError: true };
+				if (params.collect === true || (page.offset === 0 && page.endOfStoredBody)) {
+					d.completionNotifier.discard((pending) => pending.id === run.id);
+					d.tracker.markCollected(run.id);
+				}
+				const body = projectResultPage(page, run.error);
+				const receipt = resultReceiptHint(run.resultReceipt);
+				const displayRun = runDisplayName(run);
+				const modelUsed = observedRunModel(run);
 				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
 				// the supervisor through, so it carries the same reading the passive completion report does.
 				const took = runDurationLabel(run);
@@ -216,8 +253,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const billed = d.childUsage.accountMany([{ key: run.id, usage: run.result?.usage ?? emptyUsage() }]);
 				d.publishPersonaCost();
 				return {
-					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${cause}\n${body}${note ? `\n\n${note}` : ""}` }],
-					details: { action: "result", ok: true, status: run.status, ...targetSnapshot },
+					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${modelUsed ? `\nObserved model: ${modelUsed}` : ""}\n${body}${receipt ? `\n${receipt}` : ""}${note ? `\n\n${note}` : ""}` }],
+					details: { action: "result", ok: true, status: run.status, ...targetSnapshot, ...(modelUsed ? { modelUsed } : {}), page: { offset: page.offset, nextOffset: page.nextOffset, endOfStoredBody: page.endOfStoredBody }, ...(run.resultReceipt ? { resultReceipt: { ...run.resultReceipt } } : {}) },
 					isError: false,
 					...toolUsageField(billed),
 				};
@@ -317,7 +354,12 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			return component;
 		},
 		renderResult(result, { expanded }, theme, context) {
-			const details = (result.details ?? {}) as { action?: string; ok?: boolean; runId?: string; target?: string; message?: string };
+			const details = (result.details ?? {}) as {
+				action?: string; ok?: boolean; runId?: string; target?: string; message?: string;
+				results?: Array<{ truncated?: boolean }>;
+				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean };
+				nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
+			};
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = details.action ?? context?.args?.action;
 			const savedId = details.runId ?? context?.args?.to;
@@ -353,13 +395,55 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const showTitle = !state?.callText || !preview;
 				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}` : ""}`, 0, 0);
 			}
+			// Archive views are listings/diagnostics, never Markdown reports. A successful archive
+			// read carries no runId (live results do) and a summary (its own receipt); the invalid
+			// argument mix and failed reads fall through to the literal failure rendering below.
+			const listing = details.action === "results" && details.ok === true && Array.isArray(details.results) ? details.results : undefined;
+			const archivedPage = details.action === "result" && details.ok === true
+				&& typeof details.summary === "object" && details.summary !== null && details.runId === undefined
+				? details.summary
+				: undefined;
 			if (expanded) {
+				// Archive pages/listings stay literal via the shared renderer — complete sanitized
+				// content, no Markdown re-render of a quote-fenced page or a ref listing.
+				if (!failed && (listing || archivedPage)) {
+					return renderLiteralToolResult(result, { expanded }, theme, context);
+				}
 				// Explicit report/message actions only; missing/running diagnostics and control
 				// receipts remain literal. Older history with no action is not guessed from prose.
 				if (!failed && ["result", "message", "inbox"].includes(action ?? "")) {
 					return createReportBody(full, theme, {}, context?.lastComponent);
 				}
 				return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
+			}
+			if (!failed && listing) {
+				// Purpose line first (count + paging/truncation/storage honesty), then a bounded
+				// listing preview; the payload's own header line is replaced by the purpose line.
+				const truncated = listing.filter((entry) => entry?.truncated === true).length;
+				const flags = [
+					...(details.nextCursor !== undefined ? [`next page: cursor ${details.nextCursor}`] : []),
+					...(truncated > 0 ? [`${truncated} truncated`] : []),
+					...(details.warnings?.length ? [`warnings: ${details.warnings.join(", ")}`] : []),
+				];
+				const purpose = compactInlineText(`results · ${listing.length} retained${flags.length ? ` · ${flags.join(" · ")}` : ""}`, { maxChars: 100 });
+				const preview = compactVisibleText(full.split("\n").slice(1).join("\n"), { maxLines: 3, maxLineChars: 100 });
+				return new Text(`${theme.fg("success", purpose)}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+			}
+			if (!failed && archivedPage) {
+				// Page position reads against the STORED body (originals may be truncated); honesty
+				// flags surface collapsed so a memory-only or truncated receipt is never mistaken
+				// for a durable whole report without expanding.
+				const end = details.nextOffset ?? archivedPage.storedChars ?? 0;
+				const flags = [
+					...(archivedPage.truncated ? ["truncated"] : []),
+					...(archivedPage.storage === "memory-only" ? ["memory-only"] : []),
+					...(details.warnings?.length ? [`warnings: ${details.warnings.join(", ")}`] : []),
+				];
+				const purpose = compactInlineText(`result · ${archivedPage.ref ?? "?"} · page ${end}/${archivedPage.storedChars ?? "?"}${flags.length ? ` · ${flags.join(" · ")}` : ""}`, { maxChars: 100 });
+				// The payload's receipt header and paging diagnostic line are replaced by the purpose
+				// line; the fence wrapper is dropped by the preview, leaving the page body quoted.
+				const preview = compactVisibleText(full.split("\n").slice(2).join("\n"), { maxLines: 3, maxLineChars: 100 });
+				return new Text(`${theme.fg("success", purpose)}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
 			}
 			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
 			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";

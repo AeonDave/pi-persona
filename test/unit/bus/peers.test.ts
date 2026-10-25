@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
+
+import { initTheme } from "@earendil-works/pi-coding-agent";
 
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { makeContactPeerTool, MAX_PEER_MESSAGE_CHARS } from "../../../src/bus/peers.ts";
@@ -100,4 +103,56 @@ test("contact_peer rejects oversized messages before delivery and without burnin
 	const accepted = await tool.execute("t11", { action: "send", to: "b#2", message: "small" }, undefined, undefined, CTX);
 	assert.match(text(accepted), /Sent to b#2/);
 	assert.equal(bus.pending("b#2").length, 1, "the invalid attempt did not consume the send budget");
+});
+
+// ── presentation contract: compact call line + shared literal receipt ──────────────────────
+// Same conformed host-tool rules as contact_supervisor: these cards render in the child's
+// transcript/telemetry, so no raw-args echo, bounded list results with expansion.
+
+initTheme("dark");
+const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+
+type PeerTool = ReturnType<typeof makeContactPeerTool>;
+
+function renderCallCard(tool: PeerTool, args: Record<string, unknown>): string {
+	return stripVTControlCharacters((tool as any).renderCall(args, plainTheme).render(200).join("\n")).trim();
+}
+
+function renderResultCard(tool: PeerTool, value: unknown, expanded: boolean, isError = false): string {
+	return stripVTControlCharacters((tool as any).renderResult(value, { expanded }, plainTheme, { isError }).render(400).join("\n")).trim();
+}
+
+test("contact_peer call card is the compact `peer <action>` line without the message body", () => {
+	const tool = makeContactPeerTool(new InProcessBus(), "a#1", { listPeers: () => [] });
+	assert.equal(typeof (tool as any).renderCall, "function", "renderCall must exist; the host fallback echoes raw args JSON");
+	assert.equal(renderCallCard(tool, { action: "send", to: "b#2", message: "SECRET peer note body" }), "peer send");
+	assert.equal(renderCallCard(tool, { action: "list" }), "peer list");
+	assert.equal(renderCallCard(tool, {}), "peer", "action absent → bare purpose word");
+});
+
+test("contact_peer list result is bounded collapsed and expands to every peer", async () => {
+	const bus = new InProcessBus();
+	bus.register("a#1");
+	const peers = Array.from({ length: 30 }, (_, i) => ({ handle: `p#${i}`, label: `peer-${i} (LENS)` }));
+	const tool = makeContactPeerTool(bus, "a#1", { listPeers: () => peers });
+	const r = await tool.execute("t-r1", { action: "list" }, undefined, undefined, CTX);
+	const before = JSON.stringify(r);
+	const collapsed = renderResultCard(tool, r, false);
+	assert.match(collapsed, /expand/, "a long peer list must not dump in the card");
+	assert.ok(collapsed.split("\n").length <= 5, `collapsed list stays bounded, got ${collapsed.split("\n").length} lines`);
+	assert.doesNotMatch(collapsed, /peer-29/, "the tail of the list is hidden until expansion");
+	const expanded = renderResultCard(tool, r, true);
+	assert.doesNotMatch(expanded, /expand/, "no false affordance when everything is shown");
+	assert.match(expanded, /peer-29/, "expansion shows every peer");
+	assert.equal(JSON.stringify(r), before, "rendering never mutates the tool result");
+});
+
+test("contact_peer send receipt renders as one compact line", async () => {
+	const bus = new InProcessBus();
+	bus.register("a#1");
+	bus.register("b#2");
+	const tool = makeContactPeerTool(bus, "a#1", { listPeers: () => [{ handle: "b#2", label: "b#2" }] });
+	const r = await tool.execute("t-r2", { action: "send", to: "b#2", message: "my position: X" }, undefined, undefined, CTX);
+	const card = renderResultCard(tool, r, false);
+	assert.equal(card, "Sent to b#2.", "one compact line, no expansion hint");
 });

@@ -4,8 +4,10 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { MonitorManager } from "../core/monitor.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
+import { formatDuration } from "../core/time.ts";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { compactInlineText } from "../ui/presentation.ts";
+import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
 import type { MonitorArchive, MonitorLogRecord } from "../monitor/archive.ts";
 
@@ -88,12 +90,29 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 				...(params.maxEvents !== undefined ? { maxEvents: params.maxEvents } : {}),
 			});
 			if (!result.ok) return fail(result.error);
-			return { content: [{ type: "text" as const, text: `Armed ${result.entry.id} (${compactInlineText(result.entry.label, { maxChars: 120 })}); ${params.mode === "exit" ? "wakes when this job exits" : "wakes on relevant stdout lines"}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. ${armWakeAdvice(ctx, "watch", "condition", "Keep this session open. Continue independent work, or end your turn; it wakes you by itself, so never sleep, poll, or arm a `timer` to wait for it.")}` }], details: { ok: true, id: result.entry.id, expiresAtEpochMs: result.entry.expiresAtEpochMs } };
+			return { content: [{ type: "text" as const, text: `Armed ${result.entry.id} (${compactInlineText(result.entry.label, { maxChars: 120 })}); ${params.mode === "exit" ? "wakes when this job exits" : "wakes on relevant stdout lines"}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. ${armWakeAdvice(ctx, "watch", "condition", "Keep this session open. Continue independent work, or end your turn; it wakes you by itself, so never sleep, poll, or arm a `timer` to wait for it.")}` }], details: { ok: true, id: result.entry.id, expiresAtEpochMs: result.entry.expiresAtEpochMs, label: compactInlineText(result.entry.label, { maxChars: 120 }), mode: params.mode } };
 		},
 		renderCall(args, theme) {
 			const action = compactInlineText(args.action ?? "", { maxChars: 12 });
 			const label = compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 });
 			return new Text(`${theme.fg("toolTitle", theme.bold(`monitor ${action}`))}${label ? ` ${theme.fg("dim", label)}` : ""}`, 0, 0);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			const details = (result.details ?? {}) as { ok?: boolean; label?: string; mode?: string; expiresAtEpochMs?: number };
+			const failed = context?.isError ?? result.isError ?? false;
+			const isArm = !failed && typeof details.label === "string" && (details.mode === "output" || details.mode === "exit");
+			if (!isArm) {
+				// Failures and every list/cancel/result receipt share the one literal renderer:
+				// error heading, bounded sanitized preview, expansion hint.
+				return renderLiteralToolResult(result, { expanded }, theme, context);
+			}
+			if (expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
+			const left = typeof details.expiresAtEpochMs === "number" && Number.isFinite(details.expiresAtEpochMs)
+				? details.expiresAtEpochMs - Date.now()
+				: undefined;
+			const deadline = left === undefined ? "" : left > 0 ? ` · deadline in ${formatDuration(left)}` : " · deadline reached";
+			const summary = compactInlineText(`${details.label} · ${details.mode}${deadline}`, { maxChars: 140 });
+			return new Text(`${theme.fg("toolTitle", theme.bold("armed "))}${theme.fg("accent", summary)}`, 0, 0);
 		},
 	});
 }

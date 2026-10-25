@@ -76,11 +76,14 @@ export async function worktreePreflight(root: string, exec: GitExec = defaultGit
 	return { ok: true };
 }
 
-/** Capture the complete post-run worktree state as a portable unified diff. Tracked edits use
- * `git diff HEAD`; files newly created by a coding leg are added with `git diff --no-index`.
+/** Capture the complete post-run worktree state as a portable unified diff from its pinned
+ * starting commit. Files newly created by a coding leg are added with `git diff --no-index`.
  * Exit code 1 is the normal "files differ" result for --no-index. */
-export async function captureWorktreeArtifact(root: string, exec: GitExec = defaultGitExec): Promise<WorktreeArtifact> {
-	const tracked = await exec(["-C", root, "diff", "--no-ext-diff", "--binary", "HEAD", "--"]);
+export async function captureWorktreeArtifact(root: string, baseCommit: string, exec: GitExec = defaultGitExec): Promise<WorktreeArtifact> {
+	if (!baseCommit.trim()) {
+		return { ok: false, error: "could not export the isolated worktree diff: starting commit is missing" };
+	}
+	const tracked = await exec(["-C", root, "diff", "--no-ext-diff", "--binary", baseCommit, "--"]);
 	if (tracked.code !== 0) {
 		return { ok: false, error: `could not export the isolated worktree diff: ${tracked.stderr.trim() || `git exited ${tracked.code}`}` };
 	}
@@ -107,8 +110,9 @@ export async function captureWorktreeArtifact(root: string, exec: GitExec = defa
 	return { ok: true, diff: parts.join("\n") };
 }
 
-/** Create a detached worktree off `root`'s HEAD, run `body(worktreeDir)`, then force-remove it. */
-export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: string) => Promise<T>): Promise<T> {
+/** Create a detached worktree off `root`'s HEAD, pin its starting commit, run
+ * `body(worktreeDir, baseCommit)`, then force-remove it. */
+export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: string, baseCommit: string) => Promise<T>): Promise<T> {
 	const preflight = await worktreePreflight(root, exec);
 	if (!preflight.ok) throw new Error(preflight.error);
 	const dir = await mkdtemp(join(tmpdir(), "pi-persona-wt-"));
@@ -120,7 +124,13 @@ export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: s
 		throw new Error(`could not create git worktree: ${add.stderr.trim() || `git exited ${add.code}`}`);
 	}
 	try {
-		return await body(dir);
+		const initial = await exec(["-C", dir, "rev-parse", "--verify", "HEAD^{commit}"]);
+		const baseCommit = initial.stdout.trim();
+		if (initial.code !== 0 || !baseCommit) {
+			const reason = initial.stderr.trim() || (initial.code !== 0 ? `git exited ${initial.code}` : "Git returned an empty commit id");
+			throw new Error(`could not resolve the initial worktree commit: ${reason}`);
+		}
+		return await body(dir, baseCommit);
 	} finally {
 		// Remove the worktree registration, then the dir (force: it may carry the agent's edits).
 		// Never throw: cleanup must not replace the body's result (or its error) — `defaultGitExec`

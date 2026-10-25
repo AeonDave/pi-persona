@@ -23,6 +23,9 @@ import { makeContactSupervisorTool } from "./bus/contact.ts";
 import { InProcessBus, type MsgKind } from "./bus/inproc.ts";
 import { makeContactPeerTool, type PeerInfo } from "./bus/peers.ts";
 import { attributeInbound } from "./core/fence.ts";
+import { isReaderToken } from "./bus/broker/messages.ts";
+import { readFailure } from "./bus/result-reader.ts";
+import { makeReadResultTool } from "./tools/read-result.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -90,15 +93,22 @@ function sendFollowUp(pi: ExtensionAPI, content: string): void {
  *  `isBridgeMode()` is true. Connects the broker client (capped retries; a failed connect
  *  degrades to a mute executor, never a crash — spec §4), registers the two wire-bound
  *  comm-plane tools, surfaces inbound `deliver`/`steer` frames as follow-ups, and closes the
- *  client on `session_shutdown`. */
+ *  client on `session_shutdown`. An explicit private reader token also installs read_result;
+ *  its handshake/read failures are runtime errors, never ordinary mute degradation. */
 export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: InstallBridgeDeps = {}): void {
 	const env = deps.env ?? process.env;
 	const endpoint = env.PI_PERSONA_BUS;
 	const handle = env.PI_PERSONA_HANDLE;
+	const readerToken = env.PI_PERSONA_RESULT_READER_TOKEN;
+	if (readerToken !== undefined && (!endpoint || !handle || !isReaderToken(readerToken))) {
+		throw new Error("Invalid result reader environment.");
+	}
 	if (!endpoint || !handle) return; // isBridgeMode() gates the real caller; malformed env degrades to a no-op
 
-	const wantsPeers = env.PI_PERSONA_PEERS === "1";
-	const clientDeps: MakeBrokerClientDeps = { endpoint, handle, ...(wantsPeers ? { peers: true } : {}) };
+	const canUseBus = env.PI_PERSONA_BUS_TOOLS !== "off";
+	const wantsPeers = canUseBus && env.PI_PERSONA_PEERS === "1";
+	const clientDeps: MakeBrokerClientDeps = { endpoint, handle, ...(wantsPeers ? { peers: true } : {}),
+		...(readerToken !== undefined ? { readerToken } : {}) };
 	const client = (deps.makeClient ?? makeBrokerClient)(clientDeps);
 
 	// Blocking asks are honoured only when the spawning run is async (`PI_PERSONA_ALLOW_BLOCKING`,
@@ -108,7 +118,11 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	// (the same safety default the in-process engine applies; see contact.ts / spec §4.9).
 	const allowBlocking = env.PI_PERSONA_ALLOW_BLOCKING === "1";
 	const bus = new BrokerBus(client);
-	pi.registerTool(makeContactSupervisorTool(bus, handle, SUPERVISOR_HANDLE, { allowBlocking }));
+	if (canUseBus) pi.registerTool(makeContactSupervisorTool(bus, handle, SUPERVISOR_HANDLE, { allowBlocking }));
+	if (readerToken !== undefined) {
+		pi.registerTool(makeReadResultTool({ read: (request, signal) => bus.connected
+			? client.read(request, signal) : Promise.resolve(readFailure("unavailable")) }));
+	}
 
 	// The engine-scoped peer roster (B7): fetched from the host's `list` frame and cached —
 	// `contact_peer` accepts an awaitable provider, so the first call can wait for the initial
@@ -147,7 +161,7 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 		peerRefresh = shared;
 		return shared;
 	};
-	pi.registerTool(
+	if (wantsPeers) pi.registerTool(
 		makeContactPeerTool(bus, handle, {
 			listPeers: () => refreshPeers(),
 		}),
@@ -193,9 +207,11 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 			}
 		},
 		() => {
-			// Capped retries exhausted (host gone, or a race on a just-spawned child) — degrade to
-			// a mute executor and keep running; never crash, never hang (spec §4).
-			if (env.PI_PERSONA_DEBUG) process.stderr.write(`[pi-persona] bridge: could not connect to ${endpoint}\n`);
+			// Ordinary comms degrade to a mute executor. An installed read_result remains
+			// fail-closed: a failed handshake cannot expose a fallback body.
+			if (env.PI_PERSONA_DEBUG) process.stderr.write(readerToken !== undefined
+				? "[pi-persona] bridge: result reader unavailable\n"
+				: `[pi-persona] bridge: could not connect to ${endpoint}\n`);
 			try {
 				ctx.ui.setStatus("persona-bridge", "⇄ offline");
 			} catch {
@@ -205,6 +221,7 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	);
 
 	pi.on("session_shutdown", () => {
+		bus.connected = false;
 		client.close();
 	});
 }

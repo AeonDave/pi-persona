@@ -45,9 +45,8 @@ test("write-set normalization treats repository root markers as ancestors", () =
 	assert.equal(findWriteSetOverlaps([{ agent: "a", writeSet: ["."] }, { agent: "b", writeSet: ["src/file.ts"] }]).length, 1);
 });
 
-// validateParallelWriteSets moved here from tools/delegate.ts (task 13) so a strategy — `map`'s
-// `ownership: "enforce"` — can call it without importing a tool module. delegate.ts re-exports it
-// unchanged; test/unit/tools/delegate.test.ts keeps covering it from that call site.
+// Strategies and tools share this core helper without importing from one another. The delegate
+// tool behavior tests also exercise it directly from this module.
 test("validateParallelWriteSets rejects a parallel writeSet overlap and names both paths", () => {
 	const owners = [
 		{ agent: "a", writeSet: ["src/a.ts"] },

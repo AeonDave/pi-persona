@@ -92,7 +92,7 @@ const ruling = (output: string, over: Partial<AgentResult> = {}): AgentResult =>
 const councilPersona = (name: string, fm: string): Persona => parsePersona(`---\nname: ${name}\npersona: true\n${fm}\n---\nBODY`, `${name}.md`)!;
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function councilHarness(opts: { result?: AgentResult | ((tracked?: TrackedRun) => Promise<AgentResult | undefined>); active?: Persona; personas?: Persona[] } = {}) {
+function councilHarness(opts: { result?: AgentResult | ((tracked?: TrackedRun) => Promise<AgentResult | undefined>); active?: Persona; personas?: Persona[]; launchSnapshot?: () => unknown } = {}) {
 	let tool: any;
 	const tracker = new AsyncRunTracker();
 	const stopRegistry = new Map<string, () => void>();
@@ -113,6 +113,7 @@ function councilHarness(opts: { result?: AgentResult | ((tracked?: TrackedRun) =
 		lastCtx: undefined,
 		controller: { activePersona: opts.active },
 		personas: opts.personas ?? (opts.active ? [opts.active] : []),
+		launchSnapshot: opts.launchSnapshot ?? (() => ({ participants: [] })),
 		runStrategyVisible: async (_ctx: unknown, orch: any, task: string, _label: string, tracked?: TrackedRun) => {
 			calls.push({ orch, task, tracked });
 			const r = opts.result ?? ruling("THE RULING");
@@ -134,6 +135,89 @@ function councilHarness(opts: { result?: AgentResult | ((tracked?: TrackedRun) =
 		headless: (params: Record<string, unknown>, signal?: AbortSignal) => tool.execute("c1", params, signal, undefined, { ui }),
 	};
 }
+
+test("judge launch card persists every lens model and full requested effort without consulting later settings", async () => {
+	const participants = ["BREAK", "PI_PERSONA_RESULT_READER_TOKEN", "HEAD"].map((role, index) => ({
+		key: role, label: `reviewer · ${role}`, agent: "reviewer", model: `openai/model-${index}`,
+		modelSource: "inline", thinkingRequested: "xhigh", setupPending: false,
+	}));
+	participants.push({ key: "judge", label: "arbiter", agent: "arbiter", model: "openai/judge", modelSource: "agent", thinkingRequested: "max", setupPending: false });
+	let reads = 0;
+	const h = councilHarness({ launchSnapshot: () => { reads++; return { participants }; } });
+	const receipt = await h.interactive({ question: "q", strategy: "judge", members: [
+		{ agent: "reviewer", role: "BREAK", model: "openai/model-0", thinking: "xhigh" },
+		{ agent: "reviewer", role: "PI_PERSONA_RESULT_READER_TOKEN", model: "openai/model-1", thinking: "xhigh" },
+		{ agent: "reviewer", role: "HEAD", model: "openai/model-2", thinking: "xhigh" },
+	], params: { judge: "arbiter" } });
+	assert.equal(reads, 1);
+	assert.deepEqual(receipt.details.launch.participants, participants);
+	participants[0]!.model = "changed/later";
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	const expanded = h.tool.renderResult(receipt, { expanded: true }, theme).render(200).join("\n");
+	for (const model of ["openai/model-0", "openai/model-1", "openai/model-2", "openai/judge"]) assert.ok(expanded.includes(model), expanded);
+	assert.match(expanded, /requested effort xhigh/);
+	assert.match(expanded, /requested effort max/);
+	assert.doesNotMatch(expanded, /changed\/later/);
+	assert.equal(reads, 1, "history rendering never rereads model settings");
+	const collapsed = h.tool.renderResult(receipt, { expanded: false }, theme).render(200).join("\n");
+	assert.match(collapsed, /openai\/model-0.*requested effort xhigh/);
+	assert.match(collapsed, /\+1 more/);
+	for (const width of [1, 12, 24, 80]) {
+		const lines = h.tool.renderResult(receipt, { expanded: false }, theme).render(width);
+		assert.ok(lines.every((line: string) => line.length <= width), `launch rows fit ${width} columns`);
+	}
+	const callBeforeResult = h.tool.renderCall({}, theme).render(200).join("\n");
+	h.tool.renderResult(receipt, { expanded: false }, theme);
+	const call = h.tool.renderCall({}, theme).render(200).join("\n");
+	assert.equal(call, callBeforeResult, "native call-before-result ordering needs no later repaint");
+	assert.match(call, /profile defaults/);
+	assert.doesNotMatch(call, /pending/);
+	assert.equal(reads, 1);
+});
+
+test("metadata lookup errors are explicit and cannot block a council launch", async () => {
+	const h = councilHarness({ launchSnapshot: () => { throw new Error("catalog unavailable"); } });
+	const receipt = await h.interactive({ question: "q", strategy: "fanout", members: ["reviewer"] });
+	assert.equal(receipt.isError, false);
+	assert.deepEqual(receipt.details.launch, { participants: [], unavailable: true });
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	assert.match(h.tool.renderResult(receipt, { expanded: false }, theme).render(120).join("\n"), /metadata unavailable/);
+});
+
+test("a malformed inline effort never throws from the pre-execution council call renderer", async () => {
+	const h = councilHarness();
+	const params = { question: "q", strategy: "fanout", members: [{ agent: "reviewer", thinking: "ultra" }] };
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	assert.doesNotThrow(() => h.tool.renderCall(params, theme).render(80));
+	assert.doesNotThrow(() => h.tool.renderCall({ ...params, members: "reviewer" }, theme).render(80));
+	const result = await h.interactive(params);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /thinking/);
+});
+
+test("a failed settled council still shows its saved requested models and effort", async () => {
+	const h = councilHarness({ result: ruling("partial review", { ok: false, error: "provider unavailable" }), launchSnapshot: () => ({ participants: [
+		{ key: "reviewer", label: "reviewer", agent: "reviewer", model: "openai/requested", modelSource: "inline", thinkingRequested: "xhigh", setupPending: false },
+	] }) });
+	const result = await h.headless({ question: "q", strategy: "fanout", members: ["reviewer"] });
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	const rendered = h.tool.renderResult(result, { expanded: false }, theme).render(200).join("\n");
+	assert.match(rendered, /council failed/);
+	assert.match(rendered, /requested model openai\/requested.*requested effort xhigh/);
+});
+
+test("pending council setup stays immediate and explicit while its original snapshot survives headless settlement", async () => {
+	const launchSnapshot = () => ({ participants: [{ key: "reviewer", label: "reviewer", agent: "reviewer", model: "openai/default", modelSource: "session", thinkingRequested: "off", setupPending: true }] });
+	const h = councilHarness({ launchSnapshot });
+	const receipt = await h.interactive({ question: "q", strategy: "fanout", members: ["reviewer"] });
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	const text = h.tool.renderResult(receipt, { expanded: false }, theme).render(200).join("\n");
+	assert.match(text, /model pending/);
+	assert.match(text, /openai\/default/);
+	assert.match(text, /requested effort off/);
+	const inline = await h.headless({ question: "q", strategy: "fanout", members: ["reviewer"] });
+	assert.deepEqual(inline.details.launch, launchSnapshot());
+});
 
 test("an interactive council returns a receipt at once, then settles as ONE run whose single wake carries the ruling", async () => {
 	let release!: (r: AgentResult) => void;
@@ -219,6 +303,7 @@ test("a headless council whose strategy throws is 'council failed: <cause>' exac
 	const result = await h.headless({ question: "q", strategy: "magi", roster: "nope" });
 	assert.equal(result.isError, true);
 	assert.equal(result.content[0].text, 'council failed: unknown roster "nope" (available teams: magi)');
+	assert.deepEqual(result.details.launch, { participants: [] }, "the retained launch survives a thrown runner/missing outcome");
 });
 
 test("aborting a headless council call stops the run it joined: the old tool signal still ends it", async () => {
@@ -254,6 +339,19 @@ test("an unknown param on an interactive council still warns the operator and te
 	const receipt = await h.interactive({ question: "q", strategy: "magi", roster: "magi", params: { bogus: 1 } });
 	assert.ok(h.notes.some((n) => /ignoring unknown param\(s\) \[bogus\]/.test(n)));
 	assert.match(receipt.content[0].text, /ignoring unknown param\(s\) \[bogus\]/);
+});
+
+test("a hostile unknown-param key reaches the operator toast one bounded line, and the model payload unchanged", async () => {
+	const h = councilHarness();
+	const hostileKey = `bad\nkey\x1b[31m-${"z".repeat(300)}`;
+	const receipt = await h.interactive({ question: "q", strategy: "magi", roster: "magi", params: { [hostileKey]: 1 } });
+	const toast = h.notes.find((n) => n.includes("ignoring unknown param"));
+	assert.ok(toast, "the operator warning still fires");
+	assert.doesNotMatch(toast, /\n|\r/, "the toast is a single line");
+	assert.doesNotMatch(toast, /\x1b\[/, "terminal escapes are stripped from the toast");
+	assert.ok(toast.length <= 200, `the toast is bounded (${toast.length} chars)`);
+	// The model-facing payload keeps the raw note byte-identical — only presentation was bounded.
+	assert.match(receipt.content[0].text, new RegExp(hostileKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 // ── a call that cannot run fails IMMEDIATELY, before a run, tree row or model picker exists ──────────
