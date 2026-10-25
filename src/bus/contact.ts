@@ -129,11 +129,11 @@ export function makeContactSupervisorTool(
 					const delivered = await bus.send(fromHandle, supervisorHandle, message, "progress", signal);
 					if (signal?.aborted) return result("The progress update was cancelled; delivery could not be confirmed.", { kind, delivered: false, outcome: "cancelled" });
 					return result(
-						delivered ? "Progress reported to the supervisor." : "(no supervisor listening or progress delivery could not be confirmed; progress dropped)",
+						delivered ? "Progress reported to the supervisor." : "Progress delivery could not be confirmed. The supervisor may already have received the update.",
 						{ kind, delivered, outcome: delivered ? "reported" : "unavailable" },
 					);
 				} catch {
-					return result("(progress could not be sent; delivery could not be confirmed)", { kind, delivered: false, outcome: "failed" });
+					return result("Progress delivery could not be confirmed. The supervisor may already have received the update.", { kind, delivered: false, outcome: "failed" });
 				}
 			}
 
@@ -145,7 +145,7 @@ export function makeContactSupervisorTool(
 					delivered = await bus.send(fromHandle, supervisorHandle, message, kind, signal);
 				} catch {
 					return result(
-						`The question could not be sent; no answer is possible in this path. ${unresolvedGuidance(kind)}`,
+						`Delivery of the question could not be confirmed. The supervisor may already have received it; no answer is possible in this path. ${unresolvedGuidance(kind)}`,
 						{ kind, delivered: false, outcome: "failed" },
 					);
 				}

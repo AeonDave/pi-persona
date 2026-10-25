@@ -18,6 +18,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - Child broker contacts confirm one-way delivery only after admission to the host bus.
   Full inboxes, disconnects, cancellation and missing receipts no longer report `delivered: true`.
   Receipts are bounded and never count as a supervisor answer or authorization.
+  Unconfirmed sends and errors after admission no longer claim that the message was dropped;
+  the supervisor may already have received it.
 - Reference-flow diagnostics fence worker excerpts even on the defensive missing-reference path.
 - A worker-provided patch remains usable after worktree capture fails, with an explicit warning
   that the patch was not verified against the final worktree state.
