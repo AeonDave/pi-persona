@@ -161,7 +161,10 @@ function buildPhaseTask(baseTask: string, spec: FlowSpec, phase: FlowPhase, upst
 			parts.push(`\n--- ${id} ---`);
 			parts.push(`status: ${r.ok ? "done" : "failed"}`);
 			if (ref === undefined) {
-				parts.push(`result reference unavailable: ${r.output.slice(0, 200) || "(no output)"}`);
+				const preview = r.output.slice(0, 200);
+				parts.push(preview
+					? `result reference unavailable:\n${fenceUntrusted(preview)}`
+					: "result reference unavailable: (no output)");
 				continue;
 			}
 			parts.push(`result ref: ${ref}`);

@@ -110,14 +110,16 @@ import { clearJournal, journalFileName, journalWriter, readJournal } from "./orc
 import { runFlow } from "./orchestration/flow-run.ts";
 import { Semaphore } from "./orchestration/parallel.ts";
 import { flowDisposition, type FlowOutcome } from "./orchestration/flow-run.ts";
-import { type RosterMember, roleHint, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
+import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
+import { agentAttemptIdentity, type AgentAttemptIdentity } from "./orchestration/agent-attempt.ts";
+import { snapshotStrategyModels, strategyLegMetadata, type StrategyLegMetadata, type StrategyModels } from "./ui/strategy-leg.ts";
 import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts";
 import { withResultRefs } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
 import { compactMemberResult } from "./orchestration/render.ts";
 import { sumUsage } from "./orchestration/reducers.ts";
 import type { AgentResult, FailureKind } from "./orchestration/types.ts";
-import { isThinkingLevel, type ThinkingLevel } from "./core/types.ts";
+import { isThinkingLevel } from "./core/types.ts";
 import { snapshotOrchestrationParticipants, type OrchestrationLaunchSnapshot } from "./ui/orchestration-launch.ts";
 import { SessionResults } from "./extension/results.ts";
 import { readArchivedBody, resultReceiptHint, type ResultReceipt } from "./results/retrieval.ts";
@@ -645,7 +647,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const projection = JSON.stringify(agent);
 		if (lastAgentProjection.get(node.id) === projection) return;
 		lastAgentProjection.set(node.id, projection);
-		producer.publishAgentUpdated(node.id, agent);
+		// Updates are patches: an omitted field would retain the previous attempt's model.
+		// The existing string wire contract uses an empty model to mean explicitly unknown.
+		producer.publishAgentUpdated(node.id, node.model === undefined ? { ...agent, model: "" } : agent);
 	}
 	function refreshSteeredAgentTelemetry(): void {
 		if (!telemetry || steerRegistry.size === 0) return;
@@ -1743,75 +1747,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		};
 	}
 
-	// Each core's model beside its name, in the ONE precedence the picker saved under: the
-	// participant's own assignment key (a role member's `agent#hash`, else the bare agent key) →
-	// the agent's declared default → the session model. An inline model is already the participant's
-	// explicit engine pin and wins before any saved assignment.
-	function coreModel(ctx: ExtensionContext, agent: string, assignmentKey: string = agent, participant?: ModelParticipant | null): string | undefined {
-		if (participant === null) return undefined; // a short-hint collision cannot identify one role safely
-		if (participant?.source === "inline" && participant.model) return participant.model;
+	/** Capture at engine construction, after setup: queued legs retain that run's assignments. */
+	function currentStrategyModels(ctx: ExtensionContext): StrategyModels {
 		const persona = controller.activePersona?.name;
-		const configured = persona ? personaModels(personaConfigs, persona) : {};
-		return configured[assignmentKey] ?? configured[agent] ?? agents.find((a) => a.name === agent)?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+		return snapshotStrategyModels({ agents, ...(persona ? { assigned: personaModels(personaConfigs, persona) } : {}),
+			...(ctx.model ? { sessionModel: `${ctx.model.provider}/${ctx.model.id}` } : {}) });
 	}
-	function coreTelemetryMeta(ctx: ExtensionContext, agent: string, assignmentKey?: string, participant?: ModelParticipant | null): { agent: string; model?: string; thinking?: ThinkingLevel } {
-		const model = coreModel(ctx, agent, assignmentKey, participant);
-		// The member's explicit spec-level effort rides the SAME participant channel as the model, so
-		// every strategy-seeded row (queued seed, live re-add, flow phase) names its effort from the
-		// first frame — the delegate launch rows' own rule. An ambiguous/null participant identifies
-		// no single lens, so it carries nothing, and absence renders nothing.
-		return { agent, ...(model ? { model } : {}), ...(participant?.thinking ? { thinking: participant.thinking } : {}) };
-	}
-	function coreLabel(ctx: ExtensionContext, agent: string, key: string = agent, assignmentKey?: string, participant?: ModelParticipant | null): string {
-		const short = shortModel(coreModel(ctx, agent, assignmentKey, participant));
+	function coreLabel(identity: AgentAttemptIdentity, key: string, metadata: StrategyLegMetadata): string {
+		const short = shortModel(metadata.model);
 		// `key` is the disambiguated node id (`agent` for a solo member, `agent · HINT` for a
 		// roster-role one) — display that + what the core is FOR + the model, so a watcher reads the
 		// council as roles rather than names, and three `reviewer` lenses still read distinctly.
-		// A roster-ROLE member already carries its lens in `key` (`agent · HINT`) and its standing
-		// purpose would repeat it — but a plain repeat (`melchior#2`) is the same core twice and
-		// still wants its lens, so key off the role separator, not off `key !== agent`.
-		const purpose = key.includes(" · ") ? undefined : corePurpose(agent);
+		// A role member already carries its lens in the display key. The full attempt identity,
+		// rather than that shortened label, decides whether a standing purpose would repeat it.
+		const purpose = identity.role ? undefined : corePurpose(identity.agent);
 		// `key` embeds the member's role HINT (derived from its role prompt), and `short` embeds a
 		// model ref — both are dynamic, so the whole row is collapsed to one escape-free line.
 		return compactInlineText([key, purpose, short].filter(Boolean).join(" · "), { maxChars: 120 });
-	}
-
-	/** The assignment key for a tree node key when no participant was seeded under it: strip the lens
-	 *  hint and the occurrence suffix, leaving the bare agent — the legacy key shape, which always
-	 *  resolves (a role-less agent is exactly how those assignments were saved). */
-	function bareAssignmentKey(nodeKey: string): string {
-		return (nodeKey.split(" · ")[0] ?? nodeKey).replace(/#\d+$/, "");
-	}
-
-	/** Map every picker participant to the SDK's display base. A short role hint is not unique when
-	 *  different role prompts share it, so ambiguous nodes omit the model rather than borrowing
-	 *  another lens' assignment. Repeated SDK keys (`#2`, …) resolve through their base and share the
-	 *  same participant. */
-	function participantByNode(participants: ModelParticipant[]): Map<string, ModelParticipant | null> {
-		const groups = new Map<string, Map<string, ModelParticipant>>();
-		for (const participant of participants) {
-			const base = participant.role ? `${participant.agent} · ${roleHint(participant.role)}` : participant.agent;
-			const group = groups.get(base) ?? new Map<string, ModelParticipant>();
-			group.set(participant.key, participant);
-			groups.set(base, group);
-		}
-		const out = new Map<string, ModelParticipant | null>();
-		for (const [base, group] of groups) {
-			if (group.size !== 1) {
-				out.set(base, null);
-				continue;
-			}
-			const participant = group.values().next().value as ModelParticipant | undefined;
-			if (participant) out.set(base, participant);
-		}
-		return out;
-	}
-
-	function participantForNode(nodeParticipants: ReadonlyMap<string, ModelParticipant | null>, nodeKey: string): ModelParticipant | null | undefined {
-		const exact = nodeParticipants.get(nodeKey);
-		if (exact !== undefined) return exact;
-		const base = nodeKey.replace(/#\d+$/, "");
-		return base === nodeKey ? undefined : nodeParticipants.get(base);
 	}
 
 	/** Surface the SDK's main-model recovery in the UI: a broken member is re-run on the session's own
@@ -1833,31 +1785,29 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// The SDK lifecycle callbacks that drive the unified tree for one strategy run rooted at
 	// `rootId` — shared by /orchestrate, the council tool, and each flow phase. Seeds running
 	// cores, flips ⏳ → ✓/✗ with usage, streams progress, and registers stop/steer handles.
-	function strategyTreeDeps(ctx: ExtensionContext, rootId: string, nodeParticipants: ReadonlyMap<string, ModelParticipant | null> = new Map(), tracked?: TrackedRun) {
+	function strategyTreeDeps(rootId: string, models: StrategyModels, tracked?: TrackedRun) {
 		return {
-			onAgentStart: (agent: string, abort: () => void, key?: string) => {
-				stopRegistry.set(`${rootId}/${key ?? agent}`, abort);
+			onAgentStart: (_agent: string, abort: () => void, key: string) => {
+				stopRegistry.set(`${rootId}/${key}`, abort);
 			},
-			onAgentSteerable: (agent: string, steer: SteerFn, key?: string) => {
-				steerRegistry.set(`${rootId}/${key ?? agent}`, steer);
+			onAgentSteerable: (_agent: string, steer: SteerFn, key: string) => {
+				steerRegistry.set(`${rootId}/${key}`, steer);
 			},
-			onAgentStatus: (agent: string, st: AgentStatus, result?: AgentResult, key?: string) => {
-				const nodeKey = key ?? agent;
+			onAgentStatus: (_agent: string, st: AgentStatus, result: AgentResult | undefined, nodeKey: string, identity: AgentAttemptIdentity) => {
 				const id = `${rootId}/${nodeKey}`;
+				const metadata = strategyLegMetadata(identity, models, result);
 				if (st === "running") {
 					// detail "" clears the seeded "queued" marker — this core is actually live now.
 					// Stamp the clock here too: the seed's stamp (from AgentTree.add's upsert) is queue
 					// time, not run time, so a queued leg would otherwise show elapsed time it never
 					// spent running and could raise a false stall badge once it goes live.
 					const now = Date.now();
-					const participant = participantForNode(nodeParticipants, nodeKey);
-					const assignmentKey = participant?.key ?? bareAssignmentKey(nodeKey);
-					agentTree.add({ id, label: coreLabel(ctx, agent, nodeKey, assignmentKey, participant), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, agent, assignmentKey, participant), detail: "", startedAt: now, lastAdvanceAt: now });
+					agentTree.add({ id, label: coreLabel(identity, nodeKey, metadata), parentId: rootId, status: "running", kind: "subagent", ...metadata, detail: "", startedAt: now, lastAdvanceAt: now });
 					return;
 				}
 				stopRegistry.delete(id);
 				steerRegistry.delete(id);
-				const patch: { status: AgentNodeStatus; detail?: string; output?: string; thinkingEffective?: ThinkingLevel } = { status: st };
+				const patch: AgentNodePatch = { status: st, ...metadata };
 				if (result) {
 					const u = formatUsage(result.usage);
 					if (u) patch.detail = u;
@@ -1866,12 +1816,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// stays up (siblings still going) the row honestly reads `xh→h`; once the run ends the
 					// removal makes it a one-frame flash. effortTag renders the divergence only when the
 					// requested side exists and differs, so an unstamped request shows nothing extra.
-					if (result.thinkingEffective) patch.thinkingEffective = result.thinkingEffective;
 				}
-				agentTree.update(id, patch);
+				agentTree.add({ id, label: coreLabel(identity, nodeKey, metadata), parentId: rootId, ...patch });
 			},
-			onAgentProgress: (agent: string, p: AgentProgress, key?: string) => {
-				const id = `${rootId}/${key ?? agent}`;
+			onAgentProgress: (_agent: string, p: AgentProgress, key: string) => {
+				const id = `${rootId}/${key}`;
 				if (p.toolEvent) publishAgentTool(id, p.toolEvent);
 				const now = Date.now();
 				agentTree.update(id, progressPatch(p, now));
@@ -1916,7 +1865,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const label = resolveStrategyName(orch) ?? "strategy";
 		const roster = resolveOrchestrationMembers(orch, teams);
 		const participants = runParticipants(ctx, { strategy: label, ...(orch.params ? { params: orch.params } : {}), members: roster });
-		const participantsByNode = participantByNode(participants);
 		results.activate(ctx);
 		const { rootId, signal, live } = visibleRoot(`${idPrefix}:${label}`, tracked);
 		const capture = results.bind(rootId);
@@ -1933,20 +1881,21 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const cancelled: AgentResult = { agent: label, output: "cancelled before orchestration started", usage: emptyUsage(), ok: false, error: "cancelled", failureKind: "abort" };
 				return finish(cancelled);
 			}
+			const models = currentStrategyModels(ctx);
+			const engine = buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true });
 			// Seed the whole roster at once (cores show by name immediately); "queued" until the
 			// engine actually starts each one — an honest view under the concurrency limit.
 			const seedKeys = rosterNodeKeys(roster);
 			roster.forEach((m, i) => {
-				const a = rosterSpec(m).agent;
-				const key = seedKeys[i] ?? a;
-				const participant = participantForNode(participantsByNode, key);
-				const assignmentKey = participant?.key ?? bareAssignmentKey(key);
-				agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(ctx, a, key, assignmentKey, participant), parentId: rootId, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, a, assignmentKey, participant), detail: "queued" });
+				const identity = agentAttemptIdentity(rosterSpec(m));
+				const key = seedKeys[i] ?? identity.agent;
+				const metadata = strategyLegMetadata(identity, models);
+				agentTree.add({ id: `${rootId}/${key}`, label: coreLabel(identity, key, metadata), parentId: rootId, status: "running", kind: "subagent", ...metadata, detail: "queued" });
 			});
 			// The signal goes to the STRATEGY as well as the engine: a multi-round strategy checks it
 			// cooperatively between rounds, so an aborted run stops convening instead of running every
 			// remaining round against an already-cancelled engine (docs/STRATEGIES.md).
-			const result = await runPersonaStrategy(orch, task, { engine: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }), teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), signal, ...strategyTreeDeps(ctx, rootId, participantsByNode, tracked), onAgentResult, ...strategySpawnGate(), ...modelFallbackDep(ctx) });
+			const result = await runPersonaStrategy(orch, task, { engine, teams, limits: RUN_LIMITS, ...sessionModelDep(ctx), signal, ...strategyTreeDeps(rootId, models, tracked), onAgentResult, ...strategySpawnGate(), ...modelFallbackDep(ctx) });
 			agentTree.update(rootId, { status: signal.aborted ? "stopped" : result?.ok === false ? "failed" : "done" });
 			return finish(result ?? { agent: label, output: "", ok: false, usage: emptyUsage(), error: "No strategy result", failureKind: "contract" });
 		} catch (error) {
@@ -2118,29 +2067,27 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					const plan = phasePlans.get(phase.id) ?? { members: [], participants: [] };
 					const roster = plan.members;
 					const seedKeys = rosterNodeKeys(roster);
-					const participantsByNode = participantByNode(plan.participants);
-					roster.forEach((m, i) => {
-						const a = rosterSpec(m).agent;
-						const key = seedKeys[i] ?? a;
-						const participant = participantForNode(participantsByNode, key);
-						const assignmentKey = participant?.key ?? bareAssignmentKey(key);
-						agentTree.add({ id: `${pid}/${key}`, label: coreLabel(ctx, a, key, assignmentKey, participant), parentId: pid, status: "running", kind: "subagent", ...coreTelemetryMeta(ctx, a, assignmentKey, participant), detail: "queued" });
-					});
-					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
-					if (phase.roster) orch.roster = phase.roster;
-					// Reference handoff (trusted grant wiring): the phase's legs get EXACTLY the direct
-					// upstream refs flow-run threaded through `runPhase` - pinned at the engine seam, so
-					// a strategy can neither enlarge nor smuggle refs (the SDK strips its own attempts).
+					const models = currentStrategyModels(ctx);
+					// Pin reference grants at the engine seam, beside the same frozen model selection
+					// used for phase seeds and live attempts. Strategies cannot enlarge these grants.
 					const phaseEngine = spec.handoff === "reference"
 						? withResultRefs(buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true }), resultRefs)
 						: buildEngine(signal, undefined, { providerFallback: false, async: tracked?.background === true });
+					roster.forEach((m, i) => {
+						const identity = agentAttemptIdentity(rosterSpec(m));
+						const key = seedKeys[i] ?? identity.agent;
+						const metadata = strategyLegMetadata(identity, models);
+						agentTree.add({ id: `${pid}/${key}`, label: coreLabel(identity, key, metadata), parentId: pid, status: "running", kind: "subagent", ...metadata, detail: "queued" });
+					});
+					const orch: OrchestrationGrammar = { mode: "strategy", strategy: phase.strategy, params: phase.params ?? {} };
+					if (phase.roster) orch.roster = phase.roster;
 					const r = await runPersonaStrategy(orch, task, {
 						engine: phaseEngine,
 						teams,
 						limits: RUN_LIMITS,
 						...sessionModelDep(ctx),
 						signal, // cooperative per-round abort inside the phase's strategy, not just the engine
-						...strategyTreeDeps(ctx, pid, participantsByNode, tracked),
+						...strategyTreeDeps(pid, models, tracked),
 						onAgentResult: (result, key) => { result.resultReceipt = capture(`phase:${phase.id}:leg:${key}`, result); },
 						...strategySpawnGate(),
 						...modelFallbackDep(ctx),

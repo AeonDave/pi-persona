@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
+## Unreleased
+
+### Fixed
+
+- Council, MAGI, auxiliary actors and flow legs keep their own model and effort in the live
+  tree and F9 when abbreviated roles collide or identical roles use different inline pins.
+  Runtime callbacks carry exact attempt identity; retries clear stale observations and terminal
+  rows use the engine's observed model. Saved model assignments remain keyed by the full role.
+- Terminal-result capture survives reactivation of the same extension and tracker. Shutdown
+  revokes the old archive owner without removing the capture observers or changing their order
+  before completion notifications; late results cannot enter another session's archive.
+- Child broker contacts confirm one-way delivery only after admission to the host bus.
+  Full inboxes, disconnects, cancellation and missing receipts no longer report `delivered: true`.
+  Receipts are bounded and never count as a supervisor answer or authorization.
+- Reference-flow diagnostics fence worker excerpts even on the defensive missing-reference path.
+- A worker-provided patch remains usable after worktree capture fails, with an explicit warning
+  that the patch was not verified against the final worktree state.
+
 ## [1.17.4](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.4) - 2026-10-25
 
 ### Added

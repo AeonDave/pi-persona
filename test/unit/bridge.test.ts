@@ -41,6 +41,26 @@ function makeFakePi() {
 
 const FAKE_CTX = { ui: { setStatus: () => {} } } as unknown as ExtensionContext;
 
+test("bridge contacts do not report delivery before the host accepts a one-way send", async () => {
+	const pi = makeFakePi();
+	const fake = makeFakeClient({ list: async () => [{ handle: "peer", label: "peer" }] });
+	fake.client.send = async () => false;
+	installBridge(pi.pi, FAKE_CTX, {
+		env: { PI_PERSONA_BUS: "/fake", PI_PERSONA_HANDLE: "child", PI_PERSONA_PEERS: "1" },
+		makeClient: () => fake.client,
+	});
+	try {
+		await Promise.resolve(); await Promise.resolve();
+		for (const kind of ["progress", "decision", "interview"]) {
+			const result = await pi.tool("contact_supervisor")!.execute("id", { kind, message: "hello" }, undefined, undefined, FAKE_CTX);
+			assert.equal(result.details.delivered, false, `${kind}: a connected socket is not host acceptance`);
+			assert.equal(result.details.outcome, "unavailable");
+		}
+		const peer = await pi.tool("contact_peer")!.execute("id", { action: "send", to: "peer", message: "hello" }, undefined, undefined, FAKE_CTX);
+		assert.equal(peer.details.delivered, false);
+	} finally { pi.fire("session_shutdown"); }
+});
+
 /** A fake `BrokerClient` — records calls, lets a test fire `onDeliver`/`onSteer`, and lets a
  *  test control whether/when `register()` settles (to exercise the not-yet-connected path). */
 function makeFakeClient(opts: {
@@ -57,8 +77,9 @@ function makeFakeClient(opts: {
 	const client: BrokerClient = {
 		register: opts.register ?? (() => (opts.registerNeverSettles ? new Promise<void>(() => {}) : Promise.resolve())),
 		read: opts.read ?? (async () => readFailure("denied")),
-		send: (to, kind, text) => {
+		send: async (to, kind, text) => {
 			sends.push({ to, kind, text });
+			return true;
 		},
 		ask: async () => "supervisor answer",
 		reply: () => {},

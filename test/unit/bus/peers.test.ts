@@ -41,12 +41,12 @@ test("contact_peer send delivers a one-way note to a live peer", async () => {
 	assert.equal(inbox[0]?.expectsReply, false, "one-way by design — peers can never deadlock");
 });
 
-test("contact_peer send to a finished peer reports 'gone', not an error", async () => {
+test("contact_peer send to a finished peer reports unconfirmed delivery, not an error", async () => {
 	const bus = new InProcessBus();
 	bus.register("a#1"); // b#2 already unregistered (finalized)
 	const tool = makeContactPeerTool(bus, "a#1", { listPeers: () => [] });
 	const r = await tool.execute("t3", { action: "send", to: "b#2", message: "hello?" }, undefined, undefined, CTX);
-	assert.match(text(r), /gone|finalized/i);
+	assert.match(text(r), /delivery.*could not be confirmed/i);
 });
 
 test("contact_peer send is scoped: a handle registered on the bus but NOT among listPeers() is refused, not delivered", async () => {
@@ -56,10 +56,10 @@ test("contact_peer send is scoped: a handle registered on the bus but NOT among 
 	// list — this is the coaching-gate bypass the enforcement closes.
 	const tool = makeContactPeerTool(bus, "a#1", { listPeers: () => [] });
 	const r1 = await tool.execute("t8", { action: "send", to: "supervisor", message: "psst" }, undefined, undefined, CTX);
-	assert.match(text(r1), /gone|finalized/i);
+	assert.match(text(r1), /delivery.*could not be confirmed/i);
 	assert.equal(bus.take("supervisor").length, 0, "out-of-scope send never reaches the bus inbox");
 	const r2 = await tool.execute("t9", { action: "send", to: "stranger#9", message: "psst" }, undefined, undefined, CTX);
-	assert.match(text(r2), /gone|finalized/i);
+	assert.match(text(r2), /delivery.*could not be confirmed/i);
 	assert.equal(bus.take("stranger#9").length, 0, "a concurrent run's child is out of scope too");
 });
 

@@ -1,7 +1,7 @@
 /**
  * Slimmed wire-frame catalog + validators (spec B6) — comtac's protocol trimmed to the
  * frames pi-persona actually needs: register/send/cancel/reply/list/bye (client→host) and
- * registered/deliver/steer/peers/replied/error (host→client). Mirrors comtac's
+ * registered/sent/deliver/steer/peers/replied/error (host→client). Mirrors comtac's
  * `messages.ts` validation STYLE (structural per-field checks, one explicit assert per
  * case) but drops presence/sessions/attachments/broadcasts entirely (YAGNI here).
  *
@@ -28,6 +28,7 @@ export type Frame =
 	| { t: "result_read_reply"; reqId: string; result: ReadReply }
 	| { t: "result_read_cancel"; reqId: string }
 	| { t: "send"; to: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
+	| { t: "sent"; msgId: string; delivered: boolean }
 	| { t: "cancel"; msgId: string }
 	| { t: "deliver"; from: string; fromLabel?: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
 	| { t: "reply"; askId: string; text: string }
@@ -84,6 +85,8 @@ export function isFrame(value: unknown): value is Frame {
 			);
 		case "cancel":
 			return typeof value.msgId === "string";
+		case "sent":
+			return closedRecord(value, ["t", "msgId", "delivered"]) && typeof value.msgId === "string" && typeof value.delivered === "boolean";
 		case "deliver": {
 			if (typeof value.from !== "string") return false;
 			if (value.fromLabel !== undefined && typeof value.fromLabel !== "string") return false;

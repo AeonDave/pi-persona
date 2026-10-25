@@ -137,3 +137,65 @@ The final artifact/report/suite log are in
 `C:/Users/novad/AppData/Local/Temp/pi-persona-package-qualification-BxRAHN/`;
 the first CI logs and live child transcript remain in the preceding `Q3K2Q9` directory.
 GitHub publication remains gated on a fresh passing Windows/Linux CI run of the corrective commit.
+
+## Post-release adversarial follow-through
+
+The corrective release commit `782fff52` passed Windows/Linux CI and was published as 1.17.4
+on GitHub and npm. The published artifact is the 204-file `BxRAHN` artifact above. The following
+corrections are **subsequent, unreleased work**; they do not alter that release or its tag.
+
+- Runtime callbacks now carry a frozen attempt identity (agent, full role, model and effort).
+  Council, MAGI, auxiliary actors and flow rows resolve their metadata from that identity, not
+  shortened labels. Identical role hints and identical full roles with different inline pins keep
+  distinct models. Retries clear stale observations; terminal rows use observed engine metadata.
+  The obsolete reverse lookup from display labels to participants was removed.
+- Terminal capture observers retain their original tracker-lifetime position across archive-owner
+  shutdown/reactivation. Tracking is idempotent, and revoked/late captures cannot append to a new
+  owner. A regression uses one extension factory and tracker through start, delegate, shutdown,
+  start, delegate, then retrieves the new receipt through Intercom. This proves the reused-instance
+  defect. It does **not** establish failure on every native CLI `/new`: Pi 1.4.0's
+  `AgentSessionRuntime.newSession` creates a new runtime; the CLI creates new services and a new
+  `DefaultResourceLoader`, whose reload invokes extension factories again. Those installed host
+  source paths were inspected directly.
+- Broker one-way delivery now waits for a correlated, bounded host-bus admission receipt.
+  Full inboxes, cancellation, timeout and disconnect report unconfirmed delivery; no replay is
+  attempted. This is not a supervisor answer or approval. The concrete in-process subclass adapter
+  was replaced by the small transport interface the contact tools actually need. Real socket/pipe
+  tests cover both admission and rejection, including a saturated inbox with a pending ask.
+- The defensive missing-reference flow excerpt is fenced. The existing public preflight already
+  blocks a dependent phase when the reference is missing; hostile-output coverage verifies that
+  it neither spawns that phase nor includes the worker's text in the failure report.
+- If worktree capture fails but the worker returned a usable patch, the result now starts with an
+  explicit warning that this patch was not verified against the worktree state. The regression
+  breaks only disposable worktree metadata, checks the warning and patch, verifies cleanup, and
+  confirms that the user's checkout remains unchanged.
+
+The review preserved explicit boundaries: ignored files are outside worktree input/export;
+an isolated successful leg needs an artifact; a no-session reference flow may run its source
+phase before the dependent phase rejects the unavailable durable handoff. These are documented
+contracts. The broad session-card-spoof claim supplied no reproducible path in the reviewed
+host-selected card types, attributed/fenced worker text and registry-backed Exocom attribution.
+The two unspecified UI findings likewise cannot be reported as verified defects or fixes.
+
+Luna xhigh handled the bounded regressions and provenance changes; Sol 6.1 handled lifecycle,
+attempt identity and independent refutation. Supervisor source/diff review found no remaining
+blocker. On official Node 22.23.3, the full suite passed **2,899 tests: 2,897 passed, two accepted
+Windows skips, zero failures or cancellations**, in 46.042 seconds. Strict typecheck passes.
+The final test-only assertion refinement also passed both affected integration cases.
+
+Fresh installed-package qualification passed all four combinations: registry/installed Pi 1.4.0,
+each with both engines, 17 faux calls per combination, zero runtime network requests, empty
+credential stores, successful stop and joined shutdown. All **207 packaged files** match the
+source bytes. Candidate SHA-256:
+`2b0ac6385604969838fc13f3ffa4a671fd4abbb641ac8fdbb3a073452de13610`.
+The artifact/report is retained in
+`C:/Users/novad/AppData/Local/Temp/pi-persona-package-qualification-2IHn8m/`.
+Its manifest still says 1.17.4: this is a qualification artifact, **not a publishable replacement**
+for the immutable npm release. A subsequent publication requires a new version and qualification.
+
+A real-provider judge trial completed in 34.3 seconds: three distinct rows with deliberately
+colliding technical role labels retained their Luna/Sol/Luna model pins. A real child-engine
+contact trial completed in 27.5 seconds with one successful leg and terminal receipt; the direct
+broker tests, rather than the supervisor's prose, prove delivery admission. Logs and telemetry
+evidence are in `C:/Users/novad/AppData/Local/Temp/pi-persona-tree-metadata-UL8nKA/`.
+These are focused live checks, not an exhaustive terminal/theme or long-duration stress test.

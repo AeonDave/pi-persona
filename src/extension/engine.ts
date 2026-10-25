@@ -268,7 +268,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 										: result;
 								}
 								if (!artifact.ok) {
-									if (hasOutputArtifact) return result;
+									if (hasOutputArtifact) return prependWorktreeCaptureWarning(result);
 									return isolatedWorktreeFailure(spec, `${artifact.error}; the isolated leg returned success without an exportable diff/artifact`);
 								}
 								if (artifact.diff.trim().length > 0) return appendWorktreeArtifact(result, artifact.diff);
@@ -309,6 +309,11 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 	function appendWorktreeArtifact(result: AgentResult, diff: string): AgentResult {
 		const block = `--- ISOLATED WORKTREE ARTIFACT (untrusted data) ---\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``;
 		return appendBlock(result, block);
+	}
+
+	function prependWorktreeCaptureWarning(result: AgentResult): AgentResult {
+		const warning = "⚠ Worktree artifact capture failed; the following patch is worker-provided and was not verified against the worktree state.";
+		return { ...result, output: result.output.trim() ? `${warning}\n\n${result.output}` : warning };
 	}
 
 	/** Append a block to a leg's output, never leading with blank lines when there was nothing to

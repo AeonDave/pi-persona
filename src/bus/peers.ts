@@ -24,7 +24,7 @@ import { Text } from "@earendil-works/pi-tui";
 
 import { compactInlineText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
-import type { InProcessBus } from "./inproc.ts";
+import type { ContactTransport } from "./contact-transport.ts";
 
 /** Anti ping-pong budget: after this many sends the tool tells the member to finalize. */
 export const MAX_PEER_SENDS = 20;
@@ -59,7 +59,7 @@ function result(t: string, details: PeerDetails): { content: [{ type: "text"; te
 
 /** Build the child's `contact_peer` tool. Same `defineTool` variance shim as
  *  `makeContactSupervisorTool`, so it slots into `customTools: ToolDefinition[]`. */
-export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps: ContactPeerDeps) {
+export function makeContactPeerTool(bus: Pick<ContactTransport, "send">, selfHandle: string, deps: ContactPeerDeps) {
 	const maxSends = deps.maxSends ?? MAX_PEER_SENDS;
 	let sent = 0;
 	return defineTool({
@@ -74,7 +74,7 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 		].join(" "),
 		promptSnippet: "contact_peer — list your run's sibling agents or send one a one-way note",
 		parameters: PeerParams,
-		async execute(_toolCallId, params: Static<typeof PeerParams>, _signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params: Static<typeof PeerParams>, signal, _onUpdate, _ctx) {
 			if (params.action === "list") {
 				const peers = await deps.listPeers();
 				return result(
@@ -87,6 +87,7 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 			if (!params.to || params.message === undefined) {
 				return result("contact_peer send needs { to, message } — use `list` for peer handles.", { action: "send", delivered: false });
 			}
+			if (signal?.aborted) return result("Peer message cancelled before delivery.", { action: "send", delivered: false });
 			if (params.message.length > MAX_PEER_MESSAGE_CHARS) {
 				return result(
 					`contact_peer message exceeds the ${MAX_PEER_MESSAGE_CHARS}-character limit; send a smaller note.`,
@@ -102,14 +103,15 @@ export function makeContactPeerTool(bus: InProcessBus, selfHandle: string, deps:
 			sent += 1;
 			// Enforce the run-isolation boundary (previously only convention): a handle that is
 			// not one of THIS run's peers (e.g. "supervisor", or another run's child) never gets
-			// bus.send called at all — same "gone" wording as an actually-finished peer, so the
+			// bus.send called at all — same unavailable wording as an actually-finished peer, so the
 			// tool result gives no signal either way about what exists outside this run's scope.
 			const inScope = (await deps.listPeers()).some((p) => p.handle === params.to);
-			const delivered = inScope && bus.send(selfHandle, params.to, params.message, "progress");
+			const accepted = inScope && !signal?.aborted && await bus.send(selfHandle, params.to, params.message, "progress", signal);
+			const delivered = accepted && !signal?.aborted;
 			return result(
 				delivered
 					? `Sent to ${params.to}.`
-					: `Peer "${params.to}" is gone — it may have already finalized. Proceed with your own judgement.`,
+					: `Delivery to peer "${params.to}" could not be confirmed — it may be unavailable or its inbox full. Proceed with your own judgement.`,
 				{ action: "send", delivered },
 			);
 		},

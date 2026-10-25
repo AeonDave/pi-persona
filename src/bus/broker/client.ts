@@ -2,7 +2,7 @@
  * Broker client — the child-side half of the relay (spec B3/B6): connects to the
  * session-scoped endpoint (`paths.ts`), performs the `register`/`registered` handshake,
  * and exposes the same shape a local `contact_supervisor`/`contact_peer` binding needs —
- * `send` (fire-and-forget), `ask` (a blocking `send{expectsReply}` correlated to a
+ * `send` (one-way with a bounded host-admission receipt), `ask` (a blocking `send{expectsReply}` correlated to a
  * `replied{askId}`, 10-minute cap, mirrors `bus.ask`, and sends `cancel{msgId}` when
  * aborted), `reply` (answers a host-issued
  * blocking `deliver`), `list` (the engine-scoped peer roster, B7), and `onDeliver`/`onSteer`
@@ -14,7 +14,7 @@
  * exponential backoff (250ms–5s) on the INITIAL connect only (comtac's presence tracking,
  * roster cache, and endless reconnect-after-disconnect "storm" are dropped — YAGNI here,
  * see spec B6/Task 4 brief). An unexpected disconnect (host died
- * mid-run) is NOT auto-reconnected: sends silently go nowhere, while in-flight asks/lists
+ * mid-run) is NOT auto-reconnected: sends resolve false, while in-flight asks/lists
  * reject promptly and clean up their timers. Authenticated result readers are stricter:
  * one connect attempt, bounded handshake/reads, closed failure replies, never mute success.
  *
@@ -46,8 +46,9 @@ export interface BrokerClient {
 	register(): Promise<void>;
 	/** Authenticated bounded read. Failures are fixed closed replies; never a mute success. */
 	read(request: ResultReadRequest, signal?: AbortSignal): Promise<ReadReply>;
-	/** Fire-and-forget; a dead connection silently drops it (spec: "sends report undelivered"). */
-	send(to: string, kind: MsgKind, text: string): void;
+	/** One-way message; true only after host bus admission, never a recipient answer.
+	 * Missing receipt, cancellation, saturation or disconnect resolve false without replay. */
+	send(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<boolean>;
 	/** Blocking request; resolves on a matching `replied`, rejects on `signal` abort or the
 	 *  10-minute cap (mirrors `bus.ask`'s default). */
 	ask(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<string>;
@@ -81,6 +82,8 @@ const ASK_TIMEOUT_MS = 600_000;
 // A roster lookup is one local socket/pipe round-trip, unlike a blocking supervisor ask. Do not
 // let a half-open broker pin `contact_peer list/send` until the child idle watchdog fires.
 const LIST_TIMEOUT_MS = 10_000;
+export const SEND_TIMEOUT_MS = 10_000;
+export const MAX_PENDING_SENDS = 64;
 
 export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	const netImpl = deps.net ?? nodeNet;
@@ -93,6 +96,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	let cancelConnect: (() => void) | undefined;
 	let cancelBackoff: (() => void) | undefined;
 	const pendingReads = new Map<string, { request: ResultReadRequest; resolve: (result: ReadReply) => void }>();
+	const pendingSends = new Map<string, (delivered: boolean) => void>();
 	let registerSettle: { resolve: () => void; reject: (err: Error) => void } | undefined;
 
 	const deliverListeners = new Set<(evt: DeliverEvent) => void>();
@@ -101,9 +105,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	const pendingAsks = new Map<string, { resolve: (text: string) => void; reject: (err: Error) => void }>();
 	const pendingLists = new Map<string, { resolve: (peers: Array<{ handle: string; label: string }>) => void; reject: (err: Error) => void }>();
 
-	/** Best-effort write: a frame sent while disconnected is silently dropped — matches
-	 *  the design's "sends report undelivered" (no throw the caller could even act on,
-	 *  `send`/`reply` are `void`). */
+	/** Best-effort control frame write. Confirmed sends use their own guarded write and receipt. */
 	function write(frame: Frame): void {
 		if (!socket) return;
 		try {
@@ -126,6 +128,9 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 
 	function handleFrame(frame: Frame): void {
 		switch (frame.t) {
+			case "sent":
+				pendingSends.get(frame.msgId)?.(frame.delivered);
+				return;
 			case "registered":
 				if (!registerSettle) return;
 				if (frame.handle !== deps.handle || (deps.readerToken !== undefined && (!frame.readerToken
@@ -146,6 +151,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 				// A correlated error belongs to one request on this connection. Do not let an
 				// unknown/stale correlation id affect the register handshake or another ask.
 				if (frame.msgId !== undefined) {
+					pendingSends.get(frame.msgId)?.(false);
 					pendingAsks.get(frame.msgId)?.reject(new Error(frame.reason));
 					return;
 				}
@@ -254,6 +260,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	}
 
 	function rejectAllPending(reason: string): void {
+		for (const settle of pendingSends.values()) settle(false);
 		for (const p of pendingReads.values()) p.resolve(readFailure("unavailable"));
 		for (const p of pendingAsks.values()) p.reject(new Error(reason));
 		pendingAsks.clear();
@@ -354,8 +361,24 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		});
 	}
 
-	function send(to: string, kind: MsgKind, text: string): void {
-		write({ t: "send", to, kind, text, msgId: randomUUID(), expectsReply: false });
+	function send(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<boolean> {
+		if (signal?.aborted || closed || disconnected || !registered || !socket || pendingSends.size >= MAX_PENDING_SENDS) return Promise.resolve(false);
+		const msgId = randomUUID();
+		return new Promise((resolve) => {
+			const finish = (delivered: boolean): void => {
+				if (!pendingSends.delete(msgId)) return;
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				resolve(delivered);
+			};
+			const onAbort = (): void => finish(false);
+			const timer = setTimeout(() => finish(false), SEND_TIMEOUT_MS);
+			timer.unref?.();
+			pendingSends.set(msgId, finish);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			try { socket!.write(encodeFrame({ t: "send", to, kind, text, msgId, expectsReply: false })); }
+			catch { finish(false); }
+		});
 	}
 
 	/** Why `ask`/`list` refuse to send right now — distinguishes a disposed client from one that

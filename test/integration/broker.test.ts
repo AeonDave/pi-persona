@@ -136,6 +136,31 @@ test("broker round-trip over a REAL socket/pipe: register, send, deliver, steer,
 	}
 });
 
+test("REAL one-way receipts distinguish bus admission from a full or missing inbox", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	const bus = new InProcessBus({ maxInbox: 1 });
+	bus.register("supervisor");
+	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint });
+	const client = makeBrokerClient({ endpoint, handle: "child" });
+	const ac = new AbortController();
+	let ask: Promise<unknown> | undefined;
+	try {
+		await client.register();
+		assert.equal(await client.send("supervisor", "progress", "accepted"), true);
+		assert.equal(bus.take("supervisor")[0]?.text, "accepted");
+		ask = bus.ask("other", "supervisor", "pending decision", { signal: ac.signal }).catch(() => {});
+		assert.equal(bus.send("other", "supervisor", "full"), false);
+		assert.equal(await client.send("supervisor", "progress", "full"), false);
+		assert.equal(await client.send("absent", "progress", "missing"), false);
+		assert.equal(bus.pending("supervisor")[0]?.text, "pending decision", "the receipt cannot evict an outstanding ask");
+		ac.abort();
+		await ask;
+		assert.equal(await client.send("supervisor", "decision", "one-way unresolved choice"), true);
+		assert.equal(bus.pending("supervisor")[0]?.expectsReply, false, "admission does not create a blocking obligation or authorize the choice");
+	} finally { ac.abort(); await ask; client.close(); await host.close(); }
+});
+
 test("broker ask cancellation over a REAL socket/pipe settles the host-side ask", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
 	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });

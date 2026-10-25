@@ -2420,6 +2420,47 @@ test("a successful isolated leg may satisfy the artifact contract with its retur
 	assert.match(legText(response), /diff --git a\/base\.txt b\/base\.txt/);
 });
 
+test("a worker-provided worktree patch stays visible with an explicit warning when capture fails", async () => {
+	const cwd = cleanGitRepo();
+	const protocolDiff = "diff --git a/base.txt b/base.txt\n--- a/base.txt\n+++ b/base.txt\n@@ -1 +1 @@\n-base\n+changed\n";
+	let childCwd = "";
+	const factories: EngineFactories = {
+		makeInProcessEngine: () => ({ run: async (spec) => ({ agent: spec.agent, output: "base", usage: emptyUsage(), ok: true }) }),
+		makeEngine: (deps) => {
+			childCwd = deps.cwd ?? "";
+			return {
+				run: async (spec) => {
+					// Break only the disposable worktree's Git pointer after producing the patch.
+					const gitPointer = path.join(childCwd, ".git");
+					fs.chmodSync(gitPointer, 0o666);
+					fs.rmSync(gitPointer);
+					return { agent: spec.agent, output: `summary\n\n${protocolDiff}`, usage: emptyUsage(), ok: true };
+				},
+			};
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: factories });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const response = await (m.tool("delegate") as { execute: AnyFn }).execute(
+		"worktree-capture-warning",
+		{ tasks: [{ agent: "scout", task: "return the complete patch", isolation: "worktree" }] },
+		undefined,
+		undefined,
+		ctx,
+	);
+	const text = legText(response);
+	assert.equal(response.isError, false, `a returned unified diff remains a usable artifact fallback: ${text}`);
+	assert.match(text, /worktree artifact capture failed/i);
+	assert.match(text, /worker-provided/i);
+	assert.match(text, /not verified against the worktree state/i);
+	const warningIndex = text.toLowerCase().indexOf("worktree artifact capture failed");
+	assert.ok(warningIndex >= 0 && warningIndex < text.indexOf("diff --git a/base.txt"), "the host warning precedes the unverified patch in the compact head");
+	assert.equal(fs.existsSync(childCwd), false, "the disposable worktree is still removed after capture failure");
+	assert.equal(fs.readFileSync(path.join(cwd, "base.txt"), "utf8"), "base\n", "invalidating the disposable metadata leaves the user's checkout untouched");
+});
+
 test("an isolated leg cannot fake an artifact with two summary marker lines", async () => {
 	const cwd = cleanGitRepo();
 	const factories: EngineFactories = {
@@ -10004,6 +10045,128 @@ test("a core listed twice keeps its lens; a roster-ROLE member does not repeat o
 	const lensed = labels.find((l) => l.startsWith("melchior · SECURITY"));
 	assert.ok(lensed, `no node for the role-specialised core: ${JSON.stringify(labels)}`);
 	assert.ok(!lensed.includes("Propulsore"), `a role member must not show two lenses, got "${lensed}"`);
+});
+
+test("judge tree sanitizes technical-only labels and preserves per-occurrence model/effort pins", async () => {
+	const cwd = tempDir("pi-persona-judge-role-tree-");
+	const engine: StrategyEngine = {
+		run: async (spec) => ({
+			agent: spec.agent,
+			output: spec.agent === "arbiter" ? "picked A" : `${spec.agent} report`,
+			structured: spec.agent === "arbiter" ? { vote: "A", result: "chosen", output: "A wins" } : { vote: "yes", confidence: 0.7 },
+			usage: emptyUsage(),
+			ok: true,
+		}),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: nativeSessionManager("judge-technical-role-tree") };
+	const additions: Array<Parameters<AgentTree["add"]>[0]> = [];
+	const original = AgentTree.prototype.add;
+	const add = mock.method(AgentTree.prototype, "add", function (this: AgentTree, input: Parameters<AgentTree["add"]>[0]) {
+		additions.push({ ...input });
+		return original.call(this, input);
+	});
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const council = m.tool("council") as { execute: AnyFn };
+		const result = await council.execute("judge-technical-roles", {
+			question: "choose",
+			strategy: "judge",
+			members: [
+				{ agent: "reviewer", role: "BREAK", model: "openai/panel-break", thinking: "xhigh" },
+				{ agent: "reviewer", role: "PI_PERSONA_RESULT_READER_TOKEN", model: "openai/panel-token", thinking: "high" },
+				{ agent: "reviewer", role: "HEAD", model: "openai/panel-head-first", thinking: "low" },
+				{ agent: "reviewer", role: "HEAD", model: "openai/panel-head-second", thinking: "medium" },
+			],
+			params: { judge: { agent: "arbiter", role: "HEAD", model: "openai/arbiter", thinking: "max" } },
+		}, undefined, undefined, ctx);
+		assert.equal(result.isError, false, result.content?.[0]?.text);
+	} finally {
+		add.mock.restore();
+		await m.fire("session_shutdown", {}, ctx);
+	}
+
+	const rows = additions.filter((input) => input.kind === "subagent");
+	const forKey = (key: string) => rows.filter((input) => input.id.endsWith(`/${key}`));
+	for (const key of ["reviewer · BREAK", "reviewer · role", "reviewer · role#2", "reviewer · role#3"]) {
+		assert.ok(forKey(key).length >= 2, `${key} must be seeded and re-added when its SDK leg starts: ${JSON.stringify(additions)}`);
+	}
+	const known = [
+		{ key: "reviewer · BREAK", model: "openai/panel-break", thinking: "xhigh" },
+		{ key: "reviewer · role", model: "openai/panel-token", thinking: "high" },
+		{ key: "reviewer · role#2", model: "openai/panel-head-first", thinking: "low" },
+		{ key: "reviewer · role#3", model: "openai/panel-head-second", thinking: "medium" },
+	];
+	for (const item of known) {
+		assert.ok(forKey(item.key).every((row) => row.model === item.model && row.thinking === item.thinking), `${item.key} retains its own inline model/effort on seed and live frames`);
+	}
+	const arbiterRows = forKey("arbiter · role");
+	assert.equal(arbiterRows.length, 1, "the auxiliary actor is live but is not part of the panel's pre-seeded roster");
+	assert.ok(arbiterRows.every((row) => row.model === "openai/arbiter" && row.thinking === "max"), "a unique technical-only auxiliary role still resolves its participant metadata");
+	for (const row of rows) {
+		assert.doesNotMatch(row.label, /PI_PERSONA_RESULT_READER_TOKEN|\bHEAD\b/, "technical identifiers do not leak into the actual tree label");
+	}
+	assert.ok(rows.some((row) => row.label.startsWith("reviewer · role#2 · panel-head-first")), "the second neutralized role keeps its occurrence suffix and selected model");
+	const added = readTelemetryEvents(cwd).filter((event) => event.type === "agent.added");
+	for (const row of [...known.map((item) => forKey(item.key)[0]), arbiterRows[0]]) {
+		const event = added.find((candidate) => candidate.payload.id === row?.id);
+		assert.ok(event, `the actual tree seed is persisted for ${row?.id}`);
+		assert.equal(event?.payload.label, row?.label, "telemetry and the tree share the same safe role label");
+		assert.equal(event?.payload.model, row?.model, "telemetry preserves known model identity");
+	}
+});
+
+test("MAGI tree seeds and starts each unambiguous core with its selected model and requested effort", async () => {
+	const cwd = tempDir("pi-persona-magi-role-metadata-");
+	const engine: StrategyEngine = {
+		run: async (spec) => ({ agent: spec.agent, output: `${spec.agent} votes yes`, structured: { vote: "yes", confidence: 0.8 }, usage: emptyUsage(), ok: true }),
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx: base } = makeCtx(cwd);
+	const ctx = { ...base, sessionManager: nativeSessionManager("magi-role-metadata") };
+	const additions: Array<Parameters<AgentTree["add"]>[0]> = [];
+	const original = AgentTree.prototype.add;
+	const add = mock.method(AgentTree.prototype, "add", function (this: AgentTree, input: Parameters<AgentTree["add"]>[0]) {
+		additions.push({ ...input });
+		return original.call(this, input);
+	});
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const council = m.tool("council") as { execute: AnyFn };
+		const result = await council.execute("magi-role-metadata", {
+			question: "decide",
+			strategy: "magi",
+			members: [
+				{ agent: "melchior", role: "PROPULSION", model: "openai/magi-m", thinking: "high" },
+				{ agent: "balthasar", role: "CONSERVATION", model: "openai/magi-b", thinking: "xhigh" },
+				{ agent: "casper", role: "CATALYSIS", model: "openai/magi-c", thinking: "low" },
+			],
+			params: { reflect: false },
+		}, undefined, undefined, ctx);
+		assert.equal(result.isError, false, result.content?.[0]?.text);
+	} finally {
+		add.mock.restore();
+		await m.fire("session_shutdown", {}, ctx);
+	}
+
+	const rows = additions.filter((input) => input.kind === "subagent");
+	const expected = [
+		{ key: "melchior · PROPULSION", model: "openai/magi-m", thinking: "high" },
+		{ key: "balthasar · CONSERVATION", model: "openai/magi-b", thinking: "xhigh" },
+		{ key: "casper · CATALYSIS", model: "openai/magi-c", thinking: "low" },
+	];
+	const added = readTelemetryEvents(cwd).filter((event) => event.type === "agent.added");
+	for (const item of expected) {
+		const nodeRows = rows.filter((row) => row.id.endsWith(`/${item.key}`));
+		assert.ok(nodeRows.length >= 2, `${item.key} must be seeded and re-added on its live SDK start: ${JSON.stringify(additions)}`);
+		assert.ok(nodeRows.every((row) => row.model === item.model && row.thinking === item.thinking), `${item.key} keeps its own model and requested effort on both frames`);
+		const event = added.find((candidate) => candidate.payload.id === nodeRows[0]?.id);
+		assert.equal(event?.payload.model, item.model, `${item.key} telemetry reports its selected model`);
+		assert.equal(event?.payload.label, nodeRows[0]?.label, `${item.key} telemetry shares the actual safe tree label`);
+	}
 });
 
 // ── runtime wake guards: a long sleep and an unchanged peek hold the very turn the wake needs idle ──

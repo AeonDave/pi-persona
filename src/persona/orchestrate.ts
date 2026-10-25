@@ -7,11 +7,8 @@
 import type { RunLimits } from "../core/capabilities.ts";
 import { makeRoster, type RosterMember } from "../orchestration/roster.ts";
 import {
-	type AgentProgress,
-	type AgentStatus,
 	makeSDK,
 	type SDKDeps,
-	type SteerFn,
 	type StrategyEngine,
 	type StrategyInput,
 } from "../orchestration/sdk.ts";
@@ -72,14 +69,14 @@ export interface RunStrategyDeps {
 	log?: (message: string) => void;
 	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result).
 	 *  `key` is a run-unique display id (disambiguates same-agent roster-role members). */
-	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult, key?: string) => void;
+	onAgentStatus?: SDKDeps["onAgentStatus"];
 	onAgentResult?: SDKDeps["onAgentResult"];
 	/** Per-agent streaming progress (rolling output), for live UI. */
-	onAgentProgress?: (agent: string, progress: AgentProgress, key?: string) => void;
+	onAgentProgress?: SDKDeps["onAgentProgress"];
 	/** Called as each agent starts with a handle to abort just that agent (UI stop). */
-	onAgentStart?: (agent: string, abort: () => void, key?: string) => void;
+	onAgentStart?: SDKDeps["onAgentStart"];
 	/** Called once an agent is live with a handle to steer it (in-process engine only). */
-	onAgentSteerable?: (agent: string, steer: SteerFn, key?: string) => void;
+	onAgentSteerable?: SDKDeps["onAgentSteerable"];
 	/** See `SDKDeps.canSpawn` — every strategy spawn, not only `delegate`. */
 	canSpawn?: (agent: string) => boolean;
 }
