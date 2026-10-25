@@ -489,7 +489,7 @@ test("close during a pending register (connected, awaiting registered) rejects i
 	await assert.rejects(() => registerPromise, /closed/);
 });
 
-test("close during an in-flight initial connect rejects register() and destroys the dialing socket instead of completing the handshake", async () => {
+test("close during an in-flight initial connect rejects register() and destroys the dialing socket instead of completing the handshake", async (t) => {
 	// Unlike `fakeNet()`, capture the client-side socket directly so we can assert it was
 	// destroyed rather than left connected — this is the race from the review finding:
 	// `close()` runs while `connectOnce()`'s "connect" event is still only queued, i.e.
@@ -504,16 +504,51 @@ test("close during an in-flight initial connect rejects register() and destroys 
 		},
 	} as unknown as typeof import("node:net");
 	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const outcomes: unknown[] = [];
+		const registerPromise = client.register();
+		void registerPromise.catch((error: unknown) => { outcomes.push(error); });
+		client.close(); // synchronous — runs before the queued "connect" microtask fires
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const outcome = outcomes[0];
+		assert.ok(outcome instanceof Error && /closed/.test(outcome.message), "local cancellation must settle without advancing the retry clock");
+		await assert.rejects(() => registerPromise, /closed/);
+		assert.equal(clientSocket.destroyed, true, "the dialing socket must be destroyed, not leaked live");
+		assert.ok(!host.frames.some((f) => f.t === "register"), "must not complete a register handshake on a closed client");
+	} finally {
+		client.close();
+		t.mock.timers.tick(60_000);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		t.mock.timers.reset();
+	}
+});
 
-	const registerPromise = client.register();
-	client.close(); // synchronous — runs before the queued "connect" microtask fires
-
-	await assert.rejects(() => registerPromise, /closed/);
-	// Give the queued "connect" (and, if the bug were present, the subsequent
-	// register/registered handshake) a chance to play out.
-	await new Promise((r) => setTimeout(r, 5));
-	assert.equal(clientSocket.destroyed, true, "the dialing socket must be destroyed, not leaked live");
-	assert.ok(!host.frames.some((f) => f.t === "register"), "must not complete a register handshake on a closed client");
+test("close interrupts an existing initial-connect backoff without waiting for the retry clock or redialing", async (t) => {
+	const { net, attempts } = flakyFakeNet(1, () => {});
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const outcomes: unknown[] = [];
+		const registerPromise = client.register();
+		void registerPromise.catch((error: unknown) => { outcomes.push(error); });
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(attempts.count, 1, "the failed dial is waiting for its frozen retry delay");
+		assert.equal(outcomes.length, 0);
+		client.close();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const outcome = outcomes[0];
+		assert.ok(outcome instanceof Error && /closed/.test(outcome.message), "close must interrupt an already scheduled backoff");
+		await assert.rejects(() => registerPromise, /closed/);
+		t.mock.timers.tick(60_000);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(attempts.count, 1, "a closed client can never retry the dial");
+	} finally {
+		client.close();
+		t.mock.timers.tick(60_000);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		t.mock.timers.reset();
+	}
 });
 
 // A never-settling register() is the defect itself, so this one needs its own deadline —
