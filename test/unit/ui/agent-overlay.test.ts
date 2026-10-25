@@ -946,3 +946,42 @@ test("a vanished agent hands the marker to the remaining agent, not to the monit
 	assert.deepEqual(stopped, ["async:B"], "the second x acts on the agent the marker shows");
 	overlay.dispose();
 });
+
+test("composeAgentRow keeps the width invariant with the appended compact effort field", () => {
+	const node: AgentNode = {
+		id: "a",
+		label: "IronVale-flow-reference · glm-5.3",
+		parentId: undefined,
+		status: "running",
+		detail: "↑217k ↓75k",
+		thinking: "xhigh",
+		startedAt: 0,
+		lastAdvanceAt: 0,
+	};
+	const wide = composeAgentRow({ node, depth: 0, selected: false, inner: 56, now: 75_000, stallMs: 90_000, theme: THEME });
+	assert.ok(visibleWidth(wide) <= 56, `row exceeds inner=56 (${visibleWidth(wide)}): ${JSON.stringify(wide)}`);
+	assert.match(wide, / · xh(?![→])/, "the requested sigla shows in the overlay list too");
+	assert.ok(wide.includes("↑217k"), "usage detail still renders");
+
+	const divergence = composeAgentRow({ node: { ...node, thinkingEffective: "high" }, depth: 0, selected: false, inner: 56, now: 75_000, stallMs: 90_000, theme: THEME });
+	assert.ok(visibleWidth(divergence) <= 56, `row exceeds inner=56 (${visibleWidth(divergence)}): ${JSON.stringify(divergence)}`);
+	assert.match(divergence, /xh→h/, "the settled divergence renders in the list row");
+
+	const tight = composeAgentRow({ node: { ...node, label: "L".repeat(200), detail: "D".repeat(200) }, depth: 0, selected: true, inner: 30, now: 1_000_000, stallMs: 1, theme: THEME });
+	assert.ok(visibleWidth(tight) <= 30, `row exceeds inner=30 (${visibleWidth(tight)}): ${JSON.stringify(tight)}`);
+});
+
+test("the F9 drill-in shows the effort with FULL names, divergence included", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "leg · glm-5.3", thinking: "xhigh", status: "running" });
+	const overlay = openOverlay(tree);
+	t.after(() => overlay.dispose());
+	overlay.handleInput("\n"); // drill in
+	assert.match(overlay.render(80).join("\n"), /thinking: requested xhigh/, "requested full name only before any observation");
+
+	tree.update("a", { thinkingEffective: "high" });
+	assert.match(overlay.render(80).join("\n"), /thinking: requested xhigh → observed high/, "the observed full name appears only once a result reported it");
+
+	tree.update("a", { thinking: "off" });
+	assert.doesNotMatch(overlay.render(80).join("\n"), /thinking:/, "off renders nothing — absence means off");
+});

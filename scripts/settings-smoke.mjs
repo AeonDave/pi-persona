@@ -10,6 +10,7 @@
  */
 
 import assert from "node:assert/strict";
+import { requireCurrentPiHost } from "./lib/package-qualification.ts";
 import { readFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -42,6 +43,7 @@ hostEntryPath = resolve(hostEntryPath);
 hostRoot = resolve(hostRoot);
 const hostPackage = JSON.parse(await readFile(join(hostRoot, "package.json"), "utf8"));
 assert.equal(hostPackage.name, "@earendil-works/pi-coding-agent", `Unexpected SDK package at ${hostRoot}`);
+requireCurrentPiHost(hostPackage.version);
 const hostModuleUrl = pathToFileURL(hostEntryPath).href;
 
 function hostSubpackageRoot(packageName) {

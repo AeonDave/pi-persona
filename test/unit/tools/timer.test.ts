@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -130,4 +131,101 @@ test("timer keeps valid padded messages and sub-second values that round to one 
 	});
 	assert.equal(result.isError, false);
 	assert.equal(timerScheduler.list()[0]?.message, "wake");
+});
+
+// ── presentation contract: compact collapsed cards, shared literal expansion ─────────────────
+
+const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+
+function renderHarness() {
+	let tool: any;
+	const pi = { registerTool: (t: unknown) => { tool = t; } } as unknown as ExtensionAPI;
+	const timerScheduler = new TimerScheduler({ now: () => Date.now(), setTimer: () => 1, clearTimer: () => {}, onFire: () => {} });
+	registerTimerTool(pi, { lastCtx: undefined, timerScheduler });
+	return tool;
+}
+
+const armResult = (tool: any, label?: string) =>
+	tool.execute("call", { action: "arm", message: "check status and summarize", delaySeconds: 90, ...(label === undefined ? {} : { label }) }, undefined, undefined, { cwd: "D:/project" });
+
+function render(tool: any, result: unknown, expanded: boolean, isError: boolean): string {
+	return stripVTControlCharacters(tool.renderResult(result, { expanded }, plainTheme, { isError }).render(400).join("\n"));
+}
+
+test("timer call card is a compact purpose line, not an argument echo", () => {
+	const tool = renderHarness();
+	assert.equal(typeof tool.renderCall, "function", "renderCall must exist; the host fallback echoes raw args JSON");
+	const card = stripVTControlCharacters(tool.renderCall({ action: "arm", label: "status review", message: "very long wake instructions ".repeat(50) }, plainTheme).render(200).join("\n"));
+	assert.match(card, /timer arm/);
+	assert.match(card, /status review/);
+	assert.doesNotMatch(card, /very long wake instructions/);
+	assert.doesNotMatch(card, /[{}]/);
+	const cancel = stripVTControlCharacters(tool.renderCall({ action: "cancel", id: "timer-3" }, plainTheme).render(200).join("\n"));
+	assert.match(cancel, /timer cancel timer-3/);
+});
+
+test("timer arm result card collapses to label and a relative fire time — no advice paragraph, no ISO", async () => {
+	const tool = renderHarness();
+	const result = await armResult(tool, "status review");
+	assert.equal(result.isError, false);
+	assert.equal(result.details.ok, true);
+	assert.equal(result.details.id, "timer-1");
+	assert.equal(result.details.label, "status review", "bounded card fields land in arm-success details only");
+	const before = JSON.stringify(result);
+	const collapsed = render(tool, result, false, false);
+	assert.match(collapsed, /armed status review/);
+	assert.match(collapsed, /fires in \d/);
+	assert.doesNotMatch(collapsed, /end this turn|keep the session open|sleep, poll|Headless/);
+	assert.doesNotMatch(collapsed, /\d{4}-\d{2}-\d{2}T/);
+	assert.ok(collapsed.split("\n").length <= 2, `collapsed arm card stays one compact line, got ${collapsed.split("\n").length}`);
+	assert.equal(JSON.stringify(result), before, "rendering never mutates the tool result");
+});
+
+test("timer arm card expands to the complete literal receipt", async () => {
+	const tool = renderHarness();
+	const result = await armResult(tool, "status review");
+	const before = JSON.stringify(result);
+	const expanded = render(tool, result, true, false);
+	assert.match(expanded, /Armed timer-1 \(status review\)/);
+	assert.match(expanded, /\d{4}-\d{2}-\d{2}T/);
+	assert.match(expanded, /You can end this turn now/);
+	assert.equal(JSON.stringify(result), before, "rendering never mutates the tool result");
+});
+
+test("timer failures and non-arm receipts render through the shared literal renderer", async () => {
+	const tool = renderHarness();
+	const failed = await tool.execute("call", { action: "arm", message: "x", delaySeconds: 60, atIso: "2026-09-02T12:00:00Z" }, undefined, undefined, { cwd: "D:/project" });
+	assert.equal(failed.isError, true);
+	const collapsed = render(tool, failed, false, true);
+	assert.match(collapsed, /^failed/);
+	assert.match(collapsed, /not both/);
+	assert.doesNotMatch(collapsed, /armed /);
+	assert.ok(collapsed.split("\n").length <= 6, "failed arm stays a bounded collapsed card");
+	assert.match(render(tool, failed, true, true), /not both/, "expanded failure shows the full text");
+
+	const cancel = await tool.execute("call", { action: "cancel", id: "timer-9" }, undefined, undefined, { cwd: "D:/project" });
+	assert.equal(cancel.isError, true);
+	assert.match(render(tool, cancel, false, true), /No armed timer with id "timer-9"/);
+
+	const now = await tool.execute("call", { action: "now" }, undefined, undefined, { cwd: "D:/project" });
+	assert.equal(now.isError, false);
+	const nowCard = render(tool, now, false, false);
+	assert.match(nowCard, /UTC/);
+	assert.ok(nowCard.split("\n").length <= 6, "clock reading stays a bounded collapsed card");
+});
+
+test("timer collapsed arm cards are escape-free even for hostile labels", async () => {
+	const tool = renderHarness();
+	const result = await armResult(tool, "build\u001b[31m REDACTED\u001b[0m safe.exe");
+	assert.equal(result.isError, false);
+	const collapsed = render(tool, result, false, false);
+	assert.doesNotMatch(collapsed, /\u001b/);
+	assert.match(collapsed, /armed build REDACTED safe\.exe/);
+});
+
+test("timer arm card says due-now instead of a negative countdown", () => {
+	const tool = renderHarness();
+	const past = { content: [{ type: "text", text: "Armed timer-1 (late)." }], details: { action: "arm", id: "timer-1", fireAtEpochMs: Date.now() - 5_000, ok: true, label: "late" }, isError: false };
+	assert.match(render(tool, past, false, false), /due now/);
+	assert.doesNotMatch(render(tool, past, false, false), /fires in/);
 });

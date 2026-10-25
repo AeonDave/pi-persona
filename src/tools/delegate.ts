@@ -6,6 +6,7 @@
  */
 
 import { cappedList } from "../core/format.ts";
+import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../core/types.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { type AgentRunSpec, type InfrastructureFailure, isInfrastructureFailure, isPositiveFiniteMs } from "../orchestration/sdk.ts";
 
@@ -20,6 +21,8 @@ export interface DelegateTask {
 	skills?: string[];
 	/** Model override for this sub-agent. */
 	model?: string;
+	/** Requested effort for this leg; overrides agent and shared child defaults. Pi clamps it. */
+	thinking?: ThinkingLevel;
 	/** Tool allowlist override for this sub-agent. */
 	tools?: string[];
 	/** Extra system-prompt text: an ON-THE-FLY specialist persona, appended to the
@@ -47,6 +50,7 @@ export interface DelegateParams {
 	name?: string;
 	skills?: string[];
 	model?: string;
+	thinking?: ThinkingLevel;
 	tools?: string[];
 	role?: string;
 	isolation?: "none" | "worktree";
@@ -133,10 +137,6 @@ export function validateDelegationBrief(params: DelegateParams): string | undefi
 	return undefined;
 }
 
-// Moved to core/ownership.ts (so a strategy can call it without importing a tool module);
-// re-exported here unchanged for this file's own call sites and existing tests.
-export { findWriteSetOverlaps, validateParallelWriteSets, type WriteSetOverlap } from "../core/ownership.ts";
-
 function unwrapJsonish(value: unknown, label: string): { ok: true; value: unknown } | { ok: false; error: string } {
 	let current = value;
 	for (let depth = 0; depth < 2; depth++) {
@@ -205,6 +205,9 @@ function decodedTaskFieldError(bag: Record<string, unknown>, index: number): str
 			return `delegate: ${label}.${field} must be a string.`;
 		}
 	}
+	if (bag.thinking !== undefined && !isThinkingLevel(bag.thinking)) {
+		return `delegate: ${label}.thinking must be one of: ${THINKING_LEVELS.join(", ")}.`;
+	}
 	if (bag.isolation !== undefined && bag.isolation !== "none" && bag.isolation !== "worktree") {
 		return `delegate: ${label}.isolation must be "none" or "worktree".`;
 	}
@@ -264,6 +267,9 @@ export function coerceDelegateParams(raw: unknown): { ok: true; params: Delegate
 		return { ok: false, error: "delegate: arguments must be an object." };
 	}
 	const bag = { ...(raw as Record<string, unknown>) };
+	if (bag.thinking !== undefined && !isThinkingLevel(bag.thinking)) {
+		return { ok: false, error: `delegate: thinking must be one of: ${THINKING_LEVELS.join(", ")}.` };
+	}
 	const tasks = coerceTaskList(bag.tasks);
 	if (!tasks.ok) return tasks;
 	if (tasks.value !== undefined) bag.tasks = tasks.value;
@@ -282,10 +288,10 @@ export function coerceDelegateParams(raw: unknown): { ok: true; params: Delegate
 	return { ok: true, params: bag as DelegateParams };
 }
 
-/** Short model name for display: drop provider + `claude-` + any `:thinking`. */
+/** Short model name for display: drop provider + `claude-`; model ids remain opaque. */
 export function shortModel(ref: string | undefined): string {
 	if (!ref) return "";
-	const base = ref.split(":")[0]?.split("/").pop() ?? ref;
+	const base = ref.split("/").pop() ?? ref;
 	return base.replace(/^claude-/, "");
 }
 
@@ -321,6 +327,7 @@ export function specOf(t: DelegateTask, index = 0): AgentRunSpec {
 	};
 	if (t.skills && t.skills.length > 0) spec.skills = t.skills;
 	if (t.model) spec.model = t.model;
+	if (t.thinking !== undefined) spec.thinking = t.thinking;
 	if (t.tools !== undefined) spec.tools = t.tools;
 	if (t.role?.trim()) spec.role = t.role.trim();
 	if (t.outputContract?.trim()) spec.outputContract = t.outputContract.trim();

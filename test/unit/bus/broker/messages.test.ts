@@ -3,6 +3,31 @@ import assert from "node:assert/strict";
 
 import { isFrame } from "../../../../src/bus/broker/messages.ts";
 
+const reqId = "12345678-1234-1234-1234-123456789abc";
+const ref = `result:${reqId}`;
+
+test("reader frames are closed, UUID-correlated and strictly range checked", () => {
+	assert.equal(isFrame({ t: "result_read", reqId, ref }), true);
+	assert.equal(isFrame({ t: "result_read", reqId, ref, offset: 0, limit: 16000 }), true);
+	assert.equal(isFrame({ t: "result_read_cancel", reqId }), true);
+	for (const patch of [{ reqId: "x" }, { ref: "../file" }, { offset: -1 }, { offset: 0.5 },
+		{ offset: "0" }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { limit: 1 }, { limit: 16001 },
+		{ limit: null }, { session: "foreign" }, { path: "/secret" }]) {
+		assert.equal(isFrame({ t: "result_read", reqId, ref, ...patch }), false, JSON.stringify(patch));
+	}
+	assert.equal(isFrame({ t: "result_read_cancel", reqId, ref }), false);
+});
+
+test("reader registration validates the private token and forbids client grants", () => {
+	for (const t of ["register", "registered"]) {
+		assert.equal(isFrame({ t, handle: "child", readerToken: "a".repeat(64) }), true);
+		for (const readerToken of ["", "a".repeat(63), "G".repeat(64), 1]) {
+			assert.equal(isFrame({ t, handle: "child", readerToken }), false);
+		}
+		assert.equal(isFrame({ t, handle: "child", readerToken: "a".repeat(64), grants: [ref] }), false);
+	}
+});
+
 test("isFrame accepts register", () => {
 	assert.equal(isFrame({ t: "register", handle: "a1" }), true);
 	assert.equal(isFrame({ t: "register", handle: "a1", label: "coder", group: "g1", peers: true }), true);

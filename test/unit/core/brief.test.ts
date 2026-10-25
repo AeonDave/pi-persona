@@ -385,6 +385,18 @@ const ALL_EXOCOM_TOOLS = {
 const XOPTS = { canDelegate: true, canAskHuman: true, tools: ALL_EXOCOM_TOOLS };
 const PEERS = [{ name: "orion", persona: "dev" }];
 
+test("peer collaboration guidance distinguishes optional pickup from binding questions and honors tool denials", () => {
+	const enabled = { ...XOPTS, tools: { ...ALL_EXOCOM_TOOLS, task: true, offer: true, publish: true, profile: true } };
+	const text = buildExocomBrief(PEERS, enabled) ?? "";
+	assert.match(text, /exocom_task/);
+	assert.match(text, /voluntar/i);
+	assert.match(text, /exocom_offer.*(?:optional|obligation)/);
+	assert.match(text, /exocom_publish/);
+	assert.match(text, /self-reported/);
+	const denied = buildExocomBrief(PEERS, XOPTS) ?? "";
+	assert.doesNotMatch(denied, /exocom_task|exocom_offer|exocom_publish|exocom_profile/);
+});
+
 test("buildExocomBrief: no peers → no brief", () => {
 	assert.equal(buildExocomBrief([], XOPTS), undefined);
 });

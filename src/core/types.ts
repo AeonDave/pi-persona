@@ -14,7 +14,7 @@ export type { Permission };
  *  new level here too — `pi.getThinkingLevel()` returns the upstream union, so a missing member here
  *  is a hard compile error where the host reads it (see `PersonaHost.getThinkingLevel`). */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export function isThinkingLevel(x: unknown): x is ThinkingLevel {
 	return typeof x === "string" && (THINKING_LEVELS as readonly string[]).includes(x);

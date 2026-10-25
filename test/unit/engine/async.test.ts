@@ -10,7 +10,7 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildRetentionOverflowNote, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, isAsyncRunStalled, madeHeadway, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion, runDurationLabel, STALL_FLAG_MS } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildRetentionOverflowNote, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, isAsyncRunStalled, madeHeadway, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion, runDisplayName, runDurationLabel, STALL_FLAG_MS } from "../../../src/engine/async.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { DEFAULT_ASYNC_RETAIN } from "../../../src/core/config.ts";
@@ -39,6 +39,20 @@ const failedRun = (id: string, agent: string, error: string): AsyncRun => ({
 	status: "failed",
 	progress: { output: "", turns: 1, tokens: 1 },
 	error,
+});
+
+test("terminal identities and completion reports use the observed model while launch history keeps its requested model", () => {
+	const run = doneRun("run-actual", "worker", "verified output");
+	run.model = "requested";
+	run.result!.modelUsed = "provider/resolved";
+	assert.equal(runDisplayName(run), "worker · resolved");
+	assert.match(buildPeekDigest([run], { now: 0, stallMs: 90000 }), /worker · resolved/);
+	assert.match(buildCompletionReport([run], (text) => `<untrusted>${text}</untrusted>`), /Observed model: provider\/resolved/);
+	assert.equal(runDisplayName({ ...run, status: "running" }), "worker · requested");
+	assert.equal(runDisplayName({ agent: "worker", model: "requested" }), "worker · requested");
+	delete run.result!.modelUsed;
+	assert.equal(runDisplayName(run), "worker · requested");
+	assert.doesNotMatch(buildCompletionReport([run], (text) => text), /Observed model:/);
 });
 
 /** Controllable clock: timers fire only when tick() is called, modelling debounce/retry rounds. */
@@ -708,6 +722,34 @@ test("buildPeekDigest omits the model suffix when a run has a label but no model
 	assert.doesNotMatch(digest, /atlas-static ·/, "no model ⇒ no dangling '· ' suffix");
 });
 
+test("retained effort metadata is a snapshot, not a mutable engine-result reference", async () => {
+	const result: AgentResult = { agent: "a", output: "answer", usage: usage(), ok: true, thinkingRequested: "xhigh", thinkingEffective: "high" };
+	const tracker = new AsyncRunTracker();
+	let settled!: () => void;
+	const completion = new Promise<void>((resolve) => { settled = resolve; });
+	tracker.onComplete(() => settled());
+	const id = tracker.launch({ agent: "a", task: "t" }, async () => result);
+	await completion;
+	result.thinkingRequested = "off";
+	result.thinkingEffective = "off";
+	assert.equal(tracker.peek(id)?.result?.thinkingRequested, "xhigh");
+	assert.equal(tracker.peek(id)?.result?.thinkingEffective, "high");
+});
+
+test("completion metadata distinguishes requested effort, observed Pi effort and unknown without claiming provider cognition", () => {
+	const run = (id: string, thinkingRequested?: "low" | "xhigh", thinkingEffective?: "high") => ({
+		id, agent: "a", task: "t", status: "done" as const, progress: { output: "", turns: 1, tokens: 5 },
+		result: { agent: "a", output: "answer", usage: usage(), ok: true, ...(thinkingRequested ? { thinkingRequested } : {}), ...(thinkingEffective ? { thinkingEffective } : {}) },
+	});
+	const report = buildCompletionReport([run("run-1", "xhigh", "high"), run("run-2", "low"), run("run-3", undefined, "high"), run("run-4")], (text) => `<F>${text}</F>`);
+	assert.match(report, /run-1.*requested xhigh.*observed Pi effort high/);
+	assert.match(report, /run-2.*requested low.*observed Pi effort unknown/);
+	assert.match(report, /run-3.*requested unknown.*observed Pi effort high/);
+	assert.match(report, /not provider cognition/);
+	assert.doesNotMatch(report, /run-4.*requested/);
+	assert.match(report, /<F>answer<\/F>/, "metadata does not modify untrusted result bodies");
+});
+
 test("buildCompletionReport gives an empty result a plain '(no output)' — never an empty fence shell", () => {
 	const fence = (t: string) => `<F>${t}</F>`;
 	const empty = buildCompletionReport(
@@ -900,11 +942,10 @@ test("buildCompletionReport fences untrusted sub-agent text (output and reasons)
 /** A string-rendering notifier (render = join with "|") for exercising the generic mechanism. */
 function makeStrNotifier(
 	clock: ReturnType<typeof fakeClock>,
-	deps: { isIdle: () => boolean; hasPending?: () => boolean; deliver: (m: string) => void | Promise<void> },
+	deps: { isIdle: () => boolean; deliver: (m: string) => void | Promise<void> },
 ): IdleCoalescingNotifier<string> {
 	return new IdleCoalescingNotifier<string>({
 		isIdle: deps.isIdle,
-		hasPending: deps.hasPending ?? (() => false),
 		deliver: deps.deliver,
 		render: (xs) => xs.join("|"),
 		setTimer: clock.setTimer,
@@ -1047,15 +1088,6 @@ test("IdleCoalescingNotifier defers while the supervisor is busy, then delivers 
 	assert.deepEqual(sent, ["q"], "delivered once the supervisor goes idle");
 });
 
-test("IdleCoalescingNotifier does not livelock on an orphaned host queue once the supervisor is idle", () => {
-	const clock = fakeClock();
-	const sent: string[] = [];
-	const n = makeStrNotifier(clock, { isIdle: () => true, hasPending: () => true, deliver: (m) => { sent.push(m); } });
-	n.notify("q");
-	clock.tick();
-	assert.deepEqual(sent, ["q"], "idle delivery starts the clean turn that can drain stale host follow-ups");
-});
-
 test("IdleCoalescingNotifier requeues and retries when a delivery races a just-started turn", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];
@@ -1176,7 +1208,6 @@ test("IdleCoalescingNotifier renders settled runs via buildCompletionReport", ()
 	const sent: string[] = [];
 	const n = new IdleCoalescingNotifier<AsyncRun>({
 		isIdle: () => true,
-		hasPending: () => false,
 		deliver: (m) => { sent.push(m); },
 		render: (runs) => buildCompletionReport(runs, (t) => t),
 		setTimer: clock.setTimer,
@@ -1195,7 +1226,7 @@ test("IdleCoalescingNotifier honours minIntervalMs and holds capped items until 
 	const delivered: string[] = [];
 	let now = 0;
 	const n = new IdleCoalescingNotifier<string>({
-		isIdle: () => true, hasPending: () => false,
+		isIdle: () => true,
 		deliver: (m) => { delivered.push(m); }, render: (items) => items.join(","),
 		setTimer: clock.setTimer, clearTimer: clock.clearTimer,
 		debounceMs: 1, minIntervalMs: 100, maxDeliveries: 2, now: () => now,

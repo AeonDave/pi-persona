@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { agentsDir, registryPath } from "./paths.ts";
+import { normalizeExocomProfile, type ExocomProfile } from "./profile.ts";
 
 export interface RegistryEntry {
 	/** `name` is display-only — NOT unique, NOT a lookup key. The registry FILE is keyed by
@@ -16,6 +17,8 @@ export interface RegistryEntry {
 	workspace_id?: string;
 	workspace_code?: string;
 	workspace_label?: string;
+	/** Optional self-reported presence; it is descriptive and never grants capability. */
+	profile?: ExocomProfile;
 }
 
 /** The fields that prove which process owns a registry slot.  `session_id` is the
@@ -57,6 +60,7 @@ export function normalizeRegistryEntry(value: unknown): RegistryEntry | undefine
 	const contextPct = typeof e.context_pct === "number" && Number.isFinite(e.context_pct) ? Math.max(0, Math.min(100, e.context_pct)) : 0;
 	const inbox = typeof e.inbox === "number" && Number.isFinite(e.inbox) ? Math.max(0, Math.min(1_000_000, Math.floor(e.inbox))) : 0;
 	const publicKey = opaqueString(e.public_key, 256);
+	const profile = normalizeExocomProfile(e.profile);
 	const hasWorkspaceMetadata = e.workspace_id !== undefined || e.workspace_code !== undefined || e.workspace_label !== undefined;
 	let workspace: Pick<RegistryEntry, "workspace_id" | "workspace_code" | "workspace_label"> = {};
 	if (hasWorkspaceMetadata) {
@@ -83,6 +87,7 @@ export function normalizeRegistryEntry(value: unknown): RegistryEntry | undefine
 		inbox,
 		heartbeat_at: new Date(Date.parse(heartbeatAt)).toISOString(),
 		...(publicKey && /^[A-Za-z0-9+/]+={0,2}$/.test(publicKey) ? { public_key: publicKey } : {}),
+		...(profile ? { profile } : {}),
 		...workspace,
 	};
 }

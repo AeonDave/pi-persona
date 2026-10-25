@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
@@ -19,6 +19,7 @@ function makeMockPi(initialActive: string[]) {
 	const pi = {
 		on: (event: string, handler: AnyFn) => { hooks[event] = handler; },
 		registerTool: (definition: { name: string }) => { tools[definition.name] = definition; },
+		events: { emit: () => {} },
 		registerMessageRenderer: () => {},
 		registerEntryRenderer: () => {},
 		appendEntry: () => {},
@@ -67,12 +68,23 @@ async function delegationPrompt(options: {
 		`---\nname: ${options.name}\npersona: true\n${options.toolsBlock ?? ""}---\nSupervise delegated work.`);
 	const m = makeMockPi(options.activeTools);
 	piPersona(m.pi);
+	const sessionManager = SessionManager.inMemory(cwd);
+	sessionManager.newSession({ id: `brief-${options.name}` });
 	const ctx = {
 		cwd,
 		hasUI: false,
 		model: undefined,
-		modelRegistry: { getAll: () => [], getAvailable: () => [] },
+		modelRegistry: {
+			getAll: () => [],
+			getAvailable: () => [],
+			getRegisteredProviderIds: () => [],
+			getProvider: () => undefined,
+			getRegisteredNativeProvider: () => undefined,
+			getRegisteredProviderConfig: () => undefined,
+		},
+		sessionManager,
 		isIdle: () => true,
+		getContextUsage: () => undefined,
 		hasPendingMessages: () => false,
 		ui: { setStatus: () => {}, notify: () => {}, select: async () => undefined },
 	};

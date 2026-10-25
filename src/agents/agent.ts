@@ -10,6 +10,8 @@
 
 import { sanitizeStatusLabel } from "../core/display-label.ts";
 import { asBoolean, asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { parseLegThinking } from "../core/leg-thinking.ts";
+import type { ThinkingLevel } from "../core/types.ts";
 import { writeSetPathError } from "../core/ownership.ts";
 
 export interface AgentConfig {
@@ -21,6 +23,8 @@ export interface AgentConfig {
 	 *  prompt text: the body already carries the behaviour, this only labels it. */
 	purpose?: string;
 	model?: string;
+	/** Default requested effort for this agent; an explicit leg override wins. Pi clamps it. */
+	thinking?: ThinkingLevel;
 	/** Tool allowlist passed to Pi. Absent means the session default tool set. */
 	tools?: string[];
 	/** Tool denylist applied after the allowlist/session default. */
@@ -73,6 +77,8 @@ export function parseAgent(content: string, source: string): AgentConfig | null 
 		if (purpose && purpose !== "agent") agent.purpose = purpose;
 	}
 	if (typeof fm.model === "string" && fm.model.trim()) agent.model = fm.model.trim();
+	const thinking = parseLegThinking(fm.thinking);
+	if (thinking !== undefined) agent.thinking = thinking;
 	const tools = asPermission(fm.tools);
 	if (tools?.allow) agent.tools = tools.allow;
 	if (tools?.deny) agent.excludeTools = tools.deny;

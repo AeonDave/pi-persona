@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerMonitorTool } from "../../../src/tools/monitor.ts";
+
+const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 
 function harness(allowed = true, archive?: any) {
 	let tool: any;
@@ -142,4 +145,71 @@ test("monitor description makes session-wide archive visibility explicit", () =>
 
 test("monitor description is a wake source, not a wait", () => {
 	assert.match(String(harness().tool.description), /not a wait.*`timer`.*sub-agents and Exocom wake you/i);
+});
+
+function renderHarness() {
+	let tool: any;
+	registerMonitorTool({ registerTool: (t: unknown) => { tool = t; } } as unknown as ExtensionAPI, {
+		lastCtx: undefined,
+		canRun: () => true,
+		monitors: {
+			arm(spec: any) { return { ok: true as const, entry: { ...spec, id: "monitor-1", startedAtEpochMs: Date.now(), expiresAtEpochMs: Date.now() + 90_000 } }; },
+			list: () => [],
+			cancel: () => true,
+		},
+	});
+	return tool;
+}
+
+const armResult = async (tool: any) => tool.execute("call", { action: "arm", command: "node", label: "build finished", mode: "output" }, undefined, undefined, { cwd: "D:/project" });
+
+test("monitor arm result card collapses to label, mode and a relative deadline — no advice paragraph, no ISO", async () => {
+	const tool = renderHarness();
+	const result = await armResult(tool);
+	assert.equal(result.details.ok, true);
+	assert.equal(result.details.id, "monitor-1");
+	assert.equal(result.details.label, "build finished");
+	assert.equal(result.details.mode, "output");
+	const before = JSON.stringify(result);
+	const raw = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false }).render(200).join("\n");
+	const collapsed = stripVTControlCharacters(raw);
+	assert.match(collapsed, /armed build finished · output/);
+	assert.match(collapsed, /deadline in /);
+	assert.doesNotMatch(collapsed, /wakes on relevant stdout lines|wakes you by itself|sleep, poll/);
+	assert.doesNotMatch(collapsed, /\d{4}-\d{2}-\d{2}T/);
+	assert.equal(JSON.stringify(result), before, "rendering never mutates the tool result");
+});
+
+test("monitor arm card expands to the complete literal receipt", async () => {
+	const tool = renderHarness();
+	const result = await armResult(tool);
+	const before = JSON.stringify(result);
+	const expanded = stripVTControlCharacters(tool.renderResult(result, { expanded: true }, plainTheme, { isError: false }).render(400).join("\n"));
+	assert.match(expanded, /Armed monitor-1 \(build finished\)/);
+	assert.match(expanded, /Deadline \d{4}-\d{2}-\d{2}T/);
+	assert.match(expanded, /wakes you by itself/);
+	assert.equal(JSON.stringify(result), before, "rendering never mutates the tool result");
+});
+
+test("monitor failed arms and non-arm actions render through the shared literal renderer", async () => {
+	const tool = renderHarness();
+	const failed = await tool.execute("call", { action: "arm", command: "node", label: "watch", mode: "nonsense" }, undefined, undefined, { cwd: "D:/project" });
+	assert.equal(failed.details.ok, false);
+	assert.equal(failed.details.label, undefined, "bounded card fields are added to arm success only");
+	assert.equal(failed.details.mode, undefined);
+	const raw = tool.renderResult(failed, { expanded: false }, plainTheme, { isError: true }).render(200).join("\n");
+	const collapsed = stripVTControlCharacters(raw);
+	assert.match(collapsed, /^failed/);
+	assert.match(collapsed, /output or exit/);
+	assert.doesNotMatch(collapsed, /armed /);
+	assert.ok(collapsed.split("\n").length <= 6, "failed arm stays a bounded collapsed card");
+	const expandedFailure = stripVTControlCharacters(tool.renderResult(failed, { expanded: true }, plainTheme, { isError: true }).render(400).join("\n"));
+	assert.match(expandedFailure, /output or exit/);
+	const cancel = await tool.execute("call", { action: "cancel", id: "monitor-1" }, undefined, undefined, { cwd: "D:/project" });
+	const cancelCard = stripVTControlCharacters(tool.renderResult(cancel, { expanded: false }, plainTheme, { isError: false }).render(200).join("\n"));
+	assert.match(cancelCard, /Cancelled monitor-1/);
+	assert.doesNotMatch(cancelCard, /armed /);
+	const before = JSON.stringify(cancel);
+	tool.renderResult(cancel, { expanded: true }, plainTheme, { isError: false });
+	assert.equal(JSON.stringify(cancel), before);
 });

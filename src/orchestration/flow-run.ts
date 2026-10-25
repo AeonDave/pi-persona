@@ -15,11 +15,14 @@ import type { AgentResult, FailureKind } from "./types.ts";
 
 export type PhaseStatus = "running" | "done" | "failed";
 
-/** One phase ready to run: its spec, the built task, and its upstream phases' results. */
+/** One phase ready to run: its spec, the built task, its upstream phases' results, and — in
+ *  reference mode — the DIRECT upstream refs granted to this phase's legs (nothing transitive). */
 export interface FlowPhaseRun {
 	phase: FlowPhase;
 	task: string;
 	upstream: Record<string, AgentResult>;
+	/** Empty in inline mode; the phase's direct needs' archived refs in reference mode. */
+	resultRefs: readonly string[];
 }
 
 export type RunPhaseFn = (run: FlowPhaseRun) => Promise<AgentResult>;
@@ -32,10 +35,23 @@ export interface FlowJournalEntry {
 	output: string;
 	/** A gated phase whose checkpoint was approved — so a resume doesn't re-prompt. */
 	gateApproved?: boolean;
+	/** Reference handoff: the archived `result:<UUID>` this phase's output lives under — the
+ *  body itself is NOT journaled in that mode (resume reads it back via the archive). */
+	resultRef?: string;
+	/** The archive-record schema version the `resultRef` line was written against. */
+	resultVersion?: 1;
 }
 
 /** A resume map value: a phase result plus whether its checkpoint gate was already approved. */
-export type ResumedResult = AgentResult & { gateApproved?: boolean };
+export type ResumedResult = AgentResult & {
+	gateApproved?: boolean;
+	resultVersion?: 1;
+	/** Reference handoff: the archived ref this phase was journaled under (from the journal). */
+	resultRef?: string;
+	/** The archived body for a phase's ref could not be read back (resume, or a live capture
+	 *  that produced no ref) — dependents block on this need; nothing re-runs or falls back. */
+	refUnavailable?: string;
+};
 
 export interface FlowRunDeps {
 	/** Run one phase's strategy → its result (wraps `runPersonaStrategy` in prod). */
@@ -43,6 +59,10 @@ export interface FlowRunDeps {
 	/** The pinned run identity (I3: `flowRunHash` = flow + task + cwd) — recorded in every journal line. */
 	hash: string;
 	signal?: AbortSignal;
+	/** Reference handoff: read a journaled ref's stored body back from the terminal archive —
+	 *  how a RESUME rebuilds a done phase's output without re-running it. Required for a
+	 *  reference-mode resume that has refs to restore; absent ⇒ every ref reads unavailable. */
+	readArchivedResult?: (ref: string) => { ok: true; body: string; status: "done" | "failed" | "stopped"; truncated?: boolean } | { ok: false; error: string };
 	/** Grace an aborted wave gets to unwind cooperatively before its still-running phases are
 	 *  force-settled (defaults to {@link ABORT_GRACE_MS}); shrinkable in tests. */
 	abortGraceMs?: number;
@@ -123,37 +143,94 @@ function within(p: Promise<unknown>, ms: number): Promise<void> {
 	});
 }
 
-/** Build a phase's task: the base task plus each upstream phase's output as context. */
+/** Reference handoff: how much of an upstream body is embedded as a PREVIEW (contract 2).
+ *  The full report stays in the archive; the dependent pages it with `read_result`. */
+export const RESULT_PREVIEW_CHARS = 1200;
+
+/** Build a phase's task. Inline (the default, first-class): the base task plus each upstream
+ *  phase's FULL fenced output. Reference: per upstream phase ONLY a bounded fenced preview +
+ *  the archived ref + its status + how to read more — never the full body. */
 function buildPhaseTask(baseTask: string, spec: FlowSpec, phase: FlowPhase, upstream: Record<string, AgentResult>): string {
 	const parts = [`Flow "${spec.name}" — phase "${phase.id}" (strategy: ${phase.strategy}).`, baseTask];
 	const ups = Object.entries(upstream);
-	if (ups.length > 0) {
-		parts.push("\nUpstream results to build on:");
-		for (const [id, r] of ups) parts.push(`\n--- ${id} ---\n${fenceUntrusted(r.output)}`);
+	if (ups.length === 0) return parts.join("\n");
+	if (spec.handoff === "reference") {
+		parts.push("\nUpstream results (archived references — read more with the read_result tool):");
+		for (const [id, r] of ups) {
+			const ref = r.resultReceipt?.ref;
+			parts.push(`\n--- ${id} ---`);
+			parts.push(`status: ${r.ok ? "done" : "failed"}`);
+			if (ref === undefined) {
+				parts.push(`result reference unavailable: ${r.output.slice(0, 200) || "(no output)"}`);
+				continue;
+			}
+			parts.push(`result ref: ${ref}`);
+			if (r.resultReceipt?.truncated) parts.push("Archive retention truncated the original report; the stored body is partial even after reading every page.");
+			parts.push(`preview (first ${RESULT_PREVIEW_CHARS} of ${r.output.length} chars):\n${fenceUntrusted(r.output.slice(0, RESULT_PREVIEW_CHARS))}${r.output.length > RESULT_PREVIEW_CHARS ? "\n(preview truncated — use read_result for the rest)" : ""}`);
+			parts.push(`Read the full report with the read_result tool, e.g. {"ref":"${ref}","offset":0,"limit":8000}; follow each reply's nextOffset until endOfStoredBody.`);
+		}
+		return parts.join("\n");
 	}
+	parts.push("\nUpstream results to build on:");
+	for (const [id, r] of ups) parts.push(`\n--- ${id} ---\n${fenceUntrusted(r.output)}`);
 	return parts.join("\n");
 }
 
 export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDeps): Promise<FlowOutcome> {
 	const byId = new Map(spec.phases.map((p) => [p.id, p]));
+	const reference = spec.handoff === "reference";
+	/** One journal write, mode-aware: reference lines carry the ref (+version marker) and never
+	 *  the body; inline lines stay byte-identical to the historical format. */
+	const journalSettled = (id: string, r: AgentResult, gateApproved = false): void => {
+		if (!deps.journal) return;
+		const ref = r.resultReceipt?.ref;
+		deps.journal(reference
+			? { phase: id, hash: deps.hash, ok: r.ok, output: "", ...(r.ok && ref !== undefined ? { resultRef: ref, resultVersion: 1 as const } : {}), ...(gateApproved ? { gateApproved: true } : {}) }
+			: { phase: id, hash: deps.hash, ok: r.ok, output: r.output, ...(gateApproved ? { gateApproved: true } : {}) });
+	};
+	/** Reference resume: rebuild a done phase's output from the terminal archive. A ref that
+	 *  cannot be read back marks the phase `refUnavailable` — its dependents BLOCK (no respawn,
+	 *  no inline fallback, no re-run of the done phase); the error says why. */
+	const restoreResumed = (r: ResumedResult): ResumedResult => {
+		if (r.refUnavailable) return { ...r, output: "" };
+		const ref = r.resultRef;
+		if (ref === undefined) {
+			return { ...r, output: "", refUnavailable: "the phase was journaled without an archived result reference" };
+		}
+		if (r.resultVersion !== 1) return { ...r, output: "", refUnavailable: "unsupported or missing archived result journal version" };
+		const read = deps.readArchivedResult?.(ref);
+		if (!read) return { ...r, output: "", refUnavailable: `archived result ${ref} is unreadable (no archive reader is wired for this run)` };
+		if (!read.ok) return { ...r, output: "", refUnavailable: `archived result ${ref} is unreadable (${read.error})` };
+		if (read.status !== "done") return { ...r, output: "", refUnavailable: `archived result ${ref} has status ${read.status}; expected done` };
+		return { ...r, output: read.body, resultReceipt: { ...(r.resultReceipt ?? {}), ref, ...(read.truncated === undefined ? {} : { truncated: read.truncated }) } };
+	};
 	// A gated phase only satisfies its dependents once its checkpoint is "passed" (or it blocks
 	// them once "rejected"). Resume pre-seeds gates the journal already recorded as approved.
 	const gateState = new Map<string, "passed" | "rejected">();
-	const done = new Map<string, AgentResult>();
-	for (const [id, r] of Object.entries(deps.resume ?? {})) {
+	const done = new Map<string, ResumedResult>();
+	for (const [id, r0] of Object.entries(deps.resume ?? {})) {
 		const gated = byId.get(id)?.gate === true;
 		// A gated phase resumed as ok but WITHOUT a recorded approval (the process died between
 		// journaling its completion and its gate decision) must RE-RUN, not be treated as done —
 		// otherwise it sits in `done` with an unresolved gate and its dependents can never run.
-		if (gated && r.ok && !(r as ResumedResult).gateApproved) continue;
+		let r: ResumedResult = r0;
+		if (reference && r0.ok) {
+			const restored = restoreResumed(r0);
+			r = restored.resultReceipt?.ref !== undefined ? restored : { ...restored, refUnavailable: restored.refUnavailable ?? "the phase has no archived result reference" };
+		}
+		// An invalid reference cannot turn this historical checkpoint into newly paid work.
+		if (gated && r.ok && !r.gateApproved && !r.refUnavailable) continue;
 		done.set(id, r);
-		if (gated && (r as ResumedResult).gateApproved) gateState.set(id, "passed");
+		if (gated && r0.gateApproved) gateState.set(id, "passed");
 	}
 	// A FAILED gated phase has no checkpoint to resolve — its gate must not keep dependents
 	// from being considered (needFailed then records them "blocked", exactly like a failed
 	// non-gated need; otherwise they'd never become ready and silently vanish, stuck ⏳).
 	const gateResolved = (id: string): boolean => !byId.get(id)?.gate || gateState.has(id) || done.get(id)?.ok === false;
 	const needFailed = (n: string): boolean => (done.has(n) && !done.get(n)?.ok) || gateState.get(n) === "rejected";
+	/** An OK need whose archived reference cannot serve dependents (unreadable at resume, or a
+	 *  live capture that produced no ref). The need stays DONE — only its dependents block. */
+	const needUnavailable = (n: string): boolean => (done.get(n)?.refUnavailable ?? "") !== "";
 	let remaining = spec.phases.filter((p) => !done.has(p.id));
 	let cancelled = false;
 	// Keep blocked dependents distinct from phases that actually ran and failed. The flow's
@@ -170,12 +247,18 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		const ready = remaining.filter((p) => (p.needs ?? []).every((n) => done.has(n) && gateResolved(n)));
 		if (ready.length === 0) break; // acyclic + progress guarantees this can't happen
 
-		// A phase whose any need FAILED or whose gate was REJECTED is blocked — record, don't run.
-		const blocked = ready.filter((p) => (p.needs ?? []).some((n) => needFailed(n)));
+		// A phase whose any need FAILED, whose gate was REJECTED, or (reference mode) whose need's
+		// archived ref cannot be read — record, don't run.
+		const blocked = ready.filter((p) => (p.needs ?? []).some((n) => needFailed(n) || needUnavailable(n)));
 		for (const p of blocked) {
 			blockedPhaseIds.add(p.id);
 			const gateReject = (p.needs ?? []).some((n) => gateState.get(n) === "rejected");
-			const error = gateReject ? "blocked: a checkpoint gate was not approved" : "blocked: an upstream phase failed";
+			const unavailableNeed = (p.needs ?? []).find((n) => needUnavailable(n));
+			const error = gateReject
+				? "blocked: a checkpoint gate was not approved"
+				: unavailableNeed !== undefined
+					? `blocked: upstream phase "${unavailableNeed}" result reference is unavailable (${done.get(unavailableNeed)?.refUnavailable})`
+					: "blocked: an upstream phase failed";
 			const r: AgentResult = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error };
 			done.set(p.id, r);
 			deps.onPhase?.(p.id, "failed", r);
@@ -196,15 +279,25 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 					const u = done.get(n);
 					if (u) upstream[n] = u;
 				}
+				// Reference mode: the phase's legs are granted EXACTLY its direct needs' refs —
+				// never a transitive ancestor's (the reader scope mirrors the task's previews).
+				const resultRefs: readonly string[] = reference
+					? (p.needs ?? []).map((n) => done.get(n)?.resultReceipt?.ref).filter((x): x is string => x !== undefined)
+					: [];
 				const task = buildPhaseTask(baseTask, spec, p, upstream);
 				// A throwing phase (e.g. a misconfigured strategy) is a phase FAILURE, not a
 				// crashed DAG — record it failed so its dependents block and the flow finishes.
-				let r: AgentResult;
+				let r: ResumedResult;
 				try {
-					r = await deps.runPhase({ phase: p, task, upstream });
+					r = await deps.runPhase({ phase: p, task, upstream, resultRefs });
 				} catch (err) {
 					const error = err instanceof Error ? err.message : String(err);
 					r = { agent: p.id, output: "", usage: emptyUsage(), ok: false, error };
+				}
+				// Reference mode is a durability contract: a phase that finished without an archived
+				// ref cannot serve its dependents. It stays done — dependents BLOCK on it below.
+				if (reference && r.ok && r.resultReceipt?.ref === undefined) {
+					r = { ...r, refUnavailable: "the phase completed without an archived result reference" };
 				}
 				// The run already gave up on this phase and moved on. Its UI node is torn down and
 				// its outcome is already reported, so re-drive neither — but work that DID complete
@@ -212,12 +305,12 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 				// for the same phase a second time. A late FAILURE is not journaled — there is
 				// nothing to reuse, and a resume has to re-run it anyway.
 				if (forced) {
-					if (r.ok) deps.journal?.({ phase: p.id, hash: deps.hash, ok: true, output: r.output });
+					if (r.ok) journalSettled(p.id, r);
 					return;
 				}
 				settled.set(p.id, r);
 				deps.onPhase?.(p.id, r.ok ? "done" : "failed", r);
-				deps.journal?.({ phase: p.id, hash: deps.hash, ok: r.ok, output: r.output });
+				journalSettled(p.id, r);
 			}),
 		);
 
@@ -257,16 +350,26 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 			if (!phase?.gate || !r.ok || gateState.has(id)) continue;
 			const approved = deps.approveGate ? await deps.approveGate(phase, r) : true;
 			gateState.set(id, approved ? "passed" : "rejected");
-			if (approved) deps.journal?.({ phase: id, hash: deps.hash, ok: true, output: r.output, gateApproved: true });
+			if (approved) journalSettled(id, r, true);
 		}
 		remaining = remaining.filter((p) => !done.has(p.id));
 	}
 
+	// Missing reference evidence is a failed resume, even when the saved phase is a sink
+	// with no dependent to expose the problem. Retain it in done to prevent any respawn.
+	for (const [id, result] of done) {
+		if (result.refUnavailable) done.set(id, {
+			...result, ok: false, error: `Archived result reference is unavailable: ${result.refUnavailable}`, failureKind: "contract",
+		});
+	}
 	const results: Record<string, AgentResult> = Object.fromEntries(done);
 	const needed = new Set(spec.phases.flatMap((p) => p.needs ?? []));
 	const terminals = spec.phases.filter((p) => !needed.has(p.id));
 	const terminalOutput = terminals
-		.map((p) => done.get(p.id)?.output ?? "")
+		.map((p) => {
+			const result = done.get(p.id);
+			return `${result?.output ?? ""}${result?.resultReceipt?.truncated ? "\n[pi-persona] Archive retention truncated this report; this is the partial stored body." : ""}`;
+		})
 		.filter((s) => s.trim())
 		.join("\n\n---\n\n");
 	const ok = spec.phases.every((p) => done.get(p.id)?.ok ?? false);

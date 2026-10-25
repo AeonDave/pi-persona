@@ -8,7 +8,8 @@ import { dirname } from "node:path";
 
 import { attributePeer } from "../core/fence.ts";
 import { findWriteSetOverlaps, writeSetPathError } from "../core/ownership.ts";
-import { isSemanticFrame, truncateForInject, type ExocomAsk, type ExocomClaim, type ExocomSemanticFrame } from "./envelope.ts";
+import { frameSigningPayload, isSemanticFrame, truncateForInject, type ExocomAsk, type ExocomClaim, type ExocomSemanticFrame } from "./envelope.ts";
+import { applyCollaborationEvent, collaborationStatus, emptyCollaboration, parseCollaboration, pruneCollaboration, releaseCollaboration, retainedCollaborationEvent, type CollaborationState } from "./collaboration.ts";
 
 export type LedgerEvent = ExocomSemanticFrame;
 
@@ -33,6 +34,8 @@ export interface LedgerState {
 	/** Accepted ask ids, including completed asks, so ids cannot be recycled in this retained ledger window. */
 	askIds: string[];
 	seen: string[];
+	/** Optional only for older in-memory callers; current snapshots retain the bounded peer-work state. */
+	collaboration?: CollaborationState;
 }
 
 export type ApplyResult =
@@ -56,7 +59,7 @@ export const LEDGER_LIMITS = {
 } as const;
 
 export function emptyLedger(): LedgerState {
-	return { claims: [], asks: [], answers: [], askIds: [], seen: [] };
+	return { claims: [], asks: [], answers: [], askIds: [], seen: [], collaboration: emptyCollaboration() };
 }
 
 function remember(state: LedgerState, msgId: string): LedgerState {
@@ -99,8 +102,31 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 		}
 		return { ok: false, error: "malformed ledger event" };
 	}
+	const retained = retainedCollaborationEvent(state.collaboration ?? emptyCollaboration(), event.msg_id);
+	if (retained) return frameSigningPayload(retained) === frameSigningPayload(event)
+		? { ok: true, state, duplicate: true } : { ok: false, error: "msg_id conflicts with a retained collaboration fact" };
 	if (state.seen.includes(event.msg_id)) return { ok: true, state, duplicate: true };
 	switch (event.kind) {
+		case "task_create":
+		case "task_take":
+		case "task_finish":
+		case "offer":
+		case "publish": {
+			const collaboration = state.collaboration ?? emptyCollaboration();
+			const applied = applyCollaborationEvent(collaboration, event);
+			if (!applied.ok) return applied;
+			let claims = state.claims;
+			const task = collaboration.tasks.find((candidate) => candidate.created.work_key === event.work_key);
+			if (event.kind === "task_take" && task?.created.write_set.length) {
+				if (claims.some((claim) => claim.work_key === event.work_key && claim.from_session === event.from_session)) return { ok: false, error: "task pickup conflicts with an existing owned claim on this work_key" };
+				const claimed = applyLedgerEvent(state, { kind: "claim", work_key: event.work_key, from_session: event.from_session, from_name: event.from_name,
+					write_set: [...task.created.write_set], slice: task.created.description.slice(0, 256), msg_id: event.msg_id, ts: event.ts });
+				if (!claimed.ok) return claimed;
+				claims = claimed.state.claims;
+			}
+			if (event.kind === "task_finish" && task?.taken) claims = claims.filter((claim) => claim.msg_id !== task.taken!.msg_id);
+			return { ok: true, state: remember({ ...state, claims, collaboration: applied.state }, event.msg_id) };
+		}
 		case "claim": {
 			if (state.claims.length >= LEDGER_LIMITS.maxClaims) return { ok: false, error: "ledger claim limit reached" };
 			for (const path of event.write_set) {
@@ -138,12 +164,18 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 		case "release": {
 			const owned = state.claims.filter((claim) => claim.work_key === event.work_key && claim.from_session === event.from_session);
 			const outbound = state.asks.filter((ask) => ask.work_key === event.work_key && ask.from_session === event.from_session);
-			if (owned.length === 0 && outbound.length === 0) return { ok: false, error: "release: no owned claim or outbound ask on that work_key" };
+			const collaboration = state.collaboration ?? emptyCollaboration();
+			const ownsTask = collaboration.tasks.some((task) => task.created.work_key === event.work_key && !task.finished && !task.stale
+				&& (task.taken?.from_session ?? task.created.from_session) === event.from_session);
+			if (owned.length === 0 && outbound.length === 0 && !ownsTask) return { ok: false, error: "release: no owned claim or outbound ask on that work_key" };
 			const claims = state.claims.filter((claim) => !(claim.work_key === event.work_key && claim.from_session === event.from_session));
 			const asks = state.asks.filter((ask) => !(ask.work_key === event.work_key && ask.from_session === event.from_session));
-			return { ok: true, state: remember({ ...state, claims, asks }, event.msg_id) };
+			return { ok: true, state: remember({ ...state, claims, asks, collaboration: releaseCollaboration(collaboration, event.from_session, event.work_key, Date.parse(event.ts)) }, event.msg_id) };
 		}
-		case "progress": return { ok: true, state: remember(state, event.msg_id) };
+		case "progress": {
+			const applied = applyCollaborationEvent(state.collaboration ?? emptyCollaboration(), event);
+			return applied.ok ? { ok: true, state: remember({ ...state, collaboration: applied.state }, event.msg_id) } : applied;
+		}
 	}
 }
 
@@ -154,6 +186,7 @@ interface LedgerSnapshot {
 	answers: LedgerAnswer[];
 	ask_ids: string[];
 	seen: string[];
+	collaboration?: CollaborationState;
 }
 
 function token(value: unknown): value is string {
@@ -216,7 +249,15 @@ function parseSnapshot(raw: unknown): LedgerState | undefined {
 	}
 	const requiredAskIds = new Set(state.askIds);
 	if (![...requiredAskIds].every((askId) => snapshot.ask_ids!.includes(askId))) return undefined;
-	return { ...state, askIds: [...snapshot.ask_ids], seen: [...snapshot.seen] };
+	const collaboration = snapshot.collaboration === undefined ? emptyCollaboration() : parseCollaboration(snapshot.collaboration);
+	if (!collaboration) return undefined;
+	for (const task of collaboration.tasks) {
+		if (collaborationStatus(task) !== "taken" || !task.created.write_set.length) continue;
+		const claim = state.claims.find((candidate) => candidate.msg_id === task.taken?.msg_id);
+		if (!claim || claim.from_session !== task.taken?.from_session || claim.work_key !== task.created.work_key
+			|| JSON.stringify(claim.write_set) !== JSON.stringify(task.created.write_set)) return undefined;
+	}
+	return { ...state, collaboration, askIds: [...snapshot.ask_ids], seen: [...snapshot.seen] };
 }
 
 function snapshotOf(state: LedgerState): LedgerSnapshot {
@@ -227,6 +268,7 @@ function snapshotOf(state: LedgerState): LedgerSnapshot {
 		answers: state.answers,
 		ask_ids: state.askIds,
 		seen: state.seen,
+		collaboration: state.collaboration ?? emptyCollaboration(),
 	};
 }
 
@@ -246,6 +288,8 @@ export function parseLedger(text: string): LedgerState {
 			state = restored;
 			continue;
 		}
+		if (raw && typeof raw === "object" && typeof (raw as { kind?: unknown }).kind === "string"
+			&& (raw as { kind: string }).kind.startsWith("ledger_snapshot_")) throw new Error("unsupported ledger snapshot version");
 		if (!isSemanticFrame(raw)) continue;
 		const result = applyLedgerEvent(state, raw);
 		if (result.ok) state = result.state;
@@ -276,7 +320,7 @@ export function pruneLedger(state: LedgerState, options: LedgerPruneOptions): Le
 	const asks = state.asks.filter((ask) => options.liveSessions.has(ask.from_session) && options.liveSessions.has(ask.to_session));
 	const answers = state.answers.filter((answer) => isFresh(answer.ts, now, ttlMs)).slice(-LEDGER_LIMITS.maxResults);
 	const askIds = [...new Set([...asks.map((ask) => ask.ask_id), ...answers.map((answer) => answer.ask_id)])];
-	return { ...state, claims, asks, answers, askIds };
+	return { ...state, claims, asks, answers, askIds, collaboration: pruneCollaboration(state.collaboration ?? emptyCollaboration(), now, ttlMs, (session) => options.liveSessions.has(session)) };
 }
 
 /** The pending asks a prune dropped (a party left the pool) — the ids a waiter must be woken for. */
@@ -565,6 +609,8 @@ export function appendLedgerEvent(path: string, event: LedgerEvent): void {
 export interface LedgerCommitOptions {
 	/** Applied under the same transaction lock before validating the new event. */
 	prune?: LedgerPruneOptions;
+	/** Authoritative write admission, evaluated against the locked task definition (not a preflight read). */
+	canClaim?: boolean;
 	/** Test/operations override; defaults to half the maximum journal size. */
 	compactAtBytes?: number;
 	/** Fault-injection seam for short-write and Windows replacement regression tests. */
@@ -578,7 +624,8 @@ export interface LedgerFileIO {
 
 function pruningChanged(before: LedgerState, after: LedgerState): boolean {
 	return before.claims.length !== after.claims.length || before.asks.length !== after.asks.length
-		|| before.answers.length !== after.answers.length || before.askIds.length !== after.askIds.length;
+		|| before.answers.length !== after.answers.length || before.askIds.length !== after.askIds.length
+		|| JSON.stringify(before.collaboration) !== JSON.stringify(after.collaboration);
 }
 
 export function commitLedgerEvent(path: string, event: LedgerEvent, options: LedgerCommitOptions = {}): ApplyResult {
@@ -588,6 +635,9 @@ export function commitLedgerEvent(path: string, event: LedgerEvent, options: Led
 		const sizeBeforeRecovery = recoverIncompleteTrailingRecordLocked(path);
 		const loaded = loadLedger(path);
 		const pruned = options.prune ? pruneLedger(loaded, options.prune) : loaded;
+		const writes = event.kind === "claim" || event.kind === "task_create" ? event.write_set.length > 0
+			: event.kind === "task_take" && (pruned.collaboration?.tasks.find((task) => task.created.work_key === event.work_key)?.created.write_set.length ?? 0) > 0;
+		if (options.canClaim === false && writes) return { ok: false, error: "this session cannot claim write paths in the selected scope" };
 		const result = applyLedgerEvent(pruned, event);
 		const compactAt = Number.isFinite(options.compactAtBytes) && options.compactAtBytes !== undefined
 			? Math.max(1, Math.floor(options.compactAtBytes)) : Math.floor(LEDGER_LIMITS.maxBytes / 2);

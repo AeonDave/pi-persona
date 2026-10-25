@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
+import { readFailure, type ReadReply, type ScopedReader } from "../../../../src/bus/result-reader.ts";
 
 import { InProcessBus } from "../../../../src/bus/inproc.ts";
 import { startBrokerHost, type BrokerHost } from "../../../../src/bus/broker/host.ts";
@@ -122,6 +124,245 @@ async function startHost(bus: InProcessBus, extra: Partial<Parameters<typeof sta
 	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint: "/fake/endpoint.sock", net, ...extra });
 	return { host, server };
 }
+
+const resultRef = `result:${randomUUID()}`;
+const page = (body = "ok"): ReadReply => ({ ok: true, ref: resultRef, body, offset: 0,
+	storedChars: body.length, originalChars: body.length, truncated: false, endOfStoredBody: true,
+	status: "done", provenance: "result-output" });
+function reader(read: ScopedReader["read"] = async () => page()) {
+	let revoked = 0;
+	return { read, revoke: () => { revoked++; }, revocations: () => revoked };
+}
+const tick = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+
+test("reader handles require their one-shot secret; sibling, impersonation and replay fail without leaking it", async () => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		const r = reader();
+		const grant = await host.prepareResultReader("reader", r);
+		assert.match(grant.token, /^[a-f0-9]{64}$/);
+		const other = await host.prepareResultReader("sibling", reader());
+		for (const token of [undefined, other.token, "a".repeat(64)]) {
+			const bad = connectClient(server);
+			bad.send({ t: "register", handle: "reader", ...(token ? { readerToken: token } : {}) });
+			assert.equal(bad.frames.some((f) => f.t === "registered"), false);
+			assert.equal(JSON.stringify(bad.frames).includes(grant.token), false);
+			bad.client.destroy();
+		}
+		assert.equal(grant.wasBound(), false);
+		const good = connectClient(server);
+		good.send({ t: "register", handle: "reader", readerToken: grant.token });
+		assert.deepEqual(good.frames[0], { t: "registered", handle: "reader", readerToken: grant.token });
+		assert.equal(grant.wasBound(), true);
+		good.client.destroy();
+		assert.equal(r.revocations(), 1);
+		const replay = connectClient(server);
+		replay.send({ t: "register", handle: "reader", readerToken: grant.token });
+		assert.equal(replay.frames.some((f) => f.t === "registered"), false);
+		grant.revoke();
+		assert.equal(r.revocations(), 1);
+	} finally { await host.close(); }
+});
+
+test("a rejected supplied token cannot reuse its socket as an ordinary registration", async () => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "intruder", readerToken: "a".repeat(64) });
+		c.send({ t: "register", handle: "intruder" });
+		assert.equal(c.frames.some((f) => f.t === "registered"), false);
+		assert.equal(c.client.destroyed, true);
+	} finally { await host.close(); }
+});
+
+test("completed read ids cannot replay and sibling cancellation cannot touch another reader", async () => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		let calls = 0;
+		let signal: AbortSignal | undefined;
+		let finish!: (value: ReadReply) => void;
+		const grant = await host.prepareResultReader("reader", reader((_r, s) => {
+			calls++; signal = s; return new Promise((resolve) => { finish = resolve; });
+		}));
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: grant.token });
+		const sibling = connectClient(server);
+		sibling.send({ t: "register", handle: "sibling" });
+		const reqId = randomUUID();
+		c.send({ t: "result_read", reqId, ref: resultRef });
+		await tick();
+		sibling.send({ t: "result_read_cancel", reqId });
+		assert.equal(signal?.aborted, false);
+		finish(page());
+		await tick();
+		c.send({ t: "result_read", reqId, ref: resultRef });
+		assert.deepEqual(c.frames.at(-1), { t: "result_read_reply", reqId, result: readFailure("protocol") });
+		assert.equal(calls, 1);
+	} finally { await host.close(); }
+});
+
+test("host rejects oversized or metadata-bearing reader callbacks instead of serializing them", async () => {
+	for (const value of [{ ...page(), summary: { task: "SECRET" } }, page("x".repeat(16001))]) {
+		const { host, server } = await startHost(new InProcessBus());
+		try {
+			const grant = await host.prepareResultReader("reader", reader(async () => value));
+			const c = connectClient(server);
+			c.send({ t: "register", handle: "reader", readerToken: grant.token });
+			const reqId = randomUUID();
+			c.send({ t: "result_read", reqId, ref: resultRef, limit: 16000 });
+			await tick();
+			assert.deepEqual(c.frames.at(-1), { t: "result_read_reply", reqId, result: readFailure("protocol") });
+		} finally { await host.close(); }
+	}
+});
+
+test("ungranted refs reach only the parent's scoped reader and return its fixed denial", async () => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		const grant = await host.prepareResultReader("reader", reader(async (request) =>
+			request.ref === resultRef ? page() : readFailure("denied")));
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: grant.token });
+		const id = randomUUID();
+		c.send({ t: "result_read", reqId: id, ref: `result:${randomUUID()}` });
+		await tick();
+		assert.deepEqual(c.frames.at(-1), { t: "result_read_reply", reqId: id, result: readFailure("denied") });
+		const ordinary = connectClient(server);
+		ordinary.send({ t: "register", handle: "ordinary" });
+		ordinary.send({ t: "result_read", reqId: id, ref: resultRef });
+		assert.deepEqual(ordinary.frames.at(-1), { t: "result_read_reply", reqId: id, result: readFailure("denied") });
+	} finally { await host.close(); }
+});
+
+test("reader pending requests cap at eight; duplicates fail and cancel the original", async () => {
+	const signals: AbortSignal[] = [];
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		const grant = await host.prepareResultReader("reader", reader(async (_r, signal) => {
+			signals.push(signal!); return new Promise(() => {});
+		}));
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: grant.token });
+		const ids = Array.from({ length: 8 }, () => randomUUID());
+		for (const reqId of ids) c.send({ t: "result_read", reqId, ref: resultRef });
+		await tick();
+		assert.equal(signals.length, 8);
+		const excess = randomUUID();
+		c.send({ t: "result_read", reqId: excess, ref: resultRef });
+		assert.deepEqual(c.frames.at(-1), { t: "result_read_reply", reqId: excess, result: readFailure("busy") });
+		c.send({ t: "result_read", reqId: ids[0]!, ref: resultRef });
+		assert.deepEqual(c.frames.at(-1), { t: "result_read_reply", reqId: ids[0]!, result: readFailure("protocol") });
+		assert.equal(signals[0]?.aborted, true);
+		assert.equal(signals.length, 8);
+	} finally { await host.close(); }
+});
+
+test("cancel, abort, forget, disconnect and host close abort pending reads and discard late replies", async () => {
+	for (const action of ["cancel", "abort", "forget", "disconnect", "close"] as const) {
+		const { host, server } = await startHost(new InProcessBus());
+		const ac = new AbortController();
+		let finish!: (value: ReadReply) => void;
+		let signal: AbortSignal | undefined;
+		const r = reader((_r, s) => { signal = s; return new Promise((resolve) => { finish = resolve; }); });
+		const grant = await host.prepareResultReader("reader", r, ac.signal);
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: grant.token });
+		const reqId = randomUUID();
+		c.send({ t: "result_read", reqId, ref: resultRef });
+		await tick();
+		if (action === "cancel") c.send({ t: "result_read_cancel", reqId });
+		if (action === "abort") ac.abort();
+		if (action === "forget") host.forget("reader");
+		if (action === "disconnect") c.client.destroy();
+		if (action === "close") await host.close();
+		assert.equal(signal?.aborted, true, action);
+		finish(page("must not arrive"));
+		await tick();
+		assert.equal(c.frames.some((f) => f.t === "result_read_reply" && f.result.ok), false, action);
+		await host.close();
+		assert.equal(r.revocations(), 1, action);
+	}
+});
+
+test("host enforces its own ten-second read deadline even if the callback ignores cancellation", async (t) => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		let signal: AbortSignal | undefined;
+		const grant = await host.prepareResultReader("reader", reader(async (_r, s) => {
+			signal = s; return new Promise(() => {});
+		}));
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: grant.token });
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const reqId = randomUUID();
+		c.send({ t: "result_read", reqId, ref: resultRef });
+		await Promise.resolve();
+		t.mock.timers.tick(10000);
+		assert.equal(signal?.aborted, true);
+		assert.deepEqual(c.frames.at(-1), { t: "result_read_reply", reqId, result: readFailure("timeout") });
+	} finally { t.mock.timers.reset(); await host.close(); }
+});
+
+test("a late old socket close cannot revoke a replacement result grant", async () => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		const first = await host.prepareResultReader("reader", reader());
+		const old = connectLingeringClient(server);
+		old.send({ t: "register", handle: "reader", readerToken: first.token });
+		old.send({ t: "bye" });
+		const replacement = reader();
+		const next = await host.prepareResultReader("reader", replacement);
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: next.token });
+		old.serverSide.destroy();
+		first.revoke();
+		assert.equal(replacement.revocations(), 0);
+		c.send({ t: "result_read", reqId: randomUUID(), ref: resultRef });
+		await tick();
+		assert.equal(c.frames.some((f) => f.t === "result_read_reply" && f.result.ok), true);
+	} finally { await host.close(); }
+});
+
+test("preparation refuses occupied/reserved handles and pre-aborted or closed lifetimes", async () => {
+	const bus = new InProcessBus();
+	const { host, server } = await startHost(bus);
+	try {
+		await host.prepareResultReader("reserved", reader());
+		await assert.rejects(host.prepareResultReader("reserved", reader()));
+		host.expect("already-expected");
+		await assert.rejects(host.prepareResultReader("already-expected", reader()));
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "occupied" });
+		await assert.rejects(host.prepareResultReader("occupied", reader()));
+		bus.register("local");
+		await assert.rejects(host.prepareResultReader("local", reader()));
+		await assert.rejects(host.prepareResultReader("supervisor", reader()));
+		const r = reader();
+		await assert.rejects(host.prepareResultReader("aborted", r, AbortSignal.abort()));
+		assert.equal(r.revocations(), 1);
+	} finally { await host.close(); }
+	await assert.rejects(host.prepareResultReader("closed", reader()));
+});
+
+test("malformed reader frames and callback failures cannot echo secrets or metadata", async () => {
+	const { host, server } = await startHost(new InProcessBus());
+	try {
+		const grant = await host.prepareResultReader("reader", reader(async () => { throw new Error("secret-path"); }));
+		const c = connectClient(server);
+		c.send({ t: "register", handle: "reader", readerToken: grant.token });
+		c.send({ t: "result_read", reqId: randomUUID(), ref: resultRef });
+		await tick();
+		assert.equal(JSON.stringify(c.frames.slice(1)).includes("secret-path"), false);
+		const malformed = connectClient(server);
+		const data = Buffer.from(`{"t":"register", "readerToken":"${grant.token}" BROKEN`);
+		const header = Buffer.alloc(4); header.writeUInt32BE(data.length);
+		malformed.client.write(Buffer.concat([header, data]));
+		assert.equal(JSON.stringify(malformed.frames).includes(grant.token), false);
+		const badShape = connectClient(server);
+		badShape.client.write(encodeFrame({ t: "result_read", reqId: randomUUID(), ref: resultRef, path: "secret-path" }));
+		assert.equal(JSON.stringify(badShape.frames).includes("secret-path"), false);
+	} finally { await host.close(); }
+});
 
 test("a registered remote handle receives a deliver frame when the supervisor bus.sends to it", async () => {
 	const bus = new InProcessBus();

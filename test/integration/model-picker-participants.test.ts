@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import piPersona, { type EngineFactories } from "../../src/extension.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
@@ -40,6 +40,7 @@ function makeMockPi() {
 	const commands: Record<string, { handler: AnyFn }> = {};
 	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
+		events: { emit: () => {}, on: () => () => {} },
 		on: (ev: string, h: AnyFn) => { hooks[ev] = h; },
 		registerTool: (def: { name: string }) => { tools[def.name] = def; },
 		registerMessageRenderer: () => {},
@@ -78,10 +79,12 @@ function makeCtx(cwd: string, opts: { hasUI?: boolean; onSelect?: AnyFn } = {}) 
 	const notes: string[] = [];
 	const ctx = {
 		cwd,
+		sessionManager: SessionManager.inMemory(cwd),
 		hasUI: opts.hasUI ?? false,
 		mode: opts.hasUI ? "rpc" : "print",
 		model: opts.hasUI ? { provider: "alpha", id: "one" } : undefined,
-		modelRegistry: { getAll: () => MODELS, getAvailable: () => MODELS },
+		modelRegistry: { getAll: () => MODELS, getAvailable: () => MODELS, refresh: async () => undefined,
+			getRegisteredProviderIds: () => ["alpha", "beta"], getProvider: () => undefined },
 		isIdle: () => true,
 		hasPendingMessages: () => false,
 		ui: {
@@ -177,6 +180,65 @@ function fakeEngine(runs: AgentRunSpec[]): StrategyEngine {
 }
 
 const convene = (h: Harness, id: string, params: Record<string, unknown>) => conveneOn(h, id, params);
+
+test("council launch snapshot resolves named-team inline, saved role, agent and inherited models plus the judge", async () => {
+	const cwd = projectWith("panel:\n  - { agent: reviewer, role: BREAK, model: alpha/one, thinking: xhigh }\n  - { agent: reviewer, role: HEAD }\n  - configured\n  - inherited\n", {
+		reviewer: "---\nname: reviewer\nthinking: low\n---\nReview.", configured: "---\nname: configured\nmodel: beta/two\nthinking: max\n---\nWork.",
+		inherited: "---\nname: inherited\n---\nWork.", arbiter: "---\nname: arbiter\nmodel: alpha/one\nthinking: minimal\n---\nJudge.",
+	});
+	const h = await boot({ cwd, persona: personaOf("Host."), initialModels: { [participantKey("reviewer", "HEAD")]: "beta/two" } });
+	const council = h.m.tool("council") as { execute: AnyFn };
+	const receipt = await council.execute("snapshot", { question: "choose", strategy: "judge", roster: "panel", params: { judge: "arbiter" } }, undefined, undefined, h.ctx);
+	assert.equal(receipt.isError, false);
+	assert.deepEqual(receipt.details.launch.participants.map((p: any) => [p.agent, p.model, p.modelSource, p.thinkingRequested, p.setupPending]), [
+		["reviewer", "alpha/one", "inline", "xhigh", false], ["reviewer", "beta/two", "assignment", "low", false],
+		["configured", "beta/two", "agent", "max", false], ["inherited", "alpha/one", "session", "medium", true],
+		["arbiter", "alpha/one", "agent", "minimal", false],
+	]);
+	assert.equal(receipt.details.launch.participants[4].param, "judge");
+	await waitUntil(() => h.runs.some((r) => r.agent === "arbiter"), "the arbiter leg");
+});
+
+test("interactive council returns before its model picker settles and preserves the provisional launch default", async () => {
+	let release!: (choice: string) => void;
+	const h = await boot({ cwd: projectWith("panel: [unassigned]\n", { unassigned: "---\nname: unassigned\n---\nWork." }), persona: personaOf("Host."),
+		select: () => new Promise<string>((resolve) => { release = resolve; }),
+	});
+	const council = h.m.tool("council") as { execute: AnyFn };
+	const receipt = await council.execute("pending-snapshot", { question: "work", strategy: "fanout", roster: "panel" }, undefined, undefined, h.ctx);
+	const saved = JSON.stringify(receipt.details.launch);
+	assert.equal(receipt.details.launch.participants[0].setupPending, true);
+	assert.equal(receipt.details.launch.participants[0].model, "alpha/one");
+	assert.equal(h.runs.length, 0, "the receipt does not wait for operator setup");
+	await waitUntil(() => release !== undefined, "the model picker");
+	release("beta/two");
+	await waitUntil(() => h.runs.length === 1, "the selected leg");
+	assert.equal(h.savedModels().unassigned, "beta/two");
+	assert.equal(JSON.stringify(receipt.details.launch), saved, "later applied assignments cannot rewrite the launch receipt");
+});
+
+test("judge launch preserves three reviewer lenses, repeated role pins, and a same-key auxiliary judge", async (t) => {
+	const h = await boot({ cwd: projectWith("unused: []\n", { reviewer: "---\nname: reviewer\nthinking: high\n---\nReview." }), persona: personaOf("Host.") });
+	const members = ["BREAK", "PI_PERSONA_RESULT_READER_TOKEN", "HEAD", "HEAD"].map((role, index) => ({ agent: "reviewer", role, model: `openai/model-${index}`, thinking: index === 3 ? "low" : "xhigh" }));
+	const council = h.m.tool("council") as { execute: AnyFn; renderResult: AnyFn };
+	const receipt = await council.execute("occurrences", { question: "choose", strategy: "judge", members,
+		params: { judge: { agent: "reviewer", role: "HEAD", model: "openai/judge", thinking: "max" } } }, undefined, undefined, h.ctx);
+	assert.equal(receipt.isError, false);
+	const rows = receipt.details.launch.participants;
+	assert.deepEqual(rows.map((p: any) => p.model), ["openai/model-0", "openai/model-1", "openai/model-2", "openai/model-3", "openai/judge"]);
+	assert.deepEqual(rows.map((p: any) => p.thinkingRequested), ["xhigh", "xhigh", "xhigh", "low", "max"]);
+	assert.equal(new Set(rows.map((p: any) => p.key)).size, 5);
+	assert.notEqual(rows[2].key, rows[3].key, "a repeated role still names separate execution occurrences");
+	assert.match(rows[3].label, /#\d+$/);
+	assert.equal(rows[4].param, "judge");
+	assert.equal(h.titles.length, 0, "inline pins never manufacture setup prompts");
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	const collapsed = council.renderResult(receipt, { expanded: false }, theme).render(120).map((line: string) => line.trimEnd()).join("\n");
+	const expanded = council.renderResult(receipt, { expanded: true }, theme).render(160).map((line: string) => line.trimEnd()).join("\n");
+	for (const width of [1, 12, 24, 60, 80]) assert.ok(council.renderResult(receipt, { expanded: false }, theme).render(width).every((line: string) => line.length <= width), `actual fixture fits ${width} columns`);
+	t.diagnostic(`Collapsed actual judge launch:\n${collapsed}\nExpanded actual judge launch:\n${expanded}`);
+	await waitUntil(() => h.runs.length === 5, "all distinct requested judge legs");
+});
 
 // Explicit user refresh is separate from the automatic, never-nag picker.
 test("/persona models magi refreshes saved cores for the active caller without switching personas", async () => {
@@ -296,7 +358,7 @@ test("a session change during selection discards accepted rows instead of applyi
 	const h = await boot({ cwd: projectWith("magi: [melchior, casper]\n"), persona: personaOf("Host."), initialModels: { melchior: "retired/model" },
 		select: (title: string) => { if (title.includes("casper")) sessionId = "replacement"; return "beta/two"; },
 	});
-	Object.assign(h.ctx as object, { sessionManager: { getSessionId: () => sessionId } });
+	Object.assign((h.ctx as { sessionManager: object }).sessionManager, { getSessionId: () => sessionId });
 	await h.m.cmd("persona", "models magi", h.ctx);
 	assert.equal(h.titles.length, 2);
 	assert.deepEqual(h.savedModels(), { melchior: "retired/model" });
@@ -618,7 +680,7 @@ for (const change of ["persona", "session"] as const) {
 		const h = await boot({ cwd: projectWith("panel: [operator, scout]\n"), persona: personaOf("Host."),
 			select: (_title: string, options: string[]) => hold ? new Promise<string | undefined>((resolve) => { release = resolve; }) : options[0],
 		});
-		Object.assign(h.ctx as object, { sessionManager: { getSessionId: () => sessionId } });
+		Object.assign((h.ctx as { sessionManager: object }).sessionManager, { getSessionId: () => sessionId });
 		try {
 			const tool = h.m.tool("council") as { execute: AnyFn };
 			await tool.execute("first", { question: "first", strategy: "fanout", roster: "panel" }, undefined, undefined, h.ctx);

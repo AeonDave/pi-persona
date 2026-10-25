@@ -37,8 +37,13 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `@earendil-works/pi-*`; never bundle copies.
 - npm publishes as `@aeondave/pi-persona`. Pi supplies the four `@earendil-works/pi-*` packages
   and `typebox`: keep them as `peerDependencies: "*"` with development-only copies, never runtime
-  dependencies. The supported host floor is Pi ≥ 1.0.0 (`MIN_PI_VERSION` and the README); Node.js
-  must be ≥ 22.19 to match that host. Keep the npm
+  dependencies. Target the latest stable Pi only (currently 1.4.0, aligned with `MIN_PI_VERSION`,
+  the four development pins and README); do not maintain historical-host compatibility branches.
+  **No legacy or deferred cleanup:** remove dead code, obsolete options, superseded implementations
+  and compatibility-only aliases with their replacement. Update every caller, fixture and document
+  in the same change. A completed feature must not leave temporary scaffolding or cleanup debt.
+  Keep a path only when it serves the current host/runtime or a demonstrated current data contract.
+  Node.js must be ≥ 22.19 to match that host. Keep the npm
   `files` allowlist explicit for docs/artwork, inspect `npm pack --dry-run`, and never publish drafts.
 - Supply-chain controls: pin every GitHub Action to a verified full commit SHA; keep top-level
   token permissions read-only, grant write permissions only to the reporting job that needs them,
@@ -175,7 +180,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   a live, capability-filtered roster (agents, teams and flows, with descriptions and gated flows tagged in
   headless sessions) + a hand-off default (with one decision-class → method line, checked against the
   registry) to the system-prompt TAIL every turn — discovery that survives context burn.
-- **Sibling peer comm (in-process)**: a strategy can opt a run into direct sibling messaging
+- **Sibling peer comm**: a strategy can opt a run into direct sibling messaging
   (`AgentRunSpec.peers` — the `debate` strategy does). The child gets a `contact_peer` tool
   (`bus/peers.ts`): `list`/`send`, ONE-WAY only (blocking stays supervisor-only, so peers can
   never deadlock), peer list scoped per engine instance (never the whole bus), send budget 20,
@@ -183,7 +188,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Delivery: the in-process engine's bridge steers incoming bus messages into the child session,
   fenced with the sender attributed OUTSIDE the fence — the same bridge delivers the supervisor's
   `intercom send` (previously a dead letter). Gated by `EffectiveCapabilities.canUseBus` (OFF iff
-  the persona explicitly denies `intercom`). The child engine ignores `peers`.
+  the persona explicitly denies `intercom`). Child-process legs use the broker's engine-scoped
+  peer roster; `contact_peer` is installed only when that run opts in and the bus is allowed.
+  Granted communication tools join a nonempty child tool allowlist; explicit empty lists and
+  tool exclusions still win. In-process supervisor contact additionally requires `coaching`;
+  broker-connected children expose it when the bus is allowed.
   Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice) + [`docs/STRATEGIES.md`](docs/STRATEGIES.md).
   On the peer plane: `debate` and `pair` always; `map`/`synthesize` opt-in via `params.peers`.
   `magi`/`judge`/`fanout` stay peer-less BY DESIGN — independence is their bias guard
@@ -191,38 +200,37 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a clean git repo; missing
   repo/dirty checkout/worktree failure fails closed and never falls back to the real tree) and returns
   the winning diff for the SUPERVISOR to apply.
-- **exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`,
-  capability-gated): a plane apart from everything above — those are all INTERNAL to one supervisor's
-  own run (hierarchical, session-keyed children); exocom is FLAT and EXTERNAL, between independent
-  top-level pi instances sharing one selected scope, no parent/child relationship. Bare `--exocom`
-  keeps the current workspace scope; exact `--exocom=Ab0T` joins that existing workspace's scope from
-  another cwd through a persistent, collision-aware, case-sensitive four-character Base62 alias.
-  The scope selects registry/transport/ledger/artifacts, while every peer advertises its actual home
-  workspace id/code/safe label so external file sets are explicit. A foreign peer is advisory for
-  writes: it can inspect its own files and use postcards/ask/answer/wait/progress/release, but
-  `exocom_claim` is inactive and rejected because the ledger's paths are repository-relative to the
-  scope workspace. The code is a same-host/same-agent-dir join reference, not authentication.
-  Postcards remain one-way and non-blocking: `exocom_list`/`exocom_send`
-  plus `exocom_name` (a reply is a send with `in_reply_to` set). The separate shared JSONL work
-  ledger adds `claim`/`ask`/`answer`/`decline`/non-blocking `wait`/`progress`/`release`: overlapping
-  open write sets NACK atomically, and a pending targeted ask gates that participant to answer/decline,
-  read-only tools, and `exocom_name` identity metadata. Semantic frames are signed immediate-wake signals; the ledger is authoritative
-  if delivery is deferred. This is cooperative runtime coordination, not OS authorization. All ten
-  tools remain in `EXOCOM_TOOL_NAMES` (with `claim` withheld for a foreign member), targeted denies win independently, and joining requires
-  `canUseBus` plus at least one callable closer (`answer` or `decline`) so a published peer cannot be
-  wedged by an obligation it has no way to settle. If `exocom_name` is permitted, an unnamed top-level
-  Pi is prompted to invent a task-derived call-sign on its first user or inbound peer turn
-  (no catalog or extra model call). Naming is metadata permitted during pending asks, without
-  settling them; a targeted deny suppresses the prompt. Session identity is shared with standalone
-  `agent_name` and persisted across resume/persona changes. Until a handle is chosen, its actionable
-  naming bootstrap is delivered through the `context` hook because custom Exocom wakes can bypass
-  `before_agent_start`; after selection the hook stays silent. The session-hash suffix of a qualified target survives renames and telemetry resolves the
-  same canonical session.
-  Reuses the broker's wire framing
-  (`bus/broker/framing.ts`) and the
-  core fence (`fenceUntrusted`/`attributeInbound`) — no new trust-sensitive code path; inbound
-  attribution is resolved from the registry, never the envelope's self-reported `from_name`.
-  Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#exocom--the-external-plane).
+- **Exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`;
+  see [the collaboration guide](docs/COLLABORATION.md)): a flat external plane between independent,
+  top-level Pi sessions, separate from one supervisor's internal workers. Bare `--exocom` selects the
+  current workspace; exact `--exocom=Ab0T` joins that existing scope from another cwd through a
+  persistent, case-sensitive four-character Base62 alias. The scope selects registry, transport,
+  ledger and artifacts; each member still advertises its actual home workspace. The code is a
+  same-host/same-agent-dir join reference, not authentication.
+  `EXOCOM_TOOL_NAMES` contains 15 call-time-gated tools: `exocom_list`, `exocom_send`, `exocom_name`,
+  `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`, `exocom_release`,
+  `exocom_progress`, `exocom_status`, `exocom_task`, `exocom_offer`, `exocom_publish`, and
+  `exocom_profile`. A joined foreign-workspace peer cannot use `exocom_claim`; write-set task create
+  and pickup also require local scope and callable claim permission. Ledger paths are advisory
+  coordination, never filesystem authorization.
+  `exocom_task create` declares a voluntary task but does not start work or reserve files. The
+  immutable `task_id` is the creation frame's `msg_id`; carry it with `work_key` for take, progress,
+  finish, offer and publish so a reused work key cannot select another generation. Write-set pickup
+  and its claim are one locked ledger transaction; read-only tasks may be taken from a foreign scope.
+  An optional `exocom_offer` expires in at most 24 hours (one hour by default) and creates no answer
+  obligation. Use `exocom_ask` for an explicit blocking question. `exocom_publish` shares a bounded,
+  explicitly written excerpt, not another session's terminal-result archive. Peer prose is fenced and
+  attributed using the registry identity.
+  Tasks, offers and evidence are each capped at 64 records and 128 KiB aggregate. Terminal or stale
+  task facts and expired offers are retained for up to one hour; evidence is retained for up to one
+  hour. `exocom_profile` reports self-described capabilities (up to 8 tags, 48 characters each) and
+  optional `available`/`busy`/`away` status; absent status is unknown, and profiles confer no access.
+  During a pending ask, only settlement, `exocom_name`, status, explicit collaboration reads and
+  read-only filesystem tools remain available: profile `get` is allowed, but `set` and `clear` are not.
+  Naming remains metadata and does not answer the ask. Joining requires `canUseBus` plus at least one
+  callable ask closer (`exocom_answer` or `exocom_decline`) and is rechecked on persona changes.
+  Design: [architecture](docs/ARCHITECTURE.md#exocom--the-external-plane) and
+  [collaboration guide](docs/COLLABORATION.md).
 
 ## Testing
 

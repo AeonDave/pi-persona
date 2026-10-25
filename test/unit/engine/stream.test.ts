@@ -3,6 +3,22 @@ import assert from "node:assert/strict";
 
 import { applyEvent, createStreamState, emptyUsage, feedLines, snapshot } from "../../../src/engine/stream.ts";
 
+test("only validated assistant message_end effort is observed; it is not provider cognition", () => {
+	const state = createStreamState();
+	const emit = (role: string, thinkingLevel: unknown, type = "message_end") => applyEvent(state, { type, message: { role, thinkingLevel, content: [] } });
+	for (const thinkingLevel of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+		emit("assistant", thinkingLevel);
+		assert.equal(state.thinkingEffective, thinkingLevel);
+	}
+	emit("user", "off");
+	emit("assistant", "off", "message_update");
+	assert.equal(state.thinkingEffective, "max", "non-final and non-assistant fields cannot forge an observation");
+	for (const value of [undefined, null, "adaptive", "HIGH", 7, ["high"]]) {
+		emit("assistant", value);
+		assert.ok(!("thinkingEffective" in state), "an unknown final effort is not inferred from a prior message");
+	}
+});
+
 test("feedLines buffers partial lines across chunks", () => {
 	assert.deepEqual(feedLines("", "a\nb\nc"), { lines: ["a", "b"], rest: "c" });
 	assert.deepEqual(feedLines("x", "y\nz"), { lines: ["xy"], rest: "z" });

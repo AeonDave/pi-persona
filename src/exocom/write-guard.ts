@@ -64,6 +64,13 @@ export function writeWarningReason(path: string, claim: LedgerClaim, label: stri
 	return `exocom: ${path} is inside ${who}'s open claim — coordinate with exocom_ask or claim it; call the tool again to proceed (this warning shows once per path)\n${fencePeer(`${slice}: ${writeSet}`)}`;
 }
 
+/** The operator-TOAST variant of the same warning: its single authoritative line, sanitized and
+ *  bounded. The fenced peer-authored detail below the newline stays model-facing (the tool
+ *  result); a toast is one line and never carries the claim block. */
+export function writeWarningToastReason(path: string, claim: LedgerClaim, label: string): string {
+	return untrusted(writeWarningReason(path, claim, label).split("\n")[0] ?? "", 300);
+}
+
 /** Warn-once memory for the write guard. A bare unbounded set would grow for the life of the
  *  install on a long session with many distinct claim+path pairs; caps at `maxEntries` (like the
  *  sibling `SeenMessages` in guards.ts) and drops the oldest insertion first once exceeded. */

@@ -238,8 +238,11 @@ test("/reload tells the restored supervisor which run, timer and monitor did not
 		const carrying = requestsMentioningNotice(h);
 		assert.ok(carrying.length >= 1, "the next turn carries the restore notice");
 		const notice = carrying[0]?.map(textOf).find((text) => NOTICE.test(text)) ?? "";
-		assert.match(notice, /: run run-1 \(stopped or never reported\); 1 timer; 1 monitor\. Earlier/);
-		assert.match(notice, /Do not wait for them; relaunch or re-arm only what you still need\./);
+		assert.match(notice, /: run run-1 \(stopped or never reported\); 1 timer; 1 monitor\. Runtime workers and live run handles are not restored\. Retained terminal reports/);
+		assert.match(notice, /Runtime workers and live run handles are not restored/);
+		assert.match(notice, /Retained terminal reports may still be available via intercom/);
+		assert.match(notice, /read saved data without restarting work/);
+		assert.match(notice, /relaunch unfinished work or re-arm wake sources only when still needed\./);
 		const launches = h.toolResults.filter((text) => text.startsWith("Launched async run ")).map((text) => /run-\d+/.exec(text)?.[0]);
 		assert.deepEqual(launches, ["run-1", "run-2"], "the post-restore run is run-2, not a recycled run-1");
 

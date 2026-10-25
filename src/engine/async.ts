@@ -11,12 +11,12 @@
 
 import type { ProgressSnapshot, ToolEvent } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
+import { resultReceiptHint, type ResultReceipt } from "../results/retrieval.ts";
 import { DEFAULT_ASYNC_RETAIN } from "../core/config.ts";
 import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel, sanitizeStatusLabel } from "../core/display-label.ts";
 import { compactTokens } from "../core/format.ts";
+import { isThinkingLevel } from "../core/types.ts";
 import { formatDuration } from "../core/time.ts";
-
-export { MAX_DISPLAY_LABEL_CHARS } from "../core/display-label.ts";
 
 /** "possibly stuck" — the soft stall signal shared by the operator card, the peek digest and the UI
  *  badge. It is deliberately patient: a long scan, a big generation, or a blocking command shows no
@@ -33,6 +33,7 @@ export interface AsyncRun {
 	status: "running" | "done" | "failed" | "stopped";
 	progress: ProgressSnapshot;
 	result?: AgentResult;
+	resultReceipt?: ResultReceipt;
 	error?: string;
 	/** The codename the launcher gave this run (e.g. "atlas-static") — the SAME name shown on the
 	 *  agent-tree node for this run. When set, it's the canonical display name (over the bare
@@ -115,6 +116,7 @@ export class AsyncRunTracker {
 	/** Ids whose payload was evicted while STILL UNCOLLECTED, oldest first (insertion-ordered Set). */
 	private readonly droppedIds = new Set<string>();
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
+	private readonly createListeners: Array<(run: AsyncRun) => void> = [];
 	private seq = 0;
 	private readonly maxRetained: number;
 	private readonly now: () => number;
@@ -159,6 +161,9 @@ export class AsyncRunTracker {
 		if (meta.label !== undefined) entry.label = sanitizeDisplayLabel(meta.label);
 		if (meta.model !== undefined) entry.model = sanitizeDisplayLabel(meta.model, "model");
 		this.runs.set(id, entry);
+		for (const cb of [...this.createListeners]) {
+			try { cb(entry); } catch { /* archival observation cannot prevent launch */ }
+		}
 
 		const settle = (): void => this.settleOnce(entry);
 		// `Promise.resolve(run(...))` routes BOTH a returned rejection AND a SYNCHRONOUS throw from
@@ -176,7 +181,9 @@ export class AsyncRunTracker {
 				.then((result) => {
 					if (entry.settled) return; // force-settled by the supervisor — drop the late natural result
 					entry.status = result.ok ? "done" : result.failureKind === "abort" ? "stopped" : "failed";
-					entry.result = result;
+					// Retain scalar metadata by value: an engine reusing/mutating its result object
+					// after settlement must not rewrite this run's requested/observed effort.
+					entry.result = { ...result, usage: { ...result.usage }, ...(result.resultReceipt ? { resultReceipt: { ...result.resultReceipt } } : {}) };
 					if (!result.ok && result.error) entry.error = result.error;
 				})
 				.catch((err: unknown) => {
@@ -347,6 +354,14 @@ export class AsyncRunTracker {
 		return batch === undefined || !this.running().some((r) => r.batch === batch);
 	}
 
+	onCreate(cb: (run: AsyncRun) => void): () => void {
+		this.createListeners.push(cb);
+		return () => {
+			const i = this.createListeners.indexOf(cb);
+			if (i >= 0) this.createListeners.splice(i, 1);
+		};
+	}
+
 	onComplete(cb: (run: AsyncRun) => void): () => void {
 		this.completeListeners.push(cb);
 		return () => {
@@ -363,10 +378,18 @@ export function dedupeRunsById(runs: AsyncRun[]): AsyncRun[] {
 	return [...byId.values()];
 }
 
+/** A terminal engine observation supersedes the launch choice; running/launch rows retain their snapshot. */
+export function observedRunModel(run: Partial<Pick<AsyncRun, "status" | "result">>): string | undefined {
+	const model = run.status !== undefined && run.status !== "running" ? run.result?.modelUsed : undefined;
+	return model?.trim() ? model.split("/").map((part) => sanitizeDisplayLabel(part, "model", 256)).join("/").slice(0, 256) : undefined;
+}
+
 /** One identity everywhere a tracked run is rendered: the launcher's codename when present,
- *  otherwise the agent type, with the already-shortened model appended once. */
-export function runDisplayName(run: Pick<AsyncRun, "agent" | "label" | "model">): string {
-	const model = run.model === undefined ? undefined : sanitizeDisplayLabel(run.model, "model", 24);
+ *  otherwise the agent type, with the observed terminal model or launch model appended once. */
+export function runDisplayName(run: Pick<AsyncRun, "agent" | "label" | "model"> & Partial<Pick<AsyncRun, "status" | "result">>): string {
+	const observed = observedRunModel(run);
+	const selected = observed ? (observed.split("/").pop() ?? observed).replace(/^claude-/, "") : run.model;
+	const model = selected === undefined ? undefined : sanitizeDisplayLabel(selected, "model", 24);
 	if (model === undefined) return sanitizeDisplayLabel(run.label ?? run.agent);
 	const suffix = ` · ${model}`;
 	const nameLimit = Math.max(1, MAX_DISPLAY_LABEL_CHARS - suffix.length);
@@ -618,6 +641,25 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 	const stoppedCount = stopped.length > 0 ? `, ${stopped.length} stopped` : "";
 	const head = `[pi-persona] ${runs.length} async run${runs.length === 1 ? "" : "s"} settled — ${done.length} done, ${failed.length} failed${stoppedCount}`;
 	const blocks: string[] = [head];
+	const models = runs.flatMap((run) => {
+		const model = observedRunModel(run);
+		return model ? [`${run.id}: Observed model: ${model}`] : [];
+	});
+	if (models.length > 0) blocks.push(`\n${models.join("\n")}`);
+	const receipts = runs.slice(0, MAX_ASYNC_STATUS_ROWS).flatMap((run) => {
+		const hint = resultReceiptHint(run.resultReceipt);
+		return hint ? [`${run.id}: ${hint}`] : [];
+	});
+	if (receipts.length > 0) blocks.push(`\nTerminal reports (intercom results lists all retained references):\n${receipts.join("\n")}`);
+	// Common result metadata, outside untrusted worker prose, on inline and background paths.
+	// A host effort observation is a Pi request setting, not a measure of provider cognition.
+	const efforts = runs.flatMap((r) => {
+		const requested = r.result?.thinkingRequested;
+		const observed = r.result?.thinkingEffective;
+		if (!isThinkingLevel(requested) && !isThinkingLevel(observed)) return [];
+		return [`${r.id}: requested ${isThinkingLevel(requested) ? requested : "unknown"}; observed Pi effort ${isThinkingLevel(observed) ? observed : "unknown"}`];
+	});
+	if (efforts.length > 0) blocks.push(`\nThinking (not provider cognition):\n${efforts.join("\n")}`);
 	for (const r of done) {
 		// Only fence REAL output — an empty/whitespace result gets a plain "(no output)", never an
 		// empty <fence></fence> shell (there's nothing untrusted to guard, and the empty block reads
@@ -660,7 +702,7 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 	// The cap cuts whole legs from the middle of a wide fan-out. Name every run in the tail, which the
 	// cut keeps, so a cut leg is still fetchable by id instead of silently missing.
 	const named = report.length > MAX_COMPLETION_REPORT_CHARS
-		? `${report}\n\nRun ids in this report: ${runs.slice(0, MAX_ASYNC_STATUS_ROWS).map((r) => r.id).join(", ")}`
+		? `${report}\n\nRun ids in this report: ${runs.slice(0, MAX_ASYNC_STATUS_ROWS).map((r) => r.id).join(", ")}. Saved reports: intercom { action:"results" }; use result { ref, offset, limit } even if live handles were dropped.`
 		: report;
 	return boundCompletionSurface(named);
 }
@@ -697,9 +739,6 @@ export const MAX_EMPTY_RENDER_RETRIES = 3;
 export interface IdleNotifierDeps<T> {
 	/** Whether the supervisor is idle (not streaming a turn). */
 	isIdle: () => boolean;
-	/** Legacy host-queue probe. Retained for source compatibility, but deliberately ignored: when
-	 *  the supervisor is idle, starting a turn is what drains any orphaned host follow-ups. */
-	hasPending?: () => boolean;
 	/** Deliver the coalesced message. Async rejection is treated exactly like a synchronous throw:
 	 *  the batch is restored at the front of the queue and retried. */
 	deliver: (message: string) => void | Promise<void>;

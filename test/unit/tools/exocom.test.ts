@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 
 import { initTheme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { ExocomPeerRejection } from "../../../src/exocom/plane.ts";
 import { MAX_BROADCAST_DETAIL_ITEMS, registerExocomTools } from "../../../src/tools/exocom.ts";
 
@@ -72,8 +73,34 @@ test("exocom_list renders the peers", async () => {
 	const m = mockPi();
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	const r = await m.tools.get("exocom_list").execute("c", {}, undefined, undefined, {});
-	assert.equal(r.content[0].text, "Exocom presence only (1 peer; not a message inbox)\n- dev · dev · m · ctx 10% · target: dev@0123456789abcdef01234567\nUse each peer's qualified target as shown. Its session suffix stays routable if the peer later renames; display names alone can be reassigned.");
+	assert.equal(r.content[0].text, "Exocom presence only (1 peer; not a message inbox)\n- dev · dev · m · ctx 10% · target: dev@0123456789abcdef01234567 · self-reported availability: unknown · capabilities: not reported\nUse each peer's qualified target as shown. Its session suffix stays routable if the peer later renames; display names alone can be reassigned.");
 	assert.doesNotMatch(r.content[0].text, /purpose|peer-message/, "default roster omits prose metadata and fences");
+	assert.match(r.content[0].text, /self-reported availability: unknown/, "legacy peers do not acquire a fabricated available state");
+});
+
+test("exocom_list shows bounded self-reported profiles in compact and expanded rows", async () => {
+	const m = mockPi();
+	const peer = {
+		name: "dev", persona: "dev", model: "m", context_pct: 10, purpose: "", displayName: "dev",
+		target: "dev@0123456789abcdef01234567",
+		profile: { availability: "busy", capabilities: ["TypeScript", "Rust", "Python", "Go", "C#"] },
+	};
+	registerExocomTools(m.pi, () => stubPlane({ listPeers: () => [peer] }) as never);
+	const tool = m.tools.get("exocom_list");
+	const result = await tool.execute("c", {}, undefined, undefined, {});
+	assert.deepEqual((result.details as any).peers[0].profile, peer.profile);
+	assert.match(result.content[0].text, /self-reported availability: busy · capabilities: TypeScript, Rust, Python, Go, C#/);
+	for (const width of [40, 100, 160]) {
+		const collapsed = stripVTControlCharacters(tool.renderResult(result, { expanded: false }, plainTheme).render(width).join("\n"));
+		const expanded = stripVTControlCharacters(tool.renderResult(result, { expanded: true }, plainTheme).render(width).join("\n"));
+		assert.ok(collapsed.split("\n").every((line) => visibleWidth(line) <= width), `collapsed rows fit ${width} columns`);
+		assert.ok(expanded.split("\n").every((line) => visibleWidth(line) <= width), `expanded rows fit ${width} columns`);
+		assert.match(collapsed.replace(/\s+/g, " "), /self-reported: busy · TypeScript · Rust · \+3 more/);
+		assert.match(expanded.replace(/\s+/g, " "), /self-reported availability: busy/);
+		assert.match(expanded.replace(/\s+/g, " "), /TypeScript · Rust · Python · Go · C#/);
+		assert.doesNotMatch(expanded, /\+1 more/, "expanded view includes the full bounded capabilities list");
+		assert.doesNotMatch(`${collapsed}\n${expanded}`, /<|\u001b/);
+	}
 });
 
 test("exocom_list exposes scope and each peer's safe workspace identity without leaking paths", async () => {

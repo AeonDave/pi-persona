@@ -1,7 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { makeRoster, memberBaseLabel, parseTeams, roleHint, rosterNodeKeys, rosterSpec } from "../../../src/orchestration/roster.ts";
+import { parseAuxActor } from "../../../src/orchestration/params.ts";
+import { parseMembersBlock } from "../../../src/persona/persona.ts";
+import { makeRoster, memberBaseLabel, parseRuntimeRosterMember, parseTeams, roleHint, rosterNodeKeys, rosterSpec } from "../../../src/orchestration/roster.ts";
+
+test("thinking survives authored teams, runtime members, persona members and auxiliary actors", () => {
+	const members = parseTeams("panel:\n  - { agent: a, thinking: low }\n  - { agent: a, thinking: high }\n  - { agent: a, thinking: xhigh }").panel!;
+	assert.deepEqual(members.map((m) => rosterSpec(m).thinking), ["low", "high", "xhigh"]);
+	const runtime = parseRuntimeRosterMember({ agent: "a", thinking: "off" });
+	assert.deepEqual(runtime, { ok: true, member: { agent: "a", thinking: "off" } });
+	assert.deepEqual(parseAuxActor({ agent: "a", thinking: "max" }, "arbiter"), { ok: true, spec: { agent: "a", thinking: "max" } });
+	assert.deepEqual(parseMembersBlock([{ agent: "a", thinking: "minimal" }]), { ok: true, members: [{ agent: "a", thinking: "minimal" }] });
+});
+
+test("malformed explicit thinking rejects static teams, runtime and persona members, and aux actors", () => {
+	for (const thinking of ["ultra", "", null, 2, true, ["high"]]) {
+		assert.equal(parseRuntimeRosterMember({ agent: "a", thinking }).ok, false);
+		assert.equal(parseMembersBlock([{ agent: "a", thinking }]).ok, false);
+		assert.equal(parseAuxActor({ agent: "a", thinking }, "arbiter")?.ok, false);
+	}
+	assert.throws(() => parseTeams("panel:\n  - { agent: a, thinking: ultra }"), /thinking/);
+});
 
 test("parseTeams reads team -> agent list (inline lists)", () => {
 	const t = parseTeams("review: [security, performance]\nmagi: [melchior, balthasar, casper]");
@@ -48,8 +68,37 @@ test("a map member with no agent name is skipped (not a crash)", () => {
 test("roleHint picks the emphasised keyword, skipping connective ALL-CAPS words", () => {
 	assert.equal(roleHint("Focus ONLY on the SECURITY lens: injection, authz."), "SECURITY");
 	assert.equal(roleHint("Focus ONLY on the PERFORMANCE lens: hot paths."), "PERFORMANCE");
+	assert.equal(roleHint("Focus ONLY on the CORRECTNESS lens: edge cases."), "CORRECTNESS");
 	// no emphasised keyword → a short prefix of the role text (first few words, capped).
 	assert.equal(roleHint("look at the database layer only"), "look at the database");
+});
+
+test("roleHint ignores code, paths, environment identifiers, hashes and generic Git refs", () => {
+	assert.equal(roleHint("PI_PERSONA_RESULT_READER_TOKEN / HEAD"), "role");
+	assert.equal(roleHint("Focus PI_PERSONA_RESULT_READER_TOKEN / HEAD; use SECURITY lens"), "SECURITY");
+	assert.equal(roleHint("Review `src/core/result.ts` and abcdef0123456789 on HEAD"), "Review");
+	assert.equal(roleHint("$PI_PERSONA src/ /tmp/result on HEAD"), "role", "leading sigils and trailing path separators stay filtered");
+	assert.equal(roleHint("SECURITY: review auth"), "SECURITY", "a heading colon is punctuation, not a technical identifier");
+	assert.equal(roleHint("https://example.test C:\\repo"), "role", "URI and drive separators still identify technical tokens");
+	assert.equal(roleHint("café 🚀 et méthode"), "café et méthode");
+	assert.equal(roleHint("é".repeat(25)), `${"é".repeat(19)}…`, "truncation keeps Unicode code points intact");
+	assert.equal(roleHint("A".repeat(64)), `${"A".repeat(19)}…`, "emphasised keywords use the same hint bound");
+});
+
+test("roleHint strips terminal and direction controls before deriving a safe lens", () => {
+	const escaped = "\u001b[31mSECURITY\u001b[0m lens\nsecond line";
+	assert.equal(roleHint(escaped), "SECURITY");
+	assert.equal(roleHint("\u001b]0;forged title\u0007SECURITY lens"), "SECURITY");
+	assert.equal(roleHint("SE\u202eCURITY lens"), "SECURITY");
+});
+
+test("technical-only role hints use a neutral label and retain deterministic collision suffixes", () => {
+	const members = [
+		{ agent: "judge", role: "PI_PERSONA_RESULT_READER_TOKEN / HEAD" },
+		{ agent: "judge", role: "CACHE_RESULT_TOKEN / HEAD" },
+	];
+	assert.deepEqual(members.map(memberBaseLabel), ["judge · role", "judge · role"]);
+	assert.deepEqual(rosterNodeKeys(members), ["judge · role", "judge · role#2"]);
 });
 
 test("memberBaseLabel is the agent name, or `agent · HINT` when it carries a role", () => {

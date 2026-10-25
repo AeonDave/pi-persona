@@ -14,17 +14,22 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
+import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
 import {
 	type CreateInProcSession,
 	type CreateSessionOptions,
+	type InProcessDeps,
 	type InProcSession,
 	makeInProcessEngine,
-	mergeSessionToolAllowlist,
 	ORCHESTRATION_TOOLS,
 	withOrchestrationToolsExcluded,
 } from "../../../src/engine/inproc.ts";
-import type { AgentProgress } from "../../../src/orchestration/sdk.ts";
+import { mergeSessionToolAllowlist } from "../../../src/engine/session-tools.ts";
+import type { AgentProgress, AgentRunSpec } from "../../../src/orchestration/sdk.ts";
+import type { ThinkingLevel } from "../../../src/core/types.ts";
+import { specOf } from "../../../src/tools/delegate.ts";
+import { parseAgent } from "../../../src/agents/agent.ts";
 
 // A stub registry: one model, resolvable by provider/id or bare id.
 const stubModel = { provider: "stub", id: "m" };
@@ -111,6 +116,55 @@ const msgEnd = (text: string, usage?: Record<string, unknown>): unknown => ({
 	message: { role: "assistant", content: [{ type: "text", text }], stopReason: "end", ...(usage ? { usage } : {}) },
 });
 const update = (text: string): unknown => ({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text }] } });
+
+test("inproc resolves mixed per-leg thinking through specs, agents and shared defaults; Pi readback may clamp up or down", async () => {
+	const seen: Array<ThinkingLevel | undefined> = [];
+	const configured = parseAgent("---\nname: a\nthinking: medium\n---\nworker", "a.md")!;
+	const engine = makeInProcessEngine({
+		resolveAgent: (name) => name === "bare" ? { name, systemPrompt: "", source: "test" } : configured,
+		modelRegistry: fakeRegistry, defaultModel: "stub/m", cwd: ".", childThinking: "minimal",
+		createSession: async (opts) => {
+			seen.push(opts.thinkingLevel);
+			// Simulated host capability clamp, not an extension-owned model table.
+			const observed = opts.thinkingLevel === "low" ? "medium" : opts.thinkingLevel === "xhigh" ? "high" : opts.thinkingLevel;
+			return { ...fakeSession([msgEnd("done")]), thinkingLevel: observed };
+		},
+	});
+	const results = await Promise.all((["low", "high", "xhigh"] as const).map((thinking) => engine.run(specOf({ agent: "a", task: "t", thinking }))));
+	assert.deepEqual(seen, ["low", "high", "xhigh"]);
+	assert.deepEqual(results.map((r) => [r.thinkingRequested, r.thinkingEffective]), [["low", "medium"], ["high", "high"], ["xhigh", "high"]]);
+	assert.equal((await engine.run({ agent: "a", task: "t" })).thinkingRequested, "medium");
+	assert.equal((await engine.run({ agent: "bare", task: "t" })).thinkingRequested, "minimal");
+	results[0]!.thinkingEffective = "off";
+	assert.equal(results[1]!.thinkingEffective, "high", "results do not share mutable effort metadata");
+});
+
+test("inproc never invents observed effort when the host exposes none or an invalid value", async () => {
+	for (const thinkingLevel of [undefined, "adaptive", null, 7]) {
+		const engine = makeInProcessEngine({ resolveAgent, modelRegistry: fakeRegistry, cwd: ".", createSession: async () => ({ ...fakeSession([msgEnd("done")]), thinkingLevel }) });
+		const result = await engine.run({ agent: "a", task: "t", thinking: "high" });
+		assert.equal(result.thinkingRequested, "high");
+		assert.ok(!("thinkingEffective" in result));
+	}
+});
+
+test("inproc cancellation during construction reports the request but no unobserved clamp", async () => {
+	const ac = new AbortController();
+	const engine = makeInProcessEngine({ resolveAgent, modelRegistry: fakeRegistry, cwd: ".", createSession: async () => { ac.abort(); return { ...fakeSession([]), thinkingLevel: "low" }; } });
+	const result = await engine.run({ agent: "a", task: "t", thinking: "xhigh" }, undefined, ac.signal);
+	assert.equal(result.failureKind, "abort");
+	assert.equal(result.thinkingRequested, "xhigh");
+	assert.ok(!("thinkingEffective" in result));
+});
+
+test("inproc rejects malformed explicit thinking before creating a session", async () => {
+	let created = false;
+	const engine = makeInProcessEngine({ resolveAgent, modelRegistry: fakeRegistry, cwd: ".", createSession: async () => { created = true; return fakeSession([]); } });
+	const result = await engine.run({ agent: "a", task: "t", thinking: "ultra" } as unknown as AgentRunSpec);
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /thinking/);
+	assert.equal(created, false);
+});
 
 test("inproc engine propagates each authoritative tool lifecycle event once without args or output", async () => {
 	const events: unknown[] = [];
@@ -1504,6 +1558,7 @@ test("canUseBus: false ignores a spec's peers request (no contact_peer bound)", 
 		cwd: ".",
 		bus,
 		canUseBus: false,
+		coaching: true,
 		createSession: fakeSessions([msgEnd("x")], spy),
 	});
 	await engine.run({ agent: "a", task: "t", peers: true });
@@ -1959,4 +2014,110 @@ test("inproc keeps the cause of death when a contract-bearing leg times out with
 	assert.equal(r.failureKind, "timeout");
 	assert.match(r.error ?? "", /timed out/, "the cause of death survives contract validation");
 	assert.doesNotMatch(r.error ?? "", /contract default failed/);
+});
+
+// ── reference-mode handoff (frozen contract): preflight, injection, scoping, revoke ──
+
+const REF_OK = "result:00000000-0000-4000-8000-0000000000aa";
+const REF_OTHER = "result:00000000-0000-4000-8000-0000000000bb";
+
+/** A real persistent archive fixture: one durable saved report under REF_OK. */
+function referenceArchiveFixture() {
+	const entries: unknown[] = [];
+	const archive = new TerminalResultArchive({
+		entries: () => entries,
+		persistent: true,
+		makeRef: () => REF_OK,
+		append: (type, data) => { entries.push({ type: "custom", customType: type, data: structuredClone(data) }); },
+	});
+	const outcome = archive.save({ originKey: "origin:one", status: "done", agent: "reviewer", body: "ARCHIVED REPORT BODY", provenance: "result-output" });
+	assert.equal(outcome.ok, true, JSON.stringify(outcome));
+	assert.equal(outcome.storage, "session-entry");
+	return archive;
+}
+
+test("inproc reference preflight makes ZERO factory calls when storage, refs or admission are missing", async () => {
+	const cases: Array<{ label: string; deps: Partial<InProcessDeps>; spec: AgentRunSpec; match: RegExp }> = [
+		{ label: "no archive owner", deps: {}, spec: { agent: "a", task: "t", resultRefs: [REF_OK] }, match: /archive/ },
+		{ label: "ref unavailable in the archive", deps: { resultArchive: () => referenceArchiveFixture() }, spec: { agent: "a", task: "t", resultRefs: [REF_OTHER] }, match: new RegExp(REF_OTHER) },
+		{ label: "parent bus capability denied", deps: { resultArchive: () => referenceArchiveFixture(), canUseBus: false }, spec: { agent: "a", task: "t", resultRefs: [REF_OK] }, match: /bus/ },
+		{ label: "explicit empty tool allowlist", deps: { resultArchive: () => referenceArchiveFixture() }, spec: { agent: "a", task: "t", tools: [], resultRefs: [REF_OK] }, match: /read/ },
+	];
+	for (const { label, deps, spec, match } of cases) {
+		let created = false;
+		const engine = makeInProcessEngine({
+			resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+			...deps,
+			createSession: async () => {
+				created = true;
+				return fakeSession([]);
+			},
+		});
+		const r = await engine.run(spec);
+		assert.equal(r.ok, false, label);
+		assert.equal(r.failureKind, "contract", label);
+		assert.deepEqual(r.usage, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }, `${label}: zero usage`);
+		assert.match(r.error ?? "", match, label);
+		assert.equal(created, false, `${label}: the session factory must never run`);
+	}
+});
+
+test("inproc reference grant injects a scoped read_result and admits the literal name into a nonempty allowlist", async () => {
+	const seen: CreateSessionOptions[] = [];
+	const makeEngineFor = (cfgTools: string[] | undefined) =>
+		makeInProcessEngine({
+			resolveAgent: () => ({ name: "a", model: "stub/m", systemPrompt: "", source: "x", ...(cfgTools ? { tools: cfgTools } : {}) }),
+			modelRegistry: fakeRegistry,
+			cwd: ".",
+			resultArchive: () => referenceArchiveFixture(),
+			createSession: async (opts) => {
+				seen.push(opts);
+				return fakeSession([msgEnd("done")]);
+			},
+		});
+	await makeEngineFor(undefined).run({ agent: "a", task: "t", resultRefs: [REF_OK] });
+	await makeEngineFor(["read"]).run({ agent: "a", task: "t", resultRefs: [REF_OK] });
+	const [absent, nonempty] = seen;
+	assert.ok(absent && nonempty);
+	assert.equal(absent.tools, undefined, "an absent allowlist stays absent — injection only");
+	assert.ok((absent.customTools ?? []).some((t) => t.name === "read_result"), "the scoped tool is injected");
+	assert.deepEqual(nonempty.tools, ["read", "read_result"], "the literal read_result joins a nonempty allowlist");
+	assert.ok((nonempty.customTools ?? []).some((t) => t.name === "read_result"));
+});
+
+test("inproc scoped read_result serves only its granted ref and is revoked when the leg settles", async () => {
+	const probes: Array<{ ref: string; ok: boolean; error?: string }> = [];
+	let probeAfter: ((ref: string) => Promise<{ ok: boolean; error?: string }>) | undefined;
+	const engine = makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+		resultArchive: () => referenceArchiveFixture(),
+		createSession: async (opts) => {
+			const tool = (opts.customTools ?? []).find((t) => t.name === "read_result");
+			const call = async (ref: string): Promise<{ ok: boolean; error?: string }> => {
+				try {
+					await tool!.execute("c", { ref }, undefined, undefined, undefined as never);
+					return { ok: true };
+				} catch (e) {
+					return { ok: false, error: e instanceof Error ? e.message : String(e) };
+				}
+			};
+			probeAfter = call;
+			const session = fakeSession([msgEnd("done")]);
+			return {
+				...session,
+				prompt: async (text: string) => {
+					// Probe while the leg is LIVE (before settle revokes the reader).
+					for (const ref of [REF_OK, REF_OTHER]) probes.push({ ref, ...(await call(ref)) });
+					await session.prompt(text);
+				},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] });
+	assert.equal(r.ok, true);
+	assert.deepEqual(probes.map((p) => [p.ref, p.ok]), [[REF_OK, true], [REF_OTHER, false]], "only the granted ref is served");
+	assert.match(probes[1]!.error ?? "", /not authorized/);
+	const after = await probeAfter!(REF_OK);
+	assert.equal(after.ok, false, "the reader is revoked once the leg settles");
+	assert.match(after.error ?? "", /revoked/);
 });

@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import * as worktree from "../../../src/engine/worktree.ts";
-import type { GitExec, WorktreeArtifact } from "../../../src/engine/worktree.ts";
+import type { GitExec } from "../../../src/engine/worktree.ts";
 import { withWorktree } from "../../../src/engine/worktree.ts";
+
+const PINNED_COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
 /** A fake git that records calls and returns scripted results. */
 function fakeGit(results: Record<string, { code: number; stdout?: string }> = {}): { exec: GitExec; calls: string[][] } {
@@ -12,7 +14,11 @@ function fakeGit(results: Record<string, { code: number; stdout?: string }> = {}
 		calls.push(args);
 		const key = args.join(" ");
 		const hit = Object.entries(results).find(([k]) => key.includes(k))?.[1];
-		return { code: hit?.code ?? 0, stdout: hit?.stdout ?? "", stderr: "" };
+		if (hit) return { code: hit.code, stdout: hit.stdout ?? "", stderr: "" };
+		if (args.includes("--verify") && args.includes("HEAD^{commit}")) {
+			return { code: 0, stdout: PINNED_COMMIT, stderr: "" };
+		}
+		return { code: 0, stdout: "", stderr: "" };
 	};
 	return { exec, calls };
 }
@@ -32,6 +38,19 @@ test("defaultGitExec never blocks the event loop: a timer fires while git runs",
 test("defaultGitExec reports a failing git command as a code, never a throw", async () => {
 	const result = await worktree.defaultGitExec(["-C", "/definitely/not/a/repo", "rev-parse", "--is-inside-work-tree"]);
 	assert.notEqual(result.code, 0);
+});
+
+test("withWorktree removes a created worktree if its starting commit cannot be resolved", async () => {
+	const { exec, calls } = fakeGit({ "--verify": { code: 128 } });
+	let bodyRan = false;
+	await assert.rejects(
+		() => withWorktree("/repo", exec, async () => {
+			bodyRan = true;
+		}),
+		/baseline|commit|resolve/i,
+	);
+	assert.equal(bodyRan, false, "the worker body cannot start without a pinned baseline");
+	assert.ok(calls.some((c) => c.includes("worktree") && c.includes("remove")), "cleanup runs after baseline resolution fails");
 });
 
 test("withWorktree rejects a dirty repository before creating or running an isolated leg", async () => {
@@ -59,18 +78,19 @@ test("captureWorktreeArtifact exports tracked and untracked edits as a unified d
 		"ls-files": { code: 0, stdout: "notes.txt\n" },
 	});
 	assert.equal(typeof worktree.captureWorktreeArtifact, "function", "the artifact capture seam must exist");
-	const artifact = await (worktree.captureWorktreeArtifact as (root: string, git: GitExec) => Promise<WorktreeArtifact>)("/wt", exec);
+	const artifact = await worktree.captureWorktreeArtifact("/wt", PINNED_COMMIT, exec);
 	assert.equal(artifact.ok, true);
 	if (artifact.ok) {
 		assert.match(artifact.diff, /src\/live\.ts/);
 		assert.match(artifact.diff, /notes\.txt/);
 	}
 	assert.ok(calls.some((c) => c.includes("ls-files") && c.includes("--others")));
+	assert.ok(calls.some((c) => c.includes("diff") && c.includes(PINNED_COMMIT)), "tracked changes are diffed against the pinned baseline, not mutable HEAD");
 });
 
 test("captureWorktreeArtifact rejects an artifact too large to return safely", async () => {
 	const { exec } = fakeGit({ diff: { code: 0, stdout: "x".repeat(1_000_001) } });
-	const artifact = await worktree.captureWorktreeArtifact("/wt", exec);
+	const artifact = await worktree.captureWorktreeArtifact("/wt", PINNED_COMMIT, exec);
 	assert.equal(artifact.ok, false);
 	if (!artifact.ok) assert.match(artifact.error, /too large|limit/i);
 });
@@ -78,12 +98,15 @@ test("captureWorktreeArtifact rejects an artifact too large to return safely", a
 test("withWorktree adds a detached worktree, runs the body with its path, then removes it", async () => {
 	const { exec, calls } = fakeGit();
 	let ranIn = "";
-	const out = await withWorktree("/repo", exec, async (dir) => {
+	let baseCommit = "";
+	const out = await withWorktree("/repo", exec, async (dir, initialCommit) => {
 		ranIn = dir;
+		baseCommit = initialCommit;
 		return "result";
 	});
 	assert.equal(out, "result");
 	assert.equal(ranIn.length > 0, true, "the body got a worktree path");
+	assert.equal(baseCommit, PINNED_COMMIT, "the body got the resolved starting commit");
 	const add = calls.find((c) => c.includes("worktree") && c.includes("add"));
 	const remove = calls.find((c) => c.includes("worktree") && c.includes("remove"));
 	assert.ok(add, "git worktree add was issued");
@@ -137,6 +160,9 @@ test("withWorktree returns the body's result even when the remove step's GitExec
 	const exec: GitExec = async (args) => {
 		calls.push(args);
 		if (args.includes("remove")) throw new Error("git exec rejected");
+		if (args.includes("--verify") && args.includes("HEAD^{commit}")) {
+			return { code: 0, stdout: PINNED_COMMIT, stderr: "" };
+		}
 		return { code: 0, stdout: "", stderr: "" };
 	};
 	const out = await withWorktree("/repo", exec, async () => "result");

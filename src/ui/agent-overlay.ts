@@ -23,7 +23,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, flattenTree, isWakeSource, nodeGlyph, runningAnnotation } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, flattenTree, isWakeSource, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
@@ -77,8 +77,12 @@ export function composeAgentRow(input: AgentRowInput): string {
 
 	const prefixCols = 2 + visibleWidth(indent); // "▸ " or "  ", then the indent
 	const avail = Math.max(0, bodyMax - prefixCols - 2); // 2 = glyph + space
-	const labelMax = Math.max(8, Math.floor(avail * 0.62));
-	const label = safeInline(node.label, labelMax) || "agent";
+	// The compact effort sigla rides the label (` · xh` / ` · xh→h`); its width comes out of the
+	// label budget so the appended field never becomes the part a tight row eats first. The final
+	// clamp below still guarantees the row fits either way.
+	const effort = effortTag(node.thinking, node.thinkingEffective);
+	const labelMax = Math.max(8, Math.floor(avail * 0.62) - visibleWidth(effort));
+	const label = (safeInline(node.label, labelMax) || "agent") + effort;
 	const detailMax = node.detail ? Math.max(0, avail - labelMax - 2) : 0;
 	const detail = detailMax > 0 ? safeInline(node.detail ?? "", detailMax) : "";
 	const detailText = detail ? t.fg("dim", `  ${detail}`) : "";
@@ -383,6 +387,10 @@ export class AgentOverlay extends Container {
 			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", wake ? "  ● armed" : "  ● live") : ""}`, 1, 0),
 		);
 		if (node.detail) this.addChild(new Text(t.fg("dim", safeInline(node.detail)), 1, 0));
+		// The drill-in has room for FULL effort names (the rows stay compact): an observed level
+		// appears only once a terminal result actually reported one.
+		const effortLine = thinkingDetailLine(node.thinking, node.thinkingEffective);
+		if (effortLine) this.addChild(new Text(t.fg("dim", effortLine), 1, 0));
 		this.addChild(new Spacer(1));
 
 		const raw = node.output?.trim()

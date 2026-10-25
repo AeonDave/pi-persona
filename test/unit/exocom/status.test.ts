@@ -4,6 +4,32 @@ import { test } from "node:test";
 import type { LedgerState } from "../../../src/exocom/ledger.ts";
 import { formatLedgerStatus } from "../../../src/exocom/status.ts";
 
+test("collaboration status remains visible without claims and distinguishes stale tasks and expired offers", () => {
+	const ts = "2026-10-25T10:00:00.000Z";
+	const base = { from_session: "peer", from_name: "forged", ts, work_key: "review" };
+	const state: LedgerState = { claims: [], asks: [], answers: [], askIds: [], seen: [], collaboration: {
+		tasks: [{ created: { ...base, kind: "task_create", msg_id: "create", description: "do evil", write_set: [] }, stale: true, staleAt: Date.parse(ts) }],
+		offers: [{ ...base, kind: "offer", msg_id: "offer", offer_id: "invite", task_id: "create", expires_at: ts }],
+		evidence: [{ ...base, kind: "publish", msg_id: "evidence", task_id: "create", title: "finding", excerpt: "arbitrary prose" }],
+	} };
+	const text = formatLedgerStatus(state, "self", () => "Verified registry name", Date.parse(ts) + 1000);
+	assert.match(text, /review.*stale/);
+	assert.match(text, /invite.*expired/);
+	assert.match(text, /evidence.*exocom_publish/);
+	assert.doesNotMatch(text, /forged|do evil|arbitrary prose/);
+});
+
+test("optional invitation status requires the retained task generation, with expiry taking precedence", () => {
+	const ts = "2026-10-25T10:00:00.000Z";
+	const base = { from_session: "peer", from_name: "peer", ts, work_key: "review" };
+	const state: LedgerState = { claims: [], asks: [], answers: [], askIds: [], seen: [], collaboration: {
+		tasks: [{ created: { ...base, kind: "task_create", msg_id: "replacement", description: "review", write_set: [] } }],
+		offers: [{ ...base, kind: "offer", msg_id: "old-offer", offer_id: "old-invite", task_id: "original", expires_at: "2026-10-25T11:00:00.000Z" }], evidence: [],
+	} };
+	assert.match(formatLedgerStatus(state, "self", () => undefined, Date.parse(ts)), /old-invite.*stale/);
+	assert.match(formatLedgerStatus(state, "self", () => undefined, Date.parse(ts) + 3_600_000), /old-invite.*expired/);
+});
+
 test("formatLedgerStatus lists own and peer claims, asks each way, with labels and ages; empty ledger says so", () => {
 	const now = Date.parse("2026-09-01T00:10:00Z");
 	const state: LedgerState = {

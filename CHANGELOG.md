@@ -4,7 +4,82 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
-## [Unreleased]
+## [1.17.4](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.4) - 2026-10-25
+
+### Added
+
+- Voluntary Exocom collaboration: generation-bound shared tasks with atomic pickup/write claims,
+  expiring optional invitations, bounded attributed evidence publication and self-reported profiles.
+  Stale ownership remains visible without automatic takeover; task/evidence reads are paginated.
+  See [the collaboration guide](docs/COLLABORATION.md) for the authority and retention contracts.
+- Uniform operator views across every pi-persona surface: tool cards and commands use compact
+  purpose lines with shared-literal expansion (monitor, timer, models, read_result, agent_name,
+  contact_supervisor, contact_peer); session cards share the delegate-family frame (`Event · datum`
+  titles, indented clipped lines, boilerplate-free compact with drift-guarded projections, full
+  payload on expansion); the agent tree and F9 overlay show each leg's effort sigla (`mn l m h xh mx`,
+  off renders nothing) with honest requested→observed divergence, and delegate launch cards show the
+  full effort level next to the model.
+- Audited all operator notifications: bounded and sanitized toasts, single-surface settlement
+  announcements (done/stopped announce once via the follow-up card; failures keep their immediate
+  durable surface).
+- Installed-tarball qualification harness (`scripts/qualify-package.mjs`): packs and inspects the
+  artifact, installs it into isolated temporary hosts, and exercises real delegation, stop and
+  shutdown on both engines with a faux provider, network tripwires and empty credential stores.
+  Current policy: latest stable Pi only (1.4.0); historical host versions are rejected.
+- Per-leg thinking/effort: a typed `thinking` level on agents, delegate single/batch calls, roster
+  and council members, and auxiliary actors. Precedence is explicit leg/member > agent definition >
+  the existing configured/inherited child setting; malformed values fail before launch. Both engines
+  report requested and observed Pi effort separately (an observation is Pi's requested effort, never
+  a claim about provider cognition); the child engine passes a separate `--thinking` argument and the
+  model-suffix synthesis is gone.
+- Bounded durable terminal results: settled delegate/council/flow outcomes are saved as versioned
+  session entries with immutable `result:<UUID>` references (count/byte budgets, honest truncation
+  and storage receipts). `intercom results` lists them and `intercom result { ref, offset, limit }`
+  reads pages after reload — read-only: no respawn, no rebilling, no extra wake. The restore notice
+  now distinguishes vanished runtime work from retained terminal reports.
+
+### Fixed
+
+- Show every council/flow participant's launch model and requested effort, including auxiliary
+  judges and repeated roles with distinct inline selections. Persist the receipt for history;
+  pending model setup remains explicit. Role hints omit code and technical identifiers rather than
+  turning environment-variable names or Git refs into reviewer labels.
+- Treat failed model-availability reads as unavailable rather than advertising the whole catalog.
+  Session identity failures remain explicit and cannot reuse a previous owner or synthesize a
+  process-based identity; branch recovery restores the persisted name.
+- Admit granted bridge communication tools through Pi 1.4's plain tool allowlist, so a read-only
+  worker can still contact its supervisor. Empty grants, explicit exclusions and semantic bus denial
+  remain restrictive; sibling contact requires peer opt-in.
+- Refuse incompatible reference-flow journal versions and non-successful archived phases without
+  respawning completed work, including unapproved saved checkpoints. Retain truncation provenance
+  in resumed previews and final reports.
+- Label compact status usage as cumulative input/output tokens, distinct from context occupancy.
+- Preserve observed model identity after recovery in terminal results and completion views, while
+  launch cards retain the original selection. Requested and observed values remain distinguishable.
+- Announce a successful or stopped async run ONCE: the completion follow-up card is the single
+  settlement surface (the tree row already settles immediately); the duplicate info toast is gone.
+  Failures keep their immediate durable card/sanitized toast.
+- Pin isolated worktree exports to the starting commit, preserving worker commits together with later
+  uncommitted changes and new files in the returned patch.
+- Keep unanswered supervisor decisions/interviews unresolved instead of suggesting implicit approval.
+  Expose explicit outcomes and suppress bus activity for already-cancelled calls.
+
+### Removed
+
+- Remove the `/persona none` alias; use `/persona off` to deactivate the current persona.
+- Remove obsolete host API facades, the CJS-only Pi resolver fallback, unused session/notifier
+  options, unemitted identity-message aliases and redundant internal re-exports. Callers and test
+  fixtures now use the current Pi contracts directly.
+
+### Changed
+
+- Clarify and regression-test `/persona restore`: overwrite all bundled defaults without pruning
+  additional custom personas, agents or resources. Settings, credentials and sessions are not reset.
+- Target the latest stable Pi only (currently 1.4.0): development pins, `MIN_PI_VERSION`, docs and
+  the package-qualification gate move together, and historical host versions are rejected. A scoped
+  development override pins `undici` past known advisories inside the Pi 1.4.0 host dependency tree.
+- Align source SDK smoke checks with the canonical settings store and the current interactive vs
+  headless execution contract; settings qualification also rejects historical host versions.
 
 ## [1.17.3](https://github.com/AeonDave/pi-persona/tree/v1.17.3) - 2026-10-23
 

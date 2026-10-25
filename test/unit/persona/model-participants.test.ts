@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 import {
 	collectModelParticipants,
+	collectModelParticipantOccurrences,
 	participantKey,
 	pendingParticipants,
 	type ParticipantInput,
@@ -16,6 +17,17 @@ const PERFORMANCE = "Focus ONLY on the PERFORMANCE lens: algorithmic cost on hot
 /** `type: "agent"` is the auxiliary-actor param marker (strategy param contract). */
 const agentSchema = (judge: Partial<StrategyParam> = {}): Record<string, StrategyParam> => ({
 	judge: { type: "agent", doc: "the arbiter agent", ...judge },
+});
+
+test("launch occurrences preserve same-key legs and an auxiliary selection while picker keys remain deduplicated", () => {
+	const input: ParticipantInput = { members: [
+		{ agent: "reviewer", role: "HEAD", model: "openai/a", thinking: "low" },
+		{ agent: "reviewer", role: "HEAD", model: "openai/b", thinking: "xhigh" },
+	], params: { judge: { agent: "reviewer", role: "HEAD", model: "openai/judge", thinking: "max" } }, schema: agentSchema() };
+	assert.deepEqual(collectModelParticipantOccurrences(input).map((p) => [p.model, p.thinking, p.origin]), [
+		["openai/a", "low", "roster"], ["openai/b", "xhigh", "roster"], ["openai/judge", "max", "param"],
+	]);
+	assert.deepEqual(collectModelParticipants(input).map((p) => p.model), ["openai/a"], "model assignment prompts still have one key");
 });
 
 test("a bare member keeps the legacy agent-name key; a role member gets a stable hashed key", () => {
@@ -101,6 +113,38 @@ test("an explicit inline member model is never a picker candidate", () => {
 	const pending = pendingParticipants(list, { prompted: new Set() });
 	assert.deepEqual(pending.map((p) => p.key), [participantKey("reviewer", PERFORMANCE)]);
 	assert.equal(list[0]?.assigned, true, "an explicit model counts as assigned");
+});
+
+test("a member's explicit thinking rides the participant; absence stays absent", () => {
+	// The tree's effort sigla is seeded from the SAME participant that carries the model, so the
+	// effort must be the member's SPEC-level value — exactly what lands in AgentRunSpec.thinking
+	// when a strategy spreads `rosterSpec(member)` — and nothing else: no agent-default resolution,
+	// no model-assignment lookup, no invention from an unassigned participant.
+	const explicit = collectModelParticipants({
+		members: ["scout", { agent: "thinker", thinking: "xhigh" }, { agent: "waiter", thinking: "low" }],
+		agentModel: () => "p/frontmatter",
+		assigned: { thinker: "p/saved" },
+		sessionModel: "p/session",
+	});
+	assert.equal(explicit.find((p) => p.agent === "scout")?.thinking, undefined, "no declared effort ⇒ nothing to display");
+	assert.equal(explicit.find((p) => p.agent === "thinker")?.thinking, "xhigh");
+	assert.equal(explicit.find((p) => p.agent === "waiter")?.thinking, "low");
+
+	// An auxiliary actor specialised inline carries its own declared effort the same way.
+	const aux = collectModelParticipants({
+		strategy: "synthesize",
+		params: { synthesizer: { agent: "thinker", thinking: "high" } },
+	});
+	assert.equal(aux.find((p) => p.agent === "thinker")?.thinking, "high");
+
+	// A model-only participant (assigned/frontmatter/session) still shows no effort — thinking is
+	// never borrowed from any model input, and `off` is a REAL declared value that must survive.
+	const modelled = collectModelParticipants({
+		members: [{ agent: "melchior", model: "p/inline", thinking: "off" }],
+		agentModel: () => "p/frontmatter",
+	});
+	assert.equal(modelled.find((p) => p.agent === "melchior")?.thinking, "off", "an explicit off is a declared value, not absence");
+	assert.equal(modelled.find((p) => p.agent === "melchior")?.model, "p/inline");
 });
 
 test("auxiliary actors come from agent-typed strategy params (provided value or declared default)", () => {

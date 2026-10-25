@@ -1,0 +1,42 @@
+{
+  "scope": "own pi-persona code only; temporary Git repository; no upstream execution or project edits",
+  "worktree": {
+    "confirmed": true,
+    "baseline": "6b12869648673de1a7a86ef590bc38115e5ed4de",
+    "workerCommit": "80698eb387adb7b6537870ac65430d3a8368af37",
+    "artifactAccepted": true,
+    "committedChangeIncluded": false,
+    "uncommittedChangeIncluded": true,
+    "newFileIncluded": true,
+    "appliedArtifactLeavesCommittedFileAtBaseline": true,
+    "worktreeRemoved": true,
+    "gitObjectStillExists": true
+  },
+  "unansweredDecision": {
+    "confirmed": true,
+    "nonblockingText": "The supervisor is busy right now; your question was noted — proceed using your best judgement.",
+    "details": {
+      "kind": "decision",
+      "delivered": true
+    },
+    "failures": [
+      {
+        "reason": "ask timeout",
+        "text": "(the supervisor did not reply in time — proceed using your best judgement)",
+        "details": {
+          "kind": "decision",
+          "delivered": false
+        }
+      },
+      {
+        "reason": "broker connection closed",
+        "text": "(the supervisor is no longer available — this request was not delivered; proceed using your best judgement)",
+        "details": {
+          "kind": "decision",
+          "delivered": false
+        }
+      }
+    ],
+    "note": "permissive protocol advice; not an OS/tool-permission bypass and no model behavior was simulated"
+  }
+}

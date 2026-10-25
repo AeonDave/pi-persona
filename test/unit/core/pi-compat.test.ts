@@ -16,13 +16,18 @@ test("satisfiesFloor compares major.minor.patch and ignores prerelease tags", ()
 test("installedPiVersion reads the host package version without throwing", () => {
 	const v = installedPiVersion();
 	assert.ok(v === undefined || /^\d+\.\d+\.\d+/.test(v));
-	assert.equal(MIN_PI_VERSION, "1.0.0");
+	assert.equal(satisfiesFloor("1.3.999", MIN_PI_VERSION), false, "historical Pi host lines are not supported");
+});
+
+test("the supported host target matches all four pinned Pi development packages", () => {
+	const pkg = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { devDependencies: Record<string, string> };
+	for (const name of ["pi-agent-core", "pi-ai", "pi-coding-agent", "pi-tui"]) {
+		assert.equal(pkg.devDependencies[`@earendil-works/${name}`], MIN_PI_VERSION, name);
+	}
 });
 
 test("installedPiVersion returns the real semver when the host package is on disk", (t) => {
-	// `@earendil-works/pi-coding-agent` is ESM-only (no `main`), so resolution must go through
-	// `import.meta.resolve` rather than `createRequire(...).resolve`, which throws
-	// ERR_PACKAGE_PATH_NOT_EXPORTED for a package with no CJS entry.
+	// The current host exports its ESM import entry; resolve through that export condition.
 	const pkgPath = join(process.cwd(), "node_modules", "@earendil-works", "pi-coding-agent", "package.json");
 	if (!existsSync(pkgPath)) {
 		t.skip("`@earendil-works/pi-coding-agent` is not installed in this checkout");

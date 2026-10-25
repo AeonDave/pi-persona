@@ -7,7 +7,9 @@ import { configuredModels } from "../../../src/extension/engine.ts";
 type ModelRef = { provider: string; id: string };
 
 function context(registry: object, model?: ModelRef): ExtensionContext {
-	return { modelRegistry: registry, ...(model ? { model } : {}) } as unknown as ExtensionContext;
+	return { modelRegistry: { getRegisteredProviderIds: () => [], getRegisteredNativeProvider: () => undefined,
+		getRegisteredProviderConfig: () => undefined, getProvider: () => undefined, ...registry },
+		...(model ? { model } : {}) } as unknown as ExtensionContext;
 }
 
 test("configuredModels keeps host availability at model granularity within the active provider", () => {
@@ -72,10 +74,9 @@ test("only the exact active model is restored when it is absent from availabilit
 	assert.deepEqual(configuredModels(context({ getAll: () => [active, hidden], getAvailable: () => [] }, active)), [active]);
 });
 
-test("throwing or absent legacy availability APIs retain the historical catalog fallback", () => {
-	const known = { provider: "legacy", id: "known" };
-	assert.deepEqual(configuredModels(context({ getAll: () => [known] })), [known]);
-	assert.deepEqual(configuredModels(context({ getAll: () => [known], getAvailable: () => { throw new Error("legacy facade"); } })), [known]);
+test("an unavailable host availability snapshot never advertises the entire catalog as configured", () => {
+	const known = { provider: "subscription", id: "account-denied" };
+	assert.throws(() => configuredModels(context({ getAll: () => [known], getAvailable: () => { throw new Error("availability unavailable"); } })), /availability unavailable/);
 });
 
 test("broken registration metadata cannot lose available models or prevent another bridge from being included", () => {

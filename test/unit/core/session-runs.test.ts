@@ -82,18 +82,18 @@ test("restoreNotice names what did not survive, omits zero clauses and ends with
 	assert.equal(all,
 		"Session restored. Background work from before the restore did not survive (it lives only in memory): "
 		+ "runs run-3, run-4 (stopped or never reported); 1 timer; 1 monitor. "
-		+ "Earlier run results can no longer be fetched. Do not wait for them; relaunch or re-arm only what you still need.");
+		+ "Runtime workers and live run handles are not restored. Retained terminal reports may still be available via intercom { action:'results' } and result { ref:'result:<UUID>' }; read saved data without restarting work. Do not wait for vanished workers; relaunch unfinished work or re-arm wake sources only when still needed.");
 	assert.equal(all.split("\n").length, 1, "one line");
 
 	const oneRun = restoreNotice(lost(["run-7"])) ?? "";
-	assert.match(oneRun, /: run run-7 \(stopped or never reported\)\. Earlier/);
+	assert.match(oneRun, /: run run-7 \(stopped or never reported\)\. Runtime workers/);
 	assert.doesNotMatch(oneRun, /timer|monitor/);
 
 	const timersOnly = restoreNotice(lost([], 2, 0)) ?? "";
-	assert.match(timersOnly, /: 2 timers\. Earlier/);
+	assert.match(timersOnly, /: 2 timers\. Runtime workers/);
 	assert.doesNotMatch(timersOnly, /run-|\bruns?\b.*stopped|monitor/);
 
-	assert.match(restoreNotice(lost([], 0, 3)) ?? "", /: 3 monitors\. Earlier/);
+	assert.match(restoreNotice(lost([], 0, 3)) ?? "", /: 3 monitors\. Runtime workers/);
 });
 
 test("restoreNotice names at most eight run ids and counts the rest", () => {

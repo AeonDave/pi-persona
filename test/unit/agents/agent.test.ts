@@ -19,6 +19,7 @@ test("parseAgent reads frontmatter and uses the body as the system prompt", () =
 	assert.equal(a.name, "scout");
 	assert.equal(a.description, "Fast read-only explorer");
 	assert.equal(a.model, "anthropic/claude-x");
+	assert.equal(a.thinking, "low");
 	assert.deepEqual(a.tools, ["read", "grep", "find"]);
 	assert.equal(a.systemPrompt, "You are scout. Explore and report.");
 	assert.equal(a.source, "/a/scout.md");
@@ -77,6 +78,12 @@ test("parseAgent reads mcp: true (else undefined)", () => {
 	assert.equal(parseAgent("---\nname: s\nmcp: true\n---\nbody", "/s")?.mcp, true);
 	assert.equal(parseAgent("---\nname: s\n---\nbody", "/s")?.mcp, undefined);
 	assert.equal(parseAgent("---\nname: s\nmcp: false\n---\nbody", "/s")?.mcp, undefined, "false ⇒ unset");
+});
+
+test("parseAgent rejects malformed explicit thinking rather than inheriting", () => {
+	for (const value of ["ultra", "7", "true", "null", "''", "[high]"]) {
+		assert.throws(() => parseAgent(`---\nname: worker\nthinking: ${value}\n---\nbody`, "worker.md"), /thinking.*off.*xhigh.*max/);
+	}
 });
 
 test("parseAgent returns null when name is missing", () => {

@@ -2,7 +2,9 @@
  * Orchestration-layer types shared by the SDK, strategies, and reducers.
  */
 
+import type { ThinkingLevel } from "../core/types.ts";
 import type { ChildUsage } from "../engine/stream.ts";
+import type { ResultReceipt } from "../results/retrieval.ts";
 
 export type { ChildUsage };
 
@@ -33,11 +35,19 @@ export interface AgentResult {
 	output: string;
 	/** Validated structured fields (when the agent ran against a contract). */
 	structured?: Record<string, unknown>;
+	/** Terminal archive observation; memory-only is not a durable receipt. */
+	resultReceipt?: ResultReceipt;
 	usage: ChildUsage;
 	ok: boolean;
 	error?: string;
 	/** The canonical `provider/id` the run actually used (drives provider fallback + UI). */
 	modelUsed?: string;
+	/** Selected effort before Pi's model-capability clamp, when a selection is known. */
+	thinkingRequested?: ThinkingLevel;
+	/** Observed Pi effort (session readback or final assistant-message thinkingLevel).
+	 * This is Pi's requested effort, NOT evidence of the provider's actual cognition.
+	 * Absent when the host exposes no validated observation; never inferred from the request. */
+	thinkingEffective?: ThinkingLevel;
 	/** Why it failed (set only when `ok` is false) — drives the model-fallback decision. */
 	failureKind?: FailureKind;
 	/** Set when this result comes from a recovered retry (see {@link ModelRecovery}). Its `usage`

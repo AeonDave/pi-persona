@@ -81,9 +81,10 @@ These are the guardrails a contributor must not violate. They are enforced in co
   by the SDK on every `agent()` call and by the engine per child. Concurrency is shared across all
   calls in one SDK instance; token admission uses completed usage and is rechecked after queueing, so
   active legs can overshoot it. Nesting depth is not one of these numeric knobs — it is structural,
-  capped at 1: a child's whole pi-persona extension activation short-circuits under
-  `PI_PERSONA_DISABLE=1` (the **fork-bomb guard**), so it registers NO tools at all —
-  `delegate`/`council`/`orchestrate`/`flow` included. On the child engine this is a one-shot env var
+  capped at 1: full pi-persona activation short-circuits under `PI_PERSONA_DISABLE=1` (the
+  **fork-bomb guard**), so no supervisor orchestration tools (`delegate`/`council`/`flow`) are
+  registered. A broker-enabled child instead loads the minimal bridge, which registers only
+  granted communication and scoped result-reader tools. On the child engine this is a one-shot env var
   set on each spawned process; the in-process engine instead shares one Node process across
   concurrently-building sub-sessions, so it ref-counts the guard (`inproc.ts`) to keep it set until the
   LAST one finishes. The in-process engine also excludes `ORCHESTRATION_TOOLS` from the child session
@@ -150,6 +151,12 @@ These are the guardrails a contributor must not violate. They are enforced in co
   the JSON format.
 
 ## Module layout
+
+The supported host is the latest stable Pi (currently 1.4.0). Runtime code uses its public APIs
+directly; obsolete host facades, ignored SDK options and compatibility-only aliases are removed
+with their callers. Genuine host failures remain explicit rather than fabricating session identity
+or model availability. One-way user-data migrations and retained-history readers are separate data
+contracts: they remain only while serving stored user data, not to support an older Pi runtime.
 
 Domain dependencies remain downward-only and acyclic: `core ← all`; `engine`/`bus → core`;
 `orchestration → engine + bus + core`; `persona → orchestration + core`; the Exocom transport and
@@ -282,9 +289,12 @@ up to 16 names. Same idea, two layers, two caps — see docs/REFERENCE.md's exam
 `isolation: worktree` is fail-closed. It requires a clean Git checkout so the detached `HEAD` view
 cannot silently omit staged/unstaged/untracked supervisor work; a non-repository, dirty checkout,
 worktree creation failure, missing diff artifact, or an artifact over the return limit fails the leg —
-the base engine is never invoked against the real tree as a fallback. The diff returns to the
-supervisor before the temporary tree is removed, and every git call is asynchronous so the extension
-host keeps rendering, ticking timers, and serving broker sockets while a large checkout runs.
+the base engine is never invoked against the real tree as a fallback. The created worktree's initial
+commit is pinned before the worker starts. Export compares the final file state against that immutable
+commit, so worker commits, later unstaged changes and new files are included together. The diff is
+captured before the temporary tree is removed and then returned to the supervisor; commit history is
+not applied to the main checkout. Every git call is asynchronous so the extension host keeps rendering,
+ticking timers, and serving broker sockets while a large checkout runs.
 
 Transient retries inside one agent session belong to the host **Pi runtime**'s `retry.*` settings, not
 a persona contract — pi-persona neither parses retry notation nor schedules its own backoff. Both
@@ -501,12 +511,17 @@ events and cannot route, reply, steer, or otherwise control agents.
 ## The comm plane in practice
 
 - **In-process bus** (`bus/inproc.ts`) — a handle-based mailbox: `send` (one-way), `ask` (blocks for a
-  reply), `reply`, `onMessage`. `contact_supervisor` (child→supervisor, gated by `coaching: on`) and
+  reply), `reply`, `onMessage`. `contact_supervisor` (child→supervisor, gated by `canUseBus` and,
+  for in-process children, `coaching: on`) and
   `contact_peer` (sibling→sibling) are the child-side tools bound onto it. Each unread inbox holds at
   most 200 messages; overflow evicts an old one-way note first, and an inbox full of live asks rejects
   new delivery rather than stranding a sender. Ask settlement (reply, timeout, abort, departure, or
   failed delivery) releases its timer/listener and unread entry; a previously retained question stays
   readable with `expectsReply: false`, so old questions never advertise an active reply id.
+  Tool outcomes distinguish `answered` from unavailable, timed-out, cancelled and failed requests;
+  delivery evidence is never approval. Headless questions remain nonblocking and unresolved, allowing
+  only independent already-authorized work or a blocked/partial handoff. Pre-aborted calls perform no
+  bus action, and replies racing cancellation are not reported as answers.
 - **Sibling peer comm** — a strategy opts a run in via `AgentRunSpec.peers` (gated by `canUseBus`). The
   child gets `contact_peer` (`list`/`send`, ONE-WAY so peers can never deadlock; per-engine-instance
   scoping; a 20-send budget and an 8,000-character body limit, enforced before consuming a send). The
@@ -529,6 +544,10 @@ events and cannot route, reply, steer, or otherwise control agents.
   spawn without a bus endpoint, so they never burn connect backoff against a dead socket), and the next
   build retries; `/doctor` surfaces its state on one line. A dropped client connection flips the
   child-side bridge to `⇄ offline` and fails a fresh ask fast rather than hanging.
+  A connected child exposes `contact_supervisor` when `canUseBus` is allowed; `contact_peer` also
+  requires the run's peer opt-in. Granted custom tool names join a nonempty plain allowlist so Pi's
+  host filter does not hide them. Explicit `tools: []` and exclusions remain restrictive. A denied
+  semantic bus does not remove supervisor runtime steering or an independently scoped result reader.
 
 ### Presentation is a projection, not another comm plane
 
@@ -627,6 +646,21 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   unreadable versions. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
   not deletes them. Operator-only expandable log entries do not create model context or extra wakes.
 
+**Terminal result archive** (`src/results/`, `src/extension/results.ts`) applies the same
+ownership model to settled agent work: every terminal delegate/council/flow outcome (and each final
+SDK leg result, after any model recovery) is projected — once, idempotently by immutable origin —
+into a versioned session entry with an opaque `result:<UUID>` reference, independent from runtime
+run ids. Budgets: 128 entries, 8 MiB cumulative serialized payload per owning session file, 512 KiB
+per record; bodies cap at 262,144 UTF-16 units with honest truncation metadata. Unknown, malformed
+and duplicate history still consumes quota; unaccountable history disables new persistence instead
+of resetting it. A fork/copy is a new owning file charged only for the entries it actually carries.
+`storage: "session-entry"` means the host accepted the entry — never an fsync guarantee; memory-only
+retention is labelled as such. Retrieval is read-only: `intercom results` lists, `intercom result
+{ ref, offset, limit }` pages (8,000 default / 16,000 max units, surrogate-safe), with no respawn,
+rebilling, collection or extra wake; reading a page never returns the whole run hidden in metadata.
+A saved result is not a live worker: the restore notice says runtime handles are gone while retained
+reports remain readable.
+
 This is a UI invariant only: truncating a collapsed card must never be confused with truncating the
 underlying result or changing a strategy's contract.
 
@@ -640,17 +674,22 @@ and message peer-to-peer, with no parent/child relationship. (intercom = interna
 external comm.)
 
 Exocom supplies fenced one-way postcards and presence; chat `message` never mutates shared work
-state. Separately, a workspace work ledger (`ledger.ts`, tools in `tools/exocom-work.ts`) records
-claims/asks/answers/progress/releases. `exocom_ask` canonicalizes its target through
-`plane.resolvePeer` (raw session ids on the ledger, never the display name); registry display name is
-keyed by `from_session`, never the envelope's self-reported `from_name`. A pending ask constrains the
-turn (`gate.ts`: answer/decline plus read-only tools) behind a bounded `pendingAskPrompt`.
-`exocom_wait` is non-blocking. Clean shutdown releases this session's claims/asks; if that best-effort
-write fails, the vanished owner is pruned on the next ledger transaction (live registry sessions are
-the lease), and `expireWaiters` wakes any waiter left behind instead of leaving `exocom_wait` armed
-forever. This gate is cooperative coordination for participating local Pi processes — not filesystem
-authorization, not isolation from another same-user process, and not a delegate/council or task/run
-replacement.
+state. `src/exocom/ledger.ts` stores claims, questions, answers and progress; `src/exocom/collaboration.ts`
+adds voluntary tasks, optional offers and explicit evidence excerpts. Tool adapters live in
+`src/tools/exocom.ts`, `src/tools/exocom-collaboration.ts`, and `src/tools/exocom-profile.ts`.
+`exocom_ask` resolves its target through the live registry to a raw session id, never a display name.
+Attribution is resolved by `from_session`, never the envelope's self-reported `from_name`.
+
+A pending ask gates the participant to `exocom_answer`/`exocom_decline`, `exocom_name` identity
+metadata, `exocom_status`, explicit collaboration reads (`exocom_task` list/get, `exocom_publish`
+read, `exocom_profile` get), and read-only filesystem tools. Profile `set`/`clear` and all other
+mutations remain unavailable until the ask is settled. Naming does not settle an ask. The bounded
+`pendingAskPrompt` explains the outstanding obligation. `exocom_wait` is non-blocking. Clean shutdown
+releases this session's claims/asks; if that best-effort write fails, the vanished owner is pruned on
+the next ledger transaction (live registry sessions are the lease), and `expireWaiters` wakes any
+waiter left behind instead of leaving `exocom_wait` armed forever. This gate is cooperative
+coordination for participating local Pi processes — not filesystem authorization, not isolation from
+another same-user process, and not a delegate/council or task/run replacement.
 
 - **Opt-in, OFF by default.** `PI_PERSONA_EXOCOM=1` or bare `--exocom` joins the current workspace;
   `--exocom=Ab0T` joins an existing scope by its exact, case-sensitive four-character Base62 alias
@@ -677,18 +716,31 @@ replacement.
   standing brief, and `/exocom` label a peer as same-workspace or external without exposing its
   absolute `cwd`. External peers are full Pi instances that can inspect files in their own workspace;
   paths are never implicitly shared.
-- **Postcards plus a durable, non-blocking join.** `exocom_send` returns a `msg_id` immediately; a
-  reply is another `exocom_send` with `in_reply_to` set. `target: "*"` broadcasts postcards
-  best-effort (one unreachable peer doesn't fail the rest). Work coordination is separate:
-  `exocom_ask` commits an obligation to the ledger, `answer`/`decline` settles it, and `exocom_wait`
-  arms a bounded idle wake rather than blocking. The signed frame is a wake signal; the ledger remains
-  the source of truth if delivery is deferred.
+- **Postcards, asks and offers have different obligations.** `exocom_send` returns a `msg_id`
+  immediately; a reply is another `exocom_send` with `in_reply_to` set. `target: "*"` broadcasts
+  postcards best-effort. `exocom_ask` commits a targeted question that must be answered or declined;
+  `exocom_wait` arms a bounded idle wake rather than blocking. `exocom_offer` is an optional,
+  expiring invitation to consider an open task, targeted to one peer or the pool; it creates no ask,
+  no answer obligation and no work authorization. Its default lifetime is one hour, capped at 24 hours.
+  Signed immediate-wake frames are signals; the ledger remains authoritative when delivery is deferred.
+- **Task generations and atomic pickup.** `exocom_task create` records a voluntary objective and
+  declared write set; creation neither launches work nor claims paths. The task's immutable
+  `task_id` is its creation frame's `msg_id`; later take/progress/finish, offer and publish actions
+  carry both `work_key` and `task_id`, so reusing a key cannot attach a delayed action to a newer
+  task. A write-set task's pickup and overlapping write claim commit together under the ledger lock;
+  competing overlapping pickups are rejected. Read-only tasks can be taken by a peer in another
+  workspace scope. A task whose owning registry lease disappears becomes stale and cannot be taken
+  over automatically. `exocom_task list` is paginated; `get` returns the complete bounded task detail,
+  including the exact write set. `exocom_publish` attaches an explicitly authored bounded excerpt to
+  one task generation; discovery pages titles and message ids, and the full excerpt is read by id.
+  These excerpts do not grant access to a peer's terminal-result archive.
 - **Cross-workspace writes are advisory-only in v1.** A repository-relative claim path has meaning
   only in the workspace that owns the selected scope, so a member whose home workspace differs from
-  the scope cannot `exocom_claim` (the tool and the signed-frame receiver both reject a foreign
-  claim) — it can still send, inspect its own files, ask, answer/decline, wait, and release its own
-  asks. Multi-repository write coordination would need a versioned resource namespace; paths from
-  unrelated repositories are never compared as if they named the same files.
+  the scope cannot `exocom_claim` or create/pick up a write-set task (the tool and signed-frame
+  transaction both enforce the scope). It can still read shared tasks/evidence, take read-only tasks,
+  send postcards, ask, answer/decline, and release its own asks. Multi-repository write coordination
+  would need a versioned resource namespace; paths from unrelated repositories are never compared as
+  if they named the same files.
 - **Reply routing is session-stable.** `exocom_list` shows human display names (`name`/`name#2`);
   sends and inbound reply hints use `name@<96-bit session hash>`, so a retained qualified target
   stays valid after a rename. Ambiguous suffix matches fail closed rather than guess. The
@@ -727,15 +779,23 @@ replacement.
   double-trigger a turn. An exchange's LENGTH is instead bounded prompt-side: the per-turn peer brief
   (`core/brief.ts`) carries a relevance bound — send only what changes what someone does — deliberately
   not a round count, since a counter can't see whether a round still serves the work.
-- **Tools are lazy and fail closed.** `exocom_list({ offset?, limit? })` exposes bounded, paginated
-  presence; `exocom_send({ target, message, in_reply_to? })` sends one-way (a session-qualified-looking
-  target resolves only as one, never falling back to a display name, since names are self-chosen);
-  `exocom_name({ name })` rebrands the display call-sign without moving any state. The ledger tools —
-  `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`, `exocom_progress`,
-  `exocom_release` — are capability-gated with the postcard tools; the live accessor, capability gate,
-  and active-tool set all deny them once the plane stops, since Pi has no dynamic tool-unregister API.
-  Admission requires at least one obligation closer, because every published peer may receive a
-  durable ask and must retain a way to settle it.
+- **Fifteen tools are lazy and fail closed.** `EXOCOM_TOOL_NAMES` lists `exocom_list`, `exocom_send`,
+  `exocom_name`, `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`,
+  `exocom_release`, `exocom_progress`, `exocom_status`, `exocom_task`, `exocom_offer`,
+  `exocom_publish`, and `exocom_profile`. Each tool rechecks effective persona capabilities at call
+  time; the live accessor and active-tool set also deny calls once the plane stops, since Pi has no
+  dynamic tool-unregister API. A joined foreign-scope peer has no `exocom_claim`. Admission requires
+  `canUseBus` and at least one callable ask closer, because every published peer may receive a durable
+  ask and must retain a way to settle it.
+- **Collaboration and profile retention are bounded.** The ledger retains at most 64 tasks, 64 offers,
+  and 64 evidence excerpts with a 128 KiB aggregate collaboration-state budget. Task descriptions cap
+  at 2,048 characters; write sets at 64 paths of 256 characters each; progress/finish notes at 4,096.
+  Evidence titles cap at 160 characters and excerpts at 4,096 characters / 8,192 UTF-8 bytes. Finished
+  or stale tasks remain for up to one hour; expired offers remain for up to one hour after expiry, and
+  evidence for up to one hour after publication. Active tasks remain while their owner lease is live.
+  `exocom_profile` contains up to eight self-described capability labels (48 characters each) and
+  optional `available`, `busy` or `away` status. Missing status is unknown. Profiles exist only for
+  their live Exocom session and never prove skills, permission or availability.
 - **Inbound delivery is bounded without loss.** Each message is injected under the same byte cap
   whether plain text or an artifact descriptor. Bursts stay FIFO-queued; each rate-limited wake drains
   as many whole messages as fit, leaving the rest queued. A presentation cap on the collapsed card

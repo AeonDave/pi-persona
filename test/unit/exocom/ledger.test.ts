@@ -475,6 +475,26 @@ test("two independent processes racing overlapping claims produce exactly one su
 	}
 });
 
+test("two independent peers racing voluntary task pickup reserve exactly one task and claim", { timeout: 10_000 }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-task-race-"));
+	const ledger = join(dir, "ledger.jsonl");
+	const barrier = join(dir, "go");
+	try {
+		const created: ExocomSemanticFrame = { kind: "task_create", work_key: "inventory", description: "Inspect inventory", write_set: ["src/inventory.ts"], from_session: "creator", from_name: "orion", msg_id: "created", ts };
+		assert.equal(commitLedgerEvent(ledger, created).ok, true);
+		const pickup = (session: string): ExocomSemanticFrame => ({ kind: "task_take", work_key: "inventory", task_id: "created", from_session: session, from_name: "peer", msg_id: `take-${session}`, ts });
+		const both = Promise.all([spawnClaimChild(ledger, barrier, pickup("left")), spawnClaimChild(ledger, barrier, pickup("right"))]);
+		writeFileSync(barrier, "go", { flag: "wx" });
+		const results = await both;
+		assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.output).join("\n"));
+		const outcomes = results.map((result) => JSON.parse(result.output) as { ok: boolean });
+		assert.equal(outcomes.filter((outcome) => outcome.ok).length, 1);
+		const state = loadLedger(ledger);
+		assert.equal(state.claims.length, 1);
+		assert.equal(state.collaboration?.tasks[0]?.taken?.from_session, state.claims[0]?.from_session);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("compaction handles short writes and never falls back to an in-place replace failure", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-atomic-replace-"));
 	const ledger = join(dir, "ledger.jsonl");

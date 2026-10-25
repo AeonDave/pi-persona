@@ -20,6 +20,7 @@ import type { LedgerAsk, LedgerClaim, LedgerState } from "./ledger.ts";
 import { formatDuration } from "../core/time.ts";
 import { fencePeer } from "../core/fence.ts";
 import { renderWriteSet, untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
+import { collaborationOfferStatus, collaborationStatus } from "./collaboration.ts";
 
 /** No section may hand the model an unbounded ledger — a long-lived scope with many claims stays
  *  one bounded read, same discipline as the pending-ask block and the peer roster. */
@@ -72,8 +73,12 @@ export function formatLedgerStatus(
 	const peerClaims = state.claims.filter((claim) => claim.from_session !== self).sort(byTsAscending);
 	const asksForYou = state.asks.filter((ask) => ask.to_session === self).sort(byTsAscending);
 	const yourAsks = state.asks.filter((ask) => ask.from_session === self).sort(byTsAscending);
+	const collaboration = state.collaboration;
+	const tasks = collaboration?.tasks ?? [];
+	const offers = collaboration?.offers ?? [];
+	const evidence = collaboration?.evidence ?? [];
 
-	if (ownClaims.length === 0 && peerClaims.length === 0 && asksForYou.length === 0 && yourAsks.length === 0) {
+	if (ownClaims.length === 0 && peerClaims.length === 0 && asksForYou.length === 0 && yourAsks.length === 0 && tasks.length === 0 && offers.length === 0 && evidence.length === 0) {
 		return "nothing claimed or pending";
 	}
 
@@ -82,5 +87,10 @@ export function formatLedgerStatus(
 		section("peer claims", peerClaims.map((claim) => claimRow(claim, self, labelFor, now)), { fence: true }),
 		section("asks waiting for you", asksForYou.map((ask) => askRow(ask, ask.from_session, labelFor, now)), { fence: true }),
 		section("your open asks", yourAsks.map((ask) => askRow(ask, ask.to_session, labelFor, now))),
+		...(tasks.length ? [section("shared tasks (exocom_task list for detail)", tasks.map((task) =>
+			`${task.created.work_key} · ${collaborationStatus(task)} · ${resolveLabel(task.taken?.from_session ?? task.created.from_session, labelFor)}`), { fence: true })] : []),
+		...(offers.length ? [section("optional invitations", offers.map((offer) =>
+			`${offer.offer_id} · task ${offer.work_key} · ${collaborationOfferStatus(offer, tasks, now)} · ${offer.to_session ? resolveLabel(offer.to_session, labelFor) : "open invitation"}`), { fence: true })] : []),
+		...(evidence.length ? [`${evidence.length} retained evidence excerpt(s); discover with exocom_publish { action: "read", work_key: "<task>" }.`] : []),
 	].join("\n\n");
 }

@@ -73,6 +73,7 @@ export interface RunStrategyDeps {
 	/** Per-agent lifecycle, for live UI (which roster agent is running/done + its result).
 	 *  `key` is a run-unique display id (disambiguates same-agent roster-role members). */
 	onAgentStatus?: (agent: string, status: AgentStatus, result?: AgentResult, key?: string) => void;
+	onAgentResult?: SDKDeps["onAgentResult"];
 	/** Per-agent streaming progress (rolling output), for live UI. */
 	onAgentProgress?: (agent: string, progress: AgentProgress, key?: string) => void;
 	/** Called as each agent starts with a handle to abort just that agent (UI stop). */
@@ -110,6 +111,7 @@ export async function runPersonaStrategy(
 	if (deps.onModelFallback) sdkDeps.onModelFallback = deps.onModelFallback;
 	if (deps.log) sdkDeps.log = deps.log;
 	if (deps.onAgentStatus) sdkDeps.onAgentStatus = deps.onAgentStatus;
+	if (deps.onAgentResult) sdkDeps.onAgentResult = deps.onAgentResult;
 	if (deps.onAgentProgress) sdkDeps.onAgentProgress = deps.onAgentProgress;
 	if (deps.onAgentStart) sdkDeps.onAgentStart = deps.onAgentStart;
 	if (deps.onAgentSteerable) sdkDeps.onAgentSteerable = deps.onAgentSteerable;

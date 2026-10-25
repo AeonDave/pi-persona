@@ -217,7 +217,7 @@ export class ModelPicker extends Container implements Focusable {
 			return;
 		} else {
 			const before = this.input.getValue();
-			// Input has no per-instance keybindings API (Pi 1.3/1.4). Scope its global
+			// Input has no per-instance keybindings API (Pi 1.4). Scope its global
 			// lookup to this synchronous call and restore it even if handling throws.
 			const global = getKeybindings();
 			try {

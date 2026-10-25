@@ -25,6 +25,7 @@ test("a provider reroute reaches the onFallback breadcrumb the extension wires",
 		cwd: process.cwd(),
 		model: { provider: "anthropic", id: "m" },
 		modelRegistry: {
+			getRegisteredProviderIds: () => [],
 			getAll: () => [{ provider: "anthropic", id: "m" }, { provider: "amazon-bedrock", id: "m" }],
 			getAvailable: () => [{ provider: "anthropic", id: "m" }, { provider: "amazon-bedrock", id: "m" }],
 		},
@@ -89,6 +90,7 @@ test("providerFallback:false disables the decorator, while the default still rer
 		cwd: process.cwd(),
 		model: { provider: "anthropic", id: "m" },
 		modelRegistry: {
+			getRegisteredProviderIds: () => [],
 			getAll: () => [{ provider: "anthropic", id: "m" }, { provider: "amazon-bedrock", id: "m" }],
 			getAvailable: () => [{ provider: "anthropic", id: "m" }, { provider: "amazon-bedrock", id: "m" }],
 		},
@@ -133,7 +135,7 @@ test("modelFor resolves a role member's own assignment first, then the agent's l
 	const ctx = {
 		cwd: process.cwd(),
 		model: { provider: "anthropic", id: "m" },
-		modelRegistry: { getAll: () => [{ provider: "anthropic", id: "m" }], getAvailable: () => [{ provider: "anthropic", id: "m" }] },
+		modelRegistry: { getRegisteredProviderIds: () => [], getAll: () => [{ provider: "anthropic", id: "m" }], getAvailable: () => [{ provider: "anthropic", id: "m" }] },
 		sessionManager: { getSessionId: () => "s1" },
 	} as unknown as BuildEngineDeps["lastCtx"];
 	const persona = "magi";

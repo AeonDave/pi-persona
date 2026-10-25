@@ -77,8 +77,7 @@ export function writeSetPathError(path: string): string | undefined {
 }
 
 /** Return an actionable error for a parallel write-set collision; undefined means safe to spawn.
- *  Lives here (not in `tools/delegate.ts`) so a strategy can call it without importing a tool
- *  module — `delegate.ts` re-exports it unchanged for its own call sites. */
+ *  Lives here so strategies and tools can depend on ownership without importing each other. */
 export function validateParallelWriteSets(tasks: readonly WriteSetOwner[]): string | undefined {
 	for (const [index, task] of tasks.entries()) {
 		for (const path of task.writeSet ?? []) {

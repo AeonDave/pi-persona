@@ -22,6 +22,11 @@ export interface FlowPhase {
 export interface FlowSpec {
 	name: string;
 	description?: string;
+	/** How a dependent phase receives its upstream phases' output. `inline` (the default,
+	 *  and still first-class) embeds each upstream result's full fenced body in the dependent's
+	 *  task; `reference` embeds only a bounded preview plus the archived result reference — the
+	 *  dependent reads the rest through the scoped `read_result` tool (see flow-run.ts). */
+	handoff?: "inline" | "reference";
 	phases: FlowPhase[];
 }
 
@@ -111,6 +116,12 @@ export function parseFlow(content: string): FlowParse {
 
 	const flow: FlowSpec = { name: raw.name, phases };
 	if (typeof raw.description === "string") flow.description = raw.description;
+	if (raw.handoff !== undefined) {
+		if (raw.handoff !== "inline" && raw.handoff !== "reference") {
+			return { ok: false, error: `flow.handoff must be "inline" or "reference" (got ${JSON.stringify(raw.handoff)})` };
+		}
+		flow.handoff = raw.handoff;
+	}
 	return { ok: true, flow };
 }
 

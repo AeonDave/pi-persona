@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { isInfrastructureFailure, makeSDK, type StrategyEngine } from "../../../src/orchestration/sdk.ts";
+import { isInfrastructureFailure, makeSDK, type StrategyEngine, withResultRefs } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
+import { parseAuxActor } from "../../../src/orchestration/params.ts";
+import { parseMembersBlock } from "../../../src/persona/persona.ts";
+import { rosterSpec } from "../../../src/orchestration/roster.ts";
 
 const LIMITS = { maxChildren: 8, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
@@ -18,6 +21,31 @@ const engineRejectingFor = (...bad: string[]): StrategyEngine => ({
 
 // The per-leg vs. run-fatal boundary: an engine rejection is THIS leg's failure (the fan-out keeps
 // its siblings' completed work), while a run-scoped limit breach still stops the whole run.
+
+test("SDK forwards thinking from inline/persona members and auxiliary actors through model recovery unchanged", async () => {
+	const seen: Array<{ model?: string; thinking?: string }> = [];
+	const sdk = makeSDK({
+		engine: { run: async (spec) => {
+			seen.push({ ...spec });
+			return spec.model === "broken/m"
+				? { ...ok(spec.agent), ok: false, failureKind: "provider", modelUsed: "broken/m" }
+				: { ...ok(spec.agent), modelUsed: "main/m", ...(spec.thinking ? { thinkingRequested: spec.thinking } : {}), thinkingEffective: "high" };
+		} },
+		roster: { team: () => [] }, limits: LIMITS, sessionModel: "main/m",
+	});
+	const members = parseMembersBlock([{ agent: "a", thinking: "low" }, { agent: "a", thinking: "high" }]);
+	assert.equal(members.ok, true);
+	if (!members.ok) return;
+	const aux = parseAuxActor({ agent: "arbiter", model: "broken/m", thinking: "xhigh" }, "arbiter");
+	assert.ok(aux?.ok);
+	const results = await sdk.parallel(members.members.map((member) => () => sdk.agent({ ...rosterSpec(member), task: "t" })));
+	const recovered = await sdk.agent({ ...aux.spec, task: "t" });
+	assert.deepEqual(seen.map((s) => s.thinking), ["low", "high", "xhigh", "xhigh"]);
+	assert.deepEqual(results.map((r) => r.thinkingRequested), ["low", "high"]);
+	assert.equal(recovered.thinkingRequested, "xhigh");
+	assert.equal(recovered.thinkingEffective, "high");
+	assert.deepEqual(recovered.modelRecovery, { from: "broken/m", to: "main/m" });
+});
 
 test("a rejecting engine becomes that leg's ok:false result, so the fan-out keeps its siblings' work", async () => {
 	const sdk = makeSDK({ engine: engineRejectingFor("b"), roster: { team: () => [] }, limits: LIMITS });
@@ -351,4 +379,44 @@ test("a root abort between a slot grant and the engine seam still prevents the q
 
 	assert.equal(firstResult.ok, true);
 	assert.equal(queuedResult.failureKind, "abort");
+});
+
+// ── reference-mode result refs (frozen contract): internal, strategy-strippable ──
+
+test("sdk strips a strategy-supplied resultRefs grant — strategies cannot enlarge it", async () => {
+	const seen: Array<readonly string[] | undefined> = [];
+	const sdk = makeSDK({
+		engine: {
+			run: async (spec) => {
+				seen.push(spec.resultRefs);
+				return ok(spec.agent);
+			},
+		},
+		roster: { team: () => [] },
+		limits: LIMITS,
+	});
+	await sdk.agent({ agent: "a", task: "t", resultRefs: ["result:00000000-0000-4000-8000-00000000000a"] });
+	assert.deepEqual(seen, [undefined], "the strategy's own refs never reach the engine");
+});
+
+test("withResultRefs pins a trusted grant at the engine seam (flow reference mode wiring)", async () => {
+	const seen: Array<readonly string[] | undefined> = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			seen.push(spec.resultRefs);
+			return ok(spec.agent);
+		},
+	};
+	const refs = ["result:00000000-0000-4000-8000-00000000000a"] as const;
+	const sdk = makeSDK({
+		engine: withResultRefs(engine, refs),
+		roster: { team: () => [] },
+		limits: LIMITS,
+	});
+	// A strategy tries to smuggle its own ref; the trusted wrapper's grant is what runs.
+	await sdk.agent({ agent: "a", task: "t", resultRefs: ["result:00000000-0000-4000-8000-00000000ff"] });
+	assert.deepEqual(seen, [refs]);
+	// The wrapper overrides, it does not union.
+	await withResultRefs(engine, []).run({ agent: "b", task: "t", resultRefs: ["result:00000000-0000-4000-8000-00000000000f"] });
+	assert.deepEqual(seen.at(-1), []);
 });

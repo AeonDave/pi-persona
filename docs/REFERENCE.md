@@ -34,7 +34,7 @@ hard-fail.
 
 | Surface | Does |
 |---|---|
-| `delegate` tool | spawn one or more sub-agents; interactive sessions always run it in the background (results return as completion follow-ups); headless `pi -p` always blocks and returns results inline. There is no `sync`/`async` parameter. A leg whose tool is silent longer than the idle window (180 s) fails with a message telling you to raise that leg's `timeoutMs`. A `tasks` fan-out's receipt pairs each run id with its call-sign, and one wake covers the whole batch |
+| `delegate` tool | spawn one or more sub-agents; interactive sessions always run it in the background (results return as completion follow-ups); headless `pi -p` always blocks and returns results inline. There is no `sync`/`async` parameter. A leg whose tool is silent longer than the idle window (180 s) fails with a message telling you to raise that leg's `timeoutMs`. A `tasks` fan-out's receipt pairs each run id with its call-sign, and one wake covers the whole batch. An optional `thinking` picks that leg's effort level (off…max); omission keeps the agent's own setting and the configured/inherited child default, and results distinguish requested from observed effort |
 | `council` tool | select any installed strategy over a named roster or temporary inline `members`; voting strategies preserve tally and dissent. Interactive sessions run a council in the background, like `delegate`: a receipt with a run id now, ONE completion follow-up with the ruling (`intercom result { to: runId }` for the full payload); headless `pi -p` returns it inline. Use it when the method adds value (vote, arbiter's pick, critique loop, per-item sweep, rival builds), not for plain independent parallel work, which is `delegate`. The strategy list in the tool description is generated from the registry (`when`, positional `roster`, `*` for a required param); a call missing a required param (`judge` and `compete` need `params.judge`) fails at once with `council failed: "<strategy>" requires params.<key> — …` and launches nothing, while an unknown strategy or roster is reported by the run itself, in the completion follow-up. A persona's declared `council:` still resolves when strategy, roster and params are omitted. Per-strategy behaviour (section labels, MAGI reflection fallbacks) is in [`STRATEGIES.md`](./STRATEGIES.md) |
 | `intercom` tool | observe and control internal runs with `peek`, `result`, `steer`, and `stop`; `list`, `inbox`, `message`, `reply`, and `send` drive the coaching bus. There is no `wait`: a finished child wakes the supervisor through the completion follow-up |
 | `timer` tool | read the fresh clock with `now`, or schedule an idle wake with `arm`, `cancel`, and `list`; alarms are one-shot and in-memory per session; an armed alarm shows as a row in the agent widget and F9 until it fires or is cancelled |
@@ -77,14 +77,15 @@ its lighter variants when present. The current provider is a default, not a user
 explicit worker-model request may select another configured provider. The LLM retains the choice.
 
 The delegate tool's optional `name` is carried into `AgentRunSpec.name` and reaches both engine
-backends, keeping a caller-provided run label available in the live tree and runtime result. Every
-settled async run also emits immediate UI feedback with that name and its terminal outcome. TUI
-failures persist an expandable card with the agent, model, elapsed time and a concise cause; expansion
-retains the full technical diagnostic. Other modes use a concise notification. These operator-only
-cards do not inject context or start a second turn. The model-facing report remains independently
-idle-gated; a UI notification failure cannot discard it.
+backends, keeping a caller-provided run label available in the live tree and runtime result. A
+successful or stopped run announces ONCE: the idle-gated completion follow-up is the single
+settlement surface (the agent-tree row already settles immediately). A failure keeps an immediate
+operator surface — in the TUI a durable expandable card with the agent, model, elapsed time and a
+concise cause (expansion retains the full technical diagnostic); other modes use a concise
+sanitized notification. These operator-only cards do not inject context or start a second turn.
+The model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
 
-### Pi 1.0 codemode
+### Native codemode
 
 Pi's native `codemode` can call callable pi-persona tools through the normal nested-tool pipeline.
 Argument validation and persona permission gates still apply to every inner call; scripts do not
@@ -124,13 +125,18 @@ a live pending ask on the exact child handle, never inferred from its last activ
 | Surface | Needs | What you get |
 |---|---|---|
 | **Observe and control** | any persona | `peek` inspects async sub-agents; `steer` sends a soft correction; `stop` requests cancellation, and `stop { to: "all" }` cancels every running run, `council` and `flow` included (runs already stopping are skipped, never force-cleared in bulk; a slash or mandated run is stopped at shutdown, not by this). The `f9` overlay provides the same controls (`s`, `x`, `X`). Cancelling a worker does not undo existing changes; an unknown id on `result`, `steer` or `stop` returns a miss text listing the known runs |
-| **Retrieve** | any persona | `result { to }` returns one retained run payload; `message { messageId }` returns one retained bus message. History is bounded to 256 messages and 256,000 body characters, and retrieval never starts a worker |
-| **Message bus** | `coaching: true` | children get `contact_supervisor`; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
+| **Retrieve** | any persona | `result { to }` returns one retained run payload (`offset`/`limit` page a bounded view without collecting it; `collect: true` acknowledges whole-body collection of a live run); `result { ref, offset, limit }` reads a page of a retained terminal result after reload; `results` lists retained terminal results with immutable refs; `message { messageId }` returns one retained bus message. History is bounded to 256 messages and 256,000 body characters, terminal results to 128 entries / 8 MiB per session, and retrieval never starts a worker |
+| **Message bus** | bus allowed; in-process children also require `coaching: true` | broker-connected children and coached in-process children get `contact_supervisor`, subject to explicit empty tool grants and exclusions; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
 | **Sibling peer comm** | strategy opt-in | `debate` and `pair` members always get one-way `contact_peer`; `map` and `synthesize` add it with `params: { peers: true }` |
 
-With coaching enabled, an async child's `decision` or `interview` waits for a supervisor reply.
-A headless (inline) child posts the question one-way and continues instead: the supervisor is
-parked in that call and cannot answer a blocking ask. Progress messages are always one-way.
+When supervisor contact is available, an async child's `decision` or `interview` waits for a supervisor reply.
+A headless (inline) child posts the question one-way without waiting: the supervisor is parked
+in that call and cannot answer. The decision/interview remains unresolved; the child may continue
+only independent work already authorized, otherwise it returns a blocked/partial result. A timeout,
+disconnection or failure is never permission to invent an answer. Results expose `outcome` as
+`reported`, `answered`, `unavailable`, `timed-out`, `cancelled` or `failed`; `delivered` means only
+confirmed delivery, not a reply or approval (false can mean unconfirmed). An already-cancelled call
+sends nothing. Progress messages remain one-way.
 
 Delegated output is untrusted and is fenced before it reaches the supervisor. Interactive
 delegation always runs in the background: continue independent work, and when only children remain, end the turn for
@@ -199,6 +205,43 @@ and your own open asks. A claim's `write_set` is advisory, not enforced: a super
 `write`/`edit` call whose path overlaps a PEER's open claim is blocked once with a reason to
 coordinate (`exocom_ask`) or claim the path itself; calling the same tool again on the same path is
 then allowed through (one warning per claim + normalized path, not a standing lock).
+
+### Exocom collaboration tools
+
+The external plane exposes fifteen call-time-gated tools: `exocom_list`, `exocom_send`,
+`exocom_name`, `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`,
+`exocom_release`, `exocom_progress`, `exocom_status`, `exocom_task`, `exocom_offer`,
+`exocom_publish`, and `exocom_profile`. Persona denials still apply during an active session; a
+foreign-workspace member does not receive usable `exocom_claim` access.
+
+| Tool | Contract |
+|---|---|
+| `exocom_list`, `exocom_send`, `exocom_name` | Discover session-qualified targets, send a one-way postcard, or set this session's display handle. A rename does not change the routing identity. |
+| `exocom_claim`, `exocom_release`, `exocom_progress`, `exocom_status` | Declare advisory repository-relative ownership, release it, add progress, or inspect current ledger state. Claims do not enforce OS-level write access. |
+| `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait` | Send a targeted question that creates an obligation, settle an incoming ask, or arm a non-blocking wake for an answer. |
+| `exocom_task` | Create a voluntary task (creation does not launch a worker), take it, report progress, finish it as `done` or `abandoned`, or inspect retained tasks. Use `list` then `get` for full details. |
+| `exocom_offer` | Send an optional invitation for an open task to a peer or the pool. It expires after one hour by default and at most 24 hours; it never creates an ask or an obligation to answer. |
+| `exocom_publish` | Share an explicit bounded evidence excerpt for a task, discover titles/message ids by `work_key`, and retrieve one excerpt by `msg_id`. This does not expose an `intercom` terminal-result archive. |
+| `exocom_profile` | Read, set or clear this session's self-reported capability labels and availability. Up to eight labels of 48 characters each; availability is `available`, `busy`, `away` or unknown. It never grants permission or verifies skill. |
+
+`exocom_task list` is discovery: omit `work_key` and `task_id`, then use the returned identifiers for
+`get` or a task action. Summary pages default to 10 rows; `detail: true` defaults to 5, and an
+explicit detailed limit above 5 is rejected. `exocom_task create` returns `task_id`, which equals
+the creation message id. Carry it with `work_key` for take/progress/finish, offers and evidence
+publication; the key alone is only a lookup name and can be reused after retention. Write-set pickup
+and claim are committed atomically under the ledger lock. Read-only tasks can be taken from another
+workspace scope. A task whose owner leaves becomes stale and cannot be taken over automatically.
+Detailed paths are available through `exocom_task({ action: "get", work_key, task_id })`;
+paginated list summaries may clip the write set.
+
+While an incoming ask is pending, allowed actions are answer/decline, `exocom_name`, status, explicit
+collaboration reads (`exocom_task` list/get, `exocom_publish` read, `exocom_profile` get), and
+read-only filesystem tools. Profile edits and other mutations wait until the ask is settled. Identity
+metadata does not settle it. Task, offer and evidence records are each capped at 64 and share a
+128 KiB state budget; terminal or stale tasks and expired offers are retained for up to an hour,
+while evidence is retained for up to an hour after publication. Active tasks remain while their owner
+lease is live. See the [cross-session collaboration guide](./COLLABORATION.md) for workflows and
+bounded examples.
 
 ## Configuration and data
 
@@ -592,6 +635,14 @@ queued or later stages may still start.
 `/persona-settings [show]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` ·
 `/peek [id]` · `/exocom` · `/doctor`.
 
+`/persona off` is the deactivation command. `/persona restore` force-restores every bundled resource
+into the user persona directory: personas and agents, flows, contracts, presets, `teams.yaml`, and
+the shared prompt pair. Existing bundled destinations are overwritten; additional user files are
+not pruned. For example, custom `agents/pippo.md` (a persona) and `agents/pluto.md` (an agent) survive
+unchanged. Reusing a bundled destination filename means opting into its replacement. This is not a
+reset of `settings.json`, credentials, sessions or project-local overrides. Definitions are reloaded
+afterward, including any preserved custom persona that was active.
+
 `/doctor` reports the cross-process broker's lifecycle on one line: `broker: on — endpoint …` once
 the host is listening, `broker: on — (starting…)` mid-attempt, or
 `broker: on — (not started — no child-engine build yet)` before any child-engine build has run. A
@@ -602,7 +653,7 @@ build retries. A connected broker child's status shows `⇄ <handle>`; if that c
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 `/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
-(requires ≥ 1.0.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+(requires ≥ 1.4.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 

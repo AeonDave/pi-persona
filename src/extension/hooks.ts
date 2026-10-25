@@ -18,11 +18,13 @@ import { type AsyncRun, type AsyncRunTracker, type IdleCoalescingNotifier, type 
 import { constrainedTurnAllows } from "../exocom/gate.ts";
 import type { LedgerClaim } from "../exocom/ledger.ts";
 import type { DisplayPeer } from "../exocom/plane.ts";
-import { peerClaimFor, WRITE_TOOLS, writeWarningKey, writeWarningReason } from "../exocom/write-guard.ts";
+import { peerClaimFor, WRITE_TOOLS, writeWarningKey, writeWarningReason, writeWarningToastReason } from "../exocom/write-guard.ts";
 import {
 	canonicalExocomTelemetryTargets,
+	compactNameList,
 	piPersonaToolErrorPatch,
 	sendPersonaFollowUp,
+	toastCause,
 	type PendingAsk,
 } from "./shared.ts";
 import type { TimerEntry } from "../core/timer.ts";
@@ -32,21 +34,21 @@ import { resolveStrategyName } from "../persona/orchestrate.ts";
 import type { PersonaController, PersonaHost } from "../persona/controller.ts";
 import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaConfigStore } from "../persona/config-store.ts";
-import { TELEMETRY_EVENT_NAME, type TelemetryEvent } from "../telemetry/contract.ts";
+import { TELEMETRY_EVENT_NAME } from "../telemetry/contract.ts";
 import { TelemetryProducer, type TelemetryAgentInput } from "../telemetry/producer.ts";
 import { isWakeSource, type AgentTree, type AgentNode } from "../ui/agent-tree.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 import type { FailureKind } from "../orchestration/types.ts";
 import type { ExocomInstall } from "../exocom/install.ts";
 import type { SessionIdentity } from "./identity.ts";
+import type { SessionResults } from "./results.ts";
+import { resultReceiptHint, type ResultReceipt } from "../results/retrieval.ts";
 
-type SessionManagerLike = { getSessionId?: () => string; getEntries?: () => readonly unknown[] };
-const sessionManagerOf = (ctx: ExtensionContext): SessionManagerLike => (ctx as ExtensionContext & { sessionManager?: SessionManagerLike }).sessionManager ?? {};
-
-type MandatoryOutcome = { label: string; output: string; ok: boolean; error?: string; failureKind?: FailureKind };
+type MandatoryOutcome = { label: string; output: string; ok: boolean; error?: string; failureKind?: FailureKind; resultReceipt?: ResultReceipt };
 
 export interface HookHost {
 	readonly identity: SessionIdentity;
+	readonly results: SessionResults;
 	config: PiPersonaConfig;
 	controller: PersonaController;
 	personaHost: PersonaHost;
@@ -111,8 +113,8 @@ export interface HookHost {
 	reportDefinitionCollisions(ctx: ExtensionContext): void;
 	userAgentDir(): string;
 	loadFlow(cwd: string, name: string): { ok: true; flow: FlowSpec } | { ok: false; error: string } | undefined;
-	runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, task: string): Promise<{ output: string; ok: boolean; cancelled?: boolean; error?: string; failureKind?: FailureKind }>;
-	runStrategyVisible(ctx: ExtensionContext, orch: OrchestrationGrammar, task: string, label: string): Promise<{ output: string; ok: boolean; error?: string; failureKind?: FailureKind } | undefined>;
+	runFlowVisible(ctx: ExtensionContext, spec: FlowSpec, task: string): Promise<{ output: string; ok: boolean; cancelled?: boolean; error?: string; failureKind?: FailureKind; resultReceipt?: ResultReceipt }>;
+	runStrategyVisible(ctx: ExtensionContext, orch: OrchestrationGrammar, task: string, label: string): Promise<{ output: string; ok: boolean; error?: string; failureKind?: FailureKind; resultReceipt?: ResultReceipt } | undefined>;
 	personaGrammarError(err: unknown): string;
 	intercomRecipient(input: Record<string, unknown>, askId: string | undefined): string;
 	idleDelivery: unknown;
@@ -151,7 +153,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	let restoredIssued = 0; // the counter this instance started from: unchanged ⇒ nothing new to record
 	function recordLostWork(ctx: ExtensionContext): void {
 		try {
-			const sessionId = sessionManagerOf(ctx).getSessionId?.();
+			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionId) return;
 			const lost = {
 				runs: [...new Set([...h.tracker.running(), ...h.completionNotifier.peekPending()].map((run) => run.id))],
@@ -164,8 +166,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	}
 	function announceLostWork(ctx: ExtensionContext): void {
 		try {
-			const manager = sessionManagerOf(ctx);
-			const stored = findStoredRuns(manager.getEntries?.() ?? [], manager.getSessionId?.() ?? "");
+			const manager = ctx.sessionManager;
+			const stored = findStoredRuns(manager.getEntries(), manager.getSessionId());
 			if (!stored) return;
 			h.tracker.continueFrom(stored.issued);
 			restoredIssued = h.tracker.issued;
@@ -181,6 +183,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	pi.on("session_start", async (_event, ctx) => {
 		clearInFlight();
 		h.lastCtx = ctx;
+		h.results.activate(ctx);
 		h.delegationNudge.reset(); // a fresh session starts with a clean by-hand run
 		h.childUsage.reset();
 		h.publishPersonaCost();
@@ -225,7 +228,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			// project the user came from. The model (`--model`) and effort (`--thinking`) are pi's own
 			// flags — pi validates those.
 			if (remembered) {
-				const names = h.personas.map((p) => p.name).sort().join(", ") || "(none installed — run /persona seed)";
+				const names = compactNameList(h.personas.map((p) => p.name), 12) || "(none installed — run /persona seed)";
 				const source = flagPersona ? "--persona" : h.config.defaultPersona ? "PI_PERSONA_DEFAULT" : "remembered persona";
 				const msg = `pi-persona: ${source} "${remembered}" is not an installed persona. Available: ${names}`;
 				if (ctx.hasUI) ctx.ui.notify(msg, flagPersona ? "error" : "warning");
@@ -236,15 +239,14 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		await exocom.reconcile(ctx); // after persona activation, so plane + active tools share one gate
 		await h.telemetry?.stop("session-replaced");
 		h.telemetry = undefined;
-		const sessionId = sessionManagerOf(ctx).getSessionId?.();
+		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId) {
-			const eventBus = (pi as unknown as { events?: { emit?: (name: string, event: TelemetryEvent) => void } }).events;
 			try {
 				h.telemetry = new TelemetryProducer({
 					agentDir: h.userAgentDir(),
 					cwd: ctx.cwd,
 					sessionId,
-					emit: (event) => eventBus?.emit?.(TELEMETRY_EVENT_NAME, event),
+					emit: (event) => pi.events.emit(TELEMETRY_EVENT_NAME, event),
 					heartbeat: () => exocom.currentTelemetryInstance(h.lastCtx ?? ctx),
 					onError: (error: unknown) => {
 						// Retention and writer failures must be observable during normal operation too.
@@ -285,6 +287,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.lastCtx = ctx;
 		recordLostWork(ctx); // before the notifiers/timers/runs below are torn down
 		h.disposed = true; // gate any late async-run onComplete from touching the next session's instance
+		h.results.dispose(); // revoke frozen owners before cancellation can settle old runs
 		h.deferredOrchestrations.length = 0;
 		h.pendingOrchestration = undefined;
 		h.stopPeek(); // h.reload-hygiene: never leak the idle-peek timer across sessions
@@ -351,19 +354,22 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.telemetryToolStartedAt.clear(); // a late result for a drained call must not close it twice
 		// An exocom send orphaned on that same path left its recipients at "queued" forever. They are
 		// reported failed, never delivered: the call never reached a result, so nothing observed a send.
-		for (const pending of h.telemetryExocomPending.values()) {
-			for (const message of pending) h.telemetry?.publish("message.sent", {
-				id: message.id,
-				channel: "exocom",
-				// A session id, like every other exocom publish site — never an agentId literal in this slot.
-				from: h.lastCtx ? exocom.telemetrySessionId(h.lastCtx) : `legacy-${process.pid}`,
-				to: message.sessionId,
-				kind: "message",
-				status: "failed",
-				expectsReply: false,
-				size: message.size,
-				...(message.replyTo ? { replyTo: message.replyTo } : {}),
-			});
+		if (h.lastCtx) {
+			const from = exocom.telemetrySessionId(h.lastCtx);
+			for (const pending of h.telemetryExocomPending.values()) {
+				for (const message of pending) h.telemetry?.publish("message.sent", {
+					id: message.id,
+					channel: "exocom",
+					// A session id, like every other exocom publish site — never an agentId literal in this slot.
+					from,
+					to: message.sessionId,
+					kind: "message",
+					status: "failed",
+					expectsReply: false,
+					size: message.size,
+					...(message.replyTo ? { replyTo: message.replyTo } : {}),
+				});
+			}
 		}
 		h.telemetryExocomPending.clear();
 		for (const [callId, message] of h.telemetryIntercomPending) {
@@ -410,7 +416,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// elapsed reading remains coarse to preserve caching; the precise clock goes in a new
 		// conversation message below, and timer now can refresh it within a long tool loop.
 		const now = Date.now();
-		const anchor = buildSessionAnchor(ctx.sessionManager?.getHeader?.() ?? null, now);
+		const anchor = buildSessionAnchor(ctx.sessionManager.getHeader(), now);
 		if (anchor) prompt = `${prompt}\n\n${anchor}`;
 		const wakeGuidance: string[] = [];
 		if (toolAllowed("timer")) wakeGuidance.push("timer now reads the current clock; timer arm schedules a fixed-time wake (absolute times require a timezone).");
@@ -486,6 +492,10 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 					release: !xcaps || canCallTool(xcaps, "exocom_release"),
 					progress: !xcaps || canCallTool(xcaps, "exocom_progress"),
 					status: !xcaps || canCallTool(xcaps, "exocom_status"),
+					task: !xcaps || canCallTool(xcaps, "exocom_task"),
+					offer: !xcaps || canCallTool(xcaps, "exocom_offer"),
+					publish: !xcaps || canCallTool(xcaps, "exocom_publish"),
+					profile: !xcaps || canCallTool(xcaps, "exocom_profile"),
 				},
 				// Exocom has no UI gate, so a headless (`pi -p`) run has live peers and no way to ask
 				// anyone anything. `hasUI` is pi's dialog capability, not a headcount (see the field's
@@ -521,6 +531,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 					: `${prompt}\n\n[orchestration: ${h.pendingOrchestration.label}] The mandated multi-agent orchestration FAILED or remained unresolved. Do not present its output as approved or claim completion. Report the blocker, then repair and verify before declaring success:\n\n${fenceUntrusted(evidence)}`;
 				reportMandatoryFailure(ctx, h.pendingOrchestration);
 			}
+			const receipt = resultReceiptHint(h.pendingOrchestration.resultReceipt);
+			if (receipt) prompt += `\n\n${receipt}`;
 			h.pendingOrchestration = undefined;
 		}
 		const clock = readClockSnapshot(now);
@@ -554,14 +566,14 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			try {
 				pending = exocom.pendingAsks(ctx);
 			} catch (error) {
-				if (constrainedTurnAllows(event.toolName)) pending = [];
+				if (constrainedTurnAllows(event.toolName, input)) pending = [];
 				else return reject({ block: true, reason: `exocom: ledger unavailable; mutation/delegation is fail-closed until storage recovers (${error instanceof Error ? error.message : String(error)})` });
 			}
-			if (pending.length > 0 && !constrainedTurnAllows(event.toolName)) {
+			if (pending.length > 0 && !constrainedTurnAllows(event.toolName, input)) {
 				const omitted = pending.length > 1 ? `; ${pending.length - 1} more pending` : "";
 				return reject({
 					block: true,
-					reason: `exocom: pending ask(s) to this session — only exocom_name (identity metadata), exocom_answer, exocom_decline, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id}${omitted})`,
+					reason: `exocom: pending ask(s) to this session — only exocom_name (identity metadata), exocom_answer, exocom_decline, exocom_status, explicit collaboration read actions, read, grep, find, ls until you answer (ask_id=${pending[0]!.ask_id}${omitted})`,
 				});
 			}
 			if (WRITE_TOOLS.has(event.toolName) && typeof input.path === "string" && input.path.trim()) {
@@ -578,7 +590,9 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 						exocom.writeWarnings.remember(key);
 						const label = exocom.peerLabelFor(claim.from_session) ?? claim.from_name;
 						const reason = writeWarningReason(input.path, claim, label);
-						try { if (ctx.hasUI) ctx.ui.notify(reason, "warning"); } catch { /* cosmetic */ }
+						// The toast carries only the one-line head; the fenced peer-authored claim block stays
+						// in the model's tool result below — a notification is a single line, not the fence.
+						try { if (ctx.hasUI) ctx.ui.notify(writeWarningToastReason(input.path, claim, label), "warning"); } catch { /* cosmetic */ }
 						return reject({ block: true, reason });
 					}
 				}
@@ -800,15 +814,15 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	// pipeline mode (or a flow), run it on the user's turn (the LLM cannot skip it) and
 	// fold the result into the prompt. Opportunistic h.personas (no orchestration) take the
 	// normal turn.
-	function mandatoryFailure(label: string, output: string, error: string, failureKind: FailureKind): MandatoryOutcome {
-		return { label, output, ok: false, error, failureKind };
+	function mandatoryFailure(label: string, output: string, error: string, failureKind: FailureKind, resultReceipt?: ResultReceipt): MandatoryOutcome {
+		return { label, output, ok: false, error, failureKind, ...(resultReceipt ? { resultReceipt } : {}) };
 	}
 
 	/** Make a mandatory failure visible outside the hidden system prompt too. The cause may contain
 	 * provider/model text, so compact it to one bounded operator-facing line. */
 	function reportMandatoryFailure(ctx: ExtensionContext, outcome: MandatoryOutcome): void {
-		const label = outcome.label.replace(/\s+/g, " ").trim().slice(0, 120);
-		const cause = (outcome.error ?? "unresolved result").replace(/\s+/g, " ").trim().slice(0, 500);
+		const label = compactInlineText(outcome.label, { maxChars: 120 });
+		const cause = toastCause(outcome.error ?? "unresolved result", 200);
 		const kind = outcome.failureKind ? ` [${outcome.failureKind}]` : "";
 		const message = `pi-persona: mandatory orchestration ${label} failed${kind}: ${cause}`;
 		try {
@@ -839,12 +853,12 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				}
 				const outcome = await h.runFlowVisible(ctx, parsed.flow, task);
 				const output = outcome.output || "(the flow returned no output)";
-				if (outcome.ok) return { label, output, ok: true };
+				if (outcome.ok) return { label, output, ok: true, ...(outcome.resultReceipt ? { resultReceipt: outcome.resultReceipt } : {}) };
 				const error = outcome.cancelled
 					? "the mandatory flow was aborted"
 					: (outcome.error ?? "the mandatory flow did not complete successfully");
 				const failureKind = outcome.cancelled ? "abort" : (outcome.failureKind ?? "agent");
-				return mandatoryFailure(label, output, error, failureKind);
+				return mandatoryFailure(label, output, error, failureKind, outcome.resultReceipt);
 			}
 
 			const result = await h.runStrategyVisible(ctx, orch, task, "strategy");
@@ -857,10 +871,10 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 					label,
 					result.output || "(the orchestration returned no output)",
 					result.error ?? "the mandatory orchestration did not complete successfully",
-					result.failureKind ?? "agent",
+					result.failureKind ?? "agent", result.resultReceipt,
 				);
 			}
-			return { label, output: result.output, ok: true };
+			return { label, output: result.output, ok: true, ...(result.resultReceipt ? { resultReceipt: result.resultReceipt } : {}) };
 		} catch (err) {
 			const error = `orchestration failed: ${err instanceof Error ? err.message : String(err)}`;
 			return mandatoryFailure(label, error, error, "agent");
@@ -900,7 +914,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			h.pendingOrchestration = undefined;
 			if (!h.disposed) {
 				h.deferredOrchestrations.unshift(item);
-				h.lastCtx.ui.notify(`could not replay deferred persona input: ${err instanceof Error ? err.message : String(err)}`, "error");
+				h.lastCtx.ui.notify(`could not replay deferred persona input: ${toastCause(err instanceof Error ? err.message : String(err))}`, "error");
 			}
 			return false;
 		} finally {

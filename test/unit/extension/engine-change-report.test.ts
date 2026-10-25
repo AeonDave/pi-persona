@@ -24,6 +24,7 @@ function baseDeps(gitExec: GitExec, cwd: string = process.cwd(), result: () => A
 		cwd,
 		model: { provider: "anthropic", id: "m" },
 		modelRegistry: {
+			getRegisteredProviderIds: () => [],
 			getAll: () => [{ provider: "anthropic", id: "m" }],
 			getAvailable: () => [{ provider: "anthropic", id: "m" }],
 		},

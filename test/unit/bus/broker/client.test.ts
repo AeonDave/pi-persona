@@ -5,6 +5,7 @@ import { EventEmitter } from "node:events";
 import { makeBrokerClient, type BrokerClient } from "../../../../src/bus/broker/client.ts";
 import { createFrameReader, encodeFrame } from "../../../../src/bus/broker/framing.ts";
 import type { Frame } from "../../../../src/bus/broker/messages.ts";
+import { readFailure } from "../../../../src/bus/result-reader.ts";
 
 /**
  * Fake `net`: the client-side half of the same in-memory socket-pair fake used by
@@ -115,10 +116,124 @@ async function connectedClient(deps: Partial<Parameters<typeof makeBrokerClient>
 	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net, ...deps });
 	const registerPromise = client.register();
 	await waitFor(() => host.frames.some((f) => f.t === "register"));
-	host.send({ t: "registered", handle: "child#1" });
+	host.send({ t: "registered", handle: "child#1", ...(deps.readerToken ? { readerToken: deps.readerToken } : {}) });
 	await registerPromise;
 	return { client, host, hostSide };
 }
+
+const readerToken = "a".repeat(64);
+const ref = "result:12345678-1234-1234-1234-123456789abc";
+const result = { ok: true, ref, body: "😀", offset: 0, storedChars: 2, originalChars: 2,
+	truncated: false, endOfStoredBody: true, status: "done", provenance: "result-output" } as const;
+
+test("authenticated client reads correlate without deliver/steer notifications", async () => {
+	const { client, host } = await connectedClient({ readerToken });
+	try {
+		client.onDeliver(() => assert.fail("read must not wake"));
+		client.onSteer(() => assert.fail("read must not steer"));
+		const pending = client.read({ ref, limit: 2 });
+		const request = host.frames.at(-1);
+		assert.ok(request?.t === "result_read");
+		host.send({ t: "result_read_reply", reqId: request.reqId, result });
+		assert.deepEqual(await pending, result);
+		assert.equal((host.frames[0] as { readerToken?: string }).readerToken, readerToken);
+	} finally { client.close(); }
+});
+
+test("read fails closed before grant/registration, after disconnect and for invalid inputs", async () => {
+	const plain = await connectedClient();
+	assert.deepEqual(await plain.client.read({ ref }), readFailure("denied"));
+	plain.client.close();
+	const { client, host, hostSide } = await connectedClient({ readerToken });
+	try {
+		const before = host.frames.length;
+		assert.deepEqual(await client.read({ ref, limit: 1 }), readFailure("invalid"));
+		assert.equal(host.frames.length, before);
+		hostSide.destroy();
+		assert.deepEqual(await client.read({ ref }), readFailure("unavailable"));
+	} finally { client.close(); }
+});
+
+test("read cancellation, timeout and close settle promptly and discard late replies", async (t) => {
+	for (const action of ["cancel", "timeout", "close", "disconnect"] as const) {
+		const { client, host, hostSide } = await connectedClient({ readerToken });
+		try {
+			const ac = new AbortController();
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const pending = client.read({ ref }, ac.signal);
+			const request = host.frames.at(-1);
+			assert.ok(request?.t === "result_read");
+			if (action === "cancel") ac.abort();
+			if (action === "timeout") t.mock.timers.tick(10000);
+			if (action === "close") client.close();
+			if (action === "disconnect") hostSide.destroy();
+			assert.deepEqual(await pending, readFailure(action === "cancel" ? "cancelled" : action === "timeout" ? "timeout" : "unavailable"));
+			if (action === "cancel" || action === "timeout") assert.ok(host.frames.some((f) => f.t === "result_read_cancel" && f.reqId === request.reqId));
+			host.send({ t: "result_read_reply", reqId: request.reqId, result });
+		} finally { t.mock.timers.reset(); client.close(); }
+	}
+});
+
+test("reader enforces max eight pending, pre-abort is inert, slots are released on completion", async () => {
+	const { client, host } = await connectedClient({ readerToken });
+	try {
+		const before = host.frames.length;
+		assert.deepEqual(await client.read({ ref }, AbortSignal.abort()), readFailure("cancelled"));
+		assert.equal(host.frames.length, before);
+		const pending = Array.from({ length: 8 }, () => client.read({ ref }));
+		assert.deepEqual(await client.read({ ref }), readFailure("busy"));
+		const request = host.frames.at(-1);
+		assert.ok(request?.t === "result_read");
+		host.send({ t: "result_read_reply", reqId: request.reqId, result });
+		assert.deepEqual(await pending.at(-1), result);
+		const next = client.read({ ref });
+		client.close();
+		await Promise.all([...pending, next]);
+	} finally { client.close(); }
+});
+
+test("mismatched or missing reader acknowledgement rejects instead of downgrading", async () => {
+	for (const ack of [undefined, "b".repeat(64)]) {
+		const { net, hostSide } = fakeNet();
+		const host = wireHost(hostSide);
+		const client = makeBrokerClient({ endpoint: "/fake", handle: "child", readerToken, net });
+		const registration = client.register();
+		await waitFor(() => host.frames.length === 1);
+		host.send({ t: "registered", handle: "child", ...(ack ? { readerToken: ack } : {}) });
+		await assert.rejects(registration, /reader.*protocol/i);
+		assert.deepEqual(await client.read({ ref }), readFailure("unavailable"));
+		client.close();
+	}
+});
+
+test("malformed reply and wrong page correlation fail closed without raw payload errors", async () => {
+	for (const patch of [{ task: "SECRET" }, { offset: 1 }, { body: "x".repeat(16001) }]) {
+		const { client, host, hostSide } = await connectedClient({ readerToken });
+		try {
+			const pending = client.read({ ref });
+			const request = host.frames.at(-1);
+			assert.ok(request?.t === "result_read");
+			hostSide.write(encodeFrame({ t: "result_read_reply", reqId: request.reqId, result: { ...result, ...patch } }));
+			assert.deepEqual(await pending, readFailure("protocol"));
+		} finally { client.close(); }
+	}
+});
+
+test("reader handshake has a deadline and cannot reconnect/replay", async (t) => {
+	const { net, hostSide } = fakeNet();
+	const host = wireHost(hostSide);
+	const client = makeBrokerClient({ endpoint: "/fake", handle: "child", readerToken, net });
+	try {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const pending = client.register();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		assert.ok(host.frames.length);
+		const rejection = assert.rejects(pending, /reader.*deadline/i);
+		t.mock.timers.tick(10000);
+		await rejection;
+		await assert.rejects(client.register(), /register|closed/i);
+	} finally { t.mock.timers.reset(); client.close(); }
+});
 
 test("register connects and completes the register/registered handshake", async () => {
 	const { client, host } = await connectedClient({ label: "coder", group: "g1", peers: true });

@@ -62,24 +62,25 @@ test("makeEngine streams the child's rolling output via the per-call onProgress"
 	);
 });
 
-test("makeEngine appends an explicit thinking level to the child model (avoids default adaptive)", async () => {
+test("makeEngine forwards explicit child effort using --thinking, never model suffix synthesis", async () => {
 	const eng = makeEngine({
 		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
 		childOptions: { resolveInvocation: resolveFake },
 		childThinking: "high",
 	});
 	const r = await eng.run({ agent: "scout", task: "do [args]" });
-	assert.match(r.output, /--model m:high/, "thinking appended as model:level");
+	assert.match(r.output, /--model m --thinking high/, "effort is a separate CLI argument");
+	assert.doesNotMatch(r.output, /m:high/);
 });
 
-test("makeEngine does not double a thinking suffix already on the model", async () => {
+test("makeEngine preserves a colon-bearing model id while forwarding independent thinking", async () => {
 	const eng = makeEngine({
 		resolveAgent: (n) => (n === "scout" ? SCOUT : undefined),
 		childOptions: { resolveInvocation: resolveFake },
 		childThinking: "high",
 	});
 	const r = await eng.run({ agent: "scout", task: "do [args]", model: "prov/x:low" });
-	assert.match(r.output, /--model prov\/x:low/);
+	assert.match(r.output, /--model prov\/x:low --thinking high/);
 	assert.doesNotMatch(r.output, /:low:high/);
 });
 
@@ -181,6 +182,7 @@ function makeSpyBroker(endpoint = "fake-broker-endpoint") {
 			return true;
 		},
 		hasPendingAskFrom: () => false,
+		prepareResultReader: async () => { throw new Error("no reader grant"); },
 	};
 }
 

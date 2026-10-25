@@ -6,7 +6,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 import { formatUsage } from "../../../src/ui/usage.ts";
 
-import { AgentTree, type AgentNode, deriveWaitingNodeIds, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, type AgentNodeStatus, deriveWaitingNodeIds, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
 
 test("renderAgentTree nests children under their parent with status glyphs + detail", () => {
 	const nodes: AgentNode[] = [
@@ -532,4 +532,52 @@ test("the no-overflow path returns every row untouched, wake rows included", () 
 	assert.deepEqual(renderAgentTreeSummary(nodes, 8, { now: 1_000 }), renderAgentTree(nodes, { now: 1_000 }));
 	assert.equal(renderAgentTreeSummary(nodes, 6, { now: 1_000 }).length, 6, "exactly at the limit is not an overflow");
 	assert.doesNotMatch(renderAgentTreeSummary(nodes, 6, { now: 1_000 }).join("\n"), /\d+ monitors?\b|next due/);
+});
+
+test("renderAgentTree appends the compact effort sigla after the label; off/absent render nothing", () => {
+	const lines = renderAgentTree([
+		{ id: "a", label: "IronVale-flow-reference · glm-5.3", parentId: undefined, status: "running", detail: "↑217k ↓75k", thinking: "xhigh" },
+		{ id: "b", label: "no-effort", parentId: undefined, status: "running", detail: undefined },
+		{ id: "c", label: "off-leg", parentId: undefined, status: "running", detail: undefined, thinking: "off" },
+		{ id: "d", label: "mx-leg", parentId: undefined, status: "done", detail: undefined, thinking: "max" },
+	]);
+	assert.match(lines[0] ?? "", /⏳ IronVale-flow-reference · glm-5\.3 · xh {2}↑217k ↓75k$/, "the sigla lands right after the model, before the usage detail");
+	assert.equal(lines[1], "⏳ no-effort", "unknown requested effort renders nothing");
+	assert.equal(lines[2], "⏳ off-leg", "off renders nothing — absence means off");
+	assert.equal(lines[3], "✓ mx-leg · mx");
+});
+
+test("a settled row renders requested→observed divergence honestly — never fabricated", () => {
+	const row = (thinking?: AgentNode["thinking"], thinkingEffective?: AgentNode["thinkingEffective"]): string =>
+		renderAgentTree([{ id: "x", label: "leg", parentId: undefined, status: "done" as AgentNodeStatus, detail: undefined, ...(thinking !== undefined ? { thinking } : {}), ...(thinkingEffective !== undefined ? { thinkingEffective } : {}) }]).join("\n");
+	assert.match(row("xhigh", "high"), /✓ leg · xh→h$/, "a genuinely different observed level renders the divergence");
+	assert.doesNotMatch(row("xhigh"), /→/, "no observed value reported ⇒ requested only, no invented arrow");
+	assert.equal(row("high", "high"), "✓ leg · h", "an observed level equal to requested is not a divergence");
+	assert.doesNotMatch(row("xhigh", "off"), /→/, "an observed off renders nothing — no dangling arrow");
+	assert.doesNotMatch(row(undefined, "high"), /·/, "no requested level ⇒ nothing, even with an observed one");
+});
+
+test("effortTag/thinkingDetailLine: the pure helpers behind the tree row and the drill-in", () => {
+	assert.equal(effortTag(undefined), "");
+	assert.equal(effortTag("off"), "");
+	assert.equal(effortTag("minimal"), " · mn");
+	assert.equal(effortTag("xhigh"), " · xh");
+	assert.equal(effortTag("xhigh", "high"), " · xh→h");
+	assert.equal(effortTag("high", "high"), " · h");
+	assert.equal(effortTag("xhigh", "off"), " · xh", "observed off renders nothing, never a dangling arrow");
+	assert.equal(effortTag(undefined, "high"), "");
+	assert.equal(thinkingDetailLine(undefined), "");
+	assert.equal(thinkingDetailLine("off"), "");
+	assert.equal(thinkingDetailLine("medium"), "thinking: requested medium");
+	assert.equal(thinkingDetailLine("xhigh", "high"), "thinking: requested xhigh → observed high");
+	assert.equal(thinkingDetailLine("high", "high"), "thinking: requested high", "equal observation is not a divergence");
+	assert.equal(thinkingDetailLine("xhigh", "off"), "thinking: requested xhigh");
+});
+
+test("width clipping still holds with the appended effort field (tree rows)", () => {
+	const line = renderAgentTree([
+		{ id: "a", label: "L".repeat(120), parentId: undefined, status: "running", detail: "D".repeat(120), thinking: "xhigh" },
+	]).join("\n");
+	assert.ok(visibleWidth(line) <= 210, `tree row with effort occupied ${visibleWidth(line)} columns`);
+	assert.match(line, / · xh /, "the sigla is present, not clipped away by the label clamp");
 });

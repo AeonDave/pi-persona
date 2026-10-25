@@ -56,3 +56,20 @@ test("AgentTree remove reports descendants and clear reports the prior snapshot"
   assert.equal(cleared?.type, "cleared");
   if (cleared?.type === "cleared") assert.deepEqual(cleared.nodes.map((n) => n.id), ["x"]);
 });
+
+test("effort metadata rides the tree store: add carries it, a settle patch sets it, changes report both", () => {
+  const tree = new AgentTree();
+  const changes: AgentTreeChange[] = [];
+  tree.onChange((change) => changes.push(change));
+
+  tree.add({ id: "async:r1", label: "leg · glm-5.3", kind: "subagent", agent: "operator", model: "glm-5.3", thinking: "xhigh", status: "running" });
+  tree.update("async:r1", { thinkingEffective: "high" }); // what only a real terminal result may set
+
+  assert.equal(changes[0]?.type, "added");
+  if (changes[0]?.type === "added") {
+    assert.equal(changes[0].node.thinking, "xhigh");
+    assert.equal(changes[0].node.thinkingEffective, undefined, "requested-only launch: nothing observed yet");
+  }
+  assert.equal(changes[1]?.type, "updated", "a newly observed effort is a real change and must repaint");
+  if (changes[1]?.type === "updated") assert.equal(changes[1].node.thinkingEffective, "high");
+});

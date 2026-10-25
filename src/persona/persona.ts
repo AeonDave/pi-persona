@@ -244,7 +244,7 @@ export function expandCouncilPreset(draft: CouncilDraft, presets: Record<string,
 /** Per-call council selection. `persona` borrows only that persona's expanded
  * council declaration; it never activates the persona or imports its prompt,
  * model, tools, or permissions. Explicit strategy/roster/params remain local
- * overrides for backward compatibility. */
+ * overrides of those defaults. */
 export interface CouncilInvocation {
 	persona?: string | undefined;
 	strategy?: string | undefined;

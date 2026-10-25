@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Qualify pi-persona against an explicitly installed Pi host, without touching that host or the
- * operator's Pi profile. The source extension is loaded through the host's actual Pi 1.3 SDK;
+ * operator's Pi profile. The source extension is loaded through the current host's actual SDK;
  * all session state, agent files, model/auth state, and writes live under a fresh temp directory.
  *
  * Usage:
@@ -9,6 +9,7 @@
  */
 
 import assert from "node:assert/strict";
+import { requireCurrentPiHost } from "./lib/package-qualification.ts";
 import { readFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -24,7 +25,7 @@ if (!hostRootArg || !isAbsolute(hostRootArg)) {
 const hostRoot = resolve(hostRootArg);
 const hostPackage = JSON.parse(await readFile(join(hostRoot, "package.json"), "utf8"));
 assert.equal(hostPackage.name, "@earendil-works/pi-coding-agent", `Unexpected host package at ${hostRoot}`);
-assert.equal(hostPackage.version, "1.3.0", `Expected installed Pi 1.3.0, found ${hostPackage.version}`);
+requireCurrentPiHost(hostPackage.version);
 
 // Snapshot and isolate the environment before loading any Pi or pi-persona modules. In particular,
 // this prevents provider credentials from the parent shell being consulted by host availability
@@ -117,10 +118,10 @@ function rpcUi(selectCalls, notifications) {
 	};
 }
 
-const mainProviderId = "pi13-qualification-faux";
+const mainProviderId = "pi-persona-qualification-faux";
 const mainModelId = "local";
 const mainRef = `${mainProviderId}/${mainModelId}`;
-const missingProviderId = "pi13-qualification-no-auth";
+const missingProviderId = "pi-persona-qualification-no-auth";
 const missingModelId = "stale";
 const missingRef = `${missingProviderId}/${missingModelId}`;
 
@@ -170,7 +171,7 @@ try {
 		retry: { enabled: false },
 		compaction: { enabled: false },
 	});
-	const resourceLoader = new host.DefaultResourceLoader({
+	const resourceLoaderOptions = {
 		cwd: workspace,
 		agentDir,
 		settingsManager,
@@ -179,7 +180,8 @@ try {
 		noSkills: true,
 		noPromptTemplates: true,
 		noThemes: true,
-	});
+	};
+	const resourceLoader = new host.DefaultResourceLoader(resourceLoaderOptions);
 	await resourceLoader.reload();
 
 	// Credentials are a private in-memory map: the host cannot read or write the operator's auth.json.
@@ -197,6 +199,7 @@ try {
 	const runtime = await host.ModelRuntime.create({
 		credentials: credentialStore,
 		modelsPath: null,
+		modelsStorePath: join(agentDir, "qualification-models-store.json"),
 		refreshOnCreate: false,
 		allowModelNetwork: false,
 	});
@@ -245,28 +248,40 @@ try {
 	assert.equal(calls.length, 3, `Expected 3 actual RPC selections, got ${calls.length}`);
 	assert.ok(calls.every((call) => call.options.includes(mainRef)), "The local faux model was not in every picker result");
 	assert.ok(notifications.some((entry) => entry.message.includes("updated 3 model assignment(s) for \"host-smoke\"")), "The command did not confirm the caller's three assignments");
-	const savedAssignments = JSON.parse(await readFile(join(agentDir, "persona", "config.json"), "utf8"));
-	assert.deepEqual(savedAssignments["host-smoke"]?.models, {
+	const savedAssignments = JSON.parse(await readFile(join(agentDir, "persona", "settings.json"), "utf8"));
+	assert.deepEqual(savedAssignments.personas["host-smoke"]?.models, {
 		melchior: mainRef,
 		balthasar: mainRef,
 		casper: mainRef,
 	}, "Model assignments were not persisted under the active caller persona");
-	assert.equal(savedAssignments.magi, undefined, "The borrowed MAGI profile was modified instead of the active caller");
+	assert.equal(savedAssignments.personas.magi, undefined, "The borrowed MAGI profile was modified instead of the active caller");
+	// RPC has a real UI context even if its mode is changed later. End that session and
+	// construct a fresh SDK session with its default no-op UI for the headless council check.
+	await session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
+	session.dispose();
+	session = undefined;
+	const headlessLoader = new host.DefaultResourceLoader(resourceLoaderOptions);
+	await headlessLoader.reload();
+	const headless = await host.createAgentSession({ cwd: workspace, agentDir, model, modelRuntime: runtime,
+		resourceLoader: headlessLoader, sessionManager: host.SessionManager.inMemory(workspace), settingsManager });
+	session = headless.session;
+	await session.bindExtensions({ mode: "print" });
+	await session.prompt("/persona host-smoke");
 
 	mainFaux.setResponses([
-		faux.fauxAssistantMessage("Pi 1.3 custom-message hook completed."),
+		faux.fauxAssistantMessage("Current Pi custom-message hook completed."),
 		faux.fauxAssistantMessage(faux.fauxToolCall("council", {
 			question: "Verify local recovery from a deliberately unconfigured council model.",
 			persona: "magi",
 			members: [{ agent: "melchior", model: missingRef }],
 			params: { reflect: false },
-		}, { id: "pi13-qualification-council" }), { stopReason: "toolUse" }),
+		}, { id: "pi-persona-qualification-council" }), { stopReason: "toolUse" }),
 		faux.fauxAssistantMessage(JSON.stringify({ result: "Recovered locally", vote: "approve", confidence: 1, stance: "approve" })),
 		faux.fauxAssistantMessage("The local council recovery completed."),
 	]);
 	const hooksBeforeCustomMessage = customBeforeAgentStarts;
 	await session.sendCustomMessage({
-		customType: "pi13-host-qualification",
+		customType: "pi-persona-host-qualification",
 		content: "Exercise the actual before_agent_start hook for a custom message.",
 		display: false,
 		details: {},
@@ -300,7 +315,7 @@ try {
 			installedHostRoute: true,
 			unauthenticatedPersonaSwitchRejected: true,
 			activeCallerPickerSelections: calls.length,
-			persistedAssignments: Object.keys(savedAssignments["host-smoke"].models).length,
+			persistedAssignments: Object.keys(savedAssignments.personas["host-smoke"].models).length,
 			customBeforeAgentStartEvents: customHookDelta,
 			missingAuthProviderRequests: missingFaux.state.callCount,
 			recoveryDisclosureOccurrences: 1,
