@@ -21,6 +21,20 @@ const resolveAgent = (n: string): AgentConfig | undefined => agents[n];
 const contracts = (n: string) => (n === "default" ? DEFAULT_CONTRACT : undefined);
 const HOST_MODULE_ERROR = "Cannot find module '/opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/openai-responses-KCCCXI3B.js' imported from /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-66G7ITPS.js";
 
+test("child adapter passes a spawn-local frozen memory owner and scrubs inherited owner drift", async () => {
+	const previous = process.env.PI_PERSONA_MEMORY_PERSONA;
+	process.env.PI_PERSONA_MEMORY_PERSONA = JSON.stringify({ version: 1, persona: "WRONG GLOBAL OWNER" });
+	const script = `process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_PERSONA_MEMORY_PERSONA ?? 'absent'}],stopReason:'end'}})+'\\n');`;
+	try {
+		const run = (memoryPersona?: string | null) => makeEngine({ resolveAgent,
+			...(memoryPersona === undefined ? {} : { memoryPersona }),
+			childOptions: { resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }) },
+		}).run({ agent: "a", task: "inspect" });
+		const results = await Promise.all([run("alpha"), run("beta"), run(null), run()]);
+		assert.deepEqual(results.map((result) => result.output), [JSON.stringify({ version: 1, persona: "alpha" }), JSON.stringify({ version: 1, persona: "beta" }), JSON.stringify({ version: 1, persona: null }), "absent"]);
+	} finally { if (previous === undefined) delete process.env.PI_PERSONA_MEMORY_PERSONA; else process.env.PI_PERSONA_MEMORY_PERSONA = previous; }
+});
+
 test("child adapter forwards mixed effort separately from opaque model ids and reads only observed Pi message effort", async () => {
 	const configured = parseAgent("---\nname: a\nmodel: prov/opaque:version\nthinking: medium\n---\nworker", "a.md")!;
 	const invocations: string[][] = [];
@@ -560,6 +574,22 @@ test("child broker admits granted communication tools into a nonempty plain allo
 		assert.equal(result.ok, true);
 		assert.match(result.output, /busTools=on/);
 		assert.equal(seen[seen.indexOf("--tools") + 1], peers ? "read,contact_supervisor,contact_peer" : "read,contact_supervisor");
+	}
+});
+
+test("child adapter retains the pinned provider only for an exact same-id observation", async () => {
+	for (const [requested, observed, expected] of [
+		["known/model", "model", "known/model"],
+		["known/opaque:v1", "opaque:v1", "known/opaque:v1"],
+		["known/model", "different", "different"],
+		["known/model", "foreign/model", "foreign/model"],
+		["known/model", "Model", "Model"],
+	] as const) {
+		const script = `process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',model:${JSON.stringify(observed)},content:[{type:'text',text:'done'}],stopReason:'stop'}})+'\\n');`;
+		const engine = makeEngine({ resolveAgent, childOptions: { resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }) } });
+		const result = await engine.run({ agent: "a", task: "inspect", model: requested });
+		assert.equal(result.ok, true);
+		assert.equal(result.modelUsed, expected, `${requested} observed as ${observed}`);
 	}
 });
 

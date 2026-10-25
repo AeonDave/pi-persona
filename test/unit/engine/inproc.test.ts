@@ -117,6 +117,16 @@ const msgEnd = (text: string, usage?: Record<string, unknown>): unknown => ({
 });
 const update = (text: string): unknown => ({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text }] } });
 
+test("concurrent inproc engines pass distinct immutable memory owners to their per-child factories", async () => {
+	const observed: Array<string | null | undefined> = [];
+	const run = (memoryPersona: string | null) => makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".", memoryPersona,
+		createSession: async (options) => { observed.push(options.memoryPersona); return fakeSession([msgEnd("done")]); },
+	}).run({ agent: "a", task: "inspect" });
+	await Promise.all([run("alpha"), run("beta"), run(null)]);
+	assert.deepEqual(observed, ["alpha", "beta", null]);
+});
+
 test("inproc resolves mixed per-leg thinking through specs, agents and shared defaults; Pi readback may clamp up or down", async () => {
 	const seen: Array<ThinkingLevel | undefined> = [];
 	const configured = parseAgent("---\nname: a\nthinking: medium\n---\nworker", "a.md")!;

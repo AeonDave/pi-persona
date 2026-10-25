@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEventBus, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
 import { tempDir } from "../setup/temp-dir.ts";
 
@@ -20,7 +20,7 @@ function makeMockPi() {
 	const pi = {
 		on: (name: string, handler: AnyFn) => { hooks[name] = handler; },
 		registerTool: () => {},
-		events: { emit: () => {} },
+		events: createEventBus(),
 		registerMessageRenderer: () => {},
 		registerEntryRenderer: () => {},
 		appendEntry: () => {},

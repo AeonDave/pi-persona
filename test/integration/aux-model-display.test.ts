@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEventBus, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import piPersona, { type EngineFactories } from "../../src/extension.ts";
 import { AgentTree } from "../../src/ui/agent-tree.ts";
@@ -27,9 +27,11 @@ function makeMockPi() {
 	const tools: Record<string, unknown> = {};
 	const commands: Record<string, { handler: AnyFn }> = {};
 	const events: TelemetryEvent[] = [];
+	const eventBus = createEventBus();
+	eventBus.on("pi:telemetry", (event) => events.push(event as TelemetryEvent));
 	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
-		events: { emit: (_name: string, event: TelemetryEvent) => events.push(event) },
+		events: eventBus,
 		on: (name: string, handler: AnyFn) => { hooks[name] = handler; },
 		registerTool: (tool: { name: string }) => { tools[tool.name] = tool; },
 		registerMessageRenderer: () => {},

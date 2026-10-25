@@ -28,6 +28,7 @@ import { type ContractDef, contractInstructions, parseAndValidate, pinContract, 
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { resolveLegThinking } from "../core/leg-thinking.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
+import { installFrozenMemoryOwner } from "../extension/memory-owner.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
@@ -55,6 +56,8 @@ export interface InProcSession {
 }
 
 export interface CreateSessionOptions {
+	/** Immutable owning supervisor persona; null explicitly means no persona. */
+	memoryPersona?: string | null;
 	model: unknown;
 	/** Cooperative cancellation for resource/session initialization. Pi's loader does not
 	 * currently accept a signal itself, but injected factories can stop promptly and the
@@ -91,6 +94,8 @@ function sharedModelRuntime(registry: ModelRegistry): unknown {
 }
 
 export interface InProcessDeps {
+	/** Frozen at buildEngine construction, independent of later persona changes or saved settings. */
+	memoryPersona?: string | null;
 	resolveAgent: (name: string) => AgentConfig | undefined;
 	contracts?: (name: string) => ContractDef | undefined;
 	/** The host session's registry — shared so the sub-agent reuses the loader's auth. */
@@ -187,9 +192,12 @@ export function withOrchestrationToolsExcluded(extra: readonly string[] | undefi
  *  the orchestration tools excluded as a second line of defense. */
 const createPiSession: CreateInProcSession = async (opts) => {
 	if (opts.signal?.aborted) throw new DOMException("Session initialization aborted", "AbortError");
+	const manager = SessionManager.inMemory(opts.cwd);
+	const memoryPersona = opts.memoryPersona;
 	const loader = new DefaultResourceLoader({
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
+		...(memoryPersona !== undefined ? { extensionFactories: [(pi) => installFrozenMemoryOwner(pi, manager, memoryPersona)] } : {}),
 		...(opts.systemPrompt ? { appendSystemPrompt: [opts.systemPrompt] } : {}),
 	});
 	await loader.reload();
@@ -202,7 +210,7 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	// and credentials that exist only in the supervisor's memory.
 	const sessionOptions: NonNullable<Parameters<typeof createAgentSession>[0]> = {
 		model: opts.model as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["model"]>,
-		sessionManager: SessionManager.inMemory(opts.cwd),
+		sessionManager: manager,
 		resourceLoader: loader,
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
@@ -285,6 +293,7 @@ function popDisableGuard(): void {
 }
 
 export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
+	const memoryPersona = deps.memoryPersona;
 	const createSession = deps.createSession ?? createPiSession;
 	const supervisorHandle = deps.supervisorHandle ?? "supervisor";
 	// Per-run contract pinning (I3), mirroring the child adapter.
@@ -402,6 +411,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				agentDir: deps.agentDir ?? deps.cwd,
 			};
 			if (admittedTools !== undefined) sessionOpts.tools = admittedTools;
+			if (memoryPersona !== undefined) sessionOpts.memoryPersona = memoryPersona;
 			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
 			if (thinkingRequested !== undefined) sessionOpts.thinkingLevel = thinkingRequested;
 			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any

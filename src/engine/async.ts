@@ -71,6 +71,8 @@ export interface AsyncRun {
 	/** The id of the one `tasks` call this leg was launched by. Its members are delivered together, once the
 	 *  last of them settles (see {@link AsyncRunTracker.batchSettled}); a single-leg launch has none. */
 	batch?: string;
+	/** Companion-owned maintenance settles to its owner without waking the supervisor model. */
+	delivery?: "companion";
 	/** What a running run is blocked on, when it is the OPERATOR (a flow checkpoint modal): shown in the
 	 *  digest instead of a stall verdict, because silence while a human decides is not a wedge. */
 	awaiting?: string;
@@ -140,7 +142,7 @@ export class AsyncRunTracker {
 		if (Number.isSafeInteger(issued) && issued > this.seq) this.seq = issued;
 	}
 
-	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; queued?: boolean; batch?: AsyncRun["batch"] }, run: RunThunk): string {
+	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; queued?: boolean; batch?: AsyncRun["batch"]; delivery?: AsyncRun["delivery"] }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
 		const startedAt = this.now(); // one clock read, so the launch and stall stamps cannot disagree
@@ -155,6 +157,7 @@ export class AsyncRunTracker {
 		};
 		if (meta.mutates) entry.mutates = true;
 		if (meta.batch) entry.batch = meta.batch;
+		if (meta.delivery) entry.delivery = meta.delivery;
 		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
 		// once at the tracker boundary so a caller cannot smuggle multiline instructions into any of
 		// those views; renderers still sanitize defensively when they compose a label.

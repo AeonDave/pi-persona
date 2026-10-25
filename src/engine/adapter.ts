@@ -13,6 +13,7 @@ import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { resolveLegThinking } from "../core/leg-thinking.ts";
 import type { ThinkingLevel } from "../core/types.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
+import { MEMORY_PERSONA_ENV } from "../core/companion.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentProgress, type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -54,6 +55,8 @@ export interface EngineAdapterBroker {
 }
 
 export interface EngineAdapterDeps {
+	/** Immutable owning supervisor persona; null explicitly means no persona. */
+	memoryPersona?: string | null;
 	resolveAgent: (name: string) => AgentConfig | undefined;
 	contracts?: (name: string) => ContractDef | undefined;
 	signal?: AbortSignal;
@@ -98,6 +101,7 @@ export interface EngineAdapterDeps {
 }
 
 export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
+	const memoryPersona = deps.memoryPersona;
 	// Per-run contract pinning (I3): an engine instance is created per run, so the first
 	// time a contract is used we pin `name@hash` and reuse that frozen snapshot for the
 	// rest of the run — hot-reloading a contract file can't change an in-flight run.
@@ -188,6 +192,12 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
+			if (memoryPersona !== undefined || childOptions.env?.[MEMORY_PERSONA_ENV] !== undefined) {
+				const env = { ...childOptions.env };
+				delete env[MEMORY_PERSONA_ENV];
+				if (memoryPersona !== undefined) env[MEMORY_PERSONA_ENV] = JSON.stringify({ version: 1, persona: memoryPersona });
+				childOptions.env = env;
+			}
 			// NP2: a per-leg timeoutMs override raises (or shortens) just THIS leg's idle-timeout
 			// ceiling without touching the shared default other legs of the same run still see.
 			// Junk (non-finite/≤0) is ignored — the engine's existing childOptions.timeoutMs stands.
@@ -265,8 +275,14 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// The opaque provider/id the child ran on — for the UI and
 			// as the seed of the provider-fallback chain on a provider failure. The child's
 			// STREAM-REPORTED model wins over the requested spec: a resolved alias or a
-			// provider-side redirect must seed the fallback chain with what actually ran.
-			const modelUsed = child.model ?? childSpec.model ?? spec.model ?? cfg.model;
+			// provider-side redirect must seed the fallback chain with what actually ran. Pi's native
+			// assistant message reports a bare model id: retain the pinned provider ONLY when that
+			// id exactly matches, never attach it to a different observed model or qualified route.
+			const requestedModel = childSpec.model ?? spec.model ?? cfg.model;
+			const observedModel = child.model?.trim() || undefined;
+			const modelUsed = observedModel && !observedModel.includes("/") && requestedModel?.includes("/")
+				&& requestedModel.slice(requestedModel.indexOf("/") + 1) === observedModel
+				? requestedModel : observedModel ?? requestedModel;
 			if (modelUsed) result.modelUsed = modelUsed;
 			// Diagnostic tag: agent · model ref · dynamic overrides. Same shape as inproc engine,
 			// so failed follow-ups always say WHICH agent+model died and WHY.

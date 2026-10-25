@@ -268,6 +268,19 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   option (a terminal event is observed before the permission gate). A countdown replaces the stall clock; `x`
   cancels one via the stop registry; `X`, the `N agents` count and telemetry exclude them.
 
+- Loaded companions: `core/companion.ts` defines the public local presence, live memory-owner and
+  activity contracts; `extension/{companion,memory-owner}.ts` bind them to the current native owner.
+  Mind requires a compatible loaded partner, never a settings-file inference. Actual selection is
+  authoritative with persistence off; both engines freeze it for delegated legs (private per-child
+  factory in-process, spawn-local environment for child processes). `ui/activity-rows.ts` projects
+  bounded local Mind work without agent counts, controls, wakes, model usage or agent telemetry.
+  Automatic semantic review instead uses `pi-persona:mind-worker:v1`: one real tracked Mind worker,
+  with the current session model/effort, no tools/fallback/bus, normal shared concurrency and F9
+  controls, a 180s deadline, and a terminal archive. Memory/delegate/target permissions still apply.
+  Its completion belongs to Mind; it never wakes the supervisor. See the companion architecture contract.
+  These cooperative contracts are not authentication; see the loaded-companion section
+  in `docs/ARCHITECTURE.md`.
+
 - `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), session-runs (pure restore-notice helper: what a reload/resume lost + the run-id counter), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
