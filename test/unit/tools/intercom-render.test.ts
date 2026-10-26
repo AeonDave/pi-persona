@@ -21,6 +21,13 @@ function card(tool: any, result: any, expanded: boolean, context?: any): string 
 		.join("\n");
 }
 
+function call(tool: any, args: any, context?: any): string {
+	return tool.renderCall(args, theme, context)
+		.render(120)
+		.map((row: string) => stripVTControlCharacters(row).trimEnd())
+		.join("\n");
+}
+
 function assertBounded(rendered: string) {
 	const rows = rendered.split("\n");
 	assert.ok(rows.length <= 6, `collapsed card stays within ~6 rows, got ${rows.length}:\n${rendered}`);
@@ -47,12 +54,12 @@ function archiveHarness(persistent = true) {
 	return { archive, save };
 }
 
-function toolWith(archive: TerminalResultArchive): { tool: any } {
+function toolWith(archive: TerminalResultArchive, tracker: any = { peek: () => undefined, list: () => [], running: () => [] }): { tool: any } {
 	let tool: any;
 	registerIntercomTool(
 		{ registerTool: (definition: unknown) => { tool = definition; }, on: () => () => {} } as unknown as ExtensionAPI,
 		{
-			tracker: { peek: () => undefined, list: () => [], running: () => [] },
+			tracker,
 			completionNotifier: { peekPending: () => [], discard: () => {} },
 			intercomNotifier: { discard: () => {} },
 			controller: { activePersona: undefined },
@@ -76,6 +83,41 @@ function toolWith(archive: TerminalResultArchive): { tool: any } {
 const bigBody = `${"x".repeat(300_000)}MUST-NOT-LEAK-COLLAPSED`;
 const pageBody = Array.from({ length: 300 }, (_, i) => `line ${i}: ${"payload-".repeat(4)}`).join("\n");
 const wideBody = ("y".repeat(50) + "\n").repeat(400);
+
+test("saved result ref renders on Pi and standalone calls without consulting the live tracker", async () => {
+	const h = archiveHarness();
+	const saved = h.save("activation/stored", "archived report body");
+	let trackerLookups = 0;
+	const { tool } = toolWith(h.archive, {
+		peek: () => { trackerLookups++; throw new Error("archive refs are not live run ids"); },
+		list: () => [], running: () => [],
+	});
+	const args = { action: "result", ref: saved.ref };
+	const context = { args, state: {}, isPartial: false, isError: false };
+	const piCall = call(tool, args, context);
+	assert.match(piCall, new RegExp(saved.ref), `Pi's regular call card must show the archive ref: ${piCall}`);
+	assert.match(call(tool, args), new RegExp(saved.ref), "standalone call rendering also shows the archive ref");
+	assert.ok(visibleWidth(piCall) <= 100, "the ref call card stays within the collapsed-card width");
+	const hostileCall = call(tool, { action: "result", ref: `${saved.ref}\u001b[31m${"x".repeat(100)}` });
+	assert.match(hostileCall, new RegExp(saved.ref), "the bounded ref keeps its identifying prefix");
+	assert.doesNotMatch(hostileCall, /\u001b/, "model-authored ref text cannot add terminal control sequences");
+	assert.ok(visibleWidth(hostileCall) <= 100, "hostile ref text remains bounded to the call-card width");
+
+	const outcome = await tool.execute("saved", args, undefined, undefined, {});
+	const restored = JSON.parse(JSON.stringify(outcome));
+	assert.match(card(tool, restored, false, context), /archived report body/, "the stored page remains readable after result serialization");
+	assert.match(card(tool, restored, true, context), /archived report body/, "expanded stored rendering uses its retained page, not a tracker lookup");
+	assert.equal(trackerLookups, 0, "saved refs never bind to current run IDs or aliases");
+});
+
+test("intercom schema teaches exact bus handles, run-id routing, and engine-specific contact availability", () => {
+	const { tool } = toolWith(archiveHarness().archive);
+	assert.match(tool.description, /exact child bus handle.*list/i);
+	assert.match(tool.description, /steer.*exact run ID.*displayed run alias is presentation only/i);
+	assert.match(tool.description, /in-process.*coaching.*peer opt-in/i);
+	assert.match(tool.description, /child-process.*broker.*bus capability/i);
+	assert.match(tool.parameters.properties.to.description, /exact child bus handle.*list/i);
+});
 
 test("results collapsed: compact purpose line with the retained count, then a bounded listing", async () => {
 	const h = archiveHarness();
@@ -125,7 +167,7 @@ test("result ref collapsed: purpose line carries ref, page position and honesty 
 	assert.equal(result.isError, false);
 	const before = JSON.stringify(result);
 	const collapsed = card(tool, result, false, { args: { action: "result", ref: saved.ref }, isError: false });
-	assert.match(collapsed, new RegExp(`^result · ${saved.ref} · page 12789/12789`), `purpose line names ref and page position:\n${collapsed}`);
+	assert.match(collapsed, new RegExp(`^result · ${saved.ref} · UTF-16 0–12789/12789`), `purpose line names ref and honest zero-based range:\n${collapsed}`);
 	assert.match(collapsed, /line 0: payload/, "the fenced page start is previewed");
 	assert.match(collapsed, /expand/i, "the hidden page body advertises expansion");
 	assert.doesNotMatch(collapsed, /line 299/, "the rest of the page stays hidden, not dumped");
@@ -135,7 +177,7 @@ test("result ref collapsed: purpose line carries ref, page position and honesty 
 	const paged = await tool.execute("p2", { action: "result", ref: wide.ref, limit: 16_000 }, undefined, undefined, {});
 	assert.equal(paged.details.nextOffset, 16_000);
 	const pagedCard = card(tool, paged, false, { args: { action: "result", ref: wide.ref }, isError: false });
-	assert.match(pagedCard, new RegExp(`^result · ${wide.ref} · page 16000/20400`), `paged purpose line:\n${pagedCard}`);
+	assert.match(pagedCard, new RegExp(`^result · ${wide.ref} · UTF-16 0–16000/20400`), `paged purpose line:\n${pagedCard}`);
 	assertBounded(pagedCard);
 	assert.match(pagedCard, /expand/i);
 });
@@ -147,11 +189,53 @@ test("result ref collapsed: truncated and memory-only receipts are flagged on th
 	const result = await tool.execute("p", { action: "result", ref: saved.ref, offset: 254_000, limit: 16_000 }, undefined, undefined, {});
 	assert.equal(result.isError, false);
 	const collapsed = card(tool, result, false, { args: { action: "result", ref: saved.ref }, isError: false });
-	assert.match(collapsed, /page 262144\/262144/, `page position reads against the stored body:\n${collapsed}`);
+	assert.match(collapsed, /UTF-16 254000–262144\/262144/, `page position reads against the stored body:\n${collapsed}`);
 	assert.match(collapsed, /truncated/, "a truncated archive body is flagged collapsed, not only expanded");
 	assert.match(collapsed, /memory-only/, "a non-durable receipt is flagged collapsed");
+	assert.match(collapsed, /warnings:/, "archive warnings stay visible even when all honesty flags are present");
 	assertBounded(collapsed);
 	assert.doesNotMatch(collapsed, /MUST-NOT-LEAK-COLLAPSED/);
+});
+
+test("result ref collapsed: empty and surrogate-safe pages show zero-based UTF-16 ranges", async () => {
+	const h = archiveHarness();
+	const empty = h.save("activation/empty", "");
+	const emoji = h.save("activation/emoji", "a😀b");
+	const { tool } = toolWith(h.archive);
+	const emptyResult = await tool.execute("empty", { action: "result", ref: empty.ref }, undefined, undefined, {});
+	const emptyCard = card(tool, emptyResult, false, { args: { action: "result", ref: empty.ref }, isError: false });
+	assert.match(emptyCard, new RegExp(`^result · ${empty.ref} · UTF-16 0–0/0`));
+	assertBounded(emptyCard);
+
+	const first = await tool.execute("first", { action: "result", ref: emoji.ref, limit: 2 }, undefined, undefined, {});
+	assert.equal(first.details.offset, 0);
+	assert.equal(first.details.nextOffset, 1, "the first page ends before the surrogate pair");
+	assert.equal(first.content[0].text.isWellFormed(), true, "the rendered page never contains an unpaired surrogate");
+	const firstCard = card(tool, first, false, { args: { action: "result", ref: emoji.ref }, isError: false });
+	assert.match(firstCard, new RegExp(`^result · ${emoji.ref} · UTF-16 0–1/4`));
+	assertBounded(firstCard);
+
+	const second = await tool.execute("second", { action: "result", ref: emoji.ref, offset: first.details.nextOffset, limit: 2 }, undefined, undefined, {});
+	assert.equal(second.details.offset, 1);
+	assert.equal(second.details.nextOffset, 3, "the next page advances past both surrogate code units");
+	assert.match(card(tool, second, false, { args: { action: "result", ref: emoji.ref }, isError: false }), new RegExp(`UTF-16 1–3/4`));
+});
+
+test("empty archive pages retain terminal failures and their fenced diagnostics", async () => {
+	const h = archiveHarness();
+	const { tool } = toolWith(h.archive);
+	for (const body of ["", "partial report"]) {
+		const saved = h.save(`activation/failed-${body.length}`, body,
+			{ status: "failed", error: "Provider authorization failed" });
+		const args = { action: "result", ref: saved.ref, offset: body.length };
+		const outcome = await tool.execute("failure-page", args, undefined, undefined, {});
+		assert.equal(outcome.isError, false, "reading a failed worker's report still succeeds");
+		const collapsed = card(tool, outcome, false, { args, isError: false });
+		assert.match(collapsed, /Failure detail:/);
+		assert.match(collapsed, /> Provider authorization failed/, "the retained error stays quoted and visible without expansion");
+		assert.doesNotMatch(collapsed, /\(empty page\)/, "an empty body must not conceal the failure detail");
+		assertBounded(collapsed);
+	}
 });
 
 test("result ref expanded: the page renders literally through the shared renderer, complete and sanitized", async () => {

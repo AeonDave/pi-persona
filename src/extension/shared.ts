@@ -196,5 +196,5 @@ export function fenceIntercomOutcome(out: { text: string; details: { action: str
 
 export function coachingDisabledHint(personaName: string | undefined): string {
 	const who = sanitizeDisplayLabel(personaName ?? "default", "default");
-	return `(coaching is OFF for persona "${who}" — sub-agents get no contact_supervisor tool, so the message bus is empty. To redirect one use action "steer"; results return on their own. To exchange messages, add \`coaching: true\` or switch to a coaching persona.)`;
+	return `(coaching is OFF for persona "${who}". In-process supervisor contact requires \`coaching: true\`; broker-connected children and opted-in peers may still use the bus when allowed. Use "list" for reachable bus handles or "steer" with a run id to redirect a worker.)`;
 }

@@ -47,10 +47,18 @@ supervisor is free. Keep the session open, and cancel a watch when its purpose e
   stall card and `/peek`, "stalled" is stricter: 90 seconds with no assistant output, tokens, turns or
   completed tool call, so a tool that only streams output (`npm run dev`, `tail -f`) is flagged too. It is
   advice only: nothing is killed.
-  A parent is waiting only when all its live descendant branches are waiting. Enter opens a selectable worker's output; `s` sends a course correction;
+  A parent is waiting only when all its live descendant branches are waiting. Enter on a group opens
+  a scrollable overview of its worker legs, with separate queued/running/terminal counts, model,
+  effort, activity or result preview, and known cumulative usage. Enter again opens the selected
+  worker's output; Escape returns to the same group selection. `s` sends a course correction;
   `x` requests cancellation and appears only when the run can actually be stopped, marking the row
   `stopping…` at once; a stop that can't be applied says so instead of doing nothing. Escape goes
   back or closes the panel.
+  Group inspection never grants controls: `x` in the overview targets the selected worker;
+  stopping a whole council/flow requires selecting its stoppable root in the tree. Completed
+  delegate legs stay inspectable until the batch ends, then leave together. Their bounded previews
+  point to retained Intercom results. Activity and cumulative usage remain separate in worker detail;
+  neither is a claim about current context occupancy.
 - **`/peek`** gives a compact progress view. A quiet worker is a reason to inspect its last
   progress and current activity, not to launch a duplicate immediately.
 - **`/flow <name> <task>`** runs a flow (`/flow` alone lists them with descriptions; a `gate: true`

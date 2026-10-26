@@ -146,12 +146,12 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			],
 			{
 				description:
-					"peek = status of async sub-agents · results = bounded archive summaries (cursor/limit) · result = page a settled live result by to:run-id or a saved report by ref:result-UUID · steer = soft redirect into one by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = coaching messages (needs a coaching persona)",
+					"peek = status of async sub-agents · results = bounded archive summaries (cursor/limit) · result = page a settled live result by run id or a saved report by ref · steer = soft redirect by run id (it may ignore it) · stop = request engine cancellation by run id · message = retrieve one drained bus message by message id · list/inbox/reply/send = bus messages",
 			},
 		),
-		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek: the async run id (e.g. 'run-1'); stop: \"all\" cancels every running run · send: the child handle (from `list`)" })),
+		to: Type.Optional(Type.String({ maxLength: MAX_INTERCOM_REF_CHARS, description: "result/steer/stop/peek: exact async run id (e.g. 'run-1'); display aliases are labels, not routes · stop: \"all\" cancels every running run · send: exact child bus handle returned by `list`" })),
 		ref: Type.Optional(Type.String({ maxLength: 43, description: "result: opaque result:<UUID> archive reference; never a run id. Mutually exclusive with to." })),
-		offset: Type.Optional(Type.Integer({ minimum: 0, description: "result: stored-body UTF-16 offset (default 0); use nextOffset, never split a surrogate pair." })),
+		offset: Type.Optional(Type.Integer({ minimum: 0, description: "result: zero-based stored-body UTF-16 offset (default 0); displayed page ranges are zero-based and half-open [start,end); use nextOffset, never split a surrogate pair." })),
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000, description: "result: 2..16000 UTF-16 units (default 8000). results: 1..50 summaries (default 20)." })),
 		cursor: Type.Optional(Type.Integer({ minimum: 0, description: "results: nextCursor from the prior bounded summary page; omit for the first page." })),
 		collect: Type.Optional(Type.Boolean({ description: "result with live to only: true acknowledges the whole report and suppresses its pending completion. Paging alone does not collect." })),
@@ -167,11 +167,12 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` pages a live settled payload by run id (8000 units default, 16000 maximum).",
 			"`results { cursor?, limit? }` lists saved terminal summaries across this session's branches (20 default, 50 maximum); pass nextCursor for the next page.",
 			"`result { ref: 'result:<UUID>', offset?, limit? }` reads a saved report, including after reload, without collecting, billing, restarting a worker or waking the model. Memory-only references last only for this activation. Run ids route only the current runtime; never guess a historical run by id.",
-			"Use nextOffset for more UTF-16 pages. Only a whole live body returned in one read, or explicit live collect:true, suppresses a pending completion. Archive ref reads reject collect.",
+			"Use nextOffset for more UTF-16 pages. Page ranges are zero-based, half-open [start,end) UTF-16 units. Only a whole live body returned in one read, or explicit live collect:true, suppresses a pending completion. Archive ref reads reject collect.",
 			"`steer` sends a soft course-correction to one (by run id); in-process async runs can receive it mid-run,",
 			"while child-engine (MCP/worktree) async runs receive it as a brokered follow-up. After remaining tools return, Pi can consume steering; arbitrary active tool work is not promised to stop immediately.",
-			"`message` retrieves a drained bus message by its message id; `list`/`inbox`/`reply`/`send` exchange coaching messages (a child reaches you via `contact_supervisor`)",
-			"and need a `coaching: on` persona.",
+			"For `steer`/`stop`/`peek` and live `result`, `to` is the exact run ID; a displayed run alias is presentation only. `send` needs the exact child bus handle returned by `list`.",
+			"In-process children get `contact_supervisor` with coaching enabled, or `contact_peer` when the strategy has peer opt-in. Child-process `contact_supervisor` uses the broker whenever bus capability is allowed, independently of coaching; `contact_peer` still requires peer opt-in.",
+			"`message` retrieves a drained bus message by its message id; `list`/`inbox`/`reply`/`send` work with the bus messages available to this persona.",
 		].join(" "),
 		parameters: IntercomToolParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -344,6 +345,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				? state?.target?.id === args.to ? state.target.label : displayRunTarget(args.to)
 				: undefined;
 			if (action === "peek") target = runTarget ?? "all";
+			else if (action === "result" && typeof args.ref === "string") target = compactInlineText(args.ref, { maxChars: 80 }) || "?";
 			else if (["result", "steer", "stop"].includes(action)) target = runTarget ?? "?";
 			else if (action === "send") target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
 			else if (action === "message") target = compactInlineText(args.messageId ?? "?", { maxChars: 80 }) || "?";
@@ -357,8 +359,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			const details = (result.details ?? {}) as {
 				action?: string; ok?: boolean; runId?: string; target?: string; message?: string;
 				results?: Array<{ truncated?: boolean }>;
-				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean };
-				nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
+				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean; error?: string };
+				offset?: number; nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
 			};
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = details.action ?? context?.args?.action;
@@ -433,17 +435,21 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// Page position reads against the STORED body (originals may be truncated); honesty
 				// flags surface collapsed so a memory-only or truncated receipt is never mistaken
 				// for a durable whole report without expanding.
-				const end = details.nextOffset ?? archivedPage.storedChars ?? 0;
+				const start = details.offset ?? 0;
+				const total = archivedPage.storedChars ?? 0;
+				const end = details.nextOffset ?? total;
 				const flags = [
 					...(archivedPage.truncated ? ["truncated"] : []),
 					...(archivedPage.storage === "memory-only" ? ["memory-only"] : []),
 					...(details.warnings?.length ? [`warnings: ${details.warnings.join(", ")}`] : []),
 				];
-				const purpose = compactInlineText(`result · ${archivedPage.ref ?? "?"} · page ${end}/${archivedPage.storedChars ?? "?"}${flags.length ? ` · ${flags.join(" · ")}` : ""}`, { maxChars: 100 });
+				const purpose = compactInlineText(`result · ${archivedPage.ref ?? "?"} · UTF-16 ${start}–${end}/${total}`, { maxChars: 100 });
+				const flagLine = flags.length > 0 ? `\n${theme.fg("dim", compactInlineText(flags.join(" · "), { maxChars: 100 }))}` : "";
 				// The payload's receipt header and paging diagnostic line are replaced by the purpose
 				// line; the fence wrapper is dropped by the preview, leaving the page body quoted.
-				const preview = compactVisibleText(full.split("\n").slice(2).join("\n"), { maxLines: 3, maxLineChars: 100 });
-				return new Text(`${theme.fg("success", purpose)}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+				const previewSource = start === end && !archivedPage.error ? "(empty page)" : full.split("\n").slice(2).join("\n");
+				const preview = compactVisibleText(previewSource, { maxLines: 3, maxLineChars: 100 });
+				return new Text(`${theme.fg("success", purpose)}${flagLine}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
 			}
 			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
 			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";

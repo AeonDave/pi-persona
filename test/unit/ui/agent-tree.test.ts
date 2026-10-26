@@ -8,6 +8,18 @@ import { formatUsage } from "../../../src/ui/usage.ts";
 
 import { AgentTree, type AgentNode, type AgentNodeStatus, deriveWaitingNodeIds, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
 
+test("overflow worker counts exclude delegate and structural containers and separate waiting workers", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "batch", label: "Batch", kind: "delegate" });
+	tree.add({ id: "nested", label: "Nested", parentId: "batch" });
+	tree.add({ id: "ask", label: "Waiting", parentId: "nested", kind: "subagent" });
+	tree.add({ id: "work", label: "Building", parentId: "batch", kind: "subagent", detail: "npm test" });
+	tree.add({ id: "queued", label: "Queued", parentId: "batch", kind: "subagent", detail: "queued" });
+	const rows = renderAgentTreeSummary(tree.snapshot(), 3, { waitingForSupervisor: new Set(["batch", "nested", "ask"]) });
+	assert.equal(rows[0], "? 1 waiting for supervisor: Waiting");
+	assert.equal(rows[1], "⏳ 1 active worker: Building · npm test");
+});
+
 test("tree upserts preserve omitted metadata and clear explicitly reset attempt fields", () => {
 	const tree = new AgentTree();
 	tree.add({ id: "leg", label: "leg", model: "first/model", thinking: "xhigh", thinkingEffective: "high" });
@@ -283,10 +295,46 @@ test("queued descendants do not keep a waiting parent active", () => {
 
 test("progressPatch bumps lastAdvanceAt and prefers activity over usage", () => {
 	const usage = { ...emptyUsage(), input: 1000, output: 500 };
-	assert.deepEqual(progressPatch({ output: "o", activity: "⚙ bash ls", tokens: 1500, usage }, 42), { lastAdvanceAt: 42, output: "o", detail: "⚙ bash ls" });
+	assert.deepEqual(progressPatch({ output: "o", activity: "⚙ bash ls", tokens: 1500, usage }, 42), { lastAdvanceAt: 42, output: "o", detail: "⚙ bash ls", usage });
 	assert.deepEqual(progressPatch({ tokens: 164_005 }, 42), { lastAdvanceAt: 42, detail: "164k" }, "legacy aggregates stay neutral, not directional");
 	assert.deepEqual(progressPatch({}, 42), { lastAdvanceAt: 42 });
 	assert.deepEqual(progressPatch({ tokens: 0 }, 42), { lastAdvanceAt: 42 });
+});
+
+test("progressPatch keeps cumulative usage separate from the compact detail and copies it", () => {
+	const usage = { ...emptyUsage(), input: 1_000, output: 500 };
+	const patch = progressPatch({ activity: "⚙ bash ls", usage }, 42);
+	assert.equal(patch.detail, "⚙ bash ls", "activity keeps its existing row preference");
+	assert.deepEqual(patch.usage, usage, "the full cumulative usage remains available separately");
+	usage.input = 9_000;
+	assert.equal(patch.usage?.input, 1_000, "a later stream mutation cannot rewrite the tree patch");
+});
+
+test("AgentTree copies usage at every boundary and notifies only when its values change", () => {
+	const inputUsage = { ...emptyUsage(), input: 10, output: 2 };
+	const tree = new AgentTree();
+	tree.add({ id: "worker", label: "worker", usage: inputUsage });
+	inputUsage.input = 99;
+	assert.equal(tree.snapshot()[0]?.usage?.input, 10, "ingestion owns its usage copy");
+
+	const first = tree.snapshot();
+	first[0]!.usage!.input = 88;
+	assert.equal(tree.snapshot()[0]?.usage?.input, 10, "snapshots do not share mutable usage");
+
+	const updates: AgentNode[] = [];
+	tree.onChange((change) => { if (change.type === "updated") updates.push(change.node); });
+	const nextUsage = { ...emptyUsage(), input: 20, output: 2 };
+	tree.update("worker", { usage: nextUsage });
+	assert.equal(updates.length, 1, "a usage change emits an update");
+	nextUsage.input = 30;
+	assert.equal(updates[0]?.usage?.input, 20, "change notifications own a copy too");
+	updates[0]!.usage!.input = 40;
+	assert.equal(tree.snapshot()[0]?.usage?.input, 20, "notification payloads cannot mutate the live tree");
+
+	tree.update("worker", { usage: { ...nextUsage, input: 20 } });
+	assert.equal(updates.length, 1, "equal usage values are not a semantic update");
+	tree.add({ id: "worker", label: "worker", usage: undefined });
+	assert.equal(Object.hasOwn(tree.snapshot()[0]!, "usage"), false, "explicit undefined clears usage for a retry");
 });
 
 test("running and completed rows use identical directional usage formatting", () => {
@@ -424,59 +472,137 @@ const OVERFLOW = /^… \+\d+ more · F9 or \/agents for the full live tree$/;
 test("a monitor armed after a full fan-out is surfaced as a digest line instead of vanishing behind the overflow", () => {
 	const lines = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8, { now: 1_000 });
 	assert.equal(lines.length, 8);
-	assert.deepEqual(lines.slice(6), ["◉ 1 monitor · next due in 1h 59m", "… +3 more · F9 or /agents for the full live tree"]);
+	assert.deepEqual(lines.slice(5), [
+		"◉ 1 monitor · next due in 1h 59m",
+		"⏳ 3 active workers: leg-5",
+		"… +4 more · F9 or /agents for the full live tree",
+	]);
 	assert.equal(lines.filter((line) => /^◉ 1 monitor · next due in /.test(line)).length, 1);
 	assert.match(lines.at(-1) ?? "", OVERFLOW, "hidden wake rows still count as more");
-	assert.doesNotMatch(lines.slice(0, 6).join("\n"), /◉|qualify batch1/, "the monitor's own row stays below the fold; only the digest shows it");
+	assert.doesNotMatch(lines.slice(0, 5).join("\n"), /◉|qualify batch1/, "the monitor's own row stays below the fold; only the digest shows it");
 	assert.match(lines[0] ?? "", /council/, "the fan-out keeps the rows the digest did not need");
+});
+
+test("the hidden worker digest names a stable representative and uses its supplied activity, not its model", () => {
+	const nodes = councilFanout().map((node) => node.id === "council#1/4"
+		? { ...node, detail: "⚙ rg src/ui", model: "vendor/private-model", startedAt: 10, lastAdvanceAt: 10 }
+		: node);
+	nodes.push(WAKE_MONITOR);
+	const first = renderAgentTreeSummary(nodes, 8, { now: 1_000 });
+	assert.equal(first[6], "⏳ 3 active workers: leg-5 · ⚙ rg src/ui");
+	assert.ok(visibleWidth(first[6] ?? "") <= 210, "the digest representative stays within the existing summary row width bound");
+
+	const laterProgress = nodes.map((node) => ({ ...node, startedAt: 20_000, lastAdvanceAt: 20_000 }));
+	assert.equal(renderAgentTreeSummary(laterProgress, 8, { now: 21_000 })[6], first[6], "progress clocks do not reorder the representative");
+	assert.doesNotMatch(first.join("\n"), /vendor\/private-model/, "identity comes from the tree row, not a model inference");
+});
+
+test("the hidden worker digest excludes settled, queued, container, timer, monitor, and activity rows", () => {
+	const nodes: AgentNode[] = [
+		{ id: "council", label: "council", parentId: undefined, status: "running", kind: "council", detail: undefined },
+		...Array.from({ length: 6 }, (_, index): AgentNode => ({
+			id: `settled-${index}`, label: `settled-${index}`, parentId: "council", status: "done", kind: "subagent", detail: undefined,
+		})),
+		{ id: "queued", label: "queued", parentId: "council", status: "running", kind: "subagent", detail: "queued" },
+		{ id: "live", label: "live worker", parentId: "council", status: "running", kind: "subagent", detail: "⚙ compiling" },
+		{ ...WAKE_MONITOR, parentId: "council" },
+		{ ...WAKE_TIMER, parentId: "council" },
+		{ id: "activity", label: "Mind", parentId: "council", status: "running", kind: "activity", detail: "inspecting" },
+		{ id: "phase", label: "phase", parentId: "council", status: "running", kind: "phase", detail: undefined },
+	];
+	const lines = renderAgentTreeSummary(nodes, 6, { now: 1_000 });
+	assert.equal(lines.length, 6);
+	assert.match(lines.join("\n"), /⏳ 1 active worker: live worker · ⚙ compiling/);
+	assert.doesNotMatch(lines[4] ?? "", /queued|settled-[0-5]|phase/);
+});
+
+test("waiting-for-supervisor rows get a truthful digest before wake and active digests", () => {
+	const nodes = [...councilFanout(2), WAKE_MONITOR];
+	const lines = renderAgentTreeSummary(nodes, 8, {
+		now: 1_000,
+		waitingForSupervisor: new Set(["council#1", "council#1/4"]),
+	});
+	assert.equal(lines.length, 8);
+	assert.equal(lines[4], "? 1 waiting for supervisor: leg-5", "container waiting state is not counted as a second worker ask");
+	assert.match(lines[5] ?? "", /^◉ 1 monitor/);
+	assert.match(lines[6] ?? "", /^⏳ \d+ active workers:/);
+});
+
+test("tiny summary budgets use failure, ask, wake, active, then overflow priority", () => {
+	const nodes = [...councilFanout(2), WAKE_MONITOR];
+	const opts = { now: 1_000, waitingForSupervisor: new Set(["council#1/4"]) };
+	assert.deepEqual(renderAgentTreeSummary(nodes, 1, opts), ["✗ 1 failed: leg-3 (provider)"]);
+	assert.deepEqual(renderAgentTreeSummary(nodes, 2, opts), ["✗ 1 failed: leg-3 (provider)", "? 1 waiting for supervisor: leg-5"]);
+	assert.equal(renderAgentTreeSummary(nodes, 3, opts)[2], "◉ 1 monitor · next due in 1h 59m");
+	assert.match(renderAgentTreeSummary(nodes, 4, opts)[3] ?? "", /^⏳ \d+ active workers:/);
+	assert.equal(renderAgentTreeSummary(nodes, 5, opts).length, 5, "overflow uses the last slot after every higher-priority digest");
+});
+
+test("settled siblings do not hide the one remaining live worker in the active digest", () => {
+	const nodes: AgentNode[] = [
+		{ id: "batch", label: "batch", parentId: undefined, status: "running", kind: "council", detail: undefined },
+		...Array.from({ length: 7 }, (_, index): AgentNode => ({
+			id: `batch/${index}`, label: `worker-${index + 1}`, parentId: "batch",
+			status: index === 6 ? "running" : "done", kind: "subagent", detail: index === 6 ? "⚙ finishing" : undefined,
+		})),
+	];
+	const lines = renderAgentTreeSummary(nodes, 5);
+	assert.equal(lines.length, 5);
+	assert.equal(lines[3], "⏳ 1 active worker: worker-7 · ⚙ finishing");
+	assert.match(lines[4] ?? "", /^… \+5 more/);
 });
 
 test("the digest counts monitors then timers and counts down to the nearest hidden due time", () => {
 	const lines = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR, WAKE_TIMER], 8, { now: 1_000 });
 	assert.equal(lines.length, 8);
-	assert.equal(lines[6], "◉ 1 monitor · ⏰ 1 timer · next due in 4m 12s", "the timer fires first, so it sets the countdown");
-	assert.match(lines.at(-1) ?? "", /^… \+4 more · F9/);
+	assert.equal(lines[5], "◉ 1 monitor · ⏰ 1 timer · next due in 4m 12s", "the timer fires first, so it sets the countdown");
+	assert.match(lines[6] ?? "", /^⏳ 3 active workers:/);
+	assert.match(lines.at(-1) ?? "", /^… \+5 more · F9/);
 });
 
 test("the digest pluralises each kind and omits a kind that has no hidden row", () => {
 	const timers: AgentNode[] = [WAKE_TIMER, { ...WAKE_TIMER, id: "timer:timer-2", label: "second review", dueAt: 600_000 }];
 	const onlyTimers = renderAgentTreeSummary([...councilFanout(), ...timers], 8, { now: 1_000 });
-	assert.equal(onlyTimers[6], "⏰ 2 timers · next due in 4m 12s");
+	assert.equal(onlyTimers[5], "⏰ 2 timers · next due in 4m 12s");
+	assert.match(onlyTimers[6] ?? "", /^⏳ 3 active workers:/);
 
 	const monitors: AgentNode[] = [WAKE_MONITOR, { ...WAKE_MONITOR, id: "monitor:monitor-2", label: "second watch", dueAt: 9_000_000 }];
 	const onlyMonitors = renderAgentTreeSummary([...councilFanout(), ...monitors], 8, { now: 1_000 });
-	assert.equal(onlyMonitors[6], "◉ 2 monitors · next due in 1h 59m");
+	assert.equal(onlyMonitors[5], "◉ 2 monitors · next due in 1h 59m");
+	assert.match(onlyMonitors[6] ?? "", /^⏳ 3 active workers:/);
 
 	const mixed = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR, ...timers], 8, { now: 1_000 });
-	assert.equal(mixed[6], "◉ 1 monitor · ⏰ 2 timers · next due in 4m 12s");
+	assert.equal(mixed[5], "◉ 1 monitor · ⏰ 2 timers · next due in 4m 12s");
+	assert.match(mixed[6] ?? "", /^⏳ 3 active workers:/);
 });
 
 test("the digest says 'next due now' once the nearest hidden wake row is overdue", () => {
 	const lines = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8, { now: 7_200_000 });
-	assert.equal(lines[6], "◉ 1 monitor · next due now");
+	assert.equal(lines[5], "◉ 1 monitor · next due now");
 	const later = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8, { now: 8_000_000 });
-	assert.equal(later[6], "◉ 1 monitor · next due now", "past the deadline reads the same");
+	assert.equal(later[5], "◉ 1 monitor · next due now", "past the deadline reads the same");
 });
 
 test("without a clock the digest carries no 'next due' clause, and neither does a hidden row with no dueAt", () => {
 	const noClock = renderAgentTreeSummary([...councilFanout(), WAKE_MONITOR], 8);
 	assert.equal(noClock.length, 8);
-	assert.equal(noClock[6], "◉ 1 monitor");
+	assert.equal(noClock[5], "◉ 1 monitor");
 	const { dueAt: _dueAt, ...undated } = WAKE_MONITOR;
 	const noDue = renderAgentTreeSummary([...councilFanout(), undated], 8, { now: 1_000 });
-	assert.equal(noDue[6], "◉ 1 monitor", "nothing finite to count down to");
+	assert.equal(noDue[5], "◉ 1 monitor", "nothing finite to count down to");
 	const mixedDue = renderAgentTreeSummary([...councilFanout(), undated, { ...WAKE_TIMER, dueAt: Number.NaN }], 8, { now: 1_000 });
-	assert.equal(mixedDue[6], "◉ 1 monitor · ⏰ 1 timer", "a NaN dueAt is not finite either");
+	assert.equal(mixedDue[5], "◉ 1 monitor · ⏰ 1 timer", "a NaN dueAt is not finite either");
 });
 
 test("a failed leg and a hidden wake row each get their own line, and the summary stays inside its budget", () => {
 	const lines = renderAgentTreeSummary([...councilFanout(3), WAKE_MONITOR], 8, { now: 1_000 });
 	assert.equal(lines.length, 8);
-	assert.match(lines[5] ?? "", /^✗ 1 failed: leg-4 \(provider\)$/);
-	assert.equal(lines[6], "◉ 1 monitor · next due in 1h 59m");
-	assert.match(lines[7] ?? "", /^… \+4 more · F9/);
+	assert.match(lines[4] ?? "", /^✗ 1 failed: leg-4 \(provider\)$/);
+	assert.equal(lines[5], "◉ 1 monitor · next due in 1h 59m");
+	assert.match(lines[6] ?? "", /^⏳ 3 active workers:/);
+	assert.match(lines[7] ?? "", /^… \+5 more · F9/);
 	assert.match(lines[0] ?? "", /council/);
-	assert.equal(lines.slice(0, 5).length, 5, "five rows survive: failure line and digest each took a slot");
+	assert.equal(lines.slice(0, 4).length, 4, "failure, wake, and active digests each take a slot");
 });
 
 test("a wake row inside the fold gets no digest line", () => {
@@ -484,7 +610,8 @@ test("a wake row inside the fold gets no digest line", () => {
 	assert.equal(lines.length, 8);
 	assert.match(lines[0] ?? "", /^◉ qualify batch1/, "the row is shown as itself");
 	assert.doesNotMatch(lines.join("\n"), /\d+ monitors?\b/, "so there is no digest to repeat it");
-	assert.match(lines.at(-1) ?? "", /^… \+2 more/);
+	assert.match(lines.at(-1) ?? "", /^… \+3 more/);
+	assert.match(lines[6] ?? "", /^⏳ 3 active workers:/);
 	assert.equal(lines.filter((line) => OVERFLOW.test(line)).length, 1);
 });
 
@@ -495,9 +622,10 @@ test("the digest slot can pull a wake row that was just inside the fold below it
 	nodes.push(WAKE_MONITOR, filler(6), WAKE_TIMER);
 	const lines = renderAgentTreeSummary(nodes, 8, { now: 1_000 });
 	assert.equal(lines.length, 8);
-	assert.equal(lines[6], "◉ 1 monitor · ⏰ 1 timer · next due in 4m 12s", "the digest slot demoted the monitor too, so it is counted");
-	assert.doesNotMatch(lines.slice(0, 6).join("\n"), /qualify batch1/);
-	assert.equal(lines[7], "… +3 more · F9 or /agents for the full live tree");
+	assert.equal(lines[5], "◉ 1 monitor · ⏰ 1 timer · next due in 4m 12s", "the digest slot demoted the monitor too, so it is counted");
+	assert.equal(lines[6], "⏳ 2 active workers: agent-5");
+	assert.doesNotMatch(lines.slice(0, 5).join("\n"), /qualify batch1/);
+	assert.equal(lines[7], "… +4 more · F9 or /agents for the full live tree");
 });
 
 test("settled wake rows below the fold are not part of the digest", () => {
@@ -508,22 +636,23 @@ test("settled wake rows below the fold are not part of the digest", () => {
 	const lines = renderAgentTreeSummary([...councilFanout(), ...settled], 8, { now: 1_000 });
 	assert.equal(lines.length, 8);
 	assert.doesNotMatch(lines.join("\n"), /\bmonitors?\b|\btimers?\b|next due/);
-	assert.equal(lines.at(-1), "… +3 more · F9 or /agents for the full live tree", "plain overflow: no failure, no digest, seven rows kept");
+	assert.equal(lines.at(-1), "… +4 more · F9 or /agents for the full live tree", "settled wake rows are omitted while the hidden running workers get their digest");
+	assert.equal(lines[6], "⏳ 2 active workers: leg-6");
 	assert.equal(lines.filter((line) => /^[✓■] /.test(line)).length, 0, "and the settled rows themselves are below the fold");
 });
 
 test("a tight budget keeps the digest ahead of the overflow line", () => {
 	const nodes = [...councilFanout(), WAKE_MONITOR];
-	// limit 2: one slot for rows, then the digest takes it. Zero rows are shown; the digest and overflow remain.
-	assert.deepEqual(renderAgentTreeSummary(nodes, 2, { now: 1_000 }), ["◉ 1 monitor · next due in 1h 59m", "… +9 more · F9 or /agents for the full live tree"]);
+	// limit 2: wake and active digests outrank overflow; no tree rows remain.
+	assert.deepEqual(renderAgentTreeSummary(nodes, 2, { now: 1_000 }), ["◉ 1 monitor · next due in 1h 59m", "⏳ 7 active workers: leg-1"]);
 	// limit 1: one line only, and the wake digest outranks the overflow.
 	assert.deepEqual(renderAgentTreeSummary(nodes, 1, { now: 1_000 }), ["◉ 1 monitor · next due in 1h 59m"]);
-	// limit 3: one visible row, then digest and overflow.
+	// limit 3: both digests and overflow consume the budget.
 	const three = renderAgentTreeSummary(nodes, 3, { now: 1_000 });
 	assert.equal(three.length, 3);
-	assert.match(three[0] ?? "", /council/);
-	assert.equal(three[1], "◉ 1 monitor · next due in 1h 59m");
-	assert.equal(three[2], "… +8 more · F9 or /agents for the full live tree");
+	assert.equal(three[0], "◉ 1 monitor · next due in 1h 59m");
+	assert.equal(three[1], "⏳ 7 active workers: leg-1", "representative names the first hidden worker in stable display order");
+	assert.equal(three[2], "… +9 more · F9 or /agents for the full live tree");
 });
 
 test("a failure outranks the wake digest, and neither exceeds a one- or two-line budget", () => {
@@ -532,13 +661,14 @@ test("a failure outranks the wake digest, and neither exceeds a one- or two-line
 	assert.deepEqual(renderAgentTreeSummary(nodes, 2, { now: 1_000 }), ["✗ 1 failed: leg-4 (provider)", "◉ 1 monitor · next due in 1h 59m"], "the overflow line is the first to go");
 });
 
-test("without any hidden wake row the overflow summary is unchanged", () => {
+test("without hidden wake rows, active workers still stay represented", () => {
 	const nodes: AgentNode[] = [...councilFanout(), { id: "council#1/extra", label: "leg-8", parentId: "council#1", status: "running", kind: "subagent", detail: undefined }];
 	const lines = renderAgentTreeSummary(nodes, 8, { now: 1_000 });
 	assert.equal(lines.length, 8);
-	assert.equal(lines.at(-1), "… +2 more · F9 or /agents for the full live tree");
+	assert.equal(lines[6], "⏳ 3 active workers: leg-6");
+	assert.equal(lines.at(-1), "… +3 more · F9 or /agents for the full live tree");
 	assert.doesNotMatch(lines.join("\n"), /monitor|timer/);
-	assert.deepEqual(renderAgentTreeSummary(nodes, 8), [...renderAgentTree(nodes).slice(0, 7), "… +2 more · F9 or /agents for the full live tree"]);
+	assert.deepEqual(renderAgentTreeSummary(nodes, 8), [...renderAgentTree(nodes).slice(0, 6), "⏳ 3 active workers: leg-6", "… +3 more · F9 or /agents for the full live tree"]);
 });
 
 test("the no-overflow path returns every row untouched, wake rows included", () => {

@@ -9,17 +9,15 @@ import { Semaphore } from "../../../src/orchestration/parallel.ts";
 import { createBackgroundRuns } from "../../../src/tools/background-run.ts";
 import { registerDelegateTool } from "../../../src/tools/delegate-tool.ts";
 import { AgentTree } from "../../../src/ui/agent-tree.ts";
+import { settleAsyncTreeNode } from "../../../src/ui/async-settlement.ts";
 
-/** The tree and tracker are real. The extension's own settle handler (the leg's node leaves the tree)
+/** The tree and tracker are real. The extension's own terminal projection
  *  is registered first, exactly as in production, so the order in which listeners fire is the real one. */
 function harness() {
 	let tool: any;
 	const tree = new AgentTree(() => 1_000);
 	const tracker = new AsyncRunTracker();
-	tracker.onComplete((run) => {
-		tree.update(`async:${run.id}`, { status: run.status });
-		tree.remove(`async:${run.id}`);
-	});
+	tracker.onComplete((run) => settleAsyncTreeNode(tree, run));
 	const gates = new Map<string, { resolve(): void; progress(): void }>();
 	const deps: any = {
 		lastCtx: undefined,
@@ -97,7 +95,8 @@ test("an async fan-out gets ONE header row that counts settled legs and leaves w
 	assert.equal(header(h.tree)?.detail, "1/3 settled");
 	await h.settle("leg-1");
 	assert.equal(header(h.tree)?.detail, "2/3 settled");
-	assert.equal(h.tree.snapshot().filter((node) => node.id.startsWith("async:")).length, 1);
+	assert.equal(h.tree.snapshot().filter((node) => node.id.startsWith("async:")).length, 3, "settled receipts remain inspectable until the batch ends");
+	assert.equal(h.tree.snapshot().filter((node) => node.id.startsWith("async:") && node.status === "running").length, 1);
 	await h.settle("leg-2");
 	assert.deepEqual(h.tree.snapshot(), [], "the header leaves with the last leg");
 

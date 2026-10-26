@@ -596,6 +596,9 @@ stage and apply operations continue to use activity rows; model work uses the re
   new delivery rather than stranding a sender. Ask settlement (reply, timeout, abort, departure, or
   failed delivery) releases its timer/listener and unread entry; a previously retained question stays
   readable with `expectsReply: false`, so old questions never advertise an active reply id.
+  Supervisor `intercom send` requires the exact bus handle from `list`, independently of runtime
+  run IDs and displayed names. Its diagnostics distinguish an absent recipient from rejected inbox
+  admission; a full inbox does not unregister its recipient or settle an existing question.
   Tool outcomes distinguish `answered` from unavailable, timed-out, cancelled and failed requests;
   delivery evidence is never approval. Headless questions remain nonblocking and unresolved, allowing
   only independent already-authorized work or a blocked/partial handoff. Pre-aborted calls perform no
@@ -686,7 +689,20 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - `/flow` and `/orchestrate` append a durable, TUI-only expandable result card rather than a large
   notification; the supervisor gets the same text (fenced, 12k-bounded) once, as a passive next-turn message;
 - an interactive `tasks` fan-out of two or more legs gets one container row, `delegate · N legs`
-  (`k/N settled`), that never counts as an in-flight agent and leaves with its last leg;
+  (`k/N settled`), that never counts as an in-flight agent and leaves with its last leg. Settled leg
+  rows retain a bounded terminal preview until then (4,096 body characters plus a retrieval hint);
+  control handles close immediately. `ui/async-settlement.ts` only projects existing results: it
+  cannot create a missing row, prolong a worker, alter archived text or add a completion wake;
+- every group is inspectable in F9, independently of control permissions. `ui/agent-group.ts`
+  derives a bounded, scrollable overview of worker descendants without counting phase/run
+  containers, timers or local activities as workers. Queued work is distinct from running work.
+  Selection and drill-in/back navigation preserve worker IDs; a lost target consumes the next
+  directed key instead of applying it to a different worker. The overview controls its selected leg;
+  root-wide cancellation remains on the root in the tree;
+- overflowing sticky summaries preserve failure, pending-ask, wake/activity and active-worker
+  digests before the generic overflow line, in that priority order when space is insufficient.
+  Hidden active workers exclude queued/waiting/settled rows and containers; the representative follows
+  tree order rather than changing with each progress event;
 - `X` is not a directed key: it acts on the whole stoppable set of leaf rows after a confirmation that
   states how many agents it covers, and a changed set is re-confirmed. The set is every agent leaf (wake
   rows excepted) plus any run root with a stop handle (council/flow/mandated runs), and `x` on such a
@@ -699,7 +715,10 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - every agent-tree node carries `startedAt`/`lastAdvanceAt`; `LiveClock` (`src/ui/live-clock.ts`)
   repaints the sticky widget and the F9 overlay once a second while any node is running and stops
   itself once nothing is. Running/completed usage shares `formatUsage`: `↑` input and `↓` output,
-  using copied existing cumulative usage snapshots, never context occupancy. A legacy progress source
+  using copied existing cumulative usage snapshots, never context occupancy. `AgentNode.usage`
+  keeps that snapshot independently of the compact activity text; F9 shows both, without summing
+  parent totals with child totals. A new strategy attempt clears the preceding attempt's usage and
+  report preview. A progress source
   providing only an aggregate shows a neutral compact count without `tok` or a fabricated direction. A running row shows elapsed time until it goes `STALL_FLAG_MS` (90s) quiet,
   then the same `⚠ stalled <duration>` badge the async peek watchdog uses. `x` marks the target
   `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,

@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
+## Unreleased
+
+### Added
+
+- F9 group overviews compare worker states, model/effort, activity and bounded results, with
+  identity-preserving drill-in/back navigation and controls limited to the selected worker.
+- Overflowing agent summaries retain hidden active work and pending supervisor asks. Worker
+  details show known cumulative usage separately from current activity; settled fan-out previews
+  remain inspectable until the batch finishes without retaining live control handles.
+
+### Fixed
+
+- Intercom archive reads show their result reference in the call card and label the bounded text
+  range in UTF-16 units rather than presenting text offsets as page numbers.
+- Intercom distinguishes unknown bus handles from full inboxes, explains the exact addresses used
+  by send, steer and reply, and no longer claims that coaching off makes every child's bus unavailable.
+
 ## [1.17.5](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.5) - 2026-10-25
 
 ### Added

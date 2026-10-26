@@ -122,6 +122,7 @@ import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts
 import { withResultRefs } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
 import { compactMemberResult } from "./orchestration/render.ts";
+import { settleAsyncTreeNode } from "./ui/async-settlement.ts";
 import { sumUsage } from "./orchestration/reducers.ts";
 import type { AgentResult, FailureKind } from "./orchestration/types.ts";
 import { isThinkingLevel } from "./core/types.ts";
@@ -1323,11 +1324,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// NEWLY crosses the stall window, so a healthy background run produces no wakeup at all.
 	const peekWatcher = new PeekWatcher();
 	tracker.onComplete((run) => {
-		// Stamp the observed effort BEFORE the node leaves the tree: the removal right below makes
-		// this the settle flash's one frame. Only a real AgentResult observation, same rule as the
-		// strategy rows; when nothing was observed the patch stays without the field.
-		agentTree.update(`async:${run.id}`, { status: run.status, detail: run.error ?? run.result?.error ?? "", ...(run.result?.thinkingEffective ? { thinkingEffective: run.result.thinkingEffective } : {}) });
-		agentTree.remove(`async:${run.id}`); // clear the async node from the tree on completion
+		// A completed fan-out leg keeps a bounded UI receipt until its batch settles; independent
+		// runs leave immediately. Handles still close below, so a receipt never becomes a control.
+		settleAsyncTreeNode(agentTree, run);
 		steerRegistry.delete(`async:${run.id}`); // its steer handle is dead once it finishes
 		stopRegistry.delete(`async:${run.id}`); // …and so is its stop handle
 		stopRequested.delete(`async:${run.id}`);
@@ -1827,15 +1826,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// time, not run time, so a queued leg would otherwise show elapsed time it never
 					// spent running and could raise a false stall badge once it goes live.
 					const now = Date.now();
-					agentTree.add({ id, label: coreLabel(identity, nodeKey, metadata), parentId: rootId, status: "running", kind: "subagent", ...metadata, detail: "", startedAt: now, lastAdvanceAt: now });
+					agentTree.add({ id, label: coreLabel(identity, nodeKey, metadata), parentId: rootId, status: "running", kind: "subagent", ...metadata, detail: "", output: "", usage: undefined, startedAt: now, lastAdvanceAt: now });
 					return;
 				}
 				stopRegistry.delete(id);
 				steerRegistry.delete(id);
 				const patch: AgentNodePatch = { status: st, ...metadata };
 				if (result) {
-					const u = formatUsage(result.usage);
-					if (u) patch.detail = u;
+					patch.usage = result.usage;
+					patch.detail = result.error ?? formatUsage(result.usage);
 					if (result.output || result.structured) patch.output = compactMemberResult(result);
 					// Settle stamp: only a REAL terminal observation, never an invention. While the run
 					// stays up (siblings still going) the row honestly reads `xh→h`; once the run ends the

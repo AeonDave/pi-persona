@@ -95,6 +95,20 @@ test("intercom reply to an unknown/expired ask id reports failure (not a false '
 	const r = runIntercom({ action: "reply", askId: "m999", message: "OFF" }, bus, "supervisor");
 	assert.equal(r.details.ok, false);
 	assert.match(r.text, /no pending ask/i);
+	assert.match(r.text, /only pending asks/i);
+	assert.match(r.text, /progress messages cannot/i);
+});
+
+test("intercom reply does not turn a progress message into a pending ask", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.send("scout#1", "supervisor", "analysis complete");
+	const message = bus.pending("supervisor")[0]!;
+	const result = runIntercom({ action: "reply", askId: message.id, message: "continue" }, bus, "supervisor");
+	assert.equal(result.details.ok, false);
+	assert.match(result.text, /no pending ask/i);
+	assert.match(result.text, /progress messages cannot/i);
+	assert.deepEqual(bus.pending("supervisor"), [message]);
 });
 
 test("intercom send delivers a one-way message to a child", () => {
@@ -110,7 +124,50 @@ test("intercom send to an unknown peer reports it cleanly", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");
 	const r = runIntercom({ action: "send", to: "ghost", message: "x" }, bus, "supervisor");
+	assert.equal(r.details.ok, false);
 	assert.match(r.text, /unknown|not.*found|no such/i);
+	assert.match(r.text, /exact handle.*intercom list/i);
+	assert.match(r.text, /steer.*run id.*delegation receipt/i);
+	assert.doesNotMatch(r.text, /inbox.*full/i);
+	assert.deepEqual(bus.participants(), ["supervisor"]);
+});
+
+test("intercom send rejects display aliases without rerouting to an existing worker", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.register("worker#1");
+	const result = runIntercom({ action: "send", to: "worker", message: "focus on the parser" }, bus, "supervisor");
+	assert.equal(result.details.ok, false);
+	assert.match(result.text, /unknown peer "worker"/i);
+	assert.match(result.text, /exact handle.*intercom list/i);
+	assert.match(result.text, /display alias.*run id/i);
+	assert.deepEqual(bus.pending("worker#1"), []);
+	assert.deepEqual(bus.participants(), ["supervisor", "worker#1"]);
+});
+
+test("intercom send reports a full live-ask inbox without losing the ask or delivering the note", async () => {
+	const bus = new InProcessBus({ maxInbox: 1 });
+	bus.register("supervisor");
+	bus.register("worker#1");
+	const delivered: string[] = [];
+	bus.onMessage((message) => delivered.push(message.text));
+	const waiting = bus.ask("supervisor", "worker#1", "which parser is active?");
+	const ask = bus.pending("worker#1")[0]!;
+	try {
+		const result = runIntercom({ action: "send", to: "worker#1", message: "focus on the parser" }, bus, "supervisor");
+		assert.equal(result.details.ok, false);
+		assert.match(result.text, /not delivered.*worker#1.*inbox.*full.*pending asks/i);
+		assert.doesNotMatch(result.text, /unknown peer/i);
+		assert.deepEqual(bus.pending("worker#1"), [ask], "the existing ask remains available for a reply");
+		assert.equal(ask.expectsReply, true);
+		assert.equal(bus.hasPendingAskFrom("supervisor"), true);
+		assert.deepEqual(delivered, ["which parser is active?"], "the rejected note emits no delivery event");
+	} finally {
+		bus.reply(ask.id, "the JSON parser");
+	}
+	assert.equal(await waiting, "the JSON parser");
+	assert.deepEqual(bus.pending("worker#1"), [], "freeing inbox capacity does not retry the rejected note");
+	assert.deepEqual(delivered, ["which parser is active?"]);
 });
 
 test("intercom never reflects hostile peer/ask identifiers as multiline instructions", () => {

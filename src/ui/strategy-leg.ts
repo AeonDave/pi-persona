@@ -24,7 +24,7 @@ export interface StrategyLegMetadata {
 }
 
 /** A bare observed id preserves a known provider only when it exactly names the same requested id. */
-function observedModel(observed: string | undefined, requested: string | undefined): string | undefined {
+export function observedModel(observed: string | undefined, requested: string | undefined): string | undefined {
 	const value = observed?.trim();
 	if (!value) return requested;
 	if (!value.includes("/") && requested?.includes("/") && requested.slice(requested.indexOf("/") + 1) === value) return requested;

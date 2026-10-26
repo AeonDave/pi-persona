@@ -10,8 +10,8 @@ import { formatUsage } from "./usage.ts";
  * The unified agent tree — a single live model of *every* agent in flight,
  * regardless of how it was spawned: strategy cores (magi/fanout/critic), the
  * `delegate` tool's sub-agents, and dynamic specialists. The UI layer renders
- * one sticky tree above the input from this model, and (later) lets the user
- * drill into a node. Sources only push status/detail; rendering is pure.
+ * one sticky tree above the input and the navigable F9 detail views from this
+ * model. Sources push observed state; rendering is pure.
  */
 
 export type AgentNodeStatus = "running" | "done" | "failed" | "stopped";
@@ -22,7 +22,7 @@ export interface AgentNode {
 	label: string;
 	parentId: string | undefined;
 	status: AgentNodeStatus;
-	/** Semantic role in the orchestration graph; omitted by legacy callers. */
+	/** Semantic role in the orchestration graph; absent on untyped presentation rows. */
 	kind?: AgentNodeKind;
 	/** Configured agent definition (operator/reviewer/…), if known. */
 	agent?: string;
@@ -34,6 +34,8 @@ export interface AgentNode {
 	 *  AgentResult.thinkingEffective (never invented); when it diverges from `thinking`, the row
 	 *  renders the honest `xh→h` form. */
 	thinkingEffective?: ThinkingLevel;
+	/** Latest cumulative usage snapshot, retained independently from the compact row detail. */
+	usage?: ChildUsage;
 	/** A short trailing annotation (usage, current activity), shown after the label. */
 	detail: string | undefined;
 	/** The agent's output buffer, shown when the user drills into the node. */
@@ -183,11 +185,12 @@ export function deriveWaitingNodeIds(nodes: readonly AgentNode[], isWaiting: (id
 	return new Set(waitingLeaves.keys());
 }
 
-/** The tree patch for one progress snapshot: every snapshot is an advance; activity wins over
- *  usage, formatted like a completed row. Legacy aggregate-only progress stays a neutral count. */
+/** Every snapshot advances the clock. Compact activity wins over usage while the detailed
+ *  usage snapshot remains available independently. Aggregate-only progress stays a neutral count. */
 export function progressPatch(snap: { output?: string; activity?: string; tokens?: number; usage?: ChildUsage }, now: number): AgentNodePatch {
 	const patch: AgentNodePatch = { lastAdvanceAt: now };
 	if (snap.output) patch.output = snap.output;
+	if (snap.usage !== undefined) patch.usage = { ...snap.usage };
 	if (snap.activity) patch.detail = snap.activity;
 	else if (snap.usage) patch.detail = formatUsage(snap.usage);
 	else if (snap.tokens) patch.detail = compactTokens(snap.tokens);
@@ -196,6 +199,11 @@ export function progressPatch(snap: { output?: string; activity?: string; tokens
 
 function safeInline(value: string): string {
 	return compactInlineText(value, { maxChars: 96 });
+}
+
+/** Shorter bounded text for one-line digest representatives. */
+function safeDigestInline(value: string): string {
+	return compactInlineText(value, { maxChars: 48 });
 }
 
 /** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
@@ -257,15 +265,39 @@ function wakeDigestLine(hidden: readonly AgentNode[], now: number | undefined): 
 	return parts.join(" · ");
 }
 
+/** A worker is an agent leaf; an untyped parent is still a container. */
+function isWorkerNode(node: AgentNode, parents: ReadonlySet<string>): boolean {
+	return !parents.has(node.id) && !isNonAgentNode(node) && node.kind !== "delegate"
+		&& node.kind !== "council" && node.kind !== "flow" && node.kind !== "phase";
+}
+
+function waitingDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): string | undefined {
+	if (!waitingForSupervisor) return undefined;
+	const waiting = hidden.filter((node) => node.status === "running" && isWorkerNode(node, parents) && !isQueuedMarker(node.detail) && waitingForSupervisor.has(node.id));
+	if (waiting.length === 0) return undefined;
+	const representative = safeDigestInline(waiting[0]!.label) || safeDigestInline(waiting[0]!.id) || "worker";
+	return `? ${waiting.length} waiting for supervisor: ${representative}`;
+}
+
+/** Counts only hidden running workers and uses the first one in tree order as a stable representative. */
+function activeWorkerDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): string | undefined {
+	const workers = hidden.filter((node) => node.status === "running" && isWorkerNode(node, parents)
+		&& !isQueuedMarker(node.detail) && !waitingForSupervisor?.has(node.id));
+	if (workers.length === 0) return undefined;
+	const representative = workers[0]!;
+	const identity = safeDigestInline(representative.label) || safeDigestInline(representative.agent ?? "") || safeDigestInline(representative.id) || "worker";
+	const detail = representative.detail ? safeDigestInline(representative.detail) : "";
+	const label = `${workers.length} active worker${workers.length === 1 ? "" : "s"}: ${identity}${detail ? ` · ${detail}` : ""}`;
+	return `${nodeGlyph({ status: "running", kind: "subagent" })} ${label}`;
+}
+
 /**
  * Bounded above-editor digest. Large fan-outs belong in the scrollable F9
  * overlay; they must not push the editor and conversation off the screen.
  *
- * Below the fold, two kinds of row stay visible as one line each, because an operator must not
- * have to open F9 to learn them: failures (`✗ N failed: …`) and RUNNING wake sources (`◉ 1 monitor
- * · ⏰ 2 timers · next due in 4m 12s`). The layout when overflowing is
- * `[...rows, failureLine?, wakeDigest?, overflowLine]`, every line inside `maxRows`; when the budget
- * cannot hold them all the lowest-priority line goes first (failure > wake digest > overflow).
+ * Below the fold, critical failures, truthful waiting-for-supervisor workers, wake/activity rows,
+ * and active workers stay represented in a stable tree order. The overflow hint has the lowest
+ * priority, and every line stays inside `maxRows`.
  */
 export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}): string[] {
 	const rows = renderAgentTree(nodes, opts);
@@ -285,21 +317,36 @@ export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: Re
 	// `flattenTree(nodes)[i]` is the node behind `rows[i]`: `renderAgentTree` and `flattenTree` walk the
 	// same parent→children order, so a row's flat index doubles as its position in the rendered list.
 	const flat = flattenTree(nodes);
-	const hiddenWake = (from: number): AgentNode[] =>
-		flat.slice(from).map((row) => row.node).filter((node) => node.kind === "activity" || (isWakeSource(node) && node.status === "running"));
-	let visibleCount = Math.max(0, limit - (failureLine !== undefined ? 2 : 1));
-	let hidden = hiddenWake(visibleCount);
-	if (hidden.length > 0) {
-		// The digest takes a slot of its own; one fewer visible row can only hide more wake rows.
-		visibleCount = Math.max(0, visibleCount - 1);
-		hidden = hiddenWake(visibleCount);
+	const parents = new Set(nodes.flatMap((node) => node.parentId === undefined ? [] : [node.parentId]));
+	const summaryLines = (visibleCount: number): string[] => {
+		const hidden = flat.slice(visibleCount).map((row) => row.node);
+		const hiddenWake = hidden.filter((node) => node.kind === "activity" || (isWakeSource(node) && node.status === "running"));
+		const wakeLine = hiddenWake.length > 0 ? wakeDigestLine(hiddenWake, opts.now) : undefined;
+		const waitingLine = waitingDigestLine(hidden, parents, opts.waitingForSupervisor);
+		const activeLine = activeWorkerDigestLine(hidden, parents, opts.waitingForSupervisor);
+		return [
+			...(failureLine !== undefined ? [failureLine] : []),
+			...(waitingLine !== undefined ? [waitingLine] : []),
+			...(wakeLine !== undefined ? [wakeLine] : []),
+			...(activeLine !== undefined ? [activeLine] : []),
+		];
+	};
+	let visibleCount = Math.max(0, limit - 1);
+	// Digest rows can expose more hidden categories as the visible prefix shrinks. The candidate
+	// set only grows, and there are four bounded digest kinds, so this reaches a fixed point quickly.
+	for (let pass = 0; pass < 6; pass++) {
+		const selected = summaryLines(visibleCount).slice(0, limit);
+		const hasOverflow = selected.length < limit;
+		const nextVisibleCount = Math.max(0, limit - selected.length - (hasOverflow ? 1 : 0));
+		if (nextVisibleCount === visibleCount) break;
+		visibleCount = nextVisibleCount;
 	}
+	const selected = summaryLines(visibleCount).slice(0, limit);
 	const tail = [
-		...(failureLine !== undefined ? [failureLine] : []),
-		...(hidden.length > 0 ? [wakeDigestLine(hidden, opts.now)] : []),
-		`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`,
+		...selected,
+		...(selected.length < limit ? [`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`] : []),
 	];
-	return [...rows.slice(0, visibleCount), ...tail.slice(0, Math.max(0, limit - visibleCount))];
+	return [...rows.slice(0, visibleCount), ...tail];
 }
 
 export interface AddNodeInput {
@@ -312,6 +359,7 @@ export interface AddNodeInput {
 	model?: string | undefined;
 	thinking?: ThinkingLevel | undefined;
 	thinkingEffective?: ThinkingLevel | undefined;
+	usage?: ChildUsage | undefined;
 	detail?: string;
 	output?: string;
 	startedAt?: number;
@@ -326,6 +374,7 @@ export interface AgentNodePatch {
 	model?: string | undefined;
 	thinking?: ThinkingLevel | undefined;
 	thinkingEffective?: ThinkingLevel | undefined;
+	usage?: ChildUsage | undefined;
 	detail?: string;
 	output?: string;
 	startedAt?: number;
@@ -352,6 +401,10 @@ function applyPatch(node: AgentNode, patch: AgentNodePatch): void {
 		if (patch.thinkingEffective === undefined) delete node.thinkingEffective;
 		else node.thinkingEffective = patch.thinkingEffective;
 	}
+	if (Object.hasOwn(patch, "usage")) {
+		if (patch.usage === undefined) delete node.usage;
+		else node.usage = { ...patch.usage };
+	}
 	if (patch.detail !== undefined) node.detail = patch.detail;
 	if (patch.output !== undefined) node.output = patch.output;
 	if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
@@ -377,7 +430,7 @@ export class AgentTree {
 			existing.label = input.label;
 			if (input.parentId !== undefined) existing.parentId = input.parentId;
 			applyPatch(existing, input);
-			if (!sameNode(before, existing)) this.emit({ type: "updated", node: { ...existing } });
+			if (!sameNode(before, existing)) this.emit({ type: "updated", node: copyNode(existing) });
 			return;
 		}
 		const t = this.now();
@@ -394,11 +447,12 @@ export class AgentTree {
 			...(input.model !== undefined ? { model: input.model } : {}),
 			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
 			...(input.thinkingEffective !== undefined ? { thinkingEffective: input.thinkingEffective } : {}),
+			...(input.usage !== undefined ? { usage: { ...input.usage } } : {}),
 			...(input.output !== undefined ? { output: input.output } : {}),
 			...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
 		};
 		this.nodes.push(node);
-		this.emit({ type: "added", node: { ...node } });
+		this.emit({ type: "added", node: copyNode(node) });
 	}
 
 	update(id: string, patch: AgentNodePatch): void {
@@ -412,7 +466,7 @@ export class AgentTree {
 		}
 		const before = { ...node };
 		applyPatch(node, patch);
-		if (!sameNode(before, node)) this.emit({ type: "updated", node: { ...node } });
+		if (!sameNode(before, node)) this.emit({ type: "updated", node: copyNode(node) });
 	}
 
 	/** Remove a node and all its descendants. */
@@ -427,7 +481,7 @@ export class AgentTree {
 				}
 			}
 		}
-		const removed = this.nodes.filter((n) => doomed.has(n.id)).map((n) => ({ ...n }));
+		const removed = this.nodes.filter((n) => doomed.has(n.id)).map(copyNode);
 		if (removed.length === 0) return;
 		this.nodes = this.nodes.filter((n) => !doomed.has(n.id));
 		this.emit({ type: "removed", nodes: removed });
@@ -441,7 +495,7 @@ export class AgentTree {
 	}
 
 	snapshot(): AgentNode[] {
-		return this.nodes.map((n) => ({ ...n }));
+		return this.nodes.map(copyNode);
 	}
 
 	isEmpty(): boolean {
@@ -465,7 +519,17 @@ export class AgentTree {
 }
 
 const CLOCK_KEYS = new Set<keyof AgentNode>(["startedAt", "lastAdvanceAt"]);
+function copyNode(node: AgentNode): AgentNode {
+	return { ...node, ...(node.usage !== undefined ? { usage: { ...node.usage } } : {}) };
+}
+
+function sameUsage(a: ChildUsage | undefined, b: ChildUsage | undefined): boolean {
+	return a === b || (a !== undefined && b !== undefined &&
+		a.input === b.input && a.output === b.output && a.cacheRead === b.cacheRead &&
+		a.cacheWrite === b.cacheWrite && a.cost === b.cost && a.contextTokens === b.contextTokens && a.turns === b.turns);
+}
+
 function sameNode(a: AgentNode, b: AgentNode): boolean {
 	const keys = new Set([...Object.keys(a), ...Object.keys(b)] as Array<keyof AgentNode>);
-	return [...keys].every((key) => CLOCK_KEYS.has(key) || a[key] === b[key]);
+	return [...keys].every((key) => CLOCK_KEYS.has(key) || (key === "usage" ? sameUsage(a.usage, b.usage) : a[key] === b[key]));
 }

@@ -14,9 +14,24 @@ Use `intercom peek` to inspect a particular uncertainty, `steer` to queue an ins
 to stop work. A steering receipt proves acceptance, not that the worker acted on it. Interactive
 completions wake the supervisor automatically; end the turn instead of polling or sleeping.
 
+Intercom uses distinct addresses; the display name in a card is not a routing address:
+
+| Operation | Address to use |
+|---|---|
+| `steer`, `stop`, `peek`, live `result` | `to: "run-3"` from the delegation receipt; cards show the worker's readable name |
+| `send` | `to: "operator#3"`, the exact live bus handle returned by `list` |
+| `reply` | `askId` from a currently pending question; a progress message cannot receive a reply |
+| Archived `result` | `ref: "result:<UUID>"` from the retained report receipt |
+
+A worker may support steering without having a bus handle. A settled worker cannot be steered;
+read its result and delegate a new task if more work is needed. A failed `send` distinguishes an
+unknown handle from an inbox full of pending questions; neither means the message was delivered.
+
 `intercom results` lists terminal reports. `intercom result { ref, offset, limit }` reads a bounded
 page after reload. A `result:<UUID>` identifies stored evidence, not a live worker. The receipt says
 whether storage is durable or memory-only and whether retention truncated the original report.
+The compact range uses zero-based UTF-16 offsets: the start is inclusive, the end exclusive, and
+the total is the stored body length, not a page count. Follow `nextOffset` when more text remains.
 Paging to the end cannot restore text that exceeded the retention ceiling.
 
 An unanswered decision remains unresolved. Timeout, cancellation, disconnection and headless delivery

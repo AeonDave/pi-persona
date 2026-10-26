@@ -1,7 +1,7 @@
 /**
  * A focusable overlay over the unified agent tree, opened with ctx.ui.custom
- * (overlay: true). ↑↓ navigate the *agents* (leaf rows; a parent like "delegate"
- * is a non-selectable header), ⏎ drills into one — its live output in an
+ * (overlay: true). ↑↓ navigate workers and inspectable groups, ⏎ opens a group
+ * overview or a worker's live output in an
  * auto-scrolling viewport sized to the terminal — `x` stops it, `X` (twice) stops every
  * running agent, `s` steers it (from the list too), esc backs out / closes. Subscribes to the tree, so it
  * re-renders live as agents stream.
@@ -25,6 +25,7 @@ import {
 
 import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, flattenTree, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
+import { cumulativeUsageLine, groupLegBrief, groupLegMetadata, groupLegStatus, isAgentGroup, projectAgentGroup } from "./agent-group.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
 
@@ -126,6 +127,10 @@ export class AgentOverlay extends Container {
 	private stopAllArmed: string | undefined; // the stoppable set the "press X again" prompt armed on
 	private listScroll = 0; // list rows scrolled off the top (keeps the selection visible)
 	private detailId: string | undefined;
+	private groupId: string | undefined;
+	private groupSelectedId: string | undefined;
+	private groupAimLost = false;
+	private groupScroll = 0;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
 	private steering = false; // typing a steer message into the drilled-in agent
 	private steerBuffer = "";
@@ -201,8 +206,10 @@ export class AgentOverlay extends Container {
 	}
 
 	/** Detail-output rows that fit: terminal height minus the overlay chrome. */
-	private detailViewport(): number {
-		return Math.max(8, termRows() - 12);
+	private detailViewport(reservedRows: number): number {
+		// Borders and both scroll markers occupy four rows independently of the
+		// measured header/footer. New metadata must reduce output space, not overflow.
+		return Math.max(1, termRows() - reservedRows - 4);
 	}
 
 	/** List rows that fit: terminal height minus the overlay chrome. */
@@ -214,11 +221,9 @@ export class AgentOverlay extends Container {
 		return deriveWaitingNodeIds(nodes, (id) => this.actions.isWaitingForSupervisor?.(id) === true);
 	}
 
-	/** The selectable rows: every leaf, plus a container that carries a stop of its own (a council/flow run
-	 *  root), so `x` reaches the whole run instead of one leg. Other containers stay headers. */
-	private leafRows(snap: AgentNode[] = this.tree.snapshot()): FlatRow[] {
-		const parents = new Set(snap.map((n) => n.parentId).filter((p): p is string => p !== undefined));
-		return flattenTree(snap).filter((r) => !parents.has(r.node.id) || this.actions.canStop?.(r.node.id) === true);
+	/** Every row can be inspected; inspection does not confer a stop or steer handle. */
+	private selectableRows(snap: AgentNode[] = this.tree.snapshot()): FlatRow[] {
+		return flattenTree(snap);
 	}
 
 	/**
@@ -234,7 +239,8 @@ export class AgentOverlay extends Container {
 	 */
 	private selectedLeaf(leaves: FlatRow[]): FlatRow | undefined {
 		const anchored = this.selectedId !== undefined ? leaves.find((r) => r.node.id === this.selectedId) : undefined;
-		const leaf = anchored ?? leaves.find((r) => !isNonAgentNode(r.node)) ?? leaves[0];
+		const nodes = leaves.map((row) => row.node);
+		const leaf = anchored ?? leaves.find((r) => !isNonAgentNode(r.node) && (!isAgentGroup(r.node, nodes) || this.actions.canStop?.(r.node.id) === true)) ?? leaves.find((r) => !isNonAgentNode(r.node)) ?? leaves[0];
 		if (this.selectedId !== undefined && anchored === undefined && leaf !== undefined) this.aimLost = true;
 		this.selectedId = leaf?.node.id;
 		return leaf;
@@ -266,6 +272,7 @@ export class AgentOverlay extends Container {
 	private rebuild(): void {
 		this.clear();
 		if (this.detailId) this.renderDetail();
+		else if (this.groupId) this.renderGroup();
 		else this.renderList();
 		this.dirty = false;
 	}
@@ -274,7 +281,7 @@ export class AgentOverlay extends Container {
 		const t = this.theme;
 		const nodes = this.tree.snapshot();
 		const rows = flattenTree(nodes);
-		const selected = this.selectedLeaf(this.leafRows(nodes))?.node;
+		const selected = this.selectedLeaf(this.selectableRows(nodes))?.node;
 		this.addChild(new Text(t.fg("accent", t.bold("Agents")), 1, 0));
 		this.addChild(new Spacer(1));
 		if (rows.length === 0) {
@@ -304,9 +311,66 @@ export class AgentOverlay extends Container {
 			if (end < rows.length) this.addChild(new Text(t.fg("dim", `▼ ${rows.length - end} below`), 1, 0));
 		}
 		this.addChild(new Spacer(1));
-		const stoppable = selected !== undefined && this.canStopNode(selected);
-		const steerable = selected !== undefined && !isNonAgentNode(selected) && selected.status === "running" && (this.actions.canSteer?.(selected.id) ?? false);
+		const stoppable = selected !== undefined && this.canStopNode(selected, nodes);
+		const steerable = selected !== undefined && this.canSteerNode(selected, nodes);
 		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
+		this.renderNotice();
+	}
+
+	/** A group has its own stable cursor; returning from a worker keeps that same aim. */
+	private selectedGroupLeg(legs: AgentNode[]): AgentNode | undefined {
+		const anchored = legs.find((node) => node.id === this.groupSelectedId);
+		if (this.groupSelectedId !== undefined && !anchored) this.groupAimLost = true;
+		const selected = anchored ?? legs[0];
+		this.groupSelectedId = selected?.id;
+		return selected;
+	}
+
+	private renderGroup(): void {
+		const nodes = this.tree.snapshot();
+		const waitingIds = this.waitingNodeIds(nodes);
+		const group = this.groupId ? projectAgentGroup(nodes, this.groupId, waitingIds) : undefined;
+		if (!group) {
+			this.groupId = undefined;
+			this.renderList();
+			return;
+		}
+		const t = this.theme;
+		const line = (text: string, accent = false): void => {
+			this.addChild(new Text(t.fg(accent ? "accent" : "dim", sanitizeTerminalText(truncateToWidth(safeInline(text, 600), this.inner(), "…"))), 0, 0));
+		};
+		line(`Group overview · ${group.root.label}`, true);
+		line(group.summary);
+		this.addChild(new Spacer(1));
+		const selected = this.selectedGroupLeg(group.legs);
+		const navigationHint = "↑↓ select · ⏎ output · esc back";
+		const controlHint = [selected !== undefined && this.canStopNode(selected, nodes) ? "x stop leg" : "", selected !== undefined && this.canSteerNode(selected, nodes) ? "s steer leg" : ""].filter(Boolean).join(" · ");
+		const fullHint = [navigationHint, controlHint].filter(Boolean).join(" · ");
+		const footerLines = visibleWidth(fullHint) <= this.inner() ? [fullHint] : [navigationHint, controlHint].filter(Boolean);
+		// Four rows per card; reserve real footer height and both overflow markers
+		// only when cards do overflow. Long metadata never silently adds wrapped rows.
+		const available = termRows() - 6 - footerLines.length - (this.notice ? 1 : 0);
+		const capacity = Math.max(1, Math.floor(available / 4));
+		const viewport = group.legs.length <= capacity ? capacity : Math.max(1, Math.floor((available - 2) / 4));
+		const selectedIndex = Math.max(0, group.legs.findIndex((leg) => leg.id === selected?.id));
+		this.groupScroll = visibleWindow(selectedIndex, viewport, group.legs.length, this.groupScroll);
+		const end = Math.min(group.legs.length, this.groupScroll + viewport);
+		if (this.groupScroll > 0) line(`▲ ${this.groupScroll} legs above`);
+		for (const leg of group.legs.slice(this.groupScroll, end)) {
+			const clock = runningAnnotation(leg, this.now(), this.actions.stallMs ?? 0, waitingIds.has(leg.id));
+			const prefix = `${leg.id === selected?.id ? "▸" : " "} ${nodeGlyph(leg)} `;
+			const suffix = ` · ${waitingIds.has(leg.id) ? "waiting for supervisor" : `${groupLegStatus(leg)}${clock ? ` · ${clock}` : ""}`}`;
+			const label = truncateToWidth(safeInline(leg.label), Math.max(0, this.inner() - visibleWidth(prefix + suffix)), "…");
+			line(prefix + label + suffix, leg.id === selected?.id);
+			line(`  ${groupLegMetadata(leg, this.inner() - 2)}`);
+			line(`  ${groupLegBrief(leg)}`);
+			const usage = cumulativeUsageLine(leg);
+			if (usage) line(`  ${usage}`);
+		}
+		if (end < group.legs.length) line(`▼ ${group.legs.length - end} legs below`);
+		if (group.legs.length === 0) line("(no worker legs yet)");
+		this.addChild(new Spacer(1));
+		for (const hint of footerLines) line(hint);
 		this.renderNotice();
 	}
 
@@ -367,7 +431,8 @@ export class AgentOverlay extends Container {
 
 	private renderDetail(): void {
 		const t = this.theme;
-		const node = this.tree.snapshot().find((n) => n.id === this.detailId);
+		const nodes = this.tree.snapshot();
+		const node = nodes.find((n) => n.id === this.detailId);
 		if (!node) {
 			this.detailId = undefined;
 			// The compose belonged to *that* agent — drop it, or the next drill-in would
@@ -376,7 +441,8 @@ export class AgentOverlay extends Container {
 			// `x` still in flight for it is refused instead of landing on the list beneath.
 			this.steering = false;
 			this.steerBuffer = "";
-			this.renderList();
+			if (this.groupId) this.renderGroup();
+			else this.renderList();
 			return;
 		}
 		const live = node.status === "running";
@@ -384,24 +450,41 @@ export class AgentOverlay extends Container {
 		// badge and the steer-unavailable hint below would both be wrong for it.
 		const wake = isWakeSource(node);
 		const localActivity = node.kind === "activity";
-		this.addChild(
-			new Text(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", localActivity ? "  ● local work" : wake ? "  ● armed" : "  ● live") : ""}`, 1, 0),
-		);
-		if (node.detail) this.addChild(new Text(t.fg("dim", safeInline(node.detail)), 1, 0));
+		const metadata = (text: string): void => { this.addChild(new Text(truncateToWidth(text, Math.max(1, this.inner() - 2), "…"), 1, 0)); };
+		metadata(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", localActivity ? "  ● local work" : wake ? "  ● armed" : "  ● live") : ""}`);
+		if (this.waitingNodeIds(nodes).has(node.id)) metadata(t.fg("dim", "waiting for supervisor"));
+		const usageLine = cumulativeUsageLine(node);
+		if (node.detail && usageLine !== `cumulative usage: ${node.detail}`) metadata(t.fg("dim", safeInline(node.detail)));
+		if (!isNonAgentNode(node)) metadata(t.fg("dim", `model: ${safeInline(node.model ?? "pending / unknown", 160)}`));
+		if (usageLine) metadata(t.fg("dim", usageLine));
 		// The drill-in has room for FULL effort names (the rows stay compact): an observed level
 		// appears only once a terminal result actually reported one.
 		const effortLine = thinkingDetailLine(node.thinking, node.thinkingEffective);
-		if (effortLine) this.addChild(new Text(t.fg("dim", effortLine), 1, 0));
+		if (effortLine) metadata(t.fg("dim", effortLine));
 		this.addChild(new Spacer(1));
+		const w = this.inner() - 1;
+		const footer = new Container();
+		const steerable = this.canSteerNode(node, nodes);
+		const stoppable = this.canStopNode(node, nodes);
+		if (this.steering && !steerable) this.steering = false;
+		footer.addChild(new Spacer(1));
+		if (this.steering) {
+			const composed = `${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`;
+			for (const line of wrapTextWithAnsi(composed, w)) footer.addChild(new Text(line, 1, 0));
+			footer.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
+		} else {
+			footer.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
+			this.renderNotice(footer);
+			if (live && !steerable && !isNonAgentNode(node)) footer.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
+		}
 
 		const raw = node.output?.trim()
 			? node.output
 			: live
 				? "(working… the report appears here when the agent writes text — see its current tool above)"
 				: "(no output)";
-		const w = this.inner() - 1;
 		const all = this.displayRows(raw, w);
-		const viewport = this.detailViewport();
+		const viewport = this.detailViewport(super.render(this.inner()).length + footer.render(this.inner()).length);
 		const maxScroll = Math.max(0, all.length - viewport);
 		if (this.detailScroll > maxScroll) this.detailScroll = maxScroll;
 		const end = all.length - this.detailScroll;
@@ -410,22 +493,7 @@ export class AgentOverlay extends Container {
 		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
 		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
 
-		const steerable = live && !isNonAgentNode(node) && (this.actions.canSteer?.(node.id) ?? false);
-		const stoppable = this.canStopNode(node);
-		if (this.steering && !steerable) this.steering = false; // agent finished mid-compose
-		this.addChild(new Spacer(1));
-		if (this.steering) {
-			// Wrap the input so a long steer message stays fully visible while typing.
-			const composed = `${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`;
-			for (const line of wrapTextWithAnsi(composed, w)) this.addChild(new Text(line, 1, 0));
-			this.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
-		} else {
-			this.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
-			this.renderNotice();
-			if (live && !steerable && !isNonAgentNode(node)) {
-				this.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
-			}
-		}
+		this.addChild(footer);
 	}
 
 	handleInput(keyData: string): void {
@@ -446,7 +514,11 @@ export class AgentOverlay extends Container {
 					const text = this.steerBuffer.trim();
 					this.steering = false;
 					this.steerBuffer = "";
-					if (text) this.actions.onSteer?.(this.detailId, text);
+					if (text) {
+						const nodes = this.tree.snapshot();
+						const node = nodes.find((candidate) => candidate.id === this.detailId);
+						if (!node || !this.canSteerNode(node, nodes) || !this.actions.onSteer?.(node.id, text)) this.notice = "steer unavailable for this worker";
+					}
 					this.refresh();
 				} else if (keyData === "\x7f" || keyData === "\b") {
 					this.steerBuffer = this.steerBuffer.slice(0, -1);
@@ -458,7 +530,7 @@ export class AgentOverlay extends Container {
 				return;
 			}
 			const detailNode = this.tree.snapshot().find((node) => node.id === this.detailId);
-			if (keyData === "s" && detailNode && !isNonAgentNode(detailNode) && (this.actions.canSteer?.(this.detailId) ?? false)) {
+			if (keyData === "s" && detailNode && this.canSteerNode(detailNode, this.tree.snapshot())) {
 				this.steering = true;
 				this.steerBuffer = "";
 				this.refresh();
@@ -475,7 +547,12 @@ export class AgentOverlay extends Container {
 			} else if (hadNotice) this.refresh(); // unhandled key: still repaint so a cleared notice disappears
 			return;
 		}
-		const leaves = this.leafRows();
+		if (this.groupId) {
+			this.handleGroupInput(keyData, hadNotice);
+			return;
+		}
+		const nodes = this.tree.snapshot();
+		const leaves = this.selectableRows(nodes);
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 			this.moveSelection(leaves, -1);
 			this.refresh();
@@ -485,7 +562,12 @@ export class AgentOverlay extends Container {
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const leaf = this.selectedLeaf(leaves);
 			if (leaf) {
-				this.detailId = leaf.node.id;
+				if (isAgentGroup(leaf.node, nodes)) {
+					this.groupId = leaf.node.id;
+					this.groupSelectedId = undefined;
+					this.groupAimLost = false;
+					this.groupScroll = 0;
+				} else this.detailId = leaf.node.id;
 				this.detailScroll = 0; // open at the latest output (auto-scroll to bottom)
 				this.aimLost = false; // reading a row is harmless, and it re-takes aim on it
 				this.refresh();
@@ -494,7 +576,7 @@ export class AgentOverlay extends Container {
 			// Steer straight from the list: drill into the selected agent with the
 			// compose line already open (same gate as the detail view's `s`).
 			const leaf = this.aimedLeaf(leaves);
-			if (leaf && !isNonAgentNode(leaf.node) && leaf.node.status === "running" && (this.actions.canSteer?.(leaf.node.id) ?? false)) {
+			if (leaf && this.canSteerNode(leaf.node, nodes)) {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0;
 				this.steering = true;
@@ -511,11 +593,57 @@ export class AgentOverlay extends Container {
 		} else if (hadNotice) this.refresh(); // unhandled key: still repaint so a cleared notice disappears
 	}
 
+	private handleGroupInput(keyData: string, hadNotice: boolean): void {
+		const nodes = this.tree.snapshot();
+		const group = this.groupId ? projectAgentGroup(nodes, this.groupId) : undefined;
+		if (!group) {
+			// Consume this key in the disappeared view. It cannot fall through to a new tree target.
+			this.groupId = undefined;
+			this.refresh();
+			return;
+		}
+		const kb = getKeybindings();
+		const selected = this.selectedGroupLeg(group.legs);
+		if (kb.matches(keyData, "tui.select.cancel")) {
+			this.groupId = undefined;
+			this.refresh();
+		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k" || kb.matches(keyData, "tui.select.down") || keyData === "j") {
+			const delta = kb.matches(keyData, "tui.select.up") || keyData === "k" ? -1 : 1;
+			const index = group.legs.findIndex((node) => node.id === selected?.id);
+			this.groupSelectedId = group.legs[Math.max(0, Math.min(group.legs.length - 1, index + delta))]?.id;
+			this.groupAimLost = false;
+			this.refresh();
+		} else if ((kb.matches(keyData, "tui.select.confirm") || keyData === "\n") && selected) {
+			this.detailId = selected.id;
+			this.detailScroll = 0;
+			this.groupAimLost = false;
+			this.refresh();
+		} else if (keyData === "x" || keyData === "s") {
+			if (this.groupAimLost) {
+				this.groupAimLost = false;
+				this.refresh();
+				return;
+			}
+			if (selected && keyData === "x") this.tryStop(selected.id);
+			else if (selected && this.canSteerNode(selected, nodes)) {
+				this.detailId = selected.id;
+				this.detailScroll = 0;
+				this.steering = true;
+				this.steerBuffer = "";
+				this.refresh();
+			}
+		} else if (hadNotice) this.refresh();
+	}
+
+	private canSteerNode(node: AgentNode, nodes: readonly AgentNode[]): boolean {
+		return !isNonAgentNode(node) && !isAgentGroup(node, nodes) && node.status === "running" && (this.actions.canSteer?.(node.id) ?? false);
+	}
+
 	/** Whether an agent can be stopped right now: it must be running, and the caller's `canStop`
 	 *  gate (defaulting to "yes" when omitted) must agree. Shared by both hints and `tryStop`, so
 	 *  the hint that advertises "x stop" and the handler that actually gates it never diverge. */
-	private canStopNode(node: Pick<AgentNode, "id" | "status" | "kind">): boolean {
-		return node.kind !== "activity" && node.status === "running" && (this.actions.canStop?.(node.id) ?? true);
+	private canStopNode(node: AgentNode, nodes: readonly AgentNode[] = this.tree.snapshot()): boolean {
+		return node.kind !== "activity" && node.status === "running" && (this.actions.canStop?.(node.id) ?? !isAgentGroup(node, nodes));
 	}
 
 	/** The agents `X` would stop: every leaf that `x` could stop, wake sources excluded. `X` means
@@ -523,7 +651,7 @@ export class AgentOverlay extends Container {
 	 *  only by an explicit `x` on its own row. One list feeds the hint count, the confirmation prompt
 	 *  and the bulk stop, so the three always agree. */
 	private stoppableIds(snap: AgentNode[] = this.tree.snapshot()): string[] {
-		return this.leafRows(snap).filter((r) => !isNonAgentNode(r.node) && this.canStopNode(r.node)).map((r) => r.node.id);
+		return this.selectableRows(snap).filter((r) => !isNonAgentNode(r.node) && this.canStopNode(r.node, snap)).map((r) => r.node.id);
 	}
 
 	/** The trailing "x stop"/"X stop all"/"s steer" hint fragment for an action line — the list's
@@ -535,8 +663,8 @@ export class AgentOverlay extends Container {
 	}
 
 	/** The one-line refusal notice, shown identically under the list and the detail view. */
-	private renderNotice(): void {
-		if (this.notice) this.addChild(new Text(this.theme.fg("dim", this.notice), 1, 0));
+	private renderNotice(target: Container = this): void {
+		if (this.notice) target.addChild(new Text(this.theme.fg("dim", sanitizeTerminalText(truncateToWidth(safeInline(this.notice, 240), Math.max(1, this.inner() - 2), "…"))), 1, 0));
 	}
 
 	/** Stop (abort) one agent by id. A refusal — the node is gone, not stoppable, or the caller

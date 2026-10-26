@@ -797,6 +797,34 @@ for (const backend of ["inproc", "child"] as const) {
 	});
 }
 
+test("a failed strategy leg replaces its last activity with the terminal cause while siblings remain live", async () => {
+	const cwd = tempDir("pi-persona-terminal-cause-");
+	const dir = path.join(cwd, ".pi", "agents");
+	fs.mkdirSync(dir, { recursive: true });
+	for (const name of ["fails", "holds"]) fs.writeFileSync(path.join(dir, `${name}.md`), `---\nname: ${name}\nmodel: stub/omega\ntools: []\n---\nworker`);
+	let release!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeEngine: () => { throw new Error("unexpected child engine"); }, makeInProcessEngine: (deps) => ({ run: async (spec) => {
+		deps.onProgress?.({ output: "", turns: 0, tokens: 0, activity: "inspecting source" });
+		if (spec.agent === "fails") return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "contract rejected", failureKind: "contract" };
+		await held;
+		return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+	} }) } });
+	const { ctx, widgets } = wakeWidgetCtx(cwd);
+	await m.fire("session_start", {}, ctx);
+	try {
+		await (m.tool("council") as { execute: AnyFn }).execute("terminal-cause", { question: "q", strategy: "fanout", members: ["fails", "holds"] }, undefined, undefined, ctx);
+		await waitUntil(() => (widgets["persona-agents"] ?? []).some((line) => /✗.*fails/.test(line)), "the failed member to settle");
+		const row = widgets["persona-agents"]!.find((line) => /✗.*fails/.test(line))!;
+		assert.match(row, /contract rejected/);
+		assert.doesNotMatch(row, /inspecting source/);
+	} finally {
+		release();
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
 test("strategy-seeded tree rows carry the member's effort sigla and stamp the settle divergence", async () => {
 	// Three distinct members (distinct agents, so each gets its OWN participant): one with effort
 	// that is held running, one with effort held live, one with none — plus the settle stamp that
@@ -3172,7 +3200,7 @@ test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; 
 	};
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => stub, makeEngine: () => stub } });
-	const { ctx } = makeCtx(os.tmpdir(), { hasUI: true });
+	const { ctx, widgets, statuses } = wakeWidgetCtx(os.tmpdir());
 	await m.fire("session_start", undefined, ctx);
 	const delegate = m.tool("delegate") as { execute: AnyFn };
 	const followUps = () => m.sentMessages().map((s) => (s.message as { content: string }).content);
@@ -3195,6 +3223,8 @@ test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; 
 	// The supervisor is idle the whole time: legs finish one by one, and no partial wake goes out.
 	release.get("leg-0")?.();
 	await pastDebounce();
+	assert.match((widgets["persona-agents"] ?? []).join("\n"), /✓/, "a settled leg remains visible while its siblings work");
+	assert.equal(statuses.at(-1), "2", "retained UI receipts do not count as active workers");
 	release.get("leg-1")?.();
 	await pastDebounce();
 	assert.deepEqual(followUps(), [], "two of three legs settled: nothing is reported yet");
@@ -3203,6 +3233,7 @@ test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; 
 	await waitUntil(() => followUps().length > 0, "the batch completion follow-up");
 	await pastDebounce();
 	assert.equal(followUps().length, 1, "exactly one wake for the whole batch");
+	assert.equal(widgets["persona-agents"], undefined, "the final batch settlement removes its receipts and header together");
 	const report = followUps()[0] as string;
 	assert.match(report, /3 async runs settled — 3 done, 0 failed/);
 	for (const i of [0, 1, 2]) assert.match(report, new RegExp(`payload leg-${i}`), "the single report carries every leg");
@@ -6538,6 +6569,9 @@ test("the coaching-disabled hint treats a persona name as bounded metadata", () 
 	assert.doesNotMatch(hint, /[\r\n]/);
 	assert.doesNotMatch(hint, /x{100}/);
 	assert.ok(hint.length < 400);
+	assert.doesNotMatch(hint, /message bus is empty|sub-agents get no contact_supervisor/,
+		"coaching off does not prove that broker or peer-enabled children lack a bus");
+	assert.match(hint, /broker-connected children/);
 });
 
 test("the intercom TOOL returns its inbox fenced — the supervisor never sees bus text raw", async () => {
@@ -7565,7 +7599,9 @@ for (const command of ["orchestrate", "flow"] as const) {
 			assert.equal(prompts.length, 1, "automatic command setup must not displace the checkpoint");
 
 			// Use the real overlay's public stop action: a command needs a stoppable root BEFORE setup.
-			const target = command === "flow" ? /▸.*flow command-pick/ : /▸.*fanout/;
+			// Phase containers are now inspectable too: target the named command root, not
+			// the checkpoint's "plan · fanout" phase, whose label contains the same strategy.
+			const target = command === "flow" ? /▸.*flow command-pick/ : /▸.*⏳ fanout\b/;
 			await m.cmd("agents", "", { ...ctx, mode: "tui", ui: { ...ctx.ui, custom: async (factory: AnyFn) => {
 				const overlay = factory({ requestRender() {} }, { fg: (_role: string, text: string) => text, bold: (text: string) => text }, new KeybindingsManager(TUI_KEYBINDINGS), () => {}) as { render(width: number): string[]; handleInput(input: string): void; dispose(): void };
 				try {

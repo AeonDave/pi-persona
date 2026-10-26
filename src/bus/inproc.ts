@@ -171,7 +171,8 @@ export class InProcessBus {
 		return [...this.inboxes.keys()];
 	}
 
-	/** One-way message (default `progress`). Returns false if the recipient is not registered. */
+	/** One-way message (default `progress`). Returns false if the recipient is not registered
+	 *  or its inbox is full of live asks; rejected messages are not delivered or retried. */
 	send(from: string, to: string, text: string, kind: MsgKind = "progress"): boolean {
 		const box = this.inboxes.get(to);
 		if (!box) return false;

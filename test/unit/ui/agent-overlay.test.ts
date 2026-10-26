@@ -663,7 +663,11 @@ test("a run root that carries its own stop is a selectable row: x ends the whole
 	overlay.handleInput("x");
 	assert.deepEqual(stopped, ["async:run-1"], "the root's own stop ends the whole run");
 	overlay.handleInput("j");
-	assert.match(overlay.render(80).join("\n"), /▸.*melchior/, "a container without a stop of its own is skipped: the next row is the leaf");
+	assert.match(overlay.render(80).join("\n"), /▸.*a phase container/, "a phase can be inspected without gaining a stop handle");
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["async:run-1"], "inspection does not grant controls to the phase");
+	overlay.handleInput("j");
+	assert.match(overlay.render(80).join("\n"), /▸.*melchior/);
 	overlay.dispose();
 });
 

@@ -129,6 +129,13 @@ a live pending ask on the exact child handle, never inferred from its last activ
 | **Message bus** | bus allowed; in-process children also require `coaching: true` | broker-connected children and coached in-process children get `contact_supervisor`, subject to explicit empty tool grants and exclusions; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
 | **Sibling peer comm** | strategy opt-in | `debate` and `pair` members always get one-way `contact_peer`; `map` and `synthesize` add it with `params: { peers: true }` |
 
+Addressing is explicit: `steer` uses a run ID from the delegation receipt, while `send` uses the
+exact live bus handle from `list`. A displayed call-sign is not an alias for either address.
+`reply` needs a pending ask ID; progress messages and settled questions cannot be answered.
+An archived `result` uses its `ref`, shown in the call card. Its compact range is measured in
+zero-based UTF-16 offsets (start inclusive, end exclusive), not page numbers. See the
+[address table and failure guidance](COLLABORATION.md#supervising-a-leg).
+
 When supervisor contact is available, an async child's `decision` or `interview` waits for a supervisor reply.
 A headless (inline) child posts the question one-way without waiting: the supervisor is parked
 in that call and cannot answer. The decision/interview remains unresolved; the child may continue

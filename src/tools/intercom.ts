@@ -157,7 +157,7 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 			return replied
 				? { text: `Replied to ${displayAskId}.`, details: { action: "reply", ok: true } }
 				: {
-						text: `No pending ask with id "${displayAskId}" — it may have timed out or already been answered (check "inbox").`,
+						text: `No pending ask with id "${displayAskId}". Only pending asks can receive a reply; progress messages cannot. Check "inbox" for a current reply id; the ask may have settled or the id may be incorrect.`,
 						details: { action: "reply", ok: false },
 					};
 		}
@@ -171,11 +171,17 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 			if (params.message.length > MAX_INTERCOM_MESSAGE_CHARS) {
 				return { text: `intercom send message exceeds the ${MAX_INTERCOM_MESSAGE_CHARS}-character limit.`, details: { action: "send", ok: false } };
 			}
-			const delivered = bus.send(self, params.to, params.message, "progress");
 			const displayPeer = sanitizeDisplayLabel(params.to, "peer");
+			if (!bus.participants().includes(params.to)) {
+				return {
+					text: `Unknown peer "${displayPeer}" — nobody by that handle is registered. Use the exact handle from intercom list for send, not a display alias or run id. For steer, use the run id from the delegation receipt.`,
+					details: { action: "send", ok: false },
+				};
+			}
+			const delivered = bus.send(self, params.to, params.message, "progress");
 			return delivered
 				? { text: `Sent to ${displayPeer}.`, details: { action: "send", ok: true } }
-				: { text: `Unknown peer "${displayPeer}" — nobody by that handle is registered.`, details: { action: "send", ok: false } };
+				: { text: `Message not delivered to "${displayPeer}": its inbox is full of pending asks.`, details: { action: "send", ok: false } };
 		}
 	}
 }
