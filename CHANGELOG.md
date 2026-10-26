@@ -8,6 +8,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Added
 
+- `data` persona for data engineering, science, and analysis, with explicit grain and
+  metric definitions, reproducible evidence, independent cross-checks, and stated uncertainty.
 - F9 group overviews compare worker states, model/effort, activity and bounded results, with
   identity-preserving drill-in/back navigation and controls limited to the selected worker.
 - Overflowing agent summaries retain hidden active work and pending supervisor asks. Worker

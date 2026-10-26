@@ -8,6 +8,7 @@ the work. You can inspect or redirect individual workers without managing every 
 | Your request | Start with | What to expect |
 |---|---|---|
 | Implement or fix something | `dev` | A scoped change, checks, and a concise explanation of the result |
+| Build a data pipeline, train or evaluate a model, or analyze data | `data` | Explicit grain, metric definitions, reproducible evidence, and stated uncertainty |
 | Review a change | `audit` | Prioritized, evidence-backed findings; edits only when requested |
 | Turn an idea into an implementation plan | `planner` | Decisions, dependencies, and verifiable steps without changing application code |
 | Investigate a question | `researcher` | Sources, conclusions, uncertainty, and durable notes when the scope warrants them |
@@ -26,6 +27,15 @@ An effective request names the intended result and its constraints. For example:
 > Fix the cancellation bug. Preserve the public API and my existing edits. Delegate independent
 > investigations, implement the fix, and run the relevant checks. Tell me what changed and what
 > remains unverified.
+
+For `data`, use `reviewer` to challenge an analysis and an independent query to cross-check its
+results; the default `council` repair loop is for code changes, after delegated writers settle.
+Production read-only is a behavioral instruction: access is governed by the available tools and
+database permissions. The persona adds no connectors. For example:
+
+> Compare weekly signup conversion: one row per eligible user, converted users / eligible users,
+> Europe/Rome weeks, source snapshot as of 2026-10-25. Read only; state sampling and uncertainty,
+> cross-check with an independent query, and report missing access.
 
 ## Follow the work without constant polling
 

@@ -33,6 +33,7 @@ const TEAMS = parseTeams(readFileSync(`${ROOT}teams.yaml`, "utf8"));
 /** Each bundled persona and the method it declares as its own: what `council` runs when the call omits all three. */
 const DECLARED_METHOD: Record<string, { strategy: string; roster: string; params: Record<string, unknown> } | undefined> = {
 	audit: { strategy: "synthesize", roster: "review", params: { synthesizer: "reviewer", peers: true } },
+	data: { strategy: "critic-loop", roster: "repair", params: { rounds: 3 } },
 	dev: { strategy: "critic-loop", roster: "repair", params: { rounds: 3 } },
 	judge: { strategy: "judge", roster: "magi", params: { judge: "reviewer", contract: "default" } },
 	magi: { strategy: "magi", roster: "magi", params: {} },
@@ -128,9 +129,15 @@ test("every bundled persona's delegation policy and tool deny are spelled as the
 	// A persona that launches writers carries a call-time gate: capabilities are enforced, never prompt-only.
 	assert.deepEqual(policies.swarm, { requireBrief: true, requireDisjointWrites: true });
 	assert.deepEqual(policies.audit, { requireBrief: true });
+	assert.deepEqual(policies.data, {
+		requireBrief: true,
+		requireDisjointWrites: true,
+		requireFreshVerification: true,
+		verificationAgents: ["verifier"],
+	});
 	assert.deepEqual(policies.verify, { requireFreshVerification: true, verificationAgents: ["verifier"] });
 	assert.deepEqual(SET.find((p) => p.name === "planner")!.persona.tools, { deny: ["edit"] });
-	assert.deepEqual(SET.filter((p) => p.persona.coaching).map((p) => p.name).sort(), ["dev", "planner", "researcher", "swarm"]);
+	assert.deepEqual(SET.filter((p) => p.persona.coaching).map((p) => p.name).sort(), ["data", "dev", "planner", "researcher", "swarm"]);
 });
 
 // The bundled agents and teams as ONE set. `evidence-verifier` is the security chain's agent and, like `elite`,

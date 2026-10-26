@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { tempDir } from "../setup/temp-dir.ts";
+import { seedDefaults } from "../../src/core/seed.ts";
 import { loadContracts, loadDefinitions, loadTeams } from "../../src/loader.ts";
 
 function tmp(files: Record<string, string>): string {
@@ -12,6 +14,32 @@ function tmp(files: Record<string, string>): string {
 	for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
 	return dir;
 }
+
+test("seeding adds the bundled data persona to an existing profile and preserves custom personas", () => {
+	const root = fileURLToPath(new URL("../../", import.meta.url));
+	const user = tempDir("pi-persona-data-seed-");
+	const agents = path.join(user, "agents");
+	fs.mkdirSync(agents);
+	const custom = "---\nname: dev\npersona: true\n---\nMy own development workflow";
+	fs.writeFileSync(path.join(agents, "dev.md"), custom);
+	const dirs = [{ path: agents, scope: "user" }];
+	assert.equal(loadDefinitions(dirs).personas.some((p) => p.name === "data"), false);
+
+	const seeded = seedDefaults(root, user, false);
+	const loaded = loadDefinitions(dirs);
+	assert.ok(seeded.copied.includes(path.join(agents, "data.md")));
+	assert.deepEqual(loaded.warnings, []);
+	assert.deepEqual(loaded.collisions, []);
+	assert.equal(loaded.personas.find((p) => p.name === "data")?.label, "📊 Data");
+	assert.equal(loaded.agents.some((a) => a.name === "data"), false);
+	assert.equal(fs.readFileSync(path.join(agents, "dev.md"), "utf8"), custom);
+
+	const data = path.join(agents, "data.md");
+	fs.appendFileSync(data, "\nMy data conventions\n");
+	const customized = fs.readFileSync(data, "utf8");
+	assert.ok(seedDefaults(root, user, false).skipped.includes(data));
+	assert.equal(fs.readFileSync(data, "utf8"), customized);
+});
 
 test("loadDefinitions splits personas (persona:true) from agents and records shadowing", () => {
 	const user = tmp({

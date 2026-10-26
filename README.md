@@ -156,6 +156,7 @@ everyday coding, or choose one for the work ahead.
 | Persona | Best for |
 |---|---|
 | `dev` | Implementing, fixing, and reviewing code |
+| `data` | Data engineering, science, and analysis with explicit definitions, evidence, and uncertainty |
 | `planner` | Turning an idea into a drafted, critiqued plan before changing code |
 | `researcher` | Investigating questions and collecting sourced findings |
 | `audit` | Reviewing a change from correctness, security, performance, and testing perspectives |
@@ -182,7 +183,7 @@ See [the reference](docs/REFERENCE.md) for an inline council example and recover
 Edit installed personas and agents in `~/.pi/agent/persona/agents/`, or add project-specific
 overrides in `.pi/agents/`. Run `/persona reload` after editing.
 
-`/persona seed` preserves existing files. **`/persona restore` overwrites all bundled defaults**
+`/persona seed` adds missing bundled defaults and preserves existing files. **`/persona restore` overwrites all bundled defaults**
 (personas, agents, teams, flows, contracts, presets and shared prompts), discarding customizations
 to those files. It does not delete additional custom files: a persona `pippo.md` or an agent
 `pluto.md` remains untouched. A custom file using the same destination as a bundled default is
