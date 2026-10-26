@@ -379,12 +379,12 @@ test("a chatty straggler is flagged stalled operator-side; finishing the tool re
 	assert.equal(tracker.peek(id)?.lastAdvanceAt, credited, "streamed tool output earns no credit");
 	assert.equal(isAsyncRunStalled(tracker.peek(id)!, clock, STALL_FLAG_MS), true, "the poll guard and the digest see the stall too");
 	assert.match(buildPeekDigest([tracker.peek(id)!], { now: clock, stallMs: STALL_FLAG_MS }), /possibly stuck/);
-	assert.equal(watcher.poll([tracker.peek(id)!], clock, STALL_FLAG_MS).length, 1, "the operator card is raised once");
-	assert.equal(watcher.poll([tracker.peek(id)!], clock, STALL_FLAG_MS).length, 0, "...not on every tick");
+	assert.equal(watcher.poll([tracker.peek(id)!], clock, STALL_FLAG_MS).stalled.length, 1, "the operator card is raised once");
+	assert.equal(watcher.poll([tracker.peek(id)!], clock, STALL_FLAG_MS).stalled.length, 0, "...not on every tick");
 	feed({ type: "tool_execution_end", toolCallId: "dev", toolName: "bash", isError: false });
 	assert.equal(tracker.peek(id)?.lastAdvanceAt, clock, "completing the tool is headway");
 	assert.equal(isAsyncRunStalled(tracker.peek(id)!, clock, STALL_FLAG_MS), false);
-	assert.equal(watcher.poll([tracker.peek(id)!], clock, STALL_FLAG_MS).length, 0);
+	assert.deepEqual(watcher.poll([tracker.peek(id)!], clock, STALL_FLAG_MS).recovered.map((run) => run.id), [id]);
 	release();
 	await tick();
 });
@@ -419,7 +419,7 @@ test("queued runs never acquire a stall age before admission", () => {
 	const run = tracker.peek(id)!;
 	assert.equal(run.queued, true);
 	assert.equal(run.lastAdvanceAt, undefined);
-	assert.deepEqual(new PeekWatcher().poll([run], 1_000_000, 1), []);
+	assert.deepEqual(new PeekWatcher().poll([run], 1_000_000, 1), { stalled: [], recovered: [] });
 	assert.match(buildPeekDigest([run], { now: 1_000_000, stallMs: 1 }), /queued \(waiting for concurrency slot\)/);
 });
 
@@ -479,57 +479,110 @@ test("queued runs remain in running and writers until they settle", async () => 
 test("operator stall episodes rearm once the leg advances", () => {
 	const watcher = new PeekWatcher();
 	const first = runningRun(0);
-	assert.deepEqual(watcher.poll([first], 90_000, 90_000), [first]);
+	assert.deepEqual(watcher.poll([first], 90_000, 90_000).stalled, [first]);
 	watcher.poll([runningRun(100_000)], 100_000, 90_000);
-	assert.deepEqual(watcher.poll([runningRun(100_000)], 190_000, 90_000).map((run) => run.id), [first.id]);
+	assert.deepEqual(watcher.poll([runningRun(100_000)], 190_000, 90_000).stalled.map((run) => run.id), [first.id]);
+});
+
+test("PeekWatcher reports one recovery only when a reported stalled leg makes fresh progress", () => {
+	const watcher = new PeekWatcher();
+	const stalled = runningRun(0);
+	assert.deepEqual(watcher.poll([stalled], 90_000, 90_000), { stalled: [stalled], recovered: [] });
+	assert.deepEqual(watcher.poll([stalled], 100_000, 90_000), { stalled: [], recovered: [] });
+	const resumed = runningRun(100_000);
+	assert.deepEqual(watcher.poll([resumed], 100_000, 90_000), { stalled: [], recovered: [resumed] });
+	assert.deepEqual(watcher.poll([resumed], 110_000, 90_000), { stalled: [], recovered: [] });
+	assert.deepEqual(watcher.poll([runningRun(120_000)], 120_000, 90_000), { stalled: [], recovered: [] }, "ordinary healthy progress is silent");
+});
+
+test("PeekWatcher reports a new stall without a false recovery when progress already stalled again between polls", () => {
+	const watcher = new PeekWatcher();
+	watcher.poll([runningRun(0)], 90_000, 90_000);
+	const stalledAgain = runningRun(100_000);
+	assert.deepEqual(watcher.poll([stalledAgain], 190_000, 90_000), { stalled: [stalledAgain], recovered: [] });
+	assert.deepEqual(watcher.poll([stalledAgain], 200_000, 90_000), { stalled: [], recovered: [] });
+});
+
+test("PeekWatcher does not recover a reported stall when only the stall window changes", () => {
+	const watcher = new PeekWatcher();
+	const run = runningRun(0);
+	watcher.poll([run], 90_000, 90_000);
+	assert.deepEqual(watcher.poll([run], 100_000, 200_000), { stalled: [], recovered: [] });
+});
+
+test("PeekWatcher forgets excluded episodes without reporting recovery", () => {
+	const exclusions: Array<{ runs: AsyncRun[]; waiting?: ReadonlySet<string> }> = [
+		{ runs: [] },
+		...(["done", "failed", "stopped"] as const).map((status) => ({ runs: [runningRun(100_000, { status })] })),
+		{ runs: [runningRun(100_000, { queued: true })] },
+		{ runs: [runningRun(100_000, { awaiting: "waiting for operator" })] },
+		{ runs: [runningRun(100_000)], waiting: new Set(["run-1"]) },
+	];
+	for (const { runs, waiting } of exclusions) {
+		const watcher = new PeekWatcher();
+		watcher.poll([runningRun(0)], 90_000, 90_000);
+		assert.deepEqual(watcher.poll(runs, 100_000, 90_000, waiting), { stalled: [], recovered: [] });
+		assert.deepEqual(watcher.poll([runningRun(110_000)], 110_000, 90_000), { stalled: [], recovered: [] }, "an excluded episode cannot produce a later recovery");
+	}
+	const resetWatcher = new PeekWatcher();
+	resetWatcher.poll([runningRun(0)], 90_000, 90_000);
+	resetWatcher.reset();
+	assert.deepEqual(resetWatcher.poll([runningRun(100_000)], 100_000, 90_000), { stalled: [], recovered: [] });
+});
+
+test("buildCheckIn identifies resumed progress in the operator recovery card", () => {
+	const out = buildCheckIn([runningRun(100_000)], { now: 100_000, stallMs: 90_000, reason: "recovery" });
+	assert.match(out, /^Async activity · progress resumed\n/);
+	assert.match(out, /Async runs:/);
+	assert.doesNotMatch(out, /possibly stuck|routine check-in|don't reply|continue your current|step in only/i);
 });
 
 test("PeekWatcher surfaces a stalled leg only once, and re-arms after it recovers", () => {
 	const w = new PeekWatcher();
 	// advanced 10s ago, 45s window → healthy, nothing to surface
-	assert.deepEqual(w.poll([runningRun(100_000)], 110_000, 45_000), []);
+	assert.deepEqual(w.poll([runningRun(100_000)], 110_000, 45_000), { stalled: [], recovered: [] });
 	// crossed the window → surfaced exactly once
-	assert.deepEqual(w.poll([runningRun(100_000)], 146_000, 45_000).map((r) => r.id), ["run-1"]);
+	assert.deepEqual(w.poll([runningRun(100_000)], 146_000, 45_000).stalled.map((r) => r.id), ["run-1"]);
 	// still stalled at the SAME advance point → not surfaced again (no re-nag every tick)
-	assert.deepEqual(w.poll([runningRun(100_000)], 200_000, 45_000), []);
+	assert.deepEqual(w.poll([runningRun(100_000)], 200_000, 45_000), { stalled: [], recovered: [] });
 	// it advanced (lastAdvanceAt moved), so a fresh stall re-arms and re-alerts
-	assert.deepEqual(w.poll([runningRun(210_000)], 215_000, 45_000), []); // fresh, not yet stalled
-	assert.deepEqual(w.poll([runningRun(210_000)], 260_000, 45_000).map((r) => r.id), ["run-1"]);
+	assert.deepEqual(w.poll([runningRun(210_000)], 215_000, 45_000).recovered.map((r) => r.id), ["run-1"]); // fresh progress resumes once
+	assert.deepEqual(w.poll([runningRun(210_000)], 260_000, 45_000).stalled.map((r) => r.id), ["run-1"]);
 });
 
 test("PeekWatcher never surfaces a non-running leg and forgets legs that leave the list", () => {
 	// A FRESH watcher must exclude a stalled-by-timestamp done/failed leg via the STATUS guard, not the
 	// once-only suppression — so this dies if the status guard regresses (a settled run must never alert).
-	assert.deepEqual(new PeekWatcher().poll([runningRun(0, { status: "done" })], 100_000, 45_000), [], "a never-reported done leg is not 'stalled'");
-	assert.deepEqual(new PeekWatcher().poll([runningRun(0, { status: "failed" })], 100_000, 45_000), [], "a never-reported failed leg is not 'stalled'");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0, { status: "done" })], 100_000, 45_000), { stalled: [], recovered: [] }, "a never-reported done leg is not 'stalled'");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0, { status: "failed" })], 100_000, 45_000), { stalled: [], recovered: [] }, "a never-reported failed leg is not 'stalled'");
 
 	const w = new PeekWatcher();
-	assert.deepEqual(w.poll([runningRun(0)], 100_000, 45_000).map((r) => r.id), ["run-1"]); // stalled → surfaced
-	assert.deepEqual(w.poll([runningRun(0, { status: "done" })], 200_000, 45_000), []); // done → never "stuck"
-	assert.deepEqual(w.poll([], 300_000, 45_000), []); // gone → forgotten
-	assert.deepEqual(w.poll([runningRun(0)], 400_000, 45_000).map((r) => r.id), ["run-1"]); // reappears stalled → re-alert
+	assert.deepEqual(w.poll([runningRun(0)], 100_000, 45_000).stalled.map((r) => r.id), ["run-1"]); // stalled → surfaced
+	assert.deepEqual(w.poll([runningRun(0, { status: "done" })], 200_000, 45_000), { stalled: [], recovered: [] }); // done → never "stuck"
+	assert.deepEqual(w.poll([], 300_000, 45_000), { stalled: [], recovered: [] }); // gone → forgotten
+	assert.deepEqual(w.poll([runningRun(0)], 400_000, 45_000).stalled.map((r) => r.id), ["run-1"]); // reappears stalled → re-alert
 	w.reset();
-	assert.deepEqual(w.poll([runningRun(0)], 500_000, 45_000).map((r) => r.id), ["run-1"]); // reset re-arms all
+	assert.deepEqual(w.poll([runningRun(0)], 500_000, 45_000).stalled.map((r) => r.id), ["run-1"]); // reset re-arms all
 });
 
 test("PeekWatcher's stall window is inclusive at the boundary and stallMs=0 disables it", () => {
-	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 45_000, 45_000).map((r) => r.id), ["run-1"], "exactly at the threshold surfaces (>=)");
-	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 44_999, 45_000), [], "one ms short does not");
-	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 10_000_000, 0), [], "stallMs=0 disables the flag, even for an ancient leg");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 45_000, 45_000).stalled.map((r) => r.id), ["run-1"], "exactly at the threshold surfaces (>=)");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 44_999, 45_000), { stalled: [], recovered: [] }, "one ms short does not");
+	assert.deepEqual(new PeekWatcher().poll([runningRun(0)], 10_000_000, 0), { stalled: [], recovered: [] }, "stallMs=0 disables the flag, even for an ancient leg");
 });
 
 test("PeekWatcher discriminates per-leg in a mixed batch (only the stalled one)", () => {
 	const w = new PeekWatcher();
 	const fresh = runningRun(100_000, { id: "run-1" });
 	const stalled = runningRun(0, { id: "run-2" });
-	assert.deepEqual(w.poll([fresh, stalled], 100_000, 45_000).map((r) => r.id), ["run-2"], "the healthy leg is never named in the alert");
+	assert.deepEqual(w.poll([fresh, stalled], 100_000, 45_000).stalled.map((r) => r.id), ["run-2"], "the healthy leg is never named in the alert");
 });
 
 test("live supervisor asks suppress peek stall alerts and become eligible again immediately after settlement", () => {
 	const watcher = new PeekWatcher();
 	const run = runningRun(0, { id: "waiting-run" });
-	assert.deepEqual(watcher.poll([run], 100_000, 90_000, new Set(["waiting-run"])), []);
-	assert.deepEqual(watcher.poll([run], 100_001, 90_000), [run], "once the authoritative ask settles, existing silence is a real stall");
+	assert.deepEqual(watcher.poll([run], 100_000, 90_000, new Set(["waiting-run"])), { stalled: [], recovered: [] });
+	assert.deepEqual(watcher.poll([run], 100_001, 90_000).stalled, [run], "once the authoritative ask settles, existing silence is a real stall");
 });
 
 test("peek digest labels a live ask instead of claiming it is stalled", () => {
@@ -1573,7 +1626,7 @@ test("a run awaiting the operator says what it waits on and is never flagged sta
 	const digest = buildPeekDigest([run], { now: 500_000, stallMs: 90_000 });
 	assert.match(digest, /waiting for operator at checkpoint plan/);
 	assert.doesNotMatch(digest, /possibly stuck/, "the operator is thinking, the run is not wedged");
-	assert.deepEqual(new PeekWatcher().poll([run], 500_000, 90_000), [], "no stall episode while the operator holds the run");
+	assert.deepEqual(new PeekWatcher().poll([run], 500_000, 90_000), { stalled: [], recovered: [] }, "no stall episode while the operator holds the run");
 
 	assert.equal(tracker.setAwaiting(id, undefined), true);
 	assert.equal(tracker.peek(id)!.awaiting, undefined);

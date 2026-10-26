@@ -35,8 +35,8 @@ export interface PiPersonaConfig {
 	peekEveryMs: number;
 	/** Routine check-in interval (ms): how often, while async children run, the operator gets a durable,
 	 *  expandable compact progress entry. It is status-only and does not start a model turn. Deliberately
-	 *  slow and independent of the fast stall/message tick. 300000 (5 min) by default;
-	 *  PI_PERSONA_CHECKIN_MS=0 opts out. */
+	 *  independent of the fast stall/message tick. Off by default (0); a positive
+	 *  PI_PERSONA_CHECKIN_MS explicitly enables periodic transcript entries. */
 	checkInEveryMs: number;
 	/** Per-agent hard wall-clock cap (ms): an OPT-IN lifetime ceiling. When set (>0) it settles even
 	 *  a busy-but-non-converging child the idle watchdog (reset on every event) never catches.
@@ -164,7 +164,7 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		// `PI_PERSONA_SEED=on`. Default off — personas are installed via `/persona seed|restore`.
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 30_000,
-		checkInEveryMs: 300_000,
+		checkInEveryMs: 0,
 		// Opt-in: 0 = no hard cap (a healthy child runs to completion). The idle watchdog
 		// (RUN_LIMITS.timeoutMs, reset on progress) + startup deadline + token budget are the
 		// always-on backstops; set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a wall-clock ceiling.

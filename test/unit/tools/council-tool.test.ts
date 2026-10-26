@@ -362,7 +362,7 @@ test("a strategy that requires a param fails at once when the call omits it: no 
 			const h = councilHarness();
 			const result = await h[mode]({ question: "pick one", strategy, roster: "magi" });
 			assert.equal(result.isError, true, `${mode} ${strategy}`);
-			assert.match(result.content[0].text, new RegExp(`^council failed: "${strategy}" requires params\.judge`));
+			assert.ok(result.content[0].text.startsWith(`council failed: "${strategy}" requires params.judge`));
 			assert.equal(h.calls.length, 0, "the strategy never started");
 			assert.equal(h.tracker.list().length, 0, "nothing was launched");
 			assert.equal(h.stopRegistry.size, 0);

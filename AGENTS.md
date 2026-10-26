@@ -143,8 +143,10 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `stopped`). Stop-all, checkpoint waits, operator-result hand-off, run ids, restore honesty, flow journal
   identity (`flowRunHash`) and retention are in
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#supervision--the-waiting-model).
-  Periodic async status and each newly detected stall episode are durable, expandable operator-only
-  entries; stalls never wake the model. Completions, asks, and unread bus messages keep their
+  Routine async status is opt-in (`checkInEveryMs=0` by default); ordinary progress stays in live rows/F9.
+  Each newly detected stall and genuine progress resume after a reported stall is a durable,
+  expandable operator-only entry. Episode entries replace coincident routine cards and restart their
+  cadence; none wake the model. Completions, asks, and unread bus messages keep their
   existing actionable paths.
   Message ids and run ids are separate: `intercom message { messageId }` retrieves retained bus
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox

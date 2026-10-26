@@ -202,7 +202,7 @@ interface NudgeEntry {
 
 interface CheckInEntry {
 	content: string;
-	kind?: "routine" | "stall";
+	kind: "routine" | "stall" | "recovery";
 }
 
 interface RunFailureEntry {
@@ -355,7 +355,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
 	};
-	const appendCheckInEntry = (content: string, kind: "routine" | "stall" = "routine"): void => {
+	const appendCheckInEntry = (content: string, kind: CheckInEntry["kind"]): void => {
 		pi.appendEntry("pi-persona-status", { content, kind } satisfies CheckInEntry);
 	};
 	const appendCommandResult = (
@@ -1382,11 +1382,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	});
 
 	// Async-run watchdog: the fast PI_PERSONA_PEEK_MS cadence appends an operator-only card for a
-	// newly-stalled leg and wakes the supervisor only for an unread message. The slower
+	// newly-stalled or recovered leg and wakes the supervisor only for an unread message. The opt-in
 	// PI_PERSONA_CHECKIN_MS cadence appends a durable operator-only status card; it does not start a
 	// model turn. Bounded: unref'd, self-stops when no runs remain.
 	let peekTimer: ReturnType<typeof setInterval> | undefined;
-	// Last time progress status was surfaced (a new stall alert or routine card), for the slow cadence.
+	// Last time an episode or routine card was surfaced, for the opt-in slow cadence.
 	let lastPeekAt = 0;
 	function stopPeek(): void {
 		if (peekTimer) {
@@ -1411,8 +1411,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const now = Date.now();
 			const waitingRuns = waitingAsyncRunIds();
 			const fast = config.peekEveryMs > 0;
-			const stuck = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS, waitingRuns) : [];
-			const appendStatus = (content: string, kind: "routine" | "stall"): void => {
+			const { stalled, recovered } = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS, waitingRuns) : { stalled: [], recovered: [] };
+			const appendStatus = (content: string, kind: CheckInEntry["kind"]): void => {
 				try {
 					appendCheckInEntry(content, kind);
 				} catch (error) {
@@ -1427,10 +1427,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					}
 				}
 			};
-			// Every new stall episode is durable operator history, including while the model is busy.
-			if (stuck.length > 0) appendStatus(buildCheckIn(stuck, { now, stallMs: STALL_FLAG_MS, reason: "stall", waitingForSupervisor: waitingRuns }), "stall");
+			// Episode transitions replace a coincident routine card and restart its cadence. These
+			// are observations for the operator, never model wakes or proof of useful work.
+			if (stalled.length > 0) appendStatus(buildCheckIn(stalled, { now, stallMs: STALL_FLAG_MS, reason: "stall", waitingForSupervisor: waitingRuns }), "stall");
+			if (recovered.length > 0) appendStatus(buildCheckIn(recovered, { now, stallMs: STALL_FLAG_MS, reason: "recovery" }), "recovery");
 			const dueCheckIn = config.checkInEveryMs > 0 && now - lastPeekAt >= config.checkInEveryMs;
-			if (dueCheckIn) {
+			if (stalled.length > 0 || recovered.length > 0) lastPeekAt = now;
+			else if (dueCheckIn) {
 				lastPeekAt = now;
 				appendStatus(buildCheckIn(runs, { now, stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingRuns }), "routine");
 			}

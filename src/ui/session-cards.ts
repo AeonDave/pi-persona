@@ -117,7 +117,7 @@ function monitorState(record: MonitorLogRecord): { state: State; status: string 
 }
 
 interface ResultEntry { label?: string; content?: string; ok?: boolean; stoppedAtGate?: string; failureKind?: string; error?: string }
-interface ContentEntry { content?: string; kind?: "routine" | "stall" }
+interface ContentEntry { content?: string; kind?: "routine" | "stall" | "recovery" }
 interface RunFailureEntry { id: string; label: string; agent: string; model?: string; durationMs?: number; error: string }
 
 /** One run a settlement report names, projected to `<name> · <status>[ · <duration>]`. The
@@ -201,14 +201,14 @@ function settlementPreview(full: string): Card["preview"] | undefined {
 	};
 }
 
-interface StatusRunLine { name: string; detail: string; queued: boolean }
+interface StatusRunLine { name: string; detail: string; queued: boolean; signal?: string }
 
 /** Skip-list for the peek-digest boilerplate the status card's title/frame replaces. Each entry
  * is drift-guarded in tests against live `buildPeekDigest`/`buildCheckIn` output (src/engine/async.ts):
- * the check-in header, the cumulative-token footnote and the omitted-runs tail. The
+ * routine, stall and recovery headers, the cumulative-token footnote and the omitted-runs tail. The
  * `Async runs: N (M running)` header is recognized below (the title carries its counts). */
 const STATUS_SKIP: readonly RegExp[] = [
-	/^Async activity · (?:routine check-in|possible stall)$/,
+	/^Async activity · (?:routine check-in|possible stall|progress resumed)$/,
 	/^Cumulative tokens show /,
 	/^… \d+ additional async runs omitted/,
 ];
@@ -222,6 +222,7 @@ function parseStatusRuns(full: string): { running: number; queued: number; runs:
 	let running: number | undefined;
 	let queued = 0;
 	const runs: StatusRunLine[] = [];
+	const recovery = full.split("\n").includes("Async activity · progress resumed");
 	for (const line of full.split("\n")) {
 		if (line.trim().length === 0 || STATUS_SKIP.some((skip) => skip.test(line))) continue;
 		const head = STATUS_HEADER_COUNTS.exec(line);
@@ -233,11 +234,17 @@ function parseStatusRuns(full: string): { running: number; queued: number; runs:
 		const runLine = STATUS_RUNNING.exec(line);
 		if (runLine) {
 			const [, , name, turns, tokens, suffix] = runLine;
-			const isQueued = /· queued \(/.test(suffix ?? "");
+			const details = suffix ?? "";
+			const isQueued = /· queued \(/.test(details);
 			if (isQueued) queued++;
 			const usage = `${tokens ?? "0"} cumulative input + output tokens`;
-			const detail = isQueued ? `queued · ${usage}` : `${turns !== undefined ? `${turns} turns · ` : ""}${usage}`;
-			runs.push({ name: name ?? "", detail, queued: isQueued });
+			const stalledFor = /⚠ possibly stuck \(no progress for (\d+s)\)/.exec(details)?.[1];
+			const waiting = /· (waiting for supervisor|waiting for operator|awaiting [^·]+)/.exec(details)?.[1];
+			const signal = isQueued ? "queued" : stalledFor ? `no observed progress for ${stalledFor}` : waiting ?? (recovery ? "progress resumed" : undefined);
+			const detail = isQueued
+				? `queued · ${usage}`
+				: [signal, ...(turns !== undefined ? [`${turns} turns`] : []), usage].filter((part): part is string => part !== undefined).join(" · ");
+			runs.push({ name: name ?? "", detail, queued: isQueued, ...(signal !== undefined ? { signal } : {}) });
 			continue;
 		}
 		const settledLine = STATUS_SETTLED.exec(line);
@@ -256,9 +263,24 @@ function parseStatusRuns(full: string): { running: number; queued: number; runs:
 function statusPreview(full: string): Card["preview"] | undefined {
 	const parsed = parseStatusRuns(full);
 	if (!parsed) return undefined;
-	return () => {
-		const lines = parsed.runs.map((run) => `${run.name} · ${run.detail}`);
-		const visible = lines.length <= COMPACT_BODY_ROWS ? lines : [...lines.slice(0, COMPACT_BODY_ROWS - 1), `… +${lines.length - (COMPACT_BODY_ROWS - 1)} more`];
+	return (width) => {
+		const blocks = parsed.runs.map((run): string[] => {
+			const line = `${run.name} · ${run.detail}`;
+			const signalPrefix = run.signal ? `${run.name} · ${run.signal}` : undefined;
+			// Leave room after the reason so the frame's clipping marker never replaces its last character.
+			return signalPrefix && visibleWidth(signalPrefix) >= width ? [run.name, run.detail] : [line];
+		});
+		const fullLineCount = blocks.reduce((total, block) => total + block.length, 0);
+		const rowBudget = fullLineCount > COMPACT_BODY_ROWS ? COMPACT_BODY_ROWS - 1 : COMPACT_BODY_ROWS;
+		let shown = 0;
+		let usedRows = 0;
+		for (const block of blocks) {
+			if (usedRows + block.length > rowBudget) break;
+			usedRows += block.length;
+			shown++;
+		}
+		const visible = blocks.slice(0, shown).flat();
+		if (shown < blocks.length) visible.push(`… +${blocks.length - shown} more`);
 		return { text: visible.join("\n"), truncated: true };
 	};
 }
@@ -349,14 +371,15 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		if (!entry.data) return undefined;
 		const full = sanitizeTerminalText(entry.data.content || "Async activity · routine check-in");
 		const stall = entry.data.kind === "stall";
-		const event = stall ? "Stall" : "Status";
+		const recovery = entry.data.kind === "recovery";
+		const event = stall ? "Stall warning" : recovery ? "Progress resumed" : "Status";
 		const digest = full.split("\n").slice(1).filter((line) => line.trim().length > 0);
 		const parsed = parseStatusRuns(full);
 		return sessionCard({
 			title: parsed
 				? `${event} · ${parsed.running} running${parsed.queued > 0 ? ` · ${parsed.queued} queued` : ""}`
 				: `${event} · check-in`,
-			state: stall ? "attention" : "neutral", full,
+			state: stall ? "attention" : recovery ? "success" : "neutral", full,
 			preview: parsed ? statusPreview(full)! : (width) => {
 				const result = preview(digest.slice(0, 2).join("\n") || full, 2, 140)(width);
 				return { text: result.text, truncated: result.truncated || digest.length > 2 };

@@ -46,7 +46,10 @@ supervisor is free. Keep the session open, and cancel a watch when its purpose e
   Council parent clocks refresh on child engine events; that indicates liveness, not useful work. For the
   stall card and `/peek`, "stalled" is stricter: 90 seconds with no assistant output, tokens, turns or
   completed tool call, so a tool that only streams output (`npm run dev`, `tail -f`) is flagged too. It is
-  advice only: nothing is killed.
+  advice only: nothing is killed. The collapsed warning shows the quiet duration; a later
+  `Progress resumed` card records new observed progress once per reported episode, without claiming
+  completion. Ordinary progress stays in the live view; periodic `Status` cards are off by default
+  and may be enabled with the progress check-in interval in `/persona-settings`.
   A parent is waiting only when all its live descendant branches are waiting. Enter on a group opens
   a scrollable overview of its worker legs, with separate queued/running/terminal counts, model,
   effort, activity or result preview, and known cumulative usage. Enter again opens the selected

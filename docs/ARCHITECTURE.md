@@ -933,11 +933,15 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
   offer). With only background children left, the supervisor ends its turn and goes idle until a wake;
   it never sleeps, polls, or arms a `timer` to wait for a child or a monitor. The **peek watchdog**
   fires while async children run but stays SILENT unless there is something to act on. A newly
-  detected stall (`STALL_FLAG_MS`, 90s) appends a durable, expandable operator-only card, even while
-  the supervisor is busy, and never wakes the model; unread messages to the supervisor keep their
-  wake path. The **slow routine status card** (`PI_PERSONA_CHECKIN_MS`,
-  ~5 min, `0` disables) is a durable, expandable operator-only session entry with the compact ProgressView
-  digest — never full transcripts — and does not start a model turn. Live supervisor asks
+  detected stall (`STALL_FLAG_MS`, 90s) appends a durable, expandable operator-only warning showing
+  the observed quiet duration, even while the supervisor is busy. A previously reported leg that
+  genuinely advances and is currently below the stall threshold produces one **progress resumed**
+  entry. Queuing, waiting, removal, settlement or a watcher reset never invent a recovery. Neither
+  transition wakes the model; unread messages to the supervisor keep their wake path.
+  Ordinary progress stays in the live rows/F9. The **routine status card** (`PI_PERSONA_CHECKIN_MS`,
+  default `0`, off) is opt-in: a positive interval appends a durable operator-only compact ProgressView
+  digest, never full transcripts. Episode entries replace a coincident routine card and restart its
+  cadence. Explicit saved intervals are preserved. Live supervisor asks
   are derived from the exact engine handle's optional `isWaitingForSupervisor` predicate: tree/F9/peek
   show waiting, and the watchdog suppresses false stalls until the ask settles. Parent clocks advance
   with child engine events (liveness, not proof of useful work); parents are waiting only when every

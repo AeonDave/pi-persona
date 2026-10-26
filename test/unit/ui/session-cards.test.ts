@@ -114,7 +114,7 @@ test("entry status is metadata-owned, including legacy/unknown results", () => {
 	h.check("pi-persona-result", { label: "legacy", content: "complete" }, "customMessageBg", /^legacy · unknown$/);
 	h.check("pi-persona-result", { content: "complete", ok: true }, "toolSuccessBg", /^Result · complete$/);
 	h.check("pi-persona-status", { content: "error\nworker is done" }, "customMessageBg", /^Status · check-in$/);
-	h.check("pi-persona-status", { content: "healthy", kind: "stall" }, "toolPendingBg", /^Stall · check-in$/);
+	h.check("pi-persona-status", { content: "healthy", kind: "stall" }, "toolPendingBg", /^Stall warning · check-in$/);
 	h.check("pi-persona-run-failure", { id: "r", label: "worker", agent: "scout", error: "success" }, "toolErrorBg", /^Failed · worker$/, /^  scout$/);
 	h.check("pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: work\nAction: delegate" }, "toolPendingBg", /^Checkpoint · delegation checkpoint$/);
 });
@@ -128,7 +128,7 @@ test("uniform frame: Event · datum titles without pi-persona prefix, two-space 
 		["pi-persona", "operator notice", /^Update · info$/],
 		["exocom_received", "hello", /^Exocom · inbound$/],
 		["pi-persona-status", { content: status }, /^Status · 1 running$/],
-		["pi-persona-status", { content: status, kind: "stall" }, /^Stall · 1 running$/],
+		["pi-persona-status", { content: status, kind: "stall" }, /^Stall warning · 1 running$/],
 		["pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: t\nAction: a" }, /^Checkpoint · delegation checkpoint$/],
 		["pi-persona-nudge", { content: "⟢ pi-persona · checkpoint\nTrigger: t" }, /^Checkpoint$/],
 		["pi-persona-run-failure", { id: "r1", label: "worker", agent: "scout", model: "sonnet", durationMs: 4200, error: "boom" }, /^Failed · worker$/],
@@ -239,10 +239,52 @@ test("status drift-guard: compact projection matches the live buildPeekDigest/bu
 	assert.match(h.card("pi-persona-status", { content }, true).render(400).join("\n"), /\[run-a\] atlas-static · sonnet — running/);
 	assert.equal(JSON.stringify(content), before);
 
-	// Stall envelope flips the title event and the semantic state, nothing else.
-	const stall = h.card("pi-persona-status", { content, kind: "stall" }).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(stall[0], "Stall · 2 running · 1 queued");
-	h.check("pi-persona-status", { content, kind: "stall" }, "toolPendingBg", /^Stall · 2 running · 1 queued$/);
+	// The actual stall envelope keeps the digest, while the compact card leads with the
+	// concrete lack-of-progress reason ahead of verbose cumulative token counters.
+	const stalledRun = asynRun({ id: "run-stalled", label: "atlas-static", model: "sonnet", status: "running", lastAdvanceAt: 0 });
+	const stallContent = buildCheckIn([stalledRun], { now: 95_000, stallMs: 90_000, reason: "stall" });
+	assert.match(stallContent, /^Async activity · possible stall$/m);
+	assert.match(stallContent, /⚠ possibly stuck \(no progress for 95s\)/);
+	const stallData = { content: stallContent, kind: "stall" };
+	const stall = h.card("pi-persona-status", stallData).render(120).join("\n").split("\n").map((line) => line.trimEnd());
+	assert.equal(stall[0], "Stall warning · 1 running");
+	assert.equal(stall[1], "  atlas-static · sonnet · no observed progress for 95s · 53 turns · 216k cumulative input + output tokens");
+	h.check("pi-persona-status", stallData, "toolPendingBg", /^Stall warning · 1 running$/);
+	assert.match(h.card("pi-persona-status", stallData, true).render(400).join("\n"), /⚠ possibly stuck \(no progress for 95s\)/);
+
+	// Recovery is a live progress digest with a distinct header. It must remain a running
+	// projection and must never imply that a worker completed.
+	const resumedRun = asynRun({
+		id: "run-resumed", label: "atlas-static", model: "sonnet", status: "running",
+		progress: { output: "", turns: 54, tokens: 217_000 }, lastAdvanceAt: 90_000,
+	});
+	const recoveryContent = buildCheckIn([resumedRun], { now: 95_000, stallMs: 90_000, reason: "recovery" });
+	assert.match(recoveryContent, /^Async activity · progress resumed$/m);
+	const recoveryData = { content: recoveryContent, kind: "recovery" };
+	const recovery = h.card("pi-persona-status", recoveryData).render(120).join("\n").split("\n").map((line) => line.trimEnd());
+	assert.equal(recovery[0], "Progress resumed · 1 running");
+	assert.equal(recovery[1], "  atlas-static · sonnet · progress resumed · 54 turns · 217k cumulative input + output tokens");
+	assert.doesNotMatch(recovery.join("\n"), /done|complete/i);
+	h.check("pi-persona-status", recoveryData, "toolSuccessBg", /^Progress resumed · 1 running$/);
+	assert.match(h.card("pi-persona-status", recoveryData, true).render(400).join("\n"), /Async activity · progress resumed/);
+	for (const width of [40, 60, 80, 120]) {
+		for (const data of [stallData, recoveryData]) {
+			const rows = h.card("pi-persona-status", data).render(width);
+			for (const row of rows) assert.ok(visibleWidth(row) <= width, `status width=${width}: spilled ${visibleWidth(row)}`);
+		}
+	}
+
+	// Explicit wait states remain visible ahead of usage counters in the collapsed projection.
+	for (const wait of ["waiting for operator", "waiting for supervisor"] as const) {
+		const waitingRun = asynRun({
+			id: `run-${wait.replaceAll(" ", "-")}`, status: "running",
+			...(wait === "waiting for operator" ? { awaiting: wait } : {}),
+		});
+		const waitingDigest = buildPeekDigest([waitingRun], { now: 5_000, stallMs: 90_000, waitingForSupervisor: new Set([waitingRun.id]) });
+		const waitingContent = `Async activity · routine check-in\n\n${waitingDigest}`;
+		const waitingRows = h.card("pi-persona-status", { content: waitingContent }).render(120).join("\n");
+		assert.match(waitingRows, new RegExp(`\\b${wait} · 53 turns · 216k cumulative input \\+ output tokens`));
+	}
 
 	// A settled leg inside the digest keeps its own compact shape.
 	const settled = buildPeekDigest([asynRun({ id: "run-c", label: "old", model: "haiku", result: {} as NonNullable<AsyncRun["result"]> })], { now: 30_000, stallMs: 90_000 });
@@ -250,6 +292,77 @@ test("status drift-guard: compact projection matches the live buildPeekDigest/bu
 	const settledRows = h.card("pi-persona-status", { content: `Async activity · routine check-in\n\n${settled}` }).render(120).join("\n").split("\n").map((line) => line.trimEnd());
 	assert.equal(settledRows[0], "Status · 0 running");
 	assert.equal(settledRows[1], "  old · haiku · done · 12s");
+});
+
+test("status cards split clipped signals into complete run blocks and count omitted runs", () => {
+	const h = harness();
+	const label = "very-long-research-agent-alias";
+	const model = "sonnet";
+	const displayName = `${label} · ${model}`;
+	const signalRows = (content: string, kind: string | undefined, width: number) => {
+		const rows = h.card("pi-persona-status", { content, ...(kind ? { kind } : {}) }).render(width).map((line) => line.trimEnd());
+		return rows.slice(1).filter((line) => !/expand/i.test(line));
+	};
+
+	const stalled = asynRun({ id: "run-long-stall", label, model, status: "running", lastAdvanceAt: 0 });
+	const stallContent = buildCheckIn([stalled], { now: 95_000, stallMs: 90_000, reason: "stall" });
+	for (const width of [40, 60]) {
+		const body = signalRows(stallContent, "stall", width);
+		assert.equal(body.length, 2, `width=${width}: the signal stays a complete two-row block`);
+		assert.doesNotMatch(body[0] ?? "", /no observed progress/);
+		assert.match(body[1] ?? "", /no observed progress for 95s/);
+	}
+	const wideStall = signalRows(stallContent, "stall", 80);
+	assert.equal(wideStall.length, 1, "the row stays single-line when name and reason fit");
+	assert.ok((wideStall[0] ?? "").includes(`${displayName} · no observed progress for 95s`));
+
+	const resumed = asynRun({
+		id: "run-long-recovery", label, model, status: "running",
+		progress: { output: "", turns: 54, tokens: 217_000 }, lastAdvanceAt: 90_000,
+	});
+	const recoveryContent = buildCheckIn([resumed], { now: 95_000, stallMs: 90_000, reason: "recovery" });
+	for (const width of [40, 60]) {
+		const body = signalRows(recoveryContent, "recovery", width);
+		const signalWouldClip = visibleWidth(`${displayName} · progress resumed`) >= width - 2;
+		assert.equal(body.length, signalWouldClip ? 2 : 1, `width=${width}: only split when the signal would be clipped`);
+		assert.match(body.at(-1) ?? "", /progress resumed/);
+	}
+	const wideRecovery = signalRows(recoveryContent, "recovery", 80);
+	assert.equal(wideRecovery.length, 1);
+	assert.ok((wideRecovery[0] ?? "").includes(`${displayName} · progress resumed · 54 turns`));
+
+	const waiting = asynRun({ id: "run-long-wait", label, model, status: "running", awaiting: "waiting for operator" });
+	const waitingContent = `Async activity · routine check-in\n\n${buildPeekDigest([waiting], { now: 95_000, stallMs: 90_000 })}`;
+	const waitingBody = signalRows(waitingContent, undefined, 40);
+	assert.equal(waitingBody.length, 2);
+	assert.match(waitingBody[1] ?? "", /^  waiting for operator · 53 turns/);
+
+	const queued = asynRun({ id: "run-long-queued", label, model, status: "running", queued: true, progress: { output: "", turns: 0, tokens: 0 } });
+	const queuedContent = `Async activity · routine check-in\n\n${buildPeekDigest([queued], { now: 95_000, stallMs: 90_000 })}`;
+	const queuedBody = signalRows(queuedContent, undefined, 40);
+	assert.equal(queuedBody.length, 2);
+	assert.match(queuedBody[1] ?? "", /^  queued/);
+
+	const manyStalled = Array.from({ length: 5 }, (_, index) => asynRun({
+		id: `run-crowded-${index + 1}`, label: `${label}-${index + 1}`, model,
+		status: "running", lastAdvanceAt: 0,
+	}));
+	const crowdedContent = buildCheckIn(manyStalled, { now: 95_000, stallMs: 90_000, reason: "stall" });
+	for (const [width, expectedMore] of [[40, 4], [60, 4], [80, 2]] as const) {
+		const body = signalRows(crowdedContent, "stall", width);
+		assert.ok(body.length <= 4, `width=${width}: bounded preview (${body.length})`);
+		assert.match(body.at(-1) ?? "", new RegExp(`… \\+${expectedMore} more`));
+		if (width < 80) {
+			assert.equal(body.length, 3, "one complete two-row signal block plus the omitted-run count");
+			assert.match(body[1] ?? "", /no observed progress for 95s/);
+			assert.doesNotMatch(body.join("\n"), /very-long-research-agent-alias-2/);
+		} else {
+			assert.match(body.join("\n"), /very-long-research-agent-alias-2/);
+		}
+	}
+	const expanded = h.card("pi-persona-status", { content: crowdedContent, kind: "stall" }, true).render(400).join("\n");
+	assert.match(expanded, /\[run-crowded-5\]/, "expanded view retains every run in the full digest");
+	assert.match(expanded, /Cumulative tokens show/, "expanded view retains the complete generated report");
 });
 
 test("unknown shapes fall back to the bounded generic preview — never a crash or an empty card", () => {

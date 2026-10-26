@@ -16,6 +16,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Routine async status cards are off by default; live rows and F9 retain ongoing progress.
+  Stall warnings show the observed quiet duration, and a genuine progress resume is reported once
+  per episode. Long names cannot crowd the warning or waiting reason out of narrow cards.
+  Episode cards replace coincident opt-in routine updates instead of duplicating them.
+- The missing-judge regression test now checks `params.judge` literally, removing the ineffective
+  regular-expression escape flagged by CodeQL #15.
 - Intercom archive reads show their result reference in the call card and label the bounded text
   range in UTF-16 units rather than presenting text offsets as page numbers.
 - Intercom distinguishes unknown bus handles from full inboxes, explains the exact addresses used

@@ -562,17 +562,19 @@ export function buildPeekDigest(runs: AsyncRun[], opts?: { now?: number; stallMs
  * Turns the periodic peek from a poll into an EXCEPTION signal. Tracks which running legs have already
  * been surfaced as stalled, so the operator is told ONCE when a leg crosses the stall window — never
  * every tick while it stays stalled, and never at all while it is making progress. A leg that advances
- * again (its `lastAdvanceAt` moves) re-arms, so a later stall re-alerts; legs that leave the list are
- * forgotten. Pure w.r.t. the injected `now`, so it is unit-tested without a real clock.
+ * again (its `lastAdvanceAt` moves) re-arms, so a later stall re-alerts. A previously reported leg
+ * that advances and is currently healthy also reports ONE recovery. Excluded/removed legs are
+ * forgotten without recovery. Pure w.r.t. the injected `now`, so it is unit-tested without a real clock.
  */
 export class PeekWatcher {
 	/** runId → the `lastAdvanceAt` value at which the operator episode was reported. */
 	private readonly reportedAt = new Map<string, number>();
 
-	/** The running legs that have NEWLY crossed the stall window since we last reported them. */
-	poll(runs: AsyncRun[], now: number, stallMs: number, waitingForSupervisor: ReadonlySet<string> = new Set()): AsyncRun[] {
+	/** New stall episodes and genuine progress resumes; neither collection repeats every tick. */
+	poll(runs: AsyncRun[], now: number, stallMs: number, waitingForSupervisor: ReadonlySet<string> = new Set()): { stalled: AsyncRun[]; recovered: AsyncRun[] } {
 		const live = new Set<string>();
-		const newlyStuck: AsyncRun[] = [];
+		const stalled: AsyncRun[] = [];
+		const recovered: AsyncRun[] = [];
 		for (const r of runs) {
 			if (r.status !== "running") continue;
 			live.add(r.id);
@@ -586,14 +588,18 @@ export class PeekWatcher {
 			}
 			if (r.lastAdvanceAt === undefined) continue;
 			const prev = this.reportedAt.get(r.id);
-			if (prev !== undefined && r.lastAdvanceAt > prev) this.reportedAt.delete(r.id); // advanced ⇒ re-arm
-			if (isAsyncRunStalled(r, now, stallMs) && !this.reportedAt.has(r.id)) {
+			const isStalled = isAsyncRunStalled(r, now, stallMs);
+			if (prev !== undefined && r.lastAdvanceAt > prev) {
+				this.reportedAt.delete(r.id); // advanced ⇒ re-arm, even if it has already stalled again
+				if (!isStalled) recovered.push(r);
+			}
+			if (isStalled && !this.reportedAt.has(r.id)) {
 				this.reportedAt.set(r.id, r.lastAdvanceAt);
-				newlyStuck.push(r);
+				stalled.push(r);
 			}
 		}
 		for (const id of [...this.reportedAt.keys()]) if (!live.has(id)) this.reportedAt.delete(id);
-		return newlyStuck;
+		return { stalled, recovered };
 	}
 
 	/** Forget all tracked state (session start / reload hygiene). */
@@ -602,10 +608,11 @@ export class PeekWatcher {
 	}
 }
 
-/** The operator-only periodic status card. It carries the progress digest without model instructions. */
-export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number; waitingForSupervisor?: ReadonlySet<string>; reason?: "routine" | "stall" }): string {
+/** An operator-only routine or episode card. It carries the progress digest without model instructions. */
+export function buildCheckIn(runs: AsyncRun[], opts: { now: number; stallMs: number; waitingForSupervisor?: ReadonlySet<string>; reason?: "routine" | "stall" | "recovery" }): string {
 	const reason = opts.reason ?? "routine";
-	return `Async activity · ${reason === "stall" ? "possible stall" : "routine check-in"}\n\n${buildPeekDigest(runs, opts)}`;
+	const label = reason === "stall" ? "possible stall" : reason === "recovery" ? "progress resumed" : "routine check-in";
+	return `Async activity · ${label}\n\n${buildPeekDigest(runs, opts)}`;
 }
 
 /**

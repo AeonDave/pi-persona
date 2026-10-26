@@ -49,7 +49,7 @@ import { MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS } from "../../src/to
 import { parseTelemetryEvent } from "../../src/telemetry/contract.ts";
 import { makeEngine as makeThinkingChildEngine, type EngineAdapterDeps } from "../../src/engine/adapter.ts";
 import { makeInProcessEngine as makeThinkingInProcEngine, type InProcessDeps } from "../../src/engine/inproc.ts";
-import { emptyUsage } from "../../src/engine/stream.ts";
+import { emptyUsage, type ProgressSnapshot } from "../../src/engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../../src/orchestration/sdk.ts";
 import { InProcessBus } from "../../src/bus/inproc.ts";
 import { makeBrokerClient } from "../../src/bus/broker/client.ts";
@@ -5287,7 +5287,7 @@ test("custom session cards use semantic backgrounds and glyph-free headers witho
 		{ type: "pi-persona", message: true, data: { content: "Monitor events — observed data\n> process exited with exit code 0" }, bg: "customMessageBg", status: "info" },
 		{ type: "exocom_received", message: true, data: { content: "ERROR: peer says complete" }, bg: "customMessageBg", status: "inbound" },
 		{ type: "pi-persona-nudge", message: false, data: { content: "⟢ pi-persona · checkpoint\nTrigger: local work\nAction: hand off" }, bg: "toolPendingBg", status: "Checkpoint" },
-		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "Stall" },
+		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "Stall warning" },
 		{ type: "pi-persona-result", message: false, data: { label: "flow", content: "error in child prose", ok: true }, bg: "toolSuccessBg", status: "complete" },
 		{ type: "pi-persona-run-failure", message: false, data: { id: "r1", label: "worker", agent: "scout", error: "diagnostic" }, bg: "toolErrorBg", status: "Failed" },
 	];
@@ -6858,11 +6858,12 @@ test("a delegation checkpoint stays in model context and gets a durable visible 
 	assert.match(expanded, /Keep local: quick checks or coupled\/session-bound work/);
 });
 
-test("routine async check-ins append expandable operator entries without starting model turns", async () => {
+for (const routineEnabled of [false, true]) test(`routine async check-ins are ${routineEnabled ? "explicitly enabled" : "silent by default"} without starting model turns`, async () => {
 	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
 	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
-	process.env.PI_PERSONA_CHECKIN_MS = "300000";
-	process.env.PI_PERSONA_PEEK_MS = "0";
+	if (routineEnabled) process.env.PI_PERSONA_CHECKIN_MS = "300000";
+	else delete process.env.PI_PERSONA_CHECKIN_MS;
+	process.env.PI_PERSONA_PEEK_MS = routineEnabled ? "0" : "30000";
 	let now = 1_000_000;
 	const clock = mock.method(Date, "now", () => now);
 	const intervals: Array<{ ms: number; tick: () => void }> = [];
@@ -6875,6 +6876,7 @@ test("routine async check-ins append expandable operator entries without startin
 	let releaseRun!: () => void;
 	let resolveRunFinished!: () => void;
 	let runStarted = false;
+	let advance: ((progress: ProgressSnapshot) => void) | undefined;
 	const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
 	const runFinished = new Promise<void>((resolve) => { resolveRunFinished = resolve; });
 	const engine: StrategyEngine = {
@@ -6886,7 +6888,7 @@ test("routine async check-ins append expandable operator entries without startin
 		},
 	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	piPersona(m.pi, { engineFactories: { makeEngine: (deps) => { advance = deps.childOptions?.onProgress; return engine; }, makeInProcessEngine: (deps) => { advance = deps.onProgress; return engine; } } });
 	const ctx = makeCtx(tempDir("pi-persona-checkin-entry-"), { hasUI: true }).ctx;
 	let sessionStarted = false;
 	try {
@@ -6896,17 +6898,20 @@ test("routine async check-ins append expandable operator entries without startin
 		await delegate.execute("checkin-run", { agent: "scout", name: "quiet-scout", task: "continue working" }, undefined, undefined, ctx);
 		for (let i = 0; i < 10 && !runStarted; i++) await Promise.resolve();
 		assert.equal(runStarted, true, "the asynchronous test leg remains live across check-in ticks");
-		const tick = intervals.find((interval) => interval.ms === 300_000)?.tick;
-		assert.ok(tick, "the normal five-minute routine cadence is armed");
+		const tick = intervals.find((interval) => interval.ms === (routineEnabled ? 300_000 : 30_000))?.tick;
+		assert.ok(tick, "the opt-in routine cadence or default watchdog remains armed");
 
 		now += 300_000;
+		advance?.({ output: "working", turns: 1, tokens: 5 });
 		tick();
 		now += 300_000;
+		advance?.({ output: "working further", turns: 2, tokens: 10 });
 		tick();
 
 		const checkIns = m.entries().filter((entry) => entry.customType === "pi-persona-status");
 		assert.equal(m.sentMessages().length, 0, "routine status does not enter the model conversation or trigger a turn");
-		assert.equal(checkIns.length, 2, "every due cadence remains visible and durable, including a repeated snapshot");
+		assert.equal(checkIns.length, routineEnabled ? 2 : 0, "healthy progress adds transcript cards only when explicitly requested");
+		if (!routineEnabled) return;
 		const content = (checkIns[0]?.data as { content?: string } | undefined)?.content ?? "";
 		assert.match(content, /quiet-scout/, "the human-selected run alias is preserved");
 		assert.match(content, /cumulative input \+ output tokens/i, "the digest labels cumulative usage clearly");
@@ -6917,7 +6922,7 @@ test("routine async check-ins append expandable operator entries without startin
 		const collapsed = renderComponent(renderer(checkIns[0], { expanded: false }, traceTheme));
 		assert.match(collapsed, /Status · 1 running/);
 		assert.match(collapsed, /quiet-scout/);
-		assert.match(collapsed, /quiet-scout · 0 cumulative input \+ output tokens/i, "the compact per-run projection preserves the cumulative usage meaning");
+		assert.match(collapsed, /quiet-scout · 1 turns · 5 cumulative input \+ output tokens/i, "the compact per-run projection preserves the cumulative usage meaning");
 		assert.match(collapsed, /expand/i);
 		const expanded = renderComponent(renderer(checkIns[0], { expanded: true }, traceTheme));
 		assert.match(expanded, /cumulative input \+ output tokens/i);
@@ -6936,7 +6941,7 @@ test("routine async check-ins append expandable operator entries without startin
 	}
 });
 
-test("interactive first stall appends a warning entry without a model wake", async () => {
+test("stall and recovery episodes replace coincident routine entries without model wakes", async () => {
 	const previousCheckInMs = process.env.PI_PERSONA_CHECKIN_MS;
 	const previousPeekMs = process.env.PI_PERSONA_PEEK_MS;
 	process.env.PI_PERSONA_CHECKIN_MS = "300000";
@@ -6953,6 +6958,7 @@ test("interactive first stall appends a warning entry without a model wake", asy
 	let releaseRun!: () => void;
 	let resolveRunFinished!: () => void;
 	let runStarted = false;
+	let advance: ((progress: ProgressSnapshot) => void) | undefined;
 	const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
 	const runFinished = new Promise<void>((resolve) => { resolveRunFinished = resolve; });
 	const engine: StrategyEngine = {
@@ -6964,7 +6970,7 @@ test("interactive first stall appends a warning entry without a model wake", asy
 		},
 	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	piPersona(m.pi, { engineFactories: { makeEngine: (deps) => { advance = deps.childOptions?.onProgress; return engine; }, makeInProcessEngine: (deps) => { advance = deps.onProgress; return engine; } } });
 	const base = makeCtx(tempDir("pi-persona-checkin-busy-")).ctx;
 	const ctx = { ...base, hasUI: true, isIdle: () => true, hasPendingMessages: () => false };
 	let sessionStarted = false;
@@ -6981,13 +6987,27 @@ test("interactive first stall appends a warning entry without a model wake", asy
 		now += 300_000;
 		tick();
 		const statuses = m.entries().filter((entry) => entry.customType === "pi-persona-status");
-		assert.equal(statuses.length, 2, "the stall episode and due routine status are durable operator entries");
+		assert.equal(statuses.length, 1, "the stall episode replaces a coincident routine card");
 		assert.equal((statuses[0]?.data as { kind?: string }).kind, "stall");
 		assert.match(String((statuses[0]?.data as { content?: string }).content ?? ""), /possible stall/);
 		const renderer = m.entryRenderer("pi-persona-status");
 		assert.ok(renderer);
-		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /Stall · 1 running/i, "stall entries use warning-specific UI chrome");
+		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /Stall warning · 1 running/i, "stall entries use warning-specific UI chrome");
 		assert.equal(m.sentMessages().length, 0, "interactive stall detection never creates a model wake");
+		now += 30_000;
+		tick();
+		assert.equal(m.entries().filter((entry) => entry.customType === "pi-persona-status").length, 1, "an unchanged stall does not repeat");
+		now += 270_000; // recovery and the next opted-in routine card coincide
+		advance?.({ output: "work resumed", turns: 1, tokens: 10 });
+		tick();
+		const episodes = m.entries().filter((entry) => entry.customType === "pi-persona-status");
+		assert.deepEqual(episodes.map((entry) => (entry.data as { kind: string }).kind), ["stall", "recovery"]);
+		assert.match(renderComponent(renderer(episodes[1]!, { expanded: false }, traceTheme)), /Progress resumed · 1 running/i);
+		now += 30_000;
+		advance?.({ output: "work continues", turns: 2, tokens: 20 });
+		tick();
+		assert.equal(m.entries().filter((entry) => entry.customType === "pi-persona-status").length, 2, "recovery is reported once per episode");
+		assert.equal(m.sentMessages().length, 0, "episode transitions never create a model wake");
 	} finally {
 		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);
 		releaseRun();
@@ -7065,7 +7085,7 @@ test("the peek tick survives unavailable status sinks and still wakes for an unr
 		assert.doesNotThrow(tick, "unavailable status sinks cannot abort the actionable wake");
 		stderrMock.mock.restore();
 		stderrMock = undefined;
-		assert.equal(statusAttempts, 2, "both the stall episode and the routine card hit the failing sink");
+		assert.equal(statusAttempts, 1, "a failing episode sink does not trigger a duplicate routine attempt");
 		assert.equal(m.sentMessages().length, 1, "only the unread worker message wakes the model");
 		const wake = String((m.sentMessages()[0]?.message as { content?: string } | undefined)?.content ?? "");
 		assert.match(wake, /from sub-agents/);

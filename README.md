@@ -79,9 +79,11 @@ can inspect, redirect, or stop a run at any point. Results return automatically 
 the model is told to end its turn rather than sleep, poll, or arm a timer to wait. Headless `pi -p`
 blocks for the single turn and returns results inline.
 
-Periodic async status appears as a durable, expandable operator-only card (five minutes by default); it
-does not start a model turn or enter model context. Completions, blocking asks, and unread worker
-messages wake the supervisor; a stalled worker appears only as an operator card.
+Ordinary progress updates the live agent rows and F9 without adding periodic chat cards.
+A stall warning shows how long no progress was observed; a later progress-resumed card closes that
+episode. These operator-only cards do not start a model turn or enter model context. Periodic status
+cards are opt-in through the progress check-in interval in `/persona-settings` (off by default).
+Completions, blocking asks, and unread worker messages keep their supervisor wake paths.
 
 Launch and control cards show the worker's name. Steering receipts preview the message sent;
 expand with `Ctrl+O` (the default binding) to read it in full. A queued message is not proof that
