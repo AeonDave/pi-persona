@@ -17,13 +17,16 @@ test("the settings registry covers every public config value except process and 
 		"childThinking", "engine", "peekEveryMs", "checkInEveryMs", "agentHardTimeoutMs",
 		"agentStartupTimeoutMs", "nudge", "broker", "exocom", "asyncRetain", "ledgerV2",
 		"spine", "spineLegs", "changeReport", "mindCapture", "mindNudge", "flowEnabled",
-		"flowPort", "flowIdleMs",
+		"flowPort", "flowIdleMs", "idleCompaction", "idleCompactionMinutes", "idleCompactionThresholdPercent",
 	].sort();
 	assert.deepEqual(PERSONA_SETTINGS.map((setting) => setting.id).sort(), expected);
 	assert.ok(PERSONA_SETTINGS.every((setting) => setting.group && setting.label && setting.description));
 	assert.ok(PERSONA_SETTINGS.filter((setting) => setting.id !== "flowEnabled").every((setting) => setting.env?.startsWith("PI_PERSONA_")));
 	assert.ok(PERSONA_SETTINGS.every((setting) => setting.applyWhen.length > 0));
-	assert.equal(PERSONA_SETTINGS.length, 25);
+	assert.equal(PERSONA_SETTINGS.length, 28);
+	assert.deepEqual(PERSONA_SETTINGS.filter((setting) => setting.group === "Context").map(({ id }) => id).sort(), [
+		"idleCompaction", "idleCompactionMinutes", "idleCompactionThresholdPercent",
+	].sort());
 	assert.deepEqual(PERSONA_SETTINGS.filter((setting) => setting.owner === "mind").map(({ id }) => id).sort(), ["mindCapture", "mindNudge"]);
 	assert.deepEqual(PERSONA_SETTINGS.filter((setting) => setting.owner === "flow").map(({ id }) => id).sort(), ["flowEnabled", "flowIdleMs", "flowPort"]);
 	assert.match(PERSONA_SETTINGS.find(({ id }) => id === "flowPort")?.applyWhen ?? "", /next shared-service start.*existing service is unchanged/i);
@@ -82,6 +85,9 @@ test("preference validation rejects unknown keys and invalid values instead of s
 	assert.throws(() => validatePreferences({ peekEveryMs: 2_147_483_648 }), /peekEveryMs/i);
 	assert.throws(() => validatePreferences({ keybinding: "   " }), /keybinding/i);
 	assert.throws(() => validatePreferences({ defaultPersona: "   " }), /defaultPersona/i);
+	assert.throws(() => validatePreferences({ idleCompaction: "on" }), /idleCompaction/i);
+	for (const value of [0, 1441, 15.5]) assert.throws(() => validatePreferences({ idleCompactionMinutes: value }), /idleCompactionMinutes/i);
+	for (const value of [0, 101, 40.5]) assert.throws(() => validatePreferences({ idleCompactionThresholdPercent: value }), /idleCompactionThresholdPercent/i);
 });
 
 test("saved preferences apply over defaults while explicit environment variables keep precedence", () => {
@@ -91,6 +97,9 @@ test("saved preferences apply over defaults while explicit environment variables
 		defaultPersona: "saved-persona",
 		engine: "child" as const,
 		spine: "D:\\Prompts\\Main.MD",
+		idleCompaction: true,
+		idleCompactionMinutes: 60,
+		idleCompactionThresholdPercent: 75,
 	};
 	const config = resolvePersonaConfig(preferences, {
 		PI_PERSONA_PERSIST: "on",
@@ -103,6 +112,28 @@ test("saved preferences apply over defaults while explicit environment variables
 	assert.equal(config.engine, "inproc");
 	assert.equal(config.spine, "D:\\Prompts\\Main.MD");
 	assert.equal(config.spineLegs, "D:\\Prompts\\Main.MD", "saved spine selection keeps the established legs-follow rule");
+	assert.equal(config.idleCompaction, true, "saved value applies without an environment pin");
+	assert.equal(config.idleCompactionMinutes, 60);
+	assert.equal(config.idleCompactionThresholdPercent, 75);
+	const envPinned = resolvePersonaConfig(preferences, {
+		PI_PERSONA_IDLE_COMPACTION: "off",
+		PI_PERSONA_IDLE_COMPACTION_MINUTES: "30",
+		PI_PERSONA_IDLE_COMPACTION_PERCENT: "50",
+	});
+	assert.equal(envPinned.idleCompaction, false);
+	assert.equal(envPinned.idleCompactionMinutes, 30);
+	assert.equal(envPinned.idleCompactionThresholdPercent, 50);
+	const invalidEnvPinned = resolvePersonaConfig(preferences, {
+		PI_PERSONA_IDLE_COMPACTION: "invalid",
+		PI_PERSONA_IDLE_COMPACTION_MINUTES: "1441",
+		PI_PERSONA_IDLE_COMPACTION_PERCENT: "101",
+	});
+	assert.equal(invalidEnvPinned.idleCompaction, false, "invalid env disables rather than reviving saved opt-in");
+	assert.equal(invalidEnvPinned.idleCompactionMinutes, 15, "invalid env selects default rather than saved minutes");
+	assert.equal(invalidEnvPinned.idleCompactionThresholdPercent, 40, "invalid env selects default rather than saved threshold");
+	assert.equal(settingHasEnvironmentOverride("idleCompaction", { PI_PERSONA_IDLE_COMPACTION: "invalid" }), true);
+	assert.equal(settingHasEnvironmentOverride("idleCompactionMinutes", { PI_PERSONA_IDLE_COMPACTION_MINUTES: "1441" }), true);
+	assert.equal(settingHasEnvironmentOverride("idleCompactionThresholdPercent", { PI_PERSONA_IDLE_COMPACTION_PERCENT: "101" }), true);
 });
 
 test("companion values resolve saved preferences and current extension environment grammar", () => {
@@ -232,4 +263,11 @@ test("setting input parsing follows each registry entry kind and bounds", () => 
 	assert.throws(() => parseSettingInput(setting("peekEveryMs"), "-1"), /peekEveryMs/i);
 	assert.throws(() => parseSettingInput(setting("peekEveryMs"), ""), /peekEveryMs/i);
 	assert.throws(() => parseSettingInput(setting("agentStartupTimeoutMs"), "2147483648"), /agentStartupTimeoutMs/i);
+	assert.equal(parseSettingInput(setting("idleCompaction"), "on"), true);
+	assert.equal(parseSettingInput(setting("idleCompactionMinutes"), "1440"), 1440);
+	assert.equal(parseSettingInput(setting("idleCompactionThresholdPercent"), "100"), 100);
+	assert.throws(() => parseSettingInput(setting("idleCompactionMinutes"), "0"), /idleCompactionMinutes/i);
+	assert.throws(() => parseSettingInput(setting("idleCompactionMinutes"), "1441"), /idleCompactionMinutes/i);
+	assert.throws(() => parseSettingInput(setting("idleCompactionThresholdPercent"), "0"), /idleCompactionThresholdPercent/i);
+	assert.throws(() => parseSettingInput(setting("idleCompactionThresholdPercent"), "101"), /idleCompactionThresholdPercent/i);
 });

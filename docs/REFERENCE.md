@@ -292,7 +292,8 @@ The sole active settings file is `<agentDir>/persona/settings.json` (normally
 
 `preferences` contains the public extension settings; `personas.<name>.models` preserves
 provider-qualified model assignments, and `lastPersona` remembers the selection when
-`PI_PERSONA_PERSIST` is enabled. The preference registry groups all editable scalar settings as:
+`PI_PERSONA_PERSIST` is enabled. The preference registry groups scalar settings as follows; the
+Context group is currently unavailable pending host qualification:
 
 | Group | Preference IDs |
 |---|---|
@@ -301,6 +302,7 @@ provider-qualified model assignments, and `lastPersona` remembers the selection 
 | Interface | `keybinding` |
 | Delegation | `delegateDefaultAllow`, `childThinking`, `engine`, `peekEveryMs`, `checkInEveryMs`, `agentHardTimeoutMs`, `agentStartupTimeoutMs`, `nudge`, `asyncRetain`, `ledgerV2`, `changeReport` |
 | Collaboration | `broker`, `exocom` |
+| Context (unavailable) | `idleCompaction`, `idleCompactionMinutes`, `idleCompactionThresholdPercent` |
 | Prompt | `spine`, `spineLegs` |
 | Mind (when loaded) | `mindCapture` (`auto`/`prompt`/`off`), `mindNudge` |
 | Flow (when loaded) | `flowEnabled`, `flowPort`, `flowIdleMs` |
@@ -315,6 +317,14 @@ The editor never reloads Pi automatically. Scalar preferences load after a Pi re
 persona definitions and does not apply preference changes. The panel shows when a saved value is
 pending reload. Model assignments are read by the
 existing resolver for future runs, so they do not alter workers already running.
+
+**Idle compaction is blocked on the current Pi host.** The Context group retains its configuration
+and reports why it cannot be activated. Its agreed defaults are off, 15 minutes idle and known
+current context occupancy strictly above 40%, with at most one attempt per idle episode. Neither
+saved preferences nor environment values enable it while blocked; the scheduler and its input and
+compaction hooks are not installed. Restarting, reloading or updating Pi alone does not remove this
+gate. A future Persona update must first qualify the upstream fix and integration scenarios.
+Pi's own compaction settings and manual `/compact` retain their existing behavior.
 
 Mind and Flow report their supported settings through Pi's public event bus; the panel does not import
 or require either plugin. Their preferences live in the same `preferences` object above, not in new

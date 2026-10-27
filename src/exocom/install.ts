@@ -19,7 +19,6 @@ import { type InstanceDescriptor, type PeerDescriptor } from "../telemetry/contr
 import type { TelemetryProducer } from "../telemetry/producer.ts";
 import {
 	boundExocomInboundBatch,
-	canDeliverPersonaNotification,
 	EXOCOM_INBOX_MAX,
 	exocomInboundBatchSize,
 	exocomInboundDisposition,
@@ -68,8 +67,8 @@ export interface ExocomHost {
 	readonly controller: PersonaController;
 	get lastCtx(): ExtensionContext | undefined;
 	get disposed(): boolean;
-	get orchestrating(): boolean;
-	get processingDeferredOrchestration(): boolean;
+	/** Shared supervisor admission gate, including orchestration and owned compaction. */
+	canDeliverNotifications(): boolean;
 	get telemetry(): TelemetryProducer | undefined;
 	readonly delegationNudge: DelegationNudge;
 	readonly exocomArgs: ExocomArgSelection;
@@ -411,7 +410,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
 			exocomLedgerFile = ledgerPath(agentDir, hash);
 			exocomWaitNotifier = new IdleCoalescingNotifier<string>({
-				isIdle: () => canDeliverPersonaNotification(host.orchestrating, host.processingDeferredOrchestration, host.lastCtx?.isIdle() === true),
+				isIdle: () => host.canDeliverNotifications(),
 				deliver: (message) => sendPersonaFollowUp(pi, message, "pi-persona"),
 				render: (items) => items.join("\n\n"),
 				setTimer: (fn, ms) => { const h = setTimeout(fn, ms); h.unref?.(); return h; },
@@ -422,7 +421,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
 			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
 			exocomNotifier = new IdleCoalescingNotifier<string>({
-				isIdle: () => canDeliverPersonaNotification(host.orchestrating, host.processingDeferredOrchestration, host.lastCtx?.isIdle() === true),
+				isIdle: () => host.canDeliverNotifications(),
 				deliver: (message) => sendPersonaFollowUp(pi, message, "exocom_received"),
 				// A burst of independent peers must not turn one idle wake into an unbounded model
 				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;

@@ -136,6 +136,39 @@ test("registers only /persona-settings and show is deterministic, read-only, and
 	assert.ok(report.indexOf("extraDirs:") < report.indexOf("engine:"), "registry order is stable in the report");
 });
 
+test("blocked idle compaction reports effective Off even with saved or environment opt-in", async () => {
+	for (const env of [{}, { PI_PERSONA_IDLE_COMPACTION: "on" }]) {
+		const harness = makeHarness({ preferences: { idleCompaction: true }, env });
+		await command(harness).handler("show", makeContext({ notices: harness.notices }));
+		const line = harness.notices[0]!.message.split("\n").find((value) => value.startsWith("idleCompaction:"));
+		assert.match(line ?? "", /active=Off; saved=On/);
+		assert.match(line ?? "", /Unavailable: waiting for a qualified upstream Pi/);
+		assert.doesNotMatch(line ?? "", /pending \/reload/);
+	}
+});
+
+test("blocked Context setting rejects an edit without prompting or saving", async () => {
+	const harness = makeHarness();
+	const choices = ["Idle compaction [idleCompaction] · Off", "Edit", "Close"];
+	await command(harness).handler("", makeContext({
+		notices: harness.notices,
+		select: async () => choices.shift(),
+		input: async () => { throw new Error("unavailable preference must not prompt"); },
+	}));
+	assert.equal(harness.writeCalls.length, 0);
+	assert.ok(harness.notices.some(({ message }) => /Cannot edit.*Unavailable:.*upstream Pi/.test(message)));
+});
+
+test("clearing a blocked request preserves the effective Off state and does not promise reload activation", async () => {
+	const harness = makeHarness({ preferences: { idleCompaction: true } });
+	const choices = ["Idle compaction [idleCompaction] · Off", "Reset saved override", "Close"];
+	await command(harness).handler("", makeContext({ notices: harness.notices, select: async () => choices.shift() }));
+	assert.deepEqual(harness.writeCalls, [{ preferences: { idleCompaction: null } }]);
+	const message = harness.notices.find(({ message }) => message.startsWith("Saved override removed"))?.message;
+	assert.match(message ?? "", /Unavailable:.*upstream Pi/);
+	assert.doesNotMatch(message ?? "", /\/reload/);
+});
+
 test("TUI opens the full-page component without overlay options and reuses the Models callback", async () => {
 	const harness = makeHarness();
 	const commandDef = command(harness);

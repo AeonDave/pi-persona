@@ -2,6 +2,7 @@
 
 import { isThinkingLevel } from "./types.ts";
 import { resolveConfig, type PiPersonaConfig } from "./config.ts";
+import { IDLE_COMPACTION_QUALIFICATION } from "./idle-compaction-qualification.ts";
 
 export type CompanionId = "mind" | "flow";
 
@@ -30,6 +31,10 @@ export interface PersonaSetting {
 	readonly owner?: CompanionId;
 	readonly min?: number;
 	readonly max?: number;
+	/** Visible, read-only setting whose runtime cannot currently be enabled. */
+	readonly unavailableReason?: string;
+	/** Effective display value when the runtime is unavailable (the request stays saved). */
+	readonly unavailableValue?: unknown;
 }
 
 const APPLY_WHEN = "next Pi restart or native extension reload";
@@ -55,6 +60,9 @@ export const PERSONA_SETTINGS: readonly PersonaSetting[] = [
 	{ id: "exocom", group: "Collaboration", label: "External agent communication", description: "Enable communication between independent top-level Pi instances.", kind: "boolean", env: "PI_PERSONA_EXOCOM", applyWhen: APPLY_WHEN },
 	{ id: "asyncRetain", group: "Delegation", label: "Retained async results", description: "Number of settled async runs retained for later collection.", kind: "number", env: "PI_PERSONA_ASYNC_RETAIN", applyWhen: APPLY_WHEN, min: 1, max: MAX_SAFE_INTEGER },
 	{ id: "ledgerV2", group: "Delegation", label: "Expanded retry-loop identity", description: "Include role, tools, and isolation in the repeated-delegation guard key.", kind: "boolean", env: "PI_PERSONA_LEDGER_V2", applyWhen: APPLY_WHEN },
+	{ id: "idleCompaction", group: "Context", label: "Idle compaction", description: "Native idle compaction is disabled pending an upstream Pi fix and release qualification.", kind: "boolean", env: "PI_PERSONA_IDLE_COMPACTION", applyWhen: "future qualified Persona release only", ...idleCompactionAvailability(), unavailableValue: false },
+	{ id: "idleCompactionMinutes", group: "Context", label: "Idle period (minutes)", description: "Minutes idle before checking whether to compact (default 15; 1–1440). Currently unavailable.", kind: "number", env: "PI_PERSONA_IDLE_COMPACTION_MINUTES", applyWhen: "future qualified Persona release only", min: 1, max: 1440, ...idleCompactionAvailability() },
+	{ id: "idleCompactionThresholdPercent", group: "Context", label: "Context threshold (%)", description: "Attempt only when known current context usage is strictly above this value (default 40%; 1–100). Currently unavailable.", kind: "number", env: "PI_PERSONA_IDLE_COMPACTION_PERCENT", applyWhen: "future qualified Persona release only", min: 1, max: 100, ...idleCompactionAvailability() },
 	{ id: "spine", group: "Prompt", label: "Supervisor spine", description: "Shared prompt layer for the supervisor: off, on for the bundled layer, or a file path.", kind: "string", env: "PI_PERSONA_SPINE", applyWhen: APPLY_WHEN },
 	{ id: "spineLegs", group: "Prompt", label: "Delegated-leg spine", description: "Prompt layer for delegated agents; follows the supervisor selection unless set separately.", kind: "string", env: "PI_PERSONA_SPINE_LEGS", applyWhen: APPLY_WHEN },
 	{ id: "changeReport", group: "Delegation", label: "Report files changed by agents", description: "Include a git-based changed-files report for non-worktree agent runs.", kind: "boolean", env: "PI_PERSONA_LEG_CHANGE_REPORT", applyWhen: APPLY_WHEN },
@@ -64,6 +72,10 @@ export const PERSONA_SETTINGS: readonly PersonaSetting[] = [
 	{ id: "flowPort", group: "Flow", label: "Flow shared-service port", description: "Desired loopback port; 0 asks the operating system for an available port. Invalid extension environment values fall back to 7874.", kind: "number", env: "PI_PERSONA_FLOW_PORT", owner: "flow", applyWhen: "next shared-service start after Pi restart or native extension reload; an existing service is unchanged", min: 0, max: 65_535 },
 	{ id: "flowIdleMs", group: "Flow", label: "Flow idle grace (advanced)", description: "Milliseconds with no Pi registrations and no browser SSE clients before service shutdown (50–60000). Invalid environment values use 60000 with a Flow warning.", kind: "number", env: "PI_PERSONA_FLOW_IDLE_MS", owner: "flow", applyWhen: "next shared-service start after Pi restart or native extension reload; an existing service is unchanged", min: 50, max: 60_000 },
 ];
+
+function idleCompactionAvailability(): Pick<PersonaSetting, "unavailableReason"> {
+	return IDLE_COMPACTION_QUALIFICATION.qualified ? {} : { unavailableReason: IDLE_COMPACTION_QUALIFICATION.reason };
+}
 
 const SETTING_BY_ID = new Map<SettingId, PersonaSetting>(PERSONA_SETTINGS.map((setting) => [setting.id, setting]));
 

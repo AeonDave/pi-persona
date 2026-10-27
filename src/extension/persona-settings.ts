@@ -70,12 +70,13 @@ function makeSnapshot(deps: PersonaSettingsDeps): SettingsSnapshot {
 			description: setting.description,
 			kind: setting.kind,
 			...(setting.choices ? { choices: setting.choices } : {}),
-			activeValue: active[setting.id],
+			activeValue: setting.unavailableReason && Object.hasOwn(setting, "unavailableValue") ? setting.unavailableValue : active[setting.id],
 			savedValue: hasSavedValue ? saved[setting.id] : undefined,
 			hasSavedValue,
 			source: locked ? "environment" : hasSavedValue ? "saved" : "default",
 			locked,
-			...(!equalSettingValues(setting.id, next[setting.id], active[setting.id]) ? { pendingReload: true } : {}),
+			...(setting.unavailableReason ? { unavailableReason: setting.unavailableReason } :
+				!equalSettingValues(setting.id, next[setting.id], active[setting.id]) ? { pendingReload: true } : {}),
 			applyWhen: setting.applyWhen,
 			...(setting.min !== undefined ? { min: setting.min } : {}),
 			...(setting.max !== undefined ? { max: setting.max } : {}),
@@ -96,7 +97,7 @@ function formatSettingsReport(deps: PersonaSettingsDeps, snapshot = makeSnapshot
 	for (const row of snapshot.rows) {
 		const saved = row.hasSavedValue ? formatSettingValue(row.savedValue) : "none";
 		const env = row.locked ? ` · locked by ${settingById(row.id)?.env ?? "environment"}` : "";
-		const pending = row.pendingReload ? " · pending /reload" : "";
+		const pending = row.unavailableReason ? ` · ${row.unavailableReason}` : row.pendingReload ? " · pending /reload" : "";
 		lines.push(
 			`${row.id}: active=${formatSettingValue(row.activeValue)}; saved=${saved}; source=${row.source}${pending}; applies=${safeText(row.applyWhen, 120)}${env}`,
 		);
@@ -170,6 +171,7 @@ function reportUnavailable(ctx: ExtensionCommandContext): void {
 }
 
 function statusForValue(row: SettingsPanelRow): string {
+	if (row.unavailableReason) return row.unavailableReason;
 	if (row.locked) {
 		const locked = `Environment ${settingById(row.id)?.env ?? "override"} is active and locked.`;
 		return row.pendingReload ? `${locked} The running value differs; use /reload to load it (${row.applyWhen}).` : locked;
@@ -246,6 +248,7 @@ async function resetPreference(
 	}
 	if (!(await writePreference(ctx, deps, row.id, null))) return "The saved override could not be confirmed; reopen settings to verify.";
 	const updated = makeSnapshot(deps).rows.find((candidate) => candidate.id === row.id) ?? row;
+	if (updated.unavailableReason) return `Saved override removed. ${updated.unavailableReason}`;
 	if (updated.locked) {
 		return updated.pendingReload
 			? `Saved override removed. ${settingById(row.id)?.env ?? "Environment"} still controls the next value; the running value differs, so use /reload to load it.`
@@ -265,6 +268,7 @@ async function applySettingAction(
 	const setting = settingById(row.id);
 	if (!setting) return "The selected setting is no longer in the registry.";
 	if (action === "reset") return resetPreference(ctx, deps, row);
+	if (setting.unavailableReason) return `Cannot edit this setting. ${setting.unavailableReason}`;
 	if (activeEnvironmentValue(setting, deps)) return `Cannot edit this setting while ${setting.env ?? "an environment override"} is set.`;
 	let value: unknown | undefined;
 	try {

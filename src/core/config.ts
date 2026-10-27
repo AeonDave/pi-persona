@@ -38,6 +38,13 @@ export interface PiPersonaConfig {
 	 *  independent of the fast stall/message tick. Off by default (0); a positive
 	 *  PI_PERSONA_CHECKIN_MS explicitly enables periodic transcript entries. */
 	checkInEveryMs: number;
+	/** Requested opt-in native context compaction. Hard blocked pending host qualification;
+	 *  this requested value does not imply effective runtime availability. Off by default. */
+	idleCompaction: boolean;
+	/** Idle period before checking whether native context compaction should run (1–1440 minutes). */
+	idleCompactionMinutes: number;
+	/** Known context-window usage must be strictly above this percentage for idle compaction (1–100). */
+	idleCompactionThresholdPercent: number;
 	/** Per-agent hard wall-clock cap (ms): an OPT-IN lifetime ceiling. When set (>0) it settles even
 	 *  a busy-but-non-converging child the idle watchdog (reset on every event) never catches.
 	 *  DISABLED by default (0 = no cap / unlimited) so a healthy, progressing child runs to completion
@@ -143,6 +150,13 @@ function splitDirs(value: string | undefined): string[] {
 		.filter((s) => s.length > 0);
 }
 
+function boundedInteger(value: string | undefined, min: number, max: number): number | undefined {
+	const normalized = value?.trim();
+	if (!normalized || !/^\d+$/.test(normalized)) return undefined;
+	const parsed = Number(normalized);
+	return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : undefined;
+}
+
 export function resolveConfig(env: Env): PiPersonaConfig {
 	const disableFlag = env.PI_PERSONA_DISABLE;
 	const def = env.PI_PERSONA_DEFAULT?.trim();
@@ -165,6 +179,10 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		seed: env.PI_PERSONA_SEED?.trim().toLowerCase() === "on",
 		peekEveryMs: 30_000,
 		checkInEveryMs: 0,
+		// Idle compaction is an explicit opt-in; unknown switch words stay safely off.
+		idleCompaction: ON_WORDS.has(env.PI_PERSONA_IDLE_COMPACTION?.trim().toLowerCase() ?? ""),
+		idleCompactionMinutes: 15,
+		idleCompactionThresholdPercent: 40,
 		// Opt-in: 0 = no hard cap (a healthy child runs to completion). The idle watchdog
 		// (RUN_LIMITS.timeoutMs, reset on progress) + startup deadline + token budget are the
 		// always-on backstops; set PI_PERSONA_AGENT_MAX_MS=<ms> to arm a wall-clock ceiling.
@@ -193,6 +211,10 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		const checkIn = Number(checkInRaw);
 		if (Number.isFinite(checkIn) && checkIn >= 0) config.checkInEveryMs = checkIn;
 	}
+	const idleMinutes = boundedInteger(env.PI_PERSONA_IDLE_COMPACTION_MINUTES, 1, 1440);
+	if (idleMinutes !== undefined) config.idleCompactionMinutes = idleMinutes;
+	const idleThreshold = boundedInteger(env.PI_PERSONA_IDLE_COMPACTION_PERCENT, 1, 100);
+	if (idleThreshold !== undefined) config.idleCompactionThresholdPercent = idleThreshold;
 	const hardRaw = env.PI_PERSONA_AGENT_MAX_MS?.trim();
 	if (hardRaw !== undefined && hardRaw !== "") {
 		const hard = Number(hardRaw);

@@ -50,6 +50,7 @@ import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
 import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type EngineFactories } from "./extension/engine.ts";
 import { installHooks, type HookHost } from "./extension/hooks.ts";
+import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
 import { installMemoryOwner } from "./extension/memory-owner.ts";
 import { installMindWorker } from "./extension/mind-worker.ts";
@@ -575,6 +576,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let disposed = false; // set on session_shutdown; gates late async-run callbacks of a torn-down instance
 	let orchestrating = false; // re-entrancy guard for the mandatory input hook
 	let processingDeferredOrchestration = false;
+	let idleCompaction: ReturnType<typeof installIdleCompaction> | undefined;
 	const MAX_DEFERRED_ORCHESTRATIONS = 16;
 	const deferredOrchestrations: Array<{ task: string; orchestration: OrchestrationGrammar }> = [];
 	// A finished mandatory orchestration, injected (hidden) into the next turn's system prompt.
@@ -1169,7 +1171,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// the supervisor as a fresh turn instead of stranding as orphaned "sticky" follow-ups in pi's
 	// queue (pi only drains that queue from an active turn, one-at-a-time, skipping errored turns).
 	const idleDelivery = {
-		isIdle: () => canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle() === true),
+		isIdle: () => !idleCompaction?.busy && canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle() === true),
 		deliver: (message: string) => sendPersonaFollowUp(pi, message),
 		setTimer: (fn: () => void, ms: number) => {
 			const h = setTimeout(fn, ms);
@@ -1486,8 +1488,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		get controller() { return controller; },
 		get lastCtx() { return lastCtx; },
 		get disposed() { return disposed; },
-		get orchestrating() { return orchestrating; },
-		get processingDeferredOrchestration() { return processingDeferredOrchestration; },
+		canDeliverNotifications: idleDelivery.isIdle,
 		get telemetry() { return telemetry; },
 		get delegationNudge() { return delegationNudge; },
 		exocomArgs,
@@ -2435,6 +2436,32 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		childUsage,
 		publishPersonaCost,
 	};
+	// The installer returns inertly before allocating a policy, hook or timer while host
+	// qualification is blocked. If qualified in a future release, admission hooks precede
+	// Persona's input/orchestration hooks and all notification delivery shares their gate.
+	idleCompaction = installIdleCompaction(pi, {
+		enabled: config.idleCompaction,
+		idleMs: config.idleCompactionMinutes * 60_000,
+		thresholdPercent: config.idleCompactionThresholdPercent,
+		canCompact: () => {
+			if (disposed || orchestrating || processingDeferredOrchestration || pendingOrchestration ||
+				deferredOrchestrations.length > 0 || tracker.running().length > 0 || bus.hasPending(SUPERVISOR) ||
+				completionNotifier.peekPending().length > 0 || intercomNotifier.peekPending().length > 0 ||
+				timerNotifier.peekPending().length > 0 || monitors.pendingCount() > 0 ||
+				(exocom.notifier?.peekPending().length ?? 0) > 0 || (exocom.waitNotifier?.peekPending().length ?? 0) > 0) return false;
+			const sessionId = exocom.sessionId;
+			return !sessionId || !exocom.ledgerState().asks.some((ask) => ask.from_session === sessionId || ask.to_session === sessionId);
+		},
+		onReleased: () => {
+			if (disposed) return;
+			completionNotifier.kick();
+			intercomNotifier.kick();
+			timerNotifier.kick();
+			monitors.kick();
+			exocom.notifier?.kick();
+			exocom.waitNotifier?.kick();
+		},
+	});
 	installHooks(pi, hookHost, exocom);
 
 	// ONE launch pool for every background run: a delegate leg, a `council` and a `flow` each take a slot

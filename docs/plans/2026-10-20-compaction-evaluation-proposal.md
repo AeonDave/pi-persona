@@ -1,15 +1,118 @@
 # Compaction and continuity evaluation proposal
 
-**Status:** deferred. This document records future evaluation questions, not shipped behavior or
-authorization to implement compaction controls. Unified Persona settings shipped in 1.17.1; their
-current contract is in [REFERENCE.md](../REFERENCE.md). Native Pi compaction remains the only
-runtime compaction path. A separate decision is required before implementation or paid provider
-trials.
+**Status (2026-10-27):** native idle timing is restored at the user's request, but activation is
+hard-blocked by a reproduced Pi 1.4.0 compaction lifecycle defect. The Context settings show the
+unavailability; no idle scheduler or lifecycle hooks are installed while the host is unqualified.
+Saved preferences and environment values cannot bypass the block. Custom summaries, continuity
+checkpoints and comparative-quality experiments remain deferred. The current settings contract is
+in [REFERENCE.md](../REFERENCE.md); native Pi compaction remains the only runtime path.
 
-The earlier settings implementation plan has been closed. This proposal retains only its unresolved
-compaction research, future design options and evaluation gates. Revalidate every host seam against
-the supported Pi release before designing implementation; the historical Pi 1.3 qualification notes
+The earlier settings implementation plan has been closed. This proposal retains the authorized
+timing policy, its blocking evidence, the restored implementation's activation gate, unresolved
+research and evaluation gates. Revalidate every host
+seam against the supported Pi release before implementation; historical Pi 1.3 qualification notes
 are intentionally not carried forward.
+
+## Authorized idle timing and failed admission gate
+
+Upstream tracking: [Pi issue #7738](https://github.com/earendil-works/pi/issues/7738) is closed, but
+the [2026-10-12 follow-up](https://github.com/earendil-works/pi/issues/7738#issuecomment-6128063305)
+describes the same failure-hook cleanup race on 1.1.0. Our independent 1.4.0 reproduction below
+confirms that closure is not evidence this narrower case was fixed. No duplicate issue was opened.
+Our [2026-10-27 follow-up](https://github.com/earendil-works/pi/issues/7738#issuecomment-6436968518)
+includes a standalone reproduction (3/3 runs) and the tested correction: retain a controller local
+to each operation, read its signal locally, and guard every shared-state cleanup by controller
+identity, including success, catch and finally. Three offline tests passed against a temporary SDK
+copy: overlapping cancellation, successful completion of the second request, and protection of its
+controller from the older request's cleanup. The installed host was unchanged. These results do not
+qualify the upstream TypeScript build, full suite or real-provider summarization.
+
+The user selected these defaults on 2026-10-27:
+
+| Control | Agreed behavior once the host is qualified |
+|---|---|
+| Enable | Off by default; opt in through `/persona-settings` |
+| Idle interval | 15 minutes |
+| Context threshold | Known current context occupancy strictly above 40%, not cumulative token usage |
+| Attempt limit | One attempt per idle episode, including failure, cancellation or a result still above the threshold |
+| Generator | Pi's native preparation and summary generation, with its provider/auth/cancellation semantics |
+
+New foreground work or genuine terminal activity resets the idle clock. Startup, reload, branch
+navigation and compaction completion alone must not manufacture a new episode. Admission must
+exclude running/queued workers, pending input or editor drafts, orchestration, unanswered asks and
+queued notifications. Future timer alarms and passive monitors are not themselves active workers;
+their fired deliveries must remain queued safely during compaction. Unknown context usage skips
+admission. The evaluated first scope was TUI only: RPC cannot inherit TUI input buffering by assumption.
+
+The spike exercised a pure episode policy, saved/environment settings, the real extension factory,
+fake-clock worker/notification integration, and the actual Pi 1.4.0 SDK with a local faux provider.
+Several checks passed, including one-attempt behavior and held timer delivery. Those passes did
+**not** satisfy the safety gate: a normal overlapping manual compaction still failed.
+
+Reproduced sequence, using only public SDK calls/hooks and synthetic history:
+
+1. Start an owned `ctx.compact()` and hold its `session_before_compact` handler.
+2. Submit a second `session.compact()`, the same session API called by TUI `/compact`. Its abort
+   cancels the first operation and waits for idle.
+3. Release the first handler; its cancellation clears the shared controller and emits
+   `compaction_end`, then awaits an ordinary asynchronous `session_compact_failed` handler.
+4. The second operation now starts. A Persona-style public hook returns `{ cancel: true }` to
+   reject it while the first callback is pending.
+5. While that hook emission yields, the first operation's `finally` clears the second controller.
+   The second error handler dereferences the now-absent controller's `signal`.
+
+Observed result: `Cannot read properties of undefined (reading 'signal')`, with **two
+`compaction_start` events but only one `compaction_end`**. The final standalone reproduction used
+zero provider requests and zero network requests. This was reproduced separately from the full
+test run. Source anchors in the installed Pi 1.4.0 `dist/core/agent-session.js` are `compact()`
+(2230 onward), early clearing (2335), awaited failure hook (2344), and unconditional final clearing
+(2354). TUI `/compact` dispatch precedes its generic input-buffering path in
+`dist/modes/interactive/interactive-mode.js` (2611 versus 2664).
+
+Keeping ownership until the native callback, gating `before_agent_start`, vetoing threshold/overflow
+compactions and rejecting overlapping manual hooks was insufficient. The remaining defect is host
+controller ownership/cleanup, not a missing threshold or debounce. Do not suppress the exception,
+patch private host fields or intercept the user's `/compact` keystrokes. The restored settings must
+state that activation is blocked, rather than imply that an unavailable toggle can enable the feature.
+
+The user subsequently authorized keeping the implementation in the repository while disabled.
+Its pure episode tests remain executable. Negative integration checks must prove that even an
+explicit saved/environment opt-in cannot register the idle scheduler, terminal input listeners,
+compaction hooks or model requests. This is a deliberate qualification block, not an old-host
+compatibility path or a hidden experimental opt-in. Updating Pi alone does not unlock it: a future
+Persona change must first qualify the supported host and explicitly remove the block.
+
+Run `node scripts/idle-compaction-host-check.mjs` for the standalone, offline host admission check.
+It asserts correct cancellation and paired lifecycle events, so it fails on the affected Pi 1.4.0.
+It is separate from the normal suite, which verifies Persona's disabled behavior. A passing host
+check is necessary but does not replace the remaining input, wake and cancellation checks below.
+
+Reopening gate: qualify per-operation controller ownership and identity-guarded cleanup in the
+supported host, then rerun the active-manual-overlap reproduction and input/wake/cancellation
+scenarios. The tested correction preserves Pi's existing second-cancels-first behavior; neither a
+new API nor generalized serialization is required to fix this race. A public non-aborting, atomic
+`compactIfIdle` operation could simplify future admission independently. Preserve
+the default-off/no-scheduler path, test current TUI and explicitly unsupported modes, and verify
+Intercom/Exocom/timer delivery without loss or duplicate wakes. Do not claim semantic quality or cost
+improvements from a timing change alone.
+
+### Restore verification (2026-10-27)
+
+- Full suite on Windows: 2,990 tests, 2,988 passed, zero failed, two expected Windows skips.
+  `npm run typecheck` and `git diff --check` passed.
+- Focused tests cover the pure episode policy, forced saved/environment opt-ins, unavailable
+  settings, and the real SDK in TUI/RPC mode. Native manual compaction remains callable; no automatic
+  compaction, terminal subscription or wake is introduced by the blocked installer.
+- `npm run smoke:exocom` passed its real socket/pipe discovery, messaging, attribution, reply,
+  claim, budget and cleanup checks. The existing Exocom toast condition remains unchanged.
+- A real `scripts/drive.ts` run in an isolated profile with idle opt-in forced on completed one
+  `openai/gpt-6-luna` worker at requested `xhigh`, using a complete structured brief and no worker
+  tools. It returned `IDLE_SMOKE_OK`, one done/zero failed, exit 0. This is a delegation smoke,
+  not an enabled-compaction qualification. The temporary profile was removed.
+- The standalone host check exits 1 on the installed Pi 1.4.0 (the reproduced controller defect).
+  The same check passes against the isolated SDK copy with the proposed controller fix, with two
+  cancellations and paired start/end events, no provider/network calls and no saved summary.
+  The installed SDK remains unmodified. Neither result unlocks the feature.
 
 ## Research basis and limits
 
@@ -41,7 +144,7 @@ performance are separate outcomes and must be measured separately.
 
 ## Runtime boundary
 
-- With no future opt-in feature enabled, preserve native Pi compaction preparation, generation,
+- While activation is blocked, preserve native Pi compaction preparation, generation,
   overflow recovery and delivery. Add no scheduler, model request, wake, timer, injected checkpoint
   or summary artifact to the current path.
 - Native compaction remains the default and sole production path until a separately authorized,
@@ -62,7 +165,7 @@ performance are separate outcomes and must be measured separately.
 Use this as the baseline. A test may compare the native threshold with an earlier threshold while
 keeping native summary generation fixed. Record the effective native settings and their effect on
 summary output limits. Do not falsify a model's context-window declaration to force a cut point.
-This experiment does not authorize shipping a new settings control.
+Only the narrow idle-timing policy above is authorized; it must first clear the host admission gate.
 
 ### Supervisor continuity checkpoint
 

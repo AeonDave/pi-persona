@@ -38,7 +38,7 @@ introduced a behavior. An `Unreleased` entry is not yet part of a published rele
   is the latest qualification report and links the preceding implementation review for its distinct
   behavioral and live-run evidence.
 - [`ROADMAP.md`](https://github.com/AeonDave/pi-persona/blob/main/ROADMAP.md) tracks the remaining work, including the unqualified
-  [compaction proposal](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md).
+  [compaction proposal](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md): idle timing code is restored but activation is hard-blocked by a reproduced Pi 1.4.0 lifecycle defect; summary/checkpoint experiments remain deferred.
 
 ## Documentation maintenance notes
 

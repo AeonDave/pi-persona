@@ -1,7 +1,7 @@
 # pi-persona
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/AeonDave/pi-persona/v1.17.5/assets/banner.png" alt="pi-persona — supervised multi-agent orchestration for Pi">
+  <img src="https://raw.githubusercontent.com/AeonDave/pi-persona/v1.17.6/assets/banner.png" alt="pi-persona — supervised multi-agent orchestration for Pi">
 </p>
 
 [![CI](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/AeonDave/pi-persona/badge)](https://scorecard.dev/viewer/?uri=github.com/AeonDave/pi-persona) [![npm version](https://img.shields.io/npm/v/@aeondave/pi-persona?logo=npm)](https://www.npmjs.com/package/@aeondave/pi-persona) [![License](https://img.shields.io/github/license/AeonDave/pi-persona)](LICENSE)
@@ -40,9 +40,9 @@ your customizations.
 | Install option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.5` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.17.6` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
-| Git tag 1.17.5 | `pi install git:github.com/AeonDave/pi-persona@v1.17.5` |
+| Git tag 1.17.6 | `pi install git:github.com/AeonDave/pi-persona@v1.17.6` |
 
 Restart Pi after updating. For a pinned install, install the new version or tag explicitly.
 If switching from a Git install, remove that source first with
@@ -195,9 +195,14 @@ persona model assignments, not native Pi or compaction settings. In the TUI, `/`
 changes apply after restarting Pi or Pi's native `/reload`, not `/new`; `/persona reload` only
 refreshes persona definitions. Model changes apply to future runs. See [configuration and settings](docs/REFERENCE.md#configuration-and-data).
 
+The **Context** settings show idle compaction as unavailable pending a Pi fix. Its implementation
+is retained with the agreed defaults (off, 15 minutes idle, context above 40%, one attempt per idle
+period), but cannot run or be enabled on the current host. Updating Pi alone will not activate it;
+Persona must first qualify the fix. [Status and evidence](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md).
+
 ## Optional memory companion
 
-[pi-persona-mind 0.8.4](https://github.com/AeonDave/pi-persona-mind/releases/tag/v0.8.4) adds durable
+[pi-persona-mind 0.8.7](https://github.com/AeonDave/pi-persona-mind/releases/tag/v0.8.7) adds durable
 project/persona memory, session notes and a visible automatic consolidation worker. It requires
 pi-persona 1.17.5 or later. Install it with `pi install npm:@aeondave/pi-persona-mind`, then restart
 Pi or run `/reload`. See its [README](https://github.com/AeonDave/pi-persona-mind#readme) for scope,

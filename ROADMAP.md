@@ -230,7 +230,8 @@ No code changes planned until the audit completes.
 | **Configurable `STALL_FLAG_MS`** | `PI_PERSONA_STALL_MS` env var for operators with unusual workloads | Low (1.17.1 fixes the root causes) |
 | **Progress contract redesign** | Replace length-based output comparison with structured liveness states (queued/initializing/generating/executing/waiting) | Medium |
 | **`context: fork`** | Child context forking (deliberately deferred per AGENTS.md) | Deferred |
-| **Compaction and continuity evaluation** | The [open proposal](docs/plans/2026-10-20-compaction-evaluation-proposal.md) separates native timing, runtime continuity checkpoints and structured summaries; native compaction remains the default | Deferred pending separate authorization and paired quality/cost evidence |
+| **Native idle compaction** | Authorized defaults: off, 15 minutes idle, context above 40%, one attempt per idle episode. Implementation restored behind an explicit host qualification block; settings disclose unavailability. [Policy and admission checks](docs/plans/2026-10-20-compaction-evaluation-proposal.md#authorized-idle-timing-and-failed-admission-gate) | Activation blocked: Pi 1.4.0 overlapping manual compaction corrupts controller cleanup ([reproduction and tested fix](https://github.com/earendil-works/pi/issues/7738#issuecomment-6436968518)). No environment or saved-setting bypass; unlock only after supported-host qualification |
+| **Compaction continuity and summary evaluation** | The [open proposal](docs/plans/2026-10-20-compaction-evaluation-proposal.md) keeps runtime checkpoints and structured summaries separate from native timing | Deferred pending separate authorization and paired quality/cost evidence |
 | **Token-budget alerting** | Operator-visible warning when a child approaches its token budget | Low |
 | **Permission system built-in presets** | Ship `permission:` blocks in bundled persona seed files | Blocked on `pi-persona-policy` |
 

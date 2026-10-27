@@ -4,10 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
-## Unreleased
+## [1.17.6](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.6) - 2026-10-27
 
 ### Added
 
+- Restored the idle-compaction implementation behind a host qualification block. Context settings
+  disclose that it is unavailable; saved or environment opt-ins cannot start it. Defaults remain
+  off, 15 idle minutes and context above 40%, with one attempt per idle episode once qualified.
+  An offline host regression check tracks the Pi lifecycle defect separately from the green suite.
 - `data` persona for data engineering, science, and analysis, with explicit grain and
   metric definitions, reproducible evidence, independent cross-checks, and stated uncertainty.
 - F9 group overviews compare worker states, model/effort, activity and bounded results, with
@@ -18,6 +22,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Final worker output now joins every text block in order, excluding reasoning and tool content,
+  so a JSON response split across text blocks is not truncated.
+- Mind workers may make one format-correction request after bounded malformed JSON, within the
+  same tracked run, original model/effort, concurrency slot and deadline. Usage includes both
+  attempts and survives exceptions after reported progress; parent memory validation still applies.
 - Routine async status cards are off by default; live rows and F9 retain ongoing progress.
   Stall warnings show the observed quiet duration, and a genuine progress resume is reported once
   per episode. Long names cannot crowd the warning or waiting reason out of narrow cards.

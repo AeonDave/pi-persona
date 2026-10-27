@@ -24,6 +24,7 @@ export interface SettingsPanelRow {
 	source: "environment" | "saved" | "default";
 	locked: boolean;
 	pendingReload?: boolean;
+	unavailableReason?: string;
 	applyWhen: string;
 	min?: number;
 	max?: number;
@@ -91,7 +92,7 @@ export function composeSettingsRow(row: SettingsPanelRow, selected: boolean, max
 	const group = theme.fg("dim", `[${compactInlineText(row.group, { maxChars: 32 })}] `);
 	const label = compactInlineText(row.label, { maxChars: Math.max(16, Math.floor(width * 0.55)) });
 	const value = compactInlineText(formatSettingValue(row.activeValue), { maxChars: Math.max(16, Math.floor(width * 0.44)) });
-	const source = row.locked ? theme.fg("warning", "  env locked") : row.hasSavedValue ? theme.fg("dim", "  saved") : "";
+	const source = row.unavailableReason ? theme.fg("warning", "  unavailable") : row.locked ? theme.fg("warning", "  env locked") : row.hasSavedValue ? theme.fg("dim", "  saved") : "";
 	const valueText = theme.fg("dim", `  ${value}`);
 	return fitLine(`${marker}${group}${label}${valueText}${source}`, width);
 }
@@ -115,6 +116,7 @@ function detailLines(row: SettingsPanelRow, width: number, limit: number, theme:
 	const safeWidth = Math.max(1, width);
 	const lines: string[] = [theme.fg("accent", theme.bold(compactInlineText(row.label, { maxChars: 160 })))];
 	lines.push(theme.fg("dim", `Group: ${compactInlineText(row.group, { maxChars: 100 })}`));
+	if (row.unavailableReason) lines.push(...wrappedLines(row.unavailableReason, safeWidth));
 	const fixedLines = row.pendingReload ? 7 : 6;
 	const description = wrappedLines(row.description, safeWidth).slice(0, Math.max(1, Math.min(3, limit - fixedLines)));
 	lines.push(...description);

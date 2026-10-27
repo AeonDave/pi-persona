@@ -384,6 +384,21 @@ The Models section selects the assignment owner independently of the viewed coun
 profile, supports exact-key resets and keeps inline pins immutable. It patches the same file and updates
 the resolver cache for future runs, never changing an already-running worker. Native compaction is untouched.
 
+Idle compaction is retained behind a hard host-qualification gate. Pi 1.4.0 has a reproduced
+controller-cleanup race between overlapping manual compactions; a public hook veto cannot prevent
+it. The entry point must return before constructing its scheduler or registering any lifecycle/input
+hooks, regardless of saved preferences or environment overrides. Context settings expose this block
+honestly. A version bump alone cannot enable it; a future Persona change must qualify the fixed host.
+
+The preserved policy is off by default, interactive-TUI only, 15 minutes idle and known current
+context occupancy strictly above 40%. Unknown occupancy, workers, queued wakes, unanswered asks,
+pending input and nonblank drafts block admission. Startup, reload and branch selection do not arm
+an episode. Real activity may arm a new one; an attempt consumes its episode even on cancellation,
+failure or an above-threshold result. Pi owns preparation and summary generation; Persona adds no
+summary prompt, continuity checkpoint or Mind memory write. See the
+[qualification plan](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md)
+for the failing host check and the checks required before removing the gate.
+
 Mind/Flow settings use optional synchronous discovery on Pi's public event bus
 (`pi-persona:settings:collect:v1`). The owning companion reports its current startup values; the same
 central registry validates owner/type and renders only supported fields. Persona alone writes their
@@ -585,6 +600,17 @@ selection changes cancel it. Mind can also cancel through its accepted handle. S
 to the requesting companion and retains operator failure reporting, but never wakes a supervisor
 model turn. Native session teardown cancels it through the ordinary stop registry. Local inspect,
 stage and apply operations continue to use activity rows; model work uses the real agent view.
+
+A successful engine attempt whose nonempty, bounded response is syntactically invalid JSON may
+trigger one additional model request. This is a fresh attempt using the original task with a format
+reminder, not extraction or repair of arbitrary response fragments. It stays in the same tracked
+worker and concurrency slot, with the original pinned model/effort, cancellation signal and
+180-second deadline; the UI labels it `format correction 1/1`. Session, owner, idle and permission
+checks run again before admission. Usage aggregates both attempts; if an engine throws after
+reporting usage, that observed usage remains visible. Failed, empty or oversized responses do not
+trigger correction, nor does syntactically valid JSON with an invalid schema. A second malformed
+response is a contract failure with an archived report, never a third attempt. Mind still owns all
+schema, provenance, freshness and application checks; valid JSON alone does not authorize a write.
 
 ## The comm plane in practice
 

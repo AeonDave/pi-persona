@@ -117,12 +117,17 @@ function num(x: unknown): number {
 	return typeof x === "number" && !Number.isNaN(x) ? x : 0;
 }
 
-function firstText(content: unknown): string | undefined {
+function assistantText(content: unknown): string | undefined {
 	if (!Array.isArray(content)) return undefined;
+	let text = "";
+	let found = false;
 	for (const part of content) {
-		if (isObject(part) && part.type === "text" && typeof part.text === "string") return part.text;
+		if (isObject(part) && part.type === "text" && typeof part.text === "string") {
+			text += part.text;
+			found = true;
+		}
 	}
-	return undefined;
+	return found ? text : undefined;
 }
 
 /** The visible content of an in-progress message: its reasoning AND its answer text,
@@ -313,7 +318,7 @@ export function applyEvent(state: StreamState, event: unknown): ToolEvent | unde
 	if (isThinkingLevel(msg.thinkingLevel)) state.thinkingEffective = msg.thinkingLevel;
 	else delete state.thinkingEffective;
 
-	const text = firstText(msg.content);
+	const text = assistantText(msg.content);
 	if (text !== undefined) state.output = text;
 	// Fold the WHOLE completed message (reasoning + text) into the transcript — not just
 	// the text. Otherwise each message_end wipes the thinking the user was reading

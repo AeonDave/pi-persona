@@ -266,21 +266,21 @@ test("emptyUsage returns a fresh all-zero usage object on each call", () => {
 	assert.equal(b.input, 0, "mutating one does not affect another");
 });
 
-test("firstText picks text after a non-text part, and the first of multiple texts", () => {
+test("final assistant output assembles every text block in order without thinking or tool parts", () => {
 	const s = createStreamState();
 	applyEvent(s, {
 		type: "message_end",
-		message: { role: "assistant", content: [{ type: "toolCall", name: "x" }, { type: "text", text: "after-tool" }] },
+		message: { role: "assistant", content: [{ type: "toolCall", name: "x" }, { type: "text", text: '{"value":"after' }, { type: "thinking", thinking: "hidden reasoning" }, { type: "image", data: "ignored" }, { type: "text", text: ' tool"}' }] },
 	});
-	assert.equal(s.output, "after-tool");
+	assert.equal(s.output, '{"value":"after tool"}', "adjacent text blocks concatenate without injected separators, including inside JSON strings");
 	applyEvent(s, {
 		type: "message_end",
-		message: { role: "assistant", content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] },
+		message: { role: "assistant", content: [{ type: "text", text: "single" }] },
 	});
-	assert.equal(s.output, "one", "first text part wins");
+	assert.equal(s.output, "single", "a single block remains unchanged");
 });
 
-test("firstText leaves output unchanged when content is missing or not an array", () => {
+test("assistant text leaves output unchanged when content is missing or not an array", () => {
 	const s = createStreamState();
 	applyEvent(s, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "keep" }] } });
 	applyEvent(s, { type: "message_end", message: { role: "assistant", content: "not-an-array" } });
@@ -377,7 +377,7 @@ test("sawAssistant remains true after a subsequent ignored event", () => {
 });
 
 // --- G4: a text part whose `text` is non-string is skipped, not accepted ---
-test("firstText skips a text part with a non-string body and takes the next valid one", () => {
+test("assistant text skips a non-string body and retains the valid text", () => {
 	const s = createStreamState();
 	applyEvent(s, {
 		type: "message_end",

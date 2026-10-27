@@ -10,6 +10,9 @@ test("defaults apply when no env vars are set", () => {
 	assert.equal(c.persist, true);
 	assert.equal(c.delegateDefaultAllow, true);
 	assert.equal(c.seed, false); // auto-install is opt-in (PI_PERSONA_SEED=on); default off
+	assert.equal(c.idleCompaction, false, "idle compaction is opt-in");
+	assert.equal(c.idleCompactionMinutes, 15);
+	assert.equal(c.idleCompactionThresholdPercent, 40);
 	assert.deepEqual(c.extraDirs, []);
 	assert.equal(c.defaultPersona, undefined);
 });
@@ -35,6 +38,28 @@ test("routine check-ins are opt-in; invalid intervals preserve the quiet default
 	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "0" }).checkInEveryMs, 0, "explicit 0 opts out");
 	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "abc" }).checkInEveryMs, 0, "non-numeric ⇒ default");
 	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "-5" }).checkInEveryMs, 0, "negative ⇒ default");
+});
+
+test("idle compaction settings are opt-in and reject invalid environment values to their defaults", () => {
+	assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION: "on" }).idleCompaction, true);
+	assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION: " YES " }).idleCompaction, true);
+	for (const value of ["", "off", "false", "0", "no", "maybe"]) {
+		assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION: value }).idleCompaction, false, `${value} ⇒ off`);
+	}
+
+	for (const [value, expected] of [["1", 1], ["1440", 1440], ["15", 15]] as const) {
+		assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION_MINUTES: value }).idleCompactionMinutes, expected);
+	}
+	for (const value of ["", "0", "1441", "1.5", "abc", "-1"]) {
+		assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION_MINUTES: value }).idleCompactionMinutes, 15, `${value} ⇒ default`);
+	}
+
+	for (const [value, expected] of [["1", 1], ["100", 100], ["40", 40]] as const) {
+		assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION_PERCENT: value }).idleCompactionThresholdPercent, expected);
+	}
+	for (const value of ["", "0", "101", "40.5", "abc", "-1"]) {
+		assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION_PERCENT: value }).idleCompactionThresholdPercent, 40, `${value} ⇒ default`);
+	}
 });
 
 test("PI_PERSONA_AGENT_MAX_MS sets the per-agent hard wall-clock cap (default 0 = unlimited; >0 arms it)", () => {

@@ -115,6 +115,13 @@ For a long task, useful updates say what changed, what is blocked, and what happ
 names help distinguish concurrent work; the final answer should use file names and concrete
 outcomes that make sense without remembering those names.
 
+## Idle compaction availability
+
+Idle compaction is currently unavailable in `/persona-settings` → **Context**, pending a fix in
+Pi and qualification in Persona. Its code is retained, but the setting cannot start background work.
+The planned defaults remain off, 15 minutes idle, context above 40% and one attempt per idle period.
+Pi's native compaction is unchanged.
+
 ## Work with another Pi through Exocom
 
 Use Intercom for this supervisor's workers and Exocom for independent Pi sessions. Use

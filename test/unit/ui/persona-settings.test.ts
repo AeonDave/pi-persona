@@ -98,6 +98,21 @@ test("formatSettingValue sanitizes terminal controls and preserves Windows path 
 	assert.equal(formatSettingValue(undefined), "(unset)");
 });
 
+test("blocked Context row displays its unavailable state at narrow and wide widths", () => {
+	const panel = new PersonaSettingsPanel(fakeTui(30), theme(), keybindings(), {
+		file: "D:/persona/settings.json", lastPersona: null,
+		rows: [{ ...rows[0]!, id: "idleCompaction", group: "Context", label: "Idle compaction", kind: "boolean",
+			activeValue: false, savedValue: true, hasSavedValue: true,
+			unavailableReason: "Unavailable: waiting for a qualified upstream Pi fix.",
+		}],
+	}, () => {});
+	for (const width of [40, 120]) {
+		const output = panel.render(width).join("\n");
+		assert.match(output, /Unavailable:/);
+		assert.match(output, /upstream Pi/);
+	}
+});
+
 test("the full-page panel filters, navigates, edits, resets and cancels without losing selection state", () => {
 	const actions: SettingsPanelAction[] = [];
 	const panel = new PersonaSettingsPanel(fakeTui(), theme(), keybindings(), {

@@ -315,6 +315,10 @@ the canonical file commits. Malformed files remain untouched; never add a trunca
 Scalar preferences apply after a Pi restart or native `/reload`, not `/new` (never auto-reload live workers).
 Model edits apply to future runs through the existing participant resolver. `/persona reload` only
 refreshes resources, not startup preferences. Native Pi settings and compaction are not owned here.
+Idle-compaction code is deliberately retained at the user's request behind a hard host-qualification
+gate: no scheduler or lifecycle/input hooks while blocked, including with saved/environment opt-ins.
+Context settings must report unavailability. Do not unlock by guessed future version, hide the block,
+or patch Pi internals; qualify the upstream fix and the documented admission scenarios first.
 Mind/Flow contribute supported current values through `pi-persona:settings:collect:v1` (`{ add(id, values) }`);
 their five preferences share the same registry/file. Do not hard-import a companion or start services
 while collecting settings. Flow port/idle changes are for the next shared-service start, never a restart

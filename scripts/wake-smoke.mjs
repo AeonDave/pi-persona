@@ -127,6 +127,8 @@ let firstAgentEndAt;
 let wakeAt;
 let wakeAgentEndAt;
 let delegateCalls = 0;
+const delegateCallIds = new Map();
+let assistantMessagesLogged = 0;
 let launchedLegs = 0;
 let delegateArgumentError;
 const wakes = [];
@@ -193,6 +195,7 @@ function handleEvent(event) {
 	if (event.type === "tool_execution_start") {
 		if (event.toolName === "delegate") {
 			delegateCalls++;
+			if (typeof event.toolCallId === "string" && delegateCallIds.size < 16) delegateCallIds.set(event.toolCallId, delegateCalls);
 			const normalized = coerceWakeSmokeDelegateTasks(event.args);
 			if (!normalized.ok) {
 				launchedLegs = 0;
@@ -205,7 +208,7 @@ function handleEvent(event) {
 				if (scouts !== launchedLegs) delegateArgumentError = `expected scout tasks, found ${launchedLegs - scouts} non-scout task(s)`;
 				if (taskMarkers !== markers.length) delegateArgumentError ??= `expected all ${markers.length} markers in task briefs, found ${taskMarkers}`;
 			}
-			note(`delegate tasks[${launchedLegs}]`);
+			note(`delegate #${delegateCalls} id=${short(event.toolCallId ?? "unknown", 100)} tasks[${launchedLegs}]`);
 		}
 		const bad = wakeAt === undefined ? forbiddenCall(event) : undefined;
 		if (bad) {
@@ -214,11 +217,21 @@ function handleEvent(event) {
 		}
 		return;
 	}
-	if (event.type === "tool_execution_end" && event.toolName === "delegate" && launchEndAt === undefined) {
-		if (event.isError === true) fail(`delegate launch failed: ${short(event.result)}`);
-		launchEndAt = Date.now();
-		note("delegate returned (background launch)");
+	if (event.type === "tool_execution_end" && event.toolName === "delegate") {
+		const result = event.result && typeof event.result === "object" ? event.result : {};
+		const details = result.details && typeof result.details === "object" ? result.details : {};
+		const receipt = Object.fromEntries(["ok", "mode", "runIds", "runs", "launched", "settledRuns", "error", "reason"].filter((key) => Object.hasOwn(details, key)).map((key) => [key, details[key]]));
+		note(`delegate #${delegateCallIds.get(event.toolCallId) ?? "unknown"} id=${short(event.toolCallId ?? "unknown", 100)} returned: isError=${String(event.isError)}, result.isError=${String(result.isError)}, text=${short(messageText(result.content), 1_600)}, receipt=${short(receipt, 800)}`);
+		if (launchEndAt === undefined) {
+			if (event.isError === true) fail(`delegate launch failed: ${short(event.result)}`);
+			launchEndAt = Date.now();
+			note("delegate returned (background launch)");
+		}
 		return;
+	}
+	if (event.type === "message_end" && event.message?.role === "assistant" && assistantMessagesLogged < 8) {
+		const text = messageText(event.message.content);
+		if (text) { assistantMessagesLogged++; note(`assistant text: ${short(text, 1_000)}`); }
 	}
 	if ((event.type === "message_start" || event.type === "message_end") && isWake(event.message)) {
 		// One wake per message: a start/end pair is one; an unpaired end is one too.
