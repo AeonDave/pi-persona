@@ -872,6 +872,56 @@ test("a user-modified planner is left alone and installs no architect", () => {
 	assert.equal(fs.existsSync(path.join(userDirForCustom, "agents", "architect.md")), false, "a planner the user owns pulls in nothing");
 });
 
+test("verifier distinguishes documented platform skips from unexpected skips and migrates only pristine v1.17.6 copies", () => {
+	const verifier = fs.readFileSync(path.join(REPO_ROOT, "agents/verifier.md"), "utf8");
+	assert.match(verifier, /explicit project-documented platform.*skips.*untested/i);
+	assert.match(verifier, /never.*skipped.*passed/i);
+	assert.match(verifier, /unexpected.*new.*skip|new.*unexpected.*skip/i);
+	assert.match(verifier, /weakened checks/i);
+
+	const previous = (() => {
+		try {
+			return execFileSync("git", ["show", "v1.17.6:agents/verifier.md"], { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "ignore"] });
+		} catch {
+			return undefined;
+		}
+	})();
+	const entry = LEGACY_SEEDED_DEFAULTS["agents/verifier.md"];
+	assert.ok(entry, "the changed verifier agent has a seed migration entry");
+	const specs = Array.isArray(entry) ? entry : [entry];
+	const oldLF = Buffer.from((previous?.toString("utf8") ?? "").replaceAll("\r\n", "\n"), "utf8");
+	const oldCRLF = withLineEnding(oldLF, "\r\n");
+	const digest = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+	assert.ok(specs.some((spec) => spec.size === 1979 && spec.sha256 === "eeb8f50e21bd1f8ca3d821d45a9b99b37f21c2987bce7c93d647666054245c2e"), "the v1.17.6 LF digest is recorded");
+	assert.ok(specs.some((spec) => spec.size === 1998 && spec.sha256 === "66aa4b460b1183a0448fa7b210fc2308da37ce62f8e588dbbbda0bf53c0d2bb7"), "the v1.17.6 CRLF digest is recorded");
+	if (!previous) return; // Shallow/installed trees still verify the pinned migration identities above.
+	assert.equal(digest(oldLF), "eeb8f50e21bd1f8ca3d821d45a9b99b37f21c2987bce7c93d647666054245c2e");
+	assert.equal(digest(oldCRLF), "66aa4b460b1183a0448fa7b210fc2308da37ce62f8e588dbbbda0bf53c0d2bb7");
+
+	const bundledDir = tempDir("pi-persona-v1176-verifier-bundled-");
+	fs.mkdirSync(path.join(bundledDir, "agents"), { recursive: true });
+	fs.copyFileSync(path.join(REPO_ROOT, "agents/verifier.md"), path.join(bundledDir, "agents/verifier.md"));
+	for (const lineEnding of ["\n", "\r\n"] as const) {
+		const label = lineEnding === "\n" ? "LF" : "CRLF";
+		const userDirForForm = userDir();
+		fs.mkdirSync(path.join(userDirForForm, "agents"), { recursive: true });
+		const target = path.join(userDirForForm, "agents", "verifier.md");
+		fs.writeFileSync(target, withLineEnding(previous, lineEnding));
+		const result = migratePristineSeededDefaults(bundledDir, userDirForForm, { legacyDefaults: { "agents/verifier.md": entry } });
+		assert.deepEqual(result.migrated, [target], `${label}: pristine v1.17.6 bytes migrate`);
+		assert.deepEqual(fs.readFileSync(target), fs.readFileSync(path.join(bundledDir, "agents/verifier.md")), `${label}: migrated bytes match the current shipped verifier`);
+
+		const customDir = userDir();
+		fs.mkdirSync(path.join(customDir, "agents"), { recursive: true });
+		const customTarget = path.join(customDir, "agents", "verifier.md");
+		const custom = Buffer.concat([withLineEnding(previous, lineEnding), Buffer.from(`${lineEnding}# Local customization${lineEnding}`)]);
+		fs.writeFileSync(customTarget, custom);
+		const preserved = migratePristineSeededDefaults(bundledDir, customDir, { legacyDefaults: { "agents/verifier.md": entry } });
+		assert.deepEqual(preserved.migrated, [], `${label}: customized copy is not migrated`);
+		assert.deepEqual(fs.readFileSync(customTarget), custom, `${label}: user-installed agent edits survive`);
+	}
+});
+
 test("every shipped asset that changed since the last release tag carries that tag's digest in the legacy table", () => {
 	// Hand upkeep of LEGACY_SEEDED_DEFAULTS already failed once (1.11-1.14 shipped without rows), so a
 	// forgotten row is a red test, not a review comment. Release prep adds the previous tag's row; this

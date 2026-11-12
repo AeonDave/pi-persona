@@ -7,7 +7,7 @@
 [![CI](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/AeonDave/pi-persona/badge)](https://scorecard.dev/viewer/?uri=github.com/AeonDave/pi-persona) [![npm version](https://img.shields.io/npm/v/@aeondave/pi-persona?logo=npm)](https://www.npmjs.com/package/@aeondave/pi-persona) [![License](https://img.shields.io/github/license/AeonDave/pi-persona)](LICENSE)
 
 **Give Pi a supervised team.**
-`pi-persona` adds supervised multi-agent orchestration to [Pi](https://github.com/earendil-works/pi):
+`pi-persona` adds supervised multi-agent orchestration to Pi:
 async workers, live steering, cross-session collaboration, and switchable personas. It builds on
 Pi's native SDK and tool hooks; the extension adds worker supervision and coordination.
 Describe the outcome. A supervisor delegates work, gathers results, and checks the outcome;
@@ -17,7 +17,7 @@ you can inspect workers, redirect them, or stop a run while it is in progress.
 
 ## Install
 
-Requires **the latest stable Pi (currently 1.4.0)**, **Node.js ≥ 22.19**, and **Git**.
+Requires **the latest stable Pi (currently 1.5.2)**, **Node.js ≥ 22.19**, and **Git**.
 Update Pi together with this plugin; historical Pi releases are not maintained. Configure a model provider in Pi first.
 
 Run in your terminal:

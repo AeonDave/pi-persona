@@ -15,6 +15,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
+import { EVIDENCE_GUIDANCE } from "../../../src/core/evidence.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
 import {
 	type CreateInProcSession,
@@ -644,20 +645,81 @@ test("inproc engine appends the assigned identity as fenced JSON metadata", asyn
 	);
 });
 
-test("inproc engine leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
+test("inproc worker prompt keeps evidence guidance with role, skills, contract and identity despite spine opt-out", async () => {
+	const spy: Spy = {};
+	const configured: AgentConfig = {
+		name: "configured",
+		model: "stub/m",
+		systemPrompt: "Configured worker prompt",
+		spine: false,
+		source: "saved-agent.md",
+	};
+	const engine = makeInProcessEngine({
+		resolveAgent: () => configured,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		spine: "OPTIONAL WORKER SPINE",
+		createSession: fakeSessions([msgEnd("not JSON")], spy),
+	});
+	const result = await engine.run({
+		agent: "configured",
+		task: "inspect the implementation",
+		name: "Atlas CSS",
+		role: "Focus on correctness",
+		skills: ["python-testing"],
+		outputContract: "default",
+	});
+	assert.equal(result.ok, false, "the prose fixture must fail the requested contract");
+	const prompt = spy.opts?.systemPrompt ?? "";
+	assert.equal(prompt.split(EVIDENCE_GUIDANCE).length - 1, 1, "guidance appears exactly once in the actual in-process system prompt");
+	assert.ok(prompt.includes("Configured worker prompt"));
+	assert.match(prompt, /\[pi-persona assigned identity\][\s\S]*\{"name":"Atlas-CSS"\}/);
+	assert.ok(prompt.includes("Focus on correctness"));
+	assert.doesNotMatch(prompt, /OPTIONAL WORKER SPINE/);
+	assert.match(spy.promptText ?? "", /Load these skills before starting.*python-testing/);
+	assert.match(spy.promptText ?? "", /inspect the implementation/);
+	assert.match(spy.promptText ?? "", /output contract \(default\)/);
+});
+
+test("inproc worker keeps the internal tool-less JSON prompt minimal", async () => {
+	const spy: Spy = {};
+	const privateWorker: AgentConfig = {
+		name: "internal-maintenance",
+		model: "stub/m",
+		source: "internal:maintenance",
+		tools: [],
+		excludeTools: ["*"],
+		spine: false,
+		systemPrompt: "Return only the requested JSON data.",
+	};
+	const engine = makeInProcessEngine({
+		resolveAgent: () => privateWorker,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		spine: "OPTIONAL WORKER SPINE",
+		createSession: fakeSessions([msgEnd("{}")], spy),
+	});
+	await engine.run({ agent: privateWorker.name, task: "return JSON", tools: [] });
+	assert.equal(spy.opts?.systemPrompt, privateWorker.systemPrompt);
+	assert.doesNotMatch(spy.opts?.systemPrompt ?? "", /\[pi-persona\] Evidence discipline/);
+});
+
+test("inproc engine leads with the optional spine, appends stable evidence guidance and honours `spine: false`", async () => {
 	const spy: Spy = {};
 	const mk = (deps: Partial<Parameters<typeof makeInProcessEngine>[0]>) =>
 		makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("ok")], spy), ...deps });
 
 	await mk({ spine: "SPINE" }).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(spy.opts?.systemPrompt, "SPINE\n\nYou are a.\n\nROLE", "the shared layer leads, then the agent, then the role");
+	assert.ok(spy.opts?.systemPrompt?.startsWith("SPINE\n\nYou are a.\n\nROLE\n\n"), "the optional layer leads, then the agent and role");
+	assert.equal((spy.opts?.systemPrompt ?? "").split(EVIDENCE_GUIDANCE).length - 1, 1, "stable guidance follows the saved agent and role exactly once");
 
 	await mk({}).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(spy.opts?.systemPrompt, "You are a.\n\nROLE", "no spine ⇒ byte-identical to the pre-spine join");
+	assert.equal(spy.opts?.systemPrompt, `You are a.\n\nROLE\n\n${EVIDENCE_GUIDANCE}`, "no optional spine leaves the agent and role intact and retains evidence guidance");
 
 	const optedOut: Record<string, AgentConfig> = { q: { name: "q", model: "stub/m", systemPrompt: "You are q.", spine: false, source: "x" } };
 	await mk({ spine: "SPINE", resolveAgent: (n) => optedOut[n] }).run({ agent: "q", task: "t" });
-	assert.equal(spy.opts?.systemPrompt, "You are q.", "`spine: false` in the agent's frontmatter opts the leg out");
+	assert.equal(spy.opts?.systemPrompt, `You are q.\n\n${EVIDENCE_GUIDANCE}`, "`spine: false` opts out only of the optional layer, not stable evidence guidance");
 });
 
 test("inproc engine tags failed runs with agent · model + dynamic overrides so failures are actionable", async () => {

@@ -152,7 +152,7 @@ These are the guardrails a contributor must not violate. They are enforced in co
 
 ## Module layout
 
-The supported host is the latest stable Pi (currently 1.4.0). Runtime code uses its public APIs
+The supported host is the latest stable Pi (currently 1.5.2). Runtime code uses its public APIs
 directly; obsolete host facades, ignored SDK options and compatibility-only aliases are removed
 with their callers. Genuine host failures remain explicit rather than fabricating session identity
 or model availability. One-way user-data migrations and retained-history readers are separate data
@@ -188,9 +188,10 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback),
   `spec-preflight.ts` (the one unknown-agent/unknown-contract preflight shared by both engines),
-  `change-report.ts` (`captureStatus`/`diffStatus`/`renderChangeReport` — the files-changed report
-  `src/extension/engine.ts` appends to a non-worktree leg's result; pure over the injected `GitExec`
-  from `worktree.ts`), `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation),
+  `change-report.ts` (`captureStatus`/`diffStatus`/`renderChangeReport` — the shared-checkout status
+  snapshot delta `src/extension/engine.ts` appends to a non-worktree leg's result; not worker
+  authorship evidence, and unchanged status codes can hide further edits to an already-dirty path;
+  pure over the injected `GitExec` from `worktree.ts`), `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation),
   `stream.ts` (event → state), `handles.ts` (one bus-handle sequence shared by BOTH engines),
   `signals.ts` (`combineSignals`).
 - **`src/orchestration/`** — the heart: `sdk.ts` (the Strategy SDK), `strategy.ts` (registry +
@@ -484,6 +485,17 @@ once naming succeeds. An old session may contain repetitive prose; updating the 
 rewrite it. Reload extension code with Pi's `/reload` (when delegated work has settled), not merely
 `/persona reload`, which only reloads persona data.
 
+A separate stable evidence rule is composed into supervisor and normal delegated-worker prompts,
+independent of the optional spine, saved persona/agent copies and delegation nudges. Verification
+must preserve the check process's own exit status rather than a downstream formatter's status;
+missing status is unverified, not passed. Reports distinguish the actual command/API/source observed
+from inference or a worker's claim. A digest being present or computed is not a verified match:
+verification requires an observed comparison against the specified expected digest. These are model
+instructions, not command rewriting or a guarantee of obedience. Documented project/platform skip
+allowances remain explicit untested cases, not passed cases; unexpected or newly introduced skips
+still block approval. The private tool-less Mind review worker retains its dedicated minimal
+structured-output prompt.
+
 ## Time awareness — one rule, three granularities
 
 Pi's base prompt carries no date and no time, so from inside a turn five minutes of work and five
@@ -688,8 +700,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   failure, retain a bounded notification. The semantic completion follows its existing single-wake path;
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
   preview until expanded; terminal escape/control sequences are removed from the visible projection;
-- custom follow-ups and operator-only entries share `ui/session-cards.ts`: glyph-free generated
-  headings, explicit textual state, one width-aware layout and semantic theme backgrounds. Neutral
+- custom follow-ups and operator-only entries use the single composable frame in `ui/card-frame.ts`;
+  `ui/session-cards.ts` supplies surface-specific content and status projections. The frame owns
+  glyph-free headings, explicit textual state, width-aware layout and semantic theme backgrounds. Neutral
   information/unknown state uses `customMessageBg`, verified completion `toolSuccessBg`, attention
   (nudge/stall/stopped) `toolPendingBg`, and verified failure `toolErrorBg`. Only runtime-owned status
   evidence selects chrome, never peer/child prose. Colors are resolved from the active theme at render
@@ -698,7 +711,16 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   trust blockquotes); receipts, live output, monitor/timer notices and raw diagnostics stay literal.
   Source payloads and fences remain intact. The native Markdown component is retained per report and
   invalidated for theme/layout changes, without a global transcript cache. Rendering never rewrites
-  stored or model-facing payloads, nor creates a wake;
+  stored or model-facing payloads, nor creates a wake. Message cards use the host-supplied padding;
+  entry cards read current `pi.getSettings().outputPad` (native 0/1, default 1), because entry renderer
+  options do not carry padding. Titles, bodies and expand hints receive that outer padding once;
+- loaded companions can reuse the same frame through the synchronous `pi-persona:card-frame:v1`
+  presentation query: `{ version: 1, respond }` receives `{ version: 1, provider: "pi-persona",
+  createCard }`. Mind queries at render invocation rather than hard-importing an optional package or
+  caching a factory across reload. Missing, incompatible, ambiguous or throwing providers fall back
+  to readable sanitized literal history, not a second card engine. This cooperative local UI port
+  grants no memory, scheduling, tool or authentication authority. Native Pi tool shells and provider
+  errors remain host-owned; no duplicate shell or provider-error replacement is introduced;
 - literal control receipts and fallback errors share `ui/literal-tool-result.ts`: bounded collapsed
   text, an expansion hint only when detail is hidden, and full sanitized expansion. Tool errors use
   the host's `ToolRenderContext.isError`, not a presumed result field; semantic negative peer answers
@@ -785,6 +807,11 @@ of resetting it. A fork/copy is a new owning file charged only for the entries i
 retention is labelled as such. Retrieval is read-only: `intercom results` lists, `intercom result
 { ref, offset, limit }` pages (8,000 default / 16,000 max units, surrogate-safe), with no respawn,
 rebilling, collection or extra wake; reading a page never returns the whole run hidden in metadata.
+Invalid page requests identify offset bounds, surrogate-interior offsets and invalid limits separately;
+callers continue only with a returned `nextOffset`. Capture and explicit live retrieval share one
+output-selection rule: for stopped/failed runs, a strictly longer partial that starts with the exact
+nonblank terminal output is preserved as `partial-output`. Successful final outputs remain authoritative,
+and unrelated partial transcripts never replace or concatenate with a nonblank terminal answer.
 A saved result is not a live worker: the restore notice says runtime handles are gone while retained
 reports remain readable. Archive listeners belong to the extension factory/tracker lifetime and are
 installed exactly once. `session_shutdown` revokes that session's archive owner and clears its

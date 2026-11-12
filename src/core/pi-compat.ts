@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 /** API baseline of the current stable Pi target. Update with the four pinned development
  * packages and qualify the installed artifact; historical host releases are not maintained.
  * Keep README.md aligned. Host peers remain "*" because Pi supplies them through its loader. */
-export const MIN_PI_VERSION = "1.4.0";
+export const MIN_PI_VERSION = "1.5.2";
 
 function parse(v: string): [number, number, number] | undefined {
 	const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());

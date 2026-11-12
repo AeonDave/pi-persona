@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Installed-TARBALL qualification. No provider traffic or operator profile is permitted.
- * node scripts/qualify-package.mjs --host 1.4.0
+ * node scripts/qualify-package.mjs --host 1.5.2
  * Or pass an installed current-host package path; older host versions are rejected.
  * A version downloads only official Pi packages with scripts disabled; a path copies an installed
  * host into OS temp. All artifacts/logs are retained there for diagnosis. Repack after integration.

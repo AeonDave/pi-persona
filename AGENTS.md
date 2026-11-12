@@ -29,6 +29,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
 
 ## Conventions
 
+- User-requested commits use **AeonDave** as both author and committer, retaining the user's configured
+  email. Never add `Co-authored-by` or assistant/bot attribution; do not push unless explicitly requested.
 - **Erasable-syntax-only** TS (no enums / namespaces / parameter-properties) — runs under
   strip-types, tsx, jiti, Bun. `erasableSyntaxOnly` is on; keep it that way.
 - tsconfig is strict + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` +
@@ -37,7 +39,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `@earendil-works/pi-*`; never bundle copies.
 - npm publishes as `@aeondave/pi-persona`. Pi supplies the four `@earendil-works/pi-*` packages
   and `typebox`: keep them as `peerDependencies: "*"` with development-only copies, never runtime
-  dependencies. Target the latest stable Pi only (currently 1.4.0, aligned with `MIN_PI_VERSION`,
+  dependencies. Target the latest stable Pi only (currently 1.5.2, aligned with `MIN_PI_VERSION`,
   the four development pins and README); do not maintain historical-host compatibility branches.
   **No legacy or deferred cleanup:** remove dead code, obsolete options, superseded implementations
   and compatibility-only aliases with their replacement. Update every caller, fixture and document

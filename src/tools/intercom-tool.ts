@@ -395,7 +395,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// Native Pi already rendered `intercom steer <alias>` above this result. Show the
 				// instruction directly there; only standalone/older renderers need another identity row.
 				const showTitle = !state?.callText || !preview;
-				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}` : ""}`, 0, 0);
+				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}` : ""}`, 0, 0);
 			}
 			// Archive views are listings/diagnostics, never Markdown reports. A successful archive
 			// read carries no runId (live results do) and a summary (its own receipt); the invalid
@@ -429,7 +429,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				];
 				const purpose = compactInlineText(`results · ${listing.length} retained${flags.length ? ` · ${flags.join(" · ")}` : ""}`, { maxChars: 100 });
 				const preview = compactVisibleText(full.split("\n").slice(1).join("\n"), { maxLines: 3, maxLineChars: 100 });
-				return new Text(`${theme.fg("success", purpose)}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+				return new Text(`${theme.fg("success", purpose)}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
 			if (!failed && archivedPage) {
 				// Page position reads against the STORED body (originals may be truncated); honesty
@@ -449,10 +449,10 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// line; the fence wrapper is dropped by the preview, leaving the page body quoted.
 				const previewSource = start === end && !archivedPage.error ? "(empty page)" : full.split("\n").slice(2).join("\n");
 				const preview = compactVisibleText(previewSource, { maxLines: 3, maxLineChars: 100 });
-				return new Text(`${theme.fg("success", purpose)}${flagLine}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+				return new Text(`${theme.fg("success", purpose)}${flagLine}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
 			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 			return new Text(`${prefix}${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 		},
 	});

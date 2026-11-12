@@ -2,7 +2,7 @@
  * Small leaf helpers shared by the extension composition root and extracted hook/tool modules.
  * This module must not import `extension.ts` or any of the registration modules that consume it.
  */
-import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type KeybindingHints } from "@earendil-works/pi-coding-agent";
 
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { boundCompletionSurface, MAX_COMPLETION_REPORT_CHARS } from "../engine/async.ts";
@@ -139,12 +139,8 @@ export function sendPersonaFollowUp(
 	);
 }
 
-export function expandDetailHint(): string {
-	try {
-		return keyHint("app.tools.expand", "to expand");
-	} catch {
-		return "expand to see full detail";
-	}
+export function expandDetailHint(hints?: Pick<KeybindingHints, "keyHint">): string {
+	return hints?.keyHint?.("app.tools.expand", "to expand") ?? "expand to see full detail";
 }
 
 export function formatCouncilCallLabel(strategy: string, roster: string): string {

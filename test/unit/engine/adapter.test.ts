@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
+import { EVIDENCE_GUIDANCE } from "../../../src/core/evidence.ts";
 import { makeEngine, type EngineAdapterDeps } from "../../../src/engine/adapter.ts";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import type { AgentProgress, AgentRunSpec } from "../../../src/orchestration/sdk.ts";
@@ -177,25 +178,90 @@ test("child adapter does NOT add the MCP hint when the leg is not mcp:true", asy
 	assert.doesNotMatch(r.error ?? "", /mcp:true leg/);
 });
 
-test("child adapter leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
+test("child adapter leads with the optional spine, appends stable evidence guidance and honours `spine: false`", async () => {
 	// The child engine hands the composed prompt over as a temp file (`--append-system-prompt`),
 	// written before the spawn and deleted after it — so read it from inside the invocation seam.
-	let composed: string | undefined;
+	let composed = "";
 	const capture = (args: string[]) => {
 		const at = args.indexOf("--append-system-prompt");
-		composed = at >= 0 ? readFileSync(args[at + 1] as string, "utf8") : undefined;
+		composed = at >= 0 ? readFileSync(args[at + 1] as string, "utf8") : "";
 		return resolveFake(args);
 	};
 
 	await makeEngine({ resolveAgent, spine: "SPINE", childOptions: { resolveInvocation: capture } }).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(composed, "SPINE\n\nYou are a.\n\nROLE", "the shared layer leads, then the agent, then the role");
+	assert.ok(composed.startsWith("SPINE\n\nYou are a.\n\nROLE\n\n"), "the optional layer leads, then the agent and role");
+	assert.equal(composed.split(EVIDENCE_GUIDANCE).length - 1, 1, "stable guidance follows the saved agent and role exactly once");
 
 	await makeEngine({ resolveAgent, childOptions: { resolveInvocation: capture } }).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(composed, "You are a.\n\nROLE", "no spine ⇒ byte-identical to the pre-spine join");
+	assert.equal(composed, `You are a.\n\nROLE\n\n${EVIDENCE_GUIDANCE}`, "no optional spine leaves the agent and role intact and retains evidence guidance");
 
 	const optedOut = (n: string): AgentConfig | undefined => (n === "q" ? { name: "q", systemPrompt: "You are q.", spine: false, source: "x" } : undefined);
 	await makeEngine({ resolveAgent: optedOut, spine: "SPINE", childOptions: { resolveInvocation: capture } }).run({ agent: "q", task: "t" });
-	assert.equal(composed, "You are q.", "`spine: false` in the agent's frontmatter opts the leg out");
+	assert.equal(composed, `You are q.\n\n${EVIDENCE_GUIDANCE}`, "`spine: false` opts out only of the optional layer, not stable evidence guidance");
+});
+
+test("child prompt keeps evidence guidance with role, skills, contract and assigned identity even when spine is opted out", async () => {
+	let composed = "";
+	const configured: AgentConfig = {
+		name: "configured",
+		systemPrompt: "Configured worker prompt",
+		spine: false,
+		source: "saved-agent.md",
+	};
+	const engine = makeEngine({
+		resolveAgent: () => configured,
+		contracts,
+		spine: "OPTIONAL WORKER SPINE",
+		childOptions: {
+			resolveInvocation: (args) => {
+				const at = args.indexOf("--append-system-prompt");
+				composed = readFileSync(args[at + 1] as string, "utf8");
+				return resolveFake(args);
+			},
+		},
+	});
+	const result = await engine.run({
+		agent: "configured",
+		task: "inspect the implementation",
+		name: "Atlas CSS",
+		role: "Focus on correctness",
+		skills: ["python-testing"],
+		outputContract: "default",
+	});
+	assert.equal(result.ok, false, "the echo fixture is prose, so the requested contract must reject it");
+	assert.equal(composed.split(EVIDENCE_GUIDANCE).length - 1, 1, "guidance appears exactly once in the actual child system prompt");
+	assert.ok(composed.includes("Configured worker prompt"));
+	assert.match(composed, /\[pi-persona assigned identity\][\s\S]*\{"name":"Atlas-CSS"\}/);
+	assert.ok(composed.includes("Focus on correctness"));
+	assert.doesNotMatch(composed, /OPTIONAL WORKER SPINE/);
+	assert.match(result.output, /Load these skills before starting.*python-testing/);
+	assert.match(result.output, /inspect the implementation/);
+	assert.match(result.output, /output contract \(default\)/);
+});
+
+test("child prompt keeps the internal tool-less JSON worker prompt minimal", async () => {
+	let composed = "";
+	const privateWorker: AgentConfig = {
+		name: "internal-maintenance",
+		source: "internal:maintenance",
+		tools: [],
+		excludeTools: ["*"],
+		spine: false,
+		systemPrompt: "Return only the requested JSON data.",
+	};
+	await makeEngine({
+		resolveAgent: () => privateWorker,
+		spine: "OPTIONAL WORKER SPINE",
+		childOptions: {
+			resolveInvocation: (args) => {
+				const at = args.indexOf("--append-system-prompt");
+				composed = readFileSync(args[at + 1] as string, "utf8");
+				return resolveFake(args);
+			},
+		},
+	}).run({ agent: privateWorker.name, task: "return JSON", tools: [] });
+	assert.equal(composed, privateWorker.systemPrompt);
+	assert.doesNotMatch(composed, /\[pi-persona\] Evidence discipline/);
 });
 
 test("child adapter leaves the task untouched when no contract is requested", async () => {

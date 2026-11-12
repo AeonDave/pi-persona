@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project follows the version scheme
 used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
+## [Unreleased]
+
+### Changed
+
+- Target Pi 1.5.2, with the four development SDK packages updated together. Host packages
+  remain wildcard peers supplied by Pi. Removed the obsolete development-only `undici` override:
+  the current host already pins the patched version. Idle compaction remains qualification-blocked.
+- Supervisor and normal worker prompts carry stable evidence guidance: preserve the check's actual
+  exit status, distinguish observed commands/APIs from inference, and compare expected and actual
+  digests before claiming a verified hash. This applies independently of optional spines and saved definitions.
+- Non-worktree change reports identify a Git status snapshot delta, not worker authorship. Scope
+  warnings remain advisory observations; unchanged status codes are not proof of unchanged contents.
+
+### Fixed
+
+- Standalone entry cards, including checkpoints, stall warnings and progress recovery, honor the
+  current native output padding just like completion messages. Persona and loaded Mind share one
+  composable card frame through a versioned local presentation query; native tool shells stay Pi-owned.
+- Tool and custom-message expansion hints use the host-provided keybinding context, so installed
+  extensions display the operator's configured keys rather than another SDK copy's defaults.
+- Invalid archive paging requests distinguish out-of-range offsets, offsets inside a surrogate
+  pair, and invalid limits. Diagnostics report the stored body's actual bounds and recovery steps.
+- Stopped and failed runs retain a longer partial output when it is an exact-prefix extension of
+  the terminal output, consistently in archive capture and explicit live retrieval. Successful
+  final outputs still take precedence; unrelated partial transcripts do not displace a terminal answer.
+
+### Tests
+
+- Characterized archived Unicode pagination at the default, maximum and minimum page limits,
+  including surrogate-pair boundaries and lossless reconstruction using the returned `nextOffset`.
+
 ## [1.17.6](https://github.com/AeonDave/pi-persona/releases/tag/v1.17.6) - 2026-10-27
 
 ### Added

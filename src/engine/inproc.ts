@@ -26,6 +26,7 @@ import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { makeContactPeerTool } from "../bus/peers.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { EVIDENCE_GUIDANCE, shouldAppendEvidenceGuidance } from "../core/evidence.ts";
 import { resolveLegThinking } from "../core/leg-thinking.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { installFrozenMemoryOwner } from "../extension/memory-owner.ts";
@@ -414,12 +415,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (memoryPersona !== undefined) sessionOpts.memoryPersona = memoryPersona;
 			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
 			if (thinkingRequested !== undefined) sessionOpts.thinkingLevel = thinkingRequested;
-			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
-			// on-the-fly `role` specialisation from the spec. All three reach the session as the
-			// loader's `appendSystemPrompt`, so a leg keeps Pi's full base prompt either way — the
-			// layer adds behavioral consistency, it does not fill a scaffolding gap.
+			// The optional worker spine leads; the agent prompt, assigned identity and on-the-fly
+			// role follow; stable evidence guidance is last so saved agent prose cannot override it.
+			// These reach the session through the loader's `appendSystemPrompt`, preserving Pi's base prompt.
 			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
-			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim()].filter(Boolean).join("\n\n");
+			const evidence = shouldAppendEvidenceGuidance(cfg) ? EVIDENCE_GUIDANCE : undefined;
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim(), evidence].filter(Boolean).join("\n\n");
 			if (personaPrompt) sessionOpts.systemPrompt = personaPrompt;
 
 			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle

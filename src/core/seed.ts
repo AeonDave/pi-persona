@@ -225,6 +225,10 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 1364, sha256: "425b8ef2c1141b602b2f67e47224f855a8a11f936affd4429272347678de8b58" },
 	],
 	"agents/verifier.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 1979, sha256: "eeb8f50e21bd1f8ca3d821d45a9b99b37f21c2987bce7c93d647666054245c2e" },
+		{ size: 1998, sha256: "66aa4b460b1183a0448fa7b210fc2308da37ce62f8e588dbbbda0bf53c0d2bb7" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
 		{ size: 1037, sha256: "ce8f161b1879084b336e2f24495a82aba7279f099b450852ba02db8b4850def5" },
 		{ size: 1058, sha256: "78d7c9e7e6d961b0005d216968196dea28b8ef09a8ccd52b0f7a4de97754a800" },
 	],

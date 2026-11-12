@@ -13,10 +13,17 @@ test("satisfiesFloor compares major.minor.patch and ignores prerelease tags", ()
 	assert.equal(satisfiesFloor("garbage", "1.0.0"), false);
 });
 
+test("the supported host baseline is Pi 1.5.2 and rejects earlier stable releases", () => {
+	assert.equal(MIN_PI_VERSION, "1.5.2");
+	assert.equal(satisfiesFloor("1.5.0", MIN_PI_VERSION), false);
+	assert.equal(satisfiesFloor("1.5.1", MIN_PI_VERSION), false);
+	assert.equal(satisfiesFloor("1.5.2", MIN_PI_VERSION), true);
+});
+
 test("installedPiVersion reads the host package version without throwing", () => {
 	const v = installedPiVersion();
 	assert.ok(v === undefined || /^\d+\.\d+\.\d+/.test(v));
-	assert.equal(satisfiesFloor("1.3.999", MIN_PI_VERSION), false, "historical Pi host lines are not supported");
+	assert.equal(satisfiesFloor("1.4.999", MIN_PI_VERSION), false, "older Pi host lines are not supported");
 });
 
 test("the supported host target matches all four pinned Pi development packages", () => {

@@ -91,7 +91,7 @@ export function registerExocomProfileTool(pi: ExtensionAPI, getPlane: () => Exoc
 			if (context?.isError || result.isError) return renderLiteralToolResult(result, { expanded }, theme, context);
 			const details = result.details as unknown as ProfileToolDetails | undefined;
 			if (!details || !["get", "set", "clear"].includes(details.action)) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			return renderLiteralToolResult({
 				...result,

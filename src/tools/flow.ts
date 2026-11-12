@@ -183,7 +183,7 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 				return createReportBody(`${full}${metadata}`, theme, { header: title }, context?.lastComponent);
 			}
 			const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 			return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}${theme.fg("dim", metadata)}`, 0, 0);
 		},
 	});

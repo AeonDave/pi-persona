@@ -52,6 +52,7 @@ import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type Eng
 import { installHooks, type HookHost } from "./extension/hooks.ts";
 import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
+import { installCardFrameProvider } from "./extension/card-frame.ts";
 import { installMemoryOwner } from "./extension/memory-owner.ts";
 import { installMindWorker } from "./extension/mind-worker.ts";
 import { inheritedMemoryPersona, MEMORY_PERSONA_ENV } from "./core/companion.ts";
@@ -325,6 +326,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const bridgeMode = isBridgeMode();
 	const role = bridgeMode || process.env.PI_PERSONA_LEG === "1" ? "leg" : resolveConfig(process.env).disabled ? "disabled" : "supervisor";
 	installCompanionPresence(pi, role);
+	installCardFrameProvider(pi);
 	if (role === "leg") {
 		const inherited = inheritedMemoryPersona(process.env[MEMORY_PERSONA_ENV]);
 		if (inherited !== undefined) {
@@ -351,6 +353,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
 	registerSessionCards(pi, {
 		detailHint: expandDetailHint,
+		getOutputPad: () => pi.getSettings().outputPad ?? 1,
 		monitorLog: (record) => renderMonitorLog(record, true),
 	});
 	const appendNudgeEntry = (content: string): void => {

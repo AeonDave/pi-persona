@@ -7,6 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { buildExocomBrief, RUNTIME_CONTEXT_GUIDANCE } from "../core/brief.ts";
+import { EVIDENCE_GUIDANCE } from "../core/evidence.ts";
 import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
@@ -413,7 +414,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		let prompt = h.controller.composePrompt(event.systemPrompt, h.spineText) ?? noPersona;
 		// Stable system-level interpretation of runtime metadata. Never append an acknowledgement
 		// request to the conversation: that would recreate the old identity pseudo-turn loop.
-		prompt = `${prompt}\n\n${RUNTIME_CONTEXT_GUIDANCE}`;
+		prompt = `${prompt}\n\n${RUNTIME_CONTEXT_GUIDANCE}\n\n${EVIDENCE_GUIDANCE}`;
 		// The session time anchor (core/time.ts). Unconditional, unlike both briefs below: a supervisor
 		// that has been working for hours needs to know it whether or not h.agents or peers exist. It goes
 		// in the SYSTEM prompt because the prompt is re-composed and re-sent every turn rather than

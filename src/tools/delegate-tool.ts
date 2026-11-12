@@ -1,5 +1,5 @@
 /** `delegate` tool registration. */
-import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, KeybindingHints } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../agents/agent.ts";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -145,7 +145,7 @@ function launchRows(
 	});
 }
 
-function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number | undefined): CollapsedLaunchLine[] {
+function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number | undefined, hints?: Pick<KeybindingHints, "keyHint">): CollapsedLaunchLine[] {
 	if (rows.length === 0) return [{ prefix: "launched ", label: "", metadata: "", suffix: "" }];
 	const visibleCount = Math.min(rows.length, COLLAPSED_LAUNCH_ROWS);
 	const omitted = rows.length - visibleCount;
@@ -154,7 +154,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 		...(omitted > 0 ? [`+${omitted} more`] : []),
 		...(droppedCount > 0 ? [`${droppedCount} task${droppedCount === 1 ? "" : "s"} dropped`] : []),
 	];
-	const hintText = compactInlineText(expandDetailHint(), { maxChars: 32 });
+	const hintText = compactInlineText(expandDetailHint(hints), { maxChars: 32 });
 	const rowsNeedHint = rows.slice(0, visibleCount).some((row, index) => {
 		const metadata = launchRowMetadata(row);
 		const prefixWidth = index === 0 ? visibleWidth("launched ") : visibleWidth("  ");
@@ -199,9 +199,9 @@ function matchesCompleteSingleCall(args: unknown, argsComplete: boolean, isParti
 		&& (row.model ?? "") === shortModel(params.model);
 }
 
-function singleLaunchReceipt(row: DelegateLaunchRow): string[] {
+function singleLaunchReceipt(row: DelegateLaunchRow, hints?: Pick<KeybindingHints, "keyHint">): string[] {
 	const prefix = "launched ";
-	const suffix = row.clipped ? ` · ${compactInlineText(expandDetailHint(), { maxChars: 32 })}` : "";
+	const suffix = row.clipped ? ` · ${compactInlineText(expandDetailHint(hints), { maxChars: 32 })}` : "";
 	const labelBudget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(prefix) - visibleWidth(suffix));
 	const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
 	const rows = [compactVisibleLine(`${prefix}${label}${suffix}`, MAX_COLLAPSED_CARD_COLUMNS)];
@@ -805,13 +805,13 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						return new Text(theme.fg("accent", theme.bold("launched")), 0, 0);
 					}
 					if (rows.length === 1 && !hasDroppedTasks) {
-						const lines = singleLaunchReceipt(rows[0]!);
+						const lines = singleLaunchReceipt(rows[0]!, context);
 						return new Text([
 							theme.fg("accent", theme.bold(lines[0] ?? "launched")),
 							...lines.slice(1).map((line) => theme.fg("dim", line)),
 						].join("\n"), 0, 0);
 					}
-					const lines = collapsedLaunchRows(rows, details.dropped);
+					const lines = collapsedLaunchRows(rows, details.dropped, context);
 					return new Text(lines.map((line, index) => {
 						const prefix = index === 0
 							? theme.fg("toolTitle", theme.bold(line.prefix))
@@ -824,7 +824,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				}
 				if (isError) {
 					const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
-					return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+					return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 				}
 				const ids = details.runIds?.length ? details.runIds.slice(0, 3) : [details.runId as string];
 				const omitted = (details.runIds?.length ?? 0) - ids.length;
@@ -833,7 +833,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			}
 			if (isError) {
 				const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
-				return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : ""}`, 0, 0);
+				return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
 			return new Text(theme.fg("toolOutput", compactVisibleText(text, { maxLines: 4, maxLineChars: 100 }).text), 0, 0);
 		},

@@ -126,8 +126,13 @@ test("results collapsed: compact purpose line with the retained count, then a bo
 	const result = await tool.execute("l", { action: "results", limit: 50 }, undefined, undefined, {});
 	assert.equal(result.isError, false);
 	const before = JSON.stringify(result);
-	const collapsed = card(tool, result, false, { args: { action: "results" }, isError: false });
+	const collapsed = card(tool, result, false, {
+		args: { action: "results" }, isError: false,
+		keyText: () => "alt+e", keyHint: (_id: string, description: string) => `alt+e ${description}`,
+	});
 	assert.match(collapsed, /^results · 25 retained/, `purpose line names the count:\n${collapsed}`);
+	assert.match(collapsed, /alt\+e to expand/, "archive listing uses the host-injected configured keybinding");
+	assert.doesNotMatch(collapsed, /ctrl\+o/);
 	assert.match(collapsed, /result:.*000000000001 · worker · done/, "the bounded listing preview starts with the first entry");
 	assert.match(collapsed, /expand/i, "hidden entries advertise expansion");
 	assert.doesNotMatch(collapsed, /report 24|000000000019/, "entries beyond the preview stay hidden, not dumped");

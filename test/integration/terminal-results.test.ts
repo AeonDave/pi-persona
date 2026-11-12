@@ -157,6 +157,39 @@ test("frozen owner revokes stale appends; sibling branches share a file, copied 
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("interrupted archive capture salvages only strict exact-prefix partial extensions with truthful provenance", () => {
+	const owner = new SessionResults({ appendEntry: () => {} });
+	owner.activate(ctx(SessionManager.inMemory()));
+	const capture = owner.bind("interrupted-prefix");
+	const partial = "Complete retained progress with additional recovered continuation.";
+	const prefix = partial.slice(0, 27);
+
+	for (const status of ["stopped", "failed"] as const) {
+		const receipt = capture(status, { ...result(prefix), ok: false }, { status, partial });
+		assert.ok(receipt.ref);
+		const saved = owner.archive!.read({ ref: receipt.ref! });
+		assert.equal(saved.ok && saved.body, partial, `${status} archive body uses the complete progress extension`);
+		assert.equal(saved.ok && saved.summary.status, status);
+		assert.equal(saved.ok && saved.summary.provenance, "partial-output");
+	}
+
+	const done = capture("done", result(prefix), { status: "done", partial });
+	const savedDone = owner.archive!.read({ ref: done.ref! });
+	assert.equal(savedDone.ok && savedDone.body, prefix, "done retains the authoritative final output");
+	assert.equal(savedDone.ok && savedDone.summary.provenance, "result-output");
+
+	const nonPrefix = capture("non-prefix", { ...result("final answer"), ok: false }, { status: "failed", partial });
+	const savedNonPrefix = owner.archive!.read({ ref: nonPrefix.ref! });
+	assert.equal(savedNonPrefix.ok && savedNonPrefix.body, "final answer", "different final output is not replaced or concatenated");
+	assert.equal(savedNonPrefix.ok && savedNonPrefix.summary.provenance, "result-output");
+
+	const equal = capture("equal", { ...result(prefix), ok: false }, { status: "failed", partial: prefix });
+	const savedEqual = owner.archive!.read({ ref: equal.ref! });
+	assert.equal(savedEqual.ok && savedEqual.body, prefix, "equal text is not a strict extension");
+	assert.equal(savedEqual.ok && savedEqual.summary.provenance, "result-output");
+	owner.dispose();
+});
+
 test("capture is idempotent; errors, partial output, quota and failed append cannot turn work into failure or fake durability", async () => {
 	const manager = SessionManager.inMemory();
 	const owner = new SessionResults({ appendEntry: () => { throw new Error("disk error"); } });

@@ -112,8 +112,10 @@ export async function captureStatus(root: string, exec: GitExec, knownGitRoot?: 
 	return parsePorcelainZ(status.stdout);
 }
 
-/** Paths that appeared or changed status between the two snapshots, followed by paths that
- *  disappeared (resolved back to clean) — in that order; `renderChangeReport` sorts for display. */
+/** Paths that appeared or changed status between the two Git snapshots, followed by paths that
+ *  disappeared (resolved back to clean) — in that order; `renderChangeReport` sorts for display.
+ *  This compares only paths and porcelain status codes: edits to an already-dirty path whose status
+ *  stays the same are intentionally invisible, so an empty delta does not prove there were no writes. */
 export function diffStatus(before: StatusSnapshot, after: StatusSnapshot): ChangedPath[] {
 	const changes: ChangedPath[] = [];
 	for (const [path, xy] of after.entries) {
@@ -126,18 +128,24 @@ export function diffStatus(before: StatusSnapshot, after: StatusSnapshot): Chang
 	return changes;
 }
 
-/** Render the block appended to a leg's output, or `undefined` when nothing changed (the caller
- *  must not tack an empty block onto an untouched result). `writeSet` is the leg's OWN declared
- *  ownership (from `delegate`'s `writeSet`); a changed path outside it is flagged — not blocked,
- *  since a shared checkout has no enforcement lever here, only a supervisor-visible warning. */
+/** Render the Git status-snapshot delta appended to a non-worktree leg's output, or `undefined`
+ *  when no path/status code changed. This is shared-checkout evidence, not per-leg authorship:
+ *  concurrent actors can contribute, and a path outside `writeSet` is a scope observation rather
+ *  than proof that the leg wrote it or violated its declaration. `writeSet` is the leg's OWN
+ *  declared ownership (from `delegate`); the warning is advisory because a shared checkout has no
+ *  enforcement lever here. No delta is not proof of no writes (see {@link diffStatus}). */
 export function renderChangeReport(changes: ChangedPath[], writeSet?: readonly string[]): string | undefined {
 	if (changes.length === 0) return undefined;
 	const sorted = [...changes].sort((a, b) => a.path.localeCompare(b.path));
 	const owned = writeSet && writeSet.length > 0 ? writeSet.map(normalizeWritePath) : undefined;
 	const lines = sorted.slice(0, MAX_REPORTED_PATHS).map((c) => {
 		const outside = owned !== undefined && !owned.some((ws) => pathsOverlap(normalizeWritePath(c.path), ws));
-		return `- ${c.path} (${c.kind})${outside ? " ⚠ outside declared writeSet" : ""}`;
+		return `- ${c.path} (${c.kind})${outside ? " ⚠ observed outside declared writeSet in shared-checkout status delta (not proof this leg wrote it or violated scope)" : ""}`;
 	});
 	if (sorted.length > MAX_REPORTED_PATHS) lines.push(`+${sorted.length - MAX_REPORTED_PATHS} more`);
-	return ["--- FILES CHANGED DURING THIS LEG (shared checkout; parallel legs may overlap) ---", ...lines].join("\n");
+	return [
+		"--- GIT STATUS SNAPSHOT DELTA (shared checkout; not proof this leg wrote these paths; concurrent actors may contribute; inspect before attribution) ---",
+		...lines,
+		"Note: This compares Git paths and status codes only. Edits to already-dirty paths with unchanged status are not detected; no report does not prove no writes.",
+	].join("\n");
 }

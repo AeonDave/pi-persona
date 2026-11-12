@@ -1,80 +1,17 @@
 /** Operator-only presentation of existing session payloads. No delivery, storage or tool shells. */
-import type { ExtensionAPI, Theme, ThemeBg, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatDuration } from "../core/time.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
-import { createReportBody } from "./report-body.ts";
 import { MONITOR_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
 import { summarizeFailure } from "./failure-summary.ts";
-import { compactInlineText, compactVisibleText, sanitizeTerminalText, type CompactVisibleTextResult } from "./presentation.ts";
+import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
+import { createCardFrame, type CardFramePresentation, type CardFrameState } from "./card-frame.ts";
 
-type State = "neutral" | "success" | "attention" | "error";
-const COLORS: Record<State, { bg: ThemeBg; fg: ThemeColor }> = {
-	neutral: { bg: "customMessageBg", fg: "accent" },
-	success: { bg: "toolSuccessBg", fg: "success" },
-	attention: { bg: "toolPendingBg", fg: "warning" },
-	error: { bg: "toolErrorBg", fg: "error" },
-};
-interface Card {
-	title: string;
-	state: State;
-	full: string;
-	preview: (width: number) => Pick<CompactVisibleTextResult, "text" | "truncated">;
-	metadata?: string;
-	/** Selected only by trusted surface/envelope metadata, never prose keywords. */
-	markdown?: boolean;
-}
-
-/** The delegate-card-family frame every surface in this file shares: a bold semantic
- * `<Event> · <datum>` title, two-space-indented compact content lines, and the dim
- * expand hint only when compact actually hides content. Payloads are never modified —
- * this is projection-only (expanded still shows the complete sanitized payload). */
-const INDENT = "  ";
+type State = CardFrameState;
+type Card = CardFramePresentation;
 /** Compact budget: title + 5 body rows + optional hint keeps every collapsed card ≤ 7 rows. */
 const COMPACT_BODY_ROWS = 4;
-
-/** All seven surfaces share semantic chrome. Literal paths style at paint time; report bodies
- * use native Markdown's invalidatable layout cache. Pi rebuilds callbacks on transcript invalidation. */
-function createSessionCard(card: Card, expanded: boolean, theme: Theme, detailHint: () => string, outputPad = 0): Component {
-	if (expanded && card.markdown) {
-		return createReportBody(card.full || "(no output)", theme, {
-			padding: outputPad,
-			background: COLORS[card.state].bg,
-			header: (width) => [
-				theme.fg(COLORS[card.state].fg, theme.bold(truncateToWidth(sanitizeTerminalText(card.title), width))),
-				...(card.metadata ? [theme.fg("dim", truncateToWidth(card.metadata, width))] : []),
-			].join("\n"),
-		});
-	}
-	return {
-		invalidate() { /* Literal Text path has no themed/layout cache. */ },
-		render(width) {
-			if (width <= 0) return [];
-			const padding = Math.min(Math.max(0, Math.floor(outputPad)), Math.max(0, Math.floor((width - 1) / 2)));
-			const innerWidth = Math.max(1, width - padding * 2);
-			const colors = COLORS[card.state];
-			// The indent only applies where a clipped content column still fits; every compact line
-			// is clipped to the remaining columns so indent + text never wrap or spill mid-word.
-			const bodyPad = innerWidth > INDENT.length ? INDENT : "";
-			const contentWidth = Math.max(1, innerWidth - bodyPad.length);
-			const preview = expanded ? undefined : card.preview(contentWidth);
-			const body = expanded ? card.full : preview?.text ?? "(no output)";
-			const bodyLines = sanitizeTerminalText(body || "(no output)").split("\n").map((line) => expanded
-				? theme.fg("toolOutput", line)
-				: theme.fg("toolOutput", `${bodyPad}${truncateToWidth(line, contentWidth)}`));
-			const lines = [
-				theme.fg(colors.fg, theme.bold(truncateToWidth(sanitizeTerminalText(card.title), innerWidth))),
-				...(card.metadata ? [theme.fg("dim", truncateToWidth(`${bodyPad}${sanitizeTerminalText(card.metadata)}`, innerWidth))] : []),
-				...bodyLines,
-				...(preview?.truncated ? [theme.fg("dim", truncateToWidth(detailHint(), innerWidth))] : []),
-			];
-			// Text owns wrapping and full-row padding/background, including embedded foreground resets.
-			// A terminal narrower than a single wide glyph cannot display that glyph; clip only there.
-			return new Text(lines.join("\n"), padding, 0, (text) => theme.bg(colors.bg, text))
-				.render(width).map((line) => truncateToWidth(line, width));
-		},
-	};
-}
 
 function preview(full: string, maxLines: number, maxColumns: number): Card["preview"] {
 	return (width) => compactVisibleText(full, { maxLines, maxLineChars: Math.min(width, maxColumns) });
@@ -287,15 +224,22 @@ function statusPreview(full: string): Card["preview"] | undefined {
 
 export interface SessionCardOptions {
 	detailHint: () => string;
+	/** Read the current native transcript padding when Pi rebuilds a custom entry renderer. */
+	getOutputPad: () => number;
 	/** Existing bounded/fenced runtime formatter, injected to keep UI independent of tool wiring. */
 	monitorLog: (record: MonitorLogRecord) => string;
 }
 
 export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRenderer" | "registerEntryRenderer">, options: SessionCardOptions): void {
-	const sessionCard = (card: Card, expanded: boolean, theme: Theme, outputPad = 0): Component =>
-		createSessionCard(card, expanded, theme, options.detailHint, outputPad);
+	const sessionCard = (card: Card, expanded: boolean, theme: Theme, outputPad = 0, keyHint?: KeybindingHints["keyHint"]): Component =>
+		createCardFrame(card, {
+			expanded,
+			theme,
+			outputPad,
+			detailHint: keyHint ? () => keyHint("app.tools.expand", "to expand") : options.detailHint,
+		});
 	for (const customType of ["pi-persona", "exocom_received"] as const) {
-		pi.registerMessageRenderer(customType, (message, { expanded, outputPad }, theme) => {
+		pi.registerMessageRenderer(customType, (message, { expanded, outputPad, keyHint }, theme) => {
 			const raw = typeof message.content === "string" ? message.content
 				: message.content.map((part) => part.type === "text" ? part.text : "[image]").join("\n");
 			const full = sanitizeTerminalText(raw);
@@ -308,10 +252,10 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				title: customType === "pi-persona" ? `Update · ${status}` : "Exocom · inbound",
 				state, full, markdown,
 				preview: projected ?? preview(full, 4, 100),
-			}, expanded, theme, outputPad);
+			}, expanded, theme, outputPad, keyHint);
 		});
 	}
-	pi.registerEntryRenderer(MONITOR_LOG_ENTRY, (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer(MONITOR_LOG_ENTRY, (entry, { expanded, keyHint }, theme) => {
 		const record = parseMonitorLogRecord(entry.data);
 		if (!record) return undefined;
 		const { state, status } = monitorState(record);
@@ -320,9 +264,9 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 			state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
 			full: sanitizeTerminalText(options.monitorLog(record)),
 			preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · monitor result`, truncated: true }),
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint);
 	});
-	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
 		if (!data) return undefined;
 		const metadata = [compactInlineText(data.agent, { maxChars: 48 }), ...(data.model ? [compactInlineText(data.model, { maxChars: 96 })] : []), ...(data.durationMs !== undefined ? [formatDuration(data.durationMs)] : [])].join(" · ");
@@ -330,9 +274,9 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 			title: `Failed · ${compactInlineText(data.label || data.agent, { maxChars: 80 })}`, state: "error", metadata,
 			full: `Run ${compactInlineText(data.id)}\n${sanitizeTerminalText(data.error)}`,
 			preview: (width) => ({ text: compactVisibleText(summarizeFailure(data.error), { maxLines: 2, maxLineChars: Math.min(width, 100) }).text, truncated: true }),
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint);
 	});
-	pi.registerEntryRenderer<ResultEntry>("pi-persona-result", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<ResultEntry>("pi-persona-result", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
 		if (!data) return undefined;
 		const full = sanitizeTerminalText(data.content || "(no output)");
@@ -344,9 +288,9 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		return sessionCard({
 			title: `${label || "Result"} · ${status}${state === "error" && cause !== "(no output)" ? ` · ${cause}` : ""}`,
 			state, full, markdown: true, preview: preview(full, 3, 100),
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint);
 	});
-	pi.registerEntryRenderer<ContentEntry>("pi-persona-nudge", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<ContentEntry>("pi-persona-nudge", (entry, { expanded, keyHint }, theme) => {
 		if (!entry.data) return undefined;
 		const full = sanitizeTerminalText(entry.data.content || "⟢ pi-persona · checkpoint");
 		const lines = full.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -365,9 +309,9 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				const result = preview(chosen.join("\n"), 2, 100)(width);
 				return { text: result.text, truncated: result.truncated || details.some((line) => !chosen.includes(line)) };
 			},
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint);
 	});
-	pi.registerEntryRenderer<ContentEntry>("pi-persona-status", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<ContentEntry>("pi-persona-status", (entry, { expanded, keyHint }, theme) => {
 		if (!entry.data) return undefined;
 		const full = sanitizeTerminalText(entry.data.content || "Async activity · routine check-in");
 		const stall = entry.data.kind === "stall";
@@ -384,6 +328,6 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				const result = preview(digest.slice(0, 2).join("\n") || full, 2, 140)(width);
 				return { text: result.text, truncated: result.truncated || digest.length > 2 };
 			},
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint);
 	});
 }

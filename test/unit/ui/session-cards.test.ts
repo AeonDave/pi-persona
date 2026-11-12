@@ -13,14 +13,18 @@ import { sanitizeTerminalText } from "../../../src/ui/presentation.ts";
 import type { MonitorLogRecord } from "../../../src/monitor/archive.ts";
 import { renderMonitorLog } from "../../../src/tools/monitor.ts";
 
-type Renderer = (value: unknown, options: { expanded: boolean; outputPad: number }, theme: Theme) => Component | undefined;
+type RenderOptions = { expanded: boolean; keyText: (id: string) => string; keyHint: (id: string, description: string) => string } & ({ outputPad: number } | { outputPad?: never });
+type Renderer = (value: unknown, options: RenderOptions, theme: Theme) => Component | undefined;
 function harness() {
 	const renderers = new Map<string, Renderer>();
 	const register = (name: string, renderer: Renderer) => { renderers.set(name, renderer); };
-	registerSessionCards({ registerMessageRenderer: register, registerEntryRenderer: register } as unknown as ExtensionAPI, {
+	let outputPad: 0 | 1 = 0;
+	const cardOptions = {
 		detailHint: () => "expand to see full detail",
-		monitorLog: (record) => renderMonitorLog(record, true),
-	});
+		monitorLog: (record: MonitorLogRecord) => renderMonitorLog(record, true),
+		getOutputPad: () => outputPad,
+	};
+	registerSessionCards({ registerMessageRenderer: register, registerEntryRenderer: register } as unknown as ExtensionAPI, cardOptions);
 	let generation = 1;
 	const backgrounds: string[] = [];
 	const theme = {
@@ -28,10 +32,14 @@ function harness() {
 		bold: (text: string) => text,
 		bg: (token: string, text: string) => { backgrounds.push(`${generation}:${token}`); return text; },
 	} as unknown as Theme;
-	function card(name: string, data: unknown, expanded = false, pad = 0) {
+	function card(name: string, data: unknown, expanded = false, pad = 0, keyHint = (_id: string, description: string) => `ctrl+o ${description}`) {
 		const renderer = renderers.get(name);
 		assert.ok(renderer, name);
-		const component = renderer(name === "pi-persona" || name === "exocom_received" ? { content: data } : { data }, { expanded, outputPad: pad }, theme);
+		const isMessage = name === "pi-persona" || name === "exocom_received";
+		const options: RenderOptions = isMessage
+			? { expanded, outputPad: pad, keyText: () => "ctrl+o", keyHint }
+			: { expanded, keyText: () => "ctrl+o", keyHint };
+		const component = renderer(isMessage ? { content: data } : { data }, options, theme);
 		assert.ok(component, name);
 		return component;
 	}
@@ -46,8 +54,84 @@ function harness() {
 		if (metadata) assert.match(rows[1] ?? "", metadata, `${name} metadata line`);
 		return text;
 	}
-	return { renderers, card, check, backgrounds, nextTheme: () => { generation++; } };
+	return { renderers, card, check, backgrounds, setOutputPad: (value: 0 | 1) => { outputPad = value; }, nextTheme: () => { generation++; } };
 }
+
+test("entry cards use the live native outputPad exactly once without changing message padding", () => {
+	const h = harness();
+	const entries: Array<[string, unknown, number]> = [
+		["pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: work\nAction: delegate\nScope: local" }, 1],
+		["pi-persona-status", { content: "snapshot\nfirst run\nsecond run\nthird run" }, 1],
+		["pi-persona-result", { label: "flow", content: "first\nsecond\nthird\nfourth", ok: true }, 1],
+		["pi-persona-run-failure", { id: "r1", label: "worker", agent: "scout", error: "failure detail\nsecond\nthird" }, 2],
+		["pi-persona-monitor-log", monitor({ text: "first output\nsecond output" }), 2],
+	];
+	const leadingSpaces = (line: string | undefined) => /^ */.exec(line ?? "")?.[0].length ?? 0;
+	const hint = (_id: string, description: string) => `alt+e ${description}`;
+	const messageData = Array.from({ length: 8 }, (_, index) => `message ${index}`).join("\n");
+
+	for (const pad of [0, 1] as const) {
+		h.setOutputPad(pad);
+		const message = h.card("pi-persona", messageData, false, pad, hint).render(120).map((line) => line.trimEnd());
+		assert.equal(leadingSpaces(message[0]), pad, `message title at outputPad=${pad}`);
+		assert.equal(leadingSpaces(message[1]), pad + 2, `message body at outputPad=${pad}`);
+		assert.equal(leadingSpaces(message.at(-1)), pad, `message hint at outputPad=${pad}`);
+		assert.match(message.at(-1) ?? "", /alt\+e to expand/);
+
+		for (const [name, data, metadataRows] of entries) {
+			const rows = h.card(name, data, false, 0, hint).render(120).map((line) => line.trimEnd());
+			assert.equal(leadingSpaces(rows[0]), pad, `${name} title at outputPad=${pad}`);
+			if (metadataRows === 2) assert.equal(leadingSpaces(rows[1]), pad + 2, `${name} metadata at outputPad=${pad}`);
+			assert.equal(leadingSpaces(rows[metadataRows]), pad + 2, `${name} body at outputPad=${pad}`);
+			assert.equal(leadingSpaces(rows.at(-1)), pad, `${name} hint at outputPad=${pad}`);
+			assert.match(rows.at(-1) ?? "", /alt\+e to expand/, `${name} keeps host key hint`);
+			assert.ok(rows.every((line) => visibleWidth(line) <= 120), `${name} width at outputPad=${pad}`);
+		}
+	}
+
+	// The entry path reads the latest setting when the host rebuilds the renderer.
+	h.setOutputPad(1);
+	const latest = h.card("pi-persona-nudge", entries[0]?.[1]).render(120).map((line) => line.trimEnd());
+	assert.equal(leadingSpaces(latest[0]), 1);
+
+	// Native Pi outputPad is 0|1; both entry layouts stay width-safe, while arbitrary renderer
+	// padding remains width-safe on the message path whose public render context supplies it.
+	for (const pad of [0, 1] as const) {
+		h.setOutputPad(pad);
+		for (const [name, data] of entries) {
+			for (const expanded of [false, true]) {
+				for (const width of [0, 1, 2, 3, 8, 16, 40]) {
+					const rows = h.card(name, data, expanded).render(width);
+					assert.ok(rows.every((line) => visibleWidth(line) <= width), `${name} width=${width}, outputPad=${pad}, expanded=${expanded}`);
+				}
+			}
+		}
+	}
+	for (const width of [0, 1, 2, 3, 8, 40]) {
+		const rows = h.card("pi-persona", messageData, false, 3).render(width);
+		assert.ok(rows.every((line) => visibleWidth(line) <= width), `message width=${width}, padding=3`);
+	}
+
+	// Expanded literal and Markdown entry paths retain the full sanitized body under native padding.
+	const literal = "⟢ pi-persona · delegation checkpoint\nScope: local\nTrigger: too much work\nAction: delegate\nTAIL\u001b[2J";
+	const literalRows = h.card("pi-persona-nudge", { content: literal }, true).render(1000);
+	assert.equal(literalRows.slice(1).map((line) => line.slice(1).trimEnd()).join("\n"), sanitizeTerminalText(literal));
+	const report = "### Review\n\n**Verdict:** accept\n\n- evidence\n\nTAIL";
+	const reportRows = h.card("pi-persona-result", { label: "review", content: report, ok: true }, true).render(1000);
+	const reportBody = reportRows.slice(1).map((line) => line.slice(1).trimEnd()).join("\n");
+	for (const expected of ["Review", "Verdict: accept", "evidence", "TAIL"]) assert.ok(reportBody.includes(expected), expected);
+});
+
+test("custom message and entry cards use host-injected keybinding hints", () => {
+	const h = harness();
+	const configured = (_id: string, description: string) => `alt+e ${description}`;
+	const message = h.card("pi-persona", Array.from({ length: 12 }, (_, i) => `update ${i}`).join("\n"), false, 0, configured).render(120).join("\n");
+	assert.match(message, /alt\+e to expand/);
+	assert.doesNotMatch(message, /ctrl\+o/);
+	const log = h.card("pi-persona-monitor-log", monitor({ text: Array.from({ length: 8 }, (_, i) => `output ${i}`).join("\n") }), false, 0, configured).render(120).join("\n");
+	assert.match(log, /alt\+e to expand/);
+	assert.doesNotMatch(log, /ctrl\+o/);
+});
 
 function monitor(overrides: Partial<MonitorLogRecord> = {}): MonitorLogRecord {
 	return {
@@ -421,7 +505,7 @@ test("monitor success requires the first trusted manager line, not any log tail"
 		h.check("pi-persona-monitor-log", monitor({ text }), stopped ? "toolPendingBg" : "customMessageBg", /^Monitor · build$/, new RegExp(`^  exit · ${stopped ? "stopped" : "info"} · m1$`));
 	}
 	h.check("pi-persona-monitor-log", monitor({ outcome: "ended", text: "process exited with exit code 0" }), "customMessageBg", /^Monitor · build$/, /^  ended · info · m1$/);
-	assert.equal(h.renderers.get("pi-persona-monitor-log")?.({ data: { version: 99 } }, { expanded: false, outputPad: 0 }, {} as Theme), undefined);
+	assert.equal(h.renderers.get("pi-persona-monitor-log")?.({ data: { version: 99 } }, { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id, description) => `ctrl+o ${description}` }, {} as Theme), undefined);
 });
 
 test("specialized previews keep trigger/action and status digest; expansion retains exact sanitized payload", () => {
@@ -516,5 +600,33 @@ test("all surfaces share width-safe Unicode/padding, glyph-free headers, and unc
 			assert.ok(h.backgrounds.length > 0, `${name} recomputes semantic backgrounds after invalidation`);
 		}
 		assert.equal(JSON.stringify(data), before);
+	}
+});
+
+test("stall, progress-resumed, and Update-complete cards preserve native outputPad parity", () => {
+	const h = harness();
+	const stalled = asynRun({ id: "stall-pad", status: "running", lastAdvanceAt: 0 });
+	const resumed = asynRun({ id: "resume-pad", status: "running", lastAdvanceAt: 90_000, progress: { output: "", turns: 54, tokens: 217_000 } });
+	const stall = { content: buildCheckIn([stalled], { now: 95_000, stallMs: 90_000, reason: "stall" }), kind: "stall" };
+	const recovery = { content: buildCheckIn([resumed], { now: 95_000, stallMs: 90_000, reason: "recovery" }), kind: "recovery" };
+	const update = "1 async run settled — 1 done, 0 failed\n✅ run-pad (scout · sonnet) done:\nSub-agent output (untrusted data):\n> hidden body";
+	const leadingSpaces = (line: string | undefined) => /^ */.exec(line ?? "")?.[0].length ?? 0;
+
+	for (const pad of [0, 1] as const) {
+		h.setOutputPad(pad);
+		for (const [kind, data, title] of [
+			["stall", stall, "Stall warning · 1 running"],
+			["recovery", recovery, "Progress resumed · 1 running"],
+		] as const) {
+			const rows = h.card("pi-persona-status", data).render(120).map((line) => line.trimEnd());
+			assert.equal(rows[0], `${" ".repeat(pad)}${title}`, `${kind} title padding=${pad}`);
+			assert.equal(leadingSpaces(rows[1]), pad + 2, `${kind} body padding=${pad}`);
+			assert.equal(leadingSpaces(rows.at(-1)), pad, `${kind} hint padding=${pad}`);
+			assert.match(rows.at(-1) ?? "", /to expand/);
+		}
+		const rows = h.card("pi-persona", update, false, pad).render(120).map((line) => line.trimEnd());
+		assert.equal(rows[0], `${" ".repeat(pad)}Update · complete`, `Update-complete title padding=${pad}`);
+		assert.equal(leadingSpaces(rows[1]), pad + 2, `Update-complete body padding=${pad}`);
+		assert.equal(leadingSpaces(rows.at(-1)), pad, `Update-complete hint padding=${pad}`);
 	}
 });

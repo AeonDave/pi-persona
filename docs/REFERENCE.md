@@ -156,14 +156,17 @@ model/provider failure once on the current main model, including unavailable sav
 They never substitute a peer's model or search arbitrary providers. Each recovery is visible and both
 attempts consume usage/child budget; stop, timeout, contract and infrastructure failures do not retry.
 
-Any leg that does NOT run in `isolation: worktree` shares the real checkout, so its result gets a
-"what changed" block appended: `--- FILES CHANGED DURING THIS LEG (shared checkout; parallel legs
-may overlap) ---` followed by one `- <path> (<M|A|D|R|?>)` line per path (capped at 40, `+N more`
-beyond that); a changed path outside the leg's own declared `writeSet` is flagged
-`⚠ outside declared writeSet`. This is a `git status` before/after snapshot, not a private diff — a
-parallel sibling touching the same file can appear here too — and it is skipped when there is
-nothing to report, or when the leg IS worktree-isolated (that path already returns a real unified
-diff instead).
+Any leg that does NOT run in `isolation: worktree` shares the real checkout, so its result may
+include a Git status snapshot delta: one `- <path> (<M|A|D|R|?>)` line per observed status change
+(capped at 40, `+N more` beyond that). The report explicitly is **not proof that this leg wrote the
+paths**: concurrent actors' changes can appear even in a read-only worker's result. Paths outside
+the leg's declared `writeSet` remain flagged as an observed scope mismatch, not a proven violation
+by that worker. Admission ownership checks remain unchanged.
+
+This is a before/after comparison of path/status codes, not file contents or a private diff. Further
+edits to an already-dirty path with the same status can be missed; an empty report does not prove
+no writes. The block is omitted when no delta is observed or capture is unavailable. Worktree-isolated
+legs instead return their real unified diff. `changeReport` controls this advisory snapshot only.
 
 The cross-process broker is on by default for child-engine, worktree, and MCP legs. It provides the
 same supervisor communication surface over a session-scoped POSIX socket or Windows named pipe.
@@ -380,7 +383,9 @@ choose the owner explicitly.
 The optional synchronous bus channel `pi-persona:settings:collect:v1` receives
 `{ add(id, values) }`. A loaded supervisor companion responds with `add("mind", { mindCapture,
 mindNudge })` or `add("flow", { flowEnabled, flowPort, flowIdleMs })`, using its current startup
-snapshot. Each may report a supported subset. Persona validates ownership/types against the same
+snapshot. Current Mind's `auto` mode captures direct cues as active-branch session notes, not durable
+persona/shared facts; durable `remember` calls must name their destination explicitly. Each companion
+may report a supported subset. Persona validates ownership/types against the same
 registry used by the editor and displays only reported fields; an unrelated plugin cannot contribute
 an optimizer or native Pi setting through this channel. Contributors must not read credentials,
 refresh providers, write files, wake the model or start a service in response to collection.

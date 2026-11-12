@@ -11,7 +11,7 @@
 
 import type { ProgressSnapshot, ToolEvent } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
-import { resultReceiptHint, type ResultReceipt } from "../results/retrieval.ts";
+import { resultReceiptHint, selectTerminalOutput, type ResultReceipt } from "../results/retrieval.ts";
 import { DEFAULT_ASYNC_RETAIN } from "../core/config.ts";
 import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel, sanitizeStatusLabel } from "../core/display-label.ts";
 import { compactTokens } from "../core/format.ts";
@@ -483,8 +483,8 @@ export function buildRetentionOverflowNote(droppedIds: readonly string[], retent
 
 /** Return the complete text for one run for an explicit/on-demand result action. */
 export function getFullRunOutput(run: AsyncRun): string {
-	if (run.result?.output?.trim()) return run.result.output;
-	if (run.progress.output.trim()) return run.progress.output;
+	const selected = selectTerminalOutput(run.result?.output ?? "", run.progress.output, run.status);
+	if (selected) return selected.body;
 	if (run.error?.trim()) return run.error;
 	return "(no output)";
 }

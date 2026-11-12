@@ -256,13 +256,13 @@ ${strategyCatalog()}`,
 					return new Text(`${title()}\n${theme.fg("toolOutput", body || "(no ruling)")}${theme.fg("dim", metadata)}`, 0, 0);
 				}
 				const preview = compactVisibleText(body || "(no ruling)", { maxLines: 3, maxLineChars: 100 });
-				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 				return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}${theme.fg("dim", metadata)}`, 0, 0);
 			}
 			const text = formatCouncilResult(
 				{ headline: d.headline, status: d.status, tally: d.tally, usedFallback: d.usedFallback, body },
 				expanded,
-				expandDetailHint(),
+				expandDetailHint(context),
 			);
 			return expanded ? createReportBody(`${text}${metadata}`, theme, {}, context?.lastComponent) : new Text(`${theme.fg("accent", text)}${theme.fg("dim", metadata)}`, 0, 0);
 		},

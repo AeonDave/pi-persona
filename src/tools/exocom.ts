@@ -17,7 +17,7 @@
 
 import { type Static, Type } from "typebox";
 
-import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type KeybindingHints } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 
@@ -200,6 +200,7 @@ function renderListResult(
 	offset = 0,
 	nextOffset?: number,
 	scope?: { scopeCode: string; homeWorkspace: { label: string; code: string; sameAsScope: boolean } },
+	keybindings?: Pick<KeybindingHints, "keyHint">,
 ): string {
 	const scopeLabel = scope
 		? scope.homeWorkspace.sameAsScope
@@ -217,7 +218,7 @@ function renderListResult(
 	for (const peer of shown) lines.push(...peerRows(peer, expanded));
 	if (offset > 0) lines.push(`…and ${offset} peers before this page`);
 	if (pageEnd < total) lines.push(`…and ${total - pageEnd} more peers after this page`);
-	if (!expanded && total > shown.length) lines.push(`(${keyHint("app.tools.expand", "to expand")})`);
+	if (!expanded && total > shown.length) lines.push(`(${keybindings?.keyHint("app.tools.expand", "to expand") ?? "to expand"})`);
 	if (nextOffset !== undefined && nextOffset < total) lines.push(`next offset: ${nextOffset}`);
 	return lines.join("\n");
 }
@@ -320,7 +321,7 @@ export function registerExocomTools(
 				homeWorkspace?: { label?: string; code?: string; sameAsScope?: boolean };
 			} | undefined;
 			if (context?.isError || !details || !Array.isArray(details.peers)) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			const peers = details.peers;
 			const total = typeof details.total === "number" ? details.total : peers.length;
@@ -339,7 +340,7 @@ export function registerExocomTools(
 					},
 				}
 				: undefined;
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset, scope)), 0, 0);
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset, scope, context)), 0, 0);
 		},
 	});
 
@@ -468,7 +469,7 @@ export function registerExocomTools(
 			// pi renders this for a FAILED call too, handing us the error's empty details object — an
 			// unrecognised shape is a failure to show, not a send to congratulate the user on.
 			if (context?.isError || !isSendDetails(details)) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			return renderLiteralToolResult({ ...result, content: [{ type: "text", text: renderSendResult(details) }] }, { expanded }, theme, context);
 		},
@@ -492,7 +493,7 @@ export function registerExocomTools(
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as { name?: string } | undefined;
 			if (context?.isError || !details?.name) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			const name = normalizeMetadataText(details.name, 96, "(unchanged)");
 			const text = `exocom: you are now "${name}"`;

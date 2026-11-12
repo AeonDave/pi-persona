@@ -71,6 +71,35 @@ test("three large readonly reports survive reopen, paged without writes or input
 	assert.equal(h.writes.length, 3);
 });
 
+test("archived Unicode paging safely adjusts requested ends and reconstructs via nextOffset", () => {
+	const boundary = (limit: number): string => "a".repeat(limit - 1) + "😀" + "tail";
+	for (const [body, limit] of [[boundary(8000), undefined], [boundary(16000), 16000], ["a😀b😀c", 2]] as const) {
+		const h = host();
+		const receipt = saved(h.archive.save(input("unicode", body)));
+		let offset = 0;
+		let reconstructed = "";
+		for (;;) {
+			const page = h.archive.read({ ref: receipt.ref, offset, ...(limit === undefined ? {} : { limit }) });
+			if (!page.ok) assert.fail(page.message);
+			assert.ok(page.body.length <= (limit ?? 8000));
+			assert.ok(page.body.length > 0 || page.endOfStoredBody);
+			assert.equal(page.offset, offset);
+			reconstructed += page.body;
+			if (page.nextOffset === undefined) {
+				assert.equal(page.endOfStoredBody, true);
+				break;
+			}
+			assert.equal(page.nextOffset, offset + page.body.length);
+			assert.ok(page.nextOffset > offset);
+			const before = body.charCodeAt(page.nextOffset - 1);
+			const after = body.charCodeAt(page.nextOffset);
+			assert.ok(!(before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff));
+			offset = page.nextOffset;
+		}
+		assert.equal(reconstructed, body);
+	}
+});
+
 test("idempotency uses immutable origin, not run labels, and detects changed truncated suffixes", () => {
 	const h = host();
 	const first = saved(h.archive.save(input("activation/one", "x".repeat(300_000) + "A")));
@@ -378,4 +407,46 @@ test("injected append cannot mutate the archived record or reentrantly consume t
 	if (page.ok) page.summary.label = "changed outside";
 	const again = archive.read({ ref: result.ref });
 	assert.ok(again.ok && again.summary.label === "STATIC");
+});
+
+test("archived paging errors distinguish stored-body bounds, invalid limits, types and surrogate offsets", () => {
+	const h = host();
+	const body = "x".repeat(84);
+	const receipt = saved(h.archive.save(input("short-archived-body", body)));
+	assert.equal(receipt.summary.storedChars, 84);
+	for (const [offset, limit] of [[46000, 3000], [44000, 4000], [44001, 4000], [40000, 6000], [33000, 5000]] as const) {
+		const result = h.archive.read({ ref: receipt.ref, offset, limit });
+		assert.ok(!result.ok && result.reason === "invalid");
+		if (!result.ok) {
+			assert.match(result.message, new RegExp(`Invalid offset ${offset}`));
+			assert.match(result.message, /stored body is 84 UTF-16 units long/);
+			assert.match(result.message, /valid range 0\.\.84/);
+			assert.match(result.message, /offset=0/);
+			assert.match(result.message, /returned nextOffset/);
+		}
+	}
+
+	const defaults = h.archive.read({ ref: receipt.ref });
+	assert.ok(defaults.ok && defaults.offset === 0 && defaults.body === body && defaults.endOfStoredBody);
+
+	const invalidLimit = h.archive.read({ ref: receipt.ref, limit: 1 });
+	assert.ok(!invalidLimit.ok && invalidLimit.reason === "invalid");
+	if (!invalidLimit.ok) assert.match(invalidLimit.message, /Invalid limit:.*integer.*2\.\.16000/);
+
+	const hostile = { toString: () => assert.fail("must not coerce an untrusted paging value") };
+	const invalidOffsetType = h.archive.read({ ref: receipt.ref, offset: hostile as unknown as number });
+	assert.ok(!invalidOffsetType.ok && invalidOffsetType.reason === "invalid");
+	if (!invalidOffsetType.ok) assert.match(invalidOffsetType.message, /Invalid offset:.*safe integer/);
+	const invalidLimitType = h.archive.read({ ref: receipt.ref, limit: hostile as unknown as number });
+	assert.ok(!invalidLimitType.ok && invalidLimitType.reason === "invalid");
+	if (!invalidLimitType.ok) assert.match(invalidLimitType.message, /Invalid limit:.*integer.*2\.\.16000/);
+
+	const unicode = saved(h.archive.save(input("surrogate-offset", "a😀b")));
+	const splitPair = h.archive.read({ ref: unicode.ref, offset: 2 });
+	assert.ok(!splitPair.ok && splitPair.reason === "invalid");
+	if (!splitPair.ok) {
+		assert.match(splitPair.message, /Invalid offset 2/);
+		assert.match(splitPair.message, /inside a UTF-16 surrogate pair/);
+		assert.doesNotMatch(splitPair.message, /Invalid limit/);
+	}
 });

@@ -95,20 +95,15 @@
     "node": ">=22.19.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-agent-core": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^22.20.4",
     "fast-check": "^4.10.2",
     "tsx": "^4.23.13",
     "typebox": "1.4.2",
     "typescript": "^7.0.2"
-  },
-  "overrides": {
-    "@earendil-works/pi-coding-agent@1.4.0": {
-      "undici": "8.12.3"
-    }
   },
   "pi": {
     "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.17.6/assets/banner.png",

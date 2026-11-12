@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { EVIDENCE_GUIDANCE, shouldAppendEvidenceGuidance } from "../core/evidence.ts";
 import { resolveLegThinking } from "../core/leg-thinking.ts";
 import type { ThinkingLevel } from "../core/types.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
@@ -182,12 +183,12 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (thinkingRequested !== undefined) childSpec.thinking = thinkingRequested;
 			if (admittedTools !== undefined) childSpec.tools = admittedTools;
 			if (cfg.excludeTools && cfg.excludeTools.length > 0) childSpec.excludeTools = cfg.excludeTools;
-			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
-			// on-the-fly `role` specialisation from the spec. All three go out as
-			// `--append-system-prompt`, so a leg keeps Pi's full base prompt either way — the
-			// layer adds behavioral consistency, it does not fill a scaffolding gap.
+			// The optional worker spine leads; the agent prompt, assigned identity and on-the-fly
+			// role follow; stable evidence guidance is last so saved agent prose cannot override it.
+			// These all go out as `--append-system-prompt`, so the leg keeps Pi's full base prompt.
 			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
-			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim()].filter(Boolean).join("\n\n");
+			const evidence = shouldAppendEvidenceGuidance(cfg) ? EVIDENCE_GUIDANCE : undefined;
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim(), evidence].filter(Boolean).join("\n\n");
 			if (personaPrompt) childSpec.systemPrompt = personaPrompt;
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 

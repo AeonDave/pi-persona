@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-	createTerminalResultRecord, isResultRef, pageStoredBody, parseTerminalResultInput,
+	createTerminalResultRecord, isResultRef, readStoredBodyPage, parseTerminalResultInput,
 	parseTerminalResultRecord, payloadBytes,
 } from "./record.ts";
 import {
@@ -99,10 +99,10 @@ export class TerminalResultArchive {
 		const found = this.lookup("ref", request.ref);
 		if (found.kind === "missing") return this.failure("unavailable", "Result reference is unavailable in this owning session");
 		if (found.kind !== "found") return this.failure(found.kind, "Result identity is ambiguous or corrupt in this owning session");
-		const page = pageStoredBody(found.record, request.offset, request.limit);
-		if (!page) return this.failure("invalid", "Invalid stored-body UTF-16 offset or read limit (2..16000); surrogate pairs cannot be split");
+		const result = readStoredBodyPage(found.record, request.offset, request.limit);
+		if (!result.ok) return this.failure("invalid", result.message);
 		return {
-			ok: true, summary: summary(found.record, this.storage(found.retained)), ...page,
+			ok: true, summary: summary(found.record, this.storage(found.retained)), ...result.page,
 			...this.evidence(found.record, found.retained),
 		};
 	}
