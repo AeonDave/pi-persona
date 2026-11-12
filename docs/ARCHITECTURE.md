@@ -696,24 +696,38 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   "<message-id>" }` retrieves a retained message; it never interprets a message id as a run id.
   Oversized or evicted messages return an unavailable diagnostic — retention is not durable evidence
   storage;
+- a completion delivery includes unread non-blocking bus notes in its existing wake, so a worker
+  finishing before the periodic inbox check cannot strand its last progress message. The combined
+  report keeps the 12,000-character bound and retains message IDs for explicit retrieval. Inbox
+  consumption commits only after the host send succeeds; active asks keep their separate reply path;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
   Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card
   names each failed leg on its own line, and a failed council/flow card leads with the cause in its title;
-- async launch cards and targeted Intercom call headers use the worker's canonical alias/model,
-  matching the tree rather than promoting its routing ID to display identity. Launch/control receipts
+- async launch cards and targeted Intercom call headers use the worker's assigned alias,
+  matching the tree rather than promoting its routing ID to display identity. Model and effort remain
+  launch metadata; communication and status previews omit the model and retain it in expanded diagnostics. Launch/control receipts
   persist identity snapshots for history rendering; aliases never become routing keys. Colliding
   aliases carry a secondary ID, and legacy receipts without a recoverable name retain their ID fallback.
   Accepted steering receipts retain the exact sent message: collapsed cards preview it, expansion
-  shows all sanitized text and the diagnostic ID. A queued receipt does not prove the worker acted;
-- async failures append a `pi-persona-run-failure` entry in TUI mode, with alias, agent/model,
+  shows all sanitized text and the diagnostic ID. Delegate, council and flow launches also retain the
+  submitted task through `ui/launch-request.ts`; hidden requests always expose the host's expansion hint.
+  Native tool cards share Pi's expand-key and mouse-click handling. A queued receipt does not prove the worker acted;
+- async failures append a `pi-persona-run-failure` entry in TUI mode, with alias, agent,
   elapsed time and a concise cause. The entry stores the original diagnostic for expanded history
   rendering; it is operator-only and adds no model context or wake. Other modes, or an append
   failure, retain a bounded notification. The semantic completion follows its existing single-wake path;
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
-  preview until expanded; terminal escape/control sequences are removed from the visible projection;
+  preview until expanded; terminal escape/control sequences are removed from the visible projection.
+  Intercom and Exocom share the bounded `ui/communication-card.ts` snapshot contract: an attributed
+  `from <name>:` line and a literal body preview, without transport bullets or model metadata.
+  The bus snapshots the registered alias into each envelope, including broker-connected workers,
+  so later worker disposal cannot erase sender identity. Snapshots are display data only; expansion
+  always renders the original delivered source, including routing, trust boundaries and reply instructions;
 - custom follow-ups and operator-only entries use the single composable frame in `ui/card-frame.ts`;
   `ui/session-cards.ts` supplies surface-specific content and status projections. The frame owns
-  glyph-free headings, explicit textual state, width-aware layout and semantic theme backgrounds. Neutral
+  glyph-free lowercase headings, explicit textual state, width-aware layout and semantic theme backgrounds.
+  Completion, routine status, stall and recovery use the same `intercom update` heading with their
+  respective state; assigned names retain their capitalization. Neutral
   information/unknown state uses `customMessageBg`, verified completion `toolSuccessBg`, attention
   (nudge/stall/stopped) `toolPendingBg`, and verified failure `toolErrorBg`. Only runtime-owned status
   evidence selects chrome, never peer/child prose. Colors are resolved from the active theme at render

@@ -260,6 +260,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   display identity, propagated to both engines without changing routing ids.
   Async launch/control cards use that alias, with persisted tool-result snapshots for history.
   Keep run IDs for routing/diagnostics, not primary display identity; disambiguate duplicate aliases.
+  The bus snapshots the registered alias on each envelope, including broker workers. Intercom/Exocom
+  compact messages share `ui/communication-card.ts`; expanded content remains the canonical delivered
+  source. Model metadata belongs in launch details/F9 and expanded communication diagnostics.
+  Completion, stall and recovery share lowercase `intercom update` headings. Keep these projections
+  in `ui/session-cards.ts`, with the shared frame and native tool expansion/click handling.
+  Launch requests share `ui/launch-request.ts`; hidden task text must always expose an expansion hint.
   Steering cards preview the accepted message and expose all of it with Pi's expand-key binding.
   Runtime metadata guidance belongs in the stable supervisor system prompt, not a new user-like
   acknowledgement message. Keep initial setup/actionable asks working, preserve user-visible history,

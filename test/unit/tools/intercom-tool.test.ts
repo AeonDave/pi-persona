@@ -589,8 +589,8 @@ test("stop { to: 'all' } names a running run it cannot reach instead of calling 
 
 test("describeRuns lists id and call-sign, running state on request, and bounds the list", () => {
 	const runs = Array.from({ length: 10 }, (_, i) => ({ id: `run-${i}`, agent: "scout", status: i === 0 ? "running" as const : "done" as const, task: "t", progress: { output: "", turns: 0, tokens: 0 }, ...(i === 0 ? { label: "alpha-scan", model: "haiku" } : {}) }));
-	assert.equal(describeRuns(runs.slice(0, 2)), "run-0 (alpha-scan · haiku), run-1 (scout)");
-	assert.equal(describeRuns(runs.slice(0, 2), { status: true }), "run-0 (alpha-scan · haiku) running, run-1 (scout) done");
-	assert.equal(describeRuns(runs, { max: 3 }), "run-0 (alpha-scan · haiku), run-1 (scout), run-2 (scout), … (+7 more)");
+	assert.equal(describeRuns(runs.slice(0, 2)), "run-0 (alpha-scan), run-1 (scout)");
+	assert.equal(describeRuns(runs.slice(0, 2), { status: true }), "run-0 (alpha-scan) running, run-1 (scout) done");
+	assert.equal(describeRuns(runs, { max: 3 }), "run-0 (alpha-scan), run-1 (scout), run-2 (scout), … (+7 more)");
 	assert.equal(describeRuns([]), "none");
 });

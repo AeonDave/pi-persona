@@ -84,6 +84,34 @@ const bigBody = `${"x".repeat(300_000)}MUST-NOT-LEAK-COLLAPSED`;
 const pageBody = Array.from({ length: 300 }, (_, i) => `line ${i}: ${"payload-".repeat(4)}`).join("\n");
 const wideBody = ("y".repeat(50) + "\n").repeat(400);
 
+test("intercom target cards show the assigned name without the model", async () => {
+	const run = { id: "run-1", agent: "operator", label: "Moss-native-tool-exposure", model: "model-secret", status: "running", task: "inspect", progress: { output: "", turns: 0, tokens: 0 } };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [run] });
+	const rendered = call(tool, { action: "steer", to: "run-1" });
+	assert.match(rendered, /Moss-native-tool-exposure/);
+	assert.doesNotMatch(rendered, /model-secret/);
+});
+
+test("peek keeps the model only in the full diagnostic, never the compact card", async () => {
+	const run = { id: "run-1", agent: "operator", label: "Moss", model: "model-secret", status: "running", task: "inspect", progress: { output: "", turns: 1, tokens: 2 } };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [run] });
+	const args = { action: "peek" };
+	const result = await tool.execute("peek", args, undefined, undefined, {});
+	const compact = card(tool, result, false, { args });
+	assert.match(compact, /Moss/);
+	assert.doesNotMatch(compact, /model-secret/);
+	assert.match(card(tool, result, true, { args }), /model-secret/);
+});
+
+test("live result keeps observed model only in expanded diagnostics", async () => {
+	const run = { id: "run-1", agent: "operator", label: "Moss", model: "provider/model-secret", status: "done", task: "t", progress: { output: "", turns: 1, tokens: 1 }, collected: true, result: { usage: emptyUsage(), ok: true, output: "result body", modelUsed: "provider/model-secret" }, output: "result body" };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [], markCollected: () => {} });
+	const args = { action: "result", to: "run-1" };
+	const result = await tool.execute("r", args, undefined, undefined, {});
+	assert.doesNotMatch(card(tool, result, false, { args }), /model-secret/);
+	assert.match(card(tool, result, true, { args }), /model-secret/);
+});
+
 test("saved result ref renders on Pi and standalone calls without consulting the live tracker", async () => {
 	const h = archiveHarness();
 	const saved = h.save("activation/stored", "archived report body");

@@ -41,6 +41,21 @@ function scopedReader() {
 	return { reader, revocations: () => revoked };
 }
 
+test("brokered worker preserves supervisor-assigned sender name through child registration", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const broker = new SupervisorBroker({ bus, supervisorHandle: "supervisor", startHost: async () => fakeHost("/x").host, warn: () => {} });
+	const deps = broker.adapterDeps("/x")!;
+	deps.register({ handle: "operator#7", label: "Moss" });
+	bus.register("operator#7"); // real broker host's client-registration step
+	assert.equal(bus.send("operator#7", "supervisor", "hello"), true);
+	deps.unregister("operator#7");
+	const message = bus.take("supervisor")[0];
+	assert.equal(message?.from, "operator#7");
+	assert.equal(message?.fromLabel, "Moss");
+	await broker.close();
+});
+
 test("reader preflight awaits readiness; bind failure cannot return a false preparation", async () => {
 	let resolve!: (host: BrokerHost) => void;
 	const { broker } = make(() => new Promise((r) => { resolve = r; }));

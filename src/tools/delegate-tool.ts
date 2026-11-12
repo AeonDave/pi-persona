@@ -14,6 +14,8 @@ import { configuredModels } from "../extension/engine.ts";
 import { compactInlineText, compactVisibleLine, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { createReportBody } from "../ui/report-body.ts";
+import { hiddenLaunchRequestHint, launchRequestLines, readLaunchRequest, snapshotLaunchRequest, type LaunchRequest } from "../ui/launch-request.ts";
+import { renderDelegateRejection } from "../ui/delegate-rejection.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
 import { toolUsageField } from "../ui/usage.ts";
@@ -42,15 +44,11 @@ interface DelegateLaunchSnapshot {
 	model?: string;
 	/** Effort THIS call declared in its args (spec-level); absent when the call declared none. */
 	thinking?: ThinkingLevel;
+	request?: LaunchRequest;
 }
 
-interface DelegateLaunchRow {
-	id: string;
-	label: string;
+interface DelegateLaunchRow extends DelegateLaunchSnapshot {
 	detailLabel: string;
-	agent: string;
-	model?: string;
-	thinking?: ThinkingLevel;
 	displayLabel: string;
 	clipped: boolean;
 	hasAlias: boolean;
@@ -83,12 +81,14 @@ function launchRows(
 			if (!item || typeof item !== "object") continue;
 			const run = item as Record<string, unknown>;
 			if (typeof run.id !== "string" || typeof run.label !== "string" || typeof run.agent !== "string") continue;
+			const request = readLaunchRequest(run.request);
 			persisted.set(run.id, {
 				id: run.id,
 				label: run.label,
 				agent: run.agent,
 				...(typeof run.model === "string" ? { model: run.model } : {}),
 				...(isThinkingLevel(run.thinking) ? { thinking: run.thinking } : {}),
+				...(request ? { request } : {}),
 			});
 		}
 	}
@@ -113,6 +113,7 @@ function launchRows(
 					label: tracked.label ?? tracked.agent,
 					agent: tracked.agent,
 					...(tracked.model ? { model: tracked.model } : {}),
+					request: { task: tracked.task },
 				},
 				hasAlias: true,
 			};
@@ -127,6 +128,7 @@ function launchRows(
 		agent: sanitizeTerminalText(run.agent),
 		...(run.model ? { model: sanitizeTerminalText(run.model) } : {}),
 		...(run.thinking ? { thinking: run.thinking } : {}),
+		...(run.request ? { request: run.request } : {}),
 		fullName: runDisplayName(run),
 		hasAlias,
 	}));
@@ -161,7 +163,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 		const prefixWidth = index === 0 ? visibleWidth("launched ") : visibleWidth("  ");
 		return row.clipped || prefixWidth + visibleWidth(row.displayLabel) + (metadata ? 3 + visibleWidth(metadata) : 0) > MAX_COLLAPSED_CARD_COLUMNS;
 	});
-	if (omitted > 0 || droppedCount > 0 || rowsNeedHint) suffixParts.push(hintText);
+	if (omitted > 0 || droppedCount > 0 || rowsNeedHint || rows.some((row) => hiddenLaunchRequestHint(row.request))) suffixParts.push(hintText);
 	const suffix = suffixParts.length > 0 ? ` · ${compactInlineText(suffixParts.join(" · "), { maxChars: 56 })}` : "";
 	return rows.slice(0, visibleCount).map((row, index) => {
 		const prefix = index === 0 ? "launched " : "  ";
@@ -183,7 +185,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 
 function expandedLaunchDetails(text: string, rows: readonly DelegateLaunchRow[]): string {
 	if (rows.length === 0 || !rows.some((row) => row.hasAlias)) return text;
-	const diagnostics = rows.map((row) => `- ${[row.detailLabel, row.agent, row.model, row.thinking ? effortFullName(row.thinking) : ""].filter((value): value is string => !!value).join(" · ")} [${row.id}]`).join("\n");
+	const diagnostics = rows.map((row) => [`- ${[row.detailLabel, row.agent, row.model, row.thinking ? effortFullName(row.thinking) : ""].filter((value): value is string => !!value).join(" · ")} [${row.id}]`, ...launchRequestLines(row.request)].join("\n")).join("\n\n");
 	return `${text}\n\nLaunched workers:\n${diagnostics}`;
 }
 
@@ -202,7 +204,7 @@ function matchesCompleteSingleCall(args: unknown, argsComplete: boolean, isParti
 
 function singleLaunchReceipt(row: DelegateLaunchRow, hints?: Pick<KeybindingHints, "keyHint">): string[] {
 	const prefix = "launched ";
-	const suffix = row.clipped ? ` · ${compactInlineText(expandDetailHint(hints), { maxChars: 32 })}` : "";
+	const suffix = row.clipped || hiddenLaunchRequestHint(row.request) ? ` · ${compactInlineText(expandDetailHint(hints), { maxChars: 32 })}` : "";
 	const labelBudget = Math.max(16, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth(prefix) - visibleWidth(suffix));
 	const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
 	const rows = [compactVisibleLine(`${prefix}${label}${suffix}`, MAX_COLLAPSED_CARD_COLUMNS)];
@@ -274,7 +276,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		stopConditions: BriefListSchema,
 	});
 	const WriteSetSchema = Type.Array(Type.String(), {
-		description: "Repository-relative files/directories this leg alone may modify; parallel overlaps are rejected",
+		description: "Repository-relative files/directories this leg alone may modify. Required for each parallel writer when the persona requires disjoint writes. bash/powershell/script/monitor, MCP and unknown tools may write even if the task says read-only; restrict a reader's tools or use concurrency: 1. Parallel overlaps are rejected.",
 	});
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
@@ -548,6 +550,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		description: [
 			"Delegate bounded independent work to supervised sub-agents by default; you own the objective, decisions and result review. Keep quick, trivial or tightly coupled work local when a hand-off would add more overhead than value.",
 			"Pass agent and task for one worker, or a tasks array for parallel workers. Required fields follow the active persona's delegation policy (the per-turn delegation brief shows the exact call shape); an incomplete call is rejected before any worker starts, and the error names what is missing.",
+			"When disjoint writes are required, give every parallel writer a non-empty disjoint writeSet. Shells (bash/powershell), script/monitor, MCP and unknown tools count as writers even for read-only task prose. Readers need a runtime read-only tools grant and mcp: false; otherwise serialize with concurrency: 1. Top-level tools/writeSet are single-mode fields, never inherited by tasks[].",
 			"Interactive sessions ALWAYS run it in the BACKGROUND: you get run ids at once and stay free, and each result wakes you as a completion follow-up (a `tasks` call wakes you ONCE, when its last leg settles). Work independently meanwhile; when only children remain, end your turn. NEVER sleep, poll, or arm a `timer` to wait for a child. Headless sessions (`pi -p`) block for the turn and return results inline.",
 			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
@@ -586,7 +589,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			}
 			if (params.tasks && params.tasks.length > 0) {
 				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, d.RUN_LIMITS.maxConcurrency);
-				const classified = params.tasks.map((task, index) => ({ task, index, mayWrite: mayMutateWorkspace(task) }));
+				const admittedTasks = params.tasks.slice(0, d.RUN_LIMITS.maxChildren);
+				const classified = admittedTasks.map((task, index) => ({ task, index, mayWrite: mayMutateWorkspace(task) }));
 				const writing = classified.filter((entry) => entry.mayWrite);
 				if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
 					const verifierNames = new Set(policy.verificationAgents);
@@ -623,13 +627,14 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							if (unowned.length > 0) {
 								const missing = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
 								// One remedy per leg, naming the parameters: the caller should never have to guess a fix.
-								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"], or make it a reader with tools: ["read","grep","find","ls","code_outline"] (or pick scout).`);
-								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. ${remedies.join(" ")} Or serialize the batch with concurrency: 1.`;
-								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
+								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"].`);
+								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}.\n${remedies.join(" ")}\nOr make readers with tools: ["read","grep","find","ls","code_outline"] (or pick scout). Set mcp: false for readers. Shells, script/monitor, MCP and unknown tools can write regardless of task prose.\nOr serialize the batch with concurrency: 1.`;
+								const rejection = { code: "parallel-write-set-required" as const, tasks: unowned.map(({ index, task }) => ({ index, agent: task.agent, ...(task.name ? { name: task.name } : {}) })) };
+								return { content: [{ type: "text", text: message }], details: failureDetails({ rejection }), isError: true };
 							}
 						}
 					}
-					const writeSetError = validateParallelWriteSets(params.tasks);
+					const writeSetError = validateParallelWriteSets(admittedTasks);
 					if (writeSetError) return { content: [{ type: "text", text: writeSetError }], details: failureDetails({}), isError: true };
 				}
 			}
@@ -705,7 +710,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					const label = nameFor(t, nameOffset + i);
 					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut);
 					const model = shortModel(spec.model);
-					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(spec.thinking ? { thinking: spec.thinking } : {}) };
+					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(spec.thinking ? { thinking: spec.thinking } : {}), request: snapshotLaunchRequest(spec) };
 				});
 				const ids = runs.map((run) => run.id);
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${d.RUN_LIMITS.maxChildren}) were dropped.` : "";
@@ -740,7 +745,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							text: `Launched async run ${id} (${agent}) — runs in the background and wakes you on completion (${END_TURN_NOTE}).`,
 						},
 					],
-					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}), ...(runSpec.thinking ? { thinking: runSpec.thinking } : {}) }] },
+					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}), ...(runSpec.thinking ? { thinking: runSpec.thinking } : {}), request: snapshotLaunchRequest(runSpec) }] },
 					isError: false,
 				};
 			}
@@ -787,6 +792,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const details = result.details as unknown as { runId?: string; runIds?: string[]; runs?: unknown; dropped?: number } | undefined;
 			// Native Pi supplies only content/details in result; the host owns the error flag.
 			const isError = context?.isError ?? result.isError;
+			const rejection = renderDelegateRejection(result, { expanded }, theme, context);
+			if (isError && rejection) return rejection;
 			const first = result.content[0];
 			const fallback = details?.runIds?.length
 				? `async runs ${details.runIds.join(", ")}`
@@ -813,7 +820,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						&& details.dropped > 0;
 					if (rows.length === 1 && !hasDroppedTasks && context
 						&& matchesCompleteSingleCall(context.args, context.argsComplete, context.isPartial || resultIsPartial, rows[0]!)) {
-						return new Text(theme.fg("accent", theme.bold("launched")), 0, 0);
+						const hint = hiddenLaunchRequestHint(rows[0]!.request, context);
+						return new Text(`${theme.fg("accent", theme.bold("launched"))}${hint ? theme.fg("dim", ` · ${hint}`) : ""}`, 0, 0);
 					}
 					if (rows.length === 1 && !hasDroppedTasks) {
 						const lines = singleLaunchReceipt(rows[0]!, context);

@@ -471,8 +471,8 @@ test("concurrent engines produce globally-unique child bus handles (no collision
 				return fakeSession([msgEnd("x")]);
 			},
 		});
-	await Promise.all([mk().run({ agent: "a", task: "t" }), mk().run({ agent: "a", task: "t" })]);
-	for (const m of bus.take("supervisor")) seen.push(m.from);
+	await Promise.all([mk().run({ agent: "a", name: "Moss", task: "t" }), mk().run({ agent: "a", name: "Moss", task: "t" })]);
+	for (const m of bus.take("supervisor")) { seen.push(m.from); assert.equal(m.fromLabel, "Moss"); }
 	assert.equal(seen.length, 2, "both children reached the supervisor");
 	assert.equal(new Set(seen).size, 2, `handles must be unique across engines, got ${seen.join(", ")}`);
 });

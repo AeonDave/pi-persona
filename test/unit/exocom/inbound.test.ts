@@ -40,6 +40,13 @@ test("the reply hint preserves the authenticated routing target, not the human l
 	assert.match((out as any).deliver, /target:"elite#2"/, "the hint addresses the peer exocom_send can actually resolve");
 });
 
+test("inbound display data preserves the admitted body and resolved identity separately from its fence", () => {
+	const out = buildInboundDelivery(msg({ text: "first\nsecond" }), "assigned-peer", deps());
+	assert.ok("deliver" in out);
+	assert.deepEqual(out.message, { from: "assigned-peer", text: "first\nsecond", id: "m1", kind: "message" });
+	assert.match(out.deliver, /> first\n> second/);
+});
+
 // The reply hint is an ADDRESS, and `plane.send` matches it byte-for-byte against the
 // session-qualified token it cached for the authenticated sender. A call-sign is free choice
 // (`exocom_name`: "invent one") and `normalizePeerName` keeps every printable character, so

@@ -55,6 +55,9 @@ import { makeCodeOutlineTool } from "./tools/code-outline.ts";
 import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
 import { installCardFrameProvider } from "./extension/card-frame.ts";
+import { buildCommunicationCardDetails } from "./ui/communication-card.ts";
+import { createCompletionInboxDelivery } from "./extension/completion-delivery.ts";
+import { buildRunLabelDetails } from "./ui/run-labels.ts";
 import { installMemoryOwner } from "./extension/memory-owner.ts";
 import { installMindWorker } from "./extension/mind-worker.ts";
 import { inheritedMemoryPersona, MEMORY_PERSONA_ENV } from "./core/companion.ts";
@@ -158,7 +161,7 @@ import {
 	withPersonaModels,
 } from "./persona/config-store.ts";
 import { shortModel } from "./tools/delegate.ts";
-import { formatInbox } from "./tools/intercom.ts";
+import { formatIntercomDelivery, formatIntercomSender } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
 import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isNonAgentNode, progressPatch } from "./ui/agent-tree.ts";
@@ -209,7 +212,7 @@ interface NudgeEntry {
 	content: string;
 }
 
-interface CheckInEntry {
+interface CheckInEntry extends ReturnType<typeof buildRunLabelDetails> {
 	content: string;
 	kind: "routine" | "stall" | "recovery";
 }
@@ -378,8 +381,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
 	};
-	const appendCheckInEntry = (content: string, kind: CheckInEntry["kind"]): void => {
-		pi.appendEntry("pi-persona-status", { content, kind } satisfies CheckInEntry);
+	const appendCheckInEntry = (content: string, kind: CheckInEntry["kind"], runs: readonly AsyncRun[]): void => {
+		pi.appendEntry("pi-persona-status", { content, kind, ...buildRunLabelDetails(runs) } satisfies CheckInEntry);
 	};
 	const appendCommandResult = (
 		label: string,
@@ -1205,7 +1208,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	/** Drain child→supervisor messages into a compact block for a sync tool result (push). */
 	const drainBusBlock = (): string => {
 		const msgs = bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply);
-		return msgs.length > 0 ? `\n\n📨 from sub-agents:\n${fenceUntrusted(formatInbox(msgs))}` : "";
+		return msgs.length > 0 ? `\n\n${formatIntercomDelivery(msgs)}` : "";
 	};
 
 	// Shared "deliver to the supervisor only when it is idle" plumbing (see IdleCoalescingNotifier).
@@ -1230,6 +1233,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// result instead of once per leg. Single legs are never held.
 	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
 		...idleDelivery,
+		deliver: createCompletionInboxDelivery({ bus, self: SUPERVISOR,
+			deliver: (message, runs) => sendPersonaFollowUp(pi, message, "pi-persona", buildRunLabelDetails(runs)),
+		}),
 		isReady: (run) => tracker.batchSettled(run),
 		render: (runs) => {
 			const report = renderCompletion(runs, fenceUntrusted, (t) => scanForSurrender(t));
@@ -1246,6 +1252,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// leave the child blocked until its 10-minute ask timeout (bus.ask default).
 	const intercomNotifier = new IdleCoalescingNotifier<PendingAsk>({
 		...idleDelivery,
+		deliver: (text, asks) => sendPersonaFollowUp(pi, text, "pi-persona", buildCommunicationCardDetails("intercom", asks.flatMap((ask) => ask.message ? [ask.message] : []))),
 		render: renderPendingAskBatch,
 	});
 	// A buffered question is actionable only while its bus ask is live. This also covers
@@ -1416,7 +1423,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		// intercom tool, rather than stranding mid-stream as a sticky follow-up.
 		intercomNotifier.notify({
 			askId: env.id,
-			text: `[pi-persona] sub-agent ${sanitizeDisplayLabel(env.from)} needs a ${sanitizeDisplayLabel(env.kind, "decision", 32)}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${sanitizeDisplayLabel(env.id, "ask")}", message: "…" }`,
+			message: { from: env.fromLabel ?? env.from, text: env.text, id: env.id, kind: env.kind },
+			text: `[pi-persona] sub-agent ${formatIntercomSender(env)} needs a ${sanitizeDisplayLabel(env.kind, "decision", 32)}:\n\n${fenceUntrusted(env.text)}\n\nAnswer with the intercom tool: { action: "reply", askId: "${sanitizeDisplayLabel(env.id, "ask")}", message: "…" }`,
 		});
 	});
 
@@ -1453,7 +1461,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const { stalled, recovered } = fast ? peekWatcher.poll(runs, now, STALL_FLAG_MS, waitingRuns) : { stalled: [], recovered: [] };
 			const appendStatus = (content: string, kind: CheckInEntry["kind"]): void => {
 				try {
-					appendCheckInEntry(content, kind);
+					appendCheckInEntry(content, kind, runs);
 				} catch (error) {
 					const detail = compactInlineText(error instanceof Error ? error.message : String(error), { maxChars: 120 });
 					const warning = `pi-persona: could not append async status entry${detail ? ` (${detail})` : ""}`;
@@ -1482,7 +1490,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
 			if (unread.length === 0) return;
 			try {
-				sendPersonaFollowUp(pi, `[pi-persona] 📨 from sub-agents:\n${fenceUntrusted(formatInbox(unread))}`);
+				sendPersonaFollowUp(pi, `[pi-persona] ${formatIntercomDelivery(unread)}`, "pi-persona",
+					buildCommunicationCardDetails("intercom", unread.map((message) => ({ from: message.fromLabel ?? message.from, text: message.text, id: message.id, kind: message.kind }))));
 			} catch { /* best-effort wake: the session may be tearing down */ }
 		}, tickMs);
 		peekTimer.unref?.();

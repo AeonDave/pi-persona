@@ -13,12 +13,16 @@
  * engine wires a child's `contact_supervisor` tool onto.
  */
 
+import { sanitizeDisplayLabel } from "../core/display-label.ts";
+
 /** Why a child reached the supervisor — shapes how the UI/supervisor treats it. */
 export type MsgKind = "progress" | "decision" | "interview";
 
 export interface Envelope {
 	id: string;
 	from: string;
+	/** Supervisor-assigned display identity at delivery time; never a routing key. */
+	fromLabel?: string;
 	to: string;
 	kind: MsgKind;
 	text: string;
@@ -62,6 +66,7 @@ function nextId(): string {
 
 export class InProcessBus {
 	private readonly inboxes = new Map<string, Envelope[]>();
+	private readonly labels = new Map<string, string>();
 	private readonly retainedMessages = new Map<string, Envelope>();
 	private retainedMessageChars = 0;
 	private readonly pendingAsks = new Map<string, PendingAsk>();
@@ -151,12 +156,14 @@ export class InProcessBus {
 		for (const message of messages) this.retain(message);
 	}
 
-	register(name: string): void {
+	register(name: string, label?: string): void {
 		if (!this.inboxes.has(name)) this.inboxes.set(name, []);
+		if (label?.trim()) this.labels.set(name, sanitizeDisplayLabel(label, "agent", 120));
 	}
 
 	unregister(name: string): void {
 		this.inboxes.delete(name);
+		this.labels.delete(name);
 		for (const [id, pending] of this.pendingAsks) {
 			if (pending.envelope.from === name || pending.envelope.to === name) this.settleAsk(id, "unregistered");
 		}
@@ -176,7 +183,8 @@ export class InProcessBus {
 	send(from: string, to: string, text: string, kind: MsgKind = "progress"): boolean {
 		const box = this.inboxes.get(to);
 		if (!box) return false;
-		return this.deliver(box, { id: nextId(), from, to, kind, text, expectsReply: false });
+		const label = this.labels.get(from);
+		return this.deliver(box, { id: nextId(), from, ...(label ? { fromLabel: label } : {}), to, kind, text, expectsReply: false });
 	}
 
 	/** Blocking request: resolves with the reply to this message, or rejects on timeout. */
@@ -191,7 +199,8 @@ export class InProcessBus {
 		const id = nextId();
 		const timeoutMs = opts.timeoutMs ?? 600_000;
 		return new Promise<string>((resolve, reject) => {
-			const envelope: Envelope = { id, from, to, kind: opts.kind ?? "decision", text, expectsReply: true };
+			const label = this.labels.get(from);
+			const envelope: Envelope = { id, from, ...(label ? { fromLabel: label } : {}), to, kind: opts.kind ?? "decision", text, expectsReply: true };
 			const onAbort = (): void => {
 				this.settleAsk(id, "aborted");
 			};

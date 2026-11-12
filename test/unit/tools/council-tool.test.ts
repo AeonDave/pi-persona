@@ -179,7 +179,7 @@ test("metadata lookup errors are explicit and cannot block a council launch", as
 	const h = councilHarness({ launchSnapshot: () => { throw new Error("catalog unavailable"); } });
 	const receipt = await h.interactive({ question: "q", strategy: "fanout", members: ["reviewer"] });
 	assert.equal(receipt.isError, false);
-	assert.deepEqual(receipt.details.launch, { participants: [], unavailable: true });
+	assert.deepEqual(receipt.details.launch, { participants: [], unavailable: true, request: { task: "q" } });
 	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
 	assert.match(h.tool.renderResult(receipt, { expanded: false }, theme).render(120).join("\n"), /metadata unavailable/);
 });
@@ -216,7 +216,7 @@ test("pending council setup stays immediate and explicit while its original snap
 	assert.match(text, /openai\/default/);
 	assert.match(text, /requested effort off/);
 	const inline = await h.headless({ question: "q", strategy: "fanout", members: ["reviewer"] });
-	assert.deepEqual(inline.details.launch, launchSnapshot());
+	assert.deepEqual(inline.details.launch, { ...launchSnapshot(), request: { task: "q" } });
 });
 
 test("an interactive council returns a receipt at once, then settles as ONE run whose single wake carries the ruling", async () => {
@@ -303,7 +303,7 @@ test("a headless council whose strategy throws is 'council failed: <cause>' exac
 	const result = await h.headless({ question: "q", strategy: "magi", roster: "nope" });
 	assert.equal(result.isError, true);
 	assert.equal(result.content[0].text, 'council failed: unknown roster "nope" (available teams: magi)');
-	assert.deepEqual(result.details.launch, { participants: [] }, "the retained launch survives a thrown runner/missing outcome");
+	assert.deepEqual(result.details.launch, { participants: [], request: { task: "q" } }, "the retained launch and caller task survive a thrown runner/missing outcome");
 });
 
 test("aborting a headless council call stops the run it joined: the old tool signal still ends it", async () => {

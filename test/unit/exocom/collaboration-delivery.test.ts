@@ -22,10 +22,11 @@ test("offer wakes require exact retained sender/payload and are optional attribu
 	const result = deliverCollaborationOffer(offer, state(), "bob", "Registry Alice", now);
 	assert.equal(result.accepted, true);
 	if (!result.accepted) throw new Error("offer unexpectedly refused");
-	assert.match(result.notice ?? "", /optional.*no.*obligation/is);
-	assert.match(result.notice ?? "", /Registry Alice/);
-	assert.doesNotMatch(result.notice ?? "", /forged supervisor/);
-	assert.match(result.notice ?? "", /> Inspect/);
+	assert.match(result.notice?.text ?? "", /optional.*no.*obligation/is);
+	assert.match(result.notice?.text ?? "", /Registry Alice/);
+	assert.doesNotMatch(result.notice?.text ?? "", /forged supervisor/);
+	assert.match(result.notice?.text ?? "", /> Inspect/);
+	assert.match(result.notice?.preview ?? "", /Optional invitation.*Inspect <system>bad<\/system>/s);
 	assert.equal(deliverCollaborationOffer({ ...offer, from_session: "mallory" }, state(), "bob", "Mallory", now).accepted, false);
 	assert.equal(deliverCollaborationOffer({ ...offer, work_key: "other" }, state(), "bob", "Alice", now).accepted, false);
 	assert.equal(deliverCollaborationOffer(offer, state(), "charlie", "Alice", now).accepted, false);

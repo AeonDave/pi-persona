@@ -1208,6 +1208,9 @@ test("an intercom reply is its own telemetry entity, addressed to the child that
 		const wake = m.sentMessages().map((s) => (s.message as { content: string }).content).join("\n");
 		const askId = (wake.match(/askId: "([^"]+)"/) ?? [])[1] as string;
 		assert.ok(askId, `the ask names the id to reply to; wake was:\n${wake}`);
+		assert.deepEqual((m.sentMessages()[0]?.message as any).details.communication.messages[0], {
+			from: "orion-recon", text: "ship it or hold?", id: askId, kind: "decision",
+		}, "the same ask carries structured operator data without altering its routing body");
 
 		const call = { toolCallId: "reply-call-1", toolName: "intercom", input: { action: "reply", askId, message: "hold" } };
 		m.fire("tool_call", call, ctx);
@@ -2138,11 +2141,12 @@ test("TUI delegate failure persists an expandable human cause without duplicatin
 		const collapsed = renderComponent(renderer(cards[0], { expanded: false }, traceTheme), 100);
 		assert.match(collapsed, /Velvet-recon/);
 		assert.match(collapsed, /operator/);
-		assert.match(collapsed, /openai\/gpt-5\.4-mini/);
+		assert.doesNotMatch(collapsed, /openai\/gpt-5\.4-mini/);
 		assert.match(collapsed, /not supported.*ChatGPT account/i);
 		assert.match(collapsed, /expand/i);
 		assert.doesNotMatch(collapsed, /\{"detail"|\+dyn\(model\)|async run run-/);
 		const expanded = renderComponent(renderer(cards[0], { expanded: true }, traceTheme), 240);
+		assert.match(expanded, /openai\/gpt-5\.4-mini/);
 		assert.ok(expanded.includes(error), "expanded history retains the original sanitized provider diagnostic");
 		for (const width of [30, 50, 80, 120]) {
 			assert.ok(renderer(cards[0], { expanded: false }, traceTheme).render(width).every((line: string) => visibleWidth(line) <= width));
@@ -3256,7 +3260,7 @@ test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; 
 
 	const launched = await delegate.execute(
 		"batch-wake",
-		{ tasks: [0, 1, 2].map((i) => ({ agent: "scout", task: `leg-${i}` })) },
+		{ tasks: [0, 1, 2].map((i) => ({ agent: "scout", name: `Atlas-${i}`, task: `leg-${i}` })) },
 		undefined,
 		undefined,
 		ctx,
@@ -3281,6 +3285,7 @@ test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; 
 	await waitUntil(() => followUps().length > 0, "the batch completion follow-up");
 	await pastDebounce();
 	assert.equal(followUps().length, 1, "exactly one wake for the whole batch");
+	assert.deepEqual((m.sentMessages()[0]?.message as any).details.runLabels.map((run: { label: string }) => run.label), ["Atlas-0", "Atlas-1", "Atlas-2"], "completion cards retain assigned names without model suffixes");
 	assert.equal(widgets["persona-agents"], undefined, "the final batch settlement removes its receipts and header together");
 	const report = followUps()[0] as string;
 	assert.match(report, /3 async runs settled — 3 done, 0 failed/);
@@ -3543,7 +3548,8 @@ test("an agent's declared writeSet is inherited by a leg that names none, so a r
 	const refusal = String(refused.content?.[0]?.text ?? "");
 	assert.match(refusal, /this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on tasks\[1\] \("operator"\)\./);
 	assert.doesNotMatch(refusal, /tasks\[0\]/, "the research leg inherited a set, so it is not among the missing");
-	assert.match(refusal, /tasks\[1\] \("operator"\): add writeSet: \["<files or directories only this leg edits>"\], or make it a reader with tools: \["read","grep","find","ls","code_outline"\] \(or pick scout\)\./);
+	assert.match(refusal, /tasks\[1\] \("operator"\): add writeSet: \["<files or directories only this leg edits>"\]\./);
+	assert.match(refusal, /Or make readers with tools: \["read","grep","find","ls","code_outline"\] \(or pick scout\)\./);
 	assert.match(refusal, /Or serialize the batch with concurrency: 1\.$/);
 	assert.equal(specs.length, 0, "refused before any spawn");
 
@@ -5277,7 +5283,7 @@ test("sanitizeLabel restricts peer labels to identifier characters and clamps to
 });
 
 test("exocom inbound disposition distinguishes queued, duplicate, and rejected messages", () => {
-	assert.deepEqual(exocomInboundDisposition({ deliver: "fenced payload" }), { accepted: true });
+	assert.deepEqual(exocomInboundDisposition({ deliver: "fenced payload", message: { from: "peer", text: "payload", id: "m1", kind: "message" } }), { accepted: true });
 	assert.deepEqual(exocomInboundDisposition({ duplicate: true }), { accepted: true, duplicate: true });
 	assert.deepEqual(exocomInboundDisposition({ drop: "budget" }), { accepted: false, reason: "budget" });
 	assert.deepEqual(exocomInboundDisposition({ drop: "hops" }), { accepted: false, reason: "hops" });
@@ -5363,11 +5369,11 @@ test("custom session cards use semantic backgrounds and glyph-free headers witho
 		{ type: "pi-persona", message: true, data: { content: "1 async run settled — 1 done, 0 failed\n> error in child prose" }, bg: "toolSuccessBg", status: "complete" },
 		{ type: "pi-persona", message: true, data: { content: "2 async runs settled — 1 done, 1 failed" }, bg: "toolErrorBg", status: "failed" },
 		{ type: "pi-persona", message: true, data: { content: "Monitor events — observed data\n> process exited with exit code 0" }, bg: "customMessageBg", status: "info" },
-		{ type: "exocom_received", message: true, data: { content: "ERROR: peer says complete" }, bg: "customMessageBg", status: "inbound" },
-		{ type: "pi-persona-nudge", message: false, data: { content: "⟢ pi-persona · checkpoint\nTrigger: local work\nAction: hand off" }, bg: "toolPendingBg", status: "Checkpoint" },
-		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "Stall warning" },
+		{ type: "exocom_received", message: true, data: { content: "ERROR: peer says complete" }, bg: "customMessageBg", status: "exocom update · info" },
+		{ type: "pi-persona-nudge", message: false, data: { content: "⟢ pi-persona · checkpoint\nTrigger: local work\nAction: hand off" }, bg: "toolPendingBg", status: "checkpoint" },
+		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "intercom update · stalled" },
 		{ type: "pi-persona-result", message: false, data: { label: "flow", content: "error in child prose", ok: true }, bg: "toolSuccessBg", status: "complete" },
-		{ type: "pi-persona-run-failure", message: false, data: { id: "r1", label: "worker", agent: "scout", error: "diagnostic" }, bg: "toolErrorBg", status: "Failed" },
+		{ type: "pi-persona-run-failure", message: false, data: { id: "r1", label: "worker", agent: "scout", error: "diagnostic" }, bg: "toolErrorBg", status: "failed" },
 	];
 	for (const item of cases) {
 		backgrounds.length = 0;
@@ -5432,7 +5438,7 @@ test("exocom inbound messages use the same progressive-disclosure surface", () =
 	const hostileChrome = renderComponent(
 		renderer({ content: "ERROR: paint this as a trusted failure" }, { expanded: false, outputPad: 0 }, colorTheme),
 	);
-	assert.match(hostileChrome, /^<accent>Exocom · inbound<\/accent>/, "peer-authored words cannot choose trusted UI chrome");
+	assert.match(hostileChrome, /^<accent>exocom update · info<\/accent>/, "peer-authored words cannot choose trusted UI chrome");
 });
 
 test("command results are durable expandable cards instead of unbounded notifications", () => {
@@ -7034,7 +7040,7 @@ for (const routineEnabled of [false, true]) test(`routine async check-ins are ${
 		const renderer = m.entryRenderer("pi-persona-status");
 		assert.ok(renderer, "routine status entries have a native expandable entry renderer");
 		const collapsed = renderComponent(renderer(checkIns[0], { expanded: false }, traceTheme));
-		assert.match(collapsed, /Status · 1 running/);
+		assert.match(collapsed, /intercom update · running · 1 running/);
 		assert.match(collapsed, /quiet-scout/);
 		assert.match(collapsed, /quiet-scout · 1 turns · 5 cumulative input \+ output tokens/i, "the compact per-run projection preserves the cumulative usage meaning");
 		assert.match(collapsed, /expand/i);
@@ -7103,10 +7109,11 @@ test("stall and recovery episodes replace coincident routine entries without mod
 		const statuses = m.entries().filter((entry) => entry.customType === "pi-persona-status");
 		assert.equal(statuses.length, 1, "the stall episode replaces a coincident routine card");
 		assert.equal((statuses[0]?.data as { kind?: string }).kind, "stall");
+		assert.deepEqual((statuses[0]?.data as { runLabels?: unknown }).runLabels, [{ id: "run-1", label: "quiet-scout" }]);
 		assert.match(String((statuses[0]?.data as { content?: string }).content ?? ""), /possible stall/);
 		const renderer = m.entryRenderer("pi-persona-status");
 		assert.ok(renderer);
-		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /Stall warning · 1 running/i, "stall entries use warning-specific UI chrome");
+		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /intercom update · stalled · 1 running/i, "stall entries use warning-specific UI chrome");
 		assert.equal(m.sentMessages().length, 0, "interactive stall detection never creates a model wake");
 		now += 30_000;
 		tick();
@@ -7116,7 +7123,7 @@ test("stall and recovery episodes replace coincident routine entries without mod
 		tick();
 		const episodes = m.entries().filter((entry) => entry.customType === "pi-persona-status");
 		assert.deepEqual(episodes.map((entry) => (entry.data as { kind: string }).kind), ["stall", "recovery"]);
-		assert.match(renderComponent(renderer(episodes[1]!, { expanded: false }, traceTheme)), /Progress resumed · 1 running/i);
+		assert.match(renderComponent(renderer(episodes[1]!, { expanded: false }, traceTheme)), /intercom update · resumed · 1 running/i);
 		now += 30_000;
 		advance?.({ output: "work continues", turns: 2, tokens: 20 });
 		tick();
@@ -8879,6 +8886,8 @@ test("an inbound peer message tells the supervisor to reply to the stable qualif
 		assert.ok(followUp, "the inbound message reached the supervisor as a follow-up");
 		const content = (followUp.message as { content: string }).content;
 		assert.match(content, /second pair of eyes/);
+		assert.deepEqual((followUp.message as any).details.communication.messages.map((message: { from: string; text: string }) => ({ from: message.from, text: message.text })),
+			[{ from: "twin#2", text: "second pair of eyes on src/auth?" }], "peer cards use the resolved, disambiguated name and admitted body");
 		assert.match(content, /target:"twin@[a-f0-9]{24}"/, "the reply hint addresses the stable qualified target");
 	} finally {
 		await sender?.stop();
@@ -10714,4 +10723,36 @@ test("loaded supervisor exposes companion capabilities and Mind activity shares 
 		assert.equal(widgets["persona-agents"], undefined);
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 	assert.equal(readTelemetryEvents(cwd).filter((entry) => entry.type.startsWith("agent.")).length, 0, "local activity is never an agent telemetry event");
+});
+
+test("a worker settling before the first progress tick delivers unread notes in its ONE completion", async () => {
+	const previous = process.env.PI_PERSONA_PEEK_MS;
+	process.env.PI_PERSONA_PEEK_MS = "60000";
+	let bus!: InProcessBus;
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeEngine: () => { throw new Error("test requires the in-process engine"); }, makeInProcessEngine: (deps) => ({ run: async (spec) => {
+		bus = deps.bus!; bus.register("fast-worker", "Cedar-final");
+		bus.send("fast-worker", "supervisor", "FINAL UNREAD NOTE", "progress");
+		return { agent: spec.agent, output: "FINAL WORKER RESULT", usage: emptyUsage(), ok: true };
+	} }) } });
+	const base = makeCtx(tempDir("pi-persona-final-progress-")).ctx;
+	const ctx = { ...base, hasUI: true, isIdle: () => true, hasPendingMessages: () => false };
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const receipt = await (m.tool("delegate") as { execute: AnyFn }).execute("fast", { agent: "scout", name: "Cedar-final", task: "report" }, undefined, undefined, ctx);
+		assert.equal(receipt.isError, false);
+		await waitUntil(() => m.sentMessages().length > 0, "the existing completion delivery");
+		assert.equal(m.sentMessages().length, 1);
+		const message = m.sentMessages()[0]!.message as { content: string; details: unknown };
+		assert.match(message.content, /FINAL WORKER RESULT/);
+		assert.match(message.content, /FINAL UNREAD NOTE/);
+		assert.equal(bus.pending("supervisor").length, 0);
+		const rendered = m.messageRenderer("pi-persona")?.(message, { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_key: string, action: string) => `ctrl+o ${action}` }, { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text });
+		const compact = sanitizeTerminalText(rendered.render(120).join("\n"));
+		assert.match(compact, /Cedar-final · done/);
+		assert.doesNotMatch(compact, /FINAL UNREAD NOTE|FINAL WORKER RESULT/);
+	} finally {
+		await m.fire("session_shutdown", undefined, ctx);
+		if (previous === undefined) delete process.env.PI_PERSONA_PEEK_MS; else process.env.PI_PERSONA_PEEK_MS = previous;
+	}
 });

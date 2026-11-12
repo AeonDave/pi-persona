@@ -5,6 +5,21 @@ import { InProcessBus, MAX_RETAINED_MESSAGE_CHARS } from "../../../src/bus/inpro
 import { formatInbox, MAX_INTERCOM_LIST_PEERS, MAX_INTERCOM_MESSAGE_CHARS, runIntercom } from "../../../src/tools/intercom.ts";
 import { fenceIntercomToolOutcome } from "../../../src/tools/intercom-tool.ts";
 
+test("same-named senders retain distinct handles in inbox and retrieved-message diagnostics", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.register("operator#1", "Moss");
+	bus.register("operator#2", "Moss");
+	bus.send("operator#1", "supervisor", "first");
+	bus.send("operator#2", "supervisor", "second");
+	const outcome = runIntercom({ action: "inbox" }, bus, "supervisor");
+	assert.match(outcome.text, /\[Moss\] \[operator#1\]/);
+	assert.match(outcome.text, /\[Moss\] \[operator#2\]/);
+	const first = outcome.details.messages?.[0];
+	assert.ok(first);
+	assert.match(runIntercom({ action: "message", messageId: first.id }, bus, "supervisor").text, /\[Moss\] \[operator#1\]/);
+});
+
 test("intercom list returns the registered peers (minus self)", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

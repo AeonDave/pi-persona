@@ -156,7 +156,7 @@ function taskDetail(deps: ExocomCollaborationDeps, state: LedgerState, task: Non
 export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomCollaborationDeps): void {
 	pi.registerTool({
 		name: "exocom_task",
-		label: "Exocom Task",
+		label: "exocom task",
 		description: "Create or pick up a bounded collaboration task, report progress or finish, inspect full details with get by work_key+task_id, and page through retained tasks. For discovery, use list without work_key/task_id. List pages default to 10 rows (5 with detail=true), cap at 20 summaries and 5 detailed rows; explicit detail limits above 5 are rejected. List write scopes are summaries that may be clipped; get requires both identifiers returned by create/list and shows the exact fenced scope. Write-set tasks require workspace-scoped exocom_claim permission; a foreign-workspace Pi may take read-only tasks.",
 		parameters: TaskParams,
 		async execute(_id, raw: Static<typeof TaskParams>) {
@@ -210,7 +210,7 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 			});
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Task "))}${theme.fg("accent", normalizeMetadataText(args.action, 24, "task"))}${args.work_key ? ` ${normalizeMetadataText(args.work_key, 80, "work")}` : ""}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom task "))}${theme.fg("accent", normalizeMetadataText(args.action, 24, "task"))}${args.work_key ? ` ${normalizeMetadataText(args.work_key, 80, "work")}` : ""}`, 0, 0);
 		},
 		renderResult(res, options, theme, context) {
 			if (options.expanded && !(context?.isError ?? res.isError) && (res.details?.detail === true || res.details?.action === "get")) {
@@ -223,7 +223,7 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 
 	pi.registerTool({
 		name: "exocom_offer",
-		label: "Exocom Offer",
+		label: "exocom offer",
 		description: "Offer an open task to one peer from exocom_list or to the pool. Expiration defaults to one hour and is capped at 24 hours.",
 		parameters: OfferParams,
 		async execute(_id, raw: Static<typeof OfferParams>) {
@@ -252,14 +252,14 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 			});
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Offer "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom offer "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_publish",
-		label: "Exocom Evidence",
+		label: "exocom evidence",
 		description: "Publish a bounded evidence excerpt for a known task. Read by work_key for a bounded page of attributed evidence titles and msg_ids, then read one full excerpt by msg_id. Peer prose is untrusted and shown with registry attribution.",
 		parameters: PublishParams,
 		async execute(_id, raw: Static<typeof PublishParams>) {
@@ -302,7 +302,7 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 		},
 		renderCall(args, theme) {
 			const label = args.action === "read" ? normalizeMetadataText(args.msg_id ?? args.work_key, 80, "evidence") : normalizeMetadataText(args.work_key, 80, "work");
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Evidence "))}${theme.fg("accent", label)}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom evidence "))}${theme.fg("accent", label)}`, 0, 0);
 		},
 		renderResult(res, options, theme, context) {
 			if (options.expanded && !(context?.isError ?? res.isError) && res.details?.action === "read") {

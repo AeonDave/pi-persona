@@ -559,6 +559,10 @@ overlapping or missing ownership for parallel writers, and refuses a declared ve
 start before or beside a material writer in the same call or while a mutating background run is in
 flight. Only `read`, `grep`, `find`, `ls`, and the source-read-only `code_outline` count as read-only; shell-capable, MCP-enabled, and
 unknown toolsets fail closed as writers. `writeSet` is a scheduling contract, not an OS sandbox.
+Ownership checks cover the tasks admitted by `maxChildren`; a dropped task cannot create a false
+parallel-write conflict. A verifier omitted by that limit still rejects the batch, rather than silently
+removing its promised verification. Missing ownership produces a compact actionable rejection card:
+declare disjoint paths, grant only reader tools with `mcp: false`, or use `concurrency: 1`.
 An agent can declare the area it alone writes (`writeSet: [.research/]` in `research`); a write-capable leg that gives
 no `writeSet` of its own inherits it, so a write-capable but read-in-intent agent is not refused as an
 unknown writer, and a leg that does name one keeps its own. Read-only legs do not inherit defaults.

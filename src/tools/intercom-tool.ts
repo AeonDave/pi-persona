@@ -7,11 +7,14 @@ import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import { createReportBody } from "../ui/report-body.ts";
+import { buildCommunicationCardDetails, communicationPreview, parseCommunicationCardDetails } from "../ui/communication-card.ts";
+import { buildRunLabelDetails, parseRunLabelDetails } from "../ui/run-labels.ts";
+import { statusPreview } from "../ui/run-status.ts";
 import { coachingDisabledHint, expandDetailHint, reconcileAnsweredAsk } from "../extension/shared.ts";
 import {
 	type AsyncRun, AsyncRunTracker, buildPeekDigest,
 	dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier,
-	isAsyncRunStalled, observedRunModel, runDisplayName, runDurationLabel,
+	isAsyncRunStalled, observedRunModel, runDisplayLabel, runDurationLabel,
 } from "../engine/async.ts";
 import type { PollGuard } from "../core/nudge.ts";
 import { fenceUntrusted } from "../core/fence.ts";
@@ -55,12 +58,12 @@ export function fenceIntercomToolOutcome(out: IntercomOutcome, action: string, f
 	return action === "message" && out.details.ok ? fence(out.text) : fenceIntercomOutcome(out, fence);
 }
 
-/** `run-4 (alpha · haiku) running, run-3 (scout) done, … (+2 more)` — the one bounded run listing
+/** `run-4 (alpha) running, run-3 (scout) done, … (+2 more)` — the one bounded run listing
  *  every id-to-call-sign teaching surface shares (a run miss, a bulk stop). `none` when empty. */
 export function describeRuns(runs: readonly AsyncRun[], opts: { status?: boolean; max?: number } = {}): string {
 	if (runs.length === 0) return "none";
 	const max = opts.max ?? 8;
-	const shown = runs.slice(0, max).map((run) => `${run.id} (${runDisplayName(run)})${opts.status ? ` ${run.status}` : ""}`);
+	const shown = runs.slice(0, max).map((run) => `${run.id} (${runDisplayLabel(run)})${opts.status ? ` ${run.status}` : ""}`);
 	return `${shown.join(", ")}${runs.length > max ? `, … (+${runs.length - max} more)` : ""}`;
 }
 
@@ -75,9 +78,9 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 	function displayRunTarget(id: string): string {
 		const run = d.tracker?.peek(id);
 		if (!run) return sanitizeDisplayLabel(id, "run");
-		const name = runDisplayName(run);
+		const name = runDisplayLabel(run);
 		// An alias is presentation, never a unique address. Disambiguate collisions without rerouting.
-		const collision = d.tracker.list().some((other) => other.id !== id && runDisplayName(other) === name);
+		const collision = d.tracker.list().some((other) => other.id !== id && runDisplayLabel(other) === name);
 		return collision ? `${name} [${sanitizeDisplayLabel(id, "run")}]` : name;
 	}
 	/** An id the tracker holds nothing for: teach what exists (and why a stale id dead-ends) instead of
@@ -161,7 +164,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 	});
 	pi.registerTool({
 		name: "intercom",
-		label: "Intercom",
+		label: "intercom",
 		description: [
 			"Steer, stop and inspect your background sub-agents; a finished run or batch wakes you with a completion follow-up.",
 			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` pages a live settled payload by run id (8000 units default, 16000 maximum).",
@@ -192,7 +195,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const waiting = d.waitingRunIds?.();
 				const refusal = pollRefusal("peek", params.to ?? "*", runs, waiting, targetSnapshot);
 				if (refusal) return refusal;
-				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(waiting ? { waitingForSupervisor: waiting } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot }, isError: false };
+				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(waiting ? { waitingForSupervisor: waiting } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot, ...buildRunLabelDetails(runs) }, isError: false };
 			}
 			if (params.action === "results" || (params.action === "result" && params.ref !== undefined)) {
 				const invalid = params.to !== undefined || params.collect !== undefined || (params.action === "results" && (params.ref !== undefined || params.offset !== undefined)) || (params.action === "result" && params.cursor !== undefined);
@@ -243,7 +246,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				}
 				const body = projectResultPage(page, run.error);
 				const receipt = resultReceiptHint(run.resultReceipt);
-				const displayRun = runDisplayName(run);
+				const displayRun = displayRunTarget(run.id);
 				const modelUsed = observedRunModel(run);
 				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
 				// the supervisor through, so it carries the same reading the passive completion report does.
@@ -335,7 +338,9 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			if ((params.action === "list" || params.action === "inbox") && !d.controller.activePersona?.coaching) {
 				text += `\n\n${coachingDisabledHint(d.controller.activePersona?.name)}`;
 			}
-			return { content: [{ type: "text", text }], details: out.details.ok ? out.details : failureDetails(out.details), isError: !out.details.ok };
+			const messages = out.details.messages ?? (out.details.message ? [out.details.message] : []);
+			const communication = messages.length ? buildCommunicationCardDetails("intercom", messages.map((message) => ({ from: message.fromLabel ?? message.from, text: message.text, id: message.id, kind: message.kind }))) : {};
+			return { content: [{ type: "text", text }], details: out.details.ok ? { ...out.details, ...communication } : failureDetails(out.details), isError: !out.details.ok };
 		},
 		renderCall(args, theme, context) {
 			const state = context?.state as IntercomRenderState | undefined;
@@ -357,7 +362,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as {
-				action?: string; ok?: boolean; runId?: string; target?: string; message?: string;
+				action?: string; ok?: boolean; runId?: string; target?: string; message?: string; modelUsed?: string;
 				results?: Array<{ truncated?: boolean }>;
 				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean; error?: string };
 				offset?: number; nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
@@ -379,6 +384,25 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
 			const failed = (context?.isError ?? result.isError) || details.ok === false;
 			const prefix = failed ? `${theme.fg("error", theme.bold("failed"))}\n` : "";
+			const communication = parseCommunicationCardDetails(result.details);
+			if (!failed && communication?.plane === "intercom" && communication.messages.length) {
+				const overflow = communication.omitted || communication.truncated;
+				if (expanded) return new Text(theme.fg("toolOutput", full), 0, 0);
+				return {
+					render(width: number) {
+						const short = communicationPreview(communication, width);
+						return new Text(`${theme.fg("toolOutput", short.text)}${short.truncated || overflow || short.text !== full ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0).render(width);
+					},
+					invalidate() {},
+				};
+			}
+			if (!failed && !expanded && action === "peek") {
+				const project = statusPreview(full, parseRunLabelDetails(result.details));
+				if (project) {
+					const compact = project(100);
+					return new Text(`${theme.fg("toolOutput", compact.text)}\n${theme.fg("dim", expandDetailHint(context))}`, 0, 0);
+				}
+			}
 			if (!failed && details.action === "steer" && details.ok === true) {
 				const target = compactInlineText(details.target ?? state?.target?.label ?? (legacyCompleted && typeof savedId === "string" ? sanitizeDisplayLabel(savedId, "run") : details.runId ? displayRunTarget(details.runId) : ""), { maxChars: 80 });
 				const message = typeof details.message === "string" ? details.message : context?.args?.message;
@@ -451,8 +475,11 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const preview = compactVisibleText(previewSource, { maxLines: 3, maxLineChars: 100 });
 				return new Text(`${theme.fg("success", purpose)}${flagLine}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
-			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
+			const lines = full.split("\n");
+			const hiddenModel = !failed && action === "result" && details.runId !== undefined && typeof details.modelUsed === "string" && lines[1] === `Observed model: ${details.modelUsed}`;
+			if (hiddenModel) lines.splice(1, 1);
+			const preview = compactVisibleText(lines.join("\n"), { maxLines: 4, maxLineChars: 100 });
+			const hint = preview.truncated || hiddenModel ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 			return new Text(`${prefix}${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 		},
 	});

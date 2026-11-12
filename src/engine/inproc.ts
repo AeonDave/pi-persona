@@ -458,7 +458,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (deps.bus && (wantsCoaching || wantsPeers)) {
 				childHandle = nextChildHandle(spec.agent);
 				deps.bus.register(supervisorHandle);
-				deps.bus.register(childHandle);
+				deps.bus.register(childHandle, spec.name);
 				if (wantsCoaching) {
 					customTools.push(
 						makeContactSupervisorTool(deps.bus, childHandle, supervisorHandle, { allowBlocking: deps.allowBlocking ?? false }),

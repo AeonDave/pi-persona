@@ -98,7 +98,7 @@ test("a complete coherent Pi receipt avoids repeating identity, while standalone
 	const piContext = { args, argsComplete: true, isPartial: false };
 	const originalContent = JSON.stringify(launched.content);
 	const receipt = render(afterReload.tool, launched, false, 120, piContext).trimEnd();
-	assert.equal(receipt, "launched");
+	assert.match(receipt, /^launched · .*expand/);
 	assert.doesNotMatch(receipt, /delegate|Velvet-recon|operator|gpt-5\.4-mini|done|completed/i);
 
 	const standalone = render(afterReload.tool, launched, false, 120);
@@ -110,7 +110,72 @@ test("a complete coherent Pi receipt avoids repeating identity, while standalone
 	assert.match(expanded, /operator/);
 	assert.match(expanded, /gpt-5\.4-mini/);
 	assert.match(expanded, /run-1/);
+	assert.match(expanded, /PRIVATE TASK/);
 	assert.equal(JSON.stringify(launched.content), originalContent, "rendering does not alter model-facing content");
+});
+
+test("every admitted fan-out launch persists its exact task and keeps a native expansion hint", async () => {
+	const h = register();
+	const result = await h.tool.execute("batch", { tasks: [
+		{ agent: "operator", name: "Amber", task: "FIRST PROMPT\nverbatim second line" },
+		{ agent: "scout", name: "Birch", task: "SECOND PROMPT" },
+	] }, undefined, undefined, ctx());
+	const fresh = register();
+	const context = { keyHint: (_key: string, action: string) => `ctrl+o ${action}` };
+	const collapsed = render(fresh.tool, result, false, 180, context);
+	assert.match(collapsed, /ctrl\+o/);
+	assert.doesNotMatch(collapsed, /FIRST PROMPT|SECOND PROMPT/);
+	const expanded = render(fresh.tool, result, true, 240, context);
+	assert.match(expanded, /Amber[\s\S]*FIRST PROMPT[\s\S]*verbatim second line/);
+	assert.match(expanded, /Birch[\s\S]*SECOND PROMPT/);
+	assert.equal(result.details.runs[0].request.task, "FIRST PROMPT\nverbatim second line");
+});
+
+test("ownership checks inspect admitted writers, never dropped tasks", async () => {
+	for (const maxChildren of [1, 2]) {
+		const spawned: string[] = [];
+		const h = register({
+			controller: { activePersona: { delegation: { requireDisjointWrites: true } } },
+			RUN_LIMITS: { maxConcurrency: 4, maxChildren, timeoutMs: 1000 },
+			getAllTools: () => [],
+			buildEngine: () => ({ run: async (spec: any) => { spawned.push(spec.task); return { agent: spec.agent, output: "done", usage: emptyUsage(), ok: true }; } }),
+		});
+		const tasks = maxChildren === 1
+			? [{ agent: "operator", task: "admitted" }, { agent: "operator", task: "dropped" }]
+			: [{ agent: "operator", task: "A", writeSet: ["src/a"] }, { agent: "operator", task: "B", writeSet: ["src/b"] }, { agent: "operator", task: "dropped overlap", writeSet: ["src/a"] }];
+		const result = await h.tool.execute("admit", { tasks }, undefined, undefined, ctx());
+		assert.equal(result.isError, false, result.content[0].text);
+		assert.equal(result.details.runs.length, maxChildren);
+		assert.equal(result.details.dropped, 1);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.deepEqual(spawned, tasks.slice(0, maxChildren).map((task) => task.task));
+	}
+});
+
+test("dropping a declared verifier still rejects the entire batch before spawning", async () => {
+	let spawned = 0;
+	const h = register({
+		controller: { activePersona: { delegation: { requireDisjointWrites: true, requireFreshVerification: true, verificationAgents: ["scout"] } } },
+		RUN_LIMITS: { maxConcurrency: 4, maxChildren: 1, timeoutMs: 1000 }, getAllTools: () => [],
+		buildEngine: () => ({ run: async () => { spawned++; return {}; } }),
+	});
+	const result = await h.tool.execute("reject", { tasks: [{ agent: "operator", task: "mutate" }, { agent: "scout", task: "verify" }] }, undefined, undefined, ctx());
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /truncate declared fresh verifier/);
+	assert.equal(spawned, 0);
+});
+
+test("missing write ownership is structured and compact while remaining actionable", async () => {
+	const h = register({ controller: { activePersona: { delegation: { requireDisjointWrites: true } } }, getAllTools: () => [] });
+	const result = await h.tool.execute("reject", { tasks: [{ agent: "operator", name: "Amber", task: "edit A" }, { agent: "operator", name: "Birch", task: "edit B" }] }, undefined, undefined, ctx());
+	assert.equal(result.isError, true);
+	assert.equal(result.details.rejection.code, "parallel-write-set-required");
+	assert.deepEqual(result.details.rejection.tasks.map((task: any) => task.index), [0, 1]);
+	const compact = render(h.tool, result, false, 120);
+	assert.match(compact, /writeSet/);
+	assert.match(compact, /Amber|operator/);
+	assert.match(compact, /concurrency: 1/);
+	assert.ok(compact.split("\n").length <= 5, compact);
 });
 
 test("incomplete, partial, or incoherent contexts keep a full standalone receipt", async () => {
@@ -175,7 +240,7 @@ test("async single card persists and renders its tree alias after tracker reload
 	);
 	const details = launched.details as { runId: string; runs: Array<{ id: string; label: string; agent: string; model?: string }> };
 	assert.equal(details.runId, "run-1", "routing id stays available to the model and intercom");
-	assert.deepEqual(details.runs, [{ id: "run-1", label: "Dewglass-asyncfix", agent: "operator", model: "sonnet" }]);
+	assert.deepEqual(details.runs, [{ id: "run-1", label: "Dewglass-asyncfix", agent: "operator", model: "sonnet", request: { task: "repair the view" } }]);
 	assert.match(launched.content[0].text, /run-1/, "the model-facing payload retains the internal routing id");
 
 	const afterReload = register();

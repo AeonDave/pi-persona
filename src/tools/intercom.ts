@@ -13,6 +13,7 @@
 
 import type { Envelope, InProcessBus } from "../bus/inproc.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { fenceUntrusted } from "../core/fence.ts";
 
 export interface IntercomParams {
 	action: "list" | "inbox" | "message" | "reply" | "send";
@@ -54,6 +55,11 @@ export interface InboxFormatOptions {
 	maxBatchChars?: number;
 }
 
+/** One canonical, bounded and fenced push surface for sync, live and final inbox delivery. */
+export function formatIntercomDelivery(messages: Envelope[], opts?: InboxFormatOptions): string {
+	return messages.length ? `📨 from sub-agents:\n${fenceUntrusted(formatInbox(messages, opts))}` : "";
+}
+
 function clipBody(value: string, maxChars: number): { text: string; omitted: number } {
 	if (value.length <= maxChars) return { text: value, omitted: 0 };
 	const marker = `[… ${value.length - maxChars} characters omitted; request the full message by id …]`;
@@ -62,6 +68,13 @@ function clipBody(value: string, maxChars: number): { text: string; omitted: num
 	const head = Math.ceil(content / 2);
 	const tail = Math.max(0, content - head);
 	return { text: `${value.slice(0, head)}${marker}${tail > 0 ? value.slice(-tail) : ""}`, omitted: value.length - maxChars };
+}
+
+/** Display identity plus the exact handle needed to diagnose collisions and route replies. */
+export function formatIntercomSender(message: Pick<Envelope, "from" | "fromLabel">): string {
+	const name = sanitizeDisplayLabel(message.fromLabel ?? message.from, "peer", 120);
+	const handle = message.fromLabel && message.fromLabel !== message.from ? ` [${sanitizeDisplayLabel(message.from, "peer", 40)}]` : "";
+	return `[${name}]${handle}`;
 }
 
 /** One bounded readable line per inbox message; decision/interview lines always show sender + id. */
@@ -75,11 +88,11 @@ export function formatInbox(messages: Envelope[], opts?: InboxFormatOptions): st
 	const slot = Math.max(128, Math.floor((maxBatchChars - 96) / messages.length));
 	let omittedChars = 0;
 	const lines = messages.map((m) => {
-		const from = sanitizeDisplayLabel(m.from, "peer", 40);
+		const from = formatIntercomSender(m);
 		const kind = sanitizeDisplayLabel(m.kind, "message", 24);
 		const id = sanitizeDisplayLabel(m.id, "message", 40);
 		const tag = m.expectsReply ? `${kind} · reply with id ${id}` : `${kind} · message id ${id}`;
-		const prefix = `• [${from}] (${tag}): `;
+		const prefix = `• ${from} (${tag}): `;
 		const body = clipBody(m.text, Math.min(maxMessageChars, Math.max(0, slot - prefix.length)));
 		omittedChars += body.omitted;
 		return `${prefix}${body.text}`;
@@ -133,12 +146,12 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 					details: { action: "message", ok: false },
 				};
 			}
-			const from = sanitizeDisplayLabel(message.from, "peer", 40);
+			const from = formatIntercomSender(message);
 			const kind = sanitizeDisplayLabel(message.kind, "message", 24);
 			const id = sanitizeDisplayLabel(message.id, "message", 40);
 			const replyHint = message.expectsReply ? ` · reply with id ${id}` : "";
 			return {
-				text: `[${from}] (${kind}${replyHint}) message id ${id}:\n${message.text}`,
+				text: `${from} (${kind}${replyHint}) message id ${id}:\n${message.text}`,
 				details: { action: "message", messageId: message.id, message, ok: true },
 			};
 		}

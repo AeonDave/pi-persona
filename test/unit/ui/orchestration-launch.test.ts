@@ -31,3 +31,17 @@ test("launch formatting keeps each member's metadata, bounded collapsed rows, an
 	assert.match(orchestrationLaunchLines(snapshot, true).join("\n"), /four.*provider\/model.*requested effort max/);
 	assert.deepEqual(orchestrationLaunchLines({ participants: [], unavailable: true }, false), ["Launch metadata unavailable"]);
 });
+
+test("orchestration requests reuse the literal task snapshot and native expand hint", () => {
+	const request = { task: "PRIVATE REQUEST\nsecond line\u001b[31m", role: "audit", skills: ["architecture"] };
+	const snapshot = snapshotOrchestrationParticipants([], { childThinking: "medium", pendingKeys: new Set(), agentThinking: () => undefined, request });
+	request.skills.push("later change");
+	const collapsed = orchestrationLaunchLines(snapshot, false, { keyHint: () => "ctrl+o to expand" }).join("\n");
+	assert.match(collapsed, /ctrl\+o/);
+	assert.doesNotMatch(collapsed, /PRIVATE REQUEST/);
+	const expanded = orchestrationLaunchLines(snapshot, true).join("\n");
+	assert.match(expanded, /PRIVATE REQUEST\nsecond line/);
+	assert.match(expanded, /Role:\naudit/);
+	assert.match(expanded, /Skills: architecture/);
+	assert.doesNotMatch(expanded, /later change|\u001b/);
+});

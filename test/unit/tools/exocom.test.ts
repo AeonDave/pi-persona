@@ -179,7 +179,7 @@ test("exocom short receipts do not advertise expansion when no detail is hidden"
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	const tool = m.tools.get("exocom_send");
 	const call = tool.renderCall({ target: "dev", message: "a long request that should be previewed" }, plainTheme);
-	assert.match(call.render(200).join("\n"), /Exocom Send.*dev/);
+	assert.match(call.render(200).join("\n"), /exocom send.*dev/);
 	const result = await tool.execute("c", { target: "dev", message: "hi" }, undefined, undefined, {});
 	const collapsed = tool.renderResult(result, { expanded: false }, plainTheme).render(200).join("\n");
 	assert.match(collapsed, /queued.*dev/);

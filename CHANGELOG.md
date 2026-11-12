@@ -28,6 +28,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Unified Intercom/Exocom message previews, completion, checkpoint, stall and recovery cards with
+  lowercase headings and assigned worker names. Expanded cards retain complete routing, model and
+  trust diagnostics; sender aliases survive worker disposal and child-process broker delivery.
+- A worker finishing before the periodic inbox check now delivers its last unread progress in the
+  existing completion wake. Failed delivery leaves it queued; active asks keep their reply path.
+- Delegate, council and flow launch cards expose the submitted prompt through native expansion,
+  including click support and the configured key hint. Parallel ownership rejections give compact
+  remedies and ignore tasks that the child limit would never launch, while preserving verifier guards.
 - Synchronous background-process startup failures retain their error cause instead of appearing cancelled.
 - Restart-loss notices distinguish pending notifications from processes that were still active.
 - Native tool activation preserves SDK sessions with disabled builtins, including custom tool overrides.
