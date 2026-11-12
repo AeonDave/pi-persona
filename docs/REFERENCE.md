@@ -91,8 +91,10 @@ The model-facing report remains independently idle-gated; a UI notification fail
 Pi-persona adds Pi's own `grep`, `find`, and `ls` to implicit default toolsets, plus native
 `powershell` on Windows. Startup activation requires the complete native `read`/`bash`/`edit`/`write`
 base set and no configured `defaultTools` list; a partial selection is preserved. Default in-process
-workers receive additions only when neither an explicit worker grant nor a host `defaultTools`
-choice exists. Schemas, execution, cancellation, rendering and output caps remain Pi-owned.
+workers receive additions only when no explicit worker grant, host `defaultTools` choice, or explicit
+supervisor CLI tool selection exists. The CLI check suppresses automatic additions; it does not make
+workers inherit the supervisor's entire CLI tool selection. Schemas, execution, cancellation,
+rendering and output caps remain Pi-owned.
 Explicit allowlists, exclusions, empty worker grants and persona permissions remain restrictive;
 custom tools with these names are not replaced.
 

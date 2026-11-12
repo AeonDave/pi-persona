@@ -297,8 +297,10 @@ OS-tool exposure enables only Pi's already-registered `grep`, `find`, `ls`, and 
 `powershell` implementations for default toolsets. It never replaces custom tools, and it respects
 Pi's allowlist/exclusion clamp, explicit `defaultTools` selections, persona gates, and explicit empty
 worker grants. In-process workers add these tools with Pi's `+name` tool modifiers only when no
-explicit worker tool grant or host `defaultTools` choice exists; child legs activate the same host
-registry at session startup, including the tool-only fork-guard path. Pi may download its `rg`/`fd`
+explicit worker tool grant, host `defaultTools` choice, or explicit supervisor CLI tool selection exists.
+The CLI check suppresses automatic additions; worker grants remain independent rather than inheriting
+the supervisor's complete CLI tool selection. Child legs activate the same host registry at session
+startup, including the tool-only fork-guard path. Pi may download its `rg`/`fd`
 helper binaries on first use; pi-persona adds no dependency, but does not promise zero network access.
 Startup activation requires all four native base tools and preserves partial selections.
 The SDK's mutable `noTools: "builtin"` initial selection is distinct from an allowlist; the public
@@ -611,7 +613,7 @@ explicit `null` owner when the parent had Persona off.
 `project|persona|shared`; `staged` is valid only for `stage`. No memory text, paths, models, token
 counts, or free-form output are accepted. Ingress matches the active native session and checks its
 manager's current id/file. The producer also captures its native owner and scope across awaits.
-The resulting `Mind` row uses `kind: "activity"`: it has no agent count, steer/stop handle, wake,
+The resulting `mind` row uses `kind: "activity"`: it has no agent count, steer/stop handle, wake,
 stall badge, or `agent.*` telemetry. The F9 drill-in explains the local phase. Up to eight rows are
 retained, with completed/staged rows evicted before live work; teardown and explicit persona
 selection revoke old rows without cancelling workers. A staged row states that a proposal was
@@ -629,7 +631,7 @@ responses are synchronous `{ ok: true, runId, model, thinking, completion, cance
 `{ ok: false, reason }`. `completion` resolves with `{ ok, output, error?, resultRef?, model?, thinking? }`.
 Output remains untrusted data for Mind's bounded proposal parser, never executable code.
 
-This is an ordinary tracked `Mind` sub-agent in the tree and F9, sharing the launch pool, usage,
+This is an ordinary tracked `mind` sub-agent in the tree and F9, sharing the launch pool, usage,
 progress, stop/steer controls and terminal-result archive. Its private definition has an explicit empty
 tool allowlist and no worker spine. Provider/model and thinking are pinned to the accepting session;
 provider fallback is disabled. The worker has a 180-second cancellation ceiling; owner readiness or

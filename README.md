@@ -234,6 +234,10 @@ pi-persona 1.17.5 or later. Install it with `pi install npm:@aeondave/pi-persona
 Pi or run `/reload`. See its [README](https://github.com/AeonDave/pi-persona-mind#readme) for scope,
 automatic-review limits and undo.
 
+With the current companion source, the worker appears as `mind` in live rows and F9. Successful
+automatic maintenance produces one informational toast; no-op reviews stay silent. Receipts and
+guarded undo remain available through `/mind optimize history` and `/mind optimize undo`.
+
 ## Documentation
 
 | Guide | What's inside |
