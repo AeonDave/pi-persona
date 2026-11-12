@@ -257,7 +257,7 @@ function wakeDigestLine(hidden: readonly AgentNode[], now: number | undefined): 
 	const scripts = hidden.filter((node) => node.kind === "script").length;
 	const parts: string[] = [];
 	const activities = hidden.filter((node) => node.kind === "activity");
-	if (activities.length > 0) parts.push(`◈ Mind · ${safeInline(activities[activities.length - 1]!.detail ?? "local memory work")}`);
+	if (activities.length > 0) parts.push(`◈ mind · ${safeInline(activities[activities.length - 1]!.detail ?? "local memory work")}`);
 	if (monitors > 0) parts.push(`${nodeGlyph({ status: "running", kind: "monitor" })} ${monitors} monitor${monitors === 1 ? "" : "s"}`);
 	if (timers > 0) parts.push(`${nodeGlyph({ status: "running", kind: "timer" })} ${timers} timer${timers === 1 ? "" : "s"}`);
 	if (scripts > 0) parts.push(`${nodeGlyph({ status: "running", kind: "script" })} ${scripts} script${scripts === 1 ? "" : "s"}`);

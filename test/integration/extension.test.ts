@@ -10719,7 +10719,7 @@ test("loaded supervisor exposes companion capabilities and Mind activity shares 
 		m.pi.events.emit(ACTIVITY_EVENT, { ...event, sessionId: "foreign-session" });
 		assert.equal(widgets["persona-agents"], undefined);
 		m.pi.events.emit(ACTIVITY_EVENT, event);
-		await waitUntil(() => widgets["persona-agents"]?.some((line) => /Mind.*inspecting/.test(line)) === true, "Mind local work in the real widget");
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => /mind.*inspecting/.test(line)) === true, "Mind local work in the real widget");
 		assert.ok(statuses.every((status) => status === undefined), "local activity never contributes to N agents");
 		m.pi.events.emit(ACTIVITY_EVENT, { ...event, state: "done" });
 		await waitUntil(() => widgets["persona-agents"]?.some((line) => /inspection complete/.test(line)) === true, "honest completion retained in widget");

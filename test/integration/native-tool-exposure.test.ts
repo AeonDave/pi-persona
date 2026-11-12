@@ -136,6 +136,49 @@ test("production in-process engine uses the real Pi SDK outline grant with local
 	}
 });
 
+test("in-process SDK skips extra native defaults for explicit root CLI selectors while honoring per-leg grants", { timeout: 20_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-persona-cli-tool-clamp-"));
+	const previousArgv = process.argv;
+	const provider = "native-cli-clamp-offline";
+	const faux = fauxProvider({ provider, models: [{ id: "local" }] });
+	const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null,
+		modelsStorePath: join(root, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
+	runtime.registerNativeProvider(faux.provider);
+	await runtime.setRuntimeApiKey(provider, "offline-test-key");
+	const engine = makeInProcessEngine({ cwd: root, agentDir: root, modelRegistry: new ModelRegistry(runtime),
+		resolveAgent: (name) => ({ name, model: `${provider}/local`, systemPrompt: "test", source: "<integration>", ...(name === "excluded" ? { excludeTools: ["gr*"] } : {}) }),
+	});
+	try {
+		const observed = async (agent: string, tools?: string[]) => {
+			let names: string[] | undefined;
+			faux.setResponses([(context) => {
+				const active = new Set<string>();
+				for (const message of context.messages) if (message.role === "system") {
+					for (const tool of message.toolsAdded ?? []) active.add(tool.name);
+					for (const tool of message.toolsRemoved ?? []) active.delete(tool.name);
+				}
+				names = [...active];
+				return fauxAssistantMessage("done");
+			}]);
+			const result = await engine.run({ agent, task: "Do nothing.", ...(tools !== undefined ? { tools } : {}) });
+			assert.equal(result.ok, true, result.error);
+			assert.ok(names, "provider must receive a tool loadout");
+			return names;
+		};
+		process.argv = [...previousArgv];
+		assert.ok((await observed("default")).includes("grep"), "implicit defaults include native search");
+		process.argv = [...previousArgv, "--tools", "read,bash,edit,write"];
+		const selected = await observed("selected");
+		for (const name of ["grep", "find", "ls", "powershell"]) assert.ok(!selected.includes(name), `${name} is not added as an automatic native default`);
+		assert.ok((await observed("granted", ["grep"])).includes("grep"), "an explicit per-leg grant remains authoritative");
+		assert.deepEqual(await observed("empty", []), [], "an explicit empty per-leg grant remains empty");
+		assert.ok(!(await observed("excluded", ["grep"])).includes("grep"), "per-leg exclusions still win over a grant");
+	} finally {
+		process.argv = previousArgv;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("disabled Persona stays inert unless the captured dedicated leg marker is set", { timeout: 20_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-persona-native-leg-"));
 	const faux = fauxProvider({ provider: "native-tools-leg", models: [{ id: "local" }] });

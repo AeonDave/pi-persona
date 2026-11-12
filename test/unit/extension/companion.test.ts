@@ -47,7 +47,7 @@ test("activity ingress is bound to native owner and projects honest nonagent row
 	events.emit(ACTIVITY_EVENT, { ...payload, sessionId: "foreign" }); assert.equal(tree.snapshot().length, 0);
 	events.emit(ACTIVITY_EVENT, payload);
 	const node = tree.snapshot()[0]!;
-	assert.equal(node.label, "Mind"); assert.equal(node.kind, "activity");
+	assert.equal(node.label, "mind"); assert.equal(node.kind, "activity");
 	assert.equal(node.model, undefined); assert.equal(node.thinking, undefined);
 	assert.equal(isNonAgentNode(node), true); assert.equal(inFlightAgentCount([node]), 0);
 	assert.doesNotMatch(runningAnnotation(node, 999999, 1) ?? "", /stalled/);
@@ -69,7 +69,7 @@ test("activity rows remain bounded and visible below an agent fanout", () => {
 	for (let i = 0; i < 12; i++) tree.add({ id: `agent-${i}`, label: `agent ${i}` });
 	for (let i = 0; i < 20; i++) events.emit(ACTIVITY_EVENT, { ...activity, activityId: `op-${i}`, sessionId: manager.getSessionId(), phase: "stage", state: "staged" });
 	assert.equal(tree.snapshot().filter((node) => node.kind === "activity").length, 8);
-	assert.match(renderAgentTreeSummary(tree.snapshot(), 8).join("\n"), /Mind/);
+	assert.match(renderAgentTreeSummary(tree.snapshot(), 8).join("\n"), /mind/);
 	assert.equal(inFlightAgentCount(tree.snapshot()), 12);
 	ingress.stop(); assert.equal(tree.snapshot().length, 12);
 });

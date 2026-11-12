@@ -37,7 +37,7 @@ import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngin
 import type { AgentResult } from "../orchestration/types.ts";
 import { makeReadResultTool } from "../tools/read-result.ts";
 import { makeCodeOutlineTool } from "../tools/code-outline.ts";
-import { cliRemovedToolNames, nativeToolNames, withNativeToolDefaults } from "../extension/native-tools.ts";
+import { cliRemovedToolNames, cliToolLoadoutIsExplicit, nativeToolNames, withNativeToolDefaults } from "../extension/native-tools.ts";
 import { admitResultReadTool, referenceHandoffFailure } from "./result-grant.ts";
 import { makeScopedResultReader, type ResultArchiveView } from "../results/retrieval.ts";
 import { looksLikeProviderError } from "./errors.ts";
@@ -216,7 +216,7 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		process.platform,
 	).filter((name) => !customOverrides.has(name));
 	const cliRemoved = cliRemovedToolNames(process.argv);
-	const nativeDefaults = settingsManager.getDefaultTools() === undefined
+	const nativeDefaults = settingsManager.getDefaultTools() === undefined && !cliToolLoadoutIsExplicit(process.argv)
 		? hostNativeNames.filter((name) => !cliRemoved.has(name))
 		: [];
 	const selectedTools = withNativeToolDefaults(opts.tools, nativeDefaults);

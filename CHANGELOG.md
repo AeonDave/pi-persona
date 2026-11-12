@@ -42,6 +42,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   archive or UI callback throws. Both adapters use the same observer isolation rule.
 - Native tool activation preserves partial builtin selections, including an SDK session starting
   with `noTools: "builtin"` and `tools: ["+read"]`; automatic additions require the full native base set.
+- In-process workers skip automatic native-tool additions when the root CLI selects tools explicitly;
+  each worker's explicit grants and exclusions remain independent.
+- Mind worker and local-activity labels use lowercase `mind` in the live tree and summaries.
 - Unified Intercom/Exocom message previews, completion, checkpoint, stall and recovery cards with
   lowercase headings and assigned worker names. Expanded cards retain complete routing, model and
   trust diagnostics; sender aliases survive worker disposal and child-process broker delivery.
