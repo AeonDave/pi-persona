@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { effortFullName, effortSigla, parseLegThinking, resolveLegThinking } from "../../../src/core/leg-thinking.ts";
+import { defaultChildThinking, effortFullName, effortSigla, parseLegThinking, resolveLegThinking } from "../../../src/core/leg-thinking.ts";
 import { THINKING_LEVELS, type ThinkingLevel } from "../../../src/core/types.ts";
+
+test("child default prefers configured effort, then concrete supervisor, then high", () => {
+	for (const level of THINKING_LEVELS) {
+		assert.equal(defaultChildThinking(level, "low"), level);
+		assert.equal(defaultChildThinking(undefined, level), level);
+	}
+	for (const unknown of [undefined, "adaptive", "", null, 7]) assert.equal(defaultChildThinking(undefined, unknown), "high");
+	assert.equal(defaultChildThinking("unsupported", "low"), "unsupported", "configured values retain existing downstream validation");
+});
 
 test("one effort precedence: explicit spec > agent > configured/inherited child setting", () => {
 	for (const thinking of THINKING_LEVELS) {

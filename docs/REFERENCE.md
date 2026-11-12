@@ -87,6 +87,10 @@ sanitized notification. These operator-only cards do not inject context or start
 The model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
 `intercom send` uses the registered recipient's assigned name in its card. Expansion retains the
 exact bus handle and sent message; the saved receipt preserves that identity after the worker exits.
+Delegate launch receipts retain the requested effort selected at launch, including agent defaults
+and the configured or inherited child setting. Enabled levels appear in full beside the model;
+long model names cannot consume the effort's reserved space. History uses the saved selection,
+not current settings. This launch snapshot is separate from Pi's observed runtime effort in F9.
 
 A parallel `delegate` refusal for missing `writeSet` keeps its short remedy in the collapsed card.
 Expansion also shows a bounded snapshot of the original arguments, the effective concurrency, and

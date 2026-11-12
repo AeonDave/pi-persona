@@ -28,6 +28,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Delegate launch receipts show inherited effort as well as explicit selections, retain it in
+  history, and reserve its space when long names require compacting the row.
 - Intercom send cards use the recipient's assigned name, with the exact bus handle and sent
   message in expandable details; the identity snapshot survives worker disposal and history replay.
 - Delegate batch headings share click and keyboard folding with timer,

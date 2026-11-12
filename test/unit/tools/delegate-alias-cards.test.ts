@@ -8,6 +8,7 @@ import { emptyUsage } from "../../../src/engine/stream.ts";
 import { Semaphore } from "../../../src/orchestration/parallel.ts";
 import { createBackgroundRuns } from "../../../src/tools/background-run.ts";
 import { registerDelegateTool } from "../../../src/tools/delegate-tool.ts";
+import { resolveLegThinking } from "../../../src/core/leg-thinking.ts";
 
 const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 const tokenTheme = {
@@ -28,6 +29,7 @@ function register(overrides: Record<string, unknown> = {}): { tool: any; deps: a
 		tracker,
 		completionNotifier: { discard: () => {} },
 		config: { ledgerV2: false },
+		launchThinking: (spec: any) => spec.thinking,
 		RUN_LIMITS: { maxConcurrency: 4, maxChildren: 4, timeoutMs: 1000 },
 		publishAgentTool: () => {},
 		stopRegistry: new Map(),
@@ -621,4 +623,55 @@ test("fanout rows show each declared effort in full; undeclared legs stay bare; 
 	] }, 120);
 	assert.match(mixed, /parallel \(2\)/);
 	assert.doesNotMatch(mixed, /· high/);
+});
+
+test("batch and single receipts snapshot inherited requested effort without claiming observed Pi effort", async () => {
+	const agents: Array<{ name: string; thinking?: "low" | "high" }> = [{ name: "operator", thinking: "low" }, { name: "scout" }];
+	let childThinking = "xhigh";
+	const h = register({ agents, launchThinking: (spec: any) => resolveLegThinking(spec, agents.find((agent) => agent.name === spec.agent) ?? {}, childThinking) });
+	const launched = await h.tool.execute("inherited-batch", { tasks: [
+		{ agent: "operator", name: "Explicit", model: "provider/gpt-6-luna", task: "one", thinking: "medium" },
+		{ agent: "operator", name: "Agent-default", model: "provider/gpt-6-luna", task: "two" },
+		{ agent: "scout", name: "Child-default", model: "provider/gpt-6-luna", task: "three" },
+	] }, undefined, undefined, ctx());
+	assert.deepEqual(launched.details.runs.map((run: any) => run.thinking), ["medium", "low", "xhigh"]);
+	const singleArgs = { agent: "operator", name: "Single-default", model: "provider/gpt-6-luna", task: "single" };
+	const single = await h.tool.execute("inherited-single", singleArgs, undefined, undefined, ctx());
+	assert.equal(single.details.runs[0].thinking, "low");
+	childThinking = "max"; agents[0]!.thinking = "high";
+	const fresh = register();
+	const saved = JSON.parse(JSON.stringify(launched));
+	const compact = render(fresh.tool, saved, false, 120);
+	assert.match(compact, /Explicit · operator · gpt-6-luna · medium/);
+	assert.match(compact, /Agent-default · operator · gpt-6-luna · low/);
+	assert.match(compact, /Child-default · scout · gpt-6-luna · xhigh/);
+	assert.match(render(fresh.tool, saved, true, 180), /scout · gpt-6-luna · xhigh/);
+	assert.match(render(fresh.tool, JSON.parse(JSON.stringify(single)), false, 120), /operator · gpt-6-luna · low/);
+	const singleReceipt = render(fresh.tool, JSON.parse(JSON.stringify(single)), false, 120, { args: singleArgs, argsComplete: true, isPartial: false });
+	assert.match(singleReceipt, /launched · low · .*expand/);
+	assert.doesNotMatch(singleReceipt, /Single-default|operator|gpt-6-luna/, "the native call header already carries identity; inherited effort stays in the receipt");
+	assert.doesNotMatch(JSON.stringify(saved), /thinkingEffective|thinkingObserved/, "launch intent cannot invent a host observation");
+});
+
+test("bounded batch and single metadata keep requested effort visible beside long model names", async () => {
+	const h = register();
+	const model = `provider/gpt-6-${"long-model-name-".repeat(8)}`;
+	const launched = await h.tool.execute("long-metadata", { tasks: [
+		{ agent: "operator", name: "A-long-readable-worker-alias", model, thinking: "xhigh", task: "one" },
+		{ agent: "operator", name: "Second-long-readable-alias", model, thinking: "medium", task: "two" },
+	] }, undefined, undefined, ctx());
+	const compact = render(h.tool, launched, false, 120);
+	assert.match(compact.split("\n")[0]!, /xhigh/);
+	assert.match(compact.split("\n")[1]!, /medium/);
+	assert.match(compact, /expand/);
+	assert.ok(compact.split("\n").every((line) => visibleWidth(line.trimEnd()) <= 100));
+	const narrow = render(h.tool, launched, false, 40);
+	assert.match(narrow, /xhigh/); assert.match(narrow, /medium/);
+	assert.ok(narrow.split("\n").every((line) => visibleWidth(line.trimEnd()) <= 40));
+	const single = await h.tool.execute("single-long", { agent: "operator", name: "Single", model, thinking: "xhigh", task: "single" }, undefined, undefined, ctx());
+	const singleArgs = { agent: "operator", name: "Single", model, thinking: "xhigh", task: "single" };
+	const call = renderCall(h.tool, singleArgs, 120);
+	assert.match(call, /xhigh/);
+	assert.match(render(h.tool, single, false, 120), /xhigh/);
+	assert.match(render(h.tool, single, true, 240), /xhigh/);
 });

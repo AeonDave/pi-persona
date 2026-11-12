@@ -137,7 +137,7 @@ import { compactMemberResult } from "./orchestration/render.ts";
 import { settleAsyncTreeNode } from "./ui/async-settlement.ts";
 import { sumUsage } from "./orchestration/reducers.ts";
 import type { AgentResult, FailureKind } from "./orchestration/types.ts";
-import { isThinkingLevel } from "./core/types.ts";
+import { defaultChildThinking, resolveLegThinking } from "./core/leg-thinking.ts";
 import { snapshotOrchestrationParticipants, type OrchestrationLaunchSnapshot } from "./ui/orchestration-launch.ts";
 import { SessionResults } from "./extension/results.ts";
 import { readArchivedBody, resultReceiptHint, type ResultReceipt } from "./results/retrieval.ts";
@@ -1608,10 +1608,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		for (const p of participants) if (!assignments.has(p.key)) assignments.set(p.key, p);
 		const pending = ctx.hasUI && persona ? pendingParticipants([...assignments.values()], { prompted: promptedFor(persona, participants) }) : [];
 		const mayChoose = pending.length > 0 && configuredModels(ctx).length > 1;
-		const supervisorThinking = host.getThinkingLevel();
 		return snapshotOrchestrationParticipants(participants, {
 			agentThinking: (agent) => agents.find((a) => a.name === agent)?.thinking,
-			childThinking: config.childThinking ?? (isThinkingLevel(supervisorThinking) ? supervisorThinking : "high"),
+			childThinking: defaultChildThinking(config.childThinking, host.getThinkingLevel()),
 			pendingKeys: new Set(mayChoose ? pending.map((p) => p.key) : []),
 		});
 	}
@@ -2542,6 +2541,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		set lastCtx(value) { lastCtx = value; },
 		controller,
 		get agents() { return agents; },
+		launchThinking: (spec) => resolveLegThinking(spec, agents.find((agent) => agent.name === spec.agent) ?? {}, defaultChildThinking(config.childThinking, host.getThinkingLevel())),
 		contractNames: () => installedContractNames(contractDefs),
 		buildEngine,
 		agentTree,

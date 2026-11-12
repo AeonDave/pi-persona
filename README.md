@@ -100,7 +100,9 @@ episode. These operator-only cards do not start a model turn or enter model cont
 cards are opt-in through the progress check-in interval in `/persona-settings` (off by default).
 Completions, blocking asks, and unread worker messages keep their supervisor wake paths.
 
-Launch and control cards show the worker's assigned name. Intercom and Exocom updates identify
+Launch and control cards show the worker's assigned name. Launch cards show enabled effort levels
+in full, including inherited settings selected at launch; observed runtime effort remains separate in F9.
+Intercom and Exocom updates identify
 the sender with `from <name>:`; compact messages omit model metadata. Click a card or press
 `Ctrl+O` (the default binding) to see its full details, including the submitted delegation prompt
 or an Intercom `send`/`steer` message. Model, effort and routing diagnostics remain available in the detailed views.

@@ -52,3 +52,22 @@ test("native delegate, council and flow cards reveal literal prompts through a r
 		}
 	} finally { setKeybindings(previousKeys); }
 });
+
+test("native delegate first frame and saved receipt preserve explicit or inherited effort", () => {
+	initTheme("dark", false);
+	let tool!: Parameters<ExtensionAPI["registerTool"]>[0];
+	const api = { registerTool(definition: typeof tool) { tool = definition; } } as ExtensionAPI;
+	const deps: any = { tracker: new AsyncRunTracker(), RUN_LIMITS: { maxChildren: 4, maxConcurrency: 4 }, config: { ledgerV2: false }, launchThinking: () => "low" };
+	registerDelegateTool(api, deps);
+	for (const [args, effort] of [
+		[{ agent: "scout", name: "Cedar", task: "inspect", model: `provider/${"long-model-".repeat(20)}`, thinking: "xhigh" }, "xhigh"],
+		[{ agent: "scout", name: "Cedar", task: "inspect", model: "provider/model" }, "low"],
+	] as const) {
+		const component = new ToolExecutionComponent("delegate", "saved-delegate", args, {}, tool, { requestRender() {} } as unknown as TUI, process.cwd());
+		const render = () => sanitizeTerminalText(component.render(140).join("\n"));
+		if ("thinking" in args) assert.match(render(), /xhigh/, "complete call shows explicit effort before the receipt");
+		const model = args.model.split("/").at(-1)!;
+		component.updateResult({ content: [{ type: "text", text: "Launched delegate." }], details: { runId: "run-1", runs: [{ id: "run-1", label: "Cedar", agent: "scout", model, thinking: effort, request: { task: args.task } }] }, isError: false });
+		assert.match(render(), new RegExp(effort), "saved launch makes the selected effort visible even when call and receipt are deduplicated");
+	}
+});

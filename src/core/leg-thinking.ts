@@ -1,6 +1,11 @@
 /** Per-leg effort selection. Pi alone owns model-capability clamping. Pure, no host imports. */
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "./types.ts";
 
+/** Resolve the configured child default against the supervisor's concrete effort. */
+export function defaultChildThinking(configured: string | undefined, supervisor: unknown): string {
+	return configured ?? (isThinkingLevel(supervisor) ? supervisor : "high");
+}
+
 /** An explicit invalid selection is a configuration error, never an instruction to inherit. */
 export function parseLegThinking(value: unknown, label = "thinking"): ThinkingLevel | undefined {
 	if (value === undefined) return undefined;

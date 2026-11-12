@@ -43,7 +43,7 @@ interface DelegateLaunchSnapshot {
 	label: string;
 	agent: string;
 	model?: string;
-	/** Effort THIS call declared in its args (spec-level); absent when the call declared none. */
+	/** Requested launch effort, including selected agent/child defaults; never an observed Pi level. */
 	thinking?: ThinkingLevel;
 	request?: LaunchRequest;
 }
@@ -64,10 +64,15 @@ interface CollapsedLaunchLine {
 
 const COLLAPSED_LAUNCH_ROWS = 3;
 
-/** One formatter for every launch-card metadata line: agent · model · FULL effort name —
- * only the effort this call declared; `off` renders nothing (absence means off). */
-function launchRowMetadata(row: { agent?: string; model?: string; thinking?: ThinkingLevel }): string {
-	return [row.agent, row.model, row.thinking ? effortFullName(row.thinking) : ""].filter((value): value is string => !!value).join(" · ");
+/** One full-name formatter for launch intent. Bound the model before hiding a known effort. */
+function launchRowMetadata(row: { agent?: string; model?: string; thinking?: ThinkingLevel }, maxChars?: number): string {
+	const base = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
+	const effort = row.thinking ? effortFullName(row.thinking) : "";
+	const full = [base, effort].filter(Boolean).join(" · ");
+	if (maxChars === undefined) return full;
+	if (!effort || visibleWidth(full) <= maxChars) return compactInlineText(full, { maxChars });
+	const baseBudget = maxChars - visibleWidth(` · ${effort}`);
+	return base && baseBudget >= 16 ? `${compactInlineText(base, { maxChars: baseBudget })} · ${effort}` : effort;
 }
 
 /** Prefer session-persisted identity, then recover old launch cards from the live tracker. */
@@ -177,7 +182,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 		const separator = metadata && budget - visibleWidth(label) >= 19 ? " · " : "";
 		const availableMetadata = budget - visibleWidth(label) - visibleWidth(separator);
 		const shownMetadata = separator && availableMetadata >= 16
-			? compactInlineText(metadata, { maxChars: availableMetadata })
+			? launchRowMetadata(row, availableMetadata)
 			: "";
 		const lineSuffix = index === visibleCount - 1 ? suffix : "";
 		return { prefix, label, metadata: shownMetadata, suffix: lineSuffix };
@@ -186,7 +191,7 @@ function collapsedLaunchRows(rows: readonly DelegateLaunchRow[], dropped: number
 
 function expandedLaunchDetails(text: string, rows: readonly DelegateLaunchRow[]): string {
 	if (rows.length === 0 || !rows.some((row) => row.hasAlias)) return text;
-	const diagnostics = rows.map((row) => [`- ${[row.detailLabel, row.agent, row.model, row.thinking ? effortFullName(row.thinking) : ""].filter((value): value is string => !!value).join(" · ")} [${row.id}]`, ...launchRequestLines(row.request)].join("\n")).join("\n\n");
+	const diagnostics = rows.map((row) => [`- ${[row.detailLabel, launchRowMetadata(row)].filter(Boolean).join(" · ")} [${row.id}]`, ...launchRequestLines(row.request)].join("\n")).join("\n\n");
 	return `${text}\n\nLaunched workers:\n${diagnostics}`;
 }
 
@@ -210,7 +215,7 @@ function singleLaunchReceipt(row: DelegateLaunchRow, hints?: Pick<KeybindingHint
 	const label = compactInlineText(row.displayLabel, { maxChars: labelBudget });
 	const rows = [compactVisibleLine(`${prefix}${label}${suffix}`, MAX_COLLAPSED_CARD_COLUMNS)];
 	const metadata = launchRowMetadata(row);
-	if (metadata) rows.push(compactVisibleLine(`  ${compactInlineText(metadata, { maxChars: MAX_COLLAPSED_CARD_COLUMNS - 2 })}`, MAX_COLLAPSED_CARD_COLUMNS));
+	if (metadata) rows.push(`  ${launchRowMetadata(row, MAX_COLLAPSED_CARD_COLUMNS - 2)}`);
 	return rows;
 }
 
@@ -221,6 +226,8 @@ export interface DelegateToolDeps {
 	agents: AgentConfig[];
 	contractNames: () => string[];
 	buildEngine: (signal?: AbortSignal, onProgress?: (s: ProgressSnapshot) => void, opts?: { async?: boolean }) => StrategyEngine;
+	/** Selected requested effort at launch; Pi may clamp it later for the selected model. */
+	launchThinking(spec: AgentRunSpec): ThinkingLevel | undefined;
 	agentTree: AgentTree;
 	tracker: AsyncRunTracker;
 	/** Headless: joins the runs a call launched (see background-run.ts). */
@@ -722,10 +729,11 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					// Routed through specOf() (not a hand-rolled field list): a per-leg knob such as `timeoutMs`
 					// lands here for free instead of needing a second copy.
 					const spec = specOf(t, nameOffset + i);
+					const thinking = d.launchThinking(spec);
 					const label = nameFor(t, nameOffset + i);
 					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut);
 					const model = shortModel(spec.model);
-					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(spec.thinking ? { thinking: spec.thinking } : {}), request: snapshotLaunchRequest(spec) };
+					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), request: snapshotLaunchRequest(spec) };
 				});
 				const ids = runs.map((run) => run.id);
 				const droppedNote = dropped > 0 ? ` ${dropped} task(s) beyond the max-children limit (${d.RUN_LIMITS.maxChildren}) were dropped.` : "";
@@ -749,6 +757,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				// survive exactly as they do in a fan-out.
 				const single = { ...params, agent, task };
 				const runSpec = specOf(single, nameIndex);
+				const thinking = d.launchThinking(runSpec);
 				const label = nameFor(single, nameIndex);
 				const id = launchAsyncRun(agent, task, runSpec, label, inline);
 				if (inline) return settleInline([id], signal, onUpdate);
@@ -760,7 +769,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							text: `Launched async run ${id} (${agent}) — runs in the background and wakes you on completion (${END_TURN_NOTE}).`,
 						},
 					],
-					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}), ...(runSpec.thinking ? { thinking: runSpec.thinking } : {}), request: snapshotLaunchRequest(runSpec) }] },
+					details: { runId: id, runs: [{ id, label, agent, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), request: snapshotLaunchRequest(runSpec) }] },
 					isError: false,
 				};
 			}
@@ -795,8 +804,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const titleLine = `${title}${theme.fg("accent", theme.bold(compactVisibleLine(alias, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth("delegate "))))}`;
 			// Only the effort THIS call's args declare — never a value inherited from agent config.
 			const thinking = view?.thinking ?? (isThinkingLevel(args.thinking) ? args.thinking : undefined);
-			const metadata = [agent, model, thinking ? effortFullName(thinking) : ""].filter(Boolean).join(" · ");
-			const metadataLine = metadata ? theme.fg("dim", compactVisibleLine(`  ${metadata}`, MAX_COLLAPSED_CARD_COLUMNS)) : "";
+			const metadata = launchRowMetadata({ agent, model, ...(thinking ? { thinking } : {}) }, MAX_COLLAPSED_CARD_COLUMNS - 2);
+			const metadataLine = metadata ? theme.fg("dim", `  ${metadata}`) : "";
 			return new Text([titleLine, metadataLine].filter(Boolean).join("\n"), 0, 0);
 		},
 
@@ -836,7 +845,10 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					if (rows.length === 1 && !hasDroppedTasks && context
 						&& matchesCompleteSingleCall(context.args, context.argsComplete, context.isPartial || resultIsPartial, rows[0]!)) {
 						const hint = hiddenLaunchRequestHint(rows[0]!.request, context);
-						return new Text(`${theme.fg("accent", theme.bold("launched"))}${hint ? theme.fg("dim", ` · ${hint}`) : ""}`, 0, 0);
+						// The call header only knows explicit args; keep inherited launch intent visible here.
+						const row = rows[0]!;
+						const effort = row.thinking && row.thinking !== context.args.thinking ? effortFullName(row.thinking) : "";
+						return new Text(`${theme.fg("accent", theme.bold("launched"))}${effort ? theme.fg("dim", ` · ${effort}`) : ""}${hint ? theme.fg("dim", ` · ${hint}`) : ""}`, 0, 0);
 					}
 					if (rows.length === 1 && !hasDroppedTasks) {
 						const lines = singleLaunchReceipt(rows[0]!, context);
