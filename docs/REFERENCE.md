@@ -46,7 +46,7 @@ hard-fail.
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
 | persona `delegation:` | require briefs, set an output contract, schedule disjoint writes, and order fresh verification |
 | `isolation: worktree` | run in a clean throwaway Git worktree and return an exported diff; non-Git, dirty, or oversized cases fail closed |
-| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute and `../` paths are dropped. Declarative, not a sandbox |
+| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute, escaping `../`, and Windows drive-relative paths such as `C:foo` are invalid. Declarative, not a sandbox |
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
@@ -88,7 +88,18 @@ The model-facing report remains independently idle-gated; a UI notification fail
 
 ### Native OS/search tools
 
-Pi-persona exposes Pi's own `grep`, `find`, and `ls` built-ins in the default supervisor and default worker toolsets, plus native `powershell` on Windows. These are the host implementations: schemas, execution, cancellation, rendering and output caps remain Pi-owned. Explicit tool allowlists, exclusions, empty toolsets and persona permissions remain restrictive; already-registered custom tools with these names are not replaced. Restricted `defaultTools` settings are respected.
+Pi-persona adds Pi's own `grep`, `find`, and `ls` to implicit default toolsets, plus native
+`powershell` on Windows. Startup activation requires the complete native `read`/`bash`/`edit`/`write`
+base set and no configured `defaultTools` list; a partial selection is preserved. Default in-process
+workers receive additions only when neither an explicit worker grant nor a host `defaultTools`
+choice exists. Schemas, execution, cancellation, rendering and output caps remain Pi-owned.
+Explicit allowlists, exclusions, empty worker grants and persona permissions remain restrictive;
+custom tools with these names are not replaced.
+
+Pi's SDK `noTools: "builtin"` selects the initial loadout; it is not a hard allowlist and the public
+extension API does not expose that flag. If an SDK caller explicitly restores all four native base
+tools, that selection is indistinguishable from implicit defaults and may receive the additions.
+Use an explicit tool allowlist, exclusions or `defaultTools` when the selected names must stay fixed.
 
 Pi's grep/find implementations may download their native `rg`/`fd` helper binaries on first use if the binaries are not already available. Pi-persona adds no dependency or search implementation, but use is not guaranteed to be network-free.
 
@@ -152,6 +163,11 @@ exact live bus handle from `list`. A displayed call-sign is not an alias for eit
 An archived `result` uses its `ref`, shown in the call card. Its compact range is measured in
 zero-based UTF-16 offsets (start inclusive, end exclusive), not page numbers. See the
 [address table and failure guidance](COLLABORATION.md#supervising-a-leg).
+
+Periodic unread-message wakes and completion wakes share a 12,000-character delivery bound.
+When content is clipped, a retained footer supplies the consumed message IDs for explicit
+`intercom message` retrieval within the bus's retention window. A failed host send leaves its
+snapshot unread for retry; active questions stay on their separate reply path.
 
 When supervisor contact is available, an async child's `decision` or `interview` waits for a supervisor reply.
 A headless (inline) child posts the question one-way without waiting: the supervisor is parked
@@ -701,7 +717,7 @@ build retries. A connected broker child's status shows `⇄ <handle>`; if that c
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 `/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
-(requires ≥ 1.4.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+(requires ≥ 1.5.2)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 

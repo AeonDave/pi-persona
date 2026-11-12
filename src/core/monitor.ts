@@ -102,6 +102,15 @@ export const MONITOR_MAX_ARGV_CHARS = 24_000;
 export const MONITOR_MAX_LABEL_CHARS = 120;
 export const MONITOR_TRUNCATION_MARKER = "…[truncated]";
 
+/** Run passive UI/archive observation without letting it change monitor lifecycle behavior. */
+export function observeMonitor(callback: () => void): void {
+	try {
+		callback();
+	} catch {
+		/* Passive observers cannot change process lifetime or semantic delivery. */
+	}
+}
+
 interface ActiveMonitor {
 	entry: MonitorEntry;
 	handle?: unknown;
@@ -198,7 +207,7 @@ export class MonitorManager {
 			lineLength: 0,
 		};
 		this.monitors.set(id, active);
-		this.deps.onArmed?.(copyEntry(entry));
+		observeMonitor(() => this.deps.onArmed?.(copyEntry(entry)));
 
 		const handlers: MonitorProcessHandlers = {
 			onStdout: (chunk) => this.receiveStdout(id, chunk),
@@ -358,11 +367,7 @@ export class MonitorManager {
 	}
 
 	private observeOutput(id: string, stream: MonitorOutput["stream"], text: string): void {
-		try {
-			this.deps.onOutput?.({ id, stream, text });
-		} catch {
-			/* UI/log observers cannot suppress a semantic event or interrupt process cleanup. */
-		}
+		observeMonitor(() => this.deps.onOutput?.({ id, stream, text }));
 	}
 
 	private receiveExit(id: string, code: number | null, signal?: string): void {
@@ -454,6 +459,6 @@ export class MonitorManager {
 		} catch {
 			/* best effort; cancellation remains terminal */
 		}
-		this.deps.onRemoved?.(copyEntry(active.entry), reason);
+		observeMonitor(() => this.deps.onRemoved?.(copyEntry(active.entry), reason));
 	}
 }

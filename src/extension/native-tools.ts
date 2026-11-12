@@ -45,22 +45,26 @@ export function cliRemovedToolNames(argv: readonly string[]): ReadonlySet<string
 	return removed;
 }
 
+/** CLI tool selectors are an explicit host allowlist; the extension must not widen it. */
+export function cliToolLoadoutIsExplicit(argv: readonly string[]): boolean {
+	return argv.some((arg) => arg === "--tools" || arg === "-t" || arg.startsWith("--tools=") || arg.startsWith("-t=")
+		|| arg === "--no-tools" || arg === "-nt" || arg === "--no-builtin-tools" || arg === "-nbt");
+}
+
 /** Enable Pi's own inactive OS/search tools. Pi remains the source of their definitions,
  * execution, renderers, cancellation, output limits, and CLI/exclusion clamps. */
 export function activateNativeTools(pi: ExtensionAPI, platform = process.platform): void {
-	// Pi 1.5.2 provides both APIs; the runtime guard keeps narrowly mocked extension contexts
-	// inert and avoids trying discovery before the extension runner has bound.
-	if (typeof pi.getAllTools !== "function" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function" || typeof pi.getSettings !== "function") return;
+	if (cliToolLoadoutIsExplicit(process.argv)) return;
 	const hostTools = pi.getAllTools();
 	const available = nativeToolNames(hostTools, platform);
 	const cliRemoved = cliRemovedToolNames(process.argv);
 	const names = nativeToolsForHostDefaults(pi.getSettings().defaultTools, available).filter((name) => !cliRemoved.has(name));
 	if (names.length === 0) return;
 	const active = pi.getActiveTools();
-	// Pi does not expose the SDK's `noTools: "builtin"` through ExtensionAPI. With no base
-	// default active, preserve the host's intentionally empty built-in loadout instead of
-	// turning registered-but-disabled native tools back on.
-	if (!BASE_DEFAULTS.some((name) => active.includes(name) && hostTools.some((tool) => tool.name === name && tool.sourceInfo.source === "builtin"))) return;
+	// Pi does not expose the SDK's `noTools: "builtin"` through ExtensionAPI. Require the
+	// complete ordinary base-tool set before adding defaults; a partial explicit loadout such
+	// as `noTools: "builtin"` plus `tools: ["+read"]` must not be widened.
+	if (!BASE_DEFAULTS.every((name) => active.includes(name) && hostTools.some((tool) => tool.name === name && tool.sourceInfo.source === "builtin"))) return;
 	if (names.every((name) => active.includes(name))) return;
 	pi.setActiveTools([...new Set([...active, ...names])]);
 }

@@ -56,8 +56,8 @@ import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
 import { installCardFrameProvider } from "./extension/card-frame.ts";
 import { buildCommunicationCardDetails } from "./ui/communication-card.ts";
-import { createCompletionInboxDelivery } from "./extension/completion-delivery.ts";
-import { buildRunLabelDetails } from "./ui/run-labels.ts";
+import { createCompletionInboxDelivery, deliverPendingNotes, formatPendingNotes } from "./extension/completion-delivery.ts";
+import { buildRunLabelDetails, buildSettlementDetails } from "./ui/run-labels.ts";
 import { installMemoryOwner } from "./extension/memory-owner.ts";
 import { installMindWorker } from "./extension/mind-worker.ts";
 import { inheritedMemoryPersona, MEMORY_PERSONA_ENV } from "./core/companion.ts";
@@ -1234,7 +1234,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const completionNotifier = new IdleCoalescingNotifier<AsyncRun>({
 		...idleDelivery,
 		deliver: createCompletionInboxDelivery({ bus, self: SUPERVISOR,
-			deliver: (message, runs) => sendPersonaFollowUp(pi, message, "pi-persona", buildRunLabelDetails(runs)),
+			deliver: (message, runs) => sendPersonaFollowUp(pi, message, "pi-persona", buildSettlementDetails(runs)),
 		}),
 		isReady: (run) => tracker.batchSettled(run),
 		render: (runs) => {
@@ -1487,11 +1487,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// A stall is operator-only (appended above) and never costs a model turn; unread non-ask
 			// messages keep their actionable route.
 			if (!canDeliverPersonaNotification(orchestrating, processingDeferredOrchestration, lastCtx?.isIdle() === true) || lastCtx?.hasPendingMessages() === true) return;
-			const unread = fast ? bus.takeWhere(SUPERVISOR, (e) => !e.expectsReply) : [];
-			if (unread.length === 0) return;
+			if (!fast) return;
 			try {
-				sendPersonaFollowUp(pi, `[pi-persona] ${formatIntercomDelivery(unread)}`, "pi-persona",
-					buildCommunicationCardDetails("intercom", unread.map((message) => ({ from: message.fromLabel ?? message.from, text: message.text, id: message.id, kind: message.kind }))));
+				deliverPendingNotes(bus, SUPERVISOR, (unread) => {
+					sendPersonaFollowUp(pi, formatPendingNotes("[pi-persona]", unread), "pi-persona",
+						buildCommunicationCardDetails("intercom", unread.map((message) => ({ from: message.fromLabel ?? message.from, text: message.text, id: message.id, kind: message.kind }))));
+				});
 			} catch { /* best-effort wake: the session may be tearing down */ }
 		}, tickMs);
 		peekTimer.unref?.();

@@ -168,6 +168,9 @@ public listener, durable queue, or new orchestration engine is introduced.
 command validation and Pi shell resolution. `src/extension/program-observer.ts` binds both sources
 to the same archive/row/control path. Synchronous launch failures retain an error outcome and cause;
 they are reported by the launch call without an additional completion wake.
+Archive and UI observers are passive: an observer failure cannot strand an admitted process,
+prevent cancellation, or suppress its semantic event delivery. Lifecycle admission and notification
+remain owned by the manager/session adapters.
 
 The design follows the background-program model described in the official
 [Claude Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool).

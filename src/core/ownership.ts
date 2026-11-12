@@ -17,9 +17,10 @@ export function normalizeWritePath(raw: string): NormalizedWritePath {
 	// authored on one OS and may execute on another, so the overlap answer must not change
 	// with the machine. Backslashes, a drive letter, or a UNC prefix mark a Windows path
 	// (case-insensitive); plain slash-separated ownership names stay case-sensitive.
-	const windows = trimmed.includes("\\") || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\");
+	const windows = trimmed.includes("\\") || /^[A-Za-z]:/.test(trimmed);
 	const normalized = (windows ? win32.normalize(trimmed) : posix.normalize(trimmed)).replaceAll("\\", "/");
-	const value = normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+	const driveRoot = /^[A-Za-z]:\/$/.test(normalized);
+	const value = normalized.length > 1 && normalized.endsWith("/") && !driveRoot ? normalized.slice(0, -1) : normalized;
 	return { value: windows ? value.toLowerCase() : value, windows };
 }
 
@@ -27,7 +28,7 @@ export function pathsOverlap(a: NormalizedWritePath, b: NormalizedWritePath): bo
 	const left = a.windows || b.windows ? a.value.toLowerCase() : a.value;
 	const right = a.windows || b.windows ? b.value.toLowerCase() : b.value;
 	const isAncestor = (parent: string, child: string): boolean => {
-		if (parent === "/") return child.startsWith("/");
+		if (parent.endsWith("/")) return child.startsWith(parent);
 		if (parent === ".") return !child.startsWith("/");
 		return child.startsWith(`${parent}/`);
 	};
@@ -70,7 +71,9 @@ export function writeSetPathError(path: string): string | undefined {
 	const raw = path.trim();
 	const slash = raw.replaceAll("\\", "/");
 	const normalized = posix.normalize(slash);
-	if (posix.isAbsolute(slash) || win32.isAbsolute(raw) || normalized === ".." || normalized.startsWith("../")) {
+	// A drive-relative path (C:foo or C:) is not absolute, but resolves against a drive's
+	// current directory on Windows and cannot name repository-relative ownership.
+	if (/^[A-Za-z]:/.test(raw) || posix.isAbsolute(slash) || win32.isAbsolute(raw) || normalized === ".." || normalized.startsWith("../")) {
 		return 'outside the repository-relative ownership namespace; use "." for the repository root';
 	}
 	return undefined;

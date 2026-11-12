@@ -160,14 +160,24 @@ contracts: they remain only while serving stored user data, not to support an ol
 
 The `code_outline` boundary follows the same direction: `src/tools/code-outline.ts` owns bounded file I/O, the computed-from-read-bytes digest, fencing and formatting; `src/tools/code-outline-parser.ts` lazily resolves the installed WASM package entry and loads only the selected grammar on first execution. It disposes each parser/tree after synchronous extraction and retains no source/project cache. `src/core/code-outline.ts` is a pure AST walker over an already-parsed root and runtime metadata; it imports neither Pi nor the parser package at runtime and performs no filesystem access. Parser syntax errors fail closed. C-family `.c` and ambiguous `.h` are explicitly labeled and use the C++ grammar, so this is not strict-C/compiler validation.
 
-Domain dependencies remain downward-only and acyclic: `core ← all`; `engine`/`bus → core`;
-`orchestration → engine + bus + core`; `persona → orchestration + core`; the Exocom transport and
-ledger → `core + bus`; `tools`/`ui → lower layers`. `src/exocom/install.ts` is deliberately the
+Domain dependencies point toward the kernel: `core ← all`; the bus and Exocom transport/ledger
+do not import presentation or the composition root. Orchestration composes engine, bus and core
+contracts; persona policy configures orchestration. Concrete engine adapters also use leaf host
+integration helpers such as native tool admission and frozen memory ownership. These helpers
+under `extension/` must not import the composition root; their directory name does not make them
+owners of engine state. Tools and UI adapt runtime contracts without becoming their source of truth.
+`src/exocom/install.ts` is deliberately the
 composition adapter for that feature, colocated with Exocom but allowed to wire extension, persona,
 engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain layer.
 `src/extension/*` contains extracted factory internals (which must not import `extension.ts`), while
 `extension.ts` remains the package entry and composition root (`package.json` `pi.extensions` →
 `./src/extension.ts`).
+
+Reuse follows ownership of a rule, not a common base class. Script jobs reuse the monitor lifecycle,
+process adapter and archive, with exit-only behavior and separate IDs/history. Resource groups
+share a view projection without mutating the runtime tree. Cards share a frame while their content
+adapters retain distinct semantics. Timers, model workers and Exocom peers keep different lifecycle
+and control contracts; merging them into a universal task engine would hide those distinctions.
 
 - **`src/agents/`** — the agent definition (`agent.ts`: `AgentConfig`/`parseAgent`, the
   `persona: false` sibling of the persona parser; both share one frontmatter engine).
@@ -290,6 +300,10 @@ worker grants. In-process workers add these tools with Pi's `+name` tool modifie
 explicit worker tool grant or host `defaultTools` choice exists; child legs activate the same host
 registry at session startup, including the tool-only fork-guard path. Pi may download its `rg`/`fd`
 helper binaries on first use; pi-persona adds no dependency, but does not promise zero network access.
+Startup activation requires all four native base tools and preserves partial selections.
+The SDK's mutable `noTools: "builtin"` initial selection is distinct from an allowlist; the public
+API cannot distinguish a caller restoring all four base tools from implicit defaults. See the
+[native-tool reference](REFERENCE.md#native-ossearch-tools) for this boundary.
 
 
 A spec naming an agent or output contract that isn't installed fails before anything spawns, on both
@@ -699,10 +713,18 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - a completion delivery includes unread non-blocking bus notes in its existing wake, so a worker
   finishing before the periodic inbox check cannot strand its last progress message. The combined
   report keeps the 12,000-character bound and retains message IDs for explicit retrieval. Inbox
-  consumption commits only after the host send succeeds; active asks keep their separate reply path;
+  consumption commits only after the host send succeeds; active asks keep their separate reply path.
+  Periodic inbox delivery uses the same snapshot, formatting budget and commit-after-send helper
+  (`extension/completion-delivery.ts`). Failed sends leave notes unread for retry; a message arriving
+  during delivery is not part of that consumed snapshot;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
   Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card
   names each failed leg on its own line, and a failed council/flow card leads with the cause in its title;
+- new completion cards persist bounded runtime settlement facts alongside the shared run-label
+  snapshot (`ui/run-labels.ts`). Compact per-run states and durations come from that snapshot,
+  never from parsing worker errors or reports. A clipped or misleading body cannot create another
+  run's status line. Missing or malformed snapshots use a bounded literal history preview; expansion
+  keeps the delivered report intact;
 - async launch cards and targeted Intercom call headers use the worker's assigned alias,
   matching the tree rather than promoting its routing ID to display identity. Model and effort remain
   launch metadata; communication and status previews omit the model and retain it in expanded diagnostics. Launch/control receipts

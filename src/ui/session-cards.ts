@@ -8,7 +8,7 @@ import { summarizeFailure } from "./failure-summary.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
 import { createCardFrame, type CardFramePresentation, type CardFrameState } from "./card-frame.ts";
 import { communicationPreview, parseCommunicationCardDetails } from "./communication-card.ts";
-import { parseRunLabelDetails } from "./run-labels.ts";
+import { parseRunLabelDetails, parseSettlementDetails } from "./run-labels.ts";
 import { parseStatusRuns, statusPreview } from "./run-status.ts";
 
 type State = CardFrameState;
@@ -60,84 +60,17 @@ interface ResultEntry { label?: string; content?: string; ok?: boolean; stoppedA
 interface ContentEntry { content?: string; kind?: "routine" | "stall" | "recovery"; runLabels?: unknown }
 interface RunFailureEntry { id: string; label: string; agent: string; model?: string; durationMs?: number; error: string }
 
-/** One settlement row, using saved alias metadata when present and historical text otherwise. */
-interface SettledRunLine { name: string; status: "done" | "failed" | "stopped"; duration?: string }
-
-/** Boilerplate the settlement generator interleaves between the per-run lines. Every entry is
- * drift-guarded in tests against live `buildCompletionReport` output (src/engine/async.ts):
- * receipts header + `run-x: …` reference lines, the effort header, salvage `↩` block headers,
- * the shared untrusted-fence header (core/fence.ts quoteUntrusted) and its `> `-quoted payload
- * lines, the failed-leg guidance sentence, the truncation marker and retention/tail notes. */
-const SETTLEMENT_SKIP: readonly RegExp[] = [
-	/^📨 from sub-agents:$/,
-	/^Intercom message ids: m[a-z0-9]+(?:, m[a-z0-9]+)*\.$/,
-	/^Terminal reports \(/,
-	/^run-\S+: /,
-	/^Thinking \(not provider cognition\):$/,
-	/^↩ /,
-	/^Sub-agent output \(untrusted data\):$/,
-	/^>/,
-	/^Handle each failure deliberately: /,
-	/^\[\.\.\. .*?\]$/,
-	/^⚠ /,
-	/^Run ids in this report: /,
-];
-const SETTLEMENT_DONE = /^✅ (\S+) \((.+?)\) done(?: in (.+?))?:$/;
-const SETTLEMENT_STOPPED_SECTION = /^⏹ \d+ stopped:$/;
-const SETTLEMENT_FAILED_SECTION = /^❌ \d+ failed:$/;
-/** Quoted (fence) bullets carry the stopped/failed runs; the section header above them names the status. */
-const SETTLEMENT_BULLET = /^> ?• (\S+) \((.+?)\)(?: after (.+?))?: /;
-
-/** Project the compact per-run lines of a settlement report, or undefined when the body is not
- * exactly the known generator shape (head line + recognized/skipped lines only). A duration is
- * kept only when it is short (≤ 8 columns, e.g. "12s"/"2m 5s"); width clipping handles the rest. */
-function parseSettlementRuns(full: string, labels: ReadonlyMap<string, string>): { counts: string; runs: SettledRunLine[] } | undefined {
-	const lines = full.split("\n");
-	const head = SETTLEMENT_HEAD.exec(lines[0] ?? "");
-	if (!head) return undefined;
-	const done = Number(head[2]);
-	const failed = Number(head[3]);
-	const stopped = Number(head[4] ?? 0);
-	const counts = `${done} done, ${failed} failed${stopped > 0 ? `, ${stopped} stopped` : ""}`;
-	let section: "failed" | "stopped" | undefined;
-	const runs: SettledRunLine[] = [];
-	const seen = new Set<string>();
-	const add = (id: string | undefined, name: string | undefined, status: SettledRunLine["status"], duration: string | undefined) => {
-		if (!name) return;
-		const key = `${status}:${id ?? name}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-		runs.push({ name, status, ...(duration !== undefined && visibleWidth(duration) <= 8 ? { duration } : {}) });
-	};
-	for (const line of lines.slice(1)) {
-		const bullet = SETTLEMENT_BULLET.exec(line);
-		if (bullet) {
-			if (section === undefined) return undefined;
-			add(bullet[1], labels.get(bullet[1] ?? "") ?? bullet[2], section, bullet[3]);
-			continue;
-		}
-		if (line.trim().length === 0 || SETTLEMENT_SKIP.some((skip) => skip.test(line))) continue;
-		const doneLine = SETTLEMENT_DONE.exec(line);
-		if (doneLine) {
-			section = undefined;
-			add(doneLine[1], labels.get(doneLine[1] ?? "") ?? doneLine[2], "done", doneLine[3]);
-			continue;
-		}
-		if (SETTLEMENT_STOPPED_SECTION.test(line)) { section = "stopped"; continue; }
-		if (SETTLEMENT_FAILED_SECTION.test(line)) { section = "failed"; continue; }
-		return undefined; // unknown shape → the caller falls back to the generic bounded preview
-	}
-	return { counts, runs };
-}
-
-/** Compact projection of a settlement report: counts line + one line per named run, capped at
- * COMPACT_BODY_ROWS (a `… +N more` tail row replaces the overflow). Undefined run list = fallback. */
-function settlementPreview(full: string, labels: ReadonlyMap<string, string>): Card["preview"] | undefined {
-	const parsed = parseSettlementRuns(full, labels);
-	if (!parsed || parsed.runs.length === 0) return undefined;
+/** Render only runtime-owned settlement facts. Older history falls back to literal content. */
+function settlementPreview(details: unknown): Card["preview"] | undefined {
+	const snapshot = parseSettlementDetails(details);
+	if (!snapshot || snapshot.runs.length === 0) return undefined;
+	const labels = parseRunLabelDetails(details);
+	if (snapshot.runs.some((run) => !labels.has(run.id))) return undefined;
+	const counts = `${snapshot.done} done, ${snapshot.failed} failed${snapshot.stopped > 0 ? `, ${snapshot.stopped} stopped` : ""}`;
 	return () => {
-		const lines = [parsed.counts, ...parsed.runs.map((run) => `${run.name} · ${run.status}${run.duration ? ` · ${run.duration}` : ""}`)];
-		const visible = lines.length <= COMPACT_BODY_ROWS ? lines : [...lines.slice(0, COMPACT_BODY_ROWS - 1), `… +${lines.length - (COMPACT_BODY_ROWS - 1)} more`];
+		const lines = [counts, ...snapshot.runs.map((run) => `${labels.get(run.id)} · ${run.status}${run.duration && visibleWidth(run.duration) <= 8 ? ` · ${run.duration}` : ""}`)];
+		const total = snapshot.done + snapshot.failed + snapshot.stopped;
+		const visible = total <= COMPACT_BODY_ROWS - 1 ? lines : [...lines.slice(0, COMPACT_BODY_ROWS - 1), `… +${total - (COMPACT_BODY_ROWS - 2)} more`];
 		return { text: visible.join("\n"), truncated: true };
 	};
 }
@@ -174,11 +107,12 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 			// Only the validated settlement envelope is a pi-persona report. Unknown is NOT
 			// Markdown: monitor stdout/stderr, timers and operational notices share this type.
 			const markdown = customType === "exocom_received" || status !== "info";
-			const projected = customType === "pi-persona" ? settlementPreview(full, parseRunLabelDetails(message.details)) : undefined;
+			const projected = customType === "pi-persona" ? settlementPreview(message.details) : undefined;
+			const fallback = preview(full, 4, 100);
 			return sessionCard({
 				title: customType === "pi-persona" ? `${status === "info" ? "update" : "intercom update"} · ${status}` : "exocom update · info",
 				state, full, markdown,
-				preview: projected ?? preview(full, 4, 100),
+				preview: projected ?? (customType === "pi-persona" && status !== "info" ? (width) => ({ ...fallback(width), truncated: true }) : fallback),
 			}, expanded, theme, outputPad, keyHint);
 		});
 	}

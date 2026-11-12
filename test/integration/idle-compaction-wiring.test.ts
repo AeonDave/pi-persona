@@ -38,7 +38,10 @@ async function fixture(option: "env" | "saved" | "off") {
 		getFlag: (name: string) => flags.get(name),
 		appendEntry: (type: string, data: unknown) => manager.appendCustomEntry(type, data),
 		sendMessage: (message: unknown, options: unknown) => { messages.push({ message, options }); },
-		getAllTools: () => [...new Set([...activeTools, ...tools.keys()])].map(name => ({ name })),
+		getAllTools: () => [...new Set([...activeTools, ...tools.keys()])].map((name) => ({
+			name, sourceInfo: { source: ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"].includes(name) ? "builtin" : "extension" },
+		})),
+		getSettings: () => ({}),
 		getActiveTools: () => [...activeTools], setActiveTools: (names: string[]) => { activeTools = names; },
 		getThinkingLevel: () => "medium", setThinkingLevel() {}, setModel: async () => true,
 	} as unknown as ExtensionAPI;

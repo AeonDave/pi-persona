@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { findWriteSetOverlaps, validateParallelWriteSets, writeSetPathError } from "../../../src/core/ownership.ts";
+import { findWriteSetOverlaps, normalizeWritePath, pathsOverlap, validateParallelWriteSets, writeSetPathError } from "../../../src/core/ownership.ts";
 
 test("findWriteSetOverlaps rejects equal and ancestor/descendant paths with Windows normalization", () => {
 	const tasks = [
@@ -25,6 +25,23 @@ test("writeSetPathError rejects ownership outside the repository", () => {
 	}
 	assert.equal(writeSetPathError("src/a.ts"), undefined);
 	assert.equal(writeSetPathError("."), undefined);
+});
+
+test("ownership rejects Windows drive-relative paths on every host", () => {
+	for (const path of ["C:foo", "c:src/file.ts", "C:", " D:../outside "]) {
+		assert.match(writeSetPathError(path) ?? "", /repository-relative/, path);
+		assert.match(validateParallelWriteSets([{ agent: "a", writeSet: [path] }]) ?? "", /repository-relative/, path);
+	}
+});
+
+test("Windows drive syntax stays distinct from POSIX paths and preserves absolute drive roots", () => {
+	assert.deepEqual(normalizeWritePath("C:Src/App.ts"), { value: "c:src/app.ts", windows: true });
+	assert.deepEqual(normalizeWritePath("C:/"), { value: "c:/", windows: true });
+	assert.equal(pathsOverlap(normalizeWritePath("C:/"), normalizeWritePath("c:/src/file.ts")), true);
+	assert.equal(pathsOverlap(normalizeWritePath("C:/"), normalizeWritePath("c:src/file.ts")), false);
+	assert.equal(writeSetPathError("src/module.ts"), undefined);
+	assert.equal(writeSetPathError("src\\module.ts"), undefined);
+	assert.deepEqual(normalizeWritePath("SRC/module.ts"), { value: "SRC/module.ts", windows: false });
 });
 
 test("case-folding is per-path syntax, not host platform: POSIX-style names stay case-sensitive", () => {

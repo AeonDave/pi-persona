@@ -15,6 +15,10 @@ you can inspect workers, redirect them, or stop a run while it is in progress.
 
 [Install](#install) · [Team workflow](#work-with-your-team) · [Cross-session collaboration](#collaborate-with-another-pi) · [Personas](#choose-a-persona) · [Documentation](#documentation)
 
+This README describes the current source. Changes listed under [Unreleased](CHANGELOG.md#unreleased)
+are not included in the published `1.17.6` package; use the
+[release README](https://github.com/AeonDave/pi-persona/blob/v1.17.6/README.md) for that version.
+
 ## Install
 
 Requires **the latest stable Pi (currently 1.5.2)**, **Node.js ≥ 22.19**, and **Git**.
@@ -59,6 +63,7 @@ then install the npm package. Keep only one source configured to avoid loading t
 | **Cross-session collaboration** | Exocom connects independent Pi sessions to exchange findings and coordinate work |
 | **Councils and flows** | Compare perspectives, run repair-and-check loops, or organize work into stages |
 | **Timers and monitors** | Ask for a reminder or a notification when a build, file watcher, or event-producing program reports a change |
+| **Background scripts** | Launch a command or inline shell code, inspect its output in F9, stop it, and retrieve the retained log |
 | **Native OS search** | Supervisors and default worker sessions can use Pi's own `grep`, `find`, and `ls`; Windows also gets native PowerShell |
 | **Multilanguage code outline** | Read-only syntax-AST symbol outlines for JavaScript/TypeScript, Python, Go, Rust, C-family, and C# files |
 | **Switchable personas** | Choose how the supervisor approaches and orchestrates the work |
@@ -78,7 +83,11 @@ the outcome. This is one possible workflow, not a fixed pipeline; dependent step
 
 Native search uses Pi's own implementations and limits. Pi may download its `rg`/`fd` helper binaries on first use when they are not already available; this adds no pi-persona dependency but is not guaranteed network-free.
 
-`code_outline` reads one bounded source file and returns named declarations with inclusive physical line ranges, a literal name/kind/container query, and a row limit. It supports JavaScript/JSX, TypeScript/TSX, Python (`.py`/`.pyi`), Go, Rust, C-family and C# source. A single MIT-licensed WASM parser backend and its packaged grammars load only when the tool is called. C and ambiguous C headers use the C++ grammar: this is a C-family syntax outline, not strict-C or compiler validation. C# means source syntax only; it does not decompile .NET assemblies or support VB/F#. Parse errors and unsupported extensions fail clearly. The result is not semantic or runtime analysis, and never dumps file bodies. Stock read-only `scout`, `reviewer`, and `architect` agents may use it; custom tool allowlists remain unchanged unless explicitly configured.
+`code_outline` returns declarations and line ranges from one source file, with an optional query
+and row limit. It covers JavaScript/TypeScript, Python, Go, Rust, C-family and C# through one lazy
+local WASM backend, without an index or server. C-family uses the C++ grammar; C# covers source,
+not .NET binaries or other .NET languages. Syntax errors fail explicitly. See the
+[outline reference](docs/REFERENCE.md#multilanguage-code-outline) for extensions and limits.
 
 Interactive delegation, councils and flows always run in the background; there is no blocking mode, so you
 can inspect, redirect, or stop a run at any point. Results return automatically when the supervisor is free, and
@@ -91,15 +100,23 @@ episode. These operator-only cards do not start a model turn or enter model cont
 cards are opt-in through the progress check-in interval in `/persona-settings` (off by default).
 Completions, blocking asks, and unread worker messages keep their supervisor wake paths.
 
-Launch and control cards show the worker's name. Steering receipts preview the message sent;
-expand with `Ctrl+O` (the default binding) to read it in full. A queued message is not proof that
-the worker has acted on it.
+Launch and control cards show the worker's assigned name. Intercom and Exocom updates identify
+the sender with `from <name>:`; compact messages omit model metadata. Click a card or press
+`Ctrl+O` (the default binding) to see its full details, including the submitted delegation prompt
+or steering message. Model, effort and routing diagnostics remain available in the detailed views.
+A queued message is not proof that the worker has acted on it.
+
+For parallel edits, give each writer an explicit, disjoint `writeSet` of repository-relative paths.
+Read-only investigations can use `scout` or a read-only tool grant. If writers share files, run
+them sequentially with `concurrency: 1`; the ownership check does not infer safe edit boundaries
+from task prose. Ownership coordinates writers and does not sandbox their filesystem access.
 
 | Key or command | Action |
 |---|---|
 | **F8** | Cycle through installed personas |
 | **F9** or `/agents` | Open the live panel: sub-agents, Exocom peers, timers, monitors and scripts |
-| **Enter** / **s** / **x** / **X** in the panel | Open a group overview or worker output / send guidance / request a stop / stop every running agent from the tree (press twice) |
+| **Enter** / **s** / **x** / **X** in the panel | Open details / steer a worker / stop the selected controllable item / stop running agents from the tree (press twice) |
+| **Space** / **Left** / **Right** on a resource group | Toggle / collapse / expand timers, monitors, scripts or Exocom peers |
 | `/peek` | Show a compact progress summary |
 | `/flow <name> <task>` | Run a flow (`/flow` alone lists them with descriptions; a `gate: true` phase pauses for your approval). `/orchestrate <task>` runs the active persona's `orchestration:` block (no bundled persona declares one; they use `council:` via the `council` tool) |
 | `/persona list` | List installed personas |
@@ -242,8 +259,14 @@ npm test
 ```
 
 Pi loads the TypeScript extension directly; there is no build step.
+The architecture favors shared lifecycle and presentation contracts: scripts reuse monitor process
+management, resource groups share one projection, and standalone cards share one frame. Native tool
+execution and tool-card shells remain Pi-owned. See the [module boundaries](docs/ARCHITECTURE.md#module-layout)
+before adding another implementation of an existing behavior.
 Qualify the installed tarball on the current host without provider traffic or your profile with
 `node scripts/qualify-package.mjs --host <absolute-path-to-pi-coding-agent-package>`.
+Preparation installs declared runtime dependencies only in the isolated candidate directory;
+the check verifies host-owned peers and executes the packaged outline backend on both engines.
 The narrower source-SDK contract check is
 `node --import tsx scripts/qualify-host.mjs <absolute-path-to-pi-coding-agent-package>`; both reject historical host versions.
 The [CI workflow](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) runs strict

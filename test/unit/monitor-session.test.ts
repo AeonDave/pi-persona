@@ -160,3 +160,37 @@ test("cancelAll on shutdown announces every live monitor so no row outlives the 
 	h.session.cancelAll();
 	assert.equal(h.seen.length, 4, "an empty cancelAll announces nothing");
 });
+
+test("throwing passive observers cannot suppress a monitor wake or interrupt stop", async () => {
+	let idle = true;
+	const messages: string[] = [];
+	const sources: any[] = [];
+	const session = createMonitorSession({
+		isIdle: () => idle,
+		canRun: () => true,
+		deliver: (text) => { messages.push(text); },
+		start: (_spec, handlers) => { sources.push(handlers); return { stop() {} }; },
+		observe: {
+			armed: () => { throw new Error("row projection failed"); },
+			event: () => { throw new Error("row update failed"); },
+			removed: () => { throw new Error("row removal failed"); },
+			output: () => { throw new Error("log observer failed"); },
+		},
+	});
+	try {
+		const result = session.arm({ command: "node", cwd: ".", label: "watch", mode: "output", maxEvents: 20 });
+		assert.equal(result.ok, true, "an observer failure cannot prevent an admitted process from starting");
+		sources[0]!.onStdout("ready\n");
+		sources[0]!.onExit(0);
+		await session.flush();
+		assert.equal(messages.length, 1, "the observer cannot block semantic delivery");
+
+		const cancellable = session.arm({ command: "node", cwd: ".", label: "cancel", mode: "exit" });
+		assert.equal(cancellable.ok, true);
+		assert.doesNotThrow(() => session.cancel(cancellable.ok ? cancellable.entry.id : ""));
+		assert.equal(session.list().length, 0);
+	} finally {
+		idle = false;
+		session.cancelAll();
+	}
+});

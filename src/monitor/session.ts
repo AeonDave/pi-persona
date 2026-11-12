@@ -1,5 +1,5 @@
 /** Monitor events use the same idle follow-up delivery as timer and Intercom. */
-import { MonitorManager, type MonitorEntry, type MonitorEvent, type MonitorOutput, type MonitorRemovalReason } from "../core/monitor.ts";
+import { MonitorManager, observeMonitor, type MonitorEntry, type MonitorEvent, type MonitorOutput, type MonitorRemovalReason } from "../core/monitor.ts";
 import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
 import { IdleCoalescingNotifier } from "../engine/async.ts";
 import { startMonitorProcess } from "./process.ts";
@@ -49,12 +49,15 @@ export function createMonitorSession(d: MonitorSessionDeps) {
 	const manager = new MonitorManager({
 		...timerDeps, source, now: () => Date.now(), start: d.start ?? startMonitorProcess,
 		idPrefix: d.idPrefix ?? source,
-		...(d.observe ? { onArmed: (entry: MonitorEntry) => d.observe?.armed(entry), onRemoved: (entry: MonitorEntry, reason: MonitorRemovalReason) => d.observe?.removed(entry, reason) } : {}),
-		onOutput: (output) => { d.observe?.output?.(output); },
+		...(d.observe ? {
+			onArmed: (entry: MonitorEntry) => observeMonitor(() => d.observe?.armed(entry)),
+			onRemoved: (entry: MonitorEntry, reason: MonitorRemovalReason) => observeMonitor(() => d.observe?.removed(entry, reason)),
+		} : {}),
+		onOutput: (output) => observeMonitor(() => d.observe?.output?.(output)),
 		onEvent: (event) => {
 			// Observed BEFORE the permission gate: a terminal event has already left the manager, so the
 			// `cancelAll` below could never announce it, and its row would stay on screen forever.
-			d.observe?.event(event);
+			observeMonitor(() => d.observe?.event(event));
 			if (!d.canRun()) { cancelAll(); return; }
 			const oldest = notifier.peekPending()[0];
 			if (notifier.peekPending().length >= 64 && oldest) {

@@ -7200,10 +7200,19 @@ test("the peek tick survives unavailable status sinks and still wakes for an unr
 		const tick = intervals.find((interval) => interval.ms === 30_000)?.tick;
 		assert.ok(tick, "the fast stall/message cadence is armed");
 		assert.ok(workerBus.current?.send(workerHandle, "supervisor", "found the config", "progress"), "the worker posts a one-way message");
+		const sendPi = m.pi as unknown as { sendMessage: (...args: unknown[]) => void };
+		const sendMessage = sendPi.sendMessage;
+		let failedSend = false;
+		sendPi.sendMessage = (...args) => {
+			if (!failedSend) { failedSend = true; throw new Error("follow-up sink unavailable"); }
+			sendMessage(...args);
+		};
 
 		stderrMock = mock.method(process.stderr, "write", (() => { throw new Error("stderr warning sink unavailable"); }) as typeof process.stderr.write);
 		now += 300_000; // a stall episode AND a routine card are both due
 		assert.doesNotThrow(tick, "unavailable status sinks cannot abort the actionable wake");
+		assert.equal(workerBus.current?.pending("supervisor").length, 1, "a failed host send leaves the unread note available for retry");
+		assert.doesNotThrow(tick);
 		stderrMock.mock.restore();
 		stderrMock = undefined;
 		assert.equal(statusAttempts, 1, "a failing episode sink does not trigger a duplicate routine attempt");
@@ -7212,6 +7221,15 @@ test("the peek tick survives unavailable status sinks and still wakes for an unr
 		assert.match(wake, /from sub-agents/);
 		assert.match(wake, /found the config/);
 		assert.doesNotMatch(wake, /stall/i, "a stall never reaches the model");
+		for (let i = 0; i < 200; i++) assert.ok(workerBus.current?.send(workerHandle, "supervisor", `note ${i} ${"x".repeat(900)}`, "progress"));
+		const ids = workerBus.current!.pending("supervisor").map((message) => message.id);
+		tick();
+		const wide = String((m.sentMessages()[1]?.message as { content?: string } | undefined)?.content ?? "");
+		assert.ok(wide.length <= 12_000, "a wide periodic wake shares the completion delivery budget");
+		for (const id of ids) {
+			assert.ok(wide.includes(id), `the clipped wake preserves retrieval id ${id}`);
+			assert.ok(workerBus.current?.retrieve(id, "supervisor"));
+		}
 	} finally {
 		stderrMock?.mock.restore();
 		if (sessionStarted) await m.fire("session_shutdown", undefined, ctx);

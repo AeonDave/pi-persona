@@ -28,6 +28,20 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Periodic Intercom wakes now share the completion delivery's bounded snapshot and consume notes
+  only after a successful host send. Failed sends preserve unread messages for retry; clipped
+  deliveries retain message IDs for explicit retrieval.
+- Completion previews use persisted runtime states and aliases instead of parsing worker prose.
+  Multiline errors and clipped reports can no longer manufacture extra failed-run rows; older
+  history without a snapshot remains readable through a literal expandable preview.
+- Windows drive-relative ownership paths such as `C:foo` are rejected along with absolute and
+  escaping paths. Drive-root normalization preserves its distinction from drive-relative syntax.
+- Child-engine setup and spawn share one cleanup path, including partial broker registration,
+  steering setup failures and reader revocation errors.
+- Monitor/script observers cannot interrupt admission, cancellation or event delivery when an
+  archive or UI callback throws. Both adapters use the same observer isolation rule.
+- Native tool activation preserves partial builtin selections, including an SDK session starting
+  with `noTools: "builtin"` and `tools: ["+read"]`; automatic additions require the full native base set.
 - Unified Intercom/Exocom message previews, completion, checkpoint, stall and recovery cards with
   lowercase headings and assigned worker names. Expanded cards retain complete routing, model and
   trust diagnostics; sender aliases survive worker disposal and child-process broker delivery.
@@ -54,6 +68,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Tests
 
+- Installed-package qualification installs only the candidate's declared runtime dependencies in
+  its temporary package directory, checks that Pi peers still resolve to the host, and executes
+  JavaScript and TypeScript outlines from the tarball on both engines without runtime network traffic.
 - Characterized archived Unicode pagination at the default, maximum and minimum page limits,
   including surrogate-pair boundaries and lossless reconstruction using the returned `nextOffset`.
 

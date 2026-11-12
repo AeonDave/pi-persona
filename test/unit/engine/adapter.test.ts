@@ -773,6 +773,42 @@ test("child reference handoff keeps an absent allowlist absent (no --tools) and 
 	assert.equal(revoked.count, 1);
 });
 
+test("child adapter releases prepared readers and registrations when pre-spawn wiring throws", async () => {
+	for (const stage of ["registration", "steering"] as const) {
+		const log: string[] = [];
+		const revoked = { count: 0 };
+		const broker = fullBroker(log, "d".repeat(64), revoked);
+		const register = broker.register;
+		broker.register = (info) => {
+			register(info);
+			if (stage === "registration") throw new Error("registration failed after acquiring handle");
+		};
+		let invoked = false;
+		const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,
+			childOptions: { resolveInvocation: (args) => { invoked = true; return envDump("never")(args); } } });
+		await assert.rejects(engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] }, undefined, undefined, () => {
+			throw new Error("steering failed before spawn");
+		}), stage === "registration" ? /registration failed/ : /steering failed/);
+		assert.equal(invoked, false, `${stage}: no process was spawned`);
+		assert.equal(revoked.count, 1, `${stage}: the prepared reader is revoked`);
+		const handle = log.find((entry) => entry.startsWith("prepare:"))!.slice("prepare:".length);
+		assert.equal(log.filter((entry) => entry === `unregister:${handle}`).length, 1, `${stage}: the partial registration is released`);
+	}
+});
+
+test("child adapter still unregisters when reader revocation itself throws", async () => {
+	const log: string[] = [];
+	const broker = fullBroker(log);
+	broker.prepareResultReader = async (handle) => {
+		log.push(`prepare:${handle}`);
+		return { token: "e".repeat(64), revoke: () => { throw new Error("reader cleanup failed"); }, wasBound: () => false };
+	};
+	const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,
+		childOptions: { resolveInvocation: envDump("settled") } });
+	await assert.rejects(engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] }), /reader cleanup failed/);
+	assert.equal(log.filter((entry) => entry.startsWith("unregister:")).length, 1);
+});
+
 test("child engine scrubs a stale supervisor PI_PERSONA_RESULT_READER_TOKEN from a plain leg's environment", { timeout: 10000 }, async () => {
 	process.env.PI_PERSONA_RESULT_READER_TOKEN = "stale-supervisor-token";
 	process.env.PI_PERSONA_BUS_TOOLS = "off";
