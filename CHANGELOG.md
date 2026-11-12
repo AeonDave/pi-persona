@@ -6,6 +6,15 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Added
+
+- Grouped Timers, Monitors and Scripts in the live widget and F9, with shared fold state,
+  mouse support in alternate-screen mode and keyboard controls. F9 includes read-only Exocom peers.
+- Asynchronous `script` execution for literal executable arguments or inline Pi shell commands,
+  with process-tree stop, bounded session-owned output, completion wakes and restart-loss notices.
+- Default supervisors and workers expose Pi's native `grep`, `find`, and `ls`; Windows also exposes native PowerShell. Existing host implementations and tool clamps remain authoritative. Pi may download `rg`/`fd` on first use when missing.
+- Added one lazy MIT WASM AST backend for bounded `code_outline` reads across JavaScript/JSX, TypeScript/TSX, Python, Go, Rust, C-family and C# source. C-family uses the C++ grammar (not strict-C/compiler validation); unsupported extensions and syntax errors fail clearly. Only bundled read-only scout/reviewer/architect allowlists were updated; explicit user grants remain narrow.
+
 ### Changed
 
 - Target Pi 1.5.2, with the four development SDK packages updated together. Host packages
@@ -19,6 +28,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Synchronous background-process startup failures retain their error cause instead of appearing cancelled.
+- Restart-loss notices distinguish pending notifications from processes that were still active.
+- Native tool activation preserves SDK sessions with disabled builtins, including custom tool overrides.
 - Intentionally empty compact previews render small title-only informational notes, with expansion
   available for full detail, rather than inserting a misleading `(no output)` body.
 - Standalone entry cards, including checkpoints, stall warnings and progress recovery, honor the

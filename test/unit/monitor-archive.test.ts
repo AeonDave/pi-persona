@@ -26,6 +26,15 @@ function harness(initial: unknown[] = []) {
 	return { archive, entries, writes };
 }
 
+test("explicit stdin source round-trips through bounded archive validation", () => {
+	const h = harness();
+	const source = { ...entry(), stdin: "npm test\nprintf done" };
+	h.archive.armed(source); h.archive.removed(source, { kind: "cancelled" });
+	assert.equal(h.archive.result(source.id)?.entry.stdin, source.stdin);
+	assert.equal(parseMonitorLogRecord(h.writes[0]?.data)?.entry.stdin, source.stdin);
+	assert.equal(parseMonitorLogRecord({ ...record(), entry: { ...source, stdin: "x".repeat(8193) } }), undefined);
+});
+
 test("unreadable own historical formats still consume the append-only archive budget", () => {
 	for (const history of [
 		Array.from({ length: MONITOR_LOG_MAX_RECORDS }, () => custom({ version: 2 })),
@@ -75,18 +84,18 @@ test("each terminal outcome and cancellation persists exactly once; late callbac
 		h.archive.event(event("watch-1", kind));
 		const expected = h.archive.result("watch-1");
 		h.archive.output({ id: "watch-1", stream: "stdout", text: "late" });
-		h.archive.event(event()); h.archive.removed(entry()); h.archive.armed(entry());
+		h.archive.event(event()); h.archive.removed(entry(), { kind: "cancelled" }); h.archive.armed(entry());
 		assert.equal(h.writes.length, 1);
 		assert.equal(h.writes[0]?.customType, "pi-persona-monitor-log");
 		assert.equal(expected?.outcome, kind === "output" ? "ended" : kind);
 		assert.deepEqual(h.archive.result("watch-1"), expected);
 	}
-	const h = harness(); h.archive.armed(entry()); h.archive.removed(entry());
-	h.archive.removed(entry()); h.archive.event(event());
+	const h = harness(); h.archive.armed(entry()); h.archive.removed(entry(), { kind: "cancelled" });
+	h.archive.removed(entry(), { kind: "cancelled" }); h.archive.event(event());
 	assert.equal(h.archive.result("watch-1")?.outcome, "cancelled");
 	assert.equal(h.writes.length, 1);
 	h.archive.output({ id: "unknown", stream: "stdout", text: "ignored" });
-	h.archive.event(event("unknown")); h.archive.removed(entry("unknown"));
+	h.archive.event(event("unknown")); h.archive.removed(entry("unknown"), { kind: "cancelled" });
 	assert.equal(h.archive.list().length, 1);
 });
 
@@ -98,7 +107,7 @@ test("a resumed instance restores completed logs, never a process or mutable ses
 	const resumed = new MonitorArchive({ entries: () => h.entries, append: () => { writes++; } });
 	assert.deepEqual(resumed.result("watch-1"), h.archive.result("watch-1"));
 	resumed.output({ id: "watch-1", stream: "stdout", text: "late" });
-	resumed.event(event()); resumed.removed(entry());
+	resumed.event(event()); resumed.removed(entry(), { kind: "cancelled" });
 	assert.equal(writes, 0);
 	assert.equal(resumed.result("watch-1")?.stdout, "captured");
 });
@@ -203,7 +212,7 @@ test("append failure is nonfatal, explicit, bounded and never retried for a sett
 		const id = `fail-${i}`; archive.armed(entry(id));
 		archive.output({ id, stream: "stderr", text: "kept locally" });
 		assert.doesNotThrow(() => archive.event(event(id)));
-		archive.event(event(id)); archive.removed(entry(id));
+		archive.event(event(id)); archive.removed(entry(id), { kind: "cancelled" });
 		assert.match(archive.result(id)?.storageWarning ?? "", /unavailable|budget|quota|limit|persist/i);
 		assert.equal(archive.result(id)?.stderr, "kept locally");
 	}

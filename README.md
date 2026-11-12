@@ -59,6 +59,8 @@ then install the npm package. Keep only one source configured to avoid loading t
 | **Cross-session collaboration** | Exocom connects independent Pi sessions to exchange findings and coordinate work |
 | **Councils and flows** | Compare perspectives, run repair-and-check loops, or organize work into stages |
 | **Timers and monitors** | Ask for a reminder or a notification when a build, file watcher, or event-producing program reports a change |
+| **Native OS search** | Supervisors and default worker sessions can use Pi's own `grep`, `find`, and `ls`; Windows also gets native PowerShell |
+| **Multilanguage code outline** | Read-only syntax-AST symbol outlines for JavaScript/TypeScript, Python, Go, Rust, C-family, and C# files |
 | **Switchable personas** | Choose how the supervisor approaches and orchestrates the work |
 
 ## Work with your team
@@ -73,6 +75,10 @@ Once seeded, you can start directly with `pi --persona dev`. Describe the work i
 For example, specialists can investigate code paths, tests, and the API contract in parallel.
 Their findings return to the **same supervisor**, which integrates them, verifies the fix, and reports
 the outcome. This is one possible workflow, not a fixed pipeline; dependent steps run in order.
+
+Native search uses Pi's own implementations and limits. Pi may download its `rg`/`fd` helper binaries on first use when they are not already available; this adds no pi-persona dependency but is not guaranteed network-free.
+
+`code_outline` reads one bounded source file and returns named declarations with inclusive physical line ranges, a literal name/kind/container query, and a row limit. It supports JavaScript/JSX, TypeScript/TSX, Python (`.py`/`.pyi`), Go, Rust, C-family and C# source. A single MIT-licensed WASM parser backend and its packaged grammars load only when the tool is called. C and ambiguous C headers use the C++ grammar: this is a C-family syntax outline, not strict-C or compiler validation. C# means source syntax only; it does not decompile .NET assemblies or support VB/F#. Parse errors and unsupported extensions fail clearly. The result is not semantic or runtime analysis, and never dumps file bodies. Stock read-only `scout`, `reviewer`, and `architect` agents may use it; custom tool allowlists remain unchanged unless explicitly configured.
 
 Interactive delegation, councils and flows always run in the background; there is no blocking mode, so you
 can inspect, redirect, or stop a run at any point. Results return automatically when the supervisor is free, and
@@ -92,7 +98,7 @@ the worker has acted on it.
 | Key or command | Action |
 |---|---|
 | **F8** | Cycle through installed personas |
-| **F9** or `/agents` | Open the live agent panel (sub-agents, armed timers and active monitors) |
+| **F9** or `/agents` | Open the live panel: sub-agents, Exocom peers, timers, monitors and scripts |
 | **Enter** / **s** / **x** / **X** in the panel | Open a group overview or worker output / send guidance / request a stop / stop every running agent from the tree (press twice) |
 | `/peek` | Show a compact progress summary |
 | `/flow <name> <task>` | Run a flow (`/flow` alone lists them with descriptions; a `gate: true` phase pauses for your approval). `/orchestrate <task>` runs the active persona's `orchestration:` block (no bundled persona declares one; they use `council:` via the `council` tool) |
@@ -115,8 +121,11 @@ visible in the compact summary without expanding the widget over your conversati
 
 For time-based work, ask “remind me in ten minutes.” For an event, ask “let me know when this build
 finishes.” Keep Pi open while timers and monitors are running; they are not restored after a restart.
-While armed, each shows as a row in the agent panel (F9) with its countdown, and `x` cancels it.
-See [timers and monitors](docs/MONITORS.md) for examples.
+Timers, monitors and asynchronous scripts have separate groups above the editor and in F9, with
+countdowns, output details and `x` to stop one. Click a group heading in alternate-screen mode,
+or use Space/Left/Right in F9, to fold it. Ask “run the tests in the background” to launch a script,
+including inline shell or Python commands. F9 also shows independent Exocom peers without worker
+controls. See [timers, monitors and scripts](docs/MONITORS.md) for examples and retained logs.
 
 ## Collaborate with another Pi
 

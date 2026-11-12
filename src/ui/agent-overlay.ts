@@ -19,6 +19,7 @@ import {
 	Text,
 	truncateToWidth,
 	type TUI,
+	type TuiMouseEvent,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -28,6 +29,7 @@ import { LiveClock } from "./live-clock.ts";
 import { cumulativeUsageLine, groupLegBrief, groupLegMetadata, groupLegStatus, isAgentGroup, projectAgentGroup } from "./agent-group.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
+import { isResourceGroup, projectPeers, projectResourceGroups, type PeerPresence } from "./resource-groups.ts";
 
 function safeInline(value: string, maxChars = 96): string {
 	return compactInlineText(value, { maxChars });
@@ -110,6 +112,11 @@ export interface AgentOverlayActions {
 	stallMs?: number;
 	/** Clock; tests inject a fixed one. */
 	now?: () => number;
+	/** Shared presentation state with the above-editor widget. */
+	collapsedGroups?: Set<string>;
+	onGroupToggle?: () => void;
+	peerSnapshot?: () => readonly PeerPresence[];
+	onPeersChanged?: (listener: () => void) => () => void;
 }
 
 export class AgentOverlay extends Container {
@@ -122,15 +129,19 @@ export class AgentOverlay extends Container {
 	private readonly now: () => number;
 	private notice: string | undefined;
 	private unsubscribe: () => void;
+	private readonly unsubscribePeers: () => void;
 	private selectedId: string | undefined; // the selected agent's *id*, never its row index
 	private aimLost = false; // the aimed-at agent settled: swallow the next directed keystroke
 	private stopAllArmed: string | undefined; // the stoppable set the "press X again" prompt armed on
 	private listScroll = 0; // list rows scrolled off the top (keeps the selection visible)
+	private mouseListIds: string[] = [];
+	private mouseListStart = 3;
 	private detailId: string | undefined;
 	private groupId: string | undefined;
 	private groupSelectedId: string | undefined;
 	private groupAimLost = false;
 	private groupScroll = 0;
+	private readonly collapsedGroups: Set<string>;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
 	private steering = false; // typing a steer message into the drilled-in agent
 	private steerBuffer = "";
@@ -149,6 +160,7 @@ export class AgentOverlay extends Container {
 		this.theme = theme;
 		this.done = done;
 		this.actions = actions;
+		this.collapsedGroups = actions.collapsedGroups ?? new Set();
 		this.now = actions.now ?? Date.now;
 		this.clock = new LiveClock({ intervalMs: 1_000, isLive: () => tree.hasRunning(), onTick: () => this.refresh() });
 		this.unsubscribe = tree.onChange(() => {
@@ -162,6 +174,7 @@ export class AgentOverlay extends Container {
 			this.scheduleRefresh();
 			this.clock.start(); // new work may have appeared while the clock was stopped
 		});
+		this.unsubscribePeers = actions.onPeersChanged?.(() => this.scheduleRefresh()) ?? (() => {});
 		this.rebuild();
 		this.clock.start();
 	}
@@ -222,8 +235,12 @@ export class AgentOverlay extends Container {
 	}
 
 	/** Every row can be inspected; inspection does not confer a stop or steer handle. */
-	private selectableRows(snap: AgentNode[] = this.tree.snapshot()): FlatRow[] {
-		return flattenTree(snap);
+	private viewNodes(): AgentNode[] {
+		return [...projectResourceGroups(this.tree.snapshot()), ...projectPeers(this.actions.peerSnapshot?.() ?? [])];
+	}
+
+	private selectableRows(snap: AgentNode[] = this.viewNodes()): FlatRow[] {
+		return flattenTree(projectResourceGroups(snap)).filter((row) => row.node.parentId === undefined || !this.collapsedGroups.has(row.node.parentId));
 	}
 
 	/**
@@ -240,7 +257,7 @@ export class AgentOverlay extends Container {
 	private selectedLeaf(leaves: FlatRow[]): FlatRow | undefined {
 		const anchored = this.selectedId !== undefined ? leaves.find((r) => r.node.id === this.selectedId) : undefined;
 		const nodes = leaves.map((row) => row.node);
-		const leaf = anchored ?? leaves.find((r) => !isNonAgentNode(r.node) && (!isAgentGroup(r.node, nodes) || this.actions.canStop?.(r.node.id) === true)) ?? leaves.find((r) => !isNonAgentNode(r.node)) ?? leaves[0];
+		const leaf = anchored ?? leaves.find((r) => !isNonAgentNode(r.node) && (!isAgentGroup(r.node, nodes) || this.actions.canStop?.(r.node.id) === true)) ?? leaves.find((r) => !isNonAgentNode(r.node)) ?? leaves.find((r) => r.node.kind !== "resource-group") ?? leaves[0];
 		if (this.selectedId !== undefined && anchored === undefined && leaf !== undefined) this.aimLost = true;
 		this.selectedId = leaf?.node.id;
 		return leaf;
@@ -279,9 +296,10 @@ export class AgentOverlay extends Container {
 
 	private renderList(): void {
 		const t = this.theme;
-		const nodes = this.tree.snapshot();
-		const rows = flattenTree(nodes);
-		const selected = this.selectedLeaf(this.selectableRows(nodes))?.node;
+		const nodes = this.viewNodes();
+		const rows = this.selectableRows(nodes);
+		const selected = this.selectedLeaf(rows)?.node;
+		this.mouseListIds = [];
 		this.addChild(new Text(t.fg("accent", t.bold("Agents")), 1, 0));
 		this.addChild(new Spacer(1));
 		if (rows.length === 0) {
@@ -294,10 +312,12 @@ export class AgentOverlay extends Container {
 			const selIdx = Math.max(0, rows.findIndex((r) => r.node.id === selected?.id));
 			this.listScroll = visibleWindow(selIdx, vp, rows.length, this.listScroll);
 			const end = Math.min(rows.length, this.listScroll + vp);
+			this.mouseListStart = 3 + (this.listScroll > 0 ? 1 : 0);
+			this.mouseListIds = rows.slice(this.listScroll, end).map((row) => row.node.id);
 			if (this.listScroll > 0) this.addChild(new Text(t.fg("dim", `▲ ${this.listScroll} above`), 1, 0));
 			for (const row of rows.slice(this.listScroll, end)) {
 				const composed = composeAgentRow({
-					node: row.node,
+					node: isResourceGroup(row.node.id) ? { ...row.node, label: `${this.collapsedGroups.has(row.node.id) ? "▸" : "▾"} ${row.node.label}` } : row.node,
 					depth: row.depth,
 					selected: row.node.id === selected?.id,
 					inner: this.inner(),
@@ -313,7 +333,8 @@ export class AgentOverlay extends Container {
 		this.addChild(new Spacer(1));
 		const stoppable = selected !== undefined && this.canStopNode(selected, nodes);
 		const steerable = selected !== undefined && this.canSteerNode(selected, nodes);
-		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
+		const foldHint = selected && isResourceGroup(selected.id) ? "   space fold" : "";
+		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
 		this.renderNotice();
 	}
 
@@ -327,7 +348,7 @@ export class AgentOverlay extends Container {
 	}
 
 	private renderGroup(): void {
-		const nodes = this.tree.snapshot();
+		const nodes = this.viewNodes();
 		const waitingIds = this.waitingNodeIds(nodes);
 		const group = this.groupId ? projectAgentGroup(nodes, this.groupId, waitingIds) : undefined;
 		if (!group) {
@@ -362,7 +383,7 @@ export class AgentOverlay extends Container {
 			const suffix = ` · ${waitingIds.has(leg.id) ? "waiting for supervisor" : `${groupLegStatus(leg)}${clock ? ` · ${clock}` : ""}`}`;
 			const label = truncateToWidth(safeInline(leg.label), Math.max(0, this.inner() - visibleWidth(prefix + suffix)), "…");
 			line(prefix + label + suffix, leg.id === selected?.id);
-			line(`  ${groupLegMetadata(leg, this.inner() - 2)}`);
+			if (!isNonAgentNode(leg)) line(`  ${groupLegMetadata(leg, this.inner() - 2)}`);
 			line(`  ${groupLegBrief(leg)}`);
 			const usage = cumulativeUsageLine(leg);
 			if (usage) line(`  ${usage}`);
@@ -431,7 +452,7 @@ export class AgentOverlay extends Container {
 
 	private renderDetail(): void {
 		const t = this.theme;
-		const nodes = this.tree.snapshot();
+		const nodes = this.viewNodes();
 		const node = nodes.find((n) => n.id === this.detailId);
 		if (!node) {
 			this.detailId = undefined;
@@ -451,7 +472,7 @@ export class AgentOverlay extends Container {
 		const wake = isWakeSource(node);
 		const localActivity = node.kind === "activity";
 		const metadata = (text: string): void => { this.addChild(new Text(truncateToWidth(text, Math.max(1, this.inner() - 2), "…"), 1, 0)); };
-		metadata(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", localActivity ? "  ● local work" : wake ? "  ● armed" : "  ● live") : ""}`);
+		metadata(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", node.kind === "peer" ? "  ● peer" : localActivity ? "  ● local work" : node.kind === "script" ? "  ● running" : wake ? "  ● armed" : "  ● live") : ""}`);
 		if (this.waitingNodeIds(nodes).has(node.id)) metadata(t.fg("dim", "waiting for supervisor"));
 		const usageLine = cumulativeUsageLine(node);
 		if (node.detail && usageLine !== `cumulative usage: ${node.detail}`) metadata(t.fg("dim", safeInline(node.detail)));
@@ -551,7 +572,7 @@ export class AgentOverlay extends Container {
 			this.handleGroupInput(keyData, hadNotice);
 			return;
 		}
-		const nodes = this.tree.snapshot();
+		const nodes = this.viewNodes();
 		const leaves = this.selectableRows(nodes);
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 			this.moveSelection(leaves, -1);
@@ -559,6 +580,15 @@ export class AgentOverlay extends Container {
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
 			this.moveSelection(leaves, 1);
 			this.refresh();
+		} else if (keyData === " " || keyData === "\x1b[D" || keyData === "\x1b[C") {
+			const leaf = this.selectedLeaf(leaves);
+			if (leaf && isResourceGroup(leaf.node.id)) {
+				const id = leaf.node.id;
+				if (keyData === "\x1b[D" || (keyData === " " && !this.collapsedGroups.has(id))) this.collapsedGroups.add(id);
+				else this.collapsedGroups.delete(id);
+				this.actions.onGroupToggle?.();
+				this.refresh();
+			}
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const leaf = this.selectedLeaf(leaves);
 			if (leaf) {
@@ -593,8 +623,22 @@ export class AgentOverlay extends Container {
 		} else if (hadNotice) this.refresh(); // unhandled key: still repaint so a cleared notice disappears
 	}
 
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (!this.detailId && !this.groupId && event.type === "click" && event.button === "left") {
+			const id = this.mouseListIds[event.y - this.mouseListStart];
+			if (id && isResourceGroup(id) && this.viewNodes().some((node) => node.id === id)) {
+				this.selectedId = id;
+				if (!this.collapsedGroups.delete(id)) this.collapsedGroups.add(id);
+				this.actions.onGroupToggle?.();
+				this.refresh();
+				return { handled: true, target: { component: this, originX: event.screenX - event.x, originY: event.screenY - event.y, width: event.width, height: event.height } };
+			}
+		}
+		return undefined;
+	}
+
 	private handleGroupInput(keyData: string, hadNotice: boolean): void {
-		const nodes = this.tree.snapshot();
+		const nodes = this.viewNodes();
 		const group = this.groupId ? projectAgentGroup(nodes, this.groupId) : undefined;
 		if (!group) {
 			// Consume this key in the disappeared view. It cannot fall through to a new tree target.
@@ -643,7 +687,7 @@ export class AgentOverlay extends Container {
 	 *  gate (defaulting to "yes" when omitted) must agree. Shared by both hints and `tryStop`, so
 	 *  the hint that advertises "x stop" and the handler that actually gates it never diverge. */
 	private canStopNode(node: AgentNode, nodes: readonly AgentNode[] = this.tree.snapshot()): boolean {
-		return node.kind !== "activity" && node.status === "running" && (this.actions.canStop?.(node.id) ?? !isAgentGroup(node, nodes));
+		return node.kind !== "activity" && node.kind !== "resource-group" && node.kind !== "peer" && node.status === "running" && (this.actions.canStop?.(node.id) ?? !isAgentGroup(node, nodes));
 	}
 
 	/** The agents `X` would stop: every leaf that `x` could stop, wake sources excluded. `X` means
@@ -705,6 +749,7 @@ export class AgentOverlay extends Container {
 	dispose(): void {
 		this.clock.stop();
 		this.unsubscribe();
+		this.unsubscribePeers();
 	}
 
 	/** Read-only for tests: whether the live-clock tick is still armed. */

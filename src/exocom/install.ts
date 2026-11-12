@@ -59,6 +59,7 @@ import { registerExocomProfileTool } from "../tools/exocom-profile.ts";
 import { collaborationWriteIntent, deliverCollaborationOffer } from "./collaboration-delivery.ts";
 import type { SessionIdentity } from "../extension/identity.ts";
 import { WriteWarnings } from "./write-guard.ts";
+import { ExocomPeerPresenceStore, projectExocomPeerPresence, type ExocomPeerPresence } from "./presence.ts";
 
 export interface ExocomHost {
 	readonly pi: ExtensionAPI;
@@ -86,6 +87,10 @@ export interface ExocomInstall {
 	currentTelemetryInstance(ctx: ExtensionContext): InstanceDescriptor;
 	publishTelemetryPeers(peers?: DisplayPeer[]): void;
 	get plane(): ExocomPlane | undefined;
+	/** Safe human-facing peer presence only; no session ids, routes, endpoints, or controls. */
+	peerSnapshot(): readonly ExocomPeerPresence[];
+	/** Fires when the safe peer projection changes; read `peerSnapshot()` for current values. */
+	onPeersChanged(listener: () => void): () => void;
 	get name(): string;
 	get namedByModel(): boolean;
 	get scope(): ExocomScope | undefined;
@@ -115,6 +120,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// persona ⇒ unrestricted (mirrors delegationBrief's own reading of an absent capability set,
 	// rather than silently refusing to join for an unpersona'd session — see startExocom below).
 	let exocomPlane: ExocomPlane | undefined;
+	const peerPresence = new ExocomPeerPresenceStore();
 	let exocomLedgerFile = "";
 	let exocomSessionId = "";
 	let refreshIdentity: (() => void) | undefined;
@@ -299,9 +305,17 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		} catch {
 			return;
 		}
+		const now = Date.now();
+		peerPresence.publish(projectExocomPeerPresence(peers.map((peer) => ({
+			sessionId: peer.session_id,
+			name: sanitizePeerField(peer.displayName, 48) || "peer",
+			persona: sanitizePeerField(peer.persona, 48),
+			model: sanitizePeerField(peer.model, 96),
+			contextPercent: peer.context_pct,
+			heartbeatAt: peer.heartbeat_at,
+		})), now, EXOCOM.QUIET_AFTER_MS));
 		publishTelemetryPeers(peers);
 		try {
-			const now = Date.now();
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const selfModel = sanitizePeerField(host.lastCtx.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
@@ -945,6 +959,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		if (exocomPlane) {
 			const plane = exocomPlane;
 			exocomPlane = undefined;
+			peerPresence.publish([]);
 			try {
 				publishTelemetryPeers([]);
 			} catch {
@@ -980,6 +995,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		currentTelemetryInstance,
 		publishTelemetryPeers,
 		get plane() { return exocomPlane; },
+		peerSnapshot: () => peerPresence.snapshot(),
+		onPeersChanged: (listener) => peerPresence.onChange(listener),
 		get name() { return host.identity.name; },
 		get namedByModel() { return host.identity.chosen; },
 		get scope() { return exocomScope; },

@@ -774,8 +774,9 @@ test("steer follows the row: an agent beside a wake row keeps s steer, the wake 
 	tree.add(TIMER_ROW);
 	const overlay = wakeOverlay(tree, { canSteer: (id) => id === "async:A" });
 	assert.match(overlay.render(120).join("\n"), /s steer/, "the agent is selected first and can be steered");
-	overlay.handleInput("j"); // onto the timer
-	assert.match(overlay.render(120).join("\n"), /▸ ⏰ status review/);
+	overlay.handleInput("j"); // category
+	overlay.handleInput("j"); // timer
+	assert.match(overlay.render(120).join("\n"), /▸\s+⏰ status review/);
 	assert.doesNotMatch(overlay.render(120).join("\n"), /s steer/);
 	overlay.handleInput("s");
 	assert.doesNotMatch(overlay.render(120).join("\n"), /steer ▸/);
@@ -825,6 +826,56 @@ test("X is not offered for one agent plus a monitor: wake rows do not make a gro
 	overlay.handleInput("X");
 	assert.deepEqual(stopped, []);
 	overlay.dispose();
+});
+
+test("resource category can fold and open an overview with individually stoppable scripts", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "script:1", label: "build", kind: "script", output: "build output" });
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, { canStop: (id) => id === "script:1", onStop: (id) => { stopped.push(id); return true; } });
+	overlay.handleInput("k"); // select Scripts category
+	assert.match(overlay.render(120).join("\n"), /▾ Scripts/);
+	overlay.handleInput(" ");
+	assert.doesNotMatch(overlay.render(120).join("\n"), /build/);
+	overlay.handleInput(" ");
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /Group overview · Scripts/);
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["script:1"]);
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /build output/);
+	overlay.dispose();
+});
+
+test("clicking a category in F9 folds only that category", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "script:1", label: "build", kind: "script" });
+	const overlay = wakeOverlay(tree, {});
+	overlay.render(120);
+	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 3, screenX: 4, screenY: 3, width: 120, height: 10, shift: false, alt: false, ctrl: false });
+	assert.doesNotMatch(overlay.render(120).join("\n"), /build/);
+	overlay.dispose();
+});
+
+test("Exocom peer presence refreshes in F9 without gaining worker controls", () => {
+	const tree = new AgentTree(() => 0);
+	let peers: { key: string; name: string; status: "online" | "idle" }[] = [{ key: "1", name: "Ada", status: "online" }];
+	let notify = () => {};
+	let unsubscribed = false;
+	const overlay = wakeOverlay(tree, {
+		peerSnapshot: () => peers,
+		onPeersChanged: (listener) => { notify = listener; return () => { unsubscribed = true; }; },
+		canStop: () => true,
+	});
+	assert.match(overlay.render(120).join("\n"), /Exocom peers/);
+	assert.doesNotMatch(overlay.render(120).join("\n"), /x stop|s steer|X stop all/);
+	peers = [{ key: "2", name: "Bea", status: "idle" }];
+	notify();
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /Bea/);
+	assert.doesNotMatch(view, /Ada/);
+	overlay.dispose();
+	assert.equal(unsubscribed, true);
 });
 
 test("drilling into a monitor row shows its output, the armed marker and the monitor glyph in the header", () => {
@@ -920,7 +971,7 @@ test("the marker falls back to a wake row only when no agent is left", () => {
 	assert.match(overlay.render(120).join("\n"), /▸ ⏳ worker/);
 	tree.remove("async:A"); // the aimed-at agent settles; only the monitor remains
 	const view = overlay.render(120).join("\n");
-	assert.match(view, /▸ ◉ qualify batch1/, "nothing else to aim at, so the monitor takes the marker");
+	assert.match(view, /▸\s+◉ qualify batch1/, "nothing else to aim at, so the monitor takes the marker");
 	overlay.handleInput("x");
 	assert.deepEqual(stopped, [], "the lost-aim guard still swallows the first directed key");
 	overlay.dispose();

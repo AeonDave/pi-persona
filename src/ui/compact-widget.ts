@@ -10,9 +10,16 @@ import { sanitizeTerminalText } from "./presentation.ts";
  * Snapshot and sanitize once per publication, without trimming/collapsing indentation.
  * No theme colors are captured; each render uses its supplied width (including resize).
  */
-export function compactWidget(rows: readonly string[]): () => Component {
+export function compactWidget(rows: readonly string[], targets: readonly (string | undefined)[] = [], onClick?: (id: string) => void): () => Component {
 	const lines = rows.map((row) => sanitizeTerminalText(row.replace(/\t/g, " ")).replace(/[\n\u2028\u2029]/g, " "));
 	return () => ({
+		handleMouse(event) {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			const target = targets[event.y];
+			if (!target || !onClick) return undefined;
+			onClick(target);
+			return { handled: true };
+		},
 		render(width: number): string[] {
 			const columns = Math.max(0, Math.floor(width));
 			if (columns === 0) return [];

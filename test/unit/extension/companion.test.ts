@@ -16,7 +16,7 @@ test("loaded Persona responds before its disable guard and distinguishes a real 
 		for (const leg of [false, true]) {
 			if (leg) process.env.PI_PERSONA_LEG = "1"; else delete process.env.PI_PERSONA_LEG;
 			const events = createEventBus();
-			piPersona({ events } as never);
+			piPersona({ events, on: () => () => {} } as never);
 			let presence: CompanionPresence | undefined;
 			events.emit(COMPANION_EVENT, { version: 1, respond: (value: CompanionPresence) => { presence = value; } });
 			assert.equal(presence?.role, leg ? "leg" : "disabled");

@@ -1,10 +1,11 @@
 import {
 	MONITOR_MAX_ARGS, MONITOR_MAX_ARG_CHARS, MONITOR_MAX_ARGV_CHARS,
 	MONITOR_MAX_COMMAND_CHARS, MONITOR_MAX_EVENTS, MONITOR_MAX_LABEL_CHARS,
-	type MonitorEntry, type MonitorEvent, type MonitorOutput,
+	type MonitorEntry, type MonitorEvent, type MonitorOutput, type MonitorRemovalReason,
 } from "../core/monitor.ts";
 
 export const MONITOR_LOG_ENTRY = "pi-persona-monitor-log";
+export const SCRIPT_LOG_ENTRY = "pi-persona-script-log";
 export const MONITOR_LOG_MAX_STREAM_CHARS = 16 * 1024;
 export const MONITOR_LOG_MAX_TEXT_CHARS = 16 * 1024;
 export const MONITOR_LOG_MAX_RECORDS = 64;
@@ -23,6 +24,8 @@ export interface MonitorLogRecord {
 }
 
 export interface MonitorArchiveDeps {
+	/** Independent session artifact namespaces; histories never cross between these sources. */
+	source?: "monitor" | "script";
 	/** Only the owning session's entries; never a global session/history lookup. */
 	entries: () => readonly unknown[];
 	/** Session-native custom data, NOT a model-visible custom message. */
@@ -46,7 +49,7 @@ function onlyKeys(value: Record<string, unknown>, keys: readonly string[]): bool
 }
 
 function validEntry(value: unknown): value is MonitorEntry {
-	if (!object(value) || !onlyKeys(value, ["id", "label", "command", "args", "cwd", "mode", "startedAtEpochMs", "expiresAtEpochMs", "maxEvents"])) return false;
+	if (!object(value) || !onlyKeys(value, ["id", "label", "command", "args", "stdin", "cwd", "mode", "startedAtEpochMs", "expiresAtEpochMs", "maxEvents"])) return false;
 	return nonempty(value.id, 512)
 		&& nonempty(value.label, MONITOR_MAX_LABEL_CHARS)
 		&& nonempty(value.command, MONITOR_MAX_COMMAND_CHARS)
@@ -55,6 +58,7 @@ function validEntry(value: unknown): value is MonitorEntry {
 		&& Array.isArray(value.args) && value.args.length <= MONITOR_MAX_ARGS
 		&& Array.from(value.args).every((arg: unknown) => typeof arg === "string" && arg.length <= MONITOR_MAX_ARG_CHARS && !arg.includes("\0"))
 		&& value.args.reduce((sum: number, arg: string) => sum + arg.length, 0) <= MONITOR_MAX_ARGV_CHARS
+		&& (value.stdin === undefined || (typeof value.stdin === "string" && value.stdin.length <= MONITOR_MAX_ARG_CHARS && !value.stdin.includes("\0")))
 		&& typeof value.startedAtEpochMs === "number" && Number.isFinite(value.startedAtEpochMs) && value.startedAtEpochMs >= 0
 		&& typeof value.expiresAtEpochMs === "number" && Number.isFinite(value.expiresAtEpochMs) && value.expiresAtEpochMs >= value.startedAtEpochMs
 		&& typeof value.maxEvents === "number" && Number.isInteger(value.maxEvents) && value.maxEvents >= 1 && value.maxEvents <= MONITOR_MAX_EVENTS;
@@ -64,6 +68,7 @@ function copyEntry(entry: MonitorEntry): MonitorEntry {
 	return {
 		id: entry.id, label: entry.label, command: entry.command, args: [...entry.args],
 		cwd: entry.cwd, mode: entry.mode, startedAtEpochMs: entry.startedAtEpochMs,
+		...(entry.stdin === undefined ? {} : { stdin: entry.stdin }),
 		expiresAtEpochMs: entry.expiresAtEpochMs, maxEvents: entry.maxEvents,
 	};
 }
@@ -110,11 +115,13 @@ function storageCost(record: unknown): number {
  * Feed only admitted MonitorManager lifecycles (at most MONITOR_MAX_ACTIVE running entries).
  * Completed records are oldest-first; the most recent 64 survive in runtime memory.
  * Hydration runs once, so construct a fresh archive when the owning session changes.
- * History never restores running monitors. A removed observer has no cause information:
- * cancellation, permission revocation, shutdown and synchronous start failure all map to cancelled.
+ * History never restores running monitors. Silent startup failures retain their error diagnostics;
+ * cancellation, permission revocation and shutdown map to cancelled.
  */
 export class MonitorArchive {
 	private readonly deps: MonitorArchiveDeps;
+	private readonly entryType: string;
+	private readonly sourceLabel: string;
 	private readonly active = new Map<string, MonitorLogRecord>();
 	private readonly completed = new Map<string, MonitorLogRecord>();
 	private hydrated = false;
@@ -124,6 +131,8 @@ export class MonitorArchive {
 
 	constructor(deps: MonitorArchiveDeps) {
 		this.deps = deps;
+		this.entryType = deps.source === "script" ? SCRIPT_LOG_ENTRY : MONITOR_LOG_ENTRY;
+		this.sourceLabel = deps.source === "script" ? "Script" : "Monitor";
 	}
 
 	armed(entry: MonitorEntry): void {
@@ -156,10 +165,14 @@ export class MonitorArchive {
 		this.finish(record);
 	}
 
-	removed(entry: MonitorEntry): void {
+	removed(entry: MonitorEntry, reason: MonitorRemovalReason): void {
 		const record = this.active.get(entry.id);
 		if (!record) return;
-		record.outcome = "cancelled";
+		record.outcome = reason.kind;
+		if (reason.kind === "error") {
+			record.text = reason.text.slice(0, MONITOR_LOG_MAX_TEXT_CHARS);
+			if (reason.text.length > MONITOR_LOG_MAX_TEXT_CHARS) record.truncated = true;
+		}
 		this.finish(record);
 	}
 
@@ -182,7 +195,7 @@ export class MonitorArchive {
 			if (!Array.isArray(entries)) throw new Error("invalid session entries");
 			for (const entry of entries) {
 				try {
-					if (!object(entry) || entry.type !== "custom" || entry.customType !== MONITOR_LOG_ENTRY) continue;
+					if (!object(entry) || entry.type !== "custom" || entry.customType !== this.entryType) continue;
 					// Charge even unknown/malformed versions and duplicate ids: ignoring a record
 					// for retrieval does not remove its bytes from an append-only session.
 					this.persistedCount++;
@@ -191,12 +204,12 @@ export class MonitorArchive {
 					if (record) this.remember(record);
 				} catch {
 					// An unaccountable entry cannot safely reset the lifetime budget.
-					this.historyWarning = HISTORY_WARNING;
+					this.historyWarning = HISTORY_WARNING.replace(/^Monitor/, this.sourceLabel);
 				}
 			}
 		} catch {
 			// Without a trustworthy baseline, appending could silently overrun the session quota.
-			this.historyWarning = HISTORY_WARNING;
+			this.historyWarning = HISTORY_WARNING.replace(/^Monitor/, this.sourceLabel);
 		}
 	}
 
@@ -210,7 +223,7 @@ export class MonitorArchive {
 		}
 		const cost = storageCost(record);
 		if (this.persistedCount >= MONITOR_LOG_MAX_RECORDS || this.persistedBytes + cost > MONITOR_LOG_MAX_BYTES) {
-			record.storageWarning = BUDGET_WARNING;
+			record.storageWarning = BUDGET_WARNING.replace(/^Monitor/, this.sourceLabel);
 			return;
 		}
 		// Reserve even when append throws: it may have committed before reporting failure.
@@ -218,9 +231,9 @@ export class MonitorArchive {
 		this.persistedCount++;
 		this.persistedBytes += cost;
 		try {
-			this.deps.append(MONITOR_LOG_ENTRY, copyRecord(record));
+			this.deps.append(this.entryType, copyRecord(record));
 		} catch {
-			record.storageWarning = APPEND_WARNING;
+			record.storageWarning = APPEND_WARNING.replace(/^Monitor/, this.sourceLabel);
 		}
 	}
 

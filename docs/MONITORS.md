@@ -1,4 +1,4 @@
-# Time and event wakes
+# Timers, monitors and scripts
 
 The supervisor receives a UTC and local clock snapshot when a run starts, alongside the original
 session start and elapsed duration. The precise clock arrives as hidden model-visible context,
@@ -10,6 +10,32 @@ about, never one whose only job is to elapse time. Sub-agent completions and Exo
 wake the supervisor automatically, so neither tool should wait on them.
 
 ## Background programs
+
+Use `script` for asynchronous one-shot commands. It returns immediately and delivers the exit
+status and bounded stdout/stderr when the supervisor is idle. Both executable arguments and inline
+shell source are supported:
+
+```json
+{"action":"run","code":"npm test","label":"test suite","timeoutSeconds":900}
+{"action":"run","command":"python","args":["-u","-c","print('ready')"],"label":"Python job"}
+```
+
+`code` uses Pi's configured Bash shell, including its stdin transport where required. `command`
+and `args` execute an installed program with literal arguments. Choose exactly one form; inline
+PowerShell or another interpreter can use its executable and arguments. On Windows, `.cmd` launchers
+such as npm use the `code` form or an explicit shell. Programs resolve through the inherited PATH;
+this runner does not import Pi's private shell environment helpers. A short `label` is required.
+`script list` lists active executions, `script stop { id }` stops one process tree and removes its
+queued completion, and `script result { id, full: true }` reads the retained log. These are model
+tool calls; a natural request such as “run the tests in the background” is sufficient.
+
+Scripts share the monitor process lifecycle, but have independent IDs, admission and log history.
+Their limits are eight concurrent executions, a ten-minute default deadline and a twenty-four-hour
+maximum deadline. Their session archive has the same bounds described below, under the separate
+`pi-persona-script-log` entry type. Shutdown/reload stops scripts and preserves available diagnostics.
+If a completion or timer/monitor event was still queued, the restored session reports discarded
+notifications separately from processes that were still active. Read saved logs without restarting
+already completed work.
 
 `monitor` starts an executable with literal arguments in the current workspace and returns an id
 immediately. There is no implicit shell. For shell syntax, pass a script file to the appropriate
@@ -47,8 +73,14 @@ model or an integration, not something the user needs to manage.
 
 ## Visibility
 
-An armed timer or active monitor shows as a row in the agent widget and the F9 / `/agents` overlay,
-beside the sub-agents: `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` for a monitor
+Timers, monitors and scripts appear under their own **Timers**, **Monitors** and **Scripts** groups
+above the editor and in F9 / `/agents`, beside the existing sub-agent hierarchy. Click a group title
+to collapse or expand it in Pi's alternate-screen mode; in F9, Space or Left/Right provides the same
+control from the keyboard. The shared fold state lasts for the current extension activation.
+F9 also includes an **Exocom** group of independent peers with read-only presence details. Peer
+presence does not grant worker controls or imply that this session supervises them.
+
+Each active program shows `◉ <label>  <id> · <mode> · <elapsed> · deadline in <remaining>` for a monitor
 (`<id> · output · k/N events` as events arrive), `⏰ <label>  <id> · fires in <remaining>` for a timer
 (just `⏰ <id>  fires in <remaining>` when the timer has no label).
 The countdown replaces the stall clock, so a quiet watch is never `⚠ stalled`. While a process runs,
@@ -58,9 +90,9 @@ frame cadence instead of rebuilding the full row for every chunk. Terminal event
 include the final tail immediately. This is a bounded, sanitized UI projection: it does not create a
 model wake or consume an output-event allowance. `⏎` opens the command, cwd, times, bounded live output tails and last 40 event
 lines (monitor), or the fire time and message (timer); `x` cancels that
-one watch like `monitor cancel` / `timer cancel`. These are rows, not agents: no steer, `X` stop-all
+one item like `monitor cancel` / `timer cancel` / `script stop`. These are rows, not agents: no steer, `X` stop-all
 skips them (`intercom stop { to: "all" }` likewise leaves them alone; cancel with `monitor cancel` /
-`timer cancel` or `x`), and they never count in `N agents` or reach telemetry. A finished row settles
+`timer cancel` / `script stop` or `x`), and they never count in `N agents` or reach agent telemetry. A finished row settles
 and leaves like an async run: its final ✓/✗/■ goes to the tree change stream (telemetry excluded), not
 to the screen.
 
@@ -119,12 +151,12 @@ persistence failures never claim a complete or durable log.
 
 ## Permissions and architecture
 
-Starting a command requires both `monitor` and `bash` to be active and allowed by the persona.
-Changing to a persona that removes either permission stops its monitors and discards queued
+Starting a command requires both its `monitor` or `script` tool and `bash` to be active and allowed by the persona.
+Changing to a persona that removes either permission stops the affected processes and discards queued
 events. Normal Exocom pending-question gates apply to monitor calls as well.
 
 This is command execution with the host user's access, not an OS sandbox or a read-only guarantee.
-An extension that enforces command-specific policy through `tool_call` must inspect `monitor`
+An extension that enforces command-specific policy through `tool_call` must inspect `monitor` and `script`
 as well as `bash`; Pi Persona does not synthesize another extension's Bash hooks. External event
 text is fenced as untrusted data before delivery, with runtime id, time and outcome outside the fence.
 
@@ -132,6 +164,10 @@ The pure `src/core/monitor.ts` owns limits and lifecycle. `src/monitor/process.t
 using the existing process-tree cleanup helper. `src/monitor/session.ts` connects bounded events
 to the existing `IdleCoalescingNotifier` and `sendPersonaFollowUp` path. No separate wake broker,
 public listener, durable queue, or new orchestration engine is introduced.
+`src/script/session.ts` fixes the shared lifecycle to exit-only jobs; `src/tools/script.ts` owns
+command validation and Pi shell resolution. `src/extension/program-observer.ts` binds both sources
+to the same archive/row/control path. Synchronous launch failures retain an error outcome and cause;
+they are reported by the launch call without an additional completion wake.
 
 The design follows the background-program model described in the official
 [Claude Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool).
@@ -140,4 +176,6 @@ and persistent services are outside this tool's current scope.
 
 For live verification, `scripts/monitor-smoke.mjs` runs a persistent Pi RPC session and checks an
 automatic model turn after a local event. It requires an explicit `LIVE_MODEL=provider/id` because
-it spends provider tokens. Unit and integration tests use deterministic clocks and local programs.
+it spends provider tokens. Pass `--script` to check asynchronous script completion instead of a
+monitor event, and `--thinking medium` to select the model's reasoning effort. Unit and integration
+tests use deterministic clocks and local programs.

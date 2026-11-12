@@ -7,6 +7,19 @@ import { MonitorOutputTail } from "../../../src/core/monitor-output.ts";
 import { AgentTree } from "../../../src/ui/agent-tree.ts";
 import { WakeRows, wakeNodeId } from "../../../src/ui/wake-rows.ts";
 
+test("script projection uses distinct script identifiers across its lifecycle", () => {
+	const rows = new WakeRows("script");
+	const entry = { id: "same", label: "build", mode: "exit" as const, command: "npm", args: ["test"], stdin: "print('ready')", cwd: ".", startedAtEpochMs: 1, expiresAtEpochMs: 100, maxEvents: 1 };
+	const row = rows.monitorArmed(entry);
+	assert.equal(row.id, "script:same");
+	assert.equal(row.kind, "script");
+	assert.match(row.output ?? "", /print\('ready'\)/);
+	const removed = rows.monitorRemoved(entry, { kind: "error", text: "spawn failed" });
+	assert.equal(removed.id, "script:same");
+	assert.equal(removed.patch.status, "failed");
+	assert.match(removed.patch.detail ?? "", /spawn failed/);
+});
+
 const ARMED = 1_700_000_000_000;
 const DEADLINE = ARMED + 600_000;
 const iso = (ms: number): string => new Date(ms).toISOString();

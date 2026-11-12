@@ -193,6 +193,13 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
+			const childEnv = { ...childOptions.env };
+			delete childEnv.PI_PERSONA_CODE_OUTLINE;
+			childOptions.env = childEnv;
+			const outlineExcluded = cfg.excludeTools?.some((pattern) => pattern === "code_outline" || (pattern.endsWith("*") && "code_outline".startsWith(pattern.slice(0, -1))));
+			if (admittedTools?.includes("code_outline") && !outlineExcluded) {
+				childOptions.env = { ...childOptions.env, PI_PERSONA_CODE_OUTLINE: "1" };
+			}
 			if (memoryPersona !== undefined || childOptions.env?.[MEMORY_PERSONA_ENV] !== undefined) {
 				const env = { ...childOptions.env };
 				delete env[MEMORY_PERSONA_ENV];

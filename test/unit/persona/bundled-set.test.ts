@@ -159,12 +159,23 @@ test("every bundled agent says BE BRIEF. BE CLEAR. and stays within its size bud
 
 test("architect plans and never edits; reviewer critiques code AND plans without being strict", () => {
 	const architect = parseAgent(agentText("architect"), "architect.md")!;
-	assert.deepEqual(architect.tools, ["read", "grep", "find", "ls"], "architect is read-only: the plan is text, the supervisor files it");
+	assert.deepEqual(architect.tools, ["read", "grep", "find", "ls", "code_outline"], "architect stays read-only while gaining syntax-only outlines");
 	for (const heading of ["Goal", "Non-goals", "Steps", "Risks", "Open decisions"]) assert.ok(agentBody("architect").includes(`**${heading}:**`), `architect reports ${heading}`);
 	const reviewer = agentBody("reviewer");
 	assert.match(reviewer, /\*\*PLAN\*\* \(a plan or document\)/, "reviewer has a plan/document lens");
 	assert.match(reviewer, /`LGTM` whenever nothing must-fix remains/, "a plan with no must-fix item passes");
 	assert.match(reviewer, /nits go in a separate optional list and never block `LGTM`/);
+});
+
+test("only the bundled read-only scout, reviewer, and architect receive code_outline", () => {
+	for (const [name, tools] of [
+		["scout", ["read", "grep", "find", "ls", "code_outline"]],
+		["reviewer", ["read", "grep", "find", "code_outline"]],
+		["architect", ["read", "grep", "find", "ls", "code_outline"]],
+	] as const) assert.deepEqual(parseAgent(agentText(name), `${name}.md`)?.tools, tools, `${name} retains its exact narrow tool list`);
+	for (const name of AGENT_FILES.map((file) => file.slice(0, -3)).filter((name) => !["scout", "reviewer", "architect"].includes(name))) {
+		assert.ok(!parseAgent(agentText(name), `${name}.md`)?.tools?.includes("code_outline"), `${name} was not granted code_outline`);
+	}
 });
 
 test("the review team runs a correctness lens first and every lens it names is one the reviewer defines", () => {

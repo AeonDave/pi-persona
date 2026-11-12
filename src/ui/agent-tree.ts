@@ -15,7 +15,7 @@ import { formatUsage } from "./usage.ts";
  */
 
 export type AgentNodeStatus = "running" | "done" | "failed" | "stopped";
-export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase" | "monitor" | "timer" | "activity";
+export type AgentNodeKind = "subagent" | "delegate" | "council" | "flow" | "phase" | "monitor" | "timer" | "script" | "resource-group" | "peer" | "activity";
 
 export interface AgentNode {
 	id: string;
@@ -77,12 +77,12 @@ export const GLYPH: Record<AgentNodeStatus, string> = { running: "⏳", done: "�
 
 /** A wake source is a row that is not an agent (never counted, steered, or stopped in bulk). */
 export function isWakeSource(node: Pick<AgentNode, "kind">): boolean {
-	return node.kind === "monitor" || node.kind === "timer";
+	return node.kind === "monitor" || node.kind === "timer" || node.kind === "script";
 }
 
 /** Local companion work shares the view but is neither an agent nor a wake source. */
 export function isNonAgentNode(node: Pick<AgentNode, "kind">): boolean {
-	return isWakeSource(node) || node.kind === "activity";
+	return isWakeSource(node) || node.kind === "activity" || node.kind === "resource-group" || node.kind === "peer";
 }
 
 /** The kind-aware glyph shared by every surface (tree, overlay): a running timer is ⏰, a running
@@ -92,6 +92,9 @@ export function nodeGlyph(node: Pick<AgentNode, "status" | "kind">): string {
 		if (node.kind === "activity") return "◈";
 		if (node.kind === "timer") return "⏰";
 		if (node.kind === "monitor") return "◉";
+		if (node.kind === "script") return "⚙";
+		if (node.kind === "resource-group") return "◆";
+		if (node.kind === "peer") return "◉";
 	}
 	return GLYPH[node.status];
 }
@@ -144,7 +147,8 @@ export function isQueuedMarker(detail: string | undefined): boolean {
 export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail" | "kind" | "dueAt">, now: number, stallMs: number, waitingForSupervisor = false): string | undefined {
 	if (node.status !== "running" || node.startedAt === undefined) return undefined;
 	if (isQueuedMarker(node.detail)) return undefined;
-	if (node.kind === "activity") return formatDuration(now - node.startedAt);
+	if (node.kind === "resource-group" || node.kind === "peer") return undefined;
+	if (node.kind === "activity" || node.kind === "script") return formatDuration(now - node.startedAt);
 	if (waitingForSupervisor) return "waiting for supervisor";
 	if (node.dueAt !== undefined) {
 		const left = node.dueAt - now;
@@ -250,11 +254,13 @@ export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): s
 function wakeDigestLine(hidden: readonly AgentNode[], now: number | undefined): string {
 	const monitors = hidden.filter((node) => node.kind === "monitor").length;
 	const timers = hidden.filter((node) => node.kind === "timer").length;
+	const scripts = hidden.filter((node) => node.kind === "script").length;
 	const parts: string[] = [];
 	const activities = hidden.filter((node) => node.kind === "activity");
 	if (activities.length > 0) parts.push(`◈ Mind · ${safeInline(activities[activities.length - 1]!.detail ?? "local memory work")}`);
 	if (monitors > 0) parts.push(`${nodeGlyph({ status: "running", kind: "monitor" })} ${monitors} monitor${monitors === 1 ? "" : "s"}`);
 	if (timers > 0) parts.push(`${nodeGlyph({ status: "running", kind: "timer" })} ${timers} timer${timers === 1 ? "" : "s"}`);
+	if (scripts > 0) parts.push(`${nodeGlyph({ status: "running", kind: "script" })} ${scripts} script${scripts === 1 ? "" : "s"}`);
 	if (now !== undefined) {
 		const due = hidden.map((node) => node.dueAt).filter((at): at is number => at !== undefined && Number.isFinite(at));
 		if (due.length > 0) {

@@ -90,6 +90,7 @@ export interface HookHost {
 	timerNotifier: IdleCoalescingNotifier<TimerEntry>;
 	timerScheduler: { cancelAll(): void; readonly size: number };
 	monitors: MonitorSession;
+	scripts: MonitorSession;
 	peekWatcher: PeekWatcher;
 	stopPeek(): void;
 	stopRegistry: Map<string, () => void>;
@@ -164,8 +165,10 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				runs: [...new Set([...h.tracker.running(), ...h.completionNotifier.peekPending()].map((run) => run.id))],
 				timers: h.timerScheduler.size,
 				monitors: h.monitors.list().length,
+				scripts: h.scripts.list().length,
+				notifications: h.timerNotifier.peekPending().length + h.monitors.pendingCount() + h.scripts.pendingCount(),
 			};
-			if (lost.runs.length === 0 && lost.timers === 0 && lost.monitors === 0 && h.tracker.issued <= restoredIssued) return;
+			if (lost.runs.length === 0 && lost.timers === 0 && lost.monitors === 0 && lost.scripts === 0 && lost.notifications === 0 && h.tracker.issued <= restoredIssued) return;
 			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(sessionId, h.tracker.issued, lost));
 		} catch { /* shutdown must complete */ }
 	}
@@ -180,7 +183,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			if (!notice) return;
 			pi.sendMessage({ customType: "pi-persona", content: notice, display: true }, { deliverAs: "nextTurn" }); // passive: never starts a turn
 			// Acknowledge so the newest entry is an empty loss: the same loss can never be announced twice.
-			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0 }));
+			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 0 }));
 		} catch { /* the session start must complete */ }
 	}
 
@@ -309,6 +312,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
 		h.timerNotifier.cancel();
 		h.monitors.cancelAll();
+		h.scripts.cancelAll();
 		// This instance is being torn down (a h.reload/new/resume rebinds a fresh one); abort in-flight
 		// sub-h.agents and reset control state so nothing is left orphaned or rendered stale.
 		for (const abort of [...h.stopRegistry.values()]) {
@@ -401,6 +405,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.intercomNotifier.kick();
 		h.timerNotifier.kick();
 		h.monitors.kick();
+		h.scripts.kick();
 		exocom.notifier?.kick();
 		exocom.waitNotifier?.kick();
 	});

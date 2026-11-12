@@ -32,7 +32,13 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 		sendMessage: () => {},
 		getActiveTools: () => activeTools,
 		setActiveTools: (value: string[]) => { activeTools = value; },
-		getAllTools: () => [...new Set([...activeTools, ...tools.keys()])].map((name) => ({ name })),
+		getAllTools: () => [...new Set(["read", "grep", "find", "ls", ...activeTools, ...tools.keys()])].map((name) => ({
+			name,
+			sourceInfo: tools.has(name)
+				? { path: "/foreign/test-extension.ts", source: "extension", scope: "user", origin: "file" }
+				: { path: `builtin:${name}`, source: "builtin", scope: "user", origin: "file" },
+		})),
+
 		getThinkingLevel: () => "high", setThinkingLevel: () => {}, setModel: async () => true,
 	};
 	let calls = 0;

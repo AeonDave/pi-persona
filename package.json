@@ -111,5 +111,8 @@
     "extensions": [
       "./src/extension.ts"
     ]
+  },
+  "dependencies": {
+    "@vscode/tree-sitter-wasm": "0.3.1"
   }
 }

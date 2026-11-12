@@ -90,7 +90,8 @@ interface Harness {
 	/** Texts of the supervisor's own tool results, in order. */
 	toolResults: string[];
 	runsEntries: () => RunsEntry[];
-	script: (...steps: Array<"delegate" | "timer" | "monitor" | "idle">) => void;
+	script: (...steps: Array<"delegate" | "timer" | "monitor" | "script" | "quick-script" | "busy" | "idle">) => void;
+	releaseBusy: () => void;
 	dispose: () => Promise<void>;
 }
 
@@ -140,6 +141,8 @@ async function harness(root: string): Promise<Harness> {
 	// Every scout leg blocks until the test is over, so its run is still in flight at /reload.
 	let release!: () => void;
 	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let releaseBusy!: () => void;
+	const busyGate = new Promise<void>((resolve) => { releaseBusy = resolve; });
 	child.setResponses(Array.from({ length: 4 }, () => async () => { await gate; return fauxAssistantMessage("late"); }));
 
 	const sessionManager = SessionManager.inMemory(cwd);
@@ -151,7 +154,7 @@ async function harness(root: string): Promise<Harness> {
 		resourceLoader: loader,
 		sessionManager,
 		settingsManager: settings,
-		tools: ["delegate", "timer", "monitor", "bash", "intercom"],
+		tools: ["delegate", "timer", "monitor", "script", "bash", "intercom"],
 	});
 	await session.bindExtensions({ uiContext: rpcUIContext(), mode: "rpc" });
 
@@ -161,6 +164,9 @@ async function harness(root: string): Promise<Harness> {
 		delegate: () => fauxAssistantMessage(fauxToolCall("delegate", { agent: "scout", task: `scan area ${++tasks}` }, { id: `d-${tasks}` }), { stopReason: "toolUse" }),
 		timer: () => fauxAssistantMessage(fauxToolCall("timer", { action: "arm", message: "check in", delaySeconds: 3600 }, { id: `t-${tasks}` }), { stopReason: "toolUse" }),
 		monitor: () => fauxAssistantMessage(fauxToolCall("monitor", { action: "arm", command: process.execPath, args: ["-e", "setTimeout(() => {}, 60000)"], label: "restore probe", mode: "exit", timeoutSeconds: 120 }, { id: "m-1" }), { stopReason: "toolUse" }),
+		script: () => fauxAssistantMessage(fauxToolCall("script", { action: "run", command: process.execPath, args: ["-e", "setTimeout(() => {}, 60000)"], label: "script restore probe", timeoutSeconds: 120 }, { id: "s-1" }), { stopReason: "toolUse" }),
+		"quick-script": () => fauxAssistantMessage(fauxToolCall("script", { action: "run", command: process.execPath, args: ["-e", "console.log('retained result')"], label: "quick script", timeoutSeconds: 120 }, { id: "s-fast" }), { stopReason: "toolUse" }),
+		busy: async () => { await busyGate; return fauxAssistantMessage("Finished the current turn."); },
 		idle: () => fauxAssistantMessage("Understood; ending my turn."),
 	};
 	const script: Harness["script"] = (...steps) => {
@@ -178,11 +184,13 @@ async function harness(root: string): Promise<Harness> {
 		requests,
 		toolResults,
 		script,
+		releaseBusy,
 		runsEntries: () => sessionManager.getEntries()
 			.filter((entry) => entry.type === "custom" && entry.customType === RUNS_ENTRY_CUSTOM_TYPE)
 			.map((entry) => (entry as unknown as { data: RunsEntry }).data),
 		dispose: () => disposal ??= (async () => {
 			try {
+				releaseBusy();
 				await session.abort();
 				// SDK dispose disconnects listeners; it does not emit the host lifecycle. Join the
 				// extension's terminal writes before removing the temporary profile.
@@ -214,9 +222,33 @@ async function withHarness(run: (h: Harness) => Promise<void>): Promise<void> {
 const NOTICE = /Session restored\. Background work from before the restore did not survive/;
 const requestsMentioningNotice = (h: Harness) => h.requests.filter((messages) => messages.some((m) => NOTICE.test(textOf(m))));
 
-test("/reload tells the restored supervisor which run, timer and monitor did not survive, once and passively, and run ids carry on", { timeout: 90_000 }, async () => {
+test("a completed script's pending notification is reported on restore and its log remains", { timeout: 90_000 }, async () => {
 	await withHarness(async (h) => {
-		h.script("delegate", "timer", "monitor", "idle");
+		h.script("quick-script", "busy");
+		const prompt = h.session.prompt("run the quick script");
+		const deadline = Date.now() + 10_000;
+		while (!h.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === "pi-persona-script-log") && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		const archive = h.sessionManager.getEntries().find((e) => e.type === "custom" && e.customType === "pi-persona-script-log");
+		assert.ok(archive, "the script finishes and archives while the model is busy");
+		await h.session.extensionRunner?.emit({ type: "session_shutdown", reason: "reload" });
+		assert.deepEqual(h.runsEntries().at(-1)?.lost, { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 1 });
+		h.releaseBusy();
+		await prompt;
+		await h.session.reload();
+		h.script("idle");
+		await h.session.prompt("continue");
+		const text = h.requests.flat().map(textOf).join("\n");
+		assert.match(text, /1 pending notification discarded/);
+		assert.match(text, /script.*result/);
+		assert.ok(h.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === "pi-persona-script-log"), "the terminal log remains in the owning session");
+	});
+});
+
+test("/reload tells the restored supervisor which run, timer, monitor and script did not survive, once and passively, and run ids carry on", { timeout: 90_000 }, async () => {
+	await withHarness(async (h) => {
+		h.script("delegate", "timer", "monitor", "script", "idle");
 		await h.session.prompt("start a scout, arm a check-in and a watch");
 		assert.deepEqual(h.runsEntries(), [], "nothing is recorded before a shutdown");
 
@@ -224,9 +256,9 @@ test("/reload tells the restored supervisor which run, timer and monitor did not
 
 		const [lostEntry, ack, ...rest] = h.runsEntries();
 		assert.deepEqual(rest, []);
-		assert.deepEqual(lostEntry?.lost, { runs: ["run-1"], timers: 1, monitors: 1 }, "shutdown persisted exactly what was in flight");
+		assert.deepEqual(lostEntry?.lost, { runs: ["run-1"], timers: 1, monitors: 1, scripts: 1, notifications: 0 }, "shutdown persisted exactly what was in flight");
 		assert.equal(lostEntry?.issued, 1);
-		assert.deepEqual(ack?.lost, { runs: [], timers: 0, monitors: 0 }, "the restore acknowledged the loss so it can never replay");
+		assert.deepEqual(ack?.lost, { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 0 }, "the restore acknowledged the loss so it can never replay");
 		assert.equal(ack?.issued, 1, "…while the id counter still continues");
 		assert.equal(ack?.sessionId, lostEntry?.sessionId);
 
@@ -238,7 +270,7 @@ test("/reload tells the restored supervisor which run, timer and monitor did not
 		const carrying = requestsMentioningNotice(h);
 		assert.ok(carrying.length >= 1, "the next turn carries the restore notice");
 		const notice = carrying[0]?.map(textOf).find((text) => NOTICE.test(text)) ?? "";
-		assert.match(notice, /: run run-1 \(stopped or never reported\); 1 timer; 1 monitor\. Runtime workers and live run handles are not restored\. Retained terminal reports/);
+		assert.match(notice, /: run run-1 \(stopped or never reported\); 1 timer; 1 monitor; 1 script\. Runtime workers and live run handles are not restored\. Retained terminal reports/);
 		assert.match(notice, /Runtime workers and live run handles are not restored/);
 		assert.match(notice, /Retained terminal reports may still be available via intercom/);
 		assert.match(notice, /read saved data without restarting work/);
@@ -249,7 +281,7 @@ test("/reload tells the restored supervisor which run, timer and monitor did not
 		await h.dispose();
 		const last = h.runsEntries().at(-1);
 		assert.equal(last?.issued, 2, "the lineage keeps counting across the restore");
-		assert.deepEqual(last?.lost, { runs: ["run-2"], timers: 0, monitors: 0 }, "a later shutdown records only what is lost then, not the old run");
+		assert.deepEqual(last?.lost, { runs: ["run-2"], timers: 0, monitors: 0, scripts: 0, notifications: 0 }, "a later shutdown records only what is lost then, not the old run");
 	});
 });
 

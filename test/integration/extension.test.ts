@@ -95,6 +95,7 @@ function makeMockPi(storage?: SessionManager, messageSent?: (message: unknown) =
 	const commands: Record<string, { handler: AnyFn }> = {};
 	const shortcuts: Array<{ handler: AnyFn }> = [];
 	const flags: Record<string, boolean | string> = {};
+	const toolSources = new Map<string, { path: string; source: string }>();
 	const sentMessages: Array<{ message: unknown; options: unknown }> = [];
 	let activeTools = ["read", "grep", "write", "delegate", "web_search"];
 	const pi = {
@@ -131,7 +132,12 @@ function makeMockPi(storage?: SessionManager, messageSent?: (message: unknown) =
 			sentMessages.push({ message, options });
 			messageSent?.(message);
 		},
-		getAllTools: () => [...new Set([...activeTools, ...Object.keys(tools)])].map((n) => ({ name: n })),
+		getAllTools: () => [...new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", ...activeTools, ...Object.keys(tools)])].map((name) => {
+			const source = toolSources.get(name) ?? (tools[name]
+				? { path: path.join(REPO_ROOT, "src/extension.ts"), source: "extension" }
+				: { path: `builtin:${name}`, source: "builtin" });
+			return { name, sourceInfo: { ...source, scope: "user", origin: "file" } };
+		}),
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
 			activeTools = names;
@@ -144,6 +150,7 @@ function makeMockPi(storage?: SessionManager, messageSent?: (message: unknown) =
 		pi: pi as unknown as ExtensionAPI,
 		toolNames: () => Object.keys(tools),
 		activeToolNames: () => [...activeTools],
+		setToolSourceInfo: (name: string, source: { path: string; source: string }) => { toolSources.set(name, source); },
 		tool: (name: string) => tools[name],
 		messageRenderer: (customType: string) => messageRenderers[customType],
 		entryRenderer: (customType: string) => entryRenderers[customType],
@@ -180,6 +187,41 @@ test("fresh clock context reaches every run without changing the cached system p
 		assert.equal(first.message.display, false);
 		assert.equal(first.systemPrompt, second.systemPrompt);
 	} finally { clock.mock.restore(); await m.fire("session_shutdown", {}, ctx); }
+});
+
+test("scripts run asynchronously, retain their result and wake only when idle", async () => {
+	const storage = SessionManager.inMemory(REPO_ROOT);
+	const m = makeMockPi(storage);
+	m.pi.setActiveTools(["read", "bash", "script"]);
+	piPersona(m.pi);
+	const ctx = { ...makeCtx(REPO_ROOT).ctx, sessionManager: storage };
+	let idle = false;
+	ctx.isIdle = () => idle;
+	try {
+		await m.fire("session_start", {}, ctx);
+		const tool = m.tool("script") as { execute: AnyFn };
+		assert.ok(tool, "script must be registered");
+		const result = await tool.execute("run", { action: "run", command: process.execPath, args: ["-e", "console.log('SCRIPT_EXTENSION_EVENT'); console.error('SCRIPT_STDERR')"], label: "script fixture" }, undefined, undefined, ctx);
+		assert.equal(result.details.ok, true);
+		const deadline = Date.now() + 5000;
+		let count = 1;
+		while (Date.now() < deadline && count !== 0) {
+			count = (await tool.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count;
+			if (count !== 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(count, 0, "the actual process must have settled");
+		assert.equal(m.sentMessages().length, 0, "no wake while the supervisor is busy");
+		const saved = await tool.execute("result", { action: "result", id: result.details.id }, undefined, undefined, ctx);
+		assert.match(JSON.stringify(saved), /SCRIPT_EXTENSION_EVENT/);
+		assert.match(JSON.stringify(saved), /SCRIPT_STDERR/);
+		assert.ok(storage.getEntries().some((entry) => entry.type === "custom" && entry.customType === "pi-persona-script-log"));
+		idle = true;
+		await m.fire("agent_settled", {}, ctx);
+		const messages = m.sentMessages().filter((entry) => JSON.stringify(entry.message).includes("SCRIPT_EXTENSION_EVENT"));
+		assert.equal(messages.length, 1);
+		assert.deepEqual(messages[0]?.options, { deliverAs: "followUp", triggerTurn: true });
+		assert.match(JSON.stringify(messages[0]?.message), /untrusted/i);
+	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
 
 test("monitor event wakes the extension only after the supervisor becomes idle", async () => {
@@ -3285,7 +3327,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	);
 	assert.equal(missing.isError, true);
 	assert.match(String(missing.content?.[0]?.text ?? ""), /writeSet/i);
-	assert.match(String(missing.content?.[0]?.text ?? ""), /tools: \["read","grep","find","ls"\]/);
+	assert.match(String(missing.content?.[0]?.text ?? ""), /tools: \["read","grep","find","ls","code_outline"\]/);
 	assert.match(String(missing.content?.[0]?.text ?? ""), /tasks\[0\] \("operator"\): add writeSet:.*tasks\[1\] \("operator"\): add writeSet:/s, "one remedy per missing leg");
 	assert.match(String(missing.content?.[0]?.text ?? ""), /Or serialize the batch with concurrency: 1\.$/);
 	assert.equal(spawned, 0);
@@ -3406,6 +3448,36 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	assert.equal(stringifiedScouts.isError, false, "a JSON-stringified tasks array is unwrapped, not rejected as tasks.0 must be object");
 	assert.equal(spawned, 8);
 
+	m.setToolSourceInfo("grep", { path: "/foreign/grep-extension.ts", source: "extension" });
+	const overriddenGrep = await delegate.execute("custom-write-overridden-grep", {
+		tasks: [
+			{ agent: "operator", task: "edit via grep override", tools: ["grep"] },
+			{ agent: "operator", task: "edit via grep override", tools: ["grep"] },
+		],
+	}, undefined, undefined, ctx);
+	assert.equal(overriddenGrep.isError, true, "a foreign implementation overriding a builtin reader is conservatively a writer");
+	assert.equal(spawned, 8);
+
+	const ownExtensionPath = path.join(REPO_ROOT, "src/extension.ts");
+	m.setToolSourceInfo("code_outline", { path: "/foreign/code-outline-extension.ts", source: "extension" });
+	const foreignOutline = await delegate.execute("custom-write-foreign-outline", {
+		tasks: [
+			{ agent: "operator", task: "unknown outline tool", tools: ["code_outline"] },
+			{ agent: "operator", task: "unknown outline tool", tools: ["code_outline"] },
+		],
+	}, undefined, undefined, ctx);
+	assert.equal(foreignOutline.isError, true, "a foreign code_outline implementation is not trusted by name");
+	assert.equal(spawned, 8);
+	m.setToolSourceInfo("code_outline", { path: ownExtensionPath, source: "extension" });
+	const ownOutline = await delegate.execute("custom-write-own-outline", {
+		tasks: [
+			{ agent: "operator", task: "read outline A", tools: ["code_outline"] },
+			{ agent: "operator", task: "read outline B", tools: ["code_outline"] },
+		],
+	}, undefined, undefined, ctx);
+	assert.equal(ownOutline.isError, false, "only this extension's exact code_outline source is a known reader");
+	assert.equal(spawned, 10);
+
 	const stringifiedWriters = await delegate.execute(
 		"custom-write-stringified-writers",
 		{ tasks: JSON.stringify([{ agent: "operator", task: "change A" }, { agent: "operator", task: "change B" }]) },
@@ -3415,7 +3487,7 @@ test("a custom persona can require disjoint write ownership while read-only fano
 	);
 	assert.equal(stringifiedWriters.isError, true, "unwrapping JSON does not skip the ownership gate");
 	assert.match(String(stringifiedWriters.content?.[0]?.text ?? ""), /writeSet/i);
-	assert.equal(spawned, 8);
+	assert.equal(spawned, 10);
 });
 
 test("an agent's declared writeSet is inherited by a leg that names none, so a read-only-in-intent researcher fans out beside writers", async () => {
@@ -3471,7 +3543,7 @@ test("an agent's declared writeSet is inherited by a leg that names none, so a r
 	const refusal = String(refused.content?.[0]?.text ?? "");
 	assert.match(refusal, /this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on tasks\[1\] \("operator"\)\./);
 	assert.doesNotMatch(refusal, /tasks\[0\]/, "the research leg inherited a set, so it is not among the missing");
-	assert.match(refusal, /tasks\[1\] \("operator"\): add writeSet: \["<files or directories only this leg edits>"\], or make it a reader with tools: \["read","grep","find","ls"\] \(or pick scout\)\./);
+	assert.match(refusal, /tasks\[1\] \("operator"\): add writeSet: \["<files or directories only this leg edits>"\], or make it a reader with tools: \["read","grep","find","ls","code_outline"\] \(or pick scout\)\./);
 	assert.match(refusal, /Or serialize the batch with concurrency: 1\.$/);
 	assert.equal(specs.length, 0, "refused before any spawn");
 
@@ -4182,7 +4254,7 @@ test("before_agent_start filters the brief roster to the persona's delegate allo
 	const injected = m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx);
 	assert.match(injected.systemPrompt, /\[pi-persona\] Sub-agents:/);
 	assert.match(injected.systemPrompt, /- scout\b/, "the one allowed target is listed");
-	assert.match(injected.systemPrompt, /scout.*\[tools=read,grep,find,ls\]/, "the live roster exposes the target's effective tool grant");
+	assert.match(injected.systemPrompt, /scout.*\[tools=read,grep,find,ls,code_outline\]/, "the live roster exposes the target's effective tool grant");
 	assert.doesNotMatch(injected.systemPrompt, /- reviewer\b/, "a filtered-out agent is not listed");
 	assert.doesNotMatch(injected.systemPrompt, /- operator\b/, "a filtered-out agent is not listed");
 });
@@ -5985,6 +6057,42 @@ function wakeWidgetCtx(cwd: string, width = 200) {
 
 const HOLD_OPEN = ["-e", "setInterval(() => {}, 1000)"];
 
+test("the live widget groups scripts, timers and monitors and folds only the clicked category", async () => {
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "script", "timer", "monitor"]);
+	piPersona(m.pi);
+	const { ctx: base, widgets, statuses } = wakeWidgetCtx(tempDir("pi-persona-resource-fold-"));
+	let latest: WidgetContent;
+	const ctx = { ...base, isIdle: () => false, ui: { ...base.ui, setWidget(id: string, content: WidgetContent) {
+		base.ui.setWidget(id, content);
+		if (id === "persona-agents") latest = content;
+	} } };
+	try {
+		await m.fire("session_start", {}, ctx);
+		const script = m.tool("script") as { execute: AnyFn };
+		const result = await script.execute("run", { action: "run", command: process.execPath, args: HOLD_OPEN, label: "script child" }, undefined, undefined, ctx);
+		assert.equal(result.details.ok, true);
+		await (m.tool("timer") as { execute: AnyFn }).execute("alarm", { action: "arm", delaySeconds: 600, message: "timer message", label: "timer child" }, undefined, undefined, ctx);
+		await (m.tool("monitor") as { execute: AnyFn }).execute("watch", { action: "arm", command: process.execPath, args: HOLD_OPEN, label: "monitor child", mode: "exit" }, undefined, undefined, ctx);
+		await waitUntil(() => widgets["persona-agents"]?.some((line) => line.includes("script child")) ?? false, "all three resource categories");
+		const before = widgets["persona-agents"] ?? [];
+		for (const label of ["Timers", "Monitors", "Scripts", "timer child", "monitor child", "script child"]) assert.ok(before.some((line) => line.includes(label)), label);
+		assert.equal(typeof latest, "function");
+		const component = (latest as WidgetFactory)({ requestRender() {} } as Parameters<WidgetFactory>[0], traceTheme as Theme);
+		const rendered = component.render(200);
+		const y = rendered.findIndex((line) => line.includes("Scripts"));
+		assert.ok(y >= 0);
+		component.handleMouse?.({ type: "click", button: "left", x: 3, y, screenX: 3, screenY: y, width: 200, height: rendered.length, shift: false, alt: false, ctrl: false });
+		const folded = widgets["persona-agents"]?.join("\n") ?? "";
+		assert.doesNotMatch(folded, /script child/);
+		assert.match(folded, /timer child/);
+		assert.match(folded, /monitor child/);
+		assert.deepEqual(statuses.filter((status) => status !== undefined), [], "resources never count as agents");
+		assert.equal((await script.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count, 1, "folding never cancels runtime work");
+		assert.equal((await script.execute("stop", { action: "stop", id: result.details.id }, undefined, undefined, ctx)).details.stopped, true);
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
+
 test("monitor raw output projects and publishes on the SAME shared UI frame, never on each chunk", { timeout: 10_000 }, async () => {
 	const m = makeMockPi();
 	m.pi.setActiveTools(["read", "bash", "monitor"]);
@@ -6021,9 +6129,9 @@ test("monitor raw output projects and publishes on the SAME shared UI frame, nev
 		assert.equal(changes().length, 1, "all received chunks share one monitor projection");
 		assert.match(changes()[0]?.output ?? "", new RegExp(`> ${"x".repeat(200)}\\n> FRAME_END$`));
 		assert.ok(widgets["persona-agents"]?.some((line) => line.includes("FRAME_END")), "projection is composed in this frame, not the next one");
-		assert.equal(frames.mock.callCount(), 1);
+		assert.equal(frames.mock.callCount(), 2, "one flush per process source in the shared frame");
 		mock.timers.tick(16);
-		assert.equal(frames.mock.callCount(), 1, "publishing a projection must not schedule a redundant frame");
+		assert.equal(frames.mock.callCount(), 2, "publishing a projection must not schedule a redundant frame");
 		assert.equal(changes().length, 1);
 		assert.deepEqual(statuses.filter((status) => status !== undefined), []);
 		assert.equal(m.sentMessages().length, 0, "raw progress produces no wake");

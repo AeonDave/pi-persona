@@ -11,7 +11,7 @@ import { buildCheckIn, buildCompletionReport, buildPeekDigest, type AsyncRun } f
 import { registerSessionCards } from "../../../src/ui/session-cards.ts";
 import { sanitizeTerminalText } from "../../../src/ui/presentation.ts";
 import type { MonitorLogRecord } from "../../../src/monitor/archive.ts";
-import { renderMonitorLog } from "../../../src/tools/monitor.ts";
+import { renderProcessLog } from "../../../src/monitor/log.ts";
 
 type RenderOptions = { expanded: boolean; keyText: (id: string) => string; keyHint: (id: string, description: string) => string } & ({ outputPad: number } | { outputPad?: never });
 type Renderer = (value: unknown, options: RenderOptions, theme: Theme) => Component | undefined;
@@ -21,7 +21,7 @@ function harness() {
 	let outputPad: 0 | 1 = 0;
 	const cardOptions = {
 		detailHint: () => "expand to see full detail",
-		monitorLog: (record: MonitorLogRecord) => renderMonitorLog(record, true),
+		processLog: (record: MonitorLogRecord) => renderProcessLog(record, true),
 		getOutputPad: () => outputPad,
 	};
 	registerSessionCards({ registerMessageRenderer: register, registerEntryRenderer: register } as unknown as ExtensionAPI, cardOptions);
@@ -141,6 +141,13 @@ function monitor(overrides: Partial<MonitorLogRecord> = {}): MonitorLogRecord {
 		...overrides,
 	};
 }
+
+test("script terminal cards preserve the shared output and failure presentation", () => {
+	const h = harness();
+	h.check("pi-persona-script-log", monitor(), "toolSuccessBg", /^Script · build$/, /^  exit · complete · m1$/);
+	h.check("pi-persona-script-log", monitor({ text: "process exited with exit code 2" }), "toolErrorBg", /^Script · build$/, /^  exit · failed · m1$/);
+	assert.match(h.card("pi-persona-script-log", monitor({ stdout: "SCRIPT_CAPTURE" }), true).render(120).join("\n"), /SCRIPT_CAPTURE/);
+});
 
 /** Minimal tracked-run fixture shaped like the tracker's own entries, for generator drift guards. */
 function asynRun(overrides: Partial<AsyncRun> & { id: string }): AsyncRun {
@@ -537,7 +544,7 @@ test("expanded literal cards preserve sanitized text; report cards match native 
 		["pi-persona-status", { content }, safe, 1],
 		["pi-persona-nudge", { content: `⟢ pi-persona · checkpoint\n${content}` }, `⟢ pi-persona · checkpoint\n${safe}`, 1],
 		["pi-persona-run-failure", { id: "r", label: "worker", agent: "scout", error: content }, `Run r\n${safe}`, 2],
-		["pi-persona-monitor-log", monitor({ stdout: content }), sanitizeTerminalText(renderMonitorLog(monitor({ stdout: content }), true)), 2],
+		["pi-persona-monitor-log", monitor({ stdout: content }), sanitizeTerminalText(renderProcessLog(monitor({ stdout: content }), true)), 2],
 	];
 	for (const [name, data, expected, offset] of items) {
 		const before = JSON.stringify(data);

@@ -1,5 +1,5 @@
 import { stripTerminalControls } from "../core/fence.ts";
-import type { MonitorEntry, MonitorEvent, MonitorOutput } from "../core/monitor.ts";
+import type { MonitorEntry, MonitorEvent, MonitorOutput, MonitorRemovalReason } from "../core/monitor.ts";
 import { MonitorOutputTail } from "../core/monitor-output.ts";
 import type { TimerEntry } from "../core/timer.ts";
 import type { AddNodeInput, AgentNodePatch, AgentNodeStatus } from "./agent-tree.ts";
@@ -31,7 +31,7 @@ const MAX_EVENT_LINES = 40;
 const CLEAN_EXIT = /\bexit code 0\b/;
 
 /** Tree id of a wake-source row: `monitor:<id>` / `timer:<id>` (never collides with `async:`/strategy ids). */
-export function wakeNodeId(kind: "monitor" | "timer", id: string): string {
+export function wakeNodeId(kind: "monitor" | "timer" | "script", id: string): string {
 	return `${kind}:${id}`;
 }
 
@@ -141,6 +141,8 @@ function terminalStatus(event: MonitorEvent): AgentNodeStatus {
 
 export class WakeRows {
 	private readonly monitors = new Map<string, MonitorState>();
+	private readonly processKind: "monitor" | "script";
+	constructor(processKind: "monitor" | "script" = "monitor") { this.processKind = processKind; }
 
 	monitorArmed(entry: MonitorEntry): AddNodeInput {
 		const counted = entry.mode === "output";
@@ -157,6 +159,7 @@ export class WakeRows {
 				`${displayId} · ${entry.mode} mode`,
 				clamp(oneLine(`command: ${[entry.command, ...entry.args].join(" ")}`), COMMAND_LINE_MAX),
 				clamp(oneLine(`cwd: ${entry.cwd}`), COMMAND_LINE_MAX),
+				...(entry.stdin === undefined ? [] : [`inline source: ${clamp(oneLine(entry.stdin), COMMAND_LINE_MAX)}`]),
 				`armed ${iso(entry.startedAtEpochMs)} · deadline ${iso(entry.expiresAtEpochMs)}`,
 			],
 			maxEvents: entry.maxEvents,
@@ -166,9 +169,9 @@ export class WakeRows {
 		};
 		this.monitors.set(entry.id, state);
 		return {
-			id: wakeNodeId("monitor", entry.id),
+			id: wakeNodeId(this.processKind, entry.id),
 			label: clamp(oneLine(entry.label), SUMMARY_MAX),
-			kind: "monitor",
+			kind: this.processKind,
 			status: "running",
 			detail: `${displayId} · ${entry.mode}`,
 			startedAt: entry.startedAtEpochMs,
@@ -194,7 +197,7 @@ export class WakeRows {
 		for (const [id, state] of this.monitors) {
 			if (!state.outputPending) continue;
 			refreshMonitorPreview(state);
-			changes.push({ id: wakeNodeId("monitor", id), patch: { detail: monitorDetail(state), output: renderMonitorOutput(state) } });
+			changes.push({ id: wakeNodeId(this.processKind, id), patch: { detail: monitorDetail(state), output: renderMonitorOutput(state) } });
 		}
 		return changes;
 	}
@@ -227,14 +230,15 @@ export class WakeRows {
 		}
 		if (state) patch.output = renderMonitorOutput(state);
 		if (event.terminal) this.monitors.delete(event.id);
-		return { id: wakeNodeId("monitor", event.id), patch, settled: event.terminal };
+		return { id: wakeNodeId(this.processKind, event.id), patch, settled: event.terminal };
 	}
 
-	monitorRemoved(entry: MonitorEntry): WakeRowChange {
+	monitorRemoved(entry: MonitorEntry, reason: MonitorRemovalReason = { kind: "cancelled" }): WakeRowChange {
 		const state = this.monitors.get(entry.id);
 		const output = state?.outputPending ? renderMonitorOutput(state) : undefined;
 		this.monitors.delete(entry.id);
-		return { id: wakeNodeId("monitor", entry.id), patch: { status: "stopped", detail: `${clamp(oneLine(entry.id), SUMMARY_MAX)} · cancelled`, ...(output !== undefined ? { output } : {}) } };
+		const detail = reason.kind === "error" ? clamp(oneLine(reason.text), SUMMARY_MAX) : "cancelled";
+		return { id: wakeNodeId(this.processKind, entry.id), patch: { status: reason.kind === "error" ? "failed" : "stopped", detail: `${clamp(oneLine(entry.id), SUMMARY_MAX)} · ${detail}`, ...(output !== undefined ? { output } : {}) } };
 	}
 
 	timerArmed(entry: TimerEntry): AddNodeInput {

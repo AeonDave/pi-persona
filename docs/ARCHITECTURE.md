@@ -37,7 +37,7 @@ strategy/team without a core change. Ownership intent follows the agent, not the
 can declare the area it alone writes (`writeSet`, e.g. `research` → `.research/`), and a write-capable delegate leg that
 names no `writeSet` inherits it before the gates run, so the disjoint-ownership and overlap checks see a
 declared owner; a leg's own set wins, and the field stays declarative (nothing enforces paths at runtime).
-Legs restricted to read-only tools do not inherit ownership defaults, so parallel readers do not conflict.
+Legs restricted to read-only `read`/`grep`/`find`/`ls`/`code_outline` tools do not inherit ownership defaults, so parallel readers do not conflict.
 The gates use effective agent/tool capabilities, conservatively
 treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
 concurrency on the single launch path (interactive background or headless inline). A serialized verifier is accepted only
@@ -158,6 +158,8 @@ with their callers. Genuine host failures remain explicit rather than fabricatin
 or model availability. One-way user-data migrations and retained-history readers are separate data
 contracts: they remain only while serving stored user data, not to support an older Pi runtime.
 
+The `code_outline` boundary follows the same direction: `src/tools/code-outline.ts` owns bounded file I/O, the computed-from-read-bytes digest, fencing and formatting; `src/tools/code-outline-parser.ts` lazily resolves the installed WASM package entry and loads only the selected grammar on first execution. It disposes each parser/tree after synchronous extraction and retains no source/project cache. `src/core/code-outline.ts` is a pure AST walker over an already-parsed root and runtime metadata; it imports neither Pi nor the parser package at runtime and performs no filesystem access. Parser syntax errors fail closed. C-family `.c` and ambiguous `.h` are explicitly labeled and use the C++ grammar, so this is not strict-C/compiler validation.
+
 Domain dependencies remain downward-only and acyclic: `core ← all`; `engine`/`bus → core`;
 `orchestration → engine + bus + core`; `persona → orchestration + core`; the Exocom transport and
 ledger → `core + bus`; `tools`/`ui → lower layers`. `src/exocom/install.ts` is deliberately the
@@ -180,7 +182,8 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   standing hand-off default; and `buildExocomBrief` — the per-turn peer brief: live peers, the
   peer-vs-sub-agent split, and the relevance bound on an exchange), `nudge` (the
   runtime-reinforcement state machines `DelegationNudge` + `PersistenceNudge`, and the call-time wake
-  guards `PollGuard` + `longWaitSeconds`), `display-label`
+  guards `PollGuard` + `longWaitSeconds`), `code-outline` (pure syntax-AST symbol extraction from an
+  already-parsed tree), `display-label`
   (`sanitizeDisplayLabel` — an untrusted name reduced to bounded metadata before interpolation
   outside a fence), `timer` (`TimerScheduler` — the pure alarm engine behind the `timer` tool), `time`
   (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the elapsed-time
@@ -279,7 +282,15 @@ settlement does not promise that arbitrary in-process code has physically stoppe
 
 Tool grants have three distinct states on both engines: absent inherits Pi's session defaults, a
 non-empty array is an allowlist, and an explicit empty array means no tools (`--no-tools` on the
-child backend); denylists apply independently via `excludeTools`/`--exclude-tools`.
+child backend); denylists apply independently via `excludeTools`/`--exclude-tools`. The shared native
+OS-tool exposure enables only Pi's already-registered `grep`, `find`, `ls`, and (on Windows)
+`powershell` implementations for default toolsets. It never replaces custom tools, and it respects
+Pi's allowlist/exclusion clamp, explicit `defaultTools` selections, persona gates, and explicit empty
+worker grants. In-process workers add these tools with Pi's `+name` tool modifiers only when no
+explicit worker tool grant or host `defaultTools` choice exists; child legs activate the same host
+registry at session startup, including the tool-only fork-guard path. Pi may download its `rg`/`fd`
+helper binaries on first use; pi-persona adds no dependency, but does not promise zero network access.
+
 
 A spec naming an agent or output contract that isn't installed fails before anything spawns, on both
 backends alike (`engine/spec-preflight.ts`): the message names what IS installed, capped at 12 names.
@@ -773,8 +784,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   then the same `⚠ stalled <duration>` badge the async peek watchdog uses. `x` marks the target
   `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,
   already settled) surfaces as a one-line notice instead of silently no-op'ing;
-- armed timers and active monitors are **wake rows** in the same tree (`src/ui/wake-rows.ts`, ids
-  `monitor:<id>` / `timer:<id>`): rows, not agents. The countdown replaces the stall clock: a timer
+- armed timers, active monitors and scripts are **wake rows** in the same tree (`src/ui/wake-rows.ts`, ids
+  `monitor:<id>` / `timer:<id>` / `script:<id>`): rows, not agents. The countdown replaces the stall clock: a timer
   shows `fires in <d>` only, a monitor keeps its elapsed time (`<elapsed> · deadline in <d>`), so
   neither carries the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
   one through the same stop registry as an agent (the `monitor cancel` / `timer cancel` effect); `s` steer
@@ -796,6 +807,20 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   lifetime serialized-byte/count budget includes all previous entries of the archive type, even
   unreadable versions. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
   not deletes them. Operator-only expandable log entries do not create model context or extra wakes.
+- `src/ui/resource-groups.ts` adds presentation-only Timers/Monitors/Scripts categories without
+  changing runtime parentage, routing IDs or telemetry. Widget and F9 share fold state; clicks use
+  Pi's public component mouse API in alternate-screen mode, with Space/Left/Right in F9 as the
+  keyboard path. A bounded digest preserves category controls even during a large fan-out.
+  F9 observes Exocom through its bounded peer snapshot/change subscription and grants no peer
+  stop/steer controls. Peer heartbeat presence and agent execution state remain distinct facts.
+- Scripts are exit-only sessions over the existing process lifecycle (`src/script/session.ts`),
+  with separate IDs, eight-run admission and archive namespace (`pi-persona-script-log`). The
+  `script` tool accepts literal executable arguments or inline source through Pi's shell resolver;
+  stdin transport is honored when the host requires it. Both `script` and `bash` grants are
+  required. Permission loss/shutdown cancels executions and queued wakes; restore notices count
+  scripts independently. `src/extension/program-observer.ts` binds monitor and script lifecycle
+  events to archive, rows and stop handles. The shared log renderer preserves bounded/fenced output,
+  and synchronous startup rejection retains its actual error rather than a cancellation outcome.
 
 **Terminal result archive** (`src/results/`, `src/extension/results.ts`) applies the same
 ownership model to settled agent work: every terminal delegate/council/flow outcome (and each final

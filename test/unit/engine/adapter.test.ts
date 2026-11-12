@@ -379,6 +379,39 @@ test("child adapter validates spec.tools override before invocation and keeps no
 	assert.ok(emptySeen.includes("--no-tools"));
 });
 
+test("child adapter carries the explicit outline grant only for admitted tools and scrubs inherited markers", async () => {
+	const before = process.env.PI_PERSONA_CODE_OUTLINE;
+	process.env.PI_PERSONA_CODE_OUTLINE = "stale-parent-marker";
+	const script = `process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_PERSONA_CODE_OUTLINE ?? 'absent'}],stopReason:'end'}})+'\\n');`;
+	const childOptions = {
+		env: { PI_PERSONA_CODE_OUTLINE: "stale-child-options-marker" },
+		resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+	};
+	const engine = makeEngine({
+		resolveAgent: (name) => name === "outline" ? { name, model: "stub/m", tools: ["code_outline"], systemPrompt: "", source: "x" } : undefined,
+		childOptions,
+	});
+	const excludedEngine = makeEngine({
+		resolveAgent: (name) => name === "outline" ? { name, model: "stub/m", tools: ["code_outline"], excludeTools: ["code_outline"], systemPrompt: "", source: "x" } : undefined,
+		childOptions,
+	});
+	try {
+		const granted = await engine.run({ agent: "outline", task: "inspect" });
+		const empty = await engine.run({ agent: "outline", task: "inspect", tools: [] });
+		const excluded = await excludedEngine.run({ agent: "outline", task: "inspect" });
+		assert.equal(granted.ok, true, granted.error);
+		assert.equal(granted.output, "1", "the child receives the adapter's explicit grant marker");
+		assert.equal(empty.ok, true, empty.error);
+		assert.equal(empty.output, "absent", "an explicit empty allowlist does not leak the parent marker");
+		assert.equal(excluded.ok, true, excluded.error);
+		assert.equal(excluded.output, "absent", "tool exclusions revoke the marker as well as the tool");
+		assert.equal(process.env.PI_PERSONA_CODE_OUTLINE, "stale-parent-marker", "the supervisor environment is unchanged");
+	} finally {
+		if (before === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE;
+		else process.env.PI_PERSONA_CODE_OUTLINE = before;
+	}
+});
+
 test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
 	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, timeoutMs: 5_000, killGraceMs: 50 } });

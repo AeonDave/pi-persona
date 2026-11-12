@@ -59,6 +59,18 @@ test("process adapter forwards decoded stdout and stderr before process exit", a
 	assert.equal(result.stderr.join(""), "warning");
 });
 
+test("process adapter closes optional stdin and drains final output before exit", async () => {
+	const result = await waitForExit((handlers) => {
+		startMonitorProcess({
+			...nodeSpec("process.stdin.setEncoding('utf8'); let input = ''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => { process.stdout.write(input); process.stderr.write('final stderr'); })", "exit"),
+			stdin: "inline source\nwith newlines",
+		}, handlers);
+	});
+	assert.equal(result.code, 0);
+	assert.equal(result.stdout.join(""), "inline source\nwith newlines");
+	assert.equal(result.stderr.join(""), "final stderr");
+});
+
 test("stop kills a running process and suppresses late callbacks", async () => {
 	const events: string[] = [];
 	const processHandle = startMonitorProcess(

@@ -1,5 +1,6 @@
 /** `delegate` tool registration. */
-import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, KeybindingHints } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, KeybindingHints, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { resolve } from "node:path";
 import type { AgentConfig } from "../agents/agent.ts";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -223,6 +224,10 @@ export interface DelegateToolDeps {
 	runs: BackgroundRuns;
 	/** The launch pool, shared with the background `council` and `flow` runs (absent ⇒ a private one). */
 	launchPool?: Semaphore;
+	/** Current host registry metadata; missing entries are conservatively treated as writers. */
+	getAllTools: () => ToolInfo[];
+	/** Exact source file registered by this extension, used only to recognize its own AST reader. */
+	ownExtensionPath: string;
 	config: { ledgerV2: boolean };
 	RUN_LIMITS: RunLimits;
 	publishAgentTool(agentId: string, event: ToolEvent): void;
@@ -233,6 +238,17 @@ export interface DelegateToolDeps {
 }
 
 export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): void {
+	const toolIsReadOnly = (name: string): boolean => {
+		const info = d.getAllTools().find((tool) => tool.name === name);
+		if (!info) return false;
+		if (["read", "grep", "find", "ls"].includes(name)) return info.sourceInfo.source === "builtin";
+		if (name !== "code_outline") return false;
+		const normalize = (value: string) => {
+			const path = resolve(value);
+			return process.platform === "win32" ? path.toLowerCase() : path;
+		};
+		return normalize(info.sourceInfo.path) === normalize(d.ownExtensionPath);
+	};
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
 	const JsonString = Type.String({
 		description: "JSON text of the same value — accepted when a client stringifies nested args",
@@ -359,20 +375,15 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// is advice; this is the enforcement (capabilities are never prompt-only).
 	const ledger = new DelegationLedger({ ledgerV2: d.config.ledgerV2 });
 
-	// Only the built-in inspection tools are known read-only. Shells and unknown/custom tools are
-	// potential writers; treating them as readers would let a persona's ownership policy fail open
-	// merely by moving an edit into a script. ONE classifier for the in-batch gates and the
-	// cross-call one below, so a leg can never count as a writer in one and a reader in the other.
-	// `skills`/`role` are deliberately NOT part of this: both are prompt text (a skills preamble and an
-	// appended system prompt), while `tools` is an enforced session allowlist in both engines — a leg
-	// granted only read/grep/find/ls cannot write however it is instructed. Classifying on them would
-	// invent writers that provably cannot write, and under requireDisjointWrites that is a hard refusal.
-	const readOnlyTools = new Set(["read", "grep", "find", "ls"]);
+	// One classifier for in-batch gates and the cross-call gate below. Built-in read tools are
+	// readers only while Pi reports the builtin implementation; code_outline is read-only only when
+	// its exact source path is this extension's registration. Unknown and overridden tools are writers.
+	// `skills`/`role` remain prompt text; enforced session allowlists are the basis for this classification.
 	function mayMutateWorkspace(spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): boolean {
 		const configured = d.agents.find((agent) => agent.name === spec.agent);
 		const effectiveTools = spec.tools !== undefined ? spec.tools : configured?.tools;
 		const effectiveMcp = spec.mcp ?? configured?.mcp;
-		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !readOnlyTools.has(tool));
+		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !toolIsReadOnly(tool));
 	}
 
 	// Ownership intent belongs to the agent definition, not to the caller. An agent that declares the area
@@ -612,7 +623,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 							if (unowned.length > 0) {
 								const missing = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}")`);
 								// One remedy per leg, naming the parameters: the caller should never have to guess a fix.
-								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"], or make it a reader with tools: ["read","grep","find","ls"] (or pick scout).`);
+								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"], or make it a reader with tools: ["read","grep","find","ls","code_outline"] (or pick scout).`);
 								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}. ${remedies.join(" ")} Or serialize the batch with concurrency: 1.`;
 								return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 							}

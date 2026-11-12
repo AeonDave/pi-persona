@@ -50,6 +50,8 @@ import { type EngineAdapterBroker } from "./engine/adapter.ts";
 import { SupervisorBroker } from "./extension/broker-host.ts";
 import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type EngineFactories } from "./extension/engine.ts";
 import { installHooks, type HookHost } from "./extension/hooks.ts";
+import { activateNativeTools } from "./extension/native-tools.ts";
+import { makeCodeOutlineTool } from "./tools/code-outline.ts";
 import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
 import { installCardFrameProvider } from "./extension/card-frame.ts";
@@ -100,9 +102,14 @@ import { formatLedgerStatus } from "./exocom/status.ts";
 import { registerDelegateTool } from "./tools/delegate-tool.ts";
 import { describeRuns, registerIntercomTool } from "./tools/intercom-tool.ts";
 import { registerTimerTool } from "./tools/timer.ts";
-import { registerMonitorTool, renderMonitorLog } from "./tools/monitor.ts";
+import { registerMonitorTool } from "./tools/monitor.ts";
+import { renderProcessLog } from "./monitor/log.ts";
+import { registerScriptTool } from "./tools/script.ts";
 import { MonitorArchive } from "./monitor/archive.ts";
 import { createMonitorSession, type MonitorSession } from "./monitor/session.ts";
+import { createScriptSession } from "./script/session.ts";
+import { createProgramObserver } from "./extension/program-observer.ts";
+import { resourceSummary } from "./ui/resource-groups.ts";
 import { createBackgroundRuns, type TrackedRun } from "./tools/background-run.ts";
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
@@ -154,7 +161,7 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatInbox } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isNonAgentNode, progressPatch, renderAgentTreeSummary } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isNonAgentNode, progressPatch } from "./ui/agent-tree.ts";
 import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs, type ModelPickerMetadata } from "./ui/model-picker.ts";
@@ -324,7 +331,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// Loaded-extension capabilities must be discoverable even in a real delegated leg. This is a
 	// local host contract, not settings/file inference; disabled supervisors explicitly deny use.
 	const bridgeMode = isBridgeMode();
-	const role = bridgeMode || process.env.PI_PERSONA_LEG === "1" ? "leg" : resolveConfig(process.env).disabled ? "disabled" : "supervisor";
+	const delegatedLeg = process.env.PI_PERSONA_LEG === "1";
+	const delegatedOutlineGranted = process.env.PI_PERSONA_CODE_OUTLINE === "1";
+	const role = bridgeMode || delegatedLeg ? "leg" : resolveConfig(process.env).disabled ? "disabled" : "supervisor";
 	installCompanionPresence(pi, role);
 	installCardFrameProvider(pi);
 	if (role === "leg") {
@@ -343,18 +352,28 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	// return. `PI_PERSONA_BUS` unset (the default, and every existing test) ⇒ this branch never
 	// runs — zero behavior change.
 	if (bridgeMode) {
+		if (process.env.PI_PERSONA_CODE_OUTLINE === "1") pi.registerTool(makeCodeOutlineTool());
 		pi.on("session_start", (_event, ctx) => installBridge(pi, ctx));
 		return;
 	}
 
 	let config = resolveConfig(process.env);
-	if (config.disabled) return;
+	if (config.disabled) {
+		// Fork-bomb guard: a real delegated leg gets only native OS/search tools;
+		// a user-disabled supervisor (no dedicated leg marker) remains inert.
+		if (delegatedLeg) {
+			if (delegatedOutlineGranted) pi.registerTool(makeCodeOutlineTool());
+			pi.on("session_start", () => activateNativeTools(pi));
+		}
+		return;
+	}
+	pi.on("session_start", () => activateNativeTools(pi));
 	const results = new SessionResults(pi);
 	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
 	registerSessionCards(pi, {
 		detailHint: expandDetailHint,
 		getOutputPad: () => pi.getSettings().outputPad ?? 1,
-		monitorLog: (record) => renderMonitorLog(record, true),
+		processLog: (record) => renderProcessLog(record, true),
 	});
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
@@ -598,6 +617,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const companionActivities = installActivityIngress(pi, agentTree);
 	const memoryOwner = installMemoryOwner(pi, () => controller.activePersona?.name ?? null);
 	const wakeRows = new WakeRows();
+	const scriptRows = new WakeRows("script");
+	const collapsedResourceGroups = new Set<string>();
 	// Explicit telemetry is the public observability seam consumed by pi-persona-flow. It is
 	// session-scoped and starts only after persona + exocom reconciliation in session_start.
 	let telemetry: TelemetryProducer | undefined;
@@ -786,6 +807,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	let publishingMonitorOutput = false;
 	let widgetLinesInitialized = false;
 	let lastWidgetLines: readonly string[] | undefined;
+	let lastWidgetTargets: readonly (string | undefined)[] = [];
 	let widgetStatusInitialized = false;
 	let lastWidgetStatus: string | undefined;
 	const widgetNodeStatuses = new Map<string, AgentNodeStatus>();
@@ -808,16 +830,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			publishingMonitorOutput = true;
 			try {
 				for (const change of wakeRows.flushMonitorOutput()) agentTree.update(change.id, change.patch);
+				for (const change of scriptRows.flushMonitorOutput()) agentTree.update(change.id, change.patch);
 			} finally { publishingMonitorOutput = false; }
 		}
 		const nodes = agentTree.snapshot();
 		const empty = nodes.length === 0;
-		const lines = empty ? undefined : renderAgentTreeSummary([...nodes], 8, { now: Date.now(), stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingTreeIds(nodes) });
+		const summary = resourceSummary(nodes, collapsedResourceGroups, 8, { now: Date.now(), stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingTreeIds(nodes) });
+		const lines = empty ? undefined : summary.lines;
 		const status = agentCountStatus(nodes);
 		try {
-			if (!widgetLinesInitialized || !sameWidgetLines(lastWidgetLines, lines)) {
-				lastCtx.ui.setWidget("persona-agents", lines ? compactWidget(lines) : undefined, { placement: "aboveEditor" });
+			if (!widgetLinesInitialized || !sameWidgetLines(lastWidgetLines, lines)
+				|| summary.targets.length !== lastWidgetTargets.length || summary.targets.some((id, index) => id !== lastWidgetTargets[index])) {
+				lastCtx.ui.setWidget("persona-agents", lines ? compactWidget(lines, summary.targets, (id) => {
+					if (!collapsedResourceGroups.delete(id)) collapsedResourceGroups.add(id);
+					renderAgentWidget();
+				}) : undefined, { placement: "aboveEditor" });
 				lastWidgetLines = lines;
+				lastWidgetTargets = summary.targets;
 				widgetLinesInitialized = true;
 			}
 		} catch {
@@ -920,6 +949,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		await ctx.ui.custom<void>(
 			(tui, theme, _kb, done) =>
 				new AgentOverlay(agentTree, tui, theme, () => done(undefined), {
+					collapsedGroups: collapsedResourceGroups,
+					onGroupToggle: renderAgentWidget,
+					peerSnapshot: () => exocom.peerSnapshot(),
+					onPeersChanged: (listener) => exocom.onPeersChanged(listener),
 					onStop: stopAgent,
 					onSteer: steerAgent,
 					canSteer: (id) => steerRegistry.has(id),
@@ -1075,6 +1108,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	let monitors: MonitorSession | undefined;
+	let scripts: MonitorSession | undefined;
 	const host: PersonaHost = {
 		allToolNames: () => {
 			try {
@@ -1091,6 +1125,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				/* ignore */
 			}
 			monitors?.reconcilePermissions();
+			scripts?.reconcilePermissions();
 		},
 		getThinkingLevel: () => {
 			try {
@@ -1152,6 +1187,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	};
 
 	const controller = new PersonaController(host, config.delegateDefaultAllow);
+	pi.registerTool(makeCodeOutlineTool({ authorize: () => {
+		const caps = controller.capabilities;
+		return pi.getActiveTools().includes("code_outline") && (!caps || canCallTool(caps, "code_outline"));
+	} }));
 
 	// The semantic comm plane (guardrails §4.2/§4.9): the in-process bus carries a child's
 	// `contact_supervisor` messages to the supervisor (handle "supervisor"). Distinct from
@@ -1255,50 +1294,45 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		onCancelled: (entry) => settleWakeRow(wakeRows.timerCancelled(entry)),
 		onFire: (entry) => { settleWakeRow(wakeRows.timerFired(entry)); timerNotifier.notify(entry); },
 	});
-	const canRunMonitor = () => {
+	const canRunProgram = (name: "monitor" | "script") => {
 		if (disposed) return false;
 		const caps = controller.capabilities;
 		const active = pi.getActiveTools();
-		return active.includes("monitor") && active.includes("bash")
-			&& (!caps || (canCallTool(caps, "monitor") && canCallTool(caps, "bash")));
+		return active.includes(name) && active.includes("bash")
+			&& (!caps || (canCallTool(caps, name) && canCallTool(caps, "bash")));
 	};
+	const canRunMonitor = () => canRunProgram("monitor");
+	const canRunScript = () => canRunProgram("script");
 	// Session-native custom entries own the bounded logs: they are not model messages and
 	// deleting the session removes them without orphan sidecars. Shutdown persists, never deletes.
 	const monitorArchive = new MonitorArchive({
 		entries: () => lastCtx?.sessionManager.getEntries() ?? [],
 		append: (customType, data) => pi.appendEntry(customType, data),
 	});
+	const scriptArchive = new MonitorArchive({
+		source: "script",
+		entries: () => lastCtx?.sessionManager.getEntries() ?? [],
+		append: (customType, data) => pi.appendEntry(customType, data),
+	});
+	const programView = {
+		tree: agentTree, stops: stopRegistry,
+		disposed: () => disposed,
+		settle: settleWakeRow,
+		requestRender: () => requestAgentWidgetRender(false),
+	};
 	monitors = createMonitorSession({
 		idPrefix: `monitor-${randomUUID().slice(0, 8)}`,
 		isIdle: idleDelivery.isIdle,
 		deliver: (text) => sendPersonaFollowUp(pi, text),
 		canRun: canRunMonitor,
-		observe: {
-			armed: (entry) => {
-				monitorArchive.armed(entry);
-				if (disposed) return;
-				const row = wakeRows.monitorArmed(entry);
-				stopRegistry.set(row.id, () => { monitors?.cancel(entry.id); });
-				agentTree.add(row);
-			},
-			output: (output) => {
-				monitorArchive.output(output);
-				if (disposed) return;
-				if (wakeRows.monitorOutput(output)) requestAgentWidgetRender(false);
-			},
-			event: (event) => {
-				monitorArchive.event(event);
-				if (disposed) return;
-				const change = wakeRows.monitorEvent(event);
-				if (change.settled) settleWakeRow(change);
-				else agentTree.update(change.id, change.patch);
-			},
-			removed: (entry) => {
-				monitorArchive.removed(entry);
-				if (disposed) return;
-				settleWakeRow(wakeRows.monitorRemoved(entry));
-			},
-		},
+		observe: createProgramObserver({ ...programView, archive: monitorArchive, rows: wakeRows, cancel: (id) => { monitors?.cancel(id); } }),
+	});
+	scripts = createScriptSession({
+		idPrefix: `script-${randomUUID().slice(0, 8)}`,
+		isIdle: idleDelivery.isIdle,
+		deliver: (text) => sendPersonaFollowUp(pi, text),
+		canRun: canRunScript,
+		observe: createProgramObserver({ ...programView, archive: scriptArchive, rows: scriptRows, cancel: (id) => { scripts?.cancel(id); } }),
 	});
 	const tracker = new AsyncRunTracker({ maxRetained: config.asyncRetain });
 	results.track(tracker); // archive before ordinary notification, including synchronous launch failure
@@ -2373,6 +2407,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				cancelAgentWidgetRender();
 				widgetClock.stop();
 				wakeRows.clearMonitors();
+				scriptRows.clearMonitors();
 			}
 		},
 		get orchestrating() { return orchestrating; },
@@ -2402,6 +2437,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		timerNotifier,
 		timerScheduler,
 		monitors,
+		scripts,
 		peekWatcher,
 		stopPeek,
 		stopRegistry,
@@ -2450,7 +2486,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			if (disposed || orchestrating || processingDeferredOrchestration || pendingOrchestration ||
 				deferredOrchestrations.length > 0 || tracker.running().length > 0 || bus.hasPending(SUPERVISOR) ||
 				completionNotifier.peekPending().length > 0 || intercomNotifier.peekPending().length > 0 ||
-				timerNotifier.peekPending().length > 0 || monitors.pendingCount() > 0 ||
+				timerNotifier.peekPending().length > 0 || monitors.pendingCount() > 0 || scripts.pendingCount() > 0 ||
 				(exocom.notifier?.peekPending().length ?? 0) > 0 || (exocom.waitNotifier?.peekPending().length ?? 0) > 0) return false;
 			const sessionId = exocom.sessionId;
 			return !sessionId || !exocom.ledgerState().asks.some((ask) => ask.from_session === sessionId || ask.to_session === sessionId);
@@ -2501,6 +2537,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		tracker,
 		runs: backgroundRuns,
 		launchPool,
+		getAllTools: () => pi.getAllTools(),
+		ownExtensionPath: fileURLToPath(import.meta.url),
 		config: { ledgerV2: config.ledgerV2 },
 		RUN_LIMITS,
 		publishAgentTool,
@@ -2579,6 +2617,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		canRun: canRunMonitor,
 		monitors,
 		archive: monitorArchive,
+	});
+	registerScriptTool(pi, {
+		get lastCtx() { return lastCtx; },
+		set lastCtx(value) { lastCtx = value; },
+		canRun: canRunScript,
+		scripts,
+		archive: scriptArchive,
 	});
 
 	registerCouncilTool(pi, {

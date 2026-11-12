@@ -3,7 +3,7 @@ import type { ExtensionAPI, KeybindingHints, Theme } from "@earendil-works/pi-co
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatDuration } from "../core/time.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
-import { MONITOR_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
+import { MONITOR_LOG_ENTRY, SCRIPT_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
 import { summarizeFailure } from "./failure-summary.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
 import { createCardFrame, type CardFramePresentation, type CardFrameState } from "./card-frame.ts";
@@ -227,7 +227,7 @@ export interface SessionCardOptions {
 	/** Read the current native transcript padding when Pi rebuilds a custom entry renderer. */
 	getOutputPad: () => number;
 	/** Existing bounded/fenced runtime formatter, injected to keep UI independent of tool wiring. */
-	monitorLog: (record: MonitorLogRecord) => string;
+	processLog: (record: MonitorLogRecord) => string;
 }
 
 export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRenderer" | "registerEntryRenderer">, options: SessionCardOptions): void {
@@ -255,17 +255,19 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 			}, expanded, theme, outputPad, keyHint);
 		});
 	}
-	pi.registerEntryRenderer(MONITOR_LOG_ENTRY, (entry, { expanded, keyHint }, theme) => {
-		const record = parseMonitorLogRecord(entry.data);
-		if (!record) return undefined;
-		const { state, status } = monitorState(record);
-		return sessionCard({
-			title: `Monitor · ${compactInlineText(record.entry.label)}`,
-			state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
-			full: sanitizeTerminalText(options.monitorLog(record)),
-			preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · monitor result`, truncated: true }),
-		}, expanded, theme, options.getOutputPad(), keyHint);
-	});
+	for (const [entryType, source] of [[MONITOR_LOG_ENTRY, "Monitor"], [SCRIPT_LOG_ENTRY, "Script"]] as const) {
+		pi.registerEntryRenderer(entryType, (entry, { expanded, keyHint }, theme) => {
+			const record = parseMonitorLogRecord(entry.data);
+			if (!record) return undefined;
+			const { state, status } = monitorState(record);
+			return sessionCard({
+				title: `${source} · ${compactInlineText(record.entry.label)}`,
+				state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
+				full: sanitizeTerminalText(options.processLog(record)),
+				preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · ${source.toLowerCase()} result`, truncated: true }),
+			}, expanded, theme, options.getOutputPad(), keyHint);
+		});
+	}
 	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
 		if (!data) return undefined;

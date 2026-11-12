@@ -2,6 +2,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type AgentNode, effortTag, isNonAgentNode, isQueuedMarker } from "./agent-tree.ts";
 import { compactInlineText } from "./presentation.ts";
 import { formatUsage } from "./usage.ts";
+import { isResourceGroup } from "./resource-groups.ts";
 
 /** Semantic containers stay containers even while their next phase has no children. */
 export function isAgentGroup(node: AgentNode, nodes: readonly AgentNode[]): boolean {
@@ -28,6 +29,10 @@ export interface AgentGroup {
 export function projectAgentGroup(nodes: readonly AgentNode[], rootId: string, waitingIds?: ReadonlySet<string>): AgentGroup | undefined {
 	const root = nodes.find((node) => node.id === rootId);
 	if (!root) return undefined;
+	if (isResourceGroup(rootId)) {
+		const legs = nodes.filter((node) => node.parentId === rootId);
+		return { root, legs, summary: `${legs.length} item${legs.length === 1 ? "" : "s"}` };
+	}
 	const children = new Map<string, AgentNode[]>();
 	for (const node of nodes) {
 		if (node.parentId === undefined) continue;

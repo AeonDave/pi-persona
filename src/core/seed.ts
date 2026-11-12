@@ -217,12 +217,23 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 4661, sha256: "9031054af66bca2b726536e5348f6d0223f66bb7b544cc256457b015d55c850f" },
 	],
 	"agents/reviewer.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2574, sha256: "28b4282286c1b74164c3b24e6201513b696b3be86dca38e563aa31a957ba2871" },
+		{ size: 2604, sha256: "4d8605a637d4e1787690be8ef991eff7e840eb5167da628d2e95f1986c95a987" },
 		{ size: 3427, sha256: "8570b80e48a2b44dc364f7a41b3cd06741507329d91b0b9d7e1b716e7eaf7ee2" },
 		{ size: 3476, sha256: "73f404259730719051f8e9aedb17ddd398304ed40068128cd97eae3a884b0912" },
 	],
 	"agents/scout.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 1276, sha256: "8ba1a09175ccb5994286730f60596acc9bc3096a973f729ade0b689d8a960501" },
+		{ size: 1298, sha256: "6bdc361d3473dd8f7088a742fdcd0774ad38a85ab775c79392730bccaed7f457" },
 		{ size: 1341, sha256: "ffea9fe3643dbc0e5dea8ffc0722f41050374daed33e7f3a46378de36a630a62" },
 		{ size: 1364, sha256: "425b8ef2c1141b602b2f67e47224f855a8a11f936affd4429272347678de8b58" },
+	],
+	"agents/architect.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 1380, sha256: "907d1edb8e31a2fca66cee3a7508b88ea14275f36c7d272e3dd1a865813014fc" },
+		{ size: 1401, sha256: "1fd36722b5c3834fec27eb139a78abbf928a3efb04e6d57ac8137b10cb14ed90" },
 	],
 	"agents/verifier.md": [
 		// v1.17.6 pristine seed (LF and CRLF checkout variants).
