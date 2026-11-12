@@ -19,6 +19,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Intentionally empty compact previews render small title-only informational notes, with expansion
+  available for full detail, rather than inserting a misleading `(no output)` body.
 - Standalone entry cards, including checkpoints, stall warnings and progress recovery, honor the
   current native output padding just like completion messages. Persona and loaded Mind share one
   composable card frame through a versioned local presentation query; native tool shells stay Pi-owned.

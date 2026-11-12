@@ -85,8 +85,9 @@ export function createCardFrame(card: CardFramePresentation, context: CardFrameC
 			const contentWidth = Math.max(1, innerWidth - bodyPad.length);
 			const preview = expanded ? undefined : card.preview(contentWidth);
 			const body = expanded ? full : sanitizeTerminalText(preview?.text ?? "(no output)");
-			const previewClipped = !expanded && (preview?.truncated === true || body.split("\n").some((line) => visibleWidth(line) > contentWidth));
-			const bodyLines = sanitizeTerminalText(body || "(no output)").split("\n").map((line) => expanded
+			const titleOnly = !expanded && preview?.text === "" && full.length > 0;
+			const previewClipped = !expanded && (titleOnly || preview?.truncated === true || body.split("\n").some((line) => visibleWidth(line) > contentWidth));
+			const bodyLines = (titleOnly ? [] : sanitizeTerminalText(body || "(no output)").split("\n")).map((line) => expanded
 				? theme.fg("toolOutput", line)
 				: theme.fg("toolOutput", `${bodyPad}${truncateToWidth(line, contentWidth)}`));
 			const lines = [

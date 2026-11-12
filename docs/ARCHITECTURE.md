@@ -713,7 +713,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   invalidated for theme/layout changes, without a global transcript cache. Rendering never rewrites
   stored or model-facing payloads, nor creates a wake. Message cards use the host-supplied padding;
   entry cards read current `pi.getSettings().outputPad` (native 0/1, default 1), because entry renderer
-  options do not carry padding. Titles, bodies and expand hints receive that outer padding once;
+  options do not carry padding. Titles, bodies and expand hints receive that outer padding once.
+  An explicitly empty compact preview produces a title-only informational note rather than a false
+  `(no output)` body; hidden full detail still exposes the expansion hint. Expansion remains complete;
 - loaded companions can reuse the same frame through the synchronous `pi-persona:card-frame:v1`
   presentation query: `{ version: 1, respond }` receives `{ version: 1, provider: "pi-persona",
   createCard }`. Mind queries at render invocation rather than hard-importing an optional package or

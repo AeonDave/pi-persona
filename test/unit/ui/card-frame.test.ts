@@ -151,6 +151,20 @@ test("frame shows an expand hint when the actual narrow content column clips a p
 	assert.equal(shortRows.length, 2, "an unclipped short preview does not show an expand hint");
 });
 
+test("an explicitly empty collapsed preview hides its body but hints at full detail", () => {
+	const input = presentation({ full: "full detail\nTAIL", preview: () => ({ text: "", truncated: false }) });
+	for (const outputPad of [0, 1]) {
+		const rows = visibleRows(createCardFrame(input, context({ outputPad })), 80);
+		assert.equal(rows.length, 2);
+		assert.match(rows[1]!, /to expand/);
+		assert.doesNotMatch(rows.join("\n"), /no output|full detail/);
+		const expanded = visibleRows(createCardFrame(input, context({ outputPad, expanded: true })), 80).join("\n");
+		assert.match(expanded, /full detail/);
+		assert.match(expanded, /TAIL/);
+		for (const width of [1, 2, 3, 8]) assert.ok(createCardFrame(input, context({ outputPad })).render(width).every((line) => visibleWidth(line) <= width));
+	}
+});
+
 test("empty full and preview bodies retain the nonempty literal fallback", () => {
 	const input = presentation({ full: "", preview: () => ({ text: "", truncated: false }) });
 	assert.match(visibleRows(createCardFrame(input, context()), 80).join("\n"), /\(no output\)/);
