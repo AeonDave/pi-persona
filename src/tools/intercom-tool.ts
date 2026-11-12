@@ -75,6 +75,7 @@ interface IntercomRenderState {
 }
 
 export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): void {
+	const displayBusTarget = (id: string): string => d.bus.displayLabel(id);
 	function displayRunTarget(id: string): string {
 		const run = d.tracker?.peek(id);
 		if (!run) return sanitizeDisplayLabel(id, "run");
@@ -183,7 +184,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			// `to` comes from model-authored tool arguments. Use the exact value for routing, but never
 			// interpolate it into trusted prose without reducing it to compact identifier metadata.
 			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
-			const targetSnapshot = params.to === undefined ? {} : { runId: params.to, target: displayRunTarget(params.to) };
+			const targetSnapshot = params.to === undefined || params.action === "send" ? {} : { runId: params.to, target: displayRunTarget(params.to) };
 			// peek + result + steer + stop are supervisor→child controls over the async tracker /
 			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
@@ -347,12 +348,12 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			const action = compactInlineText(args.action ?? "?", { maxChars: 24 }) || "?";
 			let target = "";
 			const runTarget = typeof args.to === "string"
-				? state?.target?.id === args.to ? state.target.label : displayRunTarget(args.to)
+				? state?.target?.id === args.to ? state.target.label : action === "send" ? displayBusTarget(args.to) : displayRunTarget(args.to)
 				: undefined;
 			if (action === "peek") target = runTarget ?? "all";
 			else if (action === "result" && typeof args.ref === "string") target = compactInlineText(args.ref, { maxChars: 80 }) || "?";
 			else if (["result", "steer", "stop"].includes(action)) target = runTarget ?? "?";
-			else if (action === "send") target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
+			else if (action === "send") target = runTarget ?? "?";
 			else if (action === "message") target = compactInlineText(args.messageId ?? "?", { maxChars: 80 }) || "?";
 			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
 			const formatCall = (label: string) => `${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${label ? theme.fg("dim", ` ${compactInlineText(label, { maxChars: 80 })}`) : ""}`;
@@ -362,16 +363,16 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as {
-				action?: string; ok?: boolean; runId?: string; target?: string; message?: string; modelUsed?: string;
+				action?: string; ok?: boolean; runId?: string; busId?: string; target?: string; message?: string; sentMessage?: string; modelUsed?: string;
 				results?: Array<{ truncated?: boolean }>;
 				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean; error?: string };
 				offset?: number; nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
 			};
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = details.action ?? context?.args?.action;
-			const savedId = details.runId ?? context?.args?.to;
+			const savedId = details.busId ?? details.runId ?? context?.args?.to;
 			const legacyCompleted = !details.target && context !== undefined && context.isPartial !== true
-				&& ["steer", "stop", "result", "peek"].includes(action ?? "");
+				&& ["steer", "stop", "result", "peek", "send"].includes(action ?? "");
 			if (state && typeof savedId === "string" && (details.target || legacyCompleted)) {
 				// Old receipts have no display snapshot. A new session may reuse their run ID;
 				// the current tracker cannot supply a historical alias for that unrelated execution.
@@ -403,23 +404,25 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 					return new Text(`${theme.fg("toolOutput", compact.text)}\n${theme.fg("dim", expandDetailHint(context))}`, 0, 0);
 				}
 			}
-			if (!failed && details.action === "steer" && details.ok === true) {
+			if (!failed && (details.action === "steer" || details.action === "send") && details.ok === true) {
+				const sending = details.action === "send";
 				const target = compactInlineText(details.target ?? state?.target?.label ?? (legacyCompleted && typeof savedId === "string" ? sanitizeDisplayLabel(savedId, "run") : details.runId ? displayRunTarget(details.runId) : ""), { maxChars: 80 });
-				const message = typeof details.message === "string" ? details.message : context?.args?.message;
+				const savedMessage = sending ? details.sentMessage : details.message;
+				const message = typeof savedMessage === "string" ? savedMessage : context?.args?.message;
 				// Old persisted receipts may predate message snapshots. Keep their original content
 				// available in expansion rather than fabricating a message that was never recorded.
 				if (expanded) {
 					const text = typeof message === "string"
-						? `Steering queued${target ? ` for ${target}` : ""}.${details.runId ? `\nRun: ${sanitizeDisplayLabel(details.runId, "run")}` : ""}\n\n${sanitizeTerminalText(message)}`
+						? `${sending ? `Sent${target ? ` to ${target}` : ""}` : `Steering queued${target ? ` for ${target}` : ""}`}.${details.busId ? `\nBus handle: ${sanitizeDisplayLabel(details.busId, "peer")}` : details.runId ? `\nRun: ${sanitizeDisplayLabel(details.runId, "run")}` : ""}\n\n${sanitizeTerminalText(message)}`
 						: full;
 					return new Text(theme.fg("toolOutput", text), 0, 0);
 				}
-				const title = compactInlineText(`steering queued${target ? ` · ${target}` : ""}`, { maxChars: 100 });
+				const title = compactInlineText(`${sending ? "message sent" : "steering queued"}${target ? ` · ${target}` : ""}`, { maxChars: 100 });
 				const preview = typeof message === "string" ? compactVisibleText(message, { maxLines: 3, maxLineChars: 100 }) : undefined;
 				// Native Pi already rendered `intercom steer <alias>` above this result. Show the
 				// instruction directly there; only standalone/older renderers need another identity row.
 				const showTitle = !state?.callText || !preview;
-				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}` : ""}`, 0, 0);
+				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated || sending ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}` : ""}`, 0, 0);
 			}
 			// Archive views are listings/diagnostics, never Markdown reports. A successful archive
 			// read carries no runId (live results do) and a summary (its own receipt); the invalid
@@ -440,7 +443,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				if (!failed && ["result", "message", "inbox"].includes(action ?? "")) {
 					return createReportBody(full, theme, {}, context?.lastComponent);
 				}
-				return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
+				const receipt = details.action === "send" && details.busId ? `${full}\nBus handle: ${sanitizeDisplayLabel(details.busId, "peer")}` : full;
+				return new Text(`${prefix}${theme.fg("toolOutput", receipt)}`, 0, 0);
 			}
 			if (!failed && listing) {
 				// Purpose line first (count + paging/truncation/storage honesty), then a bounded

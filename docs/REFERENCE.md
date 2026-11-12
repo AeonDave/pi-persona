@@ -85,6 +85,16 @@ operator surface — in the TUI a durable expandable card with the agent, model,
 concise cause (expansion retains the full technical diagnostic); other modes use a concise
 sanitized notification. These operator-only cards do not inject context or start a second turn.
 The model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
+`intercom send` uses the registered recipient's assigned name in its card. Expansion retains the
+exact bus handle and sent message; the saved receipt preserves that identity after the worker exits.
+
+A parallel `delegate` refusal for missing `writeSet` keeps its short remedy in the collapsed card.
+Expansion also shows a bounded snapshot of the original arguments, the effective concurrency, and
+each task's ownership assessment: requested fields, inherited agent settings, and why its
+tools or MCP access make it a potential writer. Top-level single-worker fields remain visible so
+misplaced `tools` or `writeSet` values can be diagnosed. These diagnostics are saved with the result
+for later inspection; omitted fields stay distinguishable from explicit empty grants, and truncation
+is marked. They are presentation details, not an extra copy of the request in the model-facing error.
 
 ### Native OS/search tools
 
@@ -693,7 +703,9 @@ timers, monitors, scripts and Exocom peers are skipped): the first press states 
 stop N running agents`), any other key or a changed set re-asks. It is offered only for two or more;
 queued or later stages may still start.
 Timers, Monitors, Scripts and Exocom have separate presentation groups. Space/Left/Right folds a
-selected category; group headings also accept clicks in Pi alternate-screen mode. Exocom details
+selected resource group or delegate batch; group headings also accept
+clicks in Pi alternate-screen mode. The widget and F9 share fold state, and folded agent groups
+retain attention counts for failed, waiting and stalled descendants. Exocom details
 are read-only. `script` supports `run` (executable + literal `args`, or inline shell `code`), `list`,
 `stop` and `result`; see [background programs](MONITORS.md#background-programs).
 

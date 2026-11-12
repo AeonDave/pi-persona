@@ -9,6 +9,7 @@ import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import type { TerminalResultInput } from "../../../src/results/types.ts";
 import { registerIntercomTool } from "../../../src/tools/intercom-tool.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
+import { InProcessBus } from "../../../src/bus/inproc.ts";
 
 initTheme("dark");
 
@@ -63,7 +64,7 @@ function toolWith(archive: TerminalResultArchive, tracker: any = { peek: () => u
 			completionNotifier: { peekPending: () => [], discard: () => {} },
 			intercomNotifier: { discard: () => {} },
 			controller: { activePersona: undefined },
-			bus: {},
+			bus: new InProcessBus(),
 			SUPERVISOR: "supervisor",
 			STALL_FLAG_MS: 90_000,
 			missingRunMessage: (id: string) => `missing ${id}`,

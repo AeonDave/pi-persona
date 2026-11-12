@@ -178,6 +178,14 @@ export class InProcessBus {
 		return [...this.inboxes.keys()];
 	}
 
+	/** Current presentation only. Callers persist this label with receipts; handles still route. */
+	displayLabel(handle: string): string {
+		const labelFor = (id: string) => this.labels.get(id) ?? sanitizeDisplayLabel(id, "peer", 120);
+		const label = labelFor(handle);
+		const collision = [...this.inboxes.keys()].some((id) => id !== handle && labelFor(id) === label);
+		return collision ? `${label} [${sanitizeDisplayLabel(handle, "peer", 40)}]` : label;
+	}
+
 	/** One-way message (default `progress`). Returns false if the recipient is not registered
 	 *  or its inbox is full of live asks; rejected messages are not delivered or retried. */
 	send(from: string, to: string, text: string, kind: MsgKind = "progress"): boolean {

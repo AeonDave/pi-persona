@@ -112,7 +112,7 @@ import { MonitorArchive } from "./monitor/archive.ts";
 import { createMonitorSession, type MonitorSession } from "./monitor/session.ts";
 import { createScriptSession } from "./script/session.ts";
 import { createProgramObserver } from "./extension/program-observer.ts";
-import { resourceSummary } from "./ui/resource-groups.ts";
+import { pruneFoldState, resourceSummary } from "./ui/resource-groups.ts";
 import { createBackgroundRuns, type TrackedRun } from "./tools/background-run.ts";
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
@@ -837,6 +837,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			} finally { publishingMonitorOutput = false; }
 		}
 		const nodes = agentTree.snapshot();
+		pruneFoldState(collapsedResourceGroups, nodes);
 		const empty = nodes.length === 0;
 		const summary = resourceSummary(nodes, collapsedResourceGroups, 8, { now: Date.now(), stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingTreeIds(nodes) });
 		const lines = empty ? undefined : summary.lines;

@@ -7,6 +7,7 @@ import { Check } from "typebox/value";
 import { PollGuard } from "../../../src/core/nudge.ts";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
+import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { describeRuns, registerIntercomTool } from "../../../src/tools/intercom-tool.ts";
 
 function registeredTool(deps: any = {}): { tool: any; hooks: Map<string, Function> } {
@@ -37,7 +38,7 @@ function intercomDeps() {
 		completionNotifier,
 		intercomNotifier: { discard: () => {} },
 		controller: { activePersona: undefined },
-		bus: {},
+		bus: new InProcessBus(),
 		SUPERVISOR: "supervisor",
 		STALL_FLAG_MS: 90_000,
 		missingRunMessage: (_id: string, display: string | undefined) => `missing ${display}`,
@@ -285,6 +286,73 @@ test("a persisted steering snapshot restores the call alias without a live track
 	assert.doesNotMatch(card.render(120).join("\n"), /steering queued|Brooklantern-statesfix/, "the call header already identifies the worker; the result shows the message without a duplicate acknowledgement");
 	assert.match(header.render(120).join("\n"), /Brooklantern-statesfix/, "the same call component is updated when the persisted result is rendered");
 	assert.doesNotMatch(header.render(120).join("\n"), new RegExp(id));
+});
+
+test("send cards reuse message previews and restore the bus alias independently of run IDs", async () => {
+	const h = intercomDeps();
+	const bus = new InProcessBus(); bus.register("supervisor"); bus.register("operator#5", "Amber-runtime");
+	h.deps.bus = bus;
+	h.deps.tracker = { peek: () => { throw new Error("bus handles are not tracker run IDs"); } };
+	const { tool } = registeredTool(h.deps);
+	const message = "**literal instruction**\n" + "Preserve the current contract.\n".repeat(8) + "Final line.";
+	const args = { action: "send", to: "operator#5", message };
+	const result = await tool.execute("send-alias", args, undefined, undefined, {});
+	assert.equal(result.isError, false); assert.equal(result.details.busId, "operator#5");
+	assert.equal(result.details.sentMessage, message); assert.equal(result.details.runId, undefined);
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+	const header = tool.renderCall(args, theme).render(120).join("\n");
+	assert.match(header, /intercom send Amber-runtime/); assert.doesNotMatch(header, /operator#5/);
+	bus.unregister("operator#5");
+	const restored = registeredTool(intercomDeps().deps).tool;
+	const context = { args, state: {}, isError: false, keyHint: (_key: string, action: string) => `alt+e ${action}` };
+	const call = restored.renderCall(args, theme, context);
+	const saved = JSON.parse(JSON.stringify(result));
+	const compact = restored.renderResult(saved, { expanded: false }, theme, context).render(120).join("\n");
+	assert.match(call.render(120).join("\n"), /intercom send Amber-runtime/);
+	assert.match(compact, /\*\*literal instruction\*\*/); assert.match(compact, /alt\+e/);
+	assert.doesNotMatch(compact, /operator#5|Sent to|Final line/);
+	const expanded = restored.renderResult(saved, { expanded: true }, theme, context).render(200).map((line: string) => line.trimEnd()).join("\n");
+	assert.match(expanded, /Bus handle: operator#5/);
+	assert.ok(expanded.includes(message));
+	assert.match(expanded, /Amber-runtime/);
+});
+
+test("send preserves duplicate aliases and legacy history never borrows a reused bus handle's name", async () => {
+	const h = intercomDeps();
+	const bus = new InProcessBus(); bus.register("supervisor");
+	bus.register("opaque-left", "Same-worker"); bus.register("opaque-right", "Same-worker"); h.deps.bus = bus;
+	const { tool } = registeredTool(h.deps);
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+	for (const route of ["opaque-left", "opaque-right"]) {
+		const result = await tool.execute("collision", { action: "send", to: route, message: "Continue." }, undefined, undefined, {});
+		assert.equal(result.details.target, `Same-worker [${route}]`);
+		assert.equal(bus.pending(route)[0]?.text, "Continue.");
+	}
+	const args = { action: "send", to: "opaque-left", message: "Historical message." };
+	const context = { args, state: {}, isPartial: false };
+	const header = tool.renderCall(args, theme, context);
+	tool.renderResult({ content: [{ type: "text", text: "Sent to opaque-left." }], details: { action: "send", ok: true } }, { expanded: false }, theme, context);
+	assert.match(header.render(120).join("\n"), /opaque-left/);
+	assert.doesNotMatch(header.render(120).join("\n"), /Same-worker/, "legacy history has no canonical alias snapshot");
+});
+
+test("a refused send keeps the bus alias and route but never presents its body as delivered", async () => {
+	const h = intercomDeps();
+	const bus = new InProcessBus({ maxInbox: 1 }); bus.register("supervisor"); bus.register("operator#5", "Amber-runtime"); h.deps.bus = bus;
+	const ask = bus.ask("supervisor", "operator#5", "Pending question?");
+	const pending = bus.pending("operator#5")[0]!;
+	try {
+		const { tool } = registeredTool(h.deps);
+		const args = { action: "send", to: "operator#5", message: "PRIVATE_UNSENT_BODY" };
+		const result = await tool.execute("send-refused", args, undefined, undefined, {});
+		assert.equal(result.isError, true); assert.equal(result.details.target, "Amber-runtime");
+		assert.equal(result.details.sentMessage, undefined);
+		const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+		const restored = registeredTool(intercomDeps().deps).tool;
+		const full = restored.renderResult(JSON.parse(JSON.stringify(result)), { expanded: true }, theme, { args, isError: true }).render(200).join("\n");
+		assert.match(full, /Amber-runtime/); assert.match(full, /Bus handle: operator#5/);
+		assert.doesNotMatch(full, /PRIVATE_UNSENT_BODY|message sent/i);
+	} finally { bus.reply(pending.id, "Resolved."); await ask; }
 });
 
 test("steer cards keep unnamed and duplicate aliases identifiable without rerouting", async () => {

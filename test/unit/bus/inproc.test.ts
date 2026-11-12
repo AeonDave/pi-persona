@@ -24,6 +24,22 @@ test("sender label is snapshotted and survives registration refresh and sender t
 	assert.equal(bus.retrieve(message!.id)?.fromLabel, "Moss-native-tool-exposure");
 });
 
+test("displayLabel reads registered bus identity, disambiguates collisions and never reroutes", () => {
+	const bus = new InProcessBus();
+	bus.register("operator#5", "Amber-runtime");
+	bus.register("operator#5");
+	assert.equal(bus.displayLabel("operator#5"), "Amber-runtime");
+	bus.register("other-handle", "Amber-runtime");
+	assert.equal(bus.displayLabel("operator#5"), "Amber-runtime [operator#5]");
+	assert.equal(bus.displayLabel("other-handle"), "Amber-runtime [other-handle]");
+	bus.unregister("other-handle");
+	assert.equal(bus.displayLabel("operator#5"), "Amber-runtime");
+	bus.unregister("operator#5");
+	assert.equal(bus.displayLabel("operator#5"), "operator#5", "live accessor cannot invent an alias after teardown");
+	assert.equal(bus.send("supervisor", "Amber-runtime", "no implicit alias routing"), false);
+	assert.deepEqual(bus.participants(), []);
+});
+
 test("send delivers a one-way message to a registered recipient, or fails for unknown", () => {
 	const bus = new InProcessBus();
 	bus.register("sup");

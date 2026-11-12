@@ -178,6 +178,118 @@ test("missing write ownership is structured and compact while remaining actionab
 	assert.ok(compact.split("\n").length <= 5, compact);
 });
 
+test("ownership rejection freezes original arguments and guard grants for expanded history only", async () => {
+	const h = register({
+		controller: { activePersona: { delegation: { requireDisjointWrites: true } } },
+		agents: [{ name: "operator" }, { name: "reader", tools: ["read"] }, { name: "shell", tools: ["read", "bash"] }, { name: "mcp-reader", tools: ["read"], mcp: true }],
+		getAllTools: () => [{ name: "read", sourceInfo: { source: "builtin", path: "builtin" } }],
+	});
+	const tasks = [
+		{ agent: "operator", name: "Amber", task: "PRIVATE original prompt\n**literal**" },
+		{ agent: "reader", task: "read only" },
+		{ agent: "shell", task: "shell can write" },
+		{ agent: "mcp-reader", task: "MCP may write", tools: ["read"] },
+	];
+	const raw = { tools: ["read"], writeSet: ["top-level-only"], concurrency: 3, tasks: JSON.stringify(tasks) };
+	const original = JSON.stringify(raw);
+	const result = await h.tool.execute("reject-original", raw, undefined, undefined, ctx());
+	assert.equal(result.isError, true);
+	const diagnostic = result.details.rejection.diagnostics;
+	assert.equal(diagnostic.version, 1);
+	assert.equal(JSON.stringify(JSON.parse(diagnostic.arguments.text)), original, "nested JSON strings and misplaced single-mode fields remain original");
+	const guard = diagnostic.guard.text;
+	assert.match(guard, /Effective concurrency: 3/);
+	const legs = guard.split(/(?=tasks\[\d\])/).slice(1);
+	assert.equal(legs.length, 4);
+	assert.match(legs[0], /requested tools: not supplied/);
+	assert.match(legs[0], /requested writeSet: not supplied/);
+	assert.match(legs[0], /guard tools \(session-default\): not enumerated/);
+	assert.match(legs[0], /guard writeSet \(undeclared\): not supplied/);
+	assert.match(legs[0], /classification: writer.*default.*not enumerated/);
+	assert.match(legs[1], /guard tools \(agent\): \["read"\]/);
+	assert.match(legs[1], /classification: reader/);
+	assert.match(legs[2], /non-read-only or unrecognized tools: \["bash"\]/);
+	assert.match(legs[3], /guard mcp \(agent\): true/);
+	assert.match(legs[3], /guard tools \(task\): \["read"\]/);
+	assert.match(legs[3], /classification: writer.*MCP/);
+	assert.doesNotMatch(JSON.stringify(result.content), /PRIVATE|effectiveConcurrency|session-default/);
+	raw.tasks = "MUTATED"; raw.tools.push("MUTATED"); h.deps.agents[1].tools.push("MUTATED");
+	const saved = JSON.parse(JSON.stringify(result));
+	const reloaded = register();
+	const context = { isError: true, args: { task: "WRONG RENDER CONTEXT" }, keyHint: (_key: string, action: string) => `ctrl+o ${action}` };
+	const compact = render(reloaded.tool, saved, false, 140, context);
+	assert.match(compact, /ctrl\+o/);
+	assert.doesNotMatch(compact, /PRIVATE|literal|top-level-only|session-default|MUTATED|WRONG RENDER/);
+	const expanded = render(reloaded.tool, saved, true, 240, context);
+	assert.match(expanded, /Original arguments/);
+	assert.match(expanded, /PRIVATE original prompt/);
+	assert.match(expanded, /\*\*literal\*\*/);
+	assert.match(expanded, /Guard assessment/);
+	assert.match(expanded, /top-level.*not inherited/i);
+	assert.doesNotMatch(expanded, /MUTATED|WRONG RENDER/);
+});
+
+test("ownership rejection bounds snapshots, escapes controls and retains fallback for old history", async () => {
+	const h = register({ controller: { activePersona: { delegation: { requireDisjointWrites: true } } }, getAllTools: () => [] });
+	const result = await h.tool.execute("reject-large", { tasks: [
+		{ agent: "operator", task: `**LITERAL**\u001b[31m${"🌳".repeat(30_000)}`, tools: ["unknown".repeat(8_000)] },
+		{ agent: "operator", task: "second" },
+	] }, undefined, undefined, ctx());
+	const diagnostic = result.details.rejection.diagnostics;
+	assert.equal(diagnostic.arguments.truncated, true);
+	assert.equal(diagnostic.guard.truncated, true);
+	assert.ok(diagnostic.arguments.text.length <= 32_768);
+	assert.ok(diagnostic.guard.text.length <= 16_384);
+	assert.ok(JSON.stringify(diagnostic).length < 100_000, "duplicated grant fields cannot bypass the persisted limits");
+	const expanded = render(register().tool, JSON.parse(JSON.stringify(result)), true, 240);
+	assert.match(expanded, /truncated.*32768|32768.*truncated/i);
+	assert.match(expanded, /truncated.*16384|16384.*truncated/i);
+	assert.match(expanded, /\\u001b\[31m/, "terminal controls in original args are JSON escaped");
+	assert.match(expanded, /\*\*LITERAL\*\*/);
+	assert.doesNotMatch(expanded, /\u001b\[31m/);
+	const old = JSON.parse(JSON.stringify(result)); delete old.details.rejection.diagnostics;
+	assert.match(render(register().tool, old, true), /missing non-empty writeSet/);
+});
+
+test("ownership diagnostics retain explicit reader overrides and agent write-set inheritance", async () => {
+	const h = register({
+		controller: { activePersona: { delegation: { requireDisjointWrites: true } } },
+		agents: [{ name: "operator" }, { name: "research", tools: ["read", "bash"], writeSet: [".research/"] }, { name: "mcp", mcp: true }],
+		getAllTools: () => [{ name: "read", sourceInfo: { source: "builtin", path: "builtin" } }],
+	});
+	const result = await h.tool.execute("reject-grants", { tasks: [
+		{ agent: "operator", task: "default writer" },
+		{ agent: "research", task: "inherited writer" },
+		{ agent: "mcp", task: "explicit reader", tools: ["read"], mcp: false },
+		{ agent: "operator", task: "explicit shell writer", tools: ["bash"], writeSet: ["src/other"] },
+	] }, undefined, undefined, ctx());
+	const legs = result.details.rejection.diagnostics.guard.text.split(/(?=tasks\[\d\])/).slice(1);
+	assert.match(legs[1], /guard writeSet \(agent\): \["\.research\/"\]/);
+	assert.match(legs[2], /guard mcp \(task\): false/);
+	assert.match(legs[2], /classification: reader/);
+	assert.match(legs[3], /guard writeSet \(task\): \["src\/other"\]/);
+	assert.match(legs[3], /non-read-only or unrecognized tools: \["bash"\]/);
+});
+
+test("ownership diagnostics preserve supplied empty or whitespace write-set provenance", async () => {
+	const h = register({
+		controller: { activePersona: { delegation: { requireDisjointWrites: true } } },
+		agents: [{ name: "operator" }, { name: "research", writeSet: [".research/"] }],
+		getAllTools: () => [],
+	});
+	const result = await h.tool.execute("reject-empty-scope", { tasks: [
+		{ agent: "operator", task: "empty scope", writeSet: [] },
+		{ agent: "operator", task: "blank scope", writeSet: ["   "] },
+		{ agent: "research", task: "inherited scope", writeSet: [] },
+	] }, undefined, undefined, ctx());
+	assert.equal(result.isError, true);
+	const legs = result.details.rejection.diagnostics.guard.text.split(/(?=tasks\[\d\])/).slice(1);
+	assert.match(legs[0], /guard writeSet \(task\): \[\]/);
+	assert.match(legs[1], /guard writeSet \(task\): \["   "\]/);
+	assert.match(legs[2], /requested writeSet: \[\]/);
+	assert.match(legs[2], /guard writeSet \(agent\): \["\.research\/"\]/);
+});
+
 test("incomplete, partial, or incoherent contexts keep a full standalone receipt", async () => {
 	const first = register();
 	const args = { agent: "operator", name: "Dewglass-worker", model: "provider/model", task: "work" };

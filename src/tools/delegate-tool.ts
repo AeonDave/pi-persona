@@ -16,6 +16,7 @@ import { compactVisibleText } from "../ui/presentation.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { hiddenLaunchRequestHint, launchRequestLines, readLaunchRequest, snapshotLaunchRequest, type LaunchRequest } from "../ui/launch-request.ts";
 import { renderDelegateRejection } from "../ui/delegate-rejection.ts";
+import { snapshotRejectionDiagnostics, type WorkspaceAssessment } from "./delegate-diagnostics.ts";
 import { resolveModelRef } from "../core/models.ts";
 import { inventedLegNameHint } from "../core/naming.ts";
 import { toolUsageField } from "../ui/usage.ts";
@@ -381,12 +382,21 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// readers only while Pi reports the builtin implementation; code_outline is read-only only when
 	// its exact source path is this extension's registration. Unknown and overridden tools are writers.
 	// `skills`/`role` remain prompt text; enforced session allowlists are the basis for this classification.
-	function mayMutateWorkspace(spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): boolean {
+	function assessWorkspace(spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): WorkspaceAssessment {
 		const configured = d.agents.find((agent) => agent.name === spec.agent);
 		const effectiveTools = spec.tools !== undefined ? spec.tools : configured?.tools;
 		const effectiveMcp = spec.mcp ?? configured?.mcp;
-		return effectiveMcp === true || effectiveTools === undefined || effectiveTools.some((tool) => !toolIsReadOnly(tool));
+		const nonReadOnlyTools = effectiveMcp === true || effectiveTools === undefined ? null : effectiveTools.filter((tool) => !toolIsReadOnly(tool));
+		const mayWrite = effectiveMcp === true || effectiveTools === undefined || (nonReadOnlyTools?.length ?? 0) > 0;
+		return {
+			mayWrite,
+			tools: { source: spec.tools !== undefined ? "task" : configured?.tools !== undefined ? "agent" : "session-default", values: effectiveTools ?? null },
+			mcp: { source: spec.mcp !== undefined ? "task" : configured?.mcp !== undefined ? "agent" : "default", value: effectiveMcp === true },
+			reason: effectiveMcp === true ? "MCP enabled" : effectiveTools === undefined ? "session-default tools (host grant not enumerated)" : mayWrite ? "tools may write or are unrecognized" : "only recognized read-only tools (or no tools)",
+			nonReadOnlyTools,
+		};
 	}
+	const mayMutateWorkspace = (spec: { agent: string; tools?: string[] | undefined; mcp?: boolean | undefined }): boolean => assessWorkspace(spec).mayWrite;
 
 	// Ownership intent belongs to the agent definition, not to the caller. An agent that declares the area
 	// it alone writes (`writeSet` in its frontmatter: research → `.research/`) hands that area to each writing leg
@@ -394,7 +404,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// rather than an unknown one the supervisor would have to guess a fix for. A leg's own non-empty
 	// writeSet always wins, and an agent that declares nothing leaves the leg exactly as the caller wrote
 	// it. Declarative like the field it fills: the paths annotate and gate, nothing enforces them at runtime.
-	function inheritAgentWriteSets(call: DelegateCall): DelegateCall {
+	function inheritAgentWriteSets(call: DelegateCall, assessments: readonly WorkspaceAssessment[]): DelegateCall {
 		const declared = (agent: string | undefined, own: readonly string[] | undefined): string[] | undefined => {
 			if (own?.some((path) => path.trim())) return undefined;
 			const set = d.agents.find((candidate) => candidate.name === agent)?.writeSet;
@@ -403,8 +413,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		if (call.tasks && call.tasks.length > 0) {
 			return {
 				...call,
-				tasks: call.tasks.map((task) => {
-					const inherited = mayMutateWorkspace(task) ? declared(task.agent, task.writeSet) : undefined;
+				tasks: call.tasks.map((task, index) => {
+					const inherited = assessments[index]!.mayWrite ? declared(task.agent, task.writeSet) : undefined;
 					return inherited ? { ...task, writeSet: inherited } : task;
 				}),
 			};
@@ -582,7 +592,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						: params;
 			}
 			// Before classification and every ownership consumer (the gate, the overlap check, the run specs).
-			params = inheritAgentWriteSets(params);
+			const requestedTasks = params.tasks ?? [];
+			const assessments = requestedTasks.map(assessWorkspace);
+			params = inheritAgentWriteSets(params, assessments);
 			if (policy?.requireBrief) {
 				const briefError = validateDelegationBrief(params);
 				if (briefError) return { content: [{ type: "text", text: briefError }], details: failureDetails({}), isError: true };
@@ -590,8 +602,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			if (params.tasks && params.tasks.length > 0) {
 				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, d.RUN_LIMITS.maxConcurrency);
 				const admittedTasks = params.tasks.slice(0, d.RUN_LIMITS.maxChildren);
-				const classified = admittedTasks.map((task, index) => ({ task, index, mayWrite: mayMutateWorkspace(task) }));
-				const writing = classified.filter((entry) => entry.mayWrite);
+				const classified = admittedTasks.map((task, index) => ({ task, index, requested: requestedTasks[index]!, assessment: assessments[index]! }));
+				const writing = classified.filter((entry) => entry.assessment.mayWrite);
 				if (policy?.requireFreshVerification && policy.verificationAgents && policy.verificationAgents.length > 0) {
 					const verifierNames = new Set(policy.verificationAgents);
 					const droppedVerifiers = params.tasks
@@ -629,7 +641,10 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 								// One remedy per leg, naming the parameters: the caller should never have to guess a fix.
 								const remedies = unowned.map(({ index, task }) => `tasks[${index}] ("${task.agent}"): add writeSet: ["<files or directories only this leg edits>"].`);
 								const message = `delegate: this persona requires disjoint ownership for parallel writers; missing non-empty writeSet on ${missing.join(", ")}.\n${remedies.join(" ")}\nOr make readers with tools: ["read","grep","find","ls","code_outline"] (or pick scout). Set mcp: false for readers. Shells, script/monitor, MCP and unknown tools can write regardless of task prose.\nOr serialize the batch with concurrency: 1.`;
-								const rejection = { code: "parallel-write-set-required" as const, tasks: unowned.map(({ index, task }) => ({ index, agent: task.agent, ...(task.name ? { name: task.name } : {}) })) };
+								const rejection = { code: "parallel-write-set-required" as const,
+									tasks: unowned.map(({ index, task }) => ({ index, agent: task.agent, ...(task.name ? { name: task.name } : {}) })),
+									diagnostics: snapshotRejectionDiagnostics(rawParams, effectiveConcurrency, classified),
+								};
 								return { content: [{ type: "text", text: message }], details: failureDetails({ rejection }), isError: true };
 							}
 						}

@@ -135,6 +135,18 @@ test("intercom send delivers a one-way message to a child", () => {
 	assert.equal(bus.take("scout#1")[0]?.text, "focus on the parser");
 });
 
+test("intercom send snapshots the canonical bus alias and exact accepted message without rerouting", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor"); bus.register("operator#5", "Amber-runtime");
+	const message = "**literal**\nPreserve every line.\nFinal instruction.";
+	const result = runIntercom({ action: "send", to: "operator#5", message }, bus, "supervisor");
+	assert.equal(result.text, "Sent to Amber-runtime.");
+	assert.deepEqual(result.details, { action: "send", ok: true, busId: "operator#5", target: "Amber-runtime", sentMessage: message });
+	assert.equal(bus.pending("operator#5")[0]?.text, message);
+	bus.unregister("operator#5"); bus.register("operator#5", "Wrong-new-worker");
+	assert.equal(result.details.target, "Amber-runtime", "receipt identity is a snapshot, never a later registry lookup");
+});
+
 test("intercom send to an unknown peer reports it cleanly", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

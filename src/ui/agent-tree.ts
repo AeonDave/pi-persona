@@ -137,6 +137,13 @@ export function isQueuedMarker(detail: string | undefined): boolean {
 	return detail?.trim().toLowerCase() === "queued";
 }
 
+/** Runtime stall state shared by individual rows and folded group summaries. */
+export function isStalledNode(node: Pick<AgentNode, "status" | "startedAt" | "lastAdvanceAt" | "detail" | "kind" | "dueAt">, now: number, stallMs: number, waitingForSupervisor = false): boolean {
+	if (node.status !== "running" || node.startedAt === undefined || isQueuedMarker(node.detail) || waitingForSupervisor || node.dueAt !== undefined) return false;
+	if (node.kind === "resource-group" || node.kind === "peer" || node.kind === "activity" || node.kind === "script") return false;
+	return stallMs > 0 && now - (node.lastAdvanceAt ?? node.startedAt) >= stallMs;
+}
+
 /** "1m 15s" while a running node keeps advancing; "⚠ stalled 1m 30s" once it has been quiet
  *  for `stallMs`. Undefined for settled nodes, nodes without clock data, or a node still carrying
  *  the "queued" marker — it was seeded ahead of the concurrency gate and has not started running
@@ -157,7 +164,7 @@ export function runningAnnotation(node: Pick<AgentNode, "status" | "startedAt" |
 		return left > 0 ? `${elapsed} · deadline in ${formatDuration(left)}` : `${elapsed} · deadline reached`;
 	}
 	const quietSince = node.lastAdvanceAt ?? node.startedAt;
-	if (stallMs > 0 && now - quietSince >= stallMs) return `⚠ stalled ${formatDuration(now - quietSince)}`;
+	if (isStalledNode(node, now, stallMs, waitingForSupervisor)) return `⚠ stalled ${formatDuration(now - quietSince)}`;
 	return formatDuration(now - node.startedAt);
 }
 
@@ -277,16 +284,17 @@ function isWorkerNode(node: AgentNode, parents: ReadonlySet<string>): boolean {
 		&& node.kind !== "council" && node.kind !== "flow" && node.kind !== "phase";
 }
 
-function waitingDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): string | undefined {
+function waitingDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): { text: string; compact: string } | undefined {
 	if (!waitingForSupervisor) return undefined;
 	const waiting = hidden.filter((node) => node.status === "running" && isWorkerNode(node, parents) && !isQueuedMarker(node.detail) && waitingForSupervisor.has(node.id));
 	if (waiting.length === 0) return undefined;
 	const representative = safeDigestInline(waiting[0]!.label) || safeDigestInline(waiting[0]!.id) || "worker";
-	return `? ${waiting.length} waiting for supervisor: ${representative}`;
+	const compact = `? ${waiting.length} waiting for supervisor`;
+	return { text: `${compact}: ${representative}`, compact };
 }
 
 /** Counts only hidden running workers and uses the first one in tree order as a stable representative. */
-function activeWorkerDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): string | undefined {
+function activeWorkerDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): { text: string; compact: string } | undefined {
 	const workers = hidden.filter((node) => node.status === "running" && isWorkerNode(node, parents)
 		&& !isQueuedMarker(node.detail) && !waitingForSupervisor?.has(node.id));
 	if (workers.length === 0) return undefined;
@@ -294,7 +302,8 @@ function activeWorkerDigestLine(hidden: readonly AgentNode[], parents: ReadonlyS
 	const identity = safeDigestInline(representative.label) || safeDigestInline(representative.agent ?? "") || safeDigestInline(representative.id) || "worker";
 	const detail = representative.detail ? safeDigestInline(representative.detail) : "";
 	const label = `${workers.length} active worker${workers.length === 1 ? "" : "s"}: ${identity}${detail ? ` · ${detail}` : ""}`;
-	return `${nodeGlyph({ status: "running", kind: "subagent" })} ${label}`;
+	const glyph = nodeGlyph({ status: "running", kind: "subagent" });
+	return { text: `${glyph} ${label}`, compact: `${glyph} ${workers.length} active worker${workers.length === 1 ? "" : "s"}` };
 }
 
 /**
@@ -305,11 +314,18 @@ function activeWorkerDigestLine(hidden: readonly AgentNode[], parents: ReadonlyS
  * and active workers stay represented in a stable tree order. The overflow hint has the lowest
  * priority, and every line stays inside `maxRows`.
  */
-export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}): string[] {
-	const rows = renderAgentTree(nodes, opts);
-	const limit = Math.max(1, Math.floor(maxRows));
-	if (rows.length <= limit) return rows;
+export interface AgentSummaryRow {
+	kind: "node" | "failure" | "waiting" | "wake" | "active" | "overflow";
+	text: string;
+	/** Concise equivalent for combining this row with other essential signals. */
+	compact: string;
+	nodeId?: string;
+}
+
+/** Build digest rows from the actual hidden nodes, regardless of how visible rows were chosen. */
+export function projectAgentTreeDigests(nodes: AgentNode[], hidden: readonly AgentNode[], opts: RenderOptions = {}): AgentSummaryRow[] {
 	let failureLine: string | undefined;
+	let failureCompact: string | undefined;
 	const failed = nodes.filter((node) => node.status === "failed");
 	if (failed.length > 0) {
 		const names = failed.slice(0, 2).map((node) => {
@@ -319,24 +335,28 @@ export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: Re
 		});
 		const extra = failed.length - names.length;
 		failureLine = `✗ ${failed.length} failed: ${names.join(", ")}${extra > 0 ? `, +${extra} more` : ""}`;
+		failureCompact = `✗ ${failed.length} failed`;
 	}
-	// `flattenTree(nodes)[i]` is the node behind `rows[i]`: `renderAgentTree` and `flattenTree` walk the
-	// same parent→children order, so a row's flat index doubles as its position in the rendered list.
-	const flat = flattenTree(nodes);
 	const parents = new Set(nodes.flatMap((node) => node.parentId === undefined ? [] : [node.parentId]));
-	const summaryLines = (visibleCount: number): string[] => {
-		const hidden = flat.slice(visibleCount).map((row) => row.node);
-		const hiddenWake = hidden.filter((node) => node.kind === "activity" || (isWakeSource(node) && node.status === "running"));
-		const wakeLine = hiddenWake.length > 0 ? wakeDigestLine(hiddenWake, opts.now) : undefined;
-		const waitingLine = waitingDigestLine(hidden, parents, opts.waitingForSupervisor);
-		const activeLine = activeWorkerDigestLine(hidden, parents, opts.waitingForSupervisor);
-		return [
-			...(failureLine !== undefined ? [failureLine] : []),
-			...(waitingLine !== undefined ? [waitingLine] : []),
-			...(wakeLine !== undefined ? [wakeLine] : []),
-			...(activeLine !== undefined ? [activeLine] : []),
-		];
-	};
+	const hiddenWake = hidden.filter((node) => node.kind === "activity" || (isWakeSource(node) && node.status === "running"));
+	const wakeLine = hiddenWake.length > 0 ? wakeDigestLine(hiddenWake, opts.now) : undefined;
+	const waitingLine = waitingDigestLine(hidden, parents, opts.waitingForSupervisor);
+	const activeLine = activeWorkerDigestLine(hidden, parents, opts.waitingForSupervisor);
+	return [
+		...(failureLine !== undefined ? [{ kind: "failure" as const, text: failureLine, compact: failureCompact! }] : []),
+		...(waitingLine !== undefined ? [{ kind: "waiting" as const, ...waitingLine }] : []),
+		...(wakeLine !== undefined ? [{ kind: "wake" as const, text: wakeLine, compact: wakeLine }] : []),
+		...(activeLine !== undefined ? [{ kind: "active" as const, ...activeLine }] : []),
+	];
+}
+
+export function projectAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}, preferredIds: readonly string[] = []): AgentSummaryRow[] {
+	const rows = renderAgentTree(nodes, opts);
+	const flat = flattenTree(nodes);
+	const limit = Math.max(1, Math.floor(maxRows));
+	const visibleRows = (count: number): AgentSummaryRow[] => rows.slice(0, count).map((text, index) => ({ kind: "node", text, compact: text, ...(flat[index] ? { nodeId: flat[index]!.node.id } : {}) }));
+	if (rows.length <= limit) return visibleRows(rows.length);
+	const summaryLines = (visibleCount: number): AgentSummaryRow[] => projectAgentTreeDigests(nodes, flat.slice(visibleCount).map((row) => row.node), opts);
 	let visibleCount = Math.max(0, limit - 1);
 	// Digest rows can expose more hidden categories as the visible prefix shrinks. The candidate
 	// set only grows, and there are four bounded digest kinds, so this reaches a fixed point quickly.
@@ -350,9 +370,49 @@ export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: Re
 	const selected = summaryLines(visibleCount).slice(0, limit);
 	const tail = [
 		...selected,
-		...(selected.length < limit ? [`… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`] : []),
+		...(selected.length < limit ? [{ kind: "overflow" as const, text: `… +${rows.length - visibleCount} more · F9 or /agents for the full live tree`, compact: `+${rows.length - visibleCount} more` }] : []),
 	];
-	return [...rows.slice(0, visibleCount), ...tail];
+	const result = [...visibleRows(visibleCount), ...tail];
+	if (preferredIds.length === 0) return result;
+	const nodeById = new Map(nodes.map((node) => [node.id, node]));
+	const visibleNode = (id: string): AgentSummaryRow | undefined => {
+		const index = flat.findIndex((row) => row.node.id === id);
+		return index < 0 ? undefined : { kind: "node", nodeId: id, text: rows[index]!, compact: rows[index]! };
+	};
+	const replaceable = (item: AgentSummaryRow): boolean => item.kind === "node" && !!item.nodeId
+		&& nodeById.get(item.nodeId)?.status !== "failed" && !opts.waitingForSupervisor?.has(item.nodeId);
+	for (const id of [...preferredIds].reverse()) {
+		if (result.some((item) => item.nodeId === id)) continue;
+		const desired = visibleNode(id);
+		const index = result.findLastIndex((item) => replaceable(item) && !preferredIds.includes(item.nodeId!));
+		if (desired && index >= 0) result[index] = desired;
+	}
+	// Reconcile the canonical digest priorities against the final visible IDs. A reservation
+	// can reveal a new digest kind; make room by dropping overflow, then a preferred control,
+	// then a lower-priority digest. Recompute whenever a visible node is displaced.
+	const priority: Partial<Record<AgentSummaryRow["kind"], number>> = { failure: 0, waiting: 1, wake: 2, active: 3, overflow: 4 };
+	for (let pass = 0; pass < limit * 4 + 4; pass++) {
+		const visible = new Set(result.flatMap((item) => item.kind === "node" && item.nodeId ? [item.nodeId] : []));
+		const hidden = flat.filter((row) => !visible.has(row.node.id)).map((row) => row.node);
+		const desired = projectAgentTreeDigests(nodes, hidden, opts);
+		for (let index = 0; index < result.length; index++) {
+			const replacement = desired.find((item) => item.kind === result[index]!.kind);
+			if (replacement) result[index] = replacement;
+		}
+		const missing = desired.find((item) => !result.some((existing) => existing.kind === item.kind));
+		if (!missing) break;
+		let index = result.findLastIndex((item) => item.kind === "overflow");
+		if (index < 0) index = result.findLastIndex((item) => replaceable(item) && preferredIds.includes(item.nodeId!));
+		if (index < 0) index = result.findLastIndex((item) => replaceable(item));
+		if (index < 0) index = result.findLastIndex((item) => (priority[item.kind] ?? -1) > (priority[missing.kind] ?? -1));
+		if (index < 0) break;
+		result[index] = missing;
+	}
+	return result;
+}
+
+export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}): string[] {
+	return projectAgentTreeSummary(nodes, maxRows, opts).map((row) => row.text);
 }
 
 export interface AddNodeInput {

@@ -28,6 +28,13 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Intercom send cards use the recipient's assigned name, with the exact bus handle and sent
+  message in expandable details; the identity snapshot survives worker disposal and history replay.
+- Delegate batch headings share click and keyboard folding with timer,
+  monitor and script groups in the live widget and F9, retaining hidden-worker attention counts.
+- Parallel delegate refusals for missing write ownership retain the submitted arguments and the
+  admission assessment in expandable details, so misplaced fields and inherited writer tools can
+  be diagnosed without enlarging the collapsed card or the model-facing error.
 - Periodic Intercom wakes now share the completion delivery's bounded snapshot and consume notes
   only after a successful host send. Failed sends preserve unread messages for retry; clipped
   deliveries retain message IDs for explicit retrieval.

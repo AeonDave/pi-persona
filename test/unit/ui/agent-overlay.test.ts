@@ -857,6 +857,25 @@ test("clicking a category in F9 folds only that category", () => {
 	overlay.dispose();
 });
 
+test("delegate fold state is shared with the widget, and Enter still opens its group", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "batch", label: "delegate", kind: "delegate", detail: "2 legs" });
+	tree.add({ id: "leg1", parentId: "batch", label: "first worker", kind: "subagent" });
+	tree.add({ id: "leg2", parentId: "batch", label: "second worker", kind: "subagent" });
+	const collapsedGroups = new Set<string>();
+	const overlay = wakeOverlay(tree, { collapsedGroups });
+	overlay.render(120);
+	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 3, screenX: 4, screenY: 3, width: 120, height: 10, shift: false, alt: false, ctrl: false });
+	assert.ok(collapsedGroups.has("batch"));
+	assert.doesNotMatch(overlay.render(120).join("\n"), /first worker|second worker/);
+	overlay.handleInput(" ");
+	assert.ok(!collapsedGroups.has("batch"));
+	assert.match(overlay.render(120).join("\n"), /first worker/);
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /Group overview/);
+	overlay.dispose();
+});
+
 test("Exocom peer presence refreshes in F9 without gaining worker controls", () => {
 	const tree = new AgentTree(() => 0);
 	let peers: { key: string; name: string; status: "online" | "idle" }[] = [{ key: "1", name: "Ada", status: "online" }];

@@ -103,20 +103,22 @@ Completions, blocking asks, and unread worker messages keep their supervisor wak
 Launch and control cards show the worker's assigned name. Intercom and Exocom updates identify
 the sender with `from <name>:`; compact messages omit model metadata. Click a card or press
 `Ctrl+O` (the default binding) to see its full details, including the submitted delegation prompt
-or steering message. Model, effort and routing diagnostics remain available in the detailed views.
+or an Intercom `send`/`steer` message. Model, effort and routing diagnostics remain available in the detailed views.
 A queued message is not proof that the worker has acted on it.
 
 For parallel edits, give each writer an explicit, disjoint `writeSet` of repository-relative paths.
 Read-only investigations can use `scout` or a read-only tool grant. If writers share files, run
 them sequentially with `concurrency: 1`; the ownership check does not infer safe edit boundaries
 from task prose. Ownership coordinates writers and does not sandbox their filesystem access.
+If a parallel call is rejected for missing `writeSet`, expand its card to inspect the submitted
+arguments and the tool grants that made each task a potential writer.
 
 | Key or command | Action |
 |---|---|
 | **F8** | Cycle through installed personas |
 | **F9** or `/agents` | Open the live panel: sub-agents, Exocom peers, timers, monitors and scripts |
 | **Enter** / **s** / **x** / **X** in the panel | Open details / steer a worker / stop the selected controllable item / stop running agents from the tree (press twice) |
-| **Space** / **Left** / **Right** on a resource group | Toggle / collapse / expand timers, monitors, scripts or Exocom peers |
+| **Space** / **Left** / **Right** on a group | Toggle / collapse / expand delegate batches, timers, monitors, scripts or Exocom peers |
 | `/peek` | Show a compact progress summary |
 | `/flow <name> <task>` | Run a flow (`/flow` alone lists them with descriptions; a `gate: true` phase pauses for your approval). `/orchestrate <task>` runs the active persona's `orchestration:` block (no bundled persona declares one; they use `council:` via the `council` tool) |
 | `/persona list` | List installed personas |
@@ -135,6 +137,8 @@ Escape returns to the group. Model, thinking effort, current activity and cumula
 distinct. Completed delegate legs keep a short result preview until the batch finishes; use
 Intercom for the retained report afterward. Large groups keep hidden activity and pending asks
 visible in the compact summary without expanding the widget over your conversation.
+Click the `delegate` group heading in alternate-screen mode to hide or show its workers. Folding
+shares its state with F9; collapsed groups retain attention counts for failures, asks and stalls.
 
 For time-based work, ask “remind me in ten minutes.” For an event, ask “let me know when this build
 finishes.” Keep Pi open while timers and monitors are running; they are not restored after a restart.

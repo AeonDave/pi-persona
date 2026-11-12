@@ -24,12 +24,12 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, flattenTree, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { cumulativeUsageLine, groupLegBrief, groupLegMetadata, groupLegStatus, isAgentGroup, projectAgentGroup } from "./agent-group.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
-import { isResourceGroup, projectPeers, projectResourceGroups, type PeerPresence } from "./resource-groups.ts";
+import { foldedRows, isFoldableRow, projectPeers, projectResourceGroups, type PeerPresence } from "./resource-groups.ts";
 
 function safeInline(value: string, maxChars = 96): string {
 	return compactInlineText(value, { maxChars });
@@ -240,7 +240,7 @@ export class AgentOverlay extends Container {
 	}
 
 	private selectableRows(snap: AgentNode[] = this.viewNodes()): FlatRow[] {
-		return flattenTree(projectResourceGroups(snap)).filter((row) => row.node.parentId === undefined || !this.collapsedGroups.has(row.node.parentId));
+		return foldedRows(projectResourceGroups(snap), this.collapsedGroups, { now: this.now(), stallMs: this.actions.stallMs ?? 0, waitingForSupervisor: this.waitingNodeIds(snap) });
 	}
 
 	/**
@@ -317,7 +317,7 @@ export class AgentOverlay extends Container {
 			if (this.listScroll > 0) this.addChild(new Text(t.fg("dim", `▲ ${this.listScroll} above`), 1, 0));
 			for (const row of rows.slice(this.listScroll, end)) {
 				const composed = composeAgentRow({
-					node: isResourceGroup(row.node.id) ? { ...row.node, label: `${this.collapsedGroups.has(row.node.id) ? "▸" : "▾"} ${row.node.label}` } : row.node,
+					node: isFoldableRow(row.node, nodes) ? { ...row.node, label: `${this.collapsedGroups.has(row.node.id) ? "▸" : "▾"} ${row.node.label}` } : row.node,
 					depth: row.depth,
 					selected: row.node.id === selected?.id,
 					inner: this.inner(),
@@ -333,7 +333,7 @@ export class AgentOverlay extends Container {
 		this.addChild(new Spacer(1));
 		const stoppable = selected !== undefined && this.canStopNode(selected, nodes);
 		const steerable = selected !== undefined && this.canSteerNode(selected, nodes);
-		const foldHint = selected && isResourceGroup(selected.id) ? "   space fold" : "";
+		const foldHint = selected && isFoldableRow(selected, nodes) ? "   space fold" : "";
 		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
 		this.renderNotice();
 	}
@@ -582,7 +582,7 @@ export class AgentOverlay extends Container {
 			this.refresh();
 		} else if (keyData === " " || keyData === "\x1b[D" || keyData === "\x1b[C") {
 			const leaf = this.selectedLeaf(leaves);
-			if (leaf && isResourceGroup(leaf.node.id)) {
+			if (leaf && isFoldableRow(leaf.node, nodes)) {
 				const id = leaf.node.id;
 				if (keyData === "\x1b[D" || (keyData === " " && !this.collapsedGroups.has(id))) this.collapsedGroups.add(id);
 				else this.collapsedGroups.delete(id);
@@ -626,7 +626,9 @@ export class AgentOverlay extends Container {
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (!this.detailId && !this.groupId && event.type === "click" && event.button === "left") {
 			const id = this.mouseListIds[event.y - this.mouseListStart];
-			if (id && isResourceGroup(id) && this.viewNodes().some((node) => node.id === id)) {
+			const nodes = this.viewNodes();
+			const node = nodes.find((candidate) => candidate.id === id);
+			if (id && node && isFoldableRow(node, nodes)) {
 				this.selectedId = id;
 				if (!this.collapsedGroups.delete(id)) this.collapsedGroups.add(id);
 				this.actions.onGroupToggle?.();
