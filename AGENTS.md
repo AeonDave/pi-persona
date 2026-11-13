@@ -15,10 +15,13 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Omitting the argument uses the development SDK; pass an installed host entry to qualify that version.
 - One file: `node --import tsx --import ./test/setup/hermetic-env.ts --test test/unit/core/frontmatter.test.ts`
   - The second `--import` is the hermeticity choke point: it strips the whole `PI_PERSONA_*`
-    namespace and pins `PI_AGENT_DIR` at a throwaway dir before any test module loads, so a
+    namespace and pins `PI_AGENT_DIR` plus the SDK's `PI_CODING_AGENT_DIR` at the same throwaway dir before any test module loads, so a
     variable exported in your shell (or by CI) cannot reconfigure the extension under the suite.
     A test that exercises a variable sets it for itself, after that has run. Drop the flag and you
     are testing your shell, not the code.
+- Native search integration tests need real `rg` and `fd` binaries on `PATH`. CI prepares them with
+  `node test/setup/prepare-native-tools.mjs` before offline execution; the helper uses Pi's downloader
+  in an isolated directory and appends its bin path to `GITHUB_PATH` (use a temporary path file locally).
 - Live end-to-end (REAL model calls, spends tokens): `npm run drive -- --persona <name> --model <provider/id> "<prompt>"`
   - `drive.ts` exits non-zero and prints `[persona] ...` when the requested persona is not installed.
   - Control ops: `LIVE_MODEL=<provider/id> node --import tsx scripts/control-test.mjs` (STEER/STOP/RESUME)

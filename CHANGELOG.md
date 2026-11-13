@@ -101,6 +101,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Tests
 
+- Prepare real native search binaries before offline SDK integration tests and isolate both Persona
+  and SDK agent-directory overrides. POSIX FIFO fixtures use the current SDK execution context and
+  structured exit status without skipping the real FIFO check.
 - Installed-package qualification installs only the candidate's declared runtime dependencies in
   its temporary package directory, checks that Pi peers still resolve to the host, and executes
   JavaScript and TypeScript outlines from the tarball on both engines without runtime network traffic.

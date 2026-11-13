@@ -1,7 +1,7 @@
 # pi-persona
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/AeonDave/pi-persona/v1.18.0/assets/banner.png" alt="pi-persona — supervised multi-agent orchestration for Pi">
+  <img src="assets/banner.png" alt="pi-persona — supervised multi-agent orchestration for Pi">
 </p>
 
 [![CI](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/AeonDave/pi-persona/badge)](https://scorecard.dev/viewer/?uri=github.com/AeonDave/pi-persona) [![npm version](https://img.shields.io/npm/v/@aeondave/pi-persona?logo=npm)](https://www.npmjs.com/package/@aeondave/pi-persona) [![License](https://img.shields.io/github/license/AeonDave/pi-persona)](LICENSE)
@@ -195,6 +195,9 @@ npm ci
 npm run typecheck
 npm test
 ```
+
+Native search integration tests require real `rg` and `fd` on `PATH`; CI prepares them with Pi's
+downloader before offline tests. See [AGENTS.md](AGENTS.md) for isolated preparation.
 
 Pi loads the TypeScript extension directly; there is no build step. See [AGENTS.md](AGENTS.md) for
 contribution conventions, the [architecture](docs/ARCHITECTURE.md#module-layout) for module boundaries,

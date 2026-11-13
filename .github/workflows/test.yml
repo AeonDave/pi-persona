@@ -25,4 +25,7 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=low
       - run: npm run typecheck
+      - name: Prepare real native tools before offline integration tests
+        timeout-minutes: 5
+        run: node test/setup/prepare-native-tools.mjs
       - run: npm test

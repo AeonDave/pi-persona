@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,8 +22,11 @@ test("code_outline rejects a real FIFO without a writer without hanging", async 
 	const dir = await mkdtemp(join(tmpdir(), "pi-outline-fifo-"));
 	try {
 		const bash = createBashTool(dir);
-		const fixture = await (bash.execute as unknown as (id: string, params: { command: string }, signal: AbortSignal, update: undefined, ctx: typeof context) => Promise<{ content?: Array<{ text?: string }>; details?: { exitCode?: number } }>)("test", { command: "mkfifo fixture.ts" }, new AbortController().signal, undefined, { ...context, cwd: dir });
-		assert.equal(fixture.details?.exitCode, 0, JSON.stringify(fixture));
+		// The public AgentTool API uses the constructor cwd without a fabricated ExtensionContext.
+		const fixture = await bash.execute("test", { command: "mkfifo fixture.ts", timeout: 5 }, new AbortController().signal);
+		assert.ok(fixture.structuredContent && typeof fixture.structuredContent === "object" && "exit_code" in fixture.structuredContent, JSON.stringify(fixture));
+		assert.equal(fixture.structuredContent.exit_code, 0, JSON.stringify(fixture));
+		assert.ok((await lstat(join(dir, "fixture.ts"))).isFIFO(), "fixture is a real FIFO");
 		const tool = makeCodeOutlineTool();
 		const call = tool.execute as unknown as (id: string, params: { path: string }, signal: undefined, update: undefined, ctx: typeof context) => Promise<unknown>;
 		await Promise.race([
