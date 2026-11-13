@@ -24,7 +24,10 @@ and the exact commands in the question. To verify without changing anything, del
 with the commands and an instruction to change nothing. After launching, end your turn: the ruling
 wakes you (headless: the call returns it inline). An unapproved ruling carries the last draft and
 the unresolved critique: convene again on that failure alone, with its output in the question. The
-same cause surviving a second loop is a blocker, reported with its failing output.
+next attempt should reassess the cause and changed evidence, not repeat an unchanged loop. Continue
+with a discriminating test or different supported approach; report a concrete blocker or remaining
+unproved work with the failing output, not an arbitrary attempt-count surrender. Follow supplied
+execution constraints and pass supplied requirements to both legs; runtime owns run limits.
 
 **Evidence bar.** A pass is a check run on the final tree, quoted with command and exit status; any
 later edit voids it, yours included, so an inline change goes to a fresh `verifier` first. An

@@ -123,6 +123,14 @@ Pi's grep/find implementations may download their native `rg`/`fd` helper binari
 
 `code_outline({ path, query?, limit? })` reads one regular source file from the project cwd (or an absolute path) and returns named syntax declarations, their kind/container and inclusive physical line ranges. `query` is a literal case-insensitive substring over the name, kind or container. `limit` is 1–200 (default 80); a matching count, `hasMore` and `truncated` report omitted rows. Input is capped at 256 KiB and rendered output at 16 KiB. Fatal UTF-8, parser syntax errors and unsupported extensions are errors rather than empty outlines or text-search fallbacks. The output header reports the selected language and grammar plus a SHA-256 computed from the bytes read; it does not claim an external hash match.
 
+Extraction also rejects inputs exceeding depth 256 (root-relative AST/helper traversal or container
+nesting), 100,000 shared traversal/helper work units, or 4 MiB of aggregate UTF-16 symbol metadata
+(names, kinds and containers). These budgets apply before query filtering and row selection: a
+nonmatching query or `limit: 1` cannot bypass them. Exceeding a budget is an explicit resource-limit
+error, not a partial outline with a misleading exact count. Inspect smaller source excerpts instead.
+Parsing itself remains synchronous and input-bounded; these extraction limits are not a parser
+wall-clock timeout.
+
 One MIT-licensed `@vscode/tree-sitter-wasm` dependency supplies all parser grammars. Parser/WASM initialization and finite grammar loading are lazy until an authorized tool call; the AST-only core remains pure and does not read files or initialize Pi. Trees and parser instances are disposed after each extraction; no source index or persistent cache is kept.
 
 Supported filename families are JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), Python (`.py`, `.pyi`), Go (`.go`), Rust (`.rs`), C# (`.cs`), and common C/C++ source/header extensions. C `.c` and ambiguous `.h` are explicitly reported as C-family and parsed with the bundled C++ grammar; C syntax recognition does not establish strict-C validity or compile the file. C# output outlines source only—not VB/F# or .NET binary decompilation. Syntax outlines do not resolve names, type-check, compile, or prove runtime behavior.
@@ -184,6 +192,12 @@ Periodic unread-message wakes and completion wakes share a 12,000-character deli
 When content is clipped, a retained footer supplies the consumed message IDs for explicit
 `intercom message` retrieval within the bus's retention window. A failed host send leaves its
 snapshot unread for retry; active questions stay on their separate reply path.
+
+A live result's first page covering its entire body, or an explicit `collect: true`, acknowledges
+that result and returns pending non-blocking notes in the same tool response. The note block is
+bounded separately, so the result page and its offsets are unchanged. Notes are consumed once and
+keep their retrieval IDs; no duplicate completion wake is needed. Partial pages without collection,
+archived-reference reads, active asks and later-arriving notes retain their existing behavior.
 
 When supervisor contact is available, an async child's `decision` or `interview` waits for a supervisor reply.
 A headless (inline) child posts the question one-way without waiting: the supervisor is parked

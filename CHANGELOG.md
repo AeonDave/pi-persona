@@ -6,8 +6,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.18.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.18.0) - 2026-11-13
+
 ### Added
 
+- `reverser` and `multiagent` supervisor personas: skill/appskill-led artifact analysis and
+  general-purpose task coordination, respectively, without hardcoded skill or tool inventories.
 - Grouped Timers, Monitors and Scripts in the live widget and F9, with shared fold state,
   mouse support in alternate-screen mode and keyboard controls. F9 includes read-only Exocom peers.
 - Asynchronous `script` execution for literal executable arguments or inline Pi shell commands,
@@ -17,6 +21,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
+- Bundled personas now express specialized methods rather than autonomous authorization policies
+  or tool vetoes. Planner, Researcher and Audit can follow through on requested implementation;
+  supplied user/project/platform constraints and runtime permission enforcement remain authoritative.
+  Elite requires actual domain-skill loading while retaining its technical player-coach standing.
+- Worker model and effort selection is task-fit within the selected provider. Aggregator guidance
+  defaults to a small useful set of workers on the supervisor's exact model, not a catalog sweep.
 - Target Pi 1.5.2, with the four development SDK packages updated together. Host packages
   remain wildcard peers supplied by Pi. Removed the obsolete development-only `undici` override:
   the current host already pins the patched version. Idle compaction remains qualification-blocked.
@@ -28,6 +38,17 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Custom messages and history cards share primary-click expansion through the common frame,
+  including companion consumers. Local expansion survives ordinary renderer rebuilds; global
+  expansion changes remain authoritative and native tool shells retain their own click handling.
+- F9 closes the agent panel from list, group, detail and steering views without submitting drafts
+  or stopping workers. Global `X` stop-all includes workers inside collapsed groups; presentation
+  folding no longer changes the runtime cancellation set.
+- Explicit live result collection returns pending non-blocking Intercom notes without duplicating
+  the completion wake. Notes remain separately bounded and retrievable without changing result
+  pagination; active asks and messages outside the delivered snapshot remain unread.
+- `code_outline` rejects excessive structural/traversal/metadata work explicitly, before deep
+  nesting can amplify intermediate allocations. Query and row limits do not bypass those budgets.
 - Delegate launch receipts show inherited effort as well as explicit selections, retain it in
   history, and reserve its space when long names require compacting the row.
 - Intercom send cards use the recipient's assigned name, with the exact bus handle and sent

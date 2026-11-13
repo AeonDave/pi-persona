@@ -87,4 +87,3 @@ export function statusPreview(full: string, labels: ReadonlyMap<string, string>)
 		return { text: visible.join("\n"), truncated: true };
 	};
 }
-

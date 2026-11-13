@@ -158,7 +158,7 @@ with their callers. Genuine host failures remain explicit rather than fabricatin
 or model availability. One-way user-data migrations and retained-history readers are separate data
 contracts: they remain only while serving stored user data, not to support an older Pi runtime.
 
-The `code_outline` boundary follows the same direction: `src/tools/code-outline.ts` owns bounded file I/O, the computed-from-read-bytes digest, fencing and formatting; `src/tools/code-outline-parser.ts` lazily resolves the installed WASM package entry and loads only the selected grammar on first execution. It disposes each parser/tree after synchronous extraction and retains no source/project cache. `src/core/code-outline.ts` is a pure AST walker over an already-parsed root and runtime metadata; it imports neither Pi nor the parser package at runtime and performs no filesystem access. Parser syntax errors fail closed. C-family `.c` and ambiguous `.h` are explicitly labeled and use the C++ grammar, so this is not strict-C/compiler validation.
+The `code_outline` boundary follows the same direction: `src/tools/code-outline.ts` owns bounded file I/O, the computed-from-read-bytes digest, fencing and formatting; `src/tools/code-outline-parser.ts` lazily resolves the installed WASM package entry and loads only the selected grammar on first execution. It disposes each parser/tree after synchronous extraction and retains no source/project cache. `src/core/code-outline.ts` is a pure AST walker over an already-parsed root and runtime metadata; it imports neither Pi nor the parser package at runtime and performs no filesystem access. Parser syntax errors fail closed. Extraction additionally enforces depth, shared traversal/helper-work and aggregate symbol-metadata budgets before materializing excessive state, irrespective of query or row limit. Accepted results retain exact match counts while storing only requested rows; a budget overrun fails explicitly and still disposes the parser/tree. These are extraction guards, not a synchronous-parser wall-clock timeout. C-family `.c` and ambiguous `.h` are explicitly labeled and use the C++ grammar, so this is not strict-C/compiler validation.
 
 Domain dependencies point toward the kernel: `core ← all`; the bus and Exocom transport/ledger
 do not import presentation or the composition root. Orchestration composes engine, bus and core
@@ -718,7 +718,11 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   consumption commits only after the host send succeeds; active asks keep their separate reply path.
   Periodic inbox delivery uses the same snapshot, formatting budget and commit-after-send helper
   (`extension/completion-delivery.ts`). Failed sends leave notes unread for retry; a message arriving
-  during delivery is not part of that consumed snapshot;
+  during delivery is not part of that consumed snapshot. Explicit live result collection carries
+  the same pending non-blocking notes in its tool response before suppressing the duplicate
+  completion. Its separately bounded note block does not shorten the result page or change page
+  offsets; partial unacknowledged pages and archived-reference reads do not consume notes. Active
+  asks and messages outside the delivered snapshot remain unread;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
   Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card
   names each failed leg on its own line, and a failed council/flow card leads with the cause in its title;
@@ -764,7 +768,17 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   entry cards read current `pi.getSettings().outputPad` (native 0/1, default 1), because entry renderer
   options do not carry padding. Titles, bodies and expand hints receive that outer padding once.
   An explicitly empty compact preview produces a title-only informational note rather than a false
-  `(no output)` body; hidden full detail still exposes the expansion hint. Expansion remains complete;
+  `(no output)` body; hidden full detail still exposes the expansion hint. Expansion remains complete.
+  Custom message/entry consumers may opt into primary-click expansion with the additive optional
+  `CardFrameContext.expansionKey` (the stable original message/entry envelope). The shared frame keeps
+  only `{ lastHostExpanded, expanded }` booleans in a `WeakMap`, preserves a local click across host
+  rebuilds while the host boolean is unchanged, and lets an actual host expanded-state transition
+  override it. It uses Pi TUI's `MouseRegion` click contract (same primary-click/modifier/double-click
+  behavior as native tool output); wheel, drag and nonprimary events stay unhandled, and complete
+  previews do not consume clicks. `session-cards.ts` opts every registered type in. Native tool
+  renderers omit the key and retain Pi's own click owner. The optional context field does not change
+  the v1 query response shape; companions may adopt it independently. This state is frontend-only:
+  it retains no transcript text and changes no delivery, persistence or wake path;
 - loaded companions can reuse the same frame through the synchronous `pi-persona:card-frame:v1`
   presentation query: `{ version: 1, respond }` receives `{ version: 1, provider: "pi-persona",
   createCard }`. Mind queries at render invocation rather than hard-importing an optional package or
@@ -802,7 +816,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   digests before the generic overflow line, in that priority order when space is insufficient.
   Hidden active workers exclude queued/waiting/settled rows and containers; the representative follows
   tree order rather than changing with each progress event;
-- `X` is not a directed key: it acts on the whole stoppable set of leaf rows after a confirmation that
+- `X` is not a directed key: it uses the complete runtime tree, independently of presentation folding,
+  and acts on the whole stoppable set of leaf rows after a confirmation that
   states how many agents it covers, and a changed set is re-confirmed. The set is every agent leaf (wake
   rows excepted) plus any run root with a stop handle (council/flow/mandated runs), and `x` on such a
   root stops the whole run.

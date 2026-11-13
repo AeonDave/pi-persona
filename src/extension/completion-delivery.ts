@@ -1,4 +1,4 @@
-/** Last unread worker notes belong to the existing completion wake, never a new polling timer. */
+/** Unread worker notes share automatic completion delivery or explicit live result collection, never a new polling timer. */
 import type { Envelope, InProcessBus } from "../bus/inproc.ts";
 import { boundCompletionSurface, MAX_COMPLETION_REPORT_CHARS, type AsyncRun } from "../engine/async.ts";
 import { formatIntercomDelivery } from "../tools/intercom.ts";

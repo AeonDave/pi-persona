@@ -74,6 +74,13 @@ test("code_outline factory returns an executable native definition and rechecks 
     const large = await call("test", { path, limit: 200 }, undefined, undefined, { ...context, cwd: dir });
     assert.ok(Buffer.byteLength(large.content[0]?.text ?? "", "utf8") <= 16 * 1024);
     assert.ok(large.details.symbols.length <= 200);
+    await writeFile(path, "namespace N {".repeat(8000) + "function f() {}" + "}".repeat(8000));
+    await assert.rejects(call("deep", { path, query: "nonmatch", limit: 1 }, undefined, undefined, { ...context, cwd: dir }), /resource limit.*depth.*smaller.*query and limit/i);
+    await writeFile(path, "export function recovered() {}");
+    const recovered = await call("recovery", { path }, undefined, undefined, { ...context, cwd: dir });
+    assert.deepEqual(recovered.details.symbols.map((symbol) => symbol.name), ["recovered"]);
+    assert.match(recovered.content[0]?.text ?? "", /^Sub-agent output/);
+    assert.ok(Buffer.byteLength(recovered.content[0]?.text ?? "", "utf8") <= 16 * 1024);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

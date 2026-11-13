@@ -401,7 +401,8 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 	assert.equal(elite.council?.roster, "evidence-assurance");
 	assert.deepEqual(elite.council?.params, { rounds: 3 });
 	assert.deepEqual(elite.delegation, { requireBrief: true, outputContract: "finding" });
-	assert.match(elite.body, /target egress/i, "Elite makes the target's network egress an explicit invariant");
+	// Supersedes the old persona-authored hard-boundary classifications: operating policy is inherited.
+	assert.match(elite.body, /constraints come from user\/project\/platform/i);
 	assert.match(
 		elite.body,
 		/local (?:CLI|process|stdio).*not (?:proof|evidence) of local (?:target )?egress/is,
@@ -409,18 +410,14 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 	);
 	assert.match(
 		elite.body,
-		/UNKNOWN\*\*: keep it off the target/i,
-		"Elite fails closed when a network-capable tool's target egress is unknown",
+		/propagate supplied requirements to\s+workers/i,
+		"Elite carries inherited operating requirements into delegated legs",
 	);
-	assert.match(
+	assert.match(elite.body, /no extra questionnaires or approval gates/i);
+	assert.doesNotMatch(
 		elite.body,
-		/every packet\s+names \*\*target traffic: local\/VPN only\*\*/i,
-		"Elite propagates the local/VPN-only boundary into delegated legs",
-	);
-	assert.match(
-		elite.body,
-		/## Evidence is a hard boundary[\s\S]*\*\*UNKNOWN\*\* is treated as HOSTED\/LOGGING/i,
-		"Elite classes the evidence route and fails closed on UNKNOWN, the defensive mirror of the egress boundary",
+		/LOCAL-VERIFIED|ZERO-RETENTION|HOSTED\/LOGGING/i,
+		"Elite does not define its own network, retention or model-route policy classes",
 	);
 	assert.match(
 		elite.body,

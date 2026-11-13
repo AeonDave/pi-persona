@@ -328,7 +328,7 @@ test("a live collect acknowledgment keeps its report rendering and never regress
 			completionNotifier: { peekPending: () => [], discard: () => {} },
 			intercomNotifier: { discard: () => {} },
 			controller: { activePersona: undefined },
-			bus: {},
+			bus: new InProcessBus(),
 			SUPERVISOR: "supervisor",
 			STALL_FLAG_MS: 90_000,
 			missingRunMessage: (id: string) => `missing ${id}`,

@@ -90,6 +90,36 @@ test("JS/TS/TSX keep overloads, anonymous defaults, computed-name rules and fake
 	assert.deepEqual(computed.symbols.map((symbol) => symbol.name), ["C", "literal", "42", "ordinary"]);
 });
 
+test("real parser rejects 8000 nested TS namespaces below the input cap even for nonmatching limit-one requests", async (t) => {
+	await run("function warmup() {}", "warmup.ts");
+	const namespace = await import("@vscode/tree-sitter-wasm");
+	const runtime = (namespace as unknown as { default?: typeof namespace }).default ?? namespace;
+	const deleteParser = runtime.Parser.prototype.delete;
+	const deleteTree = runtime.Tree.prototype.delete;
+	let parsersDeleted = 0;
+	let treesDeleted = 0;
+	t.mock.method(runtime.Parser.prototype, "delete", function (this: InstanceType<typeof runtime.Parser>) {
+		parsersDeleted++;
+		return deleteParser.call(this);
+	});
+	t.mock.method(runtime.Tree.prototype, "delete", function (this: InstanceType<typeof runtime.Tree>) {
+		treesDeleted++;
+		return deleteTree.call(this);
+	});
+	const source = "namespace N {".repeat(8000) + "function f() {}" + "}".repeat(8000);
+	assert.ok(Buffer.byteLength(source) < 256 * 1024);
+	for (const query of ["", "nonmatch"]) {
+		await assert.rejects(withParsedCodeOutline(bytes(source), "deep.ts", undefined, (root, selected, byteLength) =>
+			outlineParsedCode(root, { filename: "deep.ts", bytes: byteLength, ...selected, query, limit: 1 })), /resource limit.*depth/i);
+	}
+	assert.equal(parsersDeleted, 2);
+	assert.equal(treesDeleted, 2);
+	// The same cached grammar remains usable after consume throws and native resources are disposed.
+	assert.equal((await run("function healthy() {}", "healthy.ts")).symbols[0]?.name, "healthy");
+	assert.equal(parsersDeleted, 3);
+	assert.equal(treesDeleted, 3);
+});
+
 test("language selection is explicit and unsupported extensions fail without a regex fallback", async () => {
 	assert.deepEqual(selectCodeOutlineGrammar("x.c"), { language: "C-family C syntax", grammar: "cpp" });
 	assert.deepEqual(selectCodeOutlineGrammar("x.h"), { language: "C-family header (ambiguous)", grammar: "cpp" });

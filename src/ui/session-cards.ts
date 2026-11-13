@@ -84,12 +84,13 @@ export interface SessionCardOptions {
 }
 
 export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRenderer" | "registerEntryRenderer">, options: SessionCardOptions): void {
-	const sessionCard = (card: Card, expanded: boolean, theme: Theme, outputPad = 0, keyHint?: KeybindingHints["keyHint"]): Component =>
+	const sessionCard = (card: Card, expanded: boolean, theme: Theme, outputPad = 0, keyHint?: KeybindingHints["keyHint"], expansionKey?: object): Component =>
 		createCardFrame(card, {
 			expanded,
 			theme,
 			outputPad,
 			detailHint: keyHint ? () => keyHint("app.tools.expand", "to expand") : options.detailHint,
+			...(expansionKey ? { expansionKey } : {}),
 		});
 	for (const customType of ["pi-persona", "exocom_received"] as const) {
 		pi.registerMessageRenderer(customType, (message, { expanded, outputPad, keyHint }, theme) => {
@@ -101,7 +102,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				const compact = communication.messages.length > 0
 					? (width: number) => { const result = communicationPreview(communication, width); return { ...result, truncated: result.truncated || result.text !== full }; }
 					: preview(full, 4, 100);
-				return sessionCard({ title: `${communication.plane} update · info`, state: "neutral", full, preview: compact }, expanded, theme, outputPad, keyHint);
+				return sessionCard({ title: `${communication.plane} update · info`, state: "neutral", full, preview: compact }, expanded, theme, outputPad, keyHint, message);
 			}
 			const { state, status } = customType === "pi-persona" ? followUpState(full) : { state: "neutral" as const, status: "inbound" };
 			// Only the validated settlement envelope is a pi-persona report. Unknown is NOT
@@ -113,7 +114,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				title: customType === "pi-persona" ? `${status === "info" ? "update" : "intercom update"} · ${status}` : "exocom update · info",
 				state, full, markdown,
 				preview: projected ?? (customType === "pi-persona" && status !== "info" ? (width) => ({ ...fallback(width), truncated: true }) : fallback),
-			}, expanded, theme, outputPad, keyHint);
+			}, expanded, theme, outputPad, keyHint, message);
 		});
 	}
 	for (const [entryType, source] of [[MONITOR_LOG_ENTRY, "monitor"], [SCRIPT_LOG_ENTRY, "script"]] as const) {
@@ -126,7 +127,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
 				full: sanitizeTerminalText(options.processLog(record)),
 				preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · ${source.toLowerCase()} result`, truncated: true }),
-			}, expanded, theme, options.getOutputPad(), keyHint);
+			}, expanded, theme, options.getOutputPad(), keyHint, entry);
 		});
 	}
 	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded, keyHint }, theme) => {
@@ -137,7 +138,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 			title: `failed · ${compactInlineText(data.label || data.agent, { maxChars: 80 })}`, state: "error", metadata,
 			full: `Run ${compactInlineText(data.id)}${data.model ? `\nModel: ${compactInlineText(data.model, { maxChars: 96 })}` : ""}\n${sanitizeTerminalText(data.error)}`,
 			preview: (width) => ({ text: compactVisibleText(summarizeFailure(data.error), { maxLines: 2, maxLineChars: Math.min(width, 100) }).text, truncated: true }),
-		}, expanded, theme, options.getOutputPad(), keyHint);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 	pi.registerEntryRenderer<ResultEntry>("pi-persona-result", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
@@ -151,7 +152,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		return sessionCard({
 			title: `${label || "result"} · ${status}${state === "error" && cause !== "(no output)" ? ` · ${cause}` : ""}`,
 			state, full, markdown: true, preview: preview(full, 3, 100),
-		}, expanded, theme, options.getOutputPad(), keyHint);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 	pi.registerEntryRenderer<ContentEntry>("pi-persona-nudge", (entry, { expanded, keyHint }, theme) => {
 		if (!entry.data) return undefined;
@@ -172,7 +173,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				const result = preview(chosen.join("\n"), 2, 100)(width);
 				return { text: result.text, truncated: result.truncated || details.some((line) => !chosen.includes(line)) };
 			},
-		}, expanded, theme, options.getOutputPad(), keyHint);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 	pi.registerEntryRenderer<ContentEntry>("pi-persona-status", (entry, { expanded, keyHint }, theme) => {
 		if (!entry.data) return undefined;
@@ -192,6 +193,6 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 				const result = preview(digest.slice(0, 2).join("\n") || full, 2, 140)(width);
 				return { text: result.text, truncated: result.truncated || digest.length > 2 };
 			},
-		}, expanded, theme, options.getOutputPad(), keyHint);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 }

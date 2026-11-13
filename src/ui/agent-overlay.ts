@@ -15,6 +15,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	getKeybindings,
+	matchesKey,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -334,7 +335,7 @@ export class AgentOverlay extends Container {
 		const stoppable = selected !== undefined && this.canStopNode(selected, nodes);
 		const steerable = selected !== undefined && this.canSteerNode(selected, nodes);
 		const foldHint = selected && isFoldableRow(selected, nodes) ? "   space fold" : "";
-		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc close`), 1, 0));
+		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc/F9 close`), 1, 0));
 		this.renderNotice();
 	}
 
@@ -364,7 +365,7 @@ export class AgentOverlay extends Container {
 		line(group.summary);
 		this.addChild(new Spacer(1));
 		const selected = this.selectedGroupLeg(group.legs);
-		const navigationHint = "↑↓ select · ⏎ output · esc back";
+		const navigationHint = "↑↓ select · ⏎ output · esc back · F9 close";
 		const controlHint = [selected !== undefined && this.canStopNode(selected, nodes) ? "x stop leg" : "", selected !== undefined && this.canSteerNode(selected, nodes) ? "s steer leg" : ""].filter(Boolean).join(" · ");
 		const fullHint = [navigationHint, controlHint].filter(Boolean).join(" · ");
 		const footerLines = visibleWidth(fullHint) <= this.inner() ? [fullHint] : [navigationHint, controlHint].filter(Boolean);
@@ -492,9 +493,9 @@ export class AgentOverlay extends Container {
 		if (this.steering) {
 			const composed = `${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`;
 			for (const line of wrapTextWithAnsi(composed, w)) footer.addChild(new Text(line, 1, 0));
-			footer.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel"), 1, 0));
+			footer.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel   ·   F9 close"), 1, 0));
 		} else {
-			footer.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
+			footer.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll   ·   F9 close${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
 			this.renderNotice(footer);
 			if (live && !steerable && !isNonAgentNode(node)) footer.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
 		}
@@ -518,6 +519,12 @@ export class AgentOverlay extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		// F9 is an unconditional close from every overlay mode; handle it before steering,
+		// navigation or stop-all confirmation can interpret the same sequence.
+		if (matchesKey(keyData, "f9")) {
+			this.close();
+			return;
+		}
 		const hadNotice = this.notice !== undefined;
 		this.notice = undefined; // any key clears a previous refusal notice
 		const armed = this.stopAllArmed;
@@ -697,7 +704,9 @@ export class AgentOverlay extends Container {
 	 *  only by an explicit `x` on its own row. One list feeds the hint count, the confirmation prompt
 	 *  and the bulk stop, so the three always agree. */
 	private stoppableIds(snap: AgentNode[] = this.tree.snapshot()): string[] {
-		return this.selectableRows(snap).filter((r) => !isNonAgentNode(r.node) && this.canStopNode(r.node, snap)).map((r) => r.node.id);
+		// Stop-all is a runtime control set, not a projection of visible navigation rows: folding
+		// hides descendants from the list but must not remove them from the bulk-stop target set.
+		return snap.filter((node) => !isNonAgentNode(node) && this.canStopNode(node, snap)).map((node) => node.id);
 	}
 
 	/** The trailing "x stop"/"X stop all"/"s steer" hint fragment for an action line — the list's

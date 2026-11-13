@@ -10,9 +10,11 @@ the work. You can inspect or redirect individual workers without managing every 
 | Implement or fix something | `dev` | A scoped change, checks, and a concise explanation of the result |
 | Build a data pipeline, train or evaluate a model, or analyze data | `data` | Explicit grain, metric definitions, reproducible evidence, and stated uncertainty |
 | Review a change | `audit` | Prioritized, evidence-backed findings; edits only when requested |
-| Turn an idea into an implementation plan | `planner` | Decisions, dependencies, and verifiable steps without changing application code |
+| Turn an idea into an implementation plan | `planner` | Planning first: decisions, dependencies and verifiable steps, with requested implementation as a next step |
 | Investigate a question | `researcher` | Sources, conclusions, uncertainty, and durable notes when the scope warrants them |
 | Apply one operation across many independent items | `swarm` | Explicit coverage of completed, failed, and remaining items |
+| Reverse engineer an unfamiliar binary or file format | `reverser` | Artifact-led analysis, competing hypotheses, and evidence-backed conclusions |
+| Handle everyday research, code, documentation, or mixed tasks | `multiagent` | Task-fit delegation, clear hand-offs, and an integrated answer |
 | Repair a failing build or verify an implementation | `verify` | Fresh checks on the actual tree; repairs only when requested, with unresolved failures stated clearly |
 
 Switch with `/persona <name>` or F8 (the default shortcut). `/persona seed` installs missing defaults. Existing customized
@@ -21,6 +23,11 @@ you intend to discard those customizations.
 
 Restart Pi after updating the extension. Known, untouched defaults upgrade automatically; customized
 copies remain unchanged and can be compared with the bundled persona before adopting individual edits.
+
+Choose a specialist by the work shape: `reverser` for understanding an unfamiliar artifact, `swarm`
+for independent repeated items, and `multiagent` for general-purpose supervision across kinds of work.
+Choose model and effort per task within the current provider; on aggregators, prefer a few workers
+on the supervisor's exact model instead of exploring the entire catalog.
 
 An effective request names the intended result and its constraints. For example:
 

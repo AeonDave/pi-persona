@@ -264,7 +264,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   compact messages share `ui/communication-card.ts`; expanded content remains the canonical delivered
   source. Model metadata belongs in launch details/F9 and expanded communication diagnostics.
   Completion, stall and recovery share lowercase `intercom update` headings. Keep these projections
-  in `ui/session-cards.ts`, with the shared frame and native tool expansion/click handling.
+  in `ui/session-cards.ts`, with the shared frame and native tool expansion/click handling. Custom
+  message/entry consumers opt into shared primary-click expansion with `CardFrameContext.expansionKey`
+  (stable envelope object); native tool consumers omit it. The frame keeps only weakly keyed booleans.
   Launch requests share `ui/launch-request.ts`; hidden task text must always expose an expansion hint.
   Steering cards preview the accepted message and expose all of it with Pi's expand-key binding.
   Runtime metadata guidance belongs in the stable supervisor system prompt, not a new user-like

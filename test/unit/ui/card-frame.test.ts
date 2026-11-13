@@ -165,6 +165,55 @@ test("an explicitly empty collapsed preview hides its body but hints at full det
 	}
 });
 
+test("optional expansion keys retain local clicks across rebuilds, follow host transitions, and isolate cards", () => {
+	const key = {};
+	const otherKey = {};
+	const input = presentation();
+	const make = (expansionKey: object, expanded = false) => createCardFrame(input, context({ expanded, expansionKey }));
+	const click = { type: "click" as const, button: "left" as const, x: 1, y: 1, screenX: 1, screenY: 1, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 };
+	const first = make(key);
+	const independent = make(otherKey);
+	first.handleMouse?.(click);
+	assert.match(first.render(80).join("\\n"), /TAIL/, "click expands the first envelope");
+	assert.doesNotMatch(independent.render(80).join("\\n"), /TAIL/, "another envelope remains collapsed");
+	assert.match(make(key).render(80).join("\\n"), /TAIL/, "same host expanded value preserves clicked state on rebuild");
+	assert.doesNotMatch(make(key, true).render(80).join("\\n"), /visible/, "a host transition to expanded overrides local state");
+	const hostExpanded = make(key, true);
+	hostExpanded.handleMouse?.(click);
+	assert.match(hostExpanded.render(80).join("\\n"), /visible/, "local collapse works while host expanded stays true");
+	assert.match(make(key, true).render(80).join("\\n"), /visible/, "same host state retains local collapse");
+	assert.doesNotMatch(make(key, false).render(80).join("\\n"), /TAIL/, "a changed host value overrides local state");
+});
+
+test("expansion shell handles only primary clicks when content is hidden and remains opt-in", () => {
+	const key = {};
+	const click = { type: "click" as const, button: "left" as const, x: 1, y: 1, screenX: 1, screenY: 1, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 };
+	const hidden = createCardFrame(presentation(), context({ expansionKey: key }));
+	assert.equal(hidden.handleMouse?.({ ...click, button: "right" }), undefined);
+	assert.equal(hidden.handleMouse?.({ ...click, type: "wheel", wheelDelta: -1 }), undefined);
+	assert.equal(hidden.handleMouse?.({ ...click, type: "drag" }), undefined);
+	assert.deepEqual(hidden.handleMouse?.({ ...click, shift: true }), { handled: true }, "native tool click behavior accepts modified primary clicks");
+	assert.match(hidden.render(80).join("\\n"), /TAIL/);
+
+	const fullCard = presentation({ full: "complete", preview: () => ({ text: "complete", truncated: false }) });
+	const full = createCardFrame(fullCard, context({ expansionKey: {} }));
+	assert.equal(full.handleMouse?.(click), undefined, "a card with no hidden content does not consume the click");
+	const legacy = createCardFrame(presentation(), context());
+	assert.equal(legacy.handleMouse, undefined, "without expansionKey the frame remains presentation-only");
+});
+
+test("width-clipped full previews are clickable whenever the frame displays an expansion hint", () => {
+	const input = presentation({ full: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", preview: () => ({ text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", truncated: false }) });
+	const frame = createCardFrame(input, context({ expansionKey: {} }));
+	const collapsed = visibleRows(frame, 12);
+	assert.equal(collapsed.at(-1), "to expand");
+	const click = { type: "click" as const, button: "left" as const, x: 1, y: 1, screenX: 1, screenY: 1, width: 12, height: collapsed.length, shift: false, alt: false, ctrl: false, clickCount: 1 };
+	assert.equal(frame.handleMouse?.(click)?.handled, true, "a visible expand hint must have a working click target");
+	assert.deepEqual(visibleRows(frame, 12), visibleRows(createCardFrame(input, context({ expanded: true })), 12));
+	assert.equal(frame.handleMouse?.(click)?.handled, true);
+	assert.deepEqual(visibleRows(frame, 12), collapsed, "the same click collapses again");
+});
+
 test("empty full and preview bodies retain the nonempty literal fallback", () => {
 	const input = presentation({ full: "", preview: () => ({ text: "", truncated: false }) });
 	assert.match(visibleRows(createCardFrame(input, context()), 80).join("\n"), /\(no output\)/);

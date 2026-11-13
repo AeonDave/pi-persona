@@ -59,7 +59,7 @@ export function makeCodeOutlineTool(options: CodeOutlineToolOptions = {}): ToolD
 	return {
 		name: "code_outline",
 		label: "Code outline",
-		description: "Read one JavaScript, TypeScript, Python, Go, Rust, C-family, or C# source file and return a compact syntax-AST symbol outline. C-family files use the C++ grammar, so C is not compiler-validated. Does not dump source or prove runtime behavior.",
+		description: "Read one JavaScript, TypeScript, Python, Go, Rust, C-family, or C# source file and return a compact syntax-AST symbol outline. C-family files use the C++ grammar, so C is not compiler-validated. Structural/work/metadata limits reject overly complex files: use a smaller or less deeply nested source file; query/limit do not bypass these limits. Does not dump source or prove runtime behavior.",
 		promptSnippet: "Inspect declarations in one supported source file with code_outline",
 		parameters,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {

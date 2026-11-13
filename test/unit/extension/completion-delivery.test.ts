@@ -51,6 +51,31 @@ test("already read messages and active asks are never drained or redelivered", a
 	} finally { h.bus.unregister("worker"); }
 });
 
+test("shared completion drain commits only the successfully delivered non-ask snapshot", async () => {
+	const h = harness();
+	h.bus.send("worker", "supervisor", "SNAPSHOT NOTE");
+	const noteId = h.bus.pending("supervisor")[0]!.id;
+	const ask = h.bus.ask("worker", "supervisor", "LIVE ASK");
+	let fail = true;
+	const deliver = createCompletionInboxDelivery({ bus: h.bus, self: "supervisor", deliver: (text) => {
+		if (fail) throw new Error("host send failed");
+		h.bus.send("worker", "supervisor", "LATE NOTE");
+		h.sent.push(text);
+	} });
+	try {
+		assert.throws(() => deliver("RESULT", []), /host send failed/);
+		assert.equal(h.bus.pending("supervisor").length, 2, "throwing before delivery commits nothing");
+		assert.equal(h.bus.retrieve(noteId, "supervisor"), undefined);
+		fail = false; deliver("RESULT", []);
+		assert.match(h.sent[0]!, /RESULT[\s\S]*SNAPSHOT NOTE/);
+		assert.doesNotMatch(h.sent[0]!, /LIVE ASK|LATE NOTE/);
+		assert.deepEqual(h.bus.pending("supervisor").map((message) => message.text), ["LIVE ASK", "LATE NOTE"]);
+		assert.equal(h.bus.retrieve(noteId, "supervisor")?.text, "SNAPSHOT NOTE");
+		const askId = h.bus.pending("supervisor").find((message) => message.expectsReply)!.id;
+		assert.equal(h.bus.reply(askId, "answer"), true); await ask;
+	} finally { h.bus.unregister("worker"); }
+});
+
 test("a wide unread batch shares the existing 12k cap and preserves message retrieval ids", () => {
 	const h = harness();
 	for (let i = 0; i < MAX_INBOX_MESSAGES; i++) h.bus.send("worker", "supervisor", `UNTRUSTED ${i}\n> hostile line\n${"x".repeat(900)}`);

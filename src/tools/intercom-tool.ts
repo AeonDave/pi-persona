@@ -2,6 +2,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { failureDetails } from "../extension/shared.ts";
+import { deliverPendingNotes, formatPendingNotes } from "../extension/completion-delivery.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
@@ -234,17 +235,12 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 						isError: true,
 					};
 				}
-				// Explicit collection owns this delivery: remove a still-buffered passive completion so the
-				// same result cannot appear again as a follow-up a moment later. Telling the tracker too
-				// makes this retained copy the first thing retention evicts — the supervisor has read it,
-				// so it is the cheapest payload in the map to lose.
+				// Paging alone does not collect. Build the complete successful response before committing
+				// either inbox consumption or completion suppression, so a formatter failure loses neither.
 				const full = getFullRunOutput(run);
 				const page = pageLiveResult(full, params.offset, params.limit);
 				if (!page) return { content: [{ type: "text", text: "Invalid result offset/limit; use nextOffset and 2..16000 units." }], details: failureDetails({ action: "result", ...targetSnapshot }), isError: true };
-				if (params.collect === true || (page.offset === 0 && page.endOfStoredBody)) {
-					d.completionNotifier.discard((pending) => pending.id === run.id);
-					d.tracker.markCollected(run.id);
-				}
+				const collecting = params.collect === true || (page.offset === 0 && page.endOfStoredBody);
 				const body = projectResultPage(page, run.error);
 				const receipt = resultReceiptHint(run.resultReceipt);
 				const displayRun = displayRunTarget(run.id);
@@ -252,17 +248,30 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
 				// the supervisor through, so it carries the same reading the passive completion report does.
 				const took = runDurationLabel(run);
-				// The follow-up discarded above is what would have carried the premature-surrender note, so
+				// The follow-up suppressed by collection would have carried the premature-surrender note, so
 				// a collected DONE report must carry it itself (a failed leg is already a failure report).
 				const note = run.status === "done" ? d.scanForSurrender(full) : undefined;
 				const billed = d.childUsage.accountMany([{ key: run.id, usage: run.result?.usage ?? emptyUsage() }]);
 				d.publishPersonaCost();
-				return {
-					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${modelUsed ? `\nObserved model: ${modelUsed}` : ""}\n${body}${receipt ? `\n${receipt}` : ""}${note ? `\n\n${note}` : ""}` }],
+				const response = {
+					content: [{ type: "text" as const, text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${modelUsed ? `\nObserved model: ${modelUsed}` : ""}\n${body}${receipt ? `\n${receipt}` : ""}${note ? `\n\n${note}` : ""}` }],
 					details: { action: "result", ok: true, status: run.status, ...targetSnapshot, ...(modelUsed ? { modelUsed } : {}), page: { offset: page.offset, nextOffset: page.nextOffset, endOfStoredBody: page.endOfStoredBody }, ...(run.resultReceipt ? { resultReceipt: { ...run.resultReceipt } } : {}) },
 					isError: false,
 					...toolUsageField(billed),
 				};
+				if (collecting) {
+					// Final non-ask notes share THIS tool response, not another wake. Bound only the notes:
+					// capping page + notes together would silently corrupt the advertised result page.
+					deliverPendingNotes(d.bus, d.SUPERVISOR, (unread) => {
+						response.content[0]!.text += `\n\n${formatPendingNotes("[pi-persona]", unread)}`;
+					});
+					// All construction succeeded synchronously. Suppress the duplicate passive completion
+					// and prioritize this read copy for eviction. The host owns persistence after return;
+					// this is a tool-response hand-off, not an acknowledgement of durable host storage.
+					d.completionNotifier.discard((pending) => pending.id === run.id);
+					d.tracker.markCollected(run.id);
+				}
+				return response;
 			}
 			if (params.action === "steer") {
 				if (!params.to || params.message === undefined) {

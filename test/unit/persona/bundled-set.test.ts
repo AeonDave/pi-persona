@@ -37,8 +37,10 @@ const DECLARED_METHOD: Record<string, { strategy: string; roster: string; params
 	dev: { strategy: "critic-loop", roster: "repair", params: { rounds: 3 } },
 	judge: { strategy: "judge", roster: "magi", params: { judge: "reviewer", contract: "default" } },
 	magi: { strategy: "magi", roster: "magi", params: {} },
+	multiagent: undefined,
 	planner: { strategy: "critic-loop", roster: "design", params: { rounds: 2 } },
 	researcher: undefined,
+	reverser: undefined,
 	swarm: { strategy: "map", roster: "swarm", params: { ownership: "declare" } },
 	verify: { strategy: "critic-loop", roster: "repair", params: { rounds: 4 } },
 };
@@ -48,7 +50,7 @@ test("the bundled persona set is the one these tests describe", () => {
 });
 
 test("every bundled persona has the same frontmatter shape: identity, one-line description, uniform prompt mode", () => {
-	const ORDER = ["name", "label", "persona", "description", "coaching", "systemPromptMode", "tools", "delegation", "council"];
+	const ORDER = ["name", "label", "persona", "description", "coaching", "systemPromptMode", "delegation", "council"];
 	for (const { name, fm, persona } of SET) {
 		const keys = Object.keys(fm);
 		assert.deepEqual(keys, ORDER.filter((k) => keys.includes(k)), `${name}: frontmatter keys use the shared order`);
@@ -113,7 +115,17 @@ test("every bundled persona's declared method is valid against the strategy regi
 	}
 });
 
-test("every bundled persona's delegation policy and tool deny are spelled as the parser reads them", () => {
+test("every bundled persona leaves tool grants to the session rather than imposing allow or deny lists", () => {
+	// Elite has a separate prompt budget, but shares this policy-ownership contract.
+	for (const file of readdirSync(`${ROOT}personas`).filter((f) => f.endsWith(".md"))) {
+		const text = readFileSync(`${ROOT}personas/${file}`, "utf8");
+		const fm = parseYamlSubset(splitFrontmatter(text).frontmatter);
+		assert.equal(fm.tools, undefined, `${file}: no persona-level tool allow/deny`);
+		assert.equal(parsePersona(text, file)!.tools, undefined, `${file}: no parsed tool restriction`);
+	}
+});
+
+test("every bundled persona's delegation policy is spelled as the parser reads it", () => {
 	const POLICY_KEYS = ["requireBrief", "outputContract", "requireDisjointWrites", "requireFreshVerification", "verificationAgents"];
 	const policies: Record<string, unknown> = {};
 	for (const { name, fm, persona } of SET) {
@@ -124,10 +136,11 @@ test("every bundled persona's delegation policy and tool deny are spelled as the
 			for (const agent of persona.delegation?.verificationAgents ?? []) assert.ok(BUNDLED_AGENTS.has(agent), `${name}: verification agent ${agent} is bundled`);
 			policies[name] = persona.delegation;
 		}
-		if (fm.tools !== undefined) assert.deepEqual(Object.keys(fm.tools as object), Object.keys(persona.tools ?? {}), `${name}: tools keys are allow/deny`);
 	}
 	// A persona that launches writers carries a call-time gate: capabilities are enforced, never prompt-only.
 	assert.deepEqual(policies.swarm, { requireBrief: true, requireDisjointWrites: true });
+	assert.deepEqual(policies.multiagent, { requireBrief: true, requireDisjointWrites: true });
+	assert.deepEqual(policies.reverser, { requireBrief: true, requireDisjointWrites: true });
 	assert.deepEqual(policies.audit, { requireBrief: true });
 	assert.deepEqual(policies.data, {
 		requireBrief: true,
@@ -136,8 +149,13 @@ test("every bundled persona's delegation policy and tool deny are spelled as the
 		verificationAgents: ["verifier"],
 	});
 	assert.deepEqual(policies.verify, { requireFreshVerification: true, verificationAgents: ["verifier"] });
-	assert.deepEqual(SET.find((p) => p.name === "planner")!.persona.tools, { deny: ["edit"] });
-	assert.deepEqual(SET.filter((p) => p.persona.coaching).map((p) => p.name).sort(), ["data", "dev", "planner", "researcher", "swarm"]);
+	assert.deepEqual(policies.dev, {
+		requireBrief: true,
+		requireDisjointWrites: true,
+		requireFreshVerification: true,
+		verificationAgents: ["verifier"],
+	});
+	assert.deepEqual(SET.filter((p) => p.persona.coaching).map((p) => p.name).sort(), ["data", "dev", "multiagent", "planner", "researcher", "reverser", "swarm"]);
 });
 
 // The bundled agents and teams as ONE set. `evidence-verifier` is the security chain's agent and, like `elite`,

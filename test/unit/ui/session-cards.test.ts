@@ -4,7 +4,7 @@ import { getMarkdownTheme, initTheme, type ExtensionAPI, type Theme } from "@ear
 import { fenceUntrusted, attributePeer } from "../../../src/core/fence.ts";
 
 initTheme("dark", false);
-import { Markdown, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Markdown, visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 // Generator imports are READ-ONLY drift guards: the parsers in src/ui/session-cards.ts must
 // keep matching exactly what src/engine/async.ts emits (see the drift-guard tests below).
 import { buildCheckIn, buildCompletionReport, buildPeekDigest, type AsyncRun } from "../../../src/engine/async.ts";
@@ -58,6 +58,52 @@ function harness() {
 	}
 	return { renderers, card, check, backgrounds, setOutputPad: (value: 0 | 1) => { outputPad = value; }, nextTheme: () => { generation++; } };
 }
+
+test("every registered session-card type expands and collapses through its stable source envelope", () => {
+	const h = harness();
+	const click: TuiMouseEvent = { type: "click", button: "left", x: 1, y: 1, screenX: 1, screenY: 1, width: 120, height: 20, shift: false, alt: false, ctrl: false, clickCount: 1 };
+	const body = [...Array.from({ length: 11 }, (_, index) => `matrix-${index} ${"x".repeat(40)}`), "HIDDEN_TAIL"].join("\n");
+	const record = monitor({ text: body, stdout: body });
+	const personaMessage = (content: string, details?: unknown) => ({ role: "custom", customType: "pi-persona", content, ...(details === undefined ? {} : { details }) });
+	const cases: Array<[string, object, boolean]> = [
+		["pi-persona", personaMessage(body), true],
+		["pi-persona", personaMessage(`1 async run settled — 1 done, 0 failed\n${body}`), true],
+		["pi-persona", personaMessage(`2 async runs settled — 1 done, 1 failed\n${body}`), true],
+		["pi-persona", personaMessage(`2 async runs settled — 1 done, 0 failed, 1 stopped\n${body}`), true],
+		["pi-persona", personaMessage(body, buildCommunicationCardDetails("intercom", [{ from: "peer", text: body }])), true],
+		["exocom_received", { role: "custom", customType: "exocom_received", content: body }, true],
+		["pi-persona-monitor-log", { type: "custom", customType: "pi-persona-monitor-log", data: record }, false],
+		["pi-persona-monitor-log", { type: "custom", customType: "pi-persona-monitor-log", data: monitor({ outcome: "exit", text: `process exited with exit code 2\n${body}`, stdout: body }) }, false],
+		["pi-persona-monitor-log", { type: "custom", customType: "pi-persona-monitor-log", data: monitor({ outcome: "timeout", text: body }) }, false],
+		["pi-persona-script-log", { type: "custom", customType: "pi-persona-script-log", data: record }, false],
+		["pi-persona-script-log", { type: "custom", customType: "pi-persona-script-log", data: monitor({ outcome: "error", text: body }) }, false],
+		["pi-persona-run-failure", { type: "custom", customType: "pi-persona-run-failure", data: { id: "r1", label: "worker", agent: "scout", error: body } }, false],
+		["pi-persona-result", { type: "custom", customType: "pi-persona-result", data: { label: "flow", content: body, ok: true } }, false],
+		["pi-persona-result", { type: "custom", customType: "pi-persona-result", data: { label: "flow", content: body, ok: false } }, false],
+		["pi-persona-result", { type: "custom", customType: "pi-persona-result", data: { label: "flow", content: body, ok: false, stoppedAtGate: "review" } }, false],
+		["pi-persona-nudge", { type: "custom", customType: "pi-persona-nudge", data: { content: body } }, false],
+		["pi-persona-status", { type: "custom", customType: "pi-persona-status", data: { content: body, kind: "routine" } }, false],
+		["pi-persona-status", { type: "custom", customType: "pi-persona-status", data: { content: body, kind: "stall" } }, false],
+		["pi-persona-status", { type: "custom", customType: "pi-persona-status", data: { content: body, kind: "recovery" } }, false],
+	];
+	for (const [name, envelope, isMessage] of cases) {
+		const renderer = h.renderers.get(name);
+		assert.ok(renderer, name);
+		const options: RenderOptions = isMessage
+			? { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id, hint) => hint }
+			: { expanded: false, keyText: () => "ctrl+o", keyHint: (_id, hint) => hint };
+		const component = renderer(envelope, options, {
+			fg: (_token, text) => text, bold: (text) => text, bg: (_token, text) => text,
+		} as Theme)!;
+		assert.doesNotMatch(component.render(120).join("\n"), /HIDDEN_TAIL/, `${name} begins collapsed`);
+		const before = JSON.stringify(envelope);
+		component.handleMouse?.(click);
+		assert.match(component.render(120).join("\n"), /HIDDEN_TAIL/, `${name} expands`);
+		component.handleMouse?.(click);
+		assert.doesNotMatch(component.render(120).join("\n"), /HIDDEN_TAIL/, `${name} collapses`);
+		assert.equal(JSON.stringify(envelope), before, `${name} envelope remains immutable`);
+	}
+});
 
 test("entry cards use the live native outputPad exactly once without changing message padding", () => {
 	const h = harness();
