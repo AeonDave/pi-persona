@@ -22,7 +22,6 @@ In your terminal:
 
 ```bash
 pi install npm:@aeondave/pi-persona
-pi
 ```
 
 Inside Pi, install the bundled starting points and select a supervisor:
@@ -171,7 +170,7 @@ remains unavailable pending host qualification; see [configuration and settings]
 
 ## Optional memory companion
 
-[pi-persona-mind 0.9.0](https://github.com/AeonDave/pi-persona-mind/releases/tag/v0.9.0) adds
+[pi-persona-mind](https://github.com/AeonDave/pi-persona-mind) adds
 project/persona memory, session notes, an F10 inspector, consolidation and evidence-grounded review.
 Install it with
 `pi install npm:@aeondave/pi-persona-mind`, then restart Pi or use `/reload`. Its
