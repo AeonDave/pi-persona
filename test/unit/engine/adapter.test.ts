@@ -379,6 +379,39 @@ test("child adapter validates spec.tools override before invocation and keeps no
 	assert.ok(emptySeen.includes("--no-tools"));
 });
 
+test("child adapter carries the explicit outline grant only for admitted tools and scrubs inherited markers", async () => {
+	const before = process.env.PI_PERSONA_CODE_OUTLINE;
+	process.env.PI_PERSONA_CODE_OUTLINE = "stale-parent-marker";
+	const script = `process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_PERSONA_CODE_OUTLINE ?? 'absent'}],stopReason:'end'}})+'\\n');`;
+	const childOptions = {
+		env: { PI_PERSONA_CODE_OUTLINE: "stale-child-options-marker" },
+		resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+	};
+	const engine = makeEngine({
+		resolveAgent: (name) => name === "outline" ? { name, model: "stub/m", tools: ["code_outline"], systemPrompt: "", source: "x" } : undefined,
+		childOptions,
+	});
+	const excludedEngine = makeEngine({
+		resolveAgent: (name) => name === "outline" ? { name, model: "stub/m", tools: ["code_outline"], excludeTools: ["code_outline"], systemPrompt: "", source: "x" } : undefined,
+		childOptions,
+	});
+	try {
+		const granted = await engine.run({ agent: "outline", task: "inspect" });
+		const empty = await engine.run({ agent: "outline", task: "inspect", tools: [] });
+		const excluded = await excludedEngine.run({ agent: "outline", task: "inspect" });
+		assert.equal(granted.ok, true, granted.error);
+		assert.equal(granted.output, "1", "the child receives the adapter's explicit grant marker");
+		assert.equal(empty.ok, true, empty.error);
+		assert.equal(empty.output, "absent", "an explicit empty allowlist does not leak the parent marker");
+		assert.equal(excluded.ok, true, excluded.error);
+		assert.equal(excluded.output, "absent", "tool exclusions revoke the marker as well as the tool");
+		assert.equal(process.env.PI_PERSONA_CODE_OUTLINE, "stale-parent-marker", "the supervisor environment is unchanged");
+	} finally {
+		if (before === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE;
+		else process.env.PI_PERSONA_CODE_OUTLINE = before;
+	}
+});
+
 test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
 	// deps-level idle timeout is long (would never fire in this window); the per-leg override is short.
 	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: resolveFake, timeoutMs: 5_000, killGraceMs: 50 } });
@@ -738,6 +771,42 @@ test("child reference handoff keeps an absent allowlist absent (no --tools) and 
 	assert.equal(r.ok, true, r.error);
 	assert.ok(!argsSeen.includes("--tools"), "an absent allowlist stays absent — the bridge injects read_result itself");
 	assert.equal(revoked.count, 1);
+});
+
+test("child adapter releases prepared readers and registrations when pre-spawn wiring throws", async () => {
+	for (const stage of ["registration", "steering"] as const) {
+		const log: string[] = [];
+		const revoked = { count: 0 };
+		const broker = fullBroker(log, "d".repeat(64), revoked);
+		const register = broker.register;
+		broker.register = (info) => {
+			register(info);
+			if (stage === "registration") throw new Error("registration failed after acquiring handle");
+		};
+		let invoked = false;
+		const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,
+			childOptions: { resolveInvocation: (args) => { invoked = true; return envDump("never")(args); } } });
+		await assert.rejects(engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] }, undefined, undefined, () => {
+			throw new Error("steering failed before spawn");
+		}), stage === "registration" ? /registration failed/ : /steering failed/);
+		assert.equal(invoked, false, `${stage}: no process was spawned`);
+		assert.equal(revoked.count, 1, `${stage}: the prepared reader is revoked`);
+		const handle = log.find((entry) => entry.startsWith("prepare:"))!.slice("prepare:".length);
+		assert.equal(log.filter((entry) => entry === `unregister:${handle}`).length, 1, `${stage}: the partial registration is released`);
+	}
+});
+
+test("child adapter still unregisters when reader revocation itself throws", async () => {
+	const log: string[] = [];
+	const broker = fullBroker(log);
+	broker.prepareResultReader = async (handle) => {
+		log.push(`prepare:${handle}`);
+		return { token: "e".repeat(64), revoke: () => { throw new Error("reader cleanup failed"); }, wasBound: () => false };
+	};
+	const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,
+		childOptions: { resolveInvocation: envDump("settled") } });
+	await assert.rejects(engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] }), /reader cleanup failed/);
+	assert.equal(log.filter((entry) => entry.startsWith("unregister:")).length, 1);
 });
 
 test("child engine scrubs a stale supervisor PI_PERSONA_RESULT_READER_TOKEN from a plain leg's environment", { timeout: 10000 }, async () => {

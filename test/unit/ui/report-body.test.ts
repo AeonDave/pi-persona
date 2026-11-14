@@ -27,6 +27,19 @@ test("report body delegates unchanged sanitized source to native Markdown, retai
 	assert.match(text, /raw_code\(\)/);
 });
 
+test("launch request footers remain literal and update independently of the cached report", () => {
+	const body = createReportBody("**REPORT BODY**", theme, { footer: "Task:\n**LITERAL TASK**\u001b[2J" });
+	const visible = sanitizeTerminalText(body.render(120).join("\n"));
+	assert.match(visible, /REPORT BODY/);
+	assert.doesNotMatch(visible, /\*\*REPORT BODY\*\*/);
+	assert.match(visible, /\*\*LITERAL TASK\*\*/);
+	const reused = createReportBody("**REPORT BODY**", theme, { footer: "Task:\nSECOND TASK" }, body);
+	assert.equal(reused, body);
+	const changed = sanitizeTerminalText(reused.render(120).join("\n"));
+	assert.match(changed, /SECOND TASK/);
+	assert.doesNotMatch(changed, /LITERAL TASK/);
+});
+
 test("one native component caches repeated content and reflows on resize without splitting Unicode", () => {
 	const body = createReportBody(source, theme);
 	const originalRender = Markdown.prototype.render;

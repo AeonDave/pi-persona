@@ -167,7 +167,7 @@ export class SupervisorBroker {
 		return {
 			endpoint,
 			register: (info) => {
-				this.deps.bus.register(info.handle);
+				this.deps.bus.register(info.handle, info.label);
 				this.expected.add(info.handle);
 				if (info.peers) this.peers.set(info.handle, { label: info.label ?? info.handle, group: info.group ?? "" });
 				this.hostRef?.expect(info.handle);

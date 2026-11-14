@@ -6,8 +6,27 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.18.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.18.0) - 2026-11-13
+
+### Added
+
+- `reverser` and `multiagent` supervisor personas: skill/appskill-led artifact analysis and
+  general-purpose task coordination, respectively, without hardcoded skill or tool inventories.
+- Grouped Timers, Monitors and Scripts in the live widget and F9, with shared fold state,
+  mouse support in alternate-screen mode and keyboard controls. F9 includes read-only Exocom peers.
+- Asynchronous `script` execution for literal executable arguments or inline Pi shell commands,
+  with process-tree stop, bounded session-owned output, completion wakes and restart-loss notices.
+- Default supervisors and workers expose Pi's native `grep`, `find`, and `ls`; Windows also exposes native PowerShell. Existing host implementations and tool clamps remain authoritative. Pi may download `rg`/`fd` on first use when missing.
+- Added one lazy MIT WASM AST backend for bounded `code_outline` reads across JavaScript/JSX, TypeScript/TSX, Python, Go, Rust, C-family and C# source. C-family uses the C++ grammar (not strict-C/compiler validation); unsupported extensions and syntax errors fail clearly. Only bundled read-only scout/reviewer/architect allowlists were updated; explicit user grants remain narrow.
+
 ### Changed
 
+- Bundled personas now express specialized methods rather than autonomous authorization policies
+  or tool vetoes. Planner, Researcher and Audit can follow through on requested implementation;
+  supplied user/project/platform constraints and runtime permission enforcement remain authoritative.
+  Elite requires actual domain-skill loading while retaining its technical player-coach standing.
+- Worker model and effort selection is task-fit within the selected provider. Aggregator guidance
+  defaults to a small useful set of workers on the supervisor's exact model, not a catalog sweep.
 - Target Pi 1.5.2, with the four development SDK packages updated together. Host packages
   remain wildcard peers supplied by Pi. Removed the obsolete development-only `undici` override:
   the current host already pins the patched version. Idle compaction remains qualification-blocked.
@@ -19,6 +38,54 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Custom messages and history cards share primary-click expansion through the common frame,
+  including companion consumers. Local expansion survives ordinary renderer rebuilds; global
+  expansion changes remain authoritative and native tool shells retain their own click handling.
+- F9 closes the agent panel from list, group, detail and steering views without submitting drafts
+  or stopping workers. Global `X` stop-all includes workers inside collapsed groups; presentation
+  folding no longer changes the runtime cancellation set.
+- Explicit live result collection returns pending non-blocking Intercom notes without duplicating
+  the completion wake. Notes remain separately bounded and retrievable without changing result
+  pagination; active asks and messages outside the delivered snapshot remain unread.
+- `code_outline` rejects excessive structural/traversal/metadata work explicitly, before deep
+  nesting can amplify intermediate allocations. Query and row limits do not bypass those budgets.
+- Delegate launch receipts show inherited effort as well as explicit selections, retain it in
+  history, and reserve its space when long names require compacting the row.
+- Intercom send cards use the recipient's assigned name, with the exact bus handle and sent
+  message in expandable details; the identity snapshot survives worker disposal and history replay.
+- Delegate batch headings share click and keyboard folding with timer,
+  monitor and script groups in the live widget and F9, retaining hidden-worker attention counts.
+- Parallel delegate refusals for missing write ownership retain the submitted arguments and the
+  admission assessment in expandable details, so misplaced fields and inherited writer tools can
+  be diagnosed without enlarging the collapsed card or the model-facing error.
+- Periodic Intercom wakes now share the completion delivery's bounded snapshot and consume notes
+  only after a successful host send. Failed sends preserve unread messages for retry; clipped
+  deliveries retain message IDs for explicit retrieval.
+- Completion previews use persisted runtime states and aliases instead of parsing worker prose.
+  Multiline errors and clipped reports can no longer manufacture extra failed-run rows; older
+  history without a snapshot remains readable through a literal expandable preview.
+- Windows drive-relative ownership paths such as `C:foo` are rejected along with absolute and
+  escaping paths. Drive-root normalization preserves its distinction from drive-relative syntax.
+- Child-engine setup and spawn share one cleanup path, including partial broker registration,
+  steering setup failures and reader revocation errors.
+- Monitor/script observers cannot interrupt admission, cancellation or event delivery when an
+  archive or UI callback throws. Both adapters use the same observer isolation rule.
+- Native tool activation preserves partial builtin selections, including an SDK session starting
+  with `noTools: "builtin"` and `tools: ["+read"]`; automatic additions require the full native base set.
+- In-process workers skip automatic native-tool additions when the root CLI selects tools explicitly;
+  each worker's explicit grants and exclusions remain independent.
+- Mind worker and local-activity labels use lowercase `mind` in the live tree and summaries.
+- Unified Intercom/Exocom message previews, completion, checkpoint, stall and recovery cards with
+  lowercase headings and assigned worker names. Expanded cards retain complete routing, model and
+  trust diagnostics; sender aliases survive worker disposal and child-process broker delivery.
+- A worker finishing before the periodic inbox check now delivers its last unread progress in the
+  existing completion wake. Failed delivery leaves it queued; active asks keep their reply path.
+- Delegate, council and flow launch cards expose the submitted prompt through native expansion,
+  including click support and the configured key hint. Parallel ownership rejections give compact
+  remedies and ignore tasks that the child limit would never launch, while preserving verifier guards.
+- Synchronous background-process startup failures retain their error cause instead of appearing cancelled.
+- Restart-loss notices distinguish pending notifications from processes that were still active.
+- Native tool activation preserves SDK sessions with disabled builtins, including custom tool overrides.
 - Intentionally empty compact previews render small title-only informational notes, with expansion
   available for full detail, rather than inserting a misleading `(no output)` body.
 - Standalone entry cards, including checkpoints, stall warnings and progress recovery, honor the
@@ -34,6 +101,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Tests
 
+- Prepare real native search binaries before offline SDK integration tests and isolate both Persona
+  and SDK agent-directory overrides. POSIX FIFO fixtures use the current SDK execution context and
+  structured exit status without skipping the real FIFO check.
+- Installed-package qualification installs only the candidate's declared runtime dependencies in
+  its temporary package directory, checks that Pi peers still resolve to the host, and executes
+  JavaScript and TypeScript outlines from the tarball on both engines without runtime network traffic.
 - Characterized archived Unicode pagination at the default, maximum and minimum page limits,
   including surrogate-pair boundaries and lossless reconstruction using the returned `nextOffset`.
 

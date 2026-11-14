@@ -507,7 +507,7 @@ test("the hidden worker digest excludes settled, queued, container, timer, monit
 		{ id: "live", label: "live worker", parentId: "council", status: "running", kind: "subagent", detail: "⚙ compiling" },
 		{ ...WAKE_MONITOR, parentId: "council" },
 		{ ...WAKE_TIMER, parentId: "council" },
-		{ id: "activity", label: "Mind", parentId: "council", status: "running", kind: "activity", detail: "inspecting" },
+		{ id: "activity", label: "mind", parentId: "council", status: "running", kind: "activity", detail: "inspecting" },
 		{ id: "phase", label: "phase", parentId: "council", status: "running", kind: "phase", detail: undefined },
 	];
 	const lines = renderAgentTreeSummary(nodes, 6, { now: 1_000 });

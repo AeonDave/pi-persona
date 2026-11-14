@@ -7,7 +7,7 @@ import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, DEFAULT_CONTRACT, installedContractNames } from "../core/contract.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
-import { isThinkingLevel } from "../core/types.ts";
+import { defaultChildThinking } from "../core/leg-thinking.ts";
 import type { ModelCostMetadata } from "../core/model-tier.ts";
 import { personaModels, type PersonaConfigStore } from "../persona/config-store.ts";
 import { participantKey } from "../persona/model-participants.ts";
@@ -100,8 +100,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			// The main model thinks adaptively (it picks effort by difficulty); a spawned child
 			// can't inherit "adaptive" if its model doesn't support it, so give children an
 			// explicit level — the supervisor's (if concrete) or a sane default, overridable.
-			const supLevel = host.getThinkingLevel();
-			const childThinking = config.childThinking ?? (isThinkingLevel(supLevel) ? supLevel : "high");
+			const childThinking = defaultChildThinking(config.childThinking, host.getThinkingLevel());
 
 			// A persona that opted out of the layer (`spine: false`) opts its legs out too — otherwise
 			// a short verdict persona (judge/verify/audit) would still pay for the baseline on every

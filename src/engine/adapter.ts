@@ -193,6 +193,13 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (deps.cwd) childSpec.cwd = deps.cwd;
 
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
+			const childEnv = { ...childOptions.env };
+			delete childEnv.PI_PERSONA_CODE_OUTLINE;
+			childOptions.env = childEnv;
+			const outlineExcluded = cfg.excludeTools?.some((pattern) => pattern === "code_outline" || (pattern.endsWith("*") && "code_outline".startsWith(pattern.slice(0, -1))));
+			if (admittedTools?.includes("code_outline") && !outlineExcluded) {
+				childOptions.env = { ...childOptions.env, PI_PERSONA_CODE_OUTLINE: "1" };
+			}
 			if (memoryPersona !== undefined || childOptions.env?.[MEMORY_PERSONA_ENV] !== undefined) {
 				const env = { ...childOptions.env };
 				delete env[MEMORY_PERSONA_ENV];
@@ -217,57 +224,57 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// the child's env, and give the caller a steer function.
 			let handle: string | undefined;
 			let preparedReader: PreparedResultReader | undefined;
-			if (deps.broker) {
-				const broker = deps.broker;
-			handle = nextChildHandle(spec.agent);
-				const wantsPeers = spec.peers === true && (deps.canUseBus ?? true);
-				const busTools = (deps.canUseBus ?? true) ? ["contact_supervisor", ...(wantsPeers ? ["contact_peer"] : [])] : [];
-				const mergedTools = mergeSessionToolAllowlist(admittedTools, busTools);
-				if (mergedTools !== undefined) childSpec.tools = mergedTools;
-			const label = spec.name?.trim()
-					? sanitizeDisplayLabel(spec.name, handle)
-					: spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
-				if (resultReader !== undefined) {
-					try {
-						preparedReader = await broker.prepareResultReader(handle, resultReader, signal);
-					} catch (error) {
-						return referenceHandoffFailure(spec.agent, `broker result reader preparation failed: ${error instanceof Error ? error.message : String(error)}`);
-					}
-					childOptions.env = {
-						...childOptions.env,
-						// Private spawn credential for the child's bridge (bridge.ts installs read_result
-						// only when this is set); scrubbed from the inherited env inside child.ts.
-						PI_PERSONA_RESULT_READER_TOKEN: preparedReader.token,
-					};
-				}
-				broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
-				childOptions.env = {
-					...childOptions.env,
-					PI_PERSONA_BUS: broker.endpoint,
-					PI_PERSONA_HANDLE: handle,
-					PI_PERSONA_BUS_TOOLS: (deps.canUseBus ?? true) ? "on" : "off",
-					...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
-					...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),
-				};
-				// The parent-side watchdogs must not kill a leg that is genuinely waiting on the
-				// supervisor's answer (R9, inproc parity) — ask the bus, don't guess from a static flag.
-				childOptions.isBlocked = () => broker.hasPendingAskFrom(handle!);
-				const h = handle;
-				const steer: SteerFn = Object.assign((text: string) => broker.steerFrame(h, text), {
-					isWaitingForSupervisor: () => broker.hasPendingAskFrom(h),
-				});
-				onSteerable?.(steer);
-			}
-
 			let child: Awaited<ReturnType<typeof runChildAgent>>;
 			try {
+				if (deps.broker) {
+					const broker = deps.broker;
+					handle = nextChildHandle(spec.agent);
+					const wantsPeers = spec.peers === true && (deps.canUseBus ?? true);
+					const busTools = (deps.canUseBus ?? true) ? ["contact_supervisor", ...(wantsPeers ? ["contact_peer"] : [])] : [];
+					const mergedTools = mergeSessionToolAllowlist(admittedTools, busTools);
+					if (mergedTools !== undefined) childSpec.tools = mergedTools;
+					const label = spec.name?.trim()
+						? sanitizeDisplayLabel(spec.name, handle)
+						: spec.role ? `${handle} (${roleHint(spec.role)})` : handle;
+					if (resultReader !== undefined) {
+						try {
+							preparedReader = await broker.prepareResultReader(handle, resultReader, signal);
+						} catch (error) {
+							return referenceHandoffFailure(spec.agent, `broker result reader preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+						}
+						childOptions.env = {
+							...childOptions.env,
+							// Private spawn credential for the child's bridge (bridge.ts installs read_result
+							// only when this is set); scrubbed from the inherited env inside child.ts.
+							PI_PERSONA_RESULT_READER_TOKEN: preparedReader.token,
+						};
+					}
+					broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
+					childOptions.env = {
+						...childOptions.env,
+						PI_PERSONA_BUS: broker.endpoint,
+						PI_PERSONA_HANDLE: handle,
+						PI_PERSONA_BUS_TOOLS: (deps.canUseBus ?? true) ? "on" : "off",
+						...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
+						...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),
+					};
+					// The parent-side watchdogs must not kill a leg that is genuinely waiting on the
+					// supervisor's answer (R9, inproc parity) — ask the bus, don't guess from a static flag.
+					childOptions.isBlocked = () => broker.hasPendingAskFrom(handle!);
+					const h = handle;
+					const steer: SteerFn = Object.assign((text: string) => broker.steerFrame(h, text), {
+						isWaitingForSupervisor: () => broker.hasPendingAskFrom(h),
+					});
+					onSteerable?.(steer);
+				}
+
 				child = await runChildAgent(childSpec, signal, childOptions);
 			} finally {
 				// Revoke the reader grant and unregister on EVERY settle path (success, failure, or
 				// an unexpected throw) — a leaked grant would outlive its leg; a leaked handle would
 				// otherwise linger in the host's registries forever.
-				preparedReader?.revoke();
-				if (deps.broker && handle) deps.broker.unregister(handle);
+				try { preparedReader?.revoke(); }
+				finally { if (deps.broker && handle) deps.broker.unregister(handle); }
 			}
 
 			const result: AgentResult = { agent: spec.agent, output: child.output, usage: child.usage, ok: child.ok };

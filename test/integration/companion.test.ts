@@ -36,7 +36,7 @@ test("current native host scopes companion subscriptions to its loaded extension
 		assert.equal(query()?.capabilities.memory, 1, "factory presence is available before startup hook ordering matters");
 		await session.bindExtensions({ mode: "rpc" });
 		events.emit(ACTIVITY_EVENT, { version: 1, producerId: "pi-persona-mind", activityId: "actual-sdk", sessionId: manager.getSessionId(), phase: "inspect", state: "running", target: "project" });
-		assert.equal(tree.snapshot()[0]?.label, "Mind");
+		assert.equal(tree.snapshot()[0]?.label, "mind");
 		await session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
 		assert.equal(tree.snapshot().length, 0);
 	} finally {

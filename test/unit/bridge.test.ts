@@ -22,6 +22,10 @@ function makeFakePi() {
 		registerTool: (def: FakeToolDef) => {
 			tools.push(def);
 		},
+		getAllTools: () => [],
+		getSettings: () => ({}),
+		getActiveTools: () => [],
+		setActiveTools: () => {},
 		sendMessage: (message: { customType: string; content: unknown; display: boolean }, options?: Record<string, unknown>) => {
 			sent.push({ message, options });
 		},

@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { tempDir } from "../../setup/temp-dir.ts";
+import { parsePersona } from "../../../src/persona/persona.ts";
 import {
 	inspectLegacySeededSpines,
 	LEGACY_SEEDED_DEFAULTS,
@@ -55,6 +56,33 @@ function bundled(): string {
 }
 const userDir = (): string => tempDir("pi-persona-user-");
 const read = (p: string): string => fs.readFileSync(p, "utf8");
+
+test("seeding installs and parses the new personas while preserving a custom destination", () => {
+	const u = userDir();
+	const agents = path.join(u, "agents");
+	fs.mkdirSync(agents, { recursive: true });
+	const custom = path.join(agents, "local.md");
+	fs.writeFileSync(custom, "my custom persona/agent\n");
+
+	const result = seedDefaults(REPO_ROOT, u, false);
+
+	for (const name of ["reverser", "multiagent"]) {
+		const seeded = path.join(agents, `${name}.md`);
+		assert.ok(result.copied.includes(seeded), `${name} was not seeded`);
+		const parsed = parsePersona(read(seeded), seeded);
+		assert.equal(parsed?.name, name);
+		assert.equal(parsed?.isPersona, true);
+	}
+	assert.equal(read(custom), "my custom persona/agent\n", "an existing custom destination remains untouched");
+	for (const name of ["reverser", "multiagent"]) {
+		const seeded = path.join(agents, `${name}.md`);
+		fs.appendFileSync(seeded, "\nLocal customization\n");
+		const customized = read(seeded);
+		const again = seedDefaults(REPO_ROOT, u, false);
+		assert.ok(again.skipped.includes(seeded), `${name}: custom destination is skipped`);
+		assert.equal(read(seeded), customized, `${name}: custom bytes survive a repeated seed`);
+	}
+});
 
 test("seedDefaults copies personas + agents into <user>/agents, and teams/flows/contracts/presets into their dirs", () => {
 	const u = userDir();
@@ -716,6 +744,22 @@ test("no legacy digest matches a CURRENTLY shipped file — an entry that did wo
 		for (const spec of Array.isArray(entry) ? entry : [entry]) {
 			assert.notEqual(spec.sha256, digest, `${asset}: a legacy digest equals the file being shipped, so nothing would ever be migrated`);
 		}
+	}
+});
+
+test("v1.17.6 pristine Dev, Elite, MAGI, and Swarm copies have LF and CRLF migration fingerprints", () => {
+	const previous = [
+		["personas/dev.md", 3013, "fb5dc172b1831e4511746bc454cf455ecd65de6651d269d0508e050ba33195b9", 3063, "63e31bee43dded900afaa48f9e1d824b22689c31c126f6dd1f3c5ce12b86c096"],
+		["personas/elite.md", 17767, "187d854e1a920a04c86964c15b7832e3c17e75e04c053f0efee11011e749b262", 18025, "38d0c7d610f8163521237ed0a0b037b8c74716d58360f5c77f09440e4ef0cb2f"],
+		["personas/magi.md", 2462, "c6e33eb98cd73f31e0d24784782466a8752efde4ec510c9b8f643b12b6f0be0e", 2499, "78d205a3291bfb26cfad8a1eec9bed7e19b3445aa81d6e9644427f1ae30ccd04"],
+		["personas/swarm.md", 3003, "0e99ce86374b81abdf4577bb5fe661f0cd336a7b12239e914656906c850d93d7", 3051, "da9e3f8ed7a667d1d19573bf936b6893016553b4eaf6826874f49b2cee4b9320"],
+	] as const;
+	for (const [asset, lfSize, lfHash, crlfSize, crlfHash] of previous) {
+		const entry = LEGACY_SEEDED_DEFAULTS[asset];
+		assert.ok(entry, `${asset} has no legacy migration row`);
+		const specs = Array.isArray(entry) ? entry : [entry];
+		assert.ok(specs.some((spec) => spec.size === lfSize && spec.sha256 === lfHash), `${asset} is missing the v1.17.6 LF blob fingerprint`);
+		assert.ok(specs.some((spec) => spec.size === crlfSize && spec.sha256 === crlfHash), `${asset} is missing the v1.17.6 CRLF fingerprint`);
 	}
 });
 

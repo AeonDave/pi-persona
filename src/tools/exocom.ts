@@ -277,7 +277,7 @@ export function registerExocomTools(
 ): void {
 	pi.registerTool({
 		name: "exocom_list",
-		label: "Exocom List",
+		label: "exocom list",
 		description: "List current exocom peer presence only; this is not a message inbox and replies arrive automatically.",
 		parameters: ExocomListParams,
 		async execute(_toolCallId, params: Static<typeof ExocomListParams>) {
@@ -309,7 +309,7 @@ export function registerExocomTools(
 			};
 		},
 		renderCall(_args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("Exocom List")), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("exocom list")), 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as {
@@ -346,7 +346,7 @@ export function registerExocomTools(
 
 	pi.registerTool({
 		name: "exocom_send",
-		label: "Exocom Send",
+		label: "exocom send",
 		description: [
 			"Send a ONE-WAY, non-blocking message to another top-level pi instance in this Exocom scope",
 			"(see `exocom_list`) — it returns a `msg_id` immediately and does not wait for the peer to",
@@ -462,7 +462,7 @@ export function registerExocomTools(
 			const message = String(args.message ?? "").replace(/\s+/g, " ").trim();
 			const preview = normalizeMetadataText(message, 60);
 			const suffix = preview.length < message.length ? "…" : "";
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as ExocomSendDetails | undefined;
@@ -477,7 +477,7 @@ export function registerExocomTools(
 
 	pi.registerTool({
 		name: "exocom_name",
-		label: "Exocom Name",
+		label: "exocom name",
 		description: inventedExocomNameHint(),
 		parameters: ExocomNameParams,
 		async execute(_toolCallId, params: Static<typeof ExocomNameParams>) {
@@ -488,7 +488,7 @@ export function registerExocomTools(
 			return { content: [{ type: "text", text: `exocom: you are now "${applied}"` }], details: { name: applied } };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as { name?: string } | undefined;

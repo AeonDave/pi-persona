@@ -101,7 +101,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 
 	pi.registerTool({
 		name: "exocom_claim",
-		label: "Exocom Claim",
+		label: "exocom claim",
 		description: "Claim a repository-relative write-set slice on the workspace work ledger. Overlap with an open claim is refused; a Pi joined from an external workspace cannot claim its home paths.",
 		parameters: ClaimParams,
 		async execute(_id, params: Static<typeof ClaimParams>) {
@@ -117,14 +117,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			return result(`exocom: claimed ${params.work_key} · msg_id=${msg_id}`, { work_key: params.work_key, msg_id });
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Claim "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom claim "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_ask",
-		label: "Exocom Ask",
+		label: "exocom ask",
 		description: "Ask one peer session a bounded question on a work key. Use one exact `target` from `exocom_list`; never broadcast (`*`). One pending ask per (work_key, target session).",
 		parameters: AskParams,
 		async execute(_id, params: Static<typeof AskParams>) {
@@ -151,14 +151,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			);
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_answer",
-		label: "Exocom Answer",
+		label: "exocom answer",
 		description: "Answer a pending ask addressed to this session. Drops the ask and wakes the asker's wait.",
 		parameters: AnswerParams,
 		async execute(_id, params: Static<typeof AnswerParams>) {
@@ -176,14 +176,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			);
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Answer "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom answer "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_decline",
-		label: "Exocom Decline",
+		label: "exocom decline",
 		description: "Decline a pending ask addressed to this session (answer with ok=false).",
 		parameters: DeclineParams,
 		async execute(_id, params: Static<typeof DeclineParams>) {
@@ -201,14 +201,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			);
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Decline "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom decline "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_wait",
-		label: "Exocom Wait",
+		label: "exocom wait",
 		description: `Join one ask WITHOUT blocking this tool call. Returns a retained answer immediately, otherwise a follow-up wakes you on answer or timeout (cap ${EXOCOM_WAIT_MAX_MS}ms).`,
 		parameters: WaitParams,
 		async execute(_id, params: Static<typeof WaitParams>) {
@@ -225,7 +225,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			return result(`exocom: waiting on ${params.work_key} ask_id=${params.ask_id} · timeout ${timeoutMs}ms · ${armed.id}. End this turn; you will be woken.`, { work_key: params.work_key, ask_id: params.ask_id, timeoutMs, id: armed.id, status: "waiting" });
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Wait "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom wait "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult(res, options, theme, context) {
 			// A retained answer is peer prose, not the literal receipt for arming a wait.
@@ -240,7 +240,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 
 	pi.registerTool({
 		name: "exocom_release",
-		label: "Exocom Release",
+		label: "exocom release",
 		description: "Release this session's open claims on a work key and drop its outbound pending asks.",
 		parameters: ReleaseParams,
 		async execute(_id, params: Static<typeof ReleaseParams>) {
@@ -252,14 +252,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			return result(`exocom: released ${params.work_key} · msg_id=${msg_id}`, { work_key: params.work_key, msg_id });
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Release "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom release "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_progress",
-		label: "Exocom Progress",
+		label: "exocom progress",
 		description: "Journal a progress note on a work key. Does not change claims or asks.",
 		parameters: ProgressParams,
 		async execute(_id, params: Static<typeof ProgressParams>) {
@@ -271,14 +271,14 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			return result(`exocom: progress ${params.work_key} · msg_id=${msg_id}`, { work_key: params.work_key, msg_id });
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Progress "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom progress "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});
 
 	pi.registerTool({
 		name: "exocom_status",
-		label: "Exocom Status",
+		label: "exocom status",
 		description: "Who owns what in this Exocom scope: your claims, peers' claims, asks waiting for you, your open asks.",
 		parameters: Type.Object({}),
 		async execute() {
@@ -286,7 +286,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			return result(formatLedgerStatus(state, deps.sessionId(), deps.labelFor, deps.now()), { claims: state.claims.length, asks: state.asks.length });
 		},
 		renderCall(_args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("Exocom Status")), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("exocom status")), 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
 	});

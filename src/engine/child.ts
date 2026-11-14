@@ -216,6 +216,7 @@ export async function runChildAgent(
 			delete inherited.PI_PERSONA_BUS_TOOLS;
 			delete inherited.PI_PERSONA_MEMORY_PERSONA;
 			delete inherited.PI_PERSONA_RESULT_READER_TOKEN;
+			delete inherited.PI_PERSONA_CODE_OUTLINE;
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,

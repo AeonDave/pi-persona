@@ -20,6 +20,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { type BrokerClient, type DeliverEvent, makeBrokerClient, type MakeBrokerClientDeps } from "./bus/broker/client.ts";
 import { makeContactSupervisorTool } from "./bus/contact.ts";
+import { activateNativeTools } from "./extension/native-tools.ts";
 import type { MsgKind } from "./bus/inproc.ts";
 import type { ContactTransport } from "./bus/contact-transport.ts";
 import { makeContactPeerTool, type PeerInfo } from "./bus/peers.ts";
@@ -97,6 +98,7 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 		throw new Error("Invalid result reader environment.");
 	}
 	if (!endpoint || !handle) return; // isBridgeMode() gates the real caller; malformed env degrades to a no-op
+	activateNativeTools(pi);
 
 	const canUseBus = env.PI_PERSONA_BUS_TOOLS !== "off";
 	const wantsPeers = canUseBus && env.PI_PERSONA_PEERS === "1";

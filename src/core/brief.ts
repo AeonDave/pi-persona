@@ -94,16 +94,20 @@ const MODEL_CANDIDATE_LINE_MAX = 700;
 const MODEL_CANDIDATE_PREFIX = "Cached current-provider candidates (catalog snapshot; account support may vary): ";
 const MODEL_SELECTION_GUIDANCE =
 	"Omitting `model` preserves the configured choice: a saved per-persona role/agent assignment, then the agent's frontmatter model, then the engine default; it does not necessarily select your current supervisor model. To intentionally override a configured choice with that supervisor model, pass its exact provider/id as `model` only when explicitly authorized. Never silently switch providers or billing routes.";
+const MODEL_FIT_GUIDANCE =
+	" Fit model capability and supported thinking effort independently to each task: use economical effort for bounded/simple work and higher effort for greater complexity; price is not quality. When delegation is useful on aggregator/gateway routes such as OpenRouter, absent an explicit/saved choice, default to a small, task-justified number of workers on the exact supervisor provider/model; vary per-leg thinking effort when supported. An aggregator is a route, not one model family: do not scan its entire catalog or treat its models as one family. Consider an alternative only as a targeted task-fit choice or at the user's choice, preserving the route; never silently change providers or billing.";
 /** The one model-sizing rule. No model names: cost tiers are relative API-cost bands among recent
  *  same-provider catalog candidates, and only numeric price metadata supports them. */
 const MODEL_SIZING =
 	"Models: reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess worker choices using refreshed candidates if supplied (★ = your session provider). Low/medium/high rank relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. An insufficient comparison set is also unknown. Prefer candidates near your current model's name and numbered generation before comparing cost; an older model is not preferred merely because it is cheaper. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. " +
 	MODEL_SELECTION_GUIDANCE +
-	" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
+	" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing." +
+	MODEL_FIT_GUIDANCE;
 const MODEL_SIZING_WITHOUT_DISCOVERY =
 	"Model sizing: Prefer known candidates near your current model's name and numbered generation. Choose the least expensive candidate you already know can do the task. Without catalog pricing, treat cost tier as unknown. " +
 	MODEL_SELECTION_GUIDANCE +
-	" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Do not guess stale ids or silently switch provider/billing.";
+	" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Do not guess stale ids or silently switch provider/billing." +
+	MODEL_FIT_GUIDANCE;
 /** Decision class -> council strategy (a test checks every name is a registered strategy). */
 const DECISION_CLASSES = "contested fork → magi; rival complete answers → judge; rival implementations → compete; N items → map; draft + critique → critic-loop";
 
@@ -219,10 +223,12 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	const softModelSizing = input.canListModels === false
 		? " For worker models: Prefer known candidates near your current model's name and numbered generation. Choose the least expensive candidate you already know can do the task. Without catalog pricing, treat cost tier as unknown. " +
 			MODEL_SELECTION_GUIDANCE +
-			" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Do not guess stale ids or silently switch provider/billing."
+			" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Do not guess stale ids or silently switch provider/billing." +
+			MODEL_FIT_GUIDANCE
 		: " For worker models, reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use `models` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess from refreshed candidates if supplied. Low/medium/high are relative advertised API-cost bands among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. An insufficient comparison set is also unknown. Prefer candidates near your current model's name and numbered generation before comparing cost; an older model is not preferred merely because it is cheaper. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. " +
 			MODEL_SELECTION_GUIDANCE +
-			" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.";
+			" Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing." +
+			MODEL_FIT_GUIDANCE;
 	const callFields = [`agent: "${example}"`, `task: "<self-contained bounded task + success signal>"`];
 	if (input.requireBrief) {
 		callFields.push(
@@ -232,7 +238,7 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	if (input.outputContract?.trim()) callFields.push(`outputContract: ${JSON.stringify(input.outputContract.trim())}`);
 	const discipline: string[] = [];
 	if (input.requireBrief) discipline.push("A complete brief is required for every worker, including read-only scouts. For parallel calls, put the same six fields in every tasks[].brief; the top-level brief is single-mode only. Task prose does not replace the structured brief.");
-	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. Read-only scout (or tools limited to read/grep/find/ls) may fan out without writeSet.");
+	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. Read-only scout (or tools limited to read/grep/find/ls/code_outline) may fan out without writeSet.");
 	if (input.requireFreshVerification) discipline.push("After a material mutation, start a fresh verifier sequentially against the resulting state; a verifier launched before or during the mutation cannot approve completion.");
 	const handoffShape = `Hand-off shape: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
 	lines.push(

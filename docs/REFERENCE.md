@@ -39,13 +39,14 @@ hard-fail.
 | `intercom` tool | observe and control internal runs with `peek`, `result`, `steer`, and `stop`; `list`, `inbox`, `message`, `reply`, and `send` drive the coaching bus. There is no `wait`: a finished child wakes the supervisor through the completion follow-up |
 | `timer` tool | read the fresh clock with `now`, or schedule an idle wake with `arm`, `cancel`, and `list`; alarms are one-shot and in-memory per session; an armed alarm shows as a row in the agent widget and F9 until it fires or is cancelled |
 | `monitor` tool | run a bounded job (`mode: exit`) or event-producing program (`mode: output`) and wake the supervisor; an active monitor shows as a row in the agent widget and F9 until it ends or is cancelled; see [`MONITORS.md`](./MONITORS.md) |
+| `script` tool | run an asynchronous command with executable/args or inline shell code; `list`, `stop` and `result` expose active jobs, process-tree cancellation and retained logs; shown under Scripts in the widget and F9 |
 | `flow` tool and `/flow` | run a journaled DAG of strategies, resumable only for the same flow, task and project; `gate: true` creates an approval checkpoint, shown with the gated output and what runs next (Reject is the default). The `flow` tool runs in the background interactively (receipt, then ONE follow-up when it ends; a checkpoint waits for the operator, peek reads `waiting for operator at checkpoint <id>`, and no wake happens there) and inline headless, where every checkpoint is rejected. A rejected checkpoint is a stop (`flow stopped · checkpoint <id>`, the gated plan is kept), not a failure. `/flow` and `/orchestrate` stay inline and operator-driven, and their results also reach the supervisor's next turn. `/flow` alone lists flows with descriptions; the supervisor brief lists them too, tagging gated flows as needing a human in headless sessions |
 | `models` tool | current-first model shortlist with relative cost bands; a query searches the full eligible catalog in `provider/id` form |
 | persona `mode:` | choose `solo`, `parallel`, `pipeline`, `strategy:<name>`, or `flow:<name>` |
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
 | persona `delegation:` | require briefs, set an output contract, schedule disjoint writes, and order fresh verification |
 | `isolation: worktree` | run in a clean throwaway Git worktree and return an exported diff; non-Git, dirty, or oversized cases fail closed |
-| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute and `../` paths are dropped. Declarative, not a sandbox |
+| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute, escaping `../`, and Windows drive-relative paths such as `C:foo` are invalid. Declarative, not a sandbox |
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
@@ -84,6 +85,57 @@ operator surface — in the TUI a durable expandable card with the agent, model,
 concise cause (expansion retains the full technical diagnostic); other modes use a concise
 sanitized notification. These operator-only cards do not inject context or start a second turn.
 The model-facing report remains independently idle-gated; a UI notification failure cannot discard it.
+`intercom send` uses the registered recipient's assigned name in its card. Expansion retains the
+exact bus handle and sent message; the saved receipt preserves that identity after the worker exits.
+Delegate launch receipts retain the requested effort selected at launch, including agent defaults
+and the configured or inherited child setting. Enabled levels appear in full beside the model;
+long model names cannot consume the effort's reserved space. History uses the saved selection,
+not current settings. This launch snapshot is separate from Pi's observed runtime effort in F9.
+
+A parallel `delegate` refusal for missing `writeSet` keeps its short remedy in the collapsed card.
+Expansion also shows a bounded snapshot of the original arguments, the effective concurrency, and
+each task's ownership assessment: requested fields, inherited agent settings, and why its
+tools or MCP access make it a potential writer. Top-level single-worker fields remain visible so
+misplaced `tools` or `writeSet` values can be diagnosed. These diagnostics are saved with the result
+for later inspection; omitted fields stay distinguishable from explicit empty grants, and truncation
+is marked. They are presentation details, not an extra copy of the request in the model-facing error.
+
+### Native OS/search tools
+
+Pi-persona adds Pi's own `grep`, `find`, and `ls` to implicit default toolsets, plus native
+`powershell` on Windows. Startup activation requires the complete native `read`/`bash`/`edit`/`write`
+base set and no configured `defaultTools` list; a partial selection is preserved. Default in-process
+workers receive additions only when no explicit worker grant, host `defaultTools` choice, or explicit
+supervisor CLI tool selection exists. The CLI check suppresses automatic additions; it does not make
+workers inherit the supervisor's entire CLI tool selection. Schemas, execution, cancellation,
+rendering and output caps remain Pi-owned.
+Explicit allowlists, exclusions, empty worker grants and persona permissions remain restrictive;
+custom tools with these names are not replaced.
+
+Pi's SDK `noTools: "builtin"` selects the initial loadout; it is not a hard allowlist and the public
+extension API does not expose that flag. If an SDK caller explicitly restores all four native base
+tools, that selection is indistinguishable from implicit defaults and may receive the additions.
+Use an explicit tool allowlist, exclusions or `defaultTools` when the selected names must stay fixed.
+
+Pi's grep/find implementations may download their native `rg`/`fd` helper binaries on first use if the binaries are not already available. Pi-persona adds no dependency or search implementation, but use is not guaranteed to be network-free.
+
+### Multilanguage code outline
+
+`code_outline({ path, query?, limit? })` reads one regular source file from the project cwd (or an absolute path) and returns named syntax declarations, their kind/container and inclusive physical line ranges. `query` is a literal case-insensitive substring over the name, kind or container. `limit` is 1–200 (default 80); a matching count, `hasMore` and `truncated` report omitted rows. Input is capped at 256 KiB and rendered output at 16 KiB. Fatal UTF-8, parser syntax errors and unsupported extensions are errors rather than empty outlines or text-search fallbacks. The output header reports the selected language and grammar plus a SHA-256 computed from the bytes read; it does not claim an external hash match.
+
+Extraction also rejects inputs exceeding depth 256 (root-relative AST/helper traversal or container
+nesting), 100,000 shared traversal/helper work units, or 4 MiB of aggregate UTF-16 symbol metadata
+(names, kinds and containers). These budgets apply before query filtering and row selection: a
+nonmatching query or `limit: 1` cannot bypass them. Exceeding a budget is an explicit resource-limit
+error, not a partial outline with a misleading exact count. Inspect smaller source excerpts instead.
+Parsing itself remains synchronous and input-bounded; these extraction limits are not a parser
+wall-clock timeout.
+
+One MIT-licensed `@vscode/tree-sitter-wasm` dependency supplies all parser grammars. Parser/WASM initialization and finite grammar loading are lazy until an authorized tool call; the AST-only core remains pure and does not read files or initialize Pi. Trees and parser instances are disposed after each extraction; no source index or persistent cache is kept.
+
+Supported filename families are JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), Python (`.py`, `.pyi`), Go (`.go`), Rust (`.rs`), C# (`.cs`), and common C/C++ source/header extensions. C `.c` and ambiguous `.h` are explicitly reported as C-family and parsed with the bundled C++ grammar; C syntax recognition does not establish strict-C validity or compile the file. C# output outlines source only—not VB/F# or .NET binary decompilation. Syntax outlines do not resolve names, type-check, compile, or prove runtime behavior.
+
+The tool is available to the enabled supervisor subject to call-time persona permissions. Only the bundled read-only `scout`, `reviewer`, and `architect` agent allowlists include it by default; custom explicit allowlists and exclusions are not widened.
 
 ### Native codemode
 
@@ -135,6 +187,17 @@ exact live bus handle from `list`. A displayed call-sign is not an alias for eit
 An archived `result` uses its `ref`, shown in the call card. Its compact range is measured in
 zero-based UTF-16 offsets (start inclusive, end exclusive), not page numbers. See the
 [address table and failure guidance](COLLABORATION.md#supervising-a-leg).
+
+Periodic unread-message wakes and completion wakes share a 12,000-character delivery bound.
+When content is clipped, a retained footer supplies the consumed message IDs for explicit
+`intercom message` retrieval within the bus's retention window. A failed host send leaves its
+snapshot unread for retry; active questions stay on their separate reply path.
+
+A live result's first page covering its entire body, or an explicit `collect: true`, acknowledges
+that result and returns pending non-blocking notes in the same tool response. The note block is
+bounded separately, so the result page and its offsets are unchanged. Notes are consumed once and
+keep their retrieval IDs; no duplicate completion wake is needed. Partial pages without collection,
+archived-reference reads, active asks and later-arriving notes retain their existing behavior.
 
 When supervisor contact is available, an async child's `decision` or `interview` waits for a supervisor reply.
 A headless (inline) child posts the question one-way without waiting: the supervisor is parked
@@ -540,8 +603,12 @@ recovery cannot help: use `/login` or change `/model`, then reselect with `/pers
 The runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects
 overlapping or missing ownership for parallel writers, and refuses a declared verifier that would
 start before or beside a material writer in the same call or while a mutating background run is in
-flight. Only `read`, `grep`, `find`, and `ls` count as read-only; shell-capable, MCP-enabled, and
+flight. Only `read`, `grep`, `find`, `ls`, and the source-read-only `code_outline` count as read-only; shell-capable, MCP-enabled, and
 unknown toolsets fail closed as writers. `writeSet` is a scheduling contract, not an OS sandbox.
+Ownership checks cover the tasks admitted by `maxChildren`; a dropped task cannot create a false
+parallel-write conflict. A verifier omitted by that limit still rejects the batch, rather than silently
+removing its promised verification. Missing ownership produces a compact actionable rejection card:
+declare disjoint paths, grant only reader tools with `mcp: false`, or use `concurrency: 1`.
 An agent can declare the area it alone writes (`writeSet: [.research/]` in `research`); a write-capable leg that gives
 no `writeSet` of its own inherits it, so a write-capable but read-in-intent agent is not refused as an
 unknown writer, and a leg that does name one keeps its own. Read-only legs do not inherit defaults.
@@ -648,11 +715,17 @@ test; the data-driven definitions above require no core change.
 
 ## Commands, flags, and environment
 
-**Keys** — `f8` cycles persona; `f9` or `/agents` opens the agent overlay: ↑↓ navigate, ⏎ open, `x`
+**Keys** — `f8` cycles persona; `f9` or `/agents` opens the activity overlay: ↑↓ navigate, ⏎ open, `x`
 stop, `s` steer, and Esc close. `X` (list view) stops every running leaf agent that `x` could stop (armed
-timers and monitors are not agents and are skipped): the first press states the count (`press X again to
+timers, monitors, scripts and Exocom peers are skipped): the first press states the count (`press X again to
 stop N running agents`), any other key or a changed set re-asks. It is offered only for two or more;
 queued or later stages may still start.
+Timers, Monitors, Scripts and Exocom have separate presentation groups. Space/Left/Right folds a
+selected resource group or delegate batch; group headings also accept
+clicks in Pi alternate-screen mode. The widget and F9 share fold state, and folded agent groups
+retain attention counts for failed, waiting and stalled descendants. Exocom details
+are read-only. `script` supports `run` (executable + literal `args`, or inline shell `code`), `list`,
+`stop` and `result`; see [background programs](MONITORS.md#background-programs).
 
 **Commands** — `/persona [name|off|list|reload|seed|restore|models [council-persona]]` ·
 `/persona-settings [show]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` ·
@@ -676,7 +749,7 @@ build retries. A connected broker child's status shows `⇄ <handle>`; if that c
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 `/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
-(requires ≥ 1.4.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+(requires ≥ 1.5.2)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 

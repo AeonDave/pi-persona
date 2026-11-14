@@ -2,16 +2,20 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { failureDetails } from "../extension/shared.ts";
+import { deliverPendingNotes, formatPendingNotes } from "../extension/completion-delivery.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import { createReportBody } from "../ui/report-body.ts";
+import { buildCommunicationCardDetails, communicationPreview, parseCommunicationCardDetails } from "../ui/communication-card.ts";
+import { buildRunLabelDetails, parseRunLabelDetails } from "../ui/run-labels.ts";
+import { statusPreview } from "../ui/run-status.ts";
 import { coachingDisabledHint, expandDetailHint, reconcileAnsweredAsk } from "../extension/shared.ts";
 import {
 	type AsyncRun, AsyncRunTracker, buildPeekDigest,
 	dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier,
-	isAsyncRunStalled, observedRunModel, runDisplayName, runDurationLabel,
+	isAsyncRunStalled, observedRunModel, runDisplayLabel, runDurationLabel,
 } from "../engine/async.ts";
 import type { PollGuard } from "../core/nudge.ts";
 import { fenceUntrusted } from "../core/fence.ts";
@@ -55,12 +59,12 @@ export function fenceIntercomToolOutcome(out: IntercomOutcome, action: string, f
 	return action === "message" && out.details.ok ? fence(out.text) : fenceIntercomOutcome(out, fence);
 }
 
-/** `run-4 (alpha · haiku) running, run-3 (scout) done, … (+2 more)` — the one bounded run listing
+/** `run-4 (alpha) running, run-3 (scout) done, … (+2 more)` — the one bounded run listing
  *  every id-to-call-sign teaching surface shares (a run miss, a bulk stop). `none` when empty. */
 export function describeRuns(runs: readonly AsyncRun[], opts: { status?: boolean; max?: number } = {}): string {
 	if (runs.length === 0) return "none";
 	const max = opts.max ?? 8;
-	const shown = runs.slice(0, max).map((run) => `${run.id} (${runDisplayName(run)})${opts.status ? ` ${run.status}` : ""}`);
+	const shown = runs.slice(0, max).map((run) => `${run.id} (${runDisplayLabel(run)})${opts.status ? ` ${run.status}` : ""}`);
 	return `${shown.join(", ")}${runs.length > max ? `, … (+${runs.length - max} more)` : ""}`;
 }
 
@@ -72,12 +76,13 @@ interface IntercomRenderState {
 }
 
 export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): void {
+	const displayBusTarget = (id: string): string => d.bus.displayLabel(id);
 	function displayRunTarget(id: string): string {
 		const run = d.tracker?.peek(id);
 		if (!run) return sanitizeDisplayLabel(id, "run");
-		const name = runDisplayName(run);
+		const name = runDisplayLabel(run);
 		// An alias is presentation, never a unique address. Disambiguate collisions without rerouting.
-		const collision = d.tracker.list().some((other) => other.id !== id && runDisplayName(other) === name);
+		const collision = d.tracker.list().some((other) => other.id !== id && runDisplayLabel(other) === name);
 		return collision ? `${name} [${sanitizeDisplayLabel(id, "run")}]` : name;
 	}
 	/** An id the tracker holds nothing for: teach what exists (and why a stale id dead-ends) instead of
@@ -161,7 +166,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 	});
 	pi.registerTool({
 		name: "intercom",
-		label: "Intercom",
+		label: "intercom",
 		description: [
 			"Steer, stop and inspect your background sub-agents; a finished run or batch wakes you with a completion follow-up.",
 			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` pages a live settled payload by run id (8000 units default, 16000 maximum).",
@@ -180,7 +185,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			// `to` comes from model-authored tool arguments. Use the exact value for routing, but never
 			// interpolate it into trusted prose without reducing it to compact identifier metadata.
 			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
-			const targetSnapshot = params.to === undefined ? {} : { runId: params.to, target: displayRunTarget(params.to) };
+			const targetSnapshot = params.to === undefined || params.action === "send" ? {} : { runId: params.to, target: displayRunTarget(params.to) };
 			// peek + result + steer + stop are supervisor→child controls over the async tracker /
 			// steer handles — available to EVERY persona (no dependency on the coaching bus).
 			if (params.action === "peek") {
@@ -192,7 +197,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const waiting = d.waitingRunIds?.();
 				const refusal = pollRefusal("peek", params.to ?? "*", runs, waiting, targetSnapshot);
 				if (refusal) return refusal;
-				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(waiting ? { waitingForSupervisor: waiting } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot }, isError: false };
+				return { content: [{ type: "text", text: buildPeekDigest(runs, { now: Date.now(), stallMs: d.STALL_FLAG_MS, ...(waiting ? { waitingForSupervisor: waiting } : {}) }) }], details: { action: "peek", ok: true, ...targetSnapshot, ...buildRunLabelDetails(runs) }, isError: false };
 			}
 			if (params.action === "results" || (params.action === "result" && params.ref !== undefined)) {
 				const invalid = params.to !== undefined || params.collect !== undefined || (params.action === "results" && (params.ref !== undefined || params.offset !== undefined)) || (params.action === "result" && params.cursor !== undefined);
@@ -230,35 +235,43 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 						isError: true,
 					};
 				}
-				// Explicit collection owns this delivery: remove a still-buffered passive completion so the
-				// same result cannot appear again as a follow-up a moment later. Telling the tracker too
-				// makes this retained copy the first thing retention evicts — the supervisor has read it,
-				// so it is the cheapest payload in the map to lose.
+				// Paging alone does not collect. Build the complete successful response before committing
+				// either inbox consumption or completion suppression, so a formatter failure loses neither.
 				const full = getFullRunOutput(run);
 				const page = pageLiveResult(full, params.offset, params.limit);
 				if (!page) return { content: [{ type: "text", text: "Invalid result offset/limit; use nextOffset and 2..16000 units." }], details: failureDetails({ action: "result", ...targetSnapshot }), isError: true };
-				if (params.collect === true || (page.offset === 0 && page.endOfStoredBody)) {
-					d.completionNotifier.discard((pending) => pending.id === run.id);
-					d.tracker.markCollected(run.id);
-				}
+				const collecting = params.collect === true || (page.offset === 0 && page.endOfStoredBody);
 				const body = projectResultPage(page, run.error);
 				const receipt = resultReceiptHint(run.resultReceipt);
-				const displayRun = runDisplayName(run);
+				const displayRun = displayRunTarget(run.id);
 				const modelUsed = observedRunModel(run);
 				// The wall time this leg took: an explicit collection is one of the paths a completion reaches
 				// the supervisor through, so it carries the same reading the passive completion report does.
 				const took = runDurationLabel(run);
-				// The follow-up discarded above is what would have carried the premature-surrender note, so
+				// The follow-up suppressed by collection would have carried the premature-surrender note, so
 				// a collected DONE report must carry it itself (a failed leg is already a failure report).
 				const note = run.status === "done" ? d.scanForSurrender(full) : undefined;
 				const billed = d.childUsage.accountMany([{ key: run.id, usage: run.result?.usage ?? emptyUsage() }]);
 				d.publishPersonaCost();
-				return {
-					content: [{ type: "text", text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${modelUsed ? `\nObserved model: ${modelUsed}` : ""}\n${body}${receipt ? `\n${receipt}` : ""}${note ? `\n\n${note}` : ""}` }],
+				const response = {
+					content: [{ type: "text" as const, text: `${run.id} (${displayRun}) · ${run.status}${took ? ` · ${took}` : ""}${modelUsed ? `\nObserved model: ${modelUsed}` : ""}\n${body}${receipt ? `\n${receipt}` : ""}${note ? `\n\n${note}` : ""}` }],
 					details: { action: "result", ok: true, status: run.status, ...targetSnapshot, ...(modelUsed ? { modelUsed } : {}), page: { offset: page.offset, nextOffset: page.nextOffset, endOfStoredBody: page.endOfStoredBody }, ...(run.resultReceipt ? { resultReceipt: { ...run.resultReceipt } } : {}) },
 					isError: false,
 					...toolUsageField(billed),
 				};
+				if (collecting) {
+					// Final non-ask notes share THIS tool response, not another wake. Bound only the notes:
+					// capping page + notes together would silently corrupt the advertised result page.
+					deliverPendingNotes(d.bus, d.SUPERVISOR, (unread) => {
+						response.content[0]!.text += `\n\n${formatPendingNotes("[pi-persona]", unread)}`;
+					});
+					// All construction succeeded synchronously. Suppress the duplicate passive completion
+					// and prioritize this read copy for eviction. The host owns persistence after return;
+					// this is a tool-response hand-off, not an acknowledgement of durable host storage.
+					d.completionNotifier.discard((pending) => pending.id === run.id);
+					d.tracker.markCollected(run.id);
+				}
+				return response;
 			}
 			if (params.action === "steer") {
 				if (!params.to || params.message === undefined) {
@@ -335,19 +348,21 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			if ((params.action === "list" || params.action === "inbox") && !d.controller.activePersona?.coaching) {
 				text += `\n\n${coachingDisabledHint(d.controller.activePersona?.name)}`;
 			}
-			return { content: [{ type: "text", text }], details: out.details.ok ? out.details : failureDetails(out.details), isError: !out.details.ok };
+			const messages = out.details.messages ?? (out.details.message ? [out.details.message] : []);
+			const communication = messages.length ? buildCommunicationCardDetails("intercom", messages.map((message) => ({ from: message.fromLabel ?? message.from, text: message.text, id: message.id, kind: message.kind }))) : {};
+			return { content: [{ type: "text", text }], details: out.details.ok ? { ...out.details, ...communication } : failureDetails(out.details), isError: !out.details.ok };
 		},
 		renderCall(args, theme, context) {
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = compactInlineText(args.action ?? "?", { maxChars: 24 }) || "?";
 			let target = "";
 			const runTarget = typeof args.to === "string"
-				? state?.target?.id === args.to ? state.target.label : displayRunTarget(args.to)
+				? state?.target?.id === args.to ? state.target.label : action === "send" ? displayBusTarget(args.to) : displayRunTarget(args.to)
 				: undefined;
 			if (action === "peek") target = runTarget ?? "all";
 			else if (action === "result" && typeof args.ref === "string") target = compactInlineText(args.ref, { maxChars: 80 }) || "?";
 			else if (["result", "steer", "stop"].includes(action)) target = runTarget ?? "?";
-			else if (action === "send") target = compactInlineText(args.to ?? "?", { maxChars: 80 }) || "?";
+			else if (action === "send") target = runTarget ?? "?";
 			else if (action === "message") target = compactInlineText(args.messageId ?? "?", { maxChars: 80 }) || "?";
 			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
 			const formatCall = (label: string) => `${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${label ? theme.fg("dim", ` ${compactInlineText(label, { maxChars: 80 })}`) : ""}`;
@@ -357,16 +372,16 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as {
-				action?: string; ok?: boolean; runId?: string; target?: string; message?: string;
+				action?: string; ok?: boolean; runId?: string; busId?: string; target?: string; message?: string; sentMessage?: string; modelUsed?: string;
 				results?: Array<{ truncated?: boolean }>;
 				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean; error?: string };
 				offset?: number; nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
 			};
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = details.action ?? context?.args?.action;
-			const savedId = details.runId ?? context?.args?.to;
+			const savedId = details.busId ?? details.runId ?? context?.args?.to;
 			const legacyCompleted = !details.target && context !== undefined && context.isPartial !== true
-				&& ["steer", "stop", "result", "peek"].includes(action ?? "");
+				&& ["steer", "stop", "result", "peek", "send"].includes(action ?? "");
 			if (state && typeof savedId === "string" && (details.target || legacyCompleted)) {
 				// Old receipts have no display snapshot. A new session may reuse their run ID;
 				// the current tracker cannot supply a historical alias for that unrelated execution.
@@ -379,23 +394,44 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			const full = sanitizeTerminalText(first?.type === "text" ? first.text : "(no output)");
 			const failed = (context?.isError ?? result.isError) || details.ok === false;
 			const prefix = failed ? `${theme.fg("error", theme.bold("failed"))}\n` : "";
-			if (!failed && details.action === "steer" && details.ok === true) {
+			const communication = parseCommunicationCardDetails(result.details);
+			if (!failed && communication?.plane === "intercom" && communication.messages.length) {
+				const overflow = communication.omitted || communication.truncated;
+				if (expanded) return new Text(theme.fg("toolOutput", full), 0, 0);
+				return {
+					render(width: number) {
+						const short = communicationPreview(communication, width);
+						return new Text(`${theme.fg("toolOutput", short.text)}${short.truncated || overflow || short.text !== full ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0).render(width);
+					},
+					invalidate() {},
+				};
+			}
+			if (!failed && !expanded && action === "peek") {
+				const project = statusPreview(full, parseRunLabelDetails(result.details));
+				if (project) {
+					const compact = project(100);
+					return new Text(`${theme.fg("toolOutput", compact.text)}\n${theme.fg("dim", expandDetailHint(context))}`, 0, 0);
+				}
+			}
+			if (!failed && (details.action === "steer" || details.action === "send") && details.ok === true) {
+				const sending = details.action === "send";
 				const target = compactInlineText(details.target ?? state?.target?.label ?? (legacyCompleted && typeof savedId === "string" ? sanitizeDisplayLabel(savedId, "run") : details.runId ? displayRunTarget(details.runId) : ""), { maxChars: 80 });
-				const message = typeof details.message === "string" ? details.message : context?.args?.message;
+				const savedMessage = sending ? details.sentMessage : details.message;
+				const message = typeof savedMessage === "string" ? savedMessage : context?.args?.message;
 				// Old persisted receipts may predate message snapshots. Keep their original content
 				// available in expansion rather than fabricating a message that was never recorded.
 				if (expanded) {
 					const text = typeof message === "string"
-						? `Steering queued${target ? ` for ${target}` : ""}.${details.runId ? `\nRun: ${sanitizeDisplayLabel(details.runId, "run")}` : ""}\n\n${sanitizeTerminalText(message)}`
+						? `${sending ? `Sent${target ? ` to ${target}` : ""}` : `Steering queued${target ? ` for ${target}` : ""}`}.${details.busId ? `\nBus handle: ${sanitizeDisplayLabel(details.busId, "peer")}` : details.runId ? `\nRun: ${sanitizeDisplayLabel(details.runId, "run")}` : ""}\n\n${sanitizeTerminalText(message)}`
 						: full;
 					return new Text(theme.fg("toolOutput", text), 0, 0);
 				}
-				const title = compactInlineText(`steering queued${target ? ` · ${target}` : ""}`, { maxChars: 100 });
+				const title = compactInlineText(`${sending ? "message sent" : "steering queued"}${target ? ` · ${target}` : ""}`, { maxChars: 100 });
 				const preview = typeof message === "string" ? compactVisibleText(message, { maxLines: 3, maxLineChars: 100 }) : undefined;
 				// Native Pi already rendered `intercom steer <alias>` above this result. Show the
 				// instruction directly there; only standalone/older renderers need another identity row.
 				const showTitle = !state?.callText || !preview;
-				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}` : ""}`, 0, 0);
+				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated || sending ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}` : ""}`, 0, 0);
 			}
 			// Archive views are listings/diagnostics, never Markdown reports. A successful archive
 			// read carries no runId (live results do) and a summary (its own receipt); the invalid
@@ -416,7 +452,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				if (!failed && ["result", "message", "inbox"].includes(action ?? "")) {
 					return createReportBody(full, theme, {}, context?.lastComponent);
 				}
-				return new Text(`${prefix}${theme.fg("toolOutput", full)}`, 0, 0);
+				const receipt = details.action === "send" && details.busId ? `${full}\nBus handle: ${sanitizeDisplayLabel(details.busId, "peer")}` : full;
+				return new Text(`${prefix}${theme.fg("toolOutput", receipt)}`, 0, 0);
 			}
 			if (!failed && listing) {
 				// Purpose line first (count + paging/truncation/storage honesty), then a bounded
@@ -451,8 +488,11 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const preview = compactVisibleText(previewSource, { maxLines: 3, maxLineChars: 100 });
 				return new Text(`${theme.fg("success", purpose)}${flagLine}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
-			const preview = compactVisibleText(full, { maxLines: 4, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
+			const lines = full.split("\n");
+			const hiddenModel = !failed && action === "result" && details.runId !== undefined && typeof details.modelUsed === "string" && lines[1] === `Observed model: ${details.modelUsed}`;
+			if (hiddenModel) lines.splice(1, 1);
+			const preview = compactVisibleText(lines.join("\n"), { maxLines: 4, maxLineChars: 100 });
+			const hint = preview.truncated || hiddenModel ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 			return new Text(`${prefix}${theme.fg("toolOutput", preview.text)}${hint}`, 0, 0);
 		},
 	});

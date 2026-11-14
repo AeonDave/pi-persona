@@ -26,6 +26,8 @@ export interface LostWork {
 	runs: string[];
 	timers: number;
 	monitors: number;
+	scripts: number;
+	notifications: number;
 }
 
 export interface RunsEntry {
@@ -38,9 +40,9 @@ export interface RunsEntry {
 
 const count = (value: unknown): number => (Number.isInteger(value) && (value as number) > 0 ? Math.min(value as number, MAX_COUNT) : 0);
 
-function cleanLost(value: { runs?: unknown; timers?: unknown; monitors?: unknown }): LostWork {
+function cleanLost(value: { runs?: unknown; timers?: unknown; monitors?: unknown; scripts?: unknown; notifications?: unknown }): LostWork {
 	const runs = (Array.isArray(value.runs) ? value.runs : []).filter((id): id is string => typeof id === "string" && RUN_ID.test(id));
-	return { runs: [...new Set(runs)].slice(0, MAX_COUNT), timers: count(value.timers), monitors: count(value.monitors) };
+	return { runs: [...new Set(runs)].slice(0, MAX_COUNT), timers: count(value.timers), monitors: count(value.monitors), scripts: count(value.scripts), notifications: count(value.notifications) };
 }
 
 export function makeRunsEntry(sessionId: string, issued: number, lost: LostWork): RunsEntry {
@@ -81,7 +83,10 @@ export function restoreNotice(lost: LostWork): string | undefined {
 	}
 	if (lost.timers > 0) parts.push(plural(lost.timers, "timer"));
 	if (lost.monitors > 0) parts.push(plural(lost.monitors, "monitor"));
-	if (parts.length === 0) return undefined;
-	return `Session restored. Background work from before the restore did not survive (it lives only in memory): ${parts.join("; ")}. `
-		+ "Runtime workers and live run handles are not restored. Retained terminal reports may still be available via intercom { action:'results' } and result { ref:'result:<UUID>' }; read saved data without restarting work. Do not wait for vanished workers; relaunch unfinished work or re-arm wake sources only when still needed.";
+	if (lost.scripts > 0) parts.push(plural(lost.scripts, "script"));
+	if (parts.length === 0 && lost.notifications === 0) return undefined;
+	const work = parts.length ? `Background work from before the restore did not survive (it lives only in memory): ${parts.join("; ")}. ` : "";
+	const notifications = lost.notifications > 0 ? `${plural(lost.notifications, "pending notification")} discarded. Retained script and monitor logs may be available via script { action:'result' } and monitor { action:'result' }. ` : "";
+	return `Session restored. ${work}${notifications}`
+		+ (parts.length ? "Runtime workers and live run handles are not restored. Retained terminal reports may still be available via intercom { action:'results' } and result { ref:'result:<UUID>' }; read saved data without restarting work. Do not wait for vanished workers; relaunch unfinished work or re-arm wake sources only when still needed." : "Read saved data without restarting work.");
 }

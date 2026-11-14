@@ -47,6 +47,7 @@ interface Spy {
 	aborted?: boolean;
 	disableDuringCreate?: string | undefined;
 	legDuringCreate?: string | undefined;
+	outlineGrantDuringCreate?: string | undefined;
 	steered?: unknown[];
 	opts?: CreateSessionOptions;
 	promptText?: string;
@@ -105,6 +106,7 @@ function fakeSessions(events: unknown[], spy?: Spy): CreateInProcSession {
 		if (spy) {
 			spy.disableDuringCreate = process.env.PI_PERSONA_DISABLE;
 			spy.legDuringCreate = process.env.PI_PERSONA_LEG;
+			spy.outlineGrantDuringCreate = process.env.PI_PERSONA_CODE_OUTLINE;
 			spy.opts = opts;
 		}
 		const session = fakeSession(events, spy);
@@ -300,7 +302,7 @@ test("inproc engine enforces an agent's denied tools alongside its allowlist", a
 	const spy: Spy = {};
 	const resolveRestricted = (name: string): AgentConfig | undefined =>
 		name === "restricted"
-			? { name, model: "stub/m", tools: ["read", "grep", "edit"], excludeTools: ["edit"], systemPrompt: "bounded", source: "x" }
+			? { name, model: "stub/m", tools: ["read", "grep", "edit", "code_outline"], excludeTools: ["edit", "code_outline"], systemPrompt: "bounded", source: "x" }
 			: undefined;
 	const engine = makeInProcessEngine({
 		resolveAgent: resolveRestricted,
@@ -310,8 +312,9 @@ test("inproc engine enforces an agent's denied tools alongside its allowlist", a
 	});
 	const result = await engine.run({ agent: "restricted", task: "inspect" });
 	assert.equal(result.ok, true);
-	assert.deepEqual(spy.opts?.tools, ["read", "grep", "edit"]);
-	assert.deepEqual(spy.opts?.excludeTools, ["edit"]);
+	assert.deepEqual(spy.opts?.tools, ["read", "grep", "edit", "code_outline"]);
+	assert.deepEqual(spy.opts?.excludeTools, ["edit", "code_outline"]);
+	assert.ok(!(spy.opts?.customTools ?? []).some((tool) => tool.name === "code_outline"), "an explicit code_outline exclusion is authoritative");
 });
 
 test("inproc engine rejects a modifier-shaped per-agent tool allowlist before creating a session", async () => {
@@ -386,6 +389,7 @@ test("inproc engine preserves an agent's explicit empty tool allowlist", async (
 	const result = await engine.run({ agent: "locked", task: "think" });
 	assert.equal(result.ok, true);
 	assert.deepEqual(spy.opts?.tools, [], "[] must reach Pi instead of silently restoring its default tools");
+	assert.ok(!(spy.opts?.customTools ?? []).some((tool) => tool.name === "code_outline"), "the empty/private worker clamp does not receive the outline tool");
 });
 
 test("an explicit empty inproc allowlist does not re-enable injected custom tools", () => {
@@ -412,13 +416,26 @@ test("withOrchestrationToolsExcluded always excludes delegate/council/orchestrat
 	assert.equal(new Set(withAgentExcludes).size, withAgentExcludes.length, "no duplicate entries");
 });
 
-test("inproc engine restores PI_PERSONA_DISABLE and PI_PERSONA_LEG after the sub-session is built", async () => {
+test("inproc engine restores fork guards and scrubs an inherited outline-grant marker from child activation", async () => {
 	const beforeDisable = process.env.PI_PERSONA_DISABLE;
 	const beforeLeg = process.env.PI_PERSONA_LEG;
-	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")]) });
-	await engine.run({ agent: "a", task: "t" });
-	assert.equal(process.env.PI_PERSONA_DISABLE, beforeDisable, "PI_PERSONA_DISABLE restored to its prior value");
-	assert.equal(process.env.PI_PERSONA_LEG, beforeLeg, "PI_PERSONA_LEG restored to its prior value (never leaks to the supervisor)");
+	const beforeOutline = process.env.PI_PERSONA_CODE_OUTLINE;
+	const spy: Spy = {};
+	process.env.PI_PERSONA_CODE_OUTLINE = "1";
+	try {
+		const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")], spy) });
+		await engine.run({ agent: "a", task: "t" });
+		assert.equal(spy.disableDuringCreate, "1");
+		assert.equal(spy.legDuringCreate, "1");
+		assert.equal(spy.outlineGrantDuringCreate, undefined, "a supervisor's marker is not authority for an in-process leg");
+		assert.equal(process.env.PI_PERSONA_DISABLE, beforeDisable, "PI_PERSONA_DISABLE restored to its prior value");
+		assert.equal(process.env.PI_PERSONA_LEG, beforeLeg, "PI_PERSONA_LEG restored to its prior value (never leaks to the supervisor)");
+		assert.equal(process.env.PI_PERSONA_CODE_OUTLINE, "1", "the parent environment is restored unchanged");
+	} finally {
+		if (beforeDisable === undefined) delete process.env.PI_PERSONA_DISABLE; else process.env.PI_PERSONA_DISABLE = beforeDisable;
+		if (beforeLeg === undefined) delete process.env.PI_PERSONA_LEG; else process.env.PI_PERSONA_LEG = beforeLeg;
+		if (beforeOutline === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE; else process.env.PI_PERSONA_CODE_OUTLINE = beforeOutline;
+	}
 });
 
 test("concurrent sub-session builds keep the fork-bomb guard set and never leak PI_PERSONA_DISABLE", async () => {
@@ -454,8 +471,8 @@ test("concurrent engines produce globally-unique child bus handles (no collision
 				return fakeSession([msgEnd("x")]);
 			},
 		});
-	await Promise.all([mk().run({ agent: "a", task: "t" }), mk().run({ agent: "a", task: "t" })]);
-	for (const m of bus.take("supervisor")) seen.push(m.from);
+	await Promise.all([mk().run({ agent: "a", name: "Moss", task: "t" }), mk().run({ agent: "a", name: "Moss", task: "t" })]);
+	for (const m of bus.take("supervisor")) { seen.push(m.from); assert.equal(m.fromLabel, "Moss"); }
 	assert.equal(seen.length, 2, "both children reached the supervisor");
 	assert.equal(new Set(seen).size, 2, `handles must be unique across engines, got ${seen.join(", ")}`);
 });

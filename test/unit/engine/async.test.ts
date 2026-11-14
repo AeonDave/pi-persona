@@ -1042,6 +1042,24 @@ test("IdleCoalescingNotifier coalesces a burst into a single idle delivery", () 
 	assert.deepEqual(sent, ["a|b|c"], "the whole burst is rendered and delivered once");
 });
 
+test("IdleCoalescingNotifier delivers the exact admitted batch alongside its rendered text", () => {
+	const clock = fakeClock();
+	const sent: { text: string; items: readonly string[] }[] = [];
+	const notifier = new IdleCoalescingNotifier<string>({
+		isIdle: () => true,
+		deliver: (text, items) => { sent.push({ text, items }); },
+		render: (items) => items.join("|"),
+		maxBatchItems: 2,
+		setTimer: clock.setTimer,
+		clearTimer: clock.clearTimer,
+	});
+	for (const value of ["first", "second", "later"]) notifier.notify(value);
+	clock.tick();
+	assert.deepEqual(sent, [{ text: "first|second", items: ["first", "second"] }]);
+	clock.tick();
+	assert.deepEqual(sent[1], { text: "later", items: ["later"] });
+});
+
 test("IdleCoalescingNotifier can drain a large queue in lossless bounded batches", () => {
 	const clock = fakeClock();
 	const sent: string[] = [];

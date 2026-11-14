@@ -45,7 +45,7 @@ interface PackageManifest {
 	dependencies?: Record<string, string>;
 }
 
-export function inspectPackage(manifest: PackageManifest, files: readonly string[]): { extensions: string[]; fileCount: number } {
+export function inspectPackage(manifest: PackageManifest, files: readonly string[]): { extensions: string[]; fileCount: number; runtimeDependencies: string[] } {
 	assert.equal(manifest.name, "@aeondave/pi-persona");
 	assert.ok(manifest.files?.length, "Package needs an explicit allowlist");
 	for (const peer of HOST_PEERS) {
@@ -61,7 +61,8 @@ export function inspectPackage(manifest: PackageManifest, files: readonly string
 	const extensions = (manifest.pi?.extensions ?? []).map((path) => path.replace(/^\.\//, ""));
 	assert.ok(extensions.length > 0, "Missing package extension declaration");
 	for (const entry of extensions) assert.ok(files.includes(entry), `Missing declared extension: ${entry}`);
-	return { extensions, fileCount: files.length };
+	return { extensions, fileCount: files.length,
+		runtimeDependencies: Object.entries(manifest.dependencies ?? {}).map(([name, version]) => `${name}@${version}`) };
 }
 
 export type Receipt = Record<string, unknown>;

@@ -13,14 +13,20 @@ test("provider exposes only a valid V1 synchronous query and returns the one sha
 	assert.equal(responses[0]?.version, 1);
 	assert.equal(responses[0]?.provider, "pi-persona");
 	assert.equal(responses[0]?.createCard, createCardFrame, "the event provider exposes Persona's one shared frame implementation");
-	assert.equal(typeof responses[0]?.createCard({
-		title: "Card", state: "neutral", full: "body", preview: () => ({ text: "body", truncated: false }),
+	const envelope = {};
+	const publicFrame = responses[0]?.createCard({
+		title: "Card", state: "neutral", full: "body and hidden detail", preview: () => ({ text: "body", truncated: true }),
 	}, {
 		expanded: false,
 		theme: { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text } as never,
 		outputPad: 0,
 		detailHint: () => "expand",
-	}).render, "function");
+		expansionKey: envelope,
+	});
+	assert.equal(typeof publicFrame.render, "function");
+	publicFrame.render(80);
+	publicFrame.handleMouse?.({ type: "click", button: "left", x: 1, y: 1, screenX: 1, screenY: 1, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 });
+	assert.match(publicFrame.render(80).join("\\n"), /hidden detail/, "the queried V1 factory exposes the same opt-in interaction shell");
 	assert.equal(typeof dispose, "function");
 });
 

@@ -10,9 +10,11 @@ the work. You can inspect or redirect individual workers without managing every 
 | Implement or fix something | `dev` | A scoped change, checks, and a concise explanation of the result |
 | Build a data pipeline, train or evaluate a model, or analyze data | `data` | Explicit grain, metric definitions, reproducible evidence, and stated uncertainty |
 | Review a change | `audit` | Prioritized, evidence-backed findings; edits only when requested |
-| Turn an idea into an implementation plan | `planner` | Decisions, dependencies, and verifiable steps without changing application code |
+| Turn an idea into an implementation plan | `planner` | Planning first: decisions, dependencies and verifiable steps, with requested implementation as a next step |
 | Investigate a question | `researcher` | Sources, conclusions, uncertainty, and durable notes when the scope warrants them |
 | Apply one operation across many independent items | `swarm` | Explicit coverage of completed, failed, and remaining items |
+| Reverse engineer an unfamiliar binary or file format | `reverser` | Artifact-led analysis, competing hypotheses, and evidence-backed conclusions |
+| Handle everyday research, code, documentation, or mixed tasks | `multiagent` | Task-fit delegation, clear hand-offs, and an integrated answer |
 | Repair a failing build or verify an implementation | `verify` | Fresh checks on the actual tree; repairs only when requested, with unresolved failures stated clearly |
 
 Switch with `/persona <name>` or F8 (the default shortcut). `/persona seed` installs missing defaults. Existing customized
@@ -21,6 +23,11 @@ you intend to discard those customizations.
 
 Restart Pi after updating the extension. Known, untouched defaults upgrade automatically; customized
 copies remain unchanged and can be compared with the bundled persona before adopting individual edits.
+
+Choose a specialist by the work shape: `reverser` for understanding an unfamiliar artifact, `swarm`
+for independent repeated items, and `multiagent` for general-purpose supervision across kinds of work.
+Choose model and effort per task within the current provider; on aggregators, prefer a few workers
+on the supervisor's exact model instead of exploring the entire catalog.
 
 An effective request names the intended result and its constraints. For example:
 
@@ -45,20 +52,30 @@ session suffix. The name survives persona changes and resume. `agent_name` sets 
 use; `exocom_name` sets the same identity when connected to peers. The leader can assign each
 delegated worker a `name` before launch, which reaches both its display and its first prompt.
 
-For a fixed-time reminder, ask for a timer. For a build finishing or a file, log, or system event,
-ask for a monitor. Pi runs a small event-producing program and brings the result back when the
-supervisor is free. Keep the session open, and cancel a watch when its purpose ends. See
-[time and event wakes](MONITORS.md) for examples and limits.
+For a fixed-time reminder, ask for a timer. For a file, log or system event, ask for a monitor.
+For a one-shot command such as a test suite, ask to run a script in the background. Results arrive
+when the supervisor is free. Keep the session open and stop work when its purpose ends. See
+[timers, monitors and scripts](MONITORS.md) for examples, retained logs and limits.
 
-- **F9** opens the agent tree. Queued rows have not started their clocks. Live supervisor asks show
+Launch cards keep the submitted task available through a click or the configured expand key
+(`Ctrl+O` by default). Steering cards expose the accepted message the same way. Intercom and
+Exocom updates show the assigned sender name and a short body; expanded details retain routing
+and trust diagnostics. A receipt confirms submission, not that the worker followed the instruction.
+
+- **F9** opens the live panel with workers, Exocom peers and separate timer, monitor and script groups.
+  Space or Left/Right folds a resource group; clicking its heading above the editor does the same
+  in alternate-screen mode. The two views share fold state. Enter opens a resource's details;
+  `x` stops a timer or program, while peers are read-only and have no worker controls.
+  Queued worker rows have not started their clocks. Live supervisor asks show
   `waiting for supervisor`, not a stall; running rows otherwise show elapsed time and switch to
   `⚠ stalled <duration>` after 90 seconds without progress — a suspicion, not proof of a deadlock.
   Council parent clocks refresh on child engine events; that indicates liveness, not useful work. For the
   stall card and `/peek`, "stalled" is stricter: 90 seconds with no assistant output, tokens, turns or
   completed tool call, so a tool that only streams output (`npm run dev`, `tail -f`) is flagged too. It is
   advice only: nothing is killed. The collapsed warning shows the quiet duration; a later
-  `Progress resumed` card records new observed progress once per reported episode, without claiming
-  completion. Ordinary progress stays in the live view; periodic `Status` cards are off by default
+  `intercom update · resumed` card records new observed progress once per reported episode, without claiming
+  completion. Stall and completion cards use that same heading with their own states.
+  Ordinary progress stays in the live view; periodic `intercom update · running` cards are off by default
   and may be enabled with the progress check-in interval in `/persona-settings`.
   A parent is waiting only when all its live descendant branches are waiting. Enter on a group opens
   a scrollable overview of its worker legs, with separate queued/running/terminal counts, model,
@@ -79,7 +96,7 @@ supervisor is free. Keep the session open, and cancel a watch when its purpose e
   the active persona's `orchestration:` block (bundled personas declare `council:` instead, used via the
   `council` tool); both run inline and their result also reaches the
   supervisor's next turn. In the F9 list, `X` stops every running leaf agent after a
-  second press that states how many.
+  second press that states how many. Timers, monitors, scripts and independent peers are excluded.
 - **Background results arrive automatically.** A supervisor can continue independent work while
   they run. When only background workers remain, end the turn and let completion follow-ups return
   their results; never sleep, poll, or arm a timer to wait for healthy workers (or monitors) - a

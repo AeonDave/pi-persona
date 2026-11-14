@@ -15,10 +15,13 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Omitting the argument uses the development SDK; pass an installed host entry to qualify that version.
 - One file: `node --import tsx --import ./test/setup/hermetic-env.ts --test test/unit/core/frontmatter.test.ts`
   - The second `--import` is the hermeticity choke point: it strips the whole `PI_PERSONA_*`
-    namespace and pins `PI_AGENT_DIR` at a throwaway dir before any test module loads, so a
+    namespace and pins `PI_AGENT_DIR` plus the SDK's `PI_CODING_AGENT_DIR` at the same throwaway dir before any test module loads, so a
     variable exported in your shell (or by CI) cannot reconfigure the extension under the suite.
     A test that exercises a variable sets it for itself, after that has run. Drop the flag and you
     are testing your shell, not the code.
+- Native search integration tests need real `rg` and `fd` binaries on `PATH`. CI prepares them with
+  `node test/setup/prepare-native-tools.mjs` before offline execution; the helper uses Pi's downloader
+  in an isolated directory and appends its bin path to `GITHUB_PATH` (use a temporary path file locally).
 - Live end-to-end (REAL model calls, spends tokens): `npm run drive -- --persona <name> --model <provider/id> "<prompt>"`
   - `drive.ts` exits non-zero and prints `[persona] ...` when the requested persona is not installed.
   - Control ops: `LIVE_MODEL=<provider/id> node --import tsx scripts/control-test.mjs` (STEER/STOP/RESUME)
@@ -120,6 +123,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   engines also export `PI_PERSONA_LEG=1` for a delegated leg — a **dedicated** marker (unlike the
   user-settable `PI_PERSONA_DISABLE`) so a companion extension can tell a real leg from a disabled
   supervisor; set it in lockstep with the disable guard (in-process guard + child `spawn` env).
+- Native OS/search tools are Pi-owned: `src/extension/native-tools.ts` activates existing host
+  `grep`/`find`/`ls` and Windows `powershell` defaults without replacing implementations. Pi's
+  allowlists/exclusions and explicit `defaultTools` remain authoritative; in-process legs add native
+  names only for an absent grant. Pi may fetch `rg`/`fd` on first use when absent.
+- `code_outline` is one bounded, lazily loaded WASM AST backend, not per-language tools. `src/tools/code-outline-parser.ts` owns package-entry resource resolution, grammar loading and parser/tree disposal; `src/core/code-outline.ts` is a pure AST extractor and has no filesystem or runtime parser imports. It supports JS/JSX, TS/TSX, Python, Go, Rust, C-family and C# source; C-family uses the C++ grammar and is not strict-C/compiler validation. Syntax errors and unsupported extensions fail closed; no type-checking, compilation, .NET decompilation, source cache or project index.
 - Three disjoint comm planes: **EngineEvent** (runtime) / **Bus Msg** (semantic, `src/bus`) /
   **ProgressView** (derived UI, never a source of truth). Capabilities are enforced at call time via
   one `EffectiveCapabilities`, never prompt-only. Per-run pinning: `contract@hash` is frozen at start.
@@ -255,6 +263,14 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   display identity, propagated to both engines without changing routing ids.
   Async launch/control cards use that alias, with persisted tool-result snapshots for history.
   Keep run IDs for routing/diagnostics, not primary display identity; disambiguate duplicate aliases.
+  The bus snapshots the registered alias on each envelope, including broker workers. Intercom/Exocom
+  compact messages share `ui/communication-card.ts`; expanded content remains the canonical delivered
+  source. Model metadata belongs in launch details/F9 and expanded communication diagnostics.
+  Completion, stall and recovery share lowercase `intercom update` headings. Keep these projections
+  in `ui/session-cards.ts`, with the shared frame and native tool expansion/click handling. Custom
+  message/entry consumers opt into shared primary-click expansion with `CardFrameContext.expansionKey`
+  (stable envelope object); native tool consumers omit it. The frame keeps only weakly keyed booleans.
+  Launch requests share `ui/launch-request.ts`; hidden task text must always expose an expansion hint.
   Steering cards preview the accepted message and expose all of it with Pi's expand-key binding.
   Runtime metadata guidance belongs in the stable supervisor system prompt, not a new user-like
   acknowledgement message. Keep initial setup/actionable asks working, preserve user-visible history,
@@ -271,6 +287,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `onArmed`/`onCancelled`, `MonitorManager` `onArmed`/`onRemoved` and `createMonitorSession`'s `observe`
   option (a terminal event is observed before the permission gate). A countdown replaces the stall clock; `x`
   cancels one via the stop registry; `X`, the `N agents` count and telemetry exclude them.
+  `script` runs asynchronous exit-only jobs using the same process lifecycle, with a separate
+  session, ID namespace and `pi-persona-script-log` archive. It accepts executable/args or inline
+  Pi shell source; both script and bash permissions are required. `resource-groups.ts` adds
+  collapsible Timers/Monitors/Scripts presentation groups, shared by the above-editor widget and
+  F9. These synthetic groups never enter the runtime tree or telemetry. Exocom is a read-only
+  peer section in F9 via its presence snapshot/subscription, with no worker controls.
 
 - Loaded companions: `core/companion.ts` defines the public local presence, live memory-owner and
   activity contracts; `extension/{companion,memory-owner}.ts` bind them to the current native owner.
@@ -285,12 +307,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   These cooperative contracts are not authentication; see the loaded-companion section
   in `docs/ARCHITECTURE.md`.
 
-- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), session-runs (pure restore-notice helper: what a reload/resume lost + the run-id counter), types.
+- `src/core/` — pure kernel: frontmatter, permissions, contract (+`parseContract`), config, discovery, fence (`fenceUntrusted`), brief (`buildDelegationBrief` — the per-turn roster + standing hand-off default; `buildExocomBrief` — the per-turn exocom peer roster, the peer-vs-sub-agent split, and the relevance bound on a peer exchange), `code-outline.ts` (AST-only declaration extraction from an already-parsed tree), timer (`TimerScheduler` — the alarm engine behind the `timer` tool), session-runs (pure restore-notice helper: what a reload/resume lost + the run-id counter), types.
 - `src/engine/` — `child.ts`, `inproc.ts` (default), `adapter.ts`, `async.ts` (async tracker/peek), `worktree.ts` (git-worktree isolation), `stream.ts` (event→state).
 - `src/orchestration/` — `sdk.ts` (`agent`/`parallel`/`reduce`), `strategy.ts` (registry), `strategies/*.ts`, `voting.ts`, `flow*.ts` (DAG + JSONL journal + checkpoint gates), `roster.ts` (teams + `rosterSpec`: a roster member is a bare name OR an inline `{ agent, role, model, skills }` that specialises one agent — every strategy runs members through `rosterSpec`).
 - `src/bus/` — `inproc.ts` (handle-based bus: send/ask/reply/onMessage), `contact.ts` (child `contact_supervisor` tool), `peers.ts` (child `contact_peer` sibling tool — one-way, engine-scoped), `broker/` (cross-process relay, on by default: `paths.ts`/`framing.ts`/`messages.ts` pure, `host.ts`/`client.ts` over `node:net`; `PI_PERSONA_BROKER=off` restores pre-broker spawn). `src/bridge.ts` — the child-mode-only wiring loaded when `PI_PERSONA_BUS` is set.
 - `src/persona/` — `persona.ts` (parse + `expandCouncilPreset`), `controller.ts`, `gating.ts`, `orchestrate.ts`, `config-store.ts` (pure model helpers), `settings-store.ts` (sole persistent settings owner).
-- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`, `background-run.ts` (tracked background council/flow runs: `launch`/`settle`, `TrackedRun`). `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `wake-rows.ts` (the monitor/timer → tree-row projection), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
+- `src/tools/` — `delegate.ts`, `intercom.ts`, `exocom.ts`, `code-outline.ts` (bounded source adapter) + `code-outline-parser.ts` (lazy WASM resource loader), `background-run.ts` (tracked background council/flow runs: `launch`/`settle`, `TrackedRun`). `src/ui/` — agent-tree/overlay, model-picker, `presentation.ts` (the collapsed-card compaction/sanitization helpers), `wake-rows.ts` (the monitor/timer → tree-row projection), `usage.ts`. `src/extension.ts` — the single ExtensionFactory (wires tools/commands/hooks/engines).
 - Bundled data-driven assets (discovery precedence builtin < user `~/.pi/agent/persona` < project `.pi/`):
   `personas/*.md`, `agents/*.md` (personas+agents share a folder, split by `persona: true` — a
   persona and an agent must NOT share a name; e.g. `researcher` is the persona, `research` the agent),

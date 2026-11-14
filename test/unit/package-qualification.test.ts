@@ -81,6 +81,13 @@ test("package inspection accepts only declared resources and host-owned wildcard
 	assert.throws(() => inspectPackage(manifest, files.filter((path) => path !== "src/extension.ts")), /missing.*extension/i);
 });
 
+test("package inspection carries only the packed manifest's runtime dependency specs into preparation", () => {
+	const packed = { ...manifest, dependencies: { "@vscode/tree-sitter-wasm": "0.3.1" },
+		devDependencies: { typescript: "99.0.0" } };
+	assert.deepEqual(inspectPackage(packed, files).runtimeDependencies, ["@vscode/tree-sitter-wasm@0.3.1"]);
+	assert.deepEqual(inspectPackage(manifest, files).runtimeDependencies, []);
+});
+
 test("process boundary captures failures and enforces a wall deadline", async () => {
 	const ok = await runQualificationProcess(process.execPath, ["-e", "console.log('receipt'); process.exitCode=3"], { timeoutMs: 1000 });
 	assert.equal(ok.code, 3);
@@ -105,6 +112,11 @@ test("trusted faux provider ignores clock metadata without replaying an earlier 
 		assert.equal(result.content[0].arguments.task, "PACKAGE_WORK:complete");
 		const ack = await provider.streamSimple(model, { messages: [user, clock, result, { role: "toolResult", toolName: "delegate", content: [{ type: "text", text: "receipt" }] }, clock] }, {}).result();
 		assert.equal(ack.content[0].text, "PACKAGE_SUPERVISOR_ACK");
+		for (const language of ["js", "ts"]) {
+			const outlined = await provider.streamSimple(model, { messages: [{ role: "user", content: [{ type: "text", text: `PACKAGE:outline:${language}` }] }, clock] }, {}).result();
+			assert.equal(outlined.content[0].name, "code_outline");
+			assert.deepEqual(outlined.content[0].arguments, { path: `outline-fixture.${language}` });
+		}
 	} finally {
 		if (previous === undefined) delete process.env.PACKAGE_QUALIFICATION_RECEIPTS;
 		else process.env.PACKAGE_QUALIFICATION_RECEIPTS = previous;

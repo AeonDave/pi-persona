@@ -11,7 +11,7 @@ export function collaborationWriteIntent(frame: ExocomSemanticFrame, state: Ledg
 
 export function deliverCollaborationOffer(
 	frame: ExocomOffer, state: LedgerState, sessionId: string, label: string, now: number,
-): { accepted: true; notice?: string } | { accepted: false; reason: string } {
+): { accepted: true; notice?: { text: string; preview: string } } | { accepted: false; reason: string } {
 	if (frame.to_session !== sessionId) return { accepted: false, reason: "offer addressed to another session" };
 	const stored = state.collaboration?.offers.find((offer) => offer.offer_id === frame.offer_id);
 	if (!stored || frameSigningPayload(stored) !== frameSigningPayload(frame)) {
@@ -21,9 +21,9 @@ export function deliverCollaborationOffer(
 	if (collaborationOfferStatus(stored, tasks, now) !== "open") return { accepted: true };
 	const task = tasks.find((candidate) => candidate.created.work_key === stored.work_key && candidate.created.msg_id === stored.task_id);
 	if (!task) return { accepted: true };
-	return { accepted: true, notice: [
+	return { accepted: true, notice: { text: [
 		`[pi-persona] Optional peer invitation · task=${stored.work_key} · offer=${stored.offer_id} · expires ${stored.expires_at}`,
 		"This creates no response obligation or permission. Inspect the task and take it voluntarily only within your authorized scope; otherwise continue your work.",
 		attributePeer(frame.from_session === task.created.from_session ? label : task.created.from_session, task.created.description),
-	].join("\n") };
+	].join("\n"), preview: `Optional invitation to task ${stored.work_key}: ${task.created.description}` } };
 }

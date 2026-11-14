@@ -6,7 +6,7 @@
  * spend provider tokens: require LIVE_MODEL explicitly before doing any work.
  *
  * Run from PowerShell:
- *   $env:LIVE_MODEL='openai-codex/gpt-5.6-luna'; node --import tsx scripts/monitor-smoke.mjs
+ *   $env:LIVE_MODEL='openai/gpt-6-luna'; node --import tsx scripts/monitor-smoke.mjs --script --thinking medium
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -17,9 +17,20 @@ import { fileURLToPath } from "node:url";
 import { killProcessTree } from "../src/engine/child.ts";
 import { appendBounded, contentText, jsonLineReader, resultDetails, sendCommand, short } from "./lib/rpc-smoke.mjs";
 
+const cliArgs = process.argv.slice(2);
+const scriptMode = cliArgs.includes("--script");
+const thinkingIndex = cliArgs.indexOf("--thinking");
+const thinking = thinkingIndex < 0 ? "medium" : cliArgs[thinkingIndex + 1];
+if (!new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).has(thinking)
+	|| cliArgs.some((arg, index) => arg !== "--script" && arg !== "--thinking" && (thinkingIndex < 0 || index !== thinkingIndex + 1))) {
+	console.error("Usage: monitor-smoke.mjs [--script] [--thinking off|minimal|low|medium|high|xhigh|max]");
+	process.exit(2);
+}
+const source = scriptMode ? "script" : "monitor";
+const launchAction = scriptMode ? "run" : "arm";
 const model = process.env.LIVE_MODEL?.trim();
 if (!model) {
-	console.error("monitor-smoke: refusing to spend tokens; set LIVE_MODEL=provider/id explicitly.");
+	console.error(`${source}-smoke: refusing to spend tokens; set LIVE_MODEL=provider/id explicitly.`);
 	process.exit(2);
 }
 
@@ -27,12 +38,12 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = join(repoRoot, "src", "extension.ts");
 const piIndex = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const piCli = join(dirname(piIndex), "cli.js");
-const marker = "MONITOR_SMOKE_EVENT_7f4a";
+const marker = scriptMode ? "SCRIPT_SMOKE_EVENT_7f4a" : "MONITOR_SMOKE_EVENT_7f4a";
 const deadlineMs = 120_000;
 const maxStderrChars = 24_000;
 const maxEventLog = 120;
 
-const tempRoot = mkdtempSync(join(tmpdir(), "pi-persona-monitor-smoke-"));
+const tempRoot = mkdtempSync(join(tmpdir(), `pi-persona-${source}-smoke-`));
 const gatePath = join(tempRoot, "release-gate.txt");
 const adapterPath = join(tempRoot, "monitor-adapter.mjs");
 
@@ -46,14 +57,14 @@ writeFileSync(
 );
 
 const prompt = [
-	"This is a persistent monitor reliability smoke test. Follow the exact order below.",
+	`This is a persistent ${source} reliability smoke test. Follow the exact order below.`,
 	"1. Call timer with action=now first. This is a required fresh-clock check.",
-	"2. Immediately call monitor with action=arm, mode=output, maxEvents=1, timeoutSeconds=45, and this exact local adapter:",
+	`2. Immediately call ${source} with action=${launchAction}, ${scriptMode ? "" : "mode=output, maxEvents=1, "}timeoutSeconds=45, and this exact local adapter:`,
 	`   command=${JSON.stringify(process.execPath)}`,
 	`   args=${JSON.stringify([adapterPath, gatePath, marker])}`,
-	"   label=RPC monitor smoke adapter",
-	"3. After the monitor arm succeeds, end this turn. Do not call monitor list/cancel, do not poll, and do not use another tool.",
-	`4. When the automatic monitor follow-up arrives, reply with a short acknowledgement containing the exact marker ${marker}.`,
+	`   label=RPC ${source} smoke adapter`,
+	`3. After the ${source} ${launchAction} succeeds, end this turn. Do not call ${source} list/result/cancel/stop, do not poll, and do not use another tool.`,
+	`4. When the automatic ${source} follow-up arrives, reply with a short acknowledgement containing the exact marker ${marker}.`,
 	"The harness writes the adapter gate only after it observes the first agent_end, so the event must be generated after that completed turn. Keep this task isolated; do not delegate.",
 ].join("\n");
 
@@ -74,8 +85,8 @@ const args = [
 	"--no-session",
 	"--extension", extensionPath,
 	"--model", model,
-	"--thinking", "xhigh",
-	"--tools", "read,bash,timer,monitor",
+	"--thinking", thinking,
+	"--tools", `read,bash,timer,${source}`,
 ];
 
 let child;
@@ -91,6 +102,9 @@ let monitorArmSeen = false;
 let forbiddenMonitorAction;
 let secondAssistantText = "";
 let completeOutcome;
+let sourceFollowUpCount = 0;
+let launchCount = 0;
+let forbiddenTool;
 const eventLog = [];
 
 function isMonitorFollowUp(event) {
@@ -122,18 +136,21 @@ function handleEvent(event) {
 		agentStartCount++;
 		return;
 	}
-	if (event.type === "tool_execution_start" && event.toolName === "monitor") {
+	if (event.type === "tool_execution_start" && event.toolName === source) {
 		const action = event.args && typeof event.args === "object" ? event.args.action : undefined;
-		if (action === "list" || action === "cancel") forbiddenMonitorAction = action;
+		if (action !== launchAction) forbiddenMonitorAction = action ?? "unknown";
+		else launchCount++;
 	}
+	if (event.type === "tool_execution_start" && event.toolName !== source
+		&& (event.toolName !== "timer" || event.args?.action !== "now")) forbiddenTool = event.toolName;
 	if (event.type === "tool_execution_end") {
 		const details = resultDetails(event.result);
 		if (event.toolName === "timer" && details?.action === "now" && details.ok === true && event.isError !== true) timerNowSeen = true;
-		if (event.toolName === "monitor") {
-			if (details?.ok === true && typeof details.id === "string" && !timerNowSeen) fail("monitor was armed before the required timer now check");
+		if (event.toolName === source) {
+			if (details?.ok === true && typeof details.id === "string" && !timerNowSeen) fail(`${source} started before the required timer now check`);
 			if (details?.ok === true && typeof details.id === "string") monitorArmSeen = true;
 			const action = event.args && typeof event.args === "object" ? event.args.action : undefined;
-			if (action === "list" || action === "cancel") forbiddenMonitorAction = action;
+			if (action !== undefined && action !== launchAction) forbiddenMonitorAction = action;
 		}
 		return;
 	}
@@ -148,19 +165,23 @@ function handleEvent(event) {
 		sourceMarkerAt = Date.now();
 		if (sourceMarkerAt < (gateWrittenAt ?? Number.POSITIVE_INFINITY)) fail("monitor source event arrived before the harness wrote the post-agent_end gate");
 	}
+	if (event.type === "message_end" && isMonitorFollowUp(event)) sourceFollowUpCount++;
 	if (event.type === "agent_end") {
 		firstAgentEndCount++;
 		if (firstAgentEndAt === undefined) {
 			if (!timerNowSeen) fail("first agent_end arrived without a successful timer now call");
-			if (!monitorArmSeen) fail("first agent_end arrived without a successful monitor arm");
-			if (forbiddenMonitorAction) fail(`model polled monitor with forbidden action=${forbiddenMonitorAction}`);
+			if (!monitorArmSeen) fail(`first agent_end arrived without a successful ${source} ${launchAction}`);
+			if (forbiddenMonitorAction) fail(`model polled ${source} with forbidden action=${forbiddenMonitorAction}`);
 			firstAgentEndAt = Date.now();
 			writeFileSync(gatePath, "release after first agent_end\n", "utf8");
 			gateWrittenAt = Date.now();
 			console.log(`PASS — initial agent_end observed; gate written at ${gatePath}`);
 			return;
 		}
-		if (sourceMarkerAt === undefined) fail("second agent_end arrived without an automatic monitor event marker");
+		if (sourceMarkerAt === undefined) fail(`second agent_end arrived without an automatic ${source} event marker`);
+		if (sourceFollowUpCount !== 1) fail(`expected exactly one automatic ${source} completion, got ${sourceFollowUpCount}`);
+		if (forbiddenMonitorAction) fail(`model polled ${source} with forbidden action=${forbiddenMonitorAction}`);
+		if (forbiddenTool) fail(`model used unexpected tool ${forbiddenTool}`);
 		if (!secondAssistantText.includes(marker)) fail(`second model turn did not acknowledge exact marker ${marker}`);
 		settled = true;
 		try { child?.stdin?.end(); } catch { /* close below still owns the result */ }
@@ -174,7 +195,6 @@ const send = (command) => sendCommand(child, command);
 
 async function waitForOutcome() {
 	return await new Promise((resolve, reject) => {
-		completeOutcome = resolve;
 		let finished = false;
 		let timeout;
 		const finish = (error) => {
@@ -184,7 +204,8 @@ async function waitForOutcome() {
 			if (error) reject(error);
 			else resolve();
 		};
-		timeout = setTimeout(() => finish(new Error(`monitor smoke exceeded ${deadlineMs}ms`)), deadlineMs);
+		completeOutcome = () => finish();
+		timeout = setTimeout(() => finish(new Error(`${source} smoke exceeded ${deadlineMs}ms`)), deadlineMs);
 		child.on("error", (error) => finish(error));
 		child.on("close", (code, signal) => {
 			if (settled) finish(undefined);
@@ -200,7 +221,7 @@ async function waitForOutcome() {
 }
 
 async function main() {
-	console.log(`▶ monitor-smoke model=${model} thinking=xhigh`);
+	console.log(`▶ ${source}-smoke model=${model} thinking=${thinking}`);
 	console.log(`  temp cwd=${tempRoot}`);
 	child = spawn(process.execPath, [piCli, ...args], {
 		cwd: tempRoot,
@@ -213,10 +234,10 @@ async function main() {
 	if (child.exitCode !== null) throw new Error(`Pi exited during startup (code=${child.exitCode})`);
 	send({ type: "prompt", message: prompt });
 	await outcome;
-	if (agentStartCount < 2 || firstAgentEndCount < 2 || sourceMarkerAt === undefined || gateWrittenAt === undefined || sourceMarkerAt < gateWrittenAt) {
-		throw new Error("monitor smoke ended without proving the post-agent_end automatic event ordering");
+	if (launchCount !== 1 || forbiddenTool || agentStartCount !== 2 || firstAgentEndCount !== 2 || sourceFollowUpCount !== 1 || sourceMarkerAt === undefined || gateWrittenAt === undefined || sourceMarkerAt < gateWrittenAt) {
+		throw new Error(`${source} smoke ended without proving exactly one post-agent_end automatic completion`);
 	}
-	console.log(`PASS — timer now → monitor arm → initial agent_end → ${marker} → second agent_end`);
+	console.log(`PASS — timer now → ${source} ${launchAction} → initial agent_end → one automatic ${marker} completion → second agent_end`);
 }
 
 async function stopChild() {

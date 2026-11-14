@@ -117,17 +117,13 @@ permission:
     "*": deny
 ```
 
-#### Persona policy profiles (target presets)
+#### Operator-selected policy profiles
 
-| Persona | Profile |
-|---------|---------|
-| `researcher` | Read-only, web allowed, no writes |
-| `planner` | Read-only, no mutating shell |
-| `implementer` | Write in worktree, test/build allowed, push denied |
-| `reviewer` | Read, diff, diagnostics; no modifications |
-| `release` | Tag/push/workflow with `ask` confirmation |
-| `red-lab` | Permissive **only inside sandbox/VM** |
-| `untrusted-auditor` | Read-only, network denied, credentials absent |
+Scope, authorization and operational limits belong to the operator, project and permission layer,
+not to a bundled persona's identity. Any future read-only, worktree-write or isolated-execution
+profile must be explicitly selected independently of persona names; choosing `planner`, `researcher`
+or another specialization must not silently choose an access policy. Personas describe default
+methods and deliverables, while the permission system enforces the actual grants.
 
 #### Integration surface with the permission system
 

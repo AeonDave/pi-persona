@@ -30,15 +30,15 @@ test("Mind work, staged, completed and failed rows render honestly beside an age
 		const lines = new Text(renderAgentTreeSummary(tree.snapshot(), 8, { now: 100_000, stallMs: 1_000 }).join("\n"), 0, 0).render(width);
 		assert.ok(lines.every((line) => visibleWidth(line) <= width));
 		const view = lines.join("\n");
-		assert.equal((view.match(/Mind/g) ?? []).length, 4);
+		assert.equal((view.match(/mind/g) ?? []).length, 4);
 		assert.match(view, /inspecting/); assert.match(view, /prepared/); assert.match(view, /applied/); assert.match(view, /failed/);
 		assert.match(view, /fires\s+in/); assert.match(view, /deadline\s+in/);
-		assert.doesNotMatch(lines.filter((line) => /Mind/.test(line)).join("\n"), /stalled|waiting for supervisor|tok|xh|gpt/);
+		assert.doesNotMatch(lines.filter((line) => /mind/.test(line)).join("\n"), /stalled|waiting for supervisor|tok|xh|gpt/);
 		const overlay = new AgentOverlay(tree, tui, theme, () => {}, { now: () => 100_000, stallMs: 1_000, canStop: () => true, canSteer: () => true });
 		t.after(() => overlay.dispose());
 		assert.ok(overlay.render(width).every((line) => visibleWidth(line) <= width));
 		const view80 = overlay.render(80).join("\n");
-		assert.equal((view80.match(/Mind/g) ?? []).length, 4);
+		assert.equal((view80.match(/mind/g) ?? []).length, 4);
 		assert.doesNotMatch(view80, /X stop all/, "one real worker plus local/wake rows is still one agent");
 	}
 });

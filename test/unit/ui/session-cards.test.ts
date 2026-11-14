@@ -4,14 +4,16 @@ import { getMarkdownTheme, initTheme, type ExtensionAPI, type Theme } from "@ear
 import { fenceUntrusted, attributePeer } from "../../../src/core/fence.ts";
 
 initTheme("dark", false);
-import { Markdown, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Markdown, visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 // Generator imports are READ-ONLY drift guards: the parsers in src/ui/session-cards.ts must
 // keep matching exactly what src/engine/async.ts emits (see the drift-guard tests below).
 import { buildCheckIn, buildCompletionReport, buildPeekDigest, type AsyncRun } from "../../../src/engine/async.ts";
 import { registerSessionCards } from "../../../src/ui/session-cards.ts";
 import { sanitizeTerminalText } from "../../../src/ui/presentation.ts";
 import type { MonitorLogRecord } from "../../../src/monitor/archive.ts";
-import { renderMonitorLog } from "../../../src/tools/monitor.ts";
+import { renderProcessLog } from "../../../src/monitor/log.ts";
+import { buildCommunicationCardDetails } from "../../../src/ui/communication-card.ts";
+import { buildRunLabelDetails, buildSettlementDetails } from "../../../src/ui/run-labels.ts";
 
 type RenderOptions = { expanded: boolean; keyText: (id: string) => string; keyHint: (id: string, description: string) => string } & ({ outputPad: number } | { outputPad?: never });
 type Renderer = (value: unknown, options: RenderOptions, theme: Theme) => Component | undefined;
@@ -21,7 +23,7 @@ function harness() {
 	let outputPad: 0 | 1 = 0;
 	const cardOptions = {
 		detailHint: () => "expand to see full detail",
-		monitorLog: (record: MonitorLogRecord) => renderMonitorLog(record, true),
+		processLog: (record: MonitorLogRecord) => renderProcessLog(record, true),
 		getOutputPad: () => outputPad,
 	};
 	registerSessionCards({ registerMessageRenderer: register, registerEntryRenderer: register } as unknown as ExtensionAPI, cardOptions);
@@ -56,6 +58,52 @@ function harness() {
 	}
 	return { renderers, card, check, backgrounds, setOutputPad: (value: 0 | 1) => { outputPad = value; }, nextTheme: () => { generation++; } };
 }
+
+test("every registered session-card type expands and collapses through its stable source envelope", () => {
+	const h = harness();
+	const click: TuiMouseEvent = { type: "click", button: "left", x: 1, y: 1, screenX: 1, screenY: 1, width: 120, height: 20, shift: false, alt: false, ctrl: false, clickCount: 1 };
+	const body = [...Array.from({ length: 11 }, (_, index) => `matrix-${index} ${"x".repeat(40)}`), "HIDDEN_TAIL"].join("\n");
+	const record = monitor({ text: body, stdout: body });
+	const personaMessage = (content: string, details?: unknown) => ({ role: "custom", customType: "pi-persona", content, ...(details === undefined ? {} : { details }) });
+	const cases: Array<[string, object, boolean]> = [
+		["pi-persona", personaMessage(body), true],
+		["pi-persona", personaMessage(`1 async run settled — 1 done, 0 failed\n${body}`), true],
+		["pi-persona", personaMessage(`2 async runs settled — 1 done, 1 failed\n${body}`), true],
+		["pi-persona", personaMessage(`2 async runs settled — 1 done, 0 failed, 1 stopped\n${body}`), true],
+		["pi-persona", personaMessage(body, buildCommunicationCardDetails("intercom", [{ from: "peer", text: body }])), true],
+		["exocom_received", { role: "custom", customType: "exocom_received", content: body }, true],
+		["pi-persona-monitor-log", { type: "custom", customType: "pi-persona-monitor-log", data: record }, false],
+		["pi-persona-monitor-log", { type: "custom", customType: "pi-persona-monitor-log", data: monitor({ outcome: "exit", text: `process exited with exit code 2\n${body}`, stdout: body }) }, false],
+		["pi-persona-monitor-log", { type: "custom", customType: "pi-persona-monitor-log", data: monitor({ outcome: "timeout", text: body }) }, false],
+		["pi-persona-script-log", { type: "custom", customType: "pi-persona-script-log", data: record }, false],
+		["pi-persona-script-log", { type: "custom", customType: "pi-persona-script-log", data: monitor({ outcome: "error", text: body }) }, false],
+		["pi-persona-run-failure", { type: "custom", customType: "pi-persona-run-failure", data: { id: "r1", label: "worker", agent: "scout", error: body } }, false],
+		["pi-persona-result", { type: "custom", customType: "pi-persona-result", data: { label: "flow", content: body, ok: true } }, false],
+		["pi-persona-result", { type: "custom", customType: "pi-persona-result", data: { label: "flow", content: body, ok: false } }, false],
+		["pi-persona-result", { type: "custom", customType: "pi-persona-result", data: { label: "flow", content: body, ok: false, stoppedAtGate: "review" } }, false],
+		["pi-persona-nudge", { type: "custom", customType: "pi-persona-nudge", data: { content: body } }, false],
+		["pi-persona-status", { type: "custom", customType: "pi-persona-status", data: { content: body, kind: "routine" } }, false],
+		["pi-persona-status", { type: "custom", customType: "pi-persona-status", data: { content: body, kind: "stall" } }, false],
+		["pi-persona-status", { type: "custom", customType: "pi-persona-status", data: { content: body, kind: "recovery" } }, false],
+	];
+	for (const [name, envelope, isMessage] of cases) {
+		const renderer = h.renderers.get(name);
+		assert.ok(renderer, name);
+		const options: RenderOptions = isMessage
+			? { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id, hint) => hint }
+			: { expanded: false, keyText: () => "ctrl+o", keyHint: (_id, hint) => hint };
+		const component = renderer(envelope, options, {
+			fg: (_token, text) => text, bold: (text) => text, bg: (_token, text) => text,
+		} as Theme)!;
+		assert.doesNotMatch(component.render(120).join("\n"), /HIDDEN_TAIL/, `${name} begins collapsed`);
+		const before = JSON.stringify(envelope);
+		component.handleMouse?.(click);
+		assert.match(component.render(120).join("\n"), /HIDDEN_TAIL/, `${name} expands`);
+		component.handleMouse?.(click);
+		assert.doesNotMatch(component.render(120).join("\n"), /HIDDEN_TAIL/, `${name} collapses`);
+		assert.equal(JSON.stringify(envelope), before, `${name} envelope remains immutable`);
+	}
+});
 
 test("entry cards use the live native outputPad exactly once without changing message padding", () => {
 	const h = harness();
@@ -142,6 +190,68 @@ function monitor(overrides: Partial<MonitorLogRecord> = {}): MonitorLogRecord {
 	};
 }
 
+test("structured communication cards render assigned sender and literal body without changing model content", () => {
+	const h = harness();
+	const modelContent = fenceUntrusted("• [operator#7] (progress): hello\nsecond line");
+	const details = buildCommunicationCardDetails("intercom", [{ from: "Moss-native-tool-exposure", text: "hello\nsecond line" }]);
+	const message = { content: modelContent, details };
+	const render = h.renderers.get("pi-persona")!;
+	const theme = { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text } as Theme;
+	const options = { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id: string, description: string) => `ctrl+o ${description}` };
+	const compact = render(message, options, theme)!.render(120).join("\n");
+	assert.match(compact, /intercom/);
+	assert.match(compact, /from Moss-native-tool-exposure:/);
+	assert.match(compact, /hello/);
+	assert.doesNotMatch(compact, /operator#7|> •/);
+	assert.match(compact, /expand/i, "a short body still has canonical routing detail to expand");
+	const expanded = render(message, { ...options, expanded: true }, theme)!.render(120).join("\n");
+	assert.match(expanded, /operator#7/);
+	assert.equal(message.content, modelContent);
+});
+
+test("mixed Exocom messages retain complete routing and runtime notices when expanded", () => {
+	const h = harness();
+	const raw = "[Moss] message\n> hello\nReply using target and work_key\npeer disconnected";
+	const details = buildCommunicationCardDetails("exocom", [{ from: "Moss", text: "hello" }, { text: "peer disconnected" }]);
+	const renderer = h.renderers.get("pi-persona")!;
+	const theme = { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text } as Theme;
+	const opts = { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id: string, text: string) => `ctrl+o ${text}` };
+	const compact = renderer({ content: raw, details }, opts, theme)!.render(120).join("\n");
+	assert.match(compact, /exocom update · info/);
+	assert.match(compact, /from Moss:/);
+	assert.match(compact, /peer disconnected/);
+	const expanded = renderer({ content: raw, details }, { ...opts, expanded: true }, theme)!.render(120).join("\n");
+	assert.match(expanded, /Reply using target and work_key/);
+	assert.match(expanded, /peer disconnected/);
+});
+
+test("run label snapshots remove model from compact updates while retaining expanded diagnostics", () => {
+	const h = harness();
+	const runs = [asynRun({ id: "run-1", label: "Moss", model: "model-secret" })];
+	const details = { ...buildRunLabelDetails(runs), ...buildSettlementDetails(runs) };
+	const raw = buildCompletionReport(runs, fenceUntrusted);
+	const theme = { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text } as Theme;
+	const renderer = h.renderers.get("pi-persona")!;
+	const opts = { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id: string, text: string) => text };
+	const collapsed = renderer({ content: raw, details }, opts, theme)!.render(120).join("\n");
+	assert.match(collapsed, /Moss · done/);
+	assert.doesNotMatch(collapsed, /model-secret/);
+	const expanded = renderer({ content: raw, details }, { ...opts, expanded: true }, theme)!.render(120).join("\n");
+	assert.match(expanded, /model-secret/);
+	const status = buildCheckIn([asynRun({ id: "run-1", label: "Moss", model: "model-secret", status: "running" })], { now: 5_000, stallMs: 90_000, reason: "stall" });
+	const view = h.card("pi-persona-status", { content: status, kind: "stall", ...details }).render(120).join("\n");
+	assert.match(view, /intercom update · stalled/);
+	assert.match(view, /Moss ·/);
+	assert.doesNotMatch(view, /model-secret/);
+});
+
+test("script terminal cards preserve the shared output and failure presentation", () => {
+	const h = harness();
+	h.check("pi-persona-script-log", monitor(), "toolSuccessBg", /^script · build$/, /^  exit · complete · m1$/);
+	h.check("pi-persona-script-log", monitor({ text: "process exited with exit code 2" }), "toolErrorBg", /^script · build$/, /^  exit · failed · m1$/);
+	assert.match(h.card("pi-persona-script-log", monitor({ stdout: "SCRIPT_CAPTURE" }), true).render(120).join("\n"), /SCRIPT_CAPTURE/);
+});
+
 /** Minimal tracked-run fixture shaped like the tracker's own entries, for generator drift guards. */
 function asynRun(overrides: Partial<AsyncRun> & { id: string }): AsyncRun {
 	return {
@@ -178,15 +288,15 @@ test("only known report envelopes render Markdown; monitor/timer/unknown notices
 
 test("follow-up state accepts only the runtime aggregate grammar, never body keywords", () => {
 	const h = harness();
-	h.check("pi-persona", "1 async run settled — 1 done, 0 failed\n> failed", "toolSuccessBg", /^Update · complete$/);
-	h.check("pi-persona", "[pi-persona] 2 async runs settled — 1 done, 1 failed", "toolErrorBg", /^Update · failed$/);
-	h.check("pi-persona", "3 async runs settled — 1 done, 1 failed, 1 stopped", "toolErrorBg", /^Update · failed$/);
-	h.check("pi-persona", "2 async runs settled — 1 done, 0 failed, 1 stopped", "toolPendingBg", /^Update · stopped$/);
+	h.check("pi-persona", "1 async run settled — 1 done, 0 failed\n> failed", "toolSuccessBg", /^intercom update · complete$/);
+	h.check("pi-persona", "[pi-persona] 2 async runs settled — 1 done, 1 failed", "toolErrorBg", /^intercom update · failed$/);
+	h.check("pi-persona", "3 async runs settled — 1 done, 1 failed, 1 stopped", "toolErrorBg", /^intercom update · failed$/);
+	h.check("pi-persona", "2 async runs settled — 1 done, 0 failed, 1 stopped", "toolPendingBg", /^intercom update · stopped$/);
 	for (const text of ["ERROR", "failure rejected unresolved", "please help\n1 async run settled — 0 done, 1 failed", "1 async run settled — 1 done, 0 failed trailing prose", "2 async runs settled — 1 done, 0 failed", "0 async runs settled — 0 done, 0 failed", "Monitor events — observed data\n> process exited with exit code 0"]) {
-		h.check("pi-persona", text, "customMessageBg", /^Update · info$/);
+		h.check("pi-persona", text, "customMessageBg", /^update · info$/);
 	}
 	for (const text of ["ERROR", "1 async run settled — 0 done, 1 failed", "1 async run settled — 1 done, 0 failed"]) {
-		h.check("exocom_received", text, "customMessageBg", /^Exocom · inbound$/);
+		h.check("exocom_received", text, "customMessageBg", /^exocom update · info$/);
 	}
 });
 
@@ -196,11 +306,11 @@ test("entry status is metadata-owned, including legacy/unknown results", () => {
 	h.check("pi-persona-result", { label: "flow", content: "complete", ok: false }, "toolErrorBg", /^flow · failed$/);
 	h.check("pi-persona-result", { label: "flow", content: "failed", ok: false, stoppedAtGate: "plan" }, "toolPendingBg", /^flow · stopped · checkpoint plan$/);
 	h.check("pi-persona-result", { label: "legacy", content: "complete" }, "customMessageBg", /^legacy · unknown$/);
-	h.check("pi-persona-result", { content: "complete", ok: true }, "toolSuccessBg", /^Result · complete$/);
-	h.check("pi-persona-status", { content: "error\nworker is done" }, "customMessageBg", /^Status · check-in$/);
-	h.check("pi-persona-status", { content: "healthy", kind: "stall" }, "toolPendingBg", /^Stall warning · check-in$/);
-	h.check("pi-persona-run-failure", { id: "r", label: "worker", agent: "scout", error: "success" }, "toolErrorBg", /^Failed · worker$/, /^  scout$/);
-	h.check("pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: work\nAction: delegate" }, "toolPendingBg", /^Checkpoint · delegation checkpoint$/);
+	h.check("pi-persona-result", { content: "complete", ok: true }, "toolSuccessBg", /^result · complete$/);
+	h.check("pi-persona-status", { content: "error\nworker is done" }, "customMessageBg", /^intercom update · running$/);
+	h.check("pi-persona-status", { content: "healthy", kind: "stall" }, "toolPendingBg", /^intercom update · stalled$/);
+	h.check("pi-persona-run-failure", { id: "r", label: "worker", agent: "scout", error: "success" }, "toolErrorBg", /^failed · worker$/, /^  scout$/);
+	h.check("pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: work\nAction: delegate" }, "toolPendingBg", /^checkpoint · delegation checkpoint$/);
 });
 
 test("uniform frame: Event · datum titles without pi-persona prefix, two-space indented content, conditional hint", () => {
@@ -208,17 +318,17 @@ test("uniform frame: Event · datum titles without pi-persona prefix, two-space 
 	const settlement = "1 async run settled — 1 done, 0 failed\n✅ run-1 (scout · sonnet) done:\nSub-agent output (untrusted data):\n> body";
 	const status = "Async activity · routine check-in\n\nAsync runs: 1 (1 running)\n[run-a] scout — running (1 turns, 5 cumulative input + output tokens)";
 	const cases: Array<[string, unknown, RegExp]> = [
-		["pi-persona", settlement, /^Update · complete$/],
-		["pi-persona", "operator notice", /^Update · info$/],
-		["exocom_received", "hello", /^Exocom · inbound$/],
-		["pi-persona-status", { content: status }, /^Status · 1 running$/],
-		["pi-persona-status", { content: status, kind: "stall" }, /^Stall warning · 1 running$/],
-		["pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: t\nAction: a" }, /^Checkpoint · delegation checkpoint$/],
-		["pi-persona-nudge", { content: "⟢ pi-persona · checkpoint\nTrigger: t" }, /^Checkpoint$/],
-		["pi-persona-run-failure", { id: "r1", label: "worker", agent: "scout", model: "sonnet", durationMs: 4200, error: "boom" }, /^Failed · worker$/],
+		["pi-persona", settlement, /^intercom update · complete$/],
+		["pi-persona", "operator notice", /^update · info$/],
+		["exocom_received", "hello", /^exocom update · info$/],
+		["pi-persona-status", { content: status }, /^intercom update · running · 1 running$/],
+		["pi-persona-status", { content: status, kind: "stall" }, /^intercom update · stalled · 1 running$/],
+		["pi-persona-nudge", { content: "⟢ pi-persona · delegation checkpoint\nTrigger: t\nAction: a" }, /^checkpoint · delegation checkpoint$/],
+		["pi-persona-nudge", { content: "⟢ pi-persona · checkpoint\nTrigger: t" }, /^checkpoint$/],
+		["pi-persona-run-failure", { id: "r1", label: "worker", agent: "scout", model: "sonnet", durationMs: 4200, error: "boom" }, /^failed · worker$/],
 		["pi-persona-result", { label: "flow", content: "ok", ok: true }, /^flow · complete$/],
-		["pi-persona-result", { content: "ok", ok: true }, /^Result · complete$/],
-		["pi-persona-monitor-log", monitor(), /^Monitor · build$/],
+		["pi-persona-result", { content: "ok", ok: true }, /^result · complete$/],
+		["pi-persona-monitor-log", monitor(), /^monitor · build$/],
 	];
 	for (const [name, data, title] of cases) {
 		const before = JSON.stringify(data);
@@ -235,7 +345,7 @@ test("uniform frame: Event · datum titles without pi-persona prefix, two-space 
 	}
 	// Fixed dim metadata lines: run-failure (agent · model · duration) and monitor (outcome · status · id).
 	const failureRows = h.card("pi-persona-run-failure", { id: "r1", label: "worker", agent: "scout", model: "sonnet", durationMs: 4200, error: "boom" }).render(120);
-	assert.equal(failureRows[1]?.trimEnd(), "  scout · sonnet · 4s");
+	assert.equal(failureRows[1]?.trimEnd(), "  scout · 4s");
 	const monitorRows = h.card("pi-persona-monitor-log", monitor()).render(120);
 	assert.equal(monitorRows[1]?.trimEnd(), "  exit · complete · m1");
 });
@@ -276,11 +386,15 @@ test("settlement drift-guard: compact projection matches the live buildCompletio
 	assert.match(raw, /^Handle each failure deliberately: /m);
 
 	const before = JSON.stringify(raw);
-	const rows = h.card("pi-persona", raw).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(rows[0], "Update · failed");
+	const renderer = h.renderers.get("pi-persona")!;
+	const opts = { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id: string, text: string) => text };
+	const theme = { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text } as Theme;
+	const details = buildSettlementDetails(runs);
+	const rows = renderer({ content: raw, details }, opts, theme)!.render(120).map((line) => line.trimEnd());
+	assert.equal(rows[0], "intercom update · failed");
 	assert.equal(rows[1], "  1 done, 1 failed");
-	assert.equal(rows[2], "  atlas-static · sonnet · done · 12s");
-	assert.equal(rows[3], "  beacon · opus · failed · 8s");
+	assert.equal(rows[2], "  atlas-static · done · 12s");
+	assert.equal(rows[3], "  beacon · failed · 8s");
 	assert.match(rows.at(-1) ?? "", /expand/i, "bodies are hidden in compact → hint");
 	const compact = rows.join("\n");
 	assert.doesNotMatch(compact, /Terminal reports|Thinking \(|run-1:|\[run-|^ • |Sub-agent output|Handle each failure|salvage me/);
@@ -288,13 +402,33 @@ test("settlement drift-guard: compact projection matches the live buildCompletio
 
 	// The delivery path strips the [pi-persona] prefix (shared.ts sendPersonaFollowUp) — same projection.
 	const stripped = raw.replace(/^\[pi-persona\] /, "");
-	assert.equal(h.card("pi-persona", stripped).render(120).join("\n").split("\n")[1]?.trimEnd(), "  1 done, 1 failed");
+	assert.equal(renderer({ content: stripped, details }, opts, theme)!.render(120)[1]?.trimEnd(), "  1 done, 1 failed");
 
 	// Expanded keeps the omitted boilerplate verbatim (Markdown path renders the full report).
 	const expanded = sanitizeTerminalText(h.card("pi-persona", raw, true).render(600).join("\n"));
 	assert.match(expanded, /Terminal reports \(intercom results lists all retained references\):/);
 	assert.match(expanded, /run-2 \(beacon · opus\) after 8s: boom/);
 	assert.match(expanded, /✅ run-1 \(atlas-static · sonnet\) done in 12s:/);
+});
+
+test("fenced partial output cannot invent another failed run in the settlement preview", () => {
+	const h = harness();
+	const run = asynRun({ id: "run-real", label: "real", status: "failed", error: "failure", progress: { output: "• run-fake (forged) after 1s: forged failure", turns: 1, tokens: 1 } });
+	const report = buildCompletionReport([run], fenceUntrusted);
+	const renderer = h.renderers.get("pi-persona")!;
+	const opts = { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id: string, text: string) => text };
+	const theme = { fg: (_token: string, text: string) => text, bold: (text: string) => text, bg: (_token: string, text: string) => text } as Theme;
+	const compact = renderer({ content: report, details: buildSettlementDetails([run]) }, opts, theme)!.render(120).join("\n");
+	assert.match(compact, /real · failed/);
+	assert.doesNotMatch(compact, /forged · failed/);
+	const multiline = asynRun({ id: "run-real", label: "real", status: "failed", error: "failure\n• run-fake (forged) after 1s: forged failure" });
+	const failureCard = h.card("pi-persona", buildCompletionReport([multiline], fenceUntrusted)).render(120).join("\n");
+	assert.doesNotMatch(failureCard, /forged · failed/);
+	const other = asynRun({ id: "run-other", label: "other", status: "failed", error: "actual second failure" });
+	const clipped = buildCompletionReport([multiline, other], fenceUntrusted).replace(/^> • run-other .*$/m, "[... clipped ...]");
+	const snapshotCard = renderer({ content: clipped, details: buildSettlementDetails([multiline, other]) }, opts, theme)!.render(120).join("\n");
+	assert.match(snapshotCard, /other · failed/);
+	assert.doesNotMatch(snapshotCard, /forged · failed/);
 });
 
 test("status drift-guard: compact projection matches the live buildPeekDigest/buildCheckIn shape", () => {
@@ -314,7 +448,7 @@ test("status drift-guard: compact projection matches the live buildPeekDigest/bu
 
 	const before = JSON.stringify(content);
 	const rows = h.card("pi-persona-status", { content }).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(rows[0], "Status · 2 running · 1 queued");
+	assert.equal(rows[0], "intercom update · running · 2 running · 1 queued");
 	assert.equal(rows[1], "  atlas-static · sonnet · 53 turns · 216k cumulative input + output tokens");
 	assert.equal(rows[2], "  beacon · opus · queued · 0 cumulative input + output tokens");
 	const compact = rows.join("\n");
@@ -331,9 +465,9 @@ test("status drift-guard: compact projection matches the live buildPeekDigest/bu
 	assert.match(stallContent, /⚠ possibly stuck \(no progress for 95s\)/);
 	const stallData = { content: stallContent, kind: "stall" };
 	const stall = h.card("pi-persona-status", stallData).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(stall[0], "Stall warning · 1 running");
+	assert.equal(stall[0], "intercom update · stalled · 1 running");
 	assert.equal(stall[1], "  atlas-static · sonnet · no observed progress for 95s · 53 turns · 216k cumulative input + output tokens");
-	h.check("pi-persona-status", stallData, "toolPendingBg", /^Stall warning · 1 running$/);
+	h.check("pi-persona-status", stallData, "toolPendingBg", /^intercom update · stalled · 1 running$/);
 	assert.match(h.card("pi-persona-status", stallData, true).render(400).join("\n"), /⚠ possibly stuck \(no progress for 95s\)/);
 
 	// Recovery is a live progress digest with a distinct header. It must remain a running
@@ -346,10 +480,10 @@ test("status drift-guard: compact projection matches the live buildPeekDigest/bu
 	assert.match(recoveryContent, /^Async activity · progress resumed$/m);
 	const recoveryData = { content: recoveryContent, kind: "recovery" };
 	const recovery = h.card("pi-persona-status", recoveryData).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(recovery[0], "Progress resumed · 1 running");
+	assert.equal(recovery[0], "intercom update · resumed · 1 running");
 	assert.equal(recovery[1], "  atlas-static · sonnet · progress resumed · 54 turns · 217k cumulative input + output tokens");
 	assert.doesNotMatch(recovery.join("\n"), /done|complete/i);
-	h.check("pi-persona-status", recoveryData, "toolSuccessBg", /^Progress resumed · 1 running$/);
+	h.check("pi-persona-status", recoveryData, "toolSuccessBg", /^intercom update · resumed · 1 running$/);
 	assert.match(h.card("pi-persona-status", recoveryData, true).render(400).join("\n"), /Async activity · progress resumed/);
 	for (const width of [40, 60, 80, 120]) {
 		for (const data of [stallData, recoveryData]) {
@@ -374,7 +508,7 @@ test("status drift-guard: compact projection matches the live buildPeekDigest/bu
 	const settled = buildPeekDigest([asynRun({ id: "run-c", label: "old", model: "haiku", result: {} as NonNullable<AsyncRun["result"]> })], { now: 30_000, stallMs: 90_000 });
 	assert.match(settled, /^\[run-c\] old · haiku — done in 12s: full result available via intercom result \(to: run-c\)$/m);
 	const settledRows = h.card("pi-persona-status", { content: `Async activity · routine check-in\n\n${settled}` }).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(settledRows[0], "Status · 0 running");
+	assert.equal(settledRows[0], "intercom update · running · 0 running");
 	assert.equal(settledRows[1], "  old · haiku · done · 12s");
 });
 
@@ -453,19 +587,19 @@ test("unknown shapes fall back to the bounded generic preview — never a crash 
 	const h = harness();
 	const junk = "operator notice\narbitrary body\nsecond line\nthird\nfourth\nfifth";
 	const rows = h.card("pi-persona", junk).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(rows[0], "Update · info");
+	assert.equal(rows[0], "update · info");
 	assert.ok(rows.length <= 7, `bounded (${rows.length})`);
 	assert.match(rows[1] ?? "", /^  \S/, "fallback preview is non-empty and indented");
 
 	// A settlement head followed by unrecognized content falls back instead of mis-projecting.
 	const mixed = "2 async runs settled — 1 done, 1 failed\nmystery block that matches nothing\nmore";
 	const mixedRows = h.card("pi-persona", mixed).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(mixedRows[0], "Update · failed");
+	assert.equal(mixedRows[0], "intercom update · failed");
 	assert.ok(mixedRows.length <= 7);
 	assert.match(mixedRows.join("\n"), /mystery block/);
 
 	const statusRows = h.card("pi-persona-status", { content: "error\nworker is done" }).render(120).join("\n").split("\n").map((line) => line.trimEnd());
-	assert.equal(statusRows[0], "Status · check-in");
+	assert.equal(statusRows[0], "intercom update · running");
 	assert.match(statusRows.join("\n"), /worker is done/);
 	assert.ok(statusRows.length <= 7);
 
@@ -495,16 +629,16 @@ test("compact lines clip at width with no mid-word spill, long names included", 
 
 test("monitor success requires the first trusted manager line, not any log tail", () => {
 	const h = harness();
-	h.check("pi-persona-monitor-log", monitor(), "toolSuccessBg", /^Monitor · build$/, /^  exit · complete · m1$/);
-	h.check("pi-persona-monitor-log", monitor({ text: "process exited with exit code 2\nstdout:\nprocess exited with exit code 0" }), "toolErrorBg", /^Monitor · build$/, /^  exit · failed · m1$/);
-	h.check("pi-persona-monitor-log", monitor({ text: "process exited by SIGTERM\nprocess exited with exit code 0" }), "toolPendingBg", /^Monitor · build$/, /^  exit · stopped · m1$/);
-	for (const outcome of ["timeout", "cancelled"] as const) h.check("pi-persona-monitor-log", monitor({ outcome }), "toolPendingBg", /^Monitor · build$/, new RegExp(`^  ${outcome} · stopped · m1$`));
-	h.check("pi-persona-monitor-log", monitor({ outcome: "error" }), "toolErrorBg", /^Monitor · build$/, /^  error · failed · m1$/);
+	h.check("pi-persona-monitor-log", monitor(), "toolSuccessBg", /^monitor · build$/, /^  exit · complete · m1$/);
+	h.check("pi-persona-monitor-log", monitor({ text: "process exited with exit code 2\nstdout:\nprocess exited with exit code 0" }), "toolErrorBg", /^monitor · build$/, /^  exit · failed · m1$/);
+	h.check("pi-persona-monitor-log", monitor({ text: "process exited by SIGTERM\nprocess exited with exit code 0" }), "toolPendingBg", /^monitor · build$/, /^  exit · stopped · m1$/);
+	for (const outcome of ["timeout", "cancelled"] as const) h.check("pi-persona-monitor-log", monitor({ outcome }), "toolPendingBg", /^monitor · build$/, new RegExp(`^  ${outcome} · stopped · m1$`));
+	h.check("pi-persona-monitor-log", monitor({ outcome: "error" }), "toolErrorBg", /^monitor · build$/, /^  error · failed · m1$/);
 	for (const text of ["stdout:\nprocess exited with exit code 0", "process exited with exit code 0 (signal SIGTERM)", "unknown"]) {
 		const stopped = text.includes("signal");
-		h.check("pi-persona-monitor-log", monitor({ text }), stopped ? "toolPendingBg" : "customMessageBg", /^Monitor · build$/, new RegExp(`^  exit · ${stopped ? "stopped" : "info"} · m1$`));
+		h.check("pi-persona-monitor-log", monitor({ text }), stopped ? "toolPendingBg" : "customMessageBg", /^monitor · build$/, new RegExp(`^  exit · ${stopped ? "stopped" : "info"} · m1$`));
 	}
-	h.check("pi-persona-monitor-log", monitor({ outcome: "ended", text: "process exited with exit code 0" }), "customMessageBg", /^Monitor · build$/, /^  ended · info · m1$/);
+	h.check("pi-persona-monitor-log", monitor({ outcome: "ended", text: "process exited with exit code 0" }), "customMessageBg", /^monitor · build$/, /^  ended · info · m1$/);
 	assert.equal(h.renderers.get("pi-persona-monitor-log")?.({ data: { version: 99 } }, { expanded: false, outputPad: 0, keyText: () => "ctrl+o", keyHint: (_id, description) => `ctrl+o ${description}` }, {} as Theme), undefined);
 });
 
@@ -537,7 +671,7 @@ test("expanded literal cards preserve sanitized text; report cards match native 
 		["pi-persona-status", { content }, safe, 1],
 		["pi-persona-nudge", { content: `⟢ pi-persona · checkpoint\n${content}` }, `⟢ pi-persona · checkpoint\n${safe}`, 1],
 		["pi-persona-run-failure", { id: "r", label: "worker", agent: "scout", error: content }, `Run r\n${safe}`, 2],
-		["pi-persona-monitor-log", monitor({ stdout: content }), sanitizeTerminalText(renderMonitorLog(monitor({ stdout: content }), true)), 2],
+		["pi-persona-monitor-log", monitor({ stdout: content }), sanitizeTerminalText(renderProcessLog(monitor({ stdout: content }), true)), 2],
 	];
 	for (const [name, data, expected, offset] of items) {
 		const before = JSON.stringify(data);
@@ -615,8 +749,8 @@ test("stall, progress-resumed, and Update-complete cards preserve native outputP
 	for (const pad of [0, 1] as const) {
 		h.setOutputPad(pad);
 		for (const [kind, data, title] of [
-			["stall", stall, "Stall warning · 1 running"],
-			["recovery", recovery, "Progress resumed · 1 running"],
+			["stall", stall, "intercom update · stalled · 1 running"],
+			["recovery", recovery, "intercom update · resumed · 1 running"],
 		] as const) {
 			const rows = h.card("pi-persona-status", data).render(120).map((line) => line.trimEnd());
 			assert.equal(rows[0], `${" ".repeat(pad)}${title}`, `${kind} title padding=${pad}`);
@@ -625,7 +759,7 @@ test("stall, progress-resumed, and Update-complete cards preserve native outputP
 			assert.match(rows.at(-1) ?? "", /to expand/);
 		}
 		const rows = h.card("pi-persona", update, false, pad).render(120).map((line) => line.trimEnd());
-		assert.equal(rows[0], `${" ".repeat(pad)}Update · complete`, `Update-complete title padding=${pad}`);
+		assert.equal(rows[0], `${" ".repeat(pad)}intercom update · complete`, `Update-complete title padding=${pad}`);
 		assert.equal(leadingSpaces(rows[1]), pad + 2, `Update-complete body padding=${pad}`);
 		assert.equal(leadingSpaces(rows.at(-1)), pad, `Update-complete hint padding=${pad}`);
 	}

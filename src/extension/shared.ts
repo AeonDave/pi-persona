@@ -10,6 +10,7 @@ import type { InboundDecision } from "../exocom/inbound.ts";
 import { EXOCOM } from "../exocom/limits.ts";
 import type { DisplayPeer, ExocomInboundResult } from "../exocom/plane.ts";
 import { compactInlineText } from "../ui/presentation.ts";
+import type { CommunicationMessage } from "../ui/communication-card.ts";
 
 const PI_PERSONA_TOOL_ERROR = "__piPersonaToolError";
 
@@ -131,10 +132,11 @@ export function sendPersonaFollowUp(
 	pi: Pick<ExtensionAPI, "sendMessage">,
 	content: string,
 	customType = "pi-persona",
+	details?: unknown,
 ): void {
 	const body = customType === "pi-persona" ? content.replace(/^\[pi-persona\]\s*/, "") : content;
 	pi.sendMessage(
-		{ customType, content: body, display: true },
+		{ customType, content: body, display: true, ...(details === undefined ? {} : { details }) },
 		{ deliverAs: "followUp", triggerTurn: true },
 	);
 }
@@ -149,9 +151,14 @@ export function formatCouncilCallLabel(strategy: string, roster: string): string
 	return `council ${safeStrategy}${strategy === roster ? "" : ` · ${safeRoster}`}`;
 }
 
-export interface PendingAsk {
-	askId: string;
+/** Delivery text remains authoritative; optional metadata is only its operator presentation. */
+export interface PresentedNotice {
 	text: string;
+	message?: CommunicationMessage;
+}
+
+export interface PendingAsk extends PresentedNotice {
+	askId: string;
 }
 
 export function reconcileAnsweredAsk(
