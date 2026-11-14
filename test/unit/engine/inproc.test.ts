@@ -15,6 +15,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
+import { EVIDENCE_GUIDANCE } from "../../../src/core/evidence.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
 import {
 	type CreateInProcSession,
@@ -46,6 +47,7 @@ interface Spy {
 	aborted?: boolean;
 	disableDuringCreate?: string | undefined;
 	legDuringCreate?: string | undefined;
+	outlineGrantDuringCreate?: string | undefined;
 	steered?: unknown[];
 	opts?: CreateSessionOptions;
 	promptText?: string;
@@ -104,6 +106,7 @@ function fakeSessions(events: unknown[], spy?: Spy): CreateInProcSession {
 		if (spy) {
 			spy.disableDuringCreate = process.env.PI_PERSONA_DISABLE;
 			spy.legDuringCreate = process.env.PI_PERSONA_LEG;
+			spy.outlineGrantDuringCreate = process.env.PI_PERSONA_CODE_OUTLINE;
 			spy.opts = opts;
 		}
 		const session = fakeSession(events, spy);
@@ -299,7 +302,7 @@ test("inproc engine enforces an agent's denied tools alongside its allowlist", a
 	const spy: Spy = {};
 	const resolveRestricted = (name: string): AgentConfig | undefined =>
 		name === "restricted"
-			? { name, model: "stub/m", tools: ["read", "grep", "edit"], excludeTools: ["edit"], systemPrompt: "bounded", source: "x" }
+			? { name, model: "stub/m", tools: ["read", "grep", "edit", "code_outline"], excludeTools: ["edit", "code_outline"], systemPrompt: "bounded", source: "x" }
 			: undefined;
 	const engine = makeInProcessEngine({
 		resolveAgent: resolveRestricted,
@@ -309,8 +312,9 @@ test("inproc engine enforces an agent's denied tools alongside its allowlist", a
 	});
 	const result = await engine.run({ agent: "restricted", task: "inspect" });
 	assert.equal(result.ok, true);
-	assert.deepEqual(spy.opts?.tools, ["read", "grep", "edit"]);
-	assert.deepEqual(spy.opts?.excludeTools, ["edit"]);
+	assert.deepEqual(spy.opts?.tools, ["read", "grep", "edit", "code_outline"]);
+	assert.deepEqual(spy.opts?.excludeTools, ["edit", "code_outline"]);
+	assert.ok(!(spy.opts?.customTools ?? []).some((tool) => tool.name === "code_outline"), "an explicit code_outline exclusion is authoritative");
 });
 
 test("inproc engine rejects a modifier-shaped per-agent tool allowlist before creating a session", async () => {
@@ -385,6 +389,7 @@ test("inproc engine preserves an agent's explicit empty tool allowlist", async (
 	const result = await engine.run({ agent: "locked", task: "think" });
 	assert.equal(result.ok, true);
 	assert.deepEqual(spy.opts?.tools, [], "[] must reach Pi instead of silently restoring its default tools");
+	assert.ok(!(spy.opts?.customTools ?? []).some((tool) => tool.name === "code_outline"), "the empty/private worker clamp does not receive the outline tool");
 });
 
 test("an explicit empty inproc allowlist does not re-enable injected custom tools", () => {
@@ -411,13 +416,26 @@ test("withOrchestrationToolsExcluded always excludes delegate/council/orchestrat
 	assert.equal(new Set(withAgentExcludes).size, withAgentExcludes.length, "no duplicate entries");
 });
 
-test("inproc engine restores PI_PERSONA_DISABLE and PI_PERSONA_LEG after the sub-session is built", async () => {
+test("inproc engine restores fork guards and scrubs an inherited outline-grant marker from child activation", async () => {
 	const beforeDisable = process.env.PI_PERSONA_DISABLE;
 	const beforeLeg = process.env.PI_PERSONA_LEG;
-	const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")]) });
-	await engine.run({ agent: "a", task: "t" });
-	assert.equal(process.env.PI_PERSONA_DISABLE, beforeDisable, "PI_PERSONA_DISABLE restored to its prior value");
-	assert.equal(process.env.PI_PERSONA_LEG, beforeLeg, "PI_PERSONA_LEG restored to its prior value (never leaks to the supervisor)");
+	const beforeOutline = process.env.PI_PERSONA_CODE_OUTLINE;
+	const spy: Spy = {};
+	process.env.PI_PERSONA_CODE_OUTLINE = "1";
+	try {
+		const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("x")], spy) });
+		await engine.run({ agent: "a", task: "t" });
+		assert.equal(spy.disableDuringCreate, "1");
+		assert.equal(spy.legDuringCreate, "1");
+		assert.equal(spy.outlineGrantDuringCreate, undefined, "a supervisor's marker is not authority for an in-process leg");
+		assert.equal(process.env.PI_PERSONA_DISABLE, beforeDisable, "PI_PERSONA_DISABLE restored to its prior value");
+		assert.equal(process.env.PI_PERSONA_LEG, beforeLeg, "PI_PERSONA_LEG restored to its prior value (never leaks to the supervisor)");
+		assert.equal(process.env.PI_PERSONA_CODE_OUTLINE, "1", "the parent environment is restored unchanged");
+	} finally {
+		if (beforeDisable === undefined) delete process.env.PI_PERSONA_DISABLE; else process.env.PI_PERSONA_DISABLE = beforeDisable;
+		if (beforeLeg === undefined) delete process.env.PI_PERSONA_LEG; else process.env.PI_PERSONA_LEG = beforeLeg;
+		if (beforeOutline === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE; else process.env.PI_PERSONA_CODE_OUTLINE = beforeOutline;
+	}
 });
 
 test("concurrent sub-session builds keep the fork-bomb guard set and never leak PI_PERSONA_DISABLE", async () => {
@@ -453,8 +471,8 @@ test("concurrent engines produce globally-unique child bus handles (no collision
 				return fakeSession([msgEnd("x")]);
 			},
 		});
-	await Promise.all([mk().run({ agent: "a", task: "t" }), mk().run({ agent: "a", task: "t" })]);
-	for (const m of bus.take("supervisor")) seen.push(m.from);
+	await Promise.all([mk().run({ agent: "a", name: "Moss", task: "t" }), mk().run({ agent: "a", name: "Moss", task: "t" })]);
+	for (const m of bus.take("supervisor")) { seen.push(m.from); assert.equal(m.fromLabel, "Moss"); }
 	assert.equal(seen.length, 2, "both children reached the supervisor");
 	assert.equal(new Set(seen).size, 2, `handles must be unique across engines, got ${seen.join(", ")}`);
 });
@@ -644,20 +662,81 @@ test("inproc engine appends the assigned identity as fenced JSON metadata", asyn
 	);
 });
 
-test("inproc engine leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
+test("inproc worker prompt keeps evidence guidance with role, skills, contract and identity despite spine opt-out", async () => {
+	const spy: Spy = {};
+	const configured: AgentConfig = {
+		name: "configured",
+		model: "stub/m",
+		systemPrompt: "Configured worker prompt",
+		spine: false,
+		source: "saved-agent.md",
+	};
+	const engine = makeInProcessEngine({
+		resolveAgent: () => configured,
+		contracts,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		spine: "OPTIONAL WORKER SPINE",
+		createSession: fakeSessions([msgEnd("not JSON")], spy),
+	});
+	const result = await engine.run({
+		agent: "configured",
+		task: "inspect the implementation",
+		name: "Atlas CSS",
+		role: "Focus on correctness",
+		skills: ["python-testing"],
+		outputContract: "default",
+	});
+	assert.equal(result.ok, false, "the prose fixture must fail the requested contract");
+	const prompt = spy.opts?.systemPrompt ?? "";
+	assert.equal(prompt.split(EVIDENCE_GUIDANCE).length - 1, 1, "guidance appears exactly once in the actual in-process system prompt");
+	assert.ok(prompt.includes("Configured worker prompt"));
+	assert.match(prompt, /\[pi-persona assigned identity\][\s\S]*\{"name":"Atlas-CSS"\}/);
+	assert.ok(prompt.includes("Focus on correctness"));
+	assert.doesNotMatch(prompt, /OPTIONAL WORKER SPINE/);
+	assert.match(spy.promptText ?? "", /Load these skills before starting.*python-testing/);
+	assert.match(spy.promptText ?? "", /inspect the implementation/);
+	assert.match(spy.promptText ?? "", /output contract \(default\)/);
+});
+
+test("inproc worker keeps the internal tool-less JSON prompt minimal", async () => {
+	const spy: Spy = {};
+	const privateWorker: AgentConfig = {
+		name: "internal-maintenance",
+		model: "stub/m",
+		source: "internal:maintenance",
+		tools: [],
+		excludeTools: ["*"],
+		spine: false,
+		systemPrompt: "Return only the requested JSON data.",
+	};
+	const engine = makeInProcessEngine({
+		resolveAgent: () => privateWorker,
+		modelRegistry: fakeRegistry,
+		cwd: ".",
+		spine: "OPTIONAL WORKER SPINE",
+		createSession: fakeSessions([msgEnd("{}")], spy),
+	});
+	await engine.run({ agent: privateWorker.name, task: "return JSON", tools: [] });
+	assert.equal(spy.opts?.systemPrompt, privateWorker.systemPrompt);
+	assert.doesNotMatch(spy.opts?.systemPrompt ?? "", /\[pi-persona\] Evidence discipline/);
+});
+
+test("inproc engine leads with the optional spine, appends stable evidence guidance and honours `spine: false`", async () => {
 	const spy: Spy = {};
 	const mk = (deps: Partial<Parameters<typeof makeInProcessEngine>[0]>) =>
 		makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: fakeSessions([msgEnd("ok")], spy), ...deps });
 
 	await mk({ spine: "SPINE" }).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(spy.opts?.systemPrompt, "SPINE\n\nYou are a.\n\nROLE", "the shared layer leads, then the agent, then the role");
+	assert.ok(spy.opts?.systemPrompt?.startsWith("SPINE\n\nYou are a.\n\nROLE\n\n"), "the optional layer leads, then the agent and role");
+	assert.equal((spy.opts?.systemPrompt ?? "").split(EVIDENCE_GUIDANCE).length - 1, 1, "stable guidance follows the saved agent and role exactly once");
 
 	await mk({}).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(spy.opts?.systemPrompt, "You are a.\n\nROLE", "no spine ⇒ byte-identical to the pre-spine join");
+	assert.equal(spy.opts?.systemPrompt, `You are a.\n\nROLE\n\n${EVIDENCE_GUIDANCE}`, "no optional spine leaves the agent and role intact and retains evidence guidance");
 
 	const optedOut: Record<string, AgentConfig> = { q: { name: "q", model: "stub/m", systemPrompt: "You are q.", spine: false, source: "x" } };
 	await mk({ spine: "SPINE", resolveAgent: (n) => optedOut[n] }).run({ agent: "q", task: "t" });
-	assert.equal(spy.opts?.systemPrompt, "You are q.", "`spine: false` in the agent's frontmatter opts the leg out");
+	assert.equal(spy.opts?.systemPrompt, `You are q.\n\n${EVIDENCE_GUIDANCE}`, "`spine: false` opts out only of the optional layer, not stable evidence guidance");
 });
 
 test("inproc engine tags failed runs with agent · model + dynamic overrides so failures are actionable", async () => {

@@ -6,6 +6,8 @@ import { sanitizeTerminalText } from "./presentation.ts";
 interface ReportBodyOptions {
 	/** Trusted chrome stays literal Text, outside the Markdown body. Evaluated at paint time. */
 	header?: (width: number) => string;
+	/** Frozen launch requests and other literal metadata remain outside the Markdown body. */
+	footer?: string;
 	/** Custom session cards only. Normal tools already have the host's shell. */
 	background?: ThemeBg;
 	padding?: number;
@@ -43,6 +45,7 @@ class ReportBody implements Component {
 		const lines = [
 			...(header ? new Text(header, 0, 0).render(innerWidth) : []),
 			...this.markdown.render(innerWidth).map((line) => this.theme.fg("toolOutput", line)),
+			...(this.options.footer ? new Text(this.theme.fg("dim", sanitizeTerminalText(this.options.footer)), 0, 0).render(innerWidth) : []),
 		];
 		const background = this.options.background;
 		return new Text(lines.join("\n"), padding, 0, background ? (text) => this.theme.bg(background, text) : undefined)

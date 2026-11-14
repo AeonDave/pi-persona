@@ -2,7 +2,7 @@
  * Small leaf helpers shared by the extension composition root and extracted hook/tool modules.
  * This module must not import `extension.ts` or any of the registration modules that consume it.
  */
-import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type KeybindingHints } from "@earendil-works/pi-coding-agent";
 
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { boundCompletionSurface, MAX_COMPLETION_REPORT_CHARS } from "../engine/async.ts";
@@ -10,6 +10,7 @@ import type { InboundDecision } from "../exocom/inbound.ts";
 import { EXOCOM } from "../exocom/limits.ts";
 import type { DisplayPeer, ExocomInboundResult } from "../exocom/plane.ts";
 import { compactInlineText } from "../ui/presentation.ts";
+import type { CommunicationMessage } from "../ui/communication-card.ts";
 
 const PI_PERSONA_TOOL_ERROR = "__piPersonaToolError";
 
@@ -131,20 +132,17 @@ export function sendPersonaFollowUp(
 	pi: Pick<ExtensionAPI, "sendMessage">,
 	content: string,
 	customType = "pi-persona",
+	details?: unknown,
 ): void {
 	const body = customType === "pi-persona" ? content.replace(/^\[pi-persona\]\s*/, "") : content;
 	pi.sendMessage(
-		{ customType, content: body, display: true },
+		{ customType, content: body, display: true, ...(details === undefined ? {} : { details }) },
 		{ deliverAs: "followUp", triggerTurn: true },
 	);
 }
 
-export function expandDetailHint(): string {
-	try {
-		return keyHint("app.tools.expand", "to expand");
-	} catch {
-		return "expand to see full detail";
-	}
+export function expandDetailHint(hints?: Pick<KeybindingHints, "keyHint">): string {
+	return hints?.keyHint?.("app.tools.expand", "to expand") ?? "expand to see full detail";
 }
 
 export function formatCouncilCallLabel(strategy: string, roster: string): string {
@@ -153,9 +151,14 @@ export function formatCouncilCallLabel(strategy: string, roster: string): string
 	return `council ${safeStrategy}${strategy === roster ? "" : ` · ${safeRoster}`}`;
 }
 
-export interface PendingAsk {
-	askId: string;
+/** Delivery text remains authoritative; optional metadata is only its operator presentation. */
+export interface PresentedNotice {
 	text: string;
+	message?: CommunicationMessage;
+}
+
+export interface PendingAsk extends PresentedNotice {
+	askId: string;
 }
 
 export function reconcileAnsweredAsk(

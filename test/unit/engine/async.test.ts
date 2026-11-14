@@ -10,7 +10,7 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
 
-import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildRetentionOverflowNote, dedupeRunsById, IdleCoalescingNotifier, buildPeekDigest, isAsyncRunStalled, madeHeadway, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion, runDisplayName, runDurationLabel, STALL_FLAG_MS } from "../../../src/engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, buildCheckIn, buildCompletionReport, buildRetentionOverflowNote, dedupeRunsById, getFullRunOutput, IdleCoalescingNotifier, buildPeekDigest, isAsyncRunStalled, madeHeadway, MAX_DROPPED_IDS, MAX_EMPTY_RENDER_RETRIES, PeekWatcher, renderCompletion, runDisplayName, runDurationLabel, STALL_FLAG_MS } from "../../../src/engine/async.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "../../../src/engine/stream.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { DEFAULT_ASYNC_RETAIN } from "../../../src/core/config.ts";
@@ -39,6 +39,30 @@ const failedRun = (id: string, agent: string, error: string): AsyncRun => ({
 	status: "failed",
 	progress: { output: "", turns: 1, tokens: 1 },
 	error,
+});
+
+test("explicit live retrieval salvages only interrupted exact-prefix progress extensions", () => {
+	const partial = "The preserved interrupted answer, including its continuation.";
+	const prefix = partial.slice(0, 35);
+	for (const status of ["stopped", "failed"] as const) {
+		const run: AsyncRun = {
+			id: `run-${status}`, agent: "worker", task: "t", status,
+			progress: { output: partial, turns: 1, tokens: 1 },
+			result: { agent: "worker", output: prefix, usage: usage(), ok: false },
+		};
+		assert.equal(getFullRunOutput(run), partial, `${status} exact-prefix extension is returned in full`);
+	}
+
+	const completed = doneRun("run-done", "worker", prefix);
+	completed.progress.output = partial;
+	assert.equal(getFullRunOutput(completed), prefix, "a successful final result remains authoritative");
+
+	const different: AsyncRun = {
+		id: "run-nonprefix", agent: "worker", task: "t", status: "stopped",
+		progress: { output: `${partial}!`, turns: 1, tokens: 1 },
+		result: { agent: "worker", output: "different final answer", usage: usage(), ok: false },
+	};
+	assert.equal(getFullRunOutput(different), "different final answer", "non-prefix interrupted output remains authoritative");
 });
 
 test("terminal identities and completion reports use the observed model while launch history keeps its requested model", () => {
@@ -1016,6 +1040,24 @@ test("IdleCoalescingNotifier coalesces a burst into a single idle delivery", () 
 	assert.equal(clock.armed(), 1, "a burst arms exactly one (debounced) flush");
 	clock.tick();
 	assert.deepEqual(sent, ["a|b|c"], "the whole burst is rendered and delivered once");
+});
+
+test("IdleCoalescingNotifier delivers the exact admitted batch alongside its rendered text", () => {
+	const clock = fakeClock();
+	const sent: { text: string; items: readonly string[] }[] = [];
+	const notifier = new IdleCoalescingNotifier<string>({
+		isIdle: () => true,
+		deliver: (text, items) => { sent.push({ text, items }); },
+		render: (items) => items.join("|"),
+		maxBatchItems: 2,
+		setTimer: clock.setTimer,
+		clearTimer: clock.clearTimer,
+	});
+	for (const value of ["first", "second", "later"]) notifier.notify(value);
+	clock.tick();
+	assert.deepEqual(sent, [{ text: "first|second", items: ["first", "second"] }]);
+	clock.tick();
+	assert.deepEqual(sent[1], { text: "later", items: ["later"] });
 });
 
 test("IdleCoalescingNotifier can drain a large queue in lossless bounded batches", () => {

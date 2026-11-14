@@ -37,7 +37,7 @@ strategy/team without a core change. Ownership intent follows the agent, not the
 can declare the area it alone writes (`writeSet`, e.g. `research` → `.research/`), and a write-capable delegate leg that
 names no `writeSet` inherits it before the gates run, so the disjoint-ownership and overlap checks see a
 declared owner; a leg's own set wins, and the field stays declarative (nothing enforces paths at runtime).
-Legs restricted to read-only tools do not inherit ownership defaults, so parallel readers do not conflict.
+Legs restricted to read-only `read`/`grep`/`find`/`ls`/`code_outline` tools do not inherit ownership defaults, so parallel readers do not conflict.
 The gates use effective agent/tool capabilities, conservatively
 treat shell-capable, MCP-enabled, or unknown tools as potential writers, and enforce the requested fan-out
 concurrency on the single launch path (interactive background or headless inline). A serialized verifier is accepted only
@@ -152,20 +152,32 @@ These are the guardrails a contributor must not violate. They are enforced in co
 
 ## Module layout
 
-The supported host is the latest stable Pi (currently 1.4.0). Runtime code uses its public APIs
+The supported host is the latest stable Pi (currently 1.5.2). Runtime code uses its public APIs
 directly; obsolete host facades, ignored SDK options and compatibility-only aliases are removed
 with their callers. Genuine host failures remain explicit rather than fabricating session identity
 or model availability. One-way user-data migrations and retained-history readers are separate data
 contracts: they remain only while serving stored user data, not to support an older Pi runtime.
 
-Domain dependencies remain downward-only and acyclic: `core ← all`; `engine`/`bus → core`;
-`orchestration → engine + bus + core`; `persona → orchestration + core`; the Exocom transport and
-ledger → `core + bus`; `tools`/`ui → lower layers`. `src/exocom/install.ts` is deliberately the
+The `code_outline` boundary follows the same direction: `src/tools/code-outline.ts` owns bounded file I/O, the computed-from-read-bytes digest, fencing and formatting; `src/tools/code-outline-parser.ts` lazily resolves the installed WASM package entry and loads only the selected grammar on first execution. It disposes each parser/tree after synchronous extraction and retains no source/project cache. `src/core/code-outline.ts` is a pure AST walker over an already-parsed root and runtime metadata; it imports neither Pi nor the parser package at runtime and performs no filesystem access. Parser syntax errors fail closed. Extraction additionally enforces depth, shared traversal/helper-work and aggregate symbol-metadata budgets before materializing excessive state, irrespective of query or row limit. Accepted results retain exact match counts while storing only requested rows; a budget overrun fails explicitly and still disposes the parser/tree. These are extraction guards, not a synchronous-parser wall-clock timeout. C-family `.c` and ambiguous `.h` are explicitly labeled and use the C++ grammar, so this is not strict-C/compiler validation.
+
+Domain dependencies point toward the kernel: `core ← all`; the bus and Exocom transport/ledger
+do not import presentation or the composition root. Orchestration composes engine, bus and core
+contracts; persona policy configures orchestration. Concrete engine adapters also use leaf host
+integration helpers such as native tool admission and frozen memory ownership. These helpers
+under `extension/` must not import the composition root; their directory name does not make them
+owners of engine state. Tools and UI adapt runtime contracts without becoming their source of truth.
+`src/exocom/install.ts` is deliberately the
 composition adapter for that feature, colocated with Exocom but allowed to wire extension, persona,
 engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain layer.
 `src/extension/*` contains extracted factory internals (which must not import `extension.ts`), while
 `extension.ts` remains the package entry and composition root (`package.json` `pi.extensions` →
 `./src/extension.ts`).
+
+Reuse follows ownership of a rule, not a common base class. Script jobs reuse the monitor lifecycle,
+process adapter and archive, with exit-only behavior and separate IDs/history. Resource groups
+share a view projection without mutating the runtime tree. Cards share a frame while their content
+adapters retain distinct semantics. Timers, model workers and Exocom peers keep different lifecycle
+and control contracts; merging them into a universal task engine would hide those distinctions.
 
 - **`src/agents/`** — the agent definition (`agent.ts`: `AgentConfig`/`parseAgent`, the
   `persona: false` sibling of the persona parser; both share one frontmatter engine).
@@ -180,7 +192,8 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
   standing hand-off default; and `buildExocomBrief` — the per-turn peer brief: live peers, the
   peer-vs-sub-agent split, and the relevance bound on an exchange), `nudge` (the
   runtime-reinforcement state machines `DelegationNudge` + `PersistenceNudge`, and the call-time wake
-  guards `PollGuard` + `longWaitSeconds`), `display-label`
+  guards `PollGuard` + `longWaitSeconds`), `code-outline` (pure syntax-AST symbol extraction from an
+  already-parsed tree), `display-label`
   (`sanitizeDisplayLabel` — an untrusted name reduced to bounded metadata before interpolation
   outside a fence), `timer` (`TimerScheduler` — the pure alarm engine behind the `timer` tool), `time`
   (`formatDuration` / `peerSentLabel` / `sessionElapsedLabel` / `buildSessionAnchor` — the elapsed-time
@@ -188,9 +201,10 @@ engine, telemetry, UI, and tool surfaces; it is not part of the transport/domain
 - **`src/engine/`** — "run an agent → `AgentResult`", backend-agnostic: `child.ts`, `inproc.ts`
   (default), `adapter.ts` (child-engine adapter), `fallback.ts` (provider fallback),
   `spec-preflight.ts` (the one unknown-agent/unknown-contract preflight shared by both engines),
-  `change-report.ts` (`captureStatus`/`diffStatus`/`renderChangeReport` — the files-changed report
-  `src/extension/engine.ts` appends to a non-worktree leg's result; pure over the injected `GitExec`
-  from `worktree.ts`), `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation),
+  `change-report.ts` (`captureStatus`/`diffStatus`/`renderChangeReport` — the shared-checkout status
+  snapshot delta `src/extension/engine.ts` appends to a non-worktree leg's result; not worker
+  authorship evidence, and unchanged status codes can hide further edits to an already-dirty path;
+  pure over the injected `GitExec` from `worktree.ts`), `async.ts` (async tracker / peek), `worktree.ts` (git-worktree isolation),
   `stream.ts` (event → state), `handles.ts` (one bus-handle sequence shared by BOTH engines),
   `signals.ts` (`combineSignals`).
 - **`src/orchestration/`** — the heart: `sdk.ts` (the Strategy SDK), `strategy.ts` (registry +
@@ -278,7 +292,21 @@ settlement does not promise that arbitrary in-process code has physically stoppe
 
 Tool grants have three distinct states on both engines: absent inherits Pi's session defaults, a
 non-empty array is an allowlist, and an explicit empty array means no tools (`--no-tools` on the
-child backend); denylists apply independently via `excludeTools`/`--exclude-tools`.
+child backend); denylists apply independently via `excludeTools`/`--exclude-tools`. The shared native
+OS-tool exposure enables only Pi's already-registered `grep`, `find`, `ls`, and (on Windows)
+`powershell` implementations for default toolsets. It never replaces custom tools, and it respects
+Pi's allowlist/exclusion clamp, explicit `defaultTools` selections, persona gates, and explicit empty
+worker grants. In-process workers add these tools with Pi's `+name` tool modifiers only when no
+explicit worker tool grant, host `defaultTools` choice, or explicit supervisor CLI tool selection exists.
+The CLI check suppresses automatic additions; worker grants remain independent rather than inheriting
+the supervisor's complete CLI tool selection. Child legs activate the same host registry at session
+startup, including the tool-only fork-guard path. Pi may download its `rg`/`fd`
+helper binaries on first use; pi-persona adds no dependency, but does not promise zero network access.
+Startup activation requires all four native base tools and preserves partial selections.
+The SDK's mutable `noTools: "builtin"` initial selection is distinct from an allowlist; the public
+API cannot distinguish a caller restoring all four base tools from implicit defaults. See the
+[native-tool reference](REFERENCE.md#native-ossearch-tools) for this boundary.
+
 
 A spec naming an agent or output contract that isn't installed fails before anything spawns, on both
 backends alike (`engine/spec-preflight.ts`): the message names what IS installed, capped at 12 names.
@@ -484,6 +512,17 @@ once naming succeeds. An old session may contain repetitive prose; updating the 
 rewrite it. Reload extension code with Pi's `/reload` (when delegated work has settled), not merely
 `/persona reload`, which only reloads persona data.
 
+A separate stable evidence rule is composed into supervisor and normal delegated-worker prompts,
+independent of the optional spine, saved persona/agent copies and delegation nudges. Verification
+must preserve the check process's own exit status rather than a downstream formatter's status;
+missing status is unverified, not passed. Reports distinguish the actual command/API/source observed
+from inference or a worker's claim. A digest being present or computed is not a verified match:
+verification requires an observed comparison against the specified expected digest. These are model
+instructions, not command rewriting or a guarantee of obedience. Documented project/platform skip
+allowances remain explicit untested cases, not passed cases; unexpected or newly introduced skips
+still block approval. The private tool-less Mind review worker retains its dedicated minimal
+structured-output prompt.
+
 ## Time awareness — one rule, three granularities
 
 Pi's base prompt carries no date and no time, so from inside a turn five minutes of work and five
@@ -574,7 +613,7 @@ explicit `null` owner when the parent had Persona off.
 `project|persona|shared`; `staged` is valid only for `stage`. No memory text, paths, models, token
 counts, or free-form output are accepted. Ingress matches the active native session and checks its
 manager's current id/file. The producer also captures its native owner and scope across awaits.
-The resulting `Mind` row uses `kind: "activity"`: it has no agent count, steer/stop handle, wake,
+The resulting `mind` row uses `kind: "activity"`: it has no agent count, steer/stop handle, wake,
 stall badge, or `agent.*` telemetry. The F9 drill-in explains the local phase. Up to eight rows are
 retained, with completed/staged rows evicted before live work; teardown and explicit persona
 selection revoke old rows without cancelling workers. A staged row states that a proposal was
@@ -592,7 +631,7 @@ responses are synchronous `{ ok: true, runId, model, thinking, completion, cance
 `{ ok: false, reason }`. `completion` resolves with `{ ok, output, error?, resultRef?, model?, thinking? }`.
 Output remains untrusted data for Mind's bounded proposal parser, never executable code.
 
-This is an ordinary tracked `Mind` sub-agent in the tree and F9, sharing the launch pool, usage,
+This is an ordinary tracked `mind` sub-agent in the tree and F9, sharing the launch pool, usage,
 progress, stop/steer controls and terminal-result archive. Its private definition has an explicit empty
 tool allowlist and no worker spine. Provider/model and thinking are pinned to the accepting session;
 provider fallback is disabled. The worker has a 180-second cancellation ceiling; owner readiness or
@@ -673,23 +712,50 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   "<message-id>" }` retrieves a retained message; it never interprets a message id as a run id.
   Oversized or evicted messages return an unavailable diagnostic — retention is not durable evidence
   storage;
+- a completion delivery includes unread non-blocking bus notes in its existing wake, so a worker
+  finishing before the periodic inbox check cannot strand its last progress message. The combined
+  report keeps the 12,000-character bound and retains message IDs for explicit retrieval. Inbox
+  consumption commits only after the host send succeeds; active asks keep their separate reply path.
+  Periodic inbox delivery uses the same snapshot, formatting budget and commit-after-send helper
+  (`extension/completion-delivery.ts`). Failed sends leave notes unread for retry; a message arriving
+  during delivery is not part of that consumed snapshot. Explicit live result collection carries
+  the same pending non-blocking notes in its tool response before suppressing the duplicate
+  completion. Its separately bounded note block does not shorten the result page or change page
+  offsets; partial unacknowledged pages and archived-reference reads do not consume notes. Active
+  asks and messages outside the delivered snapshot remain unread;
 - collapsed delegate/intercom/council/flow cards show state, identity, a short sanitized preview, and
   Pi's expand-key hint, each surfacing failure at the top in its own shape: the delegate card
   names each failed leg on its own line, and a failed council/flow card leads with the cause in its title;
-- async launch cards and targeted Intercom call headers use the worker's canonical alias/model,
-  matching the tree rather than promoting its routing ID to display identity. Launch/control receipts
+- new completion cards persist bounded runtime settlement facts alongside the shared run-label
+  snapshot (`ui/run-labels.ts`). Compact per-run states and durations come from that snapshot,
+  never from parsing worker errors or reports. A clipped or misleading body cannot create another
+  run's status line. Missing or malformed snapshots use a bounded literal history preview; expansion
+  keeps the delivered report intact;
+- async launch cards and targeted Intercom call headers use the worker's assigned alias,
+  matching the tree rather than promoting its routing ID to display identity. Model and effort remain
+  launch metadata; communication and status previews omit the model and retain it in expanded diagnostics. Launch/control receipts
   persist identity snapshots for history rendering; aliases never become routing keys. Colliding
   aliases carry a secondary ID, and legacy receipts without a recoverable name retain their ID fallback.
   Accepted steering receipts retain the exact sent message: collapsed cards preview it, expansion
-  shows all sanitized text and the diagnostic ID. A queued receipt does not prove the worker acted;
-- async failures append a `pi-persona-run-failure` entry in TUI mode, with alias, agent/model,
+  shows all sanitized text and the diagnostic ID. Delegate, council and flow launches also retain the
+  submitted task through `ui/launch-request.ts`; hidden requests always expose the host's expansion hint.
+  Native tool cards share Pi's expand-key and mouse-click handling. A queued receipt does not prove the worker acted;
+- async failures append a `pi-persona-run-failure` entry in TUI mode, with alias, agent,
   elapsed time and a concise cause. The entry stores the original diagnostic for expanded history
   rendering; it is operator-only and adds no model context or wake. Other modes, or an append
   failure, retain a bounded notification. The semantic completion follows its existing single-wake path;
 - follow-up cards (`pi-persona`, exocom) retain their complete semantic content but render a bounded
-  preview until expanded; terminal escape/control sequences are removed from the visible projection;
-- custom follow-ups and operator-only entries share `ui/session-cards.ts`: glyph-free generated
-  headings, explicit textual state, one width-aware layout and semantic theme backgrounds. Neutral
+  preview until expanded; terminal escape/control sequences are removed from the visible projection.
+  Intercom and Exocom share the bounded `ui/communication-card.ts` snapshot contract: an attributed
+  `from <name>:` line and a literal body preview, without transport bullets or model metadata.
+  The bus snapshots the registered alias into each envelope, including broker-connected workers,
+  so later worker disposal cannot erase sender identity. Snapshots are display data only; expansion
+  always renders the original delivered source, including routing, trust boundaries and reply instructions;
+- custom follow-ups and operator-only entries use the single composable frame in `ui/card-frame.ts`;
+  `ui/session-cards.ts` supplies surface-specific content and status projections. The frame owns
+  glyph-free lowercase headings, explicit textual state, width-aware layout and semantic theme backgrounds.
+  Completion, routine status, stall and recovery use the same `intercom update` heading with their
+  respective state; assigned names retain their capitalization. Neutral
   information/unknown state uses `customMessageBg`, verified completion `toolSuccessBg`, attention
   (nudge/stall/stopped) `toolPendingBg`, and verified failure `toolErrorBg`. Only runtime-owned status
   evidence selects chrome, never peer/child prose. Colors are resolved from the active theme at render
@@ -698,7 +764,28 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   trust blockquotes); receipts, live output, monitor/timer notices and raw diagnostics stay literal.
   Source payloads and fences remain intact. The native Markdown component is retained per report and
   invalidated for theme/layout changes, without a global transcript cache. Rendering never rewrites
-  stored or model-facing payloads, nor creates a wake;
+  stored or model-facing payloads, nor creates a wake. Message cards use the host-supplied padding;
+  entry cards read current `pi.getSettings().outputPad` (native 0/1, default 1), because entry renderer
+  options do not carry padding. Titles, bodies and expand hints receive that outer padding once.
+  An explicitly empty compact preview produces a title-only informational note rather than a false
+  `(no output)` body; hidden full detail still exposes the expansion hint. Expansion remains complete.
+  Custom message/entry consumers may opt into primary-click expansion with the additive optional
+  `CardFrameContext.expansionKey` (the stable original message/entry envelope). The shared frame keeps
+  only `{ lastHostExpanded, expanded }` booleans in a `WeakMap`, preserves a local click across host
+  rebuilds while the host boolean is unchanged, and lets an actual host expanded-state transition
+  override it. It uses Pi TUI's `MouseRegion` click contract (same primary-click/modifier/double-click
+  behavior as native tool output); wheel, drag and nonprimary events stay unhandled, and complete
+  previews do not consume clicks. `session-cards.ts` opts every registered type in. Native tool
+  renderers omit the key and retain Pi's own click owner. The optional context field does not change
+  the v1 query response shape; companions may adopt it independently. This state is frontend-only:
+  it retains no transcript text and changes no delivery, persistence or wake path;
+- loaded companions can reuse the same frame through the synchronous `pi-persona:card-frame:v1`
+  presentation query: `{ version: 1, respond }` receives `{ version: 1, provider: "pi-persona",
+  createCard }`. Mind queries at render invocation rather than hard-importing an optional package or
+  caching a factory across reload. Missing, incompatible, ambiguous or throwing providers fall back
+  to readable sanitized literal history, not a second card engine. This cooperative local UI port
+  grants no memory, scheduling, tool or authentication authority. Native Pi tool shells and provider
+  errors remain host-owned; no duplicate shell or provider-error replacement is introduced;
 - literal control receipts and fallback errors share `ui/literal-tool-result.ts`: bounded collapsed
   text, an expansion hint only when detail is hidden, and full sanitized expansion. Tool errors use
   the host's `ToolRenderContext.isError`, not a presumed result field; semantic negative peer answers
@@ -729,7 +816,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   digests before the generic overflow line, in that priority order when space is insufficient.
   Hidden active workers exclude queued/waiting/settled rows and containers; the representative follows
   tree order rather than changing with each progress event;
-- `X` is not a directed key: it acts on the whole stoppable set of leaf rows after a confirmation that
+- `X` is not a directed key: it uses the complete runtime tree, independently of presentation folding,
+  and acts on the whole stoppable set of leaf rows after a confirmation that
   states how many agents it covers, and a changed set is re-confirmed. The set is every agent leaf (wake
   rows excepted) plus any run root with a stop handle (council/flow/mandated runs), and `x` on such a
   root stops the whole run.
@@ -749,8 +837,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   then the same `⚠ stalled <duration>` badge the async peek watchdog uses. `x` marks the target
   `stopping…` at once and is offered only when a live stop handle exists; a refusal (no handle,
   already settled) surfaces as a one-line notice instead of silently no-op'ing;
-- armed timers and active monitors are **wake rows** in the same tree (`src/ui/wake-rows.ts`, ids
-  `monitor:<id>` / `timer:<id>`): rows, not agents. The countdown replaces the stall clock: a timer
+- armed timers, active monitors and scripts are **wake rows** in the same tree (`src/ui/wake-rows.ts`, ids
+  `monitor:<id>` / `timer:<id>` / `script:<id>`): rows, not agents. The countdown replaces the stall clock: a timer
   shows `fires in <d>` only, a monitor keeps its elapsed time (`<elapsed> · deadline in <d>`), so
   neither carries the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
   one through the same stop registry as an agent (the `monitor cancel` / `timer cancel` effect); `s` steer
@@ -772,6 +860,20 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   lifetime serialized-byte/count budget includes all previous entries of the archive type, even
   unreadable versions. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
   not deletes them. Operator-only expandable log entries do not create model context or extra wakes.
+- `src/ui/resource-groups.ts` adds presentation-only Timers/Monitors/Scripts categories without
+  changing runtime parentage, routing IDs or telemetry. Widget and F9 share fold state; clicks use
+  Pi's public component mouse API in alternate-screen mode, with Space/Left/Right in F9 as the
+  keyboard path. A bounded digest preserves category controls even during a large fan-out.
+  F9 observes Exocom through its bounded peer snapshot/change subscription and grants no peer
+  stop/steer controls. Peer heartbeat presence and agent execution state remain distinct facts.
+- Scripts are exit-only sessions over the existing process lifecycle (`src/script/session.ts`),
+  with separate IDs, eight-run admission and archive namespace (`pi-persona-script-log`). The
+  `script` tool accepts literal executable arguments or inline source through Pi's shell resolver;
+  stdin transport is honored when the host requires it. Both `script` and `bash` grants are
+  required. Permission loss/shutdown cancels executions and queued wakes; restore notices count
+  scripts independently. `src/extension/program-observer.ts` binds monitor and script lifecycle
+  events to archive, rows and stop handles. The shared log renderer preserves bounded/fenced output,
+  and synchronous startup rejection retains its actual error rather than a cancellation outcome.
 
 **Terminal result archive** (`src/results/`, `src/extension/results.ts`) applies the same
 ownership model to settled agent work: every terminal delegate/council/flow outcome (and each final
@@ -785,6 +887,11 @@ of resetting it. A fork/copy is a new owning file charged only for the entries i
 retention is labelled as such. Retrieval is read-only: `intercom results` lists, `intercom result
 { ref, offset, limit }` pages (8,000 default / 16,000 max units, surrogate-safe), with no respawn,
 rebilling, collection or extra wake; reading a page never returns the whole run hidden in metadata.
+Invalid page requests identify offset bounds, surrogate-interior offsets and invalid limits separately;
+callers continue only with a returned `nextOffset`. Capture and explicit live retrieval share one
+output-selection rule: for stopped/failed runs, a strictly longer partial that starts with the exact
+nonblank terminal output is preserved as `partial-output`. Successful final outputs remain authoritative,
+and unrelated partial transcripts never replace or concatenate with a nonblank terminal answer.
 A saved result is not a live worker: the restore notice says runtime handles are gone while retained
 reports remain readable. Archive listeners belong to the extension factory/tracker lifetime and are
 installed exactly once. `session_shutdown` revokes that session's archive owner and clears its

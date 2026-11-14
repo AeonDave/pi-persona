@@ -13,12 +13,13 @@ import type { GitExec } from "../../../src/engine/worktree.ts";
 import { defaultGitExec } from "../../../src/engine/worktree.ts";
 import { tempDir } from "../../setup/temp-dir.ts";
 
-test("diffStatus reports appeared, changed and disappeared entries", () => {
+test("diffStatus compares paths and status codes, so same-status edits to an already-dirty path are not detected", () => {
 	const before = parsePorcelainZ(" M src/a.ts\0?? notes.txt\0");
 	const after = parsePorcelainZ(" M src/a.ts\0 M src/b.ts\0A  src/c.ts\0");
 	assert.deepEqual(diffStatus(before, after), [
 		{ path: "src/b.ts", kind: "M" }, { path: "src/c.ts", kind: "A" }, { path: "notes.txt", kind: "clean" },
 	]);
+	assert.deepEqual(diffStatus(parsePorcelainZ(" M src/already-dirty.ts\0"), parsePorcelainZ(" M src/already-dirty.ts\0")), []);
 });
 
 test("parsePorcelainZ consumes a rename's old-path field instead of recording it as its own entry", () => {
@@ -29,16 +30,29 @@ test("parsePorcelainZ consumes a rename's old-path field instead of recording it
 	]);
 });
 
-test("renderChangeReport is undefined when nothing changed, bounded, and flags paths outside the declared writeSet", () => {
+test("renderChangeReport is an explicitly non-attributing snapshot delta, bounded, and scope-aware", () => {
 	assert.equal(renderChangeReport([]), undefined);
 	const many = Array.from({ length: 45 }, (_, i) => ({ path: `f${i}.ts`, kind: "M" as const }));
 	const text = renderChangeReport(many)!;
-	assert.match(text, /^--- FILES CHANGED DURING THIS LEG \(shared checkout; parallel legs may overlap\) ---/);
+	assert.match(text, /^--- GIT STATUS SNAPSHOT DELTA /);
+	assert.match(text, /not proof this leg wrote these paths/);
+	assert.match(text, /concurrent actors may contribute/);
+	assert.match(text, /inspect before attribution/);
+	assert.match(text, /already-dirty paths with unchanged status are not detected/);
+	assert.match(text, /no report does not prove no writes/);
 	assert.match(text, /\+5 more/);
-	assert.equal(text.split("\n").length, 1 + MAX_REPORTED_PATHS + 1);
-	const flagged = renderChangeReport([{ path: "src/x.ts", kind: "M" }, { path: "docs/y.md", kind: "A" }], ["src/"])!;
-	assert.match(flagged, /docs\/y\.md \(A\) ⚠ outside declared writeSet/);
-	assert.doesNotMatch(flagged, /src\/x\.ts.*outside/);
+	assert.equal(text.split("\n").length, 1 + MAX_REPORTED_PATHS + 2);
+
+	const scoped = renderChangeReport([{ path: "src/x.ts", kind: "M" }, { path: "docs/y.md", kind: "A" }], ["src/"])!;
+	assert.match(scoped, /src\/x\.ts \(M\)/);
+	assert.doesNotMatch(scoped, /src\/x\.ts.*outside/);
+	assert.match(scoped, /docs\/y\.md \(A\) ⚠ observed outside declared writeSet in shared-checkout status delta/);
+	assert.match(scoped, /not proof this leg wrote it or violated scope/);
+
+	for (const noScope of [renderChangeReport([{ path: "docs/y.md", kind: "A" }]), renderChangeReport([{ path: "docs/y.md", kind: "A" }], [])]) {
+		assert.match(noScope!, /docs\/y\.md \(A\)/, "keep interesting concurrent changes visible without a declared write scope, including for readers");
+		assert.doesNotMatch(noScope!, /outside declared writeSet/);
+	}
 });
 
 test("findGitRoot returns the nearest ancestor that has a .git entry", () => {

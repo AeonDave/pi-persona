@@ -65,11 +65,13 @@ function fakeGit(statusReplies: string[], revParse: { code: number; stdout: stri
 	};
 }
 
-test("a non-worktree leg's output gets a files-changed block naming what appeared", async () => {
+test("a non-worktree leg's output labels the shared-checkout status delta without attributing authorship", async () => {
 	const engine = createBuildEngine(baseDeps(fakeGit(["", " M src/a.ts\0"])))();
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true);
-	assert.match(r.output, /^done\n\n--- FILES CHANGED DURING THIS LEG/);
+	assert.match(r.output, /^done\n\n--- GIT STATUS SNAPSHOT DELTA /);
+	assert.match(r.output, /not proof this leg wrote these paths/);
+	assert.match(r.output, /concurrent actors may contribute; inspect before attribution/);
 	assert.match(r.output, /- src\/a\.ts \(M\)/);
 });
 
@@ -94,7 +96,7 @@ test("a leg that aborted with empty output still gets a clean block, never leadi
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, false);
 	assert.equal(r.error, "aborted");
-	assert.match(r.output, /^--- FILES CHANGED DURING THIS LEG/);
+	assert.match(r.output, /^--- GIT STATUS SNAPSHOT DELTA /);
 	assert.doesNotMatch(r.output, /^\s*\n/, "the block must not be preceded by blank lines when there was no output to trim");
 });
 
@@ -110,7 +112,7 @@ test("a full leg (before + after capture) spawns exactly two git processes, not 
 	const engine = createBuildEngine(baseDeps(exec, repoRoot))();
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true);
-	assert.match(r.output, /FILES CHANGED DURING THIS LEG/);
+	assert.match(r.output, /GIT STATUS SNAPSHOT DELTA/);
 	assert.equal(calls, 2, "one status call per capture, no rev-parse gate on either");
 });
 
@@ -138,6 +140,6 @@ test("a leg's cwd nested below the repository top still gets a files-changed blo
 	const engine = createBuildEngine(baseDeps(fakeGit(["", " M src/a.ts\0"]), nested))();
 	const r = await engine.run({ agent: "a", task: "t" });
 	assert.equal(r.ok, true);
-	assert.match(r.output, /^done\n\n--- FILES CHANGED DURING THIS LEG/);
+	assert.match(r.output, /^done\n\n--- GIT STATUS SNAPSHOT DELTA /);
 	assert.match(r.output, /- src\/a\.ts \(M\)/);
 });

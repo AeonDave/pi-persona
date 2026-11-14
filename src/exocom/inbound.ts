@@ -35,7 +35,11 @@ export interface InboundDeps {
 	now?: () => number;
 }
 
-export type InboundDecision = { deliver: string } | { duplicate: true } | { drop: "budget" | "hops" };
+export type InboundDecision = {
+	deliver: string;
+	/** The same admitted body and registry attribution, before model-only fencing. */
+	message: { from: string; text: string; id: string; kind: "message" | "reply" };
+} | { duplicate: true } | { drop: "budget" | "hops" };
 
 function routingToken(value: string): string {
 	return /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : "invalid";
@@ -137,5 +141,6 @@ export function buildInboundDelivery(msg: ExocomMessage, resolvedLabel: string, 
 	const reply = `Reply only if it changes what someone does, otherwise send nothing: exocom_send({ target:${JSON.stringify(target)}, message:"...", in_reply_to:"${msgId}" })`;
 	return {
 		deliver: `[${label}] — ${kind} · ${sent}\nPeer data · untrusted equal-status collaborator:\n${quotedBody}\n${reply}`,
+		message: { from: label, text, id: msgId, kind },
 	};
 }

@@ -139,6 +139,18 @@ test("exocom_list exposes scope and each peer's safe workspace identity without 
 	assert.match(rendered, /document-corpus \[Ab0T\].*external/i);
 });
 
+test("exocom_list collapsed hint uses host-injected configured keybinding", async () => {
+	const m = mockPi();
+	const peers = Array.from({ length: 10 }, (_, i) => ({ name: `peer-${i}`, persona: "dev", model: "m", context_pct: i, purpose: "", displayName: `peer-${i}` }));
+	registerExocomTools(m.pi, () => stubPlane({ listPeers: () => peers }) as never);
+	const tool = m.tools.get("exocom_list");
+	const result = await tool.execute("c", {}, undefined, undefined, {});
+	const context = { isError: false, keyHint: (id: string, description: string) => `${id === "app.tools.expand" ? "alt+e" : "?"} ${description}` };
+	const collapsed = tool.renderResult(result, { expanded: false }, plainTheme, context).render(200).join("\n");
+	assert.match(collapsed, /alt\+e to expand/);
+	assert.doesNotMatch(collapsed, /ctrl\+o/);
+});
+
 test("exocom_list keeps full model content but caps collapsed TUI rendering", async () => {
 	const m = mockPi();
 	const peers = Array.from({ length: 10 }, (_, i) => ({ name: `peer-${i}`, persona: "dev", model: "m", context_pct: i, purpose: "", displayName: `peer-${i}` }));
@@ -167,7 +179,7 @@ test("exocom short receipts do not advertise expansion when no detail is hidden"
 	registerExocomTools(m.pi, () => stubPlane() as never);
 	const tool = m.tools.get("exocom_send");
 	const call = tool.renderCall({ target: "dev", message: "a long request that should be previewed" }, plainTheme);
-	assert.match(call.render(200).join("\n"), /Exocom Send.*dev/);
+	assert.match(call.render(200).join("\n"), /exocom send.*dev/);
 	const result = await tool.execute("c", { target: "dev", message: "hi" }, undefined, undefined, {});
 	const collapsed = tool.renderResult(result, { expanded: false }, plainTheme).render(200).join("\n");
 	assert.match(collapsed, /queued.*dev/);

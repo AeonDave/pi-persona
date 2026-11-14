@@ -14,7 +14,7 @@ import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { createReportBody } from "../ui/report-body.ts";
-import { orchestrationLaunchLines, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
+import { orchestrationLaunchLines, withOrchestrationRequest, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { toolUsageField } from "../ui/usage.ts";
 import { emptyUsage } from "../engine/stream.ts";
@@ -143,11 +143,11 @@ ${strategyCatalog()}`,
 				if (members) orch.members = members;
 				try {
 					const snapshot = d.launchSnapshot(ctx, orch);
-					launch = { ...snapshot, participants: snapshot.participants.map((p) => ({ ...p })) };
+					launch = withOrchestrationRequest(snapshot, { task: params.question });
 				} catch {
 					// A display lookup must not change launch admission; its failure is visible, not
 					// replaced with guessed models or an apparently successful empty panel.
-					launch = { participants: [], unavailable: true };
+					launch = withOrchestrationRequest(undefined, { task: params.question });
 				}
 				// The same launch `delegate` uses: ONE tracked run. Interactive sessions get a receipt now and
 				// the ruling as ONE completion follow-up (the idle-gated wake, fenced and bounded); headless
@@ -242,29 +242,29 @@ ${strategyCatalog()}`,
 				// Interactive launch receipt: the ruling arrives later as the completion follow-up.
 				const launched = failed ? theme.fg("error", theme.bold("council failed"))
 					: `${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", compactInlineText(`launched ${d.runId} · ${d.strategy ?? "?"} · ${d.roster ?? "?"}`, { maxChars: 120 }))}`;
-				const metadata = orchestrationLaunchLines(d.launch, expanded).join("\n");
+				const metadata = orchestrationLaunchLines(d.launch, expanded, context).join("\n");
 				return new Text([launched, theme.fg("dim", metadata), expanded && first?.type === "text" ? theme.fg("toolOutput", sanitizeTerminalText(first.text)) : ""].filter(Boolean).join("\n"), 0, 0);
 			}
 			const body = sanitizeTerminalText(d.body || (first && first.type === "text" ? first.text : ""));
-			const metadata = d.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(d.launch, expanded).join("\n")}` : "";
+			const metadata = d.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(d.launch, expanded, context).join("\n")}` : "";
 			if (failed) {
 				const cause = compactInlineText([d.failureKind, d.error].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
 				const title = () => theme.fg("error", theme.bold(`council failed${cause ? ` · ${cause}` : ""}`));
 				if (expanded) {
 					// Only a completed council retains a ruling body; preflight/host errors are literal.
-					if (typeof d.body === "string") return createReportBody(`${body || "(no ruling)"}${metadata}`, theme, { header: title }, context?.lastComponent);
+					if (typeof d.body === "string") return createReportBody(body || "(no ruling)", theme, { header: title, footer: metadata }, context?.lastComponent);
 					return new Text(`${title()}\n${theme.fg("toolOutput", body || "(no ruling)")}${theme.fg("dim", metadata)}`, 0, 0);
 				}
 				const preview = compactVisibleText(body || "(no ruling)", { maxLines: 3, maxLineChars: 100 });
-				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 				return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}${theme.fg("dim", metadata)}`, 0, 0);
 			}
 			const text = formatCouncilResult(
 				{ headline: d.headline, status: d.status, tally: d.tally, usedFallback: d.usedFallback, body },
 				expanded,
-				expandDetailHint(),
+				expandDetailHint(context),
 			);
-			return expanded ? createReportBody(`${text}${metadata}`, theme, {}, context?.lastComponent) : new Text(`${theme.fg("accent", text)}${theme.fg("dim", metadata)}`, 0, 0);
+			return expanded ? createReportBody(text, theme, { footer: metadata }, context?.lastComponent) : new Text(`${theme.fg("accent", text)}${theme.fg("dim", metadata)}`, 0, 0);
 		},
 	});
 }

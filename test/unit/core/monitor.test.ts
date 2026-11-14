@@ -496,3 +496,38 @@ test("a start that throws, or fails synchronously, is announced as armed then re
 	assert.deepEqual(sync.removed, []);
 	assert.deepEqual(sync.log, ["armed:monitor-1", "event:monitor-1:exit:true"], "armed THEN the terminal event, in that order");
 });
+
+test("throwing lifecycle observers cannot strand an admitted process or interrupt cancellation", () => {
+	const processes: FakeProcess[] = [];
+	const events: MonitorEvent[] = [];
+	let cleared = 0;
+	const manager = new MonitorManager({
+		now: () => 1_000,
+		setTimer: () => 1,
+		clearTimer: () => { cleared++; },
+		start: (_spec, handlers) => {
+			const process: FakeProcess = { handlers, stopped: 0 };
+			processes.push(process);
+			return { stop: () => process.stopped++ };
+		},
+		onEvent: (event) => events.push(event),
+		onArmed: () => { throw new Error("row projection failed"); },
+		onRemoved: () => { throw new Error("row removal failed"); },
+	});
+
+	const launched = manager.arm(spec({ mode: "exit" }));
+	assert.equal(launched.ok, true, "the passive armed observer cannot prevent process startup");
+	assert.equal(manager.list().length, 1);
+	assert.equal(processes.length, 1);
+	processes[0]!.handlers.onExit(0);
+	assert.equal(manager.list().length, 0);
+	assert.equal(events.length, 1, "terminal delivery remains authoritative");
+	assert.equal(processes[0]!.stopped, 1);
+
+	const cancellable = manager.arm(spec());
+	assert.equal(cancellable.ok, true);
+	assert.doesNotThrow(() => manager.cancel(cancellable.ok ? cancellable.entry.id : ""));
+	assert.equal(manager.list().length, 0);
+	assert.equal(processes[1]!.stopped, 1);
+	assert.equal(cleared, 2, "both terminal and silent removal clear their deadline");
+});

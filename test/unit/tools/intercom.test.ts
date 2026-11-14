@@ -5,6 +5,21 @@ import { InProcessBus, MAX_RETAINED_MESSAGE_CHARS } from "../../../src/bus/inpro
 import { formatInbox, MAX_INTERCOM_LIST_PEERS, MAX_INTERCOM_MESSAGE_CHARS, runIntercom } from "../../../src/tools/intercom.ts";
 import { fenceIntercomToolOutcome } from "../../../src/tools/intercom-tool.ts";
 
+test("same-named senders retain distinct handles in inbox and retrieved-message diagnostics", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.register("operator#1", "Moss");
+	bus.register("operator#2", "Moss");
+	bus.send("operator#1", "supervisor", "first");
+	bus.send("operator#2", "supervisor", "second");
+	const outcome = runIntercom({ action: "inbox" }, bus, "supervisor");
+	assert.match(outcome.text, /\[Moss\] \[operator#1\]/);
+	assert.match(outcome.text, /\[Moss\] \[operator#2\]/);
+	const first = outcome.details.messages?.[0];
+	assert.ok(first);
+	assert.match(runIntercom({ action: "message", messageId: first.id }, bus, "supervisor").text, /\[Moss\] \[operator#1\]/);
+});
+
 test("intercom list returns the registered peers (minus self)", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");
@@ -118,6 +133,18 @@ test("intercom send delivers a one-way message to a child", () => {
 	const r = runIntercom({ action: "send", to: "scout#1", message: "focus on the parser" }, bus, "supervisor");
 	assert.match(r.text, /sent/i);
 	assert.equal(bus.take("scout#1")[0]?.text, "focus on the parser");
+});
+
+test("intercom send snapshots the canonical bus alias and exact accepted message without rerouting", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor"); bus.register("operator#5", "Amber-runtime");
+	const message = "**literal**\nPreserve every line.\nFinal instruction.";
+	const result = runIntercom({ action: "send", to: "operator#5", message }, bus, "supervisor");
+	assert.equal(result.text, "Sent to Amber-runtime.");
+	assert.deepEqual(result.details, { action: "send", ok: true, busId: "operator#5", target: "Amber-runtime", sentMessage: message });
+	assert.equal(bus.pending("operator#5")[0]?.text, message);
+	bus.unregister("operator#5"); bus.register("operator#5", "Wrong-new-worker");
+	assert.equal(result.details.target, "Amber-runtime", "receipt identity is a snapshot, never a later registry lookup");
 });
 
 test("intercom send to an unknown peer reports it cleanly", () => {

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
+import { EVIDENCE_GUIDANCE } from "../../../src/core/evidence.ts";
 import { makeEngine, type EngineAdapterDeps } from "../../../src/engine/adapter.ts";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import type { AgentProgress, AgentRunSpec } from "../../../src/orchestration/sdk.ts";
@@ -177,25 +178,90 @@ test("child adapter does NOT add the MCP hint when the leg is not mcp:true", asy
 	assert.doesNotMatch(r.error ?? "", /mcp:true leg/);
 });
 
-test("child adapter leads the sub-agent prompt with the spine, and honours `spine: false`", async () => {
+test("child adapter leads with the optional spine, appends stable evidence guidance and honours `spine: false`", async () => {
 	// The child engine hands the composed prompt over as a temp file (`--append-system-prompt`),
 	// written before the spawn and deleted after it — so read it from inside the invocation seam.
-	let composed: string | undefined;
+	let composed = "";
 	const capture = (args: string[]) => {
 		const at = args.indexOf("--append-system-prompt");
-		composed = at >= 0 ? readFileSync(args[at + 1] as string, "utf8") : undefined;
+		composed = at >= 0 ? readFileSync(args[at + 1] as string, "utf8") : "";
 		return resolveFake(args);
 	};
 
 	await makeEngine({ resolveAgent, spine: "SPINE", childOptions: { resolveInvocation: capture } }).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(composed, "SPINE\n\nYou are a.\n\nROLE", "the shared layer leads, then the agent, then the role");
+	assert.ok(composed.startsWith("SPINE\n\nYou are a.\n\nROLE\n\n"), "the optional layer leads, then the agent and role");
+	assert.equal(composed.split(EVIDENCE_GUIDANCE).length - 1, 1, "stable guidance follows the saved agent and role exactly once");
 
 	await makeEngine({ resolveAgent, childOptions: { resolveInvocation: capture } }).run({ agent: "a", task: "t", role: "ROLE" });
-	assert.equal(composed, "You are a.\n\nROLE", "no spine ⇒ byte-identical to the pre-spine join");
+	assert.equal(composed, `You are a.\n\nROLE\n\n${EVIDENCE_GUIDANCE}`, "no optional spine leaves the agent and role intact and retains evidence guidance");
 
 	const optedOut = (n: string): AgentConfig | undefined => (n === "q" ? { name: "q", systemPrompt: "You are q.", spine: false, source: "x" } : undefined);
 	await makeEngine({ resolveAgent: optedOut, spine: "SPINE", childOptions: { resolveInvocation: capture } }).run({ agent: "q", task: "t" });
-	assert.equal(composed, "You are q.", "`spine: false` in the agent's frontmatter opts the leg out");
+	assert.equal(composed, `You are q.\n\n${EVIDENCE_GUIDANCE}`, "`spine: false` opts out only of the optional layer, not stable evidence guidance");
+});
+
+test("child prompt keeps evidence guidance with role, skills, contract and assigned identity even when spine is opted out", async () => {
+	let composed = "";
+	const configured: AgentConfig = {
+		name: "configured",
+		systemPrompt: "Configured worker prompt",
+		spine: false,
+		source: "saved-agent.md",
+	};
+	const engine = makeEngine({
+		resolveAgent: () => configured,
+		contracts,
+		spine: "OPTIONAL WORKER SPINE",
+		childOptions: {
+			resolveInvocation: (args) => {
+				const at = args.indexOf("--append-system-prompt");
+				composed = readFileSync(args[at + 1] as string, "utf8");
+				return resolveFake(args);
+			},
+		},
+	});
+	const result = await engine.run({
+		agent: "configured",
+		task: "inspect the implementation",
+		name: "Atlas CSS",
+		role: "Focus on correctness",
+		skills: ["python-testing"],
+		outputContract: "default",
+	});
+	assert.equal(result.ok, false, "the echo fixture is prose, so the requested contract must reject it");
+	assert.equal(composed.split(EVIDENCE_GUIDANCE).length - 1, 1, "guidance appears exactly once in the actual child system prompt");
+	assert.ok(composed.includes("Configured worker prompt"));
+	assert.match(composed, /\[pi-persona assigned identity\][\s\S]*\{"name":"Atlas-CSS"\}/);
+	assert.ok(composed.includes("Focus on correctness"));
+	assert.doesNotMatch(composed, /OPTIONAL WORKER SPINE/);
+	assert.match(result.output, /Load these skills before starting.*python-testing/);
+	assert.match(result.output, /inspect the implementation/);
+	assert.match(result.output, /output contract \(default\)/);
+});
+
+test("child prompt keeps the internal tool-less JSON worker prompt minimal", async () => {
+	let composed = "";
+	const privateWorker: AgentConfig = {
+		name: "internal-maintenance",
+		source: "internal:maintenance",
+		tools: [],
+		excludeTools: ["*"],
+		spine: false,
+		systemPrompt: "Return only the requested JSON data.",
+	};
+	await makeEngine({
+		resolveAgent: () => privateWorker,
+		spine: "OPTIONAL WORKER SPINE",
+		childOptions: {
+			resolveInvocation: (args) => {
+				const at = args.indexOf("--append-system-prompt");
+				composed = readFileSync(args[at + 1] as string, "utf8");
+				return resolveFake(args);
+			},
+		},
+	}).run({ agent: privateWorker.name, task: "return JSON", tools: [] });
+	assert.equal(composed, privateWorker.systemPrompt);
+	assert.doesNotMatch(composed, /\[pi-persona\] Evidence discipline/);
 });
 
 test("child adapter leaves the task untouched when no contract is requested", async () => {
@@ -311,6 +377,39 @@ test("child adapter validates spec.tools override before invocation and keeps no
 	const empty = await emptyEngine.run({ agent: "a", task: "inspect", tools: [] });
 	assert.equal(empty.ok, true, "an explicit empty allowlist remains valid");
 	assert.ok(emptySeen.includes("--no-tools"));
+});
+
+test("child adapter carries the explicit outline grant only for admitted tools and scrubs inherited markers", async () => {
+	const before = process.env.PI_PERSONA_CODE_OUTLINE;
+	process.env.PI_PERSONA_CODE_OUTLINE = "stale-parent-marker";
+	const script = `process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_PERSONA_CODE_OUTLINE ?? 'absent'}],stopReason:'end'}})+'\\n');`;
+	const childOptions = {
+		env: { PI_PERSONA_CODE_OUTLINE: "stale-child-options-marker" },
+		resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+	};
+	const engine = makeEngine({
+		resolveAgent: (name) => name === "outline" ? { name, model: "stub/m", tools: ["code_outline"], systemPrompt: "", source: "x" } : undefined,
+		childOptions,
+	});
+	const excludedEngine = makeEngine({
+		resolveAgent: (name) => name === "outline" ? { name, model: "stub/m", tools: ["code_outline"], excludeTools: ["code_outline"], systemPrompt: "", source: "x" } : undefined,
+		childOptions,
+	});
+	try {
+		const granted = await engine.run({ agent: "outline", task: "inspect" });
+		const empty = await engine.run({ agent: "outline", task: "inspect", tools: [] });
+		const excluded = await excludedEngine.run({ agent: "outline", task: "inspect" });
+		assert.equal(granted.ok, true, granted.error);
+		assert.equal(granted.output, "1", "the child receives the adapter's explicit grant marker");
+		assert.equal(empty.ok, true, empty.error);
+		assert.equal(empty.output, "absent", "an explicit empty allowlist does not leak the parent marker");
+		assert.equal(excluded.ok, true, excluded.error);
+		assert.equal(excluded.output, "absent", "tool exclusions revoke the marker as well as the tool");
+		assert.equal(process.env.PI_PERSONA_CODE_OUTLINE, "stale-parent-marker", "the supervisor environment is unchanged");
+	} finally {
+		if (before === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE;
+		else process.env.PI_PERSONA_CODE_OUTLINE = before;
+	}
 });
 
 test("child adapter's spec.timeoutMs overrides the engine-level idle timeout for just that leg (NP2)", async () => {
@@ -672,6 +771,42 @@ test("child reference handoff keeps an absent allowlist absent (no --tools) and 
 	assert.equal(r.ok, true, r.error);
 	assert.ok(!argsSeen.includes("--tools"), "an absent allowlist stays absent — the bridge injects read_result itself");
 	assert.equal(revoked.count, 1);
+});
+
+test("child adapter releases prepared readers and registrations when pre-spawn wiring throws", async () => {
+	for (const stage of ["registration", "steering"] as const) {
+		const log: string[] = [];
+		const revoked = { count: 0 };
+		const broker = fullBroker(log, "d".repeat(64), revoked);
+		const register = broker.register;
+		broker.register = (info) => {
+			register(info);
+			if (stage === "registration") throw new Error("registration failed after acquiring handle");
+		};
+		let invoked = false;
+		const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,
+			childOptions: { resolveInvocation: (args) => { invoked = true; return envDump("never")(args); } } });
+		await assert.rejects(engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] }, undefined, undefined, () => {
+			throw new Error("steering failed before spawn");
+		}), stage === "registration" ? /registration failed/ : /steering failed/);
+		assert.equal(invoked, false, `${stage}: no process was spawned`);
+		assert.equal(revoked.count, 1, `${stage}: the prepared reader is revoked`);
+		const handle = log.find((entry) => entry.startsWith("prepare:"))!.slice("prepare:".length);
+		assert.equal(log.filter((entry) => entry === `unregister:${handle}`).length, 1, `${stage}: the partial registration is released`);
+	}
+});
+
+test("child adapter still unregisters when reader revocation itself throws", async () => {
+	const log: string[] = [];
+	const broker = fullBroker(log);
+	broker.prepareResultReader = async (handle) => {
+		log.push(`prepare:${handle}`);
+		return { token: "e".repeat(64), revoke: () => { throw new Error("reader cleanup failed"); }, wasBound: () => false };
+	};
+	const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,
+		childOptions: { resolveInvocation: envDump("settled") } });
+	await assert.rejects(engine.run({ agent: "a", task: "t", resultRefs: [REF_OK] }), /reader cleanup failed/);
+	assert.equal(log.filter((entry) => entry.startsWith("unregister:")).length, 1);
 });
 
 test("child engine scrubs a stale supervisor PI_PERSONA_RESULT_READER_TOKEN from a plain leg's environment", { timeout: 10000 }, async () => {

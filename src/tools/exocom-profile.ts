@@ -40,7 +40,7 @@ function actionText(details: ProfileToolDetails): string {
 export function registerExocomProfileTool(pi: ExtensionAPI, getPlane: () => ExocomPlane | undefined): void {
 	pi.registerTool({
 		name: "exocom_profile",
-		label: "Exocom Profile",
+		label: "exocom profile",
 		description: [
 			"Report your own optional Exocom presence. `get` reads it, `set` updates the supplied fields,",
 			"and `clear` removes it. Capabilities and availability are self-reported metadata only; they",
@@ -85,13 +85,13 @@ export function registerExocomProfileTool(pi: ExtensionAPI, getPlane: () => Exoc
 		},
 		renderCall(args, theme) {
 			const action = typeof args.action === "string" ? args.action : "get";
-			return new Text(theme.fg("toolTitle", theme.bold(`Exocom Profile ${action}`)), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold(`exocom profile ${action}`)), 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			if (context?.isError || result.isError) return renderLiteralToolResult(result, { expanded }, theme, context);
 			const details = result.details as unknown as ProfileToolDetails | undefined;
 			if (!details || !["get", "set", "clear"].includes(details.action)) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			return renderLiteralToolResult({
 				...result,

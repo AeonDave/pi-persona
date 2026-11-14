@@ -3,29 +3,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { MonitorManager } from "../core/monitor.ts";
-import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
-import { formatDuration } from "../core/time.ts";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { compactInlineText } from "../ui/presentation.ts";
-import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
-import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
-import type { MonitorArchive, MonitorLogRecord } from "../monitor/archive.ts";
-
-/** A bounded, fenced read of a session-owned log; never adds a wake by itself. */
-export function renderMonitorLog(record: MonitorLogRecord, full = false): string {
-	const limit = full ? 16_384 : 4_000;
-	const tail = (text: string) => {
-		// Match the live monitor projection's inert bidi/separator policy without rewriting captures.
-		const safe = neutralizeMonitorUnicode(stripTerminalControls(text));
-		return safe.length > limit ? `…[display truncated; use result with full=true for the retained capture]\n${safe.slice(-limit)}` : safe || "(no output)";
-	};
-	return [
-		`${compactInlineText(record.entry.id)} (${compactInlineText(record.entry.label)}) — ${record.outcome}`,
-		...(record.truncated ? ["Log capture is bounded; older output was truncated."] : []),
-		...(record.storageWarning ? [compactInlineText(record.storageWarning, { maxChars: 400 })] : []),
-		fenceUntrusted(`${tail(record.text)}\nstdout:\n${tail(record.stdout)}\nstderr:\n${tail(record.stderr)}`),
-	].join("\n");
-}
+import { renderProcessStartResult } from "../ui/process-start-result.ts";
+import type { MonitorArchive } from "../monitor/archive.ts";
+import { renderProcessLog } from "../monitor/log.ts";
 
 export interface MonitorToolDeps {
 	get lastCtx(): ExtensionContext | undefined;
@@ -64,7 +46,7 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 				}
 				const record = d.archive.result(params.id);
 				if (!record) return fail(`Monitor log unavailable for ${compactInlineText(params.id)}; it may predate logging or have exceeded session retention. Use result without id to list available logs.`);
-				return { content: [{ type: "text" as const, text: renderMonitorLog(record, params.full === true) }], details: { ok: true, id: record.entry.id, outcome: record.outcome, truncated: record.truncated } };
+				return { content: [{ type: "text" as const, text: renderProcessLog(record, params.full === true) }], details: { ok: true, id: record.entry.id, outcome: record.outcome, truncated: record.truncated } };
 			}
 			if (params.action === "list") {
 				const entries = d.monitors.list();
@@ -99,20 +81,10 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as { ok?: boolean; label?: string; mode?: string; expiresAtEpochMs?: number };
-			const failed = context?.isError ?? result.isError ?? false;
-			const isArm = !failed && typeof details.label === "string" && (details.mode === "output" || details.mode === "exit");
-			if (!isArm) {
-				// Failures and every list/cancel/result receipt share the one literal renderer:
-				// error heading, bounded sanitized preview, expansion hint.
-				return renderLiteralToolResult(result, { expanded }, theme, context);
-			}
-			if (expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
-			const left = typeof details.expiresAtEpochMs === "number" && Number.isFinite(details.expiresAtEpochMs)
-				? details.expiresAtEpochMs - Date.now()
-				: undefined;
-			const deadline = left === undefined ? "" : left > 0 ? ` · deadline in ${formatDuration(left)}` : " · deadline reached";
-			const summary = compactInlineText(`${details.label} · ${details.mode}${deadline}`, { maxChars: 140 });
-			return new Text(`${theme.fg("toolTitle", theme.bold("armed "))}${theme.fg("accent", summary)}`, 0, 0);
+			return renderProcessStartResult(result, { expanded }, theme, context,
+				typeof details.label === "string" && (details.mode === "output" || details.mode === "exit")
+					? { verb: "armed", label: details.label, mode: details.mode, ...(details.expiresAtEpochMs === undefined ? {} : { expiresAtEpochMs: details.expiresAtEpochMs }) }
+					: undefined);
 		},
 	});
 }

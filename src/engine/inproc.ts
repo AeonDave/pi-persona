@@ -18,7 +18,7 @@
  * `ChildProcessEngine`. It drops in behind the seam without touching strategies/UI.
  */
 
-import { createAgentSession, DefaultResourceLoader, type ModelRegistry, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, type ModelRegistry, SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
@@ -26,6 +26,7 @@ import { makeContactSupervisorTool } from "../bus/contact.ts";
 import { makeContactPeerTool } from "../bus/peers.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { EVIDENCE_GUIDANCE, shouldAppendEvidenceGuidance } from "../core/evidence.ts";
 import { resolveLegThinking } from "../core/leg-thinking.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { installFrozenMemoryOwner } from "../extension/memory-owner.ts";
@@ -35,6 +36,8 @@ import { roleHint } from "../orchestration/roster.ts";
 import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { makeReadResultTool } from "../tools/read-result.ts";
+import { makeCodeOutlineTool } from "../tools/code-outline.ts";
+import { cliRemovedToolNames, cliToolLoadoutIsExplicit, nativeToolNames, withNativeToolDefaults } from "../extension/native-tools.ts";
 import { admitResultReadTool, referenceHandoffFailure } from "./result-grant.ts";
 import { makeScopedResultReader, type ResultArchiveView } from "../results/retrieval.ts";
 import { looksLikeProviderError } from "./errors.ts";
@@ -193,10 +196,12 @@ export function withOrchestrationToolsExcluded(extra: readonly string[] | undefi
 const createPiSession: CreateInProcSession = async (opts) => {
 	if (opts.signal?.aborted) throw new DOMException("Session initialization aborted", "AbortError");
 	const manager = SessionManager.inMemory(opts.cwd);
+	const settingsManager = SettingsManager.create(opts.cwd, opts.agentDir);
 	const memoryPersona = opts.memoryPersona;
 	const loader = new DefaultResourceLoader({
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
+		settingsManager,
 		...(memoryPersona !== undefined ? { extensionFactories: [(pi) => installFrozenMemoryOwner(pi, manager, memoryPersona)] } : {}),
 		...(opts.systemPrompt ? { appendSystemPrompt: [opts.systemPrompt] } : {}),
 	});
@@ -205,12 +210,25 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	// If a `tools` allowlist is set, the injected custom tools must be allowed too,
 	// otherwise the allowlist would filter them out of the child's active set.
 	const customNames = (opts.customTools ?? []).map((t) => t.name);
-	const tools = mergeSessionToolAllowlist(opts.tools, customNames);
+	const customOverrides = new Set(loader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()]));
+	const hostNativeNames = nativeToolNames(
+		["grep", "find", "ls", "powershell"].map((name) => ({ name, sourceInfo: { source: "builtin" } })),
+		process.platform,
+	).filter((name) => !customOverrides.has(name));
+	const cliRemoved = cliRemovedToolNames(process.argv);
+	const nativeDefaults = settingsManager.getDefaultTools() === undefined && !cliToolLoadoutIsExplicit(process.argv)
+		? hostNativeNames.filter((name) => !cliRemoved.has(name))
+		: [];
+	const selectedTools = withNativeToolDefaults(opts.tools, nativeDefaults);
+	const tools = selectedTools?.every((name) => name.startsWith("+") || name.startsWith("-"))
+		? selectedTools
+		: mergeSessionToolAllowlist(selectedTools, customNames);
 	// Current Pi consumes the canonical modelRuntime. Sharing it also preserves native providers
 	// and credentials that exist only in the supervisor's memory.
 	const sessionOptions: NonNullable<Parameters<typeof createAgentSession>[0]> = {
 		model: opts.model as NonNullable<NonNullable<Parameters<typeof createAgentSession>[0]>["model"]>,
 		sessionManager: manager,
+		settingsManager,
 		resourceLoader: loader,
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
@@ -273,14 +291,17 @@ function resolveModel(reg: ModelRegistry, ref: string | undefined): unknown {
 let disableDepth = 0;
 let savedDisable: string | undefined;
 let savedLeg: string | undefined;
+let savedCodeOutline: string | undefined;
 function pushDisableGuard(): void {
 	if (disableDepth === 0) {
 		savedDisable = process.env.PI_PERSONA_DISABLE;
 		savedLeg = process.env.PI_PERSONA_LEG;
+		savedCodeOutline = process.env.PI_PERSONA_CODE_OUTLINE;
 	}
 	disableDepth += 1;
 	process.env.PI_PERSONA_DISABLE = "1";
 	process.env.PI_PERSONA_LEG = "1";
+	delete process.env.PI_PERSONA_CODE_OUTLINE;
 }
 function popDisableGuard(): void {
 	disableDepth -= 1;
@@ -289,6 +310,8 @@ function popDisableGuard(): void {
 		else process.env.PI_PERSONA_DISABLE = savedDisable;
 		if (savedLeg === undefined) delete process.env.PI_PERSONA_LEG;
 		else process.env.PI_PERSONA_LEG = savedLeg;
+		if (savedCodeOutline === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE;
+		else process.env.PI_PERSONA_CODE_OUTLINE = savedCodeOutline;
 	}
 }
 
@@ -414,12 +437,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (memoryPersona !== undefined) sessionOpts.memoryPersona = memoryPersona;
 			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
 			if (thinkingRequested !== undefined) sessionOpts.thinkingLevel = thinkingRequested;
-			// The shared behavioral layer (docs/SPINE.md) + the agent's own persona + any
-			// on-the-fly `role` specialisation from the spec. All three reach the session as the
-			// loader's `appendSystemPrompt`, so a leg keeps Pi's full base prompt either way — the
-			// layer adds behavioral consistency, it does not fill a scaffolding gap.
+			// The optional worker spine leads; the agent prompt, assigned identity and on-the-fly
+			// role follow; stable evidence guidance is last so saved agent prose cannot override it.
+			// These reach the session through the loader's `appendSystemPrompt`, preserving Pi's base prompt.
 			const layer = cfg.spine === false ? undefined : deps.spine?.trim();
-			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim()].filter(Boolean).join("\n\n");
+			const evidence = shouldAppendEvidenceGuidance(cfg) ? EVIDENCE_GUIDANCE : undefined;
+			const personaPrompt = [layer, cfg.systemPrompt?.trim(), assignedIdentityPrompt(spec.name), spec.role?.trim(), evidence].filter(Boolean).join("\n\n");
 			if (personaPrompt) sessionOpts.systemPrompt = personaPrompt;
 
 			// Comm plane: give this child a `contact_supervisor` tool bound to a unique handle
@@ -435,7 +458,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (deps.bus && (wantsCoaching || wantsPeers)) {
 				childHandle = nextChildHandle(spec.agent);
 				deps.bus.register(supervisorHandle);
-				deps.bus.register(childHandle);
+				deps.bus.register(childHandle, spec.name);
 				if (wantsCoaching) {
 					customTools.push(
 						makeContactSupervisorTool(deps.bus, childHandle, supervisorHandle, { allowBlocking: deps.allowBlocking ?? false }),
@@ -458,6 +481,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// literal `read_result` already admitted into a nonempty allowlist above; an absent
 			// allowlist stays absent and the injected tool rides Pi's session defaults.
 			if (resultReadTool !== undefined) customTools.push(resultReadTool);
+			if (admittedTools?.includes("code_outline") && !cfg.excludeTools?.some((pattern) => pattern === "code_outline" || (pattern.endsWith("*") && "code_outline".startsWith(pattern.slice(0, -1))))) {
+				customTools.push(makeCodeOutlineTool() as ToolDefinition);
+			}
 			if (customTools.length > 0) sessionOpts.customTools = customTools;
 
 			// The handle is live on the SESSION-LONG bus from here on, while the only unregister sits

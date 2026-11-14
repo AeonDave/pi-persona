@@ -154,13 +154,31 @@ export function parseTerminalResultRecord(value: unknown): TerminalResultRecord 
 }
 
 export interface StoredBodyPage { body: string; offset: number; nextOffset?: number; endOfStoredBody: boolean }
+export type StoredBodyPageResult = { ok: true; page: StoredBodyPage } | { ok: false; message: string };
 
-export function pageStoredBody(record: TerminalResultRecord, offset = 0, limit = RESULT_READ_DEFAULT): StoredBodyPage | undefined {
-	if (!counter(offset) || offset > record.body.length || safeEnd(record.body, offset) !== offset
-		|| !Number.isInteger(limit) || limit < 2 || limit > RESULT_READ_MAX) return undefined;
+/** Shared strict validation and diagnostic path for archived stored-body reads. */
+export function readStoredBodyPage(
+	record: TerminalResultRecord, offset: unknown = 0, limit: unknown = RESULT_READ_DEFAULT,
+): StoredBodyPageResult {
+	if (typeof offset !== "number" || !counter(offset)) {
+		return { ok: false, message: "Invalid offset: expected a non-negative safe integer." };
+	}
+	if (offset > record.body.length) {
+		const length = record.body.length;
+		return { ok: false, message: `Invalid offset ${offset}: stored body is ${length} UTF-16 units long (valid range 0..${length}); restart with offset=0 (or omit offset for the first page), then set offset only from a returned nextOffset.` };
+	}
+	if (safeEnd(record.body, offset) !== offset) {
+		return { ok: false, message: `Invalid offset ${offset}: it falls inside a UTF-16 surrogate pair; restart at offset=0 and use only returned nextOffset values.` };
+	}
+	if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 2 || limit > RESULT_READ_MAX) {
+		return { ok: false, message: `Invalid limit: expected an integer from 2..${RESULT_READ_MAX}.` };
+	}
 	const end = safeEnd(record.body, Math.min(record.body.length, offset + limit));
 	return {
-		body: record.body.slice(offset, end), offset, endOfStoredBody: end === record.body.length,
-		...(end < record.body.length ? { nextOffset: end } : {}),
+		ok: true,
+		page: {
+			body: record.body.slice(offset, end), offset, endOfStoredBody: end === record.body.length,
+			...(end < record.body.length ? { nextOffset: end } : {}),
+		},
 	};
 }

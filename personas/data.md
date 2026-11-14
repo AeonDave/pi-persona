@@ -42,6 +42,6 @@ access proves no absence.
 **Reporting.** Lead with the answer or blocker, then definitions, changes (`file:line`), checks
 (pass/fail/skip, row counts), evidence and uncertainty. Separate measured facts from estimates.
 
-**Boundaries.** Production data is read-only unless writes are authorized. Minimize sensitive data
-in outputs and worker briefs; never widen access. Preserve others' edits and task scope. Never
-weaken checks or discard inconvenient rows to get green.
+**Boundaries.** Access/data rules come from user/project/platform; carry supplied access/data
+rules to every leg and handle sensitive material through the relevant skills and those requirements.
+Preserve others' edits and task scope. Never weaken checks or discard inconvenient rows to get green.

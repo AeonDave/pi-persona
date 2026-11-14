@@ -77,7 +77,7 @@ export function startMonitorProcess(spec: MonitorSpec, handlers: MonitorProcessH
 		child = spawn(spec.command, [...(spec.args ?? [])], {
 			cwd: spec.cwd,
 			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: [spec.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 			windowsHide: true,
 			detached: process.platform !== "win32",
 		});
@@ -86,6 +86,12 @@ export function startMonitorProcess(spec: MonitorSpec, handlers: MonitorProcessH
 	}
 
 	child.on("error", (error) => emitError(error));
+	if (spec.stdin !== undefined) {
+		// An executable can close stdin before consuming it. EPIPE is an input lifecycle detail;
+		// its real exit/error and final stream drain remain authoritative.
+		child.stdin?.on("error", () => {});
+		child.stdin?.end(spec.stdin);
+	}
 	child.stdout?.on("error", (error) => emitError(error instanceof Error ? error : new Error(String(error))));
 	child.stderr?.on("error", (error) => emitError(error instanceof Error ? error : new Error(String(error))));
 	child.stdout?.on("data", (chunk: Buffer | string) => {

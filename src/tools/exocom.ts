@@ -17,7 +17,7 @@
 
 import { type Static, Type } from "typebox";
 
-import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type KeybindingHints } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 
@@ -200,6 +200,7 @@ function renderListResult(
 	offset = 0,
 	nextOffset?: number,
 	scope?: { scopeCode: string; homeWorkspace: { label: string; code: string; sameAsScope: boolean } },
+	keybindings?: Pick<KeybindingHints, "keyHint">,
 ): string {
 	const scopeLabel = scope
 		? scope.homeWorkspace.sameAsScope
@@ -217,7 +218,7 @@ function renderListResult(
 	for (const peer of shown) lines.push(...peerRows(peer, expanded));
 	if (offset > 0) lines.push(`…and ${offset} peers before this page`);
 	if (pageEnd < total) lines.push(`…and ${total - pageEnd} more peers after this page`);
-	if (!expanded && total > shown.length) lines.push(`(${keyHint("app.tools.expand", "to expand")})`);
+	if (!expanded && total > shown.length) lines.push(`(${keybindings?.keyHint("app.tools.expand", "to expand") ?? "to expand"})`);
 	if (nextOffset !== undefined && nextOffset < total) lines.push(`next offset: ${nextOffset}`);
 	return lines.join("\n");
 }
@@ -276,7 +277,7 @@ export function registerExocomTools(
 ): void {
 	pi.registerTool({
 		name: "exocom_list",
-		label: "Exocom List",
+		label: "exocom list",
 		description: "List current exocom peer presence only; this is not a message inbox and replies arrive automatically.",
 		parameters: ExocomListParams,
 		async execute(_toolCallId, params: Static<typeof ExocomListParams>) {
@@ -308,7 +309,7 @@ export function registerExocomTools(
 			};
 		},
 		renderCall(_args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("Exocom List")), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("exocom list")), 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as {
@@ -320,7 +321,7 @@ export function registerExocomTools(
 				homeWorkspace?: { label?: string; code?: string; sameAsScope?: boolean };
 			} | undefined;
 			if (context?.isError || !details || !Array.isArray(details.peers)) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			const peers = details.peers;
 			const total = typeof details.total === "number" ? details.total : peers.length;
@@ -339,13 +340,13 @@ export function registerExocomTools(
 					},
 				}
 				: undefined;
-			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset, scope)), 0, 0);
+			return new Text(theme.fg(expanded ? "toolOutput" : "accent", renderListResult(peers, expanded, total, offset, nextOffset, scope, context)), 0, 0);
 		},
 	});
 
 	pi.registerTool({
 		name: "exocom_send",
-		label: "Exocom Send",
+		label: "exocom send",
 		description: [
 			"Send a ONE-WAY, non-blocking message to another top-level pi instance in this Exocom scope",
 			"(see `exocom_list`) — it returns a `msg_id` immediately and does not wait for the peer to",
@@ -461,14 +462,14 @@ export function registerExocomTools(
 			const message = String(args.message ?? "").replace(/\s+/g, " ").trim();
 			const preview = normalizeMetadataText(message, 60);
 			const suffix = preview.length < message.length ? "…" : "";
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as ExocomSendDetails | undefined;
 			// pi renders this for a FAILED call too, handing us the error's empty details object — an
 			// unrecognised shape is a failure to show, not a send to congratulate the user on.
 			if (context?.isError || !isSendDetails(details)) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			return renderLiteralToolResult({ ...result, content: [{ type: "text", text: renderSendResult(details) }] }, { expanded }, theme, context);
 		},
@@ -476,7 +477,7 @@ export function registerExocomTools(
 
 	pi.registerTool({
 		name: "exocom_name",
-		label: "Exocom Name",
+		label: "exocom name",
 		description: inventedExocomNameHint(),
 		parameters: ExocomNameParams,
 		async execute(_toolCallId, params: Static<typeof ExocomNameParams>) {
@@ -487,12 +488,12 @@ export function registerExocomTools(
 			return { content: [{ type: "text", text: `exocom: you are now "${applied}"` }], details: { name: applied } };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("Exocom Name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("exocom name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as { name?: string } | undefined;
 			if (context?.isError || !details?.name) {
-				return renderLiteralToolResult(result, { expanded }, theme, { isError: true });
+				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
 			const name = normalizeMetadataText(details.name, 96, "(unchanged)");
 			const text = `exocom: you are now "${name}"`;

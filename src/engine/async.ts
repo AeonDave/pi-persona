@@ -11,7 +11,7 @@
 
 import type { ProgressSnapshot, ToolEvent } from "./stream.ts";
 import type { AgentResult } from "../orchestration/types.ts";
-import { resultReceiptHint, type ResultReceipt } from "../results/retrieval.ts";
+import { resultReceiptHint, selectTerminalOutput, type ResultReceipt } from "../results/retrieval.ts";
 import { DEFAULT_ASYNC_RETAIN } from "../core/config.ts";
 import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel, sanitizeStatusLabel } from "../core/display-label.ts";
 import { compactTokens } from "../core/format.ts";
@@ -387,16 +387,21 @@ export function observedRunModel(run: Partial<Pick<AsyncRun, "status" | "result"
 	return model?.trim() ? model.split("/").map((part) => sanitizeDisplayLabel(part, "model", 256)).join("/").slice(0, 256) : undefined;
 }
 
+/** Human identity without runtime/model diagnostics, shared by compact communication surfaces. */
+export function runDisplayLabel(run: Pick<AsyncRun, "agent" | "label">, maxChars = MAX_DISPLAY_LABEL_CHARS): string {
+	return sanitizeDisplayLabel(run.label ?? run.agent, "agent", maxChars);
+}
+
 /** One identity everywhere a tracked run is rendered: the launcher's codename when present,
  *  otherwise the agent type, with the observed terminal model or launch model appended once. */
 export function runDisplayName(run: Pick<AsyncRun, "agent" | "label" | "model"> & Partial<Pick<AsyncRun, "status" | "result">>): string {
 	const observed = observedRunModel(run);
 	const selected = observed ? (observed.split("/").pop() ?? observed).replace(/^claude-/, "") : run.model;
 	const model = selected === undefined ? undefined : sanitizeDisplayLabel(selected, "model", 24);
-	if (model === undefined) return sanitizeDisplayLabel(run.label ?? run.agent);
+	if (model === undefined) return runDisplayLabel(run);
 	const suffix = ` · ${model}`;
 	const nameLimit = Math.max(1, MAX_DISPLAY_LABEL_CHARS - suffix.length);
-	return `${sanitizeDisplayLabel(run.label ?? run.agent, "agent", nameLimit)}${suffix}`;
+	return `${runDisplayLabel(run, nameLimit)}${suffix}`;
 }
 
 /**
@@ -483,8 +488,8 @@ export function buildRetentionOverflowNote(droppedIds: readonly string[], retent
 
 /** Return the complete text for one run for an explicit/on-demand result action. */
 export function getFullRunOutput(run: AsyncRun): string {
-	if (run.result?.output?.trim()) return run.result.output;
-	if (run.progress.output.trim()) return run.progress.output;
+	const selected = selectTerminalOutput(run.result?.output ?? "", run.progress.output, run.status);
+	if (selected) return selected.body;
 	if (run.error?.trim()) return run.error;
 	return "(no output)";
 }
@@ -751,7 +756,7 @@ export interface IdleNotifierDeps<T> {
 	isIdle: () => boolean;
 	/** Deliver the coalesced message. Async rejection is treated exactly like a synchronous throw:
 	 *  the batch is restored at the front of the queue and retried. */
-	deliver: (message: string) => void | Promise<void>;
+	deliver: (message: string, items: readonly T[]) => void | Promise<void>;
 	/** Render a batch of buffered items into one message. */
 	render: (items: T[]) => string;
 	/** Schedule a callback; returns a handle. Injected so the clock is controllable in tests. */
@@ -925,7 +930,7 @@ export class IdleCoalescingNotifier<T> {
 			}
 			this.emptyRenders = 0;
 			this.activeBatch = batch;
-			const delivery = this.deps.deliver(message);
+			const delivery = this.deps.deliver(message, [...batch]);
 			if (!delivery || typeof (delivery as PromiseLike<void>).then !== "function") {
 				this.activeBatch = undefined;
 				if (generation === this.generation) {

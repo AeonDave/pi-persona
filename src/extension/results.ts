@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { TerminalResultArchive } from "../results/archive.ts";
-import { resultReceipt, type ResultReceipt } from "../results/retrieval.ts";
+import { resultReceipt, selectTerminalOutput, type ResultReceipt } from "../results/retrieval.ts";
 import type { TerminalResultInput, TerminalStatus } from "../results/types.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { emptyUsage } from "../engine/stream.ts";
@@ -83,10 +83,11 @@ export class SessionResults {
 				return { warning: "Terminal report not archived: owning session activation is no longer current." };
 			}
 			const status = meta.status ?? (result.ok ? "done" : result.failureKind === "abort" ? "stopped" : "failed");
-			const output = result.output.trim() ? result.output : meta.partial?.trim() ? meta.partial : result.error ?? "(no output)";
+			const selected = selectTerminalOutput(result.output, meta.partial ?? "", status);
+			const output = selected?.body ?? result.error ?? "(no output)";
 			const input: TerminalResultInput = {
 				originKey: `${prefix}:${origin}`, status, agent: result.agent.slice(0, 128), body: output,
-				provenance: result.output.trim() ? "result-output" : meta.partial?.trim() ? "partial-output" : result.error ? "error" : "result-output",
+				provenance: selected?.provenance ?? (result.error ? "error" : "result-output"),
 				...(meta.originRunId ? { originRunId: meta.originRunId.slice(0, 128) } : {}),
 				...(meta.label ? { label: meta.label.slice(0, 256) } : {}),
 				...(result.modelUsed ? { model: result.modelUsed.slice(0, 512) } : {}),

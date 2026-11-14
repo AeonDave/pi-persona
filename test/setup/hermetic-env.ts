@@ -64,3 +64,6 @@ if (!isInheritedSandbox(process.env.PI_AGENT_DIR)) {
 	// own dir (extension.test.ts does) cannot redirect this cleanup onto a directory it owns.
 	process.env.PI_AGENT_DIR = tempDir(SANDBOX_PREFIX);
 }
+// Keep pi-persona's historical alias, but make the SDK's actual directory agree before any SDK
+// import can capture PI_CODING_AGENT_DIR. In particular, replace a poisoned inherited override.
+process.env.PI_CODING_AGENT_DIR = process.env.PI_AGENT_DIR;

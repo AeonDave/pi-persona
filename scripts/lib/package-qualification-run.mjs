@@ -14,6 +14,8 @@ const workspace = join(root, "workspace");
 const receipts = join(root, "receipts.jsonl");
 await mkdir(join(agentDir, "persona", "agents"), { recursive: true });
 await mkdir(workspace, { recursive: true });
+await writeFile(join(workspace, "outline-fixture.js"), "export function packedJs() { return 1; }\n");
+await writeFile(join(workspace, "outline-fixture.ts"), "export interface PackedTs { value: number; }\nexport function packedTs(value: PackedTs): number { return value.value; }\n");
 await writeFile(receipts, "");
 await writeFile(join(agentDir, "settings.json"), JSON.stringify({
 	packages: [packageRoot], extensions: [join(fixtures, "provider.mjs")],
@@ -93,6 +95,13 @@ try {
 	assert.equal(resolve(personaCommand.sourceInfo.path), resolve(join(packageRoot, "src", "extension.ts")));
 	outcome.checks.packedExtensionPath = personaCommand.sourceInfo.path;
 	await request("prompt", { message: "/persona package-supervisor" });
+	outcome.checks.codeOutline = [];
+	for (const [language, grammar, symbols] of [["js", "javascript", ["packedJs"]], ["ts", "typescript", ["PackedTs", "packedTs"]]]) {
+		const outlined = await toolPrompt(`PACKAGE:outline:${language}`, "code_outline");
+		assert.equal(outlined.details.grammar, grammar, JSON.stringify(outlined));
+		assert.deepEqual(outlined.details.symbols.map((symbol) => symbol.name), symbols);
+		outcome.checks.codeOutline.push({ language, grammar, symbols });
+	}
 	const since = events.length;
 	const normal = await toolPrompt("PACKAGE:complete", "delegate");
 	assert.ok(normal.details.runId, JSON.stringify(normal));

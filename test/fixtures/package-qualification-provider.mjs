@@ -28,6 +28,10 @@ export default function (pi) {
 			}
 			return fauxAssistantMessage(`PACKAGE_WORKER_OK:${task}`);
 		}
+		const outline = /^PACKAGE:outline:(js|ts)$/.exec(text);
+		if (last?.role === "user" && outline) {
+			return fauxAssistantMessage(fauxToolCall("code_outline", { path: `outline-fixture.${outline[1]}` }, { id: `qualification-outline-${outline[1]}` }), { stopReason: "toolUse" });
+		}
 		const command = /^PACKAGE:(complete|cancel|shutdown|stop|result)(?::(run-\d+))?$/.exec(text);
 		if (last?.role === "user" && command) {
 			const [, action, runId] = command;

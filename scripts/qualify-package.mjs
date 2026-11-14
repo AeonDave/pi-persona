@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Installed-TARBALL qualification. No provider traffic or operator profile is permitted.
- * node scripts/qualify-package.mjs --host 1.4.0
+ * node scripts/qualify-package.mjs --host 1.5.2
  * Or pass an installed current-host package path; older host versions are rejected.
  * A version downloads only official Pi packages with scripts disabled; a path copies an installed
  * host into OS temp. All artifacts/logs are retained there for diagnosis. Repack after integration.
@@ -106,9 +106,24 @@ for (const [index, target] of requested.entries()) {
 		const packageRoot = await resetCandidatePackage(hostRoot);
 		await command(`extract-${index}`, "tar", ["-xzf", packed.filename, "--strip-components=1", "-C", relative(root, packageRoot).replaceAll("\\", "/")]);
 		assert.deepEqual(JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")), manifest);
+		const peerPaths = new Map(HOST_PEERS.map((name) => [name, findPackageJSON(name, pathToFileURL(join(packageRoot, "probe.mjs")))]));
+		if (inventory.runtimeDependencies.length) {
+			// Preparation may use the registry. Runtime below is network-blocked. Never install
+			// development or peer packages into the candidate, or replace the selected Pi host.
+			await command(`runtime-install-${index}`, process.execPath, [npmCli, "install", ...inventory.runtimeDependencies,
+				"--omit=dev", "--omit=peer", "--no-save", "--package-lock=false", ...npmFlags], packageRoot);
+		}
+		result.runtimeDependencies = [];
+		for (const [name, requested] of Object.entries(manifest.dependencies ?? {})) {
+			const dependencyManifest = findPackageJSON(name, pathToFileURL(join(packageRoot, "probe.mjs")));
+			assert.ok(dependencyManifest && await isRealPathWithin(installation, dependencyManifest), `Runtime dependency escaped temporary installation: ${name}`);
+			const dependency = JSON.parse(await readFile(dependencyManifest, "utf8"));
+			result.runtimeDependencies.push({ name, requested, version: dependency.version, manifest: dependencyManifest });
+		}
 		result.peers = [];
 		for (const name of HOST_PEERS) {
 			const peerManifest = findPackageJSON(name, pathToFileURL(join(packageRoot, "probe.mjs")));
+			assert.equal(peerManifest, peerPaths.get(name), `Runtime preparation replaced host-owned peer: ${name}`);
 			assert.ok(peerManifest && await isRealPathWithin(installation, peerManifest), `Peer escaped temporary host: ${name} -> ${peerManifest}`);
 			const peer = JSON.parse(await readFile(peerManifest, "utf8"));
 			if (name !== "typebox") assert.equal(peer.version, result.version, `Mixed host boundary: ${name}`);

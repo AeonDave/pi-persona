@@ -24,6 +24,15 @@ test("literal tool results honor the native context error flag without relying o
 	assert.doesNotMatch(rendered, /expand/);
 });
 
+test("literal result expand hint uses the host-injected configured binding", () => {
+	const h = harness();
+	const result = { content: [{ type: "text", text: Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n") }] };
+	const context = { isError: false, keyHint: (id: string, description: string) => `${id === "app.tools.expand" ? "alt+e" : "?"} ${description}` };
+	const rendered = text(renderLiteralToolResult(result, { expanded: false }, h.theme, context));
+	assert.match(rendered, /alt\+e to expand/);
+	assert.doesNotMatch(rendered, /ctrl\+o/);
+});
+
 test("literal result previews are bounded and expansion preserves all sanitized text and payload", () => {
 	const h = harness();
 	const source = Array.from({ length: 40 }, (_, i) => `evidence ${i} **literal**`).join("\n") + "\u001b[2J";

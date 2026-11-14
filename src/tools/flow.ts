@@ -11,7 +11,7 @@ import { toolUsageField } from "../ui/usage.ts";
 import { sumUsage } from "../orchestration/reducers.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { createReportBody } from "../ui/report-body.ts";
-import { orchestrationLaunchLines, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
+import { orchestrationLaunchLines, withOrchestrationRequest, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
 import type { AgentResult, FailureKind } from "../orchestration/types.ts";
 import { launchReceipt, type BackgroundRuns, type TrackedRun } from "./background-run.ts";
 
@@ -85,10 +85,10 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 			try {
 				try {
 					const snapshot = d.launchSnapshot(ctx, parsed.flow);
-					launch = { ...snapshot, participants: snapshot.participants.map((participant) => ({ ...participant })) };
+					launch = withOrchestrationRequest(snapshot, { task: params.task });
 				} catch {
 					// This is presentation metadata only; a settings/model lookup must not block the flow.
-					launch = { participants: [], unavailable: true };
+					launch = withOrchestrationRequest(undefined, { task: params.task });
 				}
 				// The same launch `delegate` uses: ONE tracked run. Interactive sessions get a receipt now and
 				// the outcome as ONE completion follow-up; a checkpoint is the OPERATOR's modal and never wakes
@@ -158,7 +158,7 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 				// Interactive launch receipt: the outcome arrives later as the completion follow-up.
 				const launched = hostError || details.ok === false ? theme.fg("error", theme.bold("flow failed"))
 					: `${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(`launched ${details.runId} · ${details.flow ?? "?"}`, { maxChars: 120 }))}`;
-				const metadata = orchestrationLaunchLines(details.launch, expanded).join("\n");
+				const metadata = orchestrationLaunchLines(details.launch, expanded, context).join("\n");
 				return new Text([launched, theme.fg("dim", metadata), expanded ? theme.fg("toolOutput", full) : ""].filter(Boolean).join("\n"), 0, 0);
 			}
 			const disposition = flowDisposition({ ok: !hostError && details.ok !== false, stoppedAtGate: details.stoppedAtGate });
@@ -176,14 +176,14 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 				: failed
 					? theme.fg("error", theme.bold(`flow failed${failureBits ? ` · ${failureBits}` : ""}`))
 					: theme.fg("success", theme.bold("flow complete"));
-			const metadata = details.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(details.launch, expanded).join("\n")}` : "";
+			const metadata = details.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(details.launch, expanded, context).join("\n")}` : "";
 			if (expanded) {
 				// Real flow outcomes are fenced even after a phase fails; host/preflight errors are not.
 				if (failed && !full.startsWith("Sub-agent output (untrusted data):\n")) return new Text(`${title()}\n${theme.fg("toolOutput", full)}${metadata}`, 0, 0);
-				return createReportBody(`${full}${metadata}`, theme, { header: title }, context?.lastComponent);
+				return createReportBody(full, theme, { header: title, footer: metadata }, context?.lastComponent);
 			}
 			const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint())}` : "";
+			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
 			return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}${theme.fg("dim", metadata)}`, 0, 0);
 		},
 	});

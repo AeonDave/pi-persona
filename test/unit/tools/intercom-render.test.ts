@@ -9,6 +9,7 @@ import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import type { TerminalResultInput } from "../../../src/results/types.ts";
 import { registerIntercomTool } from "../../../src/tools/intercom-tool.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
+import { InProcessBus } from "../../../src/bus/inproc.ts";
 
 initTheme("dark");
 
@@ -63,7 +64,7 @@ function toolWith(archive: TerminalResultArchive, tracker: any = { peek: () => u
 			completionNotifier: { peekPending: () => [], discard: () => {} },
 			intercomNotifier: { discard: () => {} },
 			controller: { activePersona: undefined },
-			bus: {},
+			bus: new InProcessBus(),
 			SUPERVISOR: "supervisor",
 			STALL_FLAG_MS: 90_000,
 			missingRunMessage: (id: string) => `missing ${id}`,
@@ -83,6 +84,34 @@ function toolWith(archive: TerminalResultArchive, tracker: any = { peek: () => u
 const bigBody = `${"x".repeat(300_000)}MUST-NOT-LEAK-COLLAPSED`;
 const pageBody = Array.from({ length: 300 }, (_, i) => `line ${i}: ${"payload-".repeat(4)}`).join("\n");
 const wideBody = ("y".repeat(50) + "\n").repeat(400);
+
+test("intercom target cards show the assigned name without the model", async () => {
+	const run = { id: "run-1", agent: "operator", label: "Moss-native-tool-exposure", model: "model-secret", status: "running", task: "inspect", progress: { output: "", turns: 0, tokens: 0 } };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [run] });
+	const rendered = call(tool, { action: "steer", to: "run-1" });
+	assert.match(rendered, /Moss-native-tool-exposure/);
+	assert.doesNotMatch(rendered, /model-secret/);
+});
+
+test("peek keeps the model only in the full diagnostic, never the compact card", async () => {
+	const run = { id: "run-1", agent: "operator", label: "Moss", model: "model-secret", status: "running", task: "inspect", progress: { output: "", turns: 1, tokens: 2 } };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [run] });
+	const args = { action: "peek" };
+	const result = await tool.execute("peek", args, undefined, undefined, {});
+	const compact = card(tool, result, false, { args });
+	assert.match(compact, /Moss/);
+	assert.doesNotMatch(compact, /model-secret/);
+	assert.match(card(tool, result, true, { args }), /model-secret/);
+});
+
+test("live result keeps observed model only in expanded diagnostics", async () => {
+	const run = { id: "run-1", agent: "operator", label: "Moss", model: "provider/model-secret", status: "done", task: "t", progress: { output: "", turns: 1, tokens: 1 }, collected: true, result: { usage: emptyUsage(), ok: true, output: "result body", modelUsed: "provider/model-secret" }, output: "result body" };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [], markCollected: () => {} });
+	const args = { action: "result", to: "run-1" };
+	const result = await tool.execute("r", args, undefined, undefined, {});
+	assert.doesNotMatch(card(tool, result, false, { args }), /model-secret/);
+	assert.match(card(tool, result, true, { args }), /model-secret/);
+});
 
 test("saved result ref renders on Pi and standalone calls without consulting the live tracker", async () => {
 	const h = archiveHarness();
@@ -126,8 +155,13 @@ test("results collapsed: compact purpose line with the retained count, then a bo
 	const result = await tool.execute("l", { action: "results", limit: 50 }, undefined, undefined, {});
 	assert.equal(result.isError, false);
 	const before = JSON.stringify(result);
-	const collapsed = card(tool, result, false, { args: { action: "results" }, isError: false });
+	const collapsed = card(tool, result, false, {
+		args: { action: "results" }, isError: false,
+		keyText: () => "alt+e", keyHint: (_id: string, description: string) => `alt+e ${description}`,
+	});
 	assert.match(collapsed, /^results · 25 retained/, `purpose line names the count:\n${collapsed}`);
+	assert.match(collapsed, /alt\+e to expand/, "archive listing uses the host-injected configured keybinding");
+	assert.doesNotMatch(collapsed, /ctrl\+o/);
 	assert.match(collapsed, /result:.*000000000001 · worker · done/, "the bounded listing preview starts with the first entry");
 	assert.match(collapsed, /expand/i, "hidden entries advertise expansion");
 	assert.doesNotMatch(collapsed, /report 24|000000000019/, "entries beyond the preview stay hidden, not dumped");
@@ -294,7 +328,7 @@ test("a live collect acknowledgment keeps its report rendering and never regress
 			completionNotifier: { peekPending: () => [], discard: () => {} },
 			intercomNotifier: { discard: () => {} },
 			controller: { activePersona: undefined },
-			bus: {},
+			bus: new InProcessBus(),
 			SUPERVISOR: "supervisor",
 			STALL_FLAG_MS: 90_000,
 			missingRunMessage: (id: string) => `missing ${id}`,

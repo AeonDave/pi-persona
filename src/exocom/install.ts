@@ -14,6 +14,7 @@ import type { DelegationNudge } from "../core/nudge.ts";
 import { shortModel } from "../tools/delegate.ts";
 import { boundDisplayRows } from "../ui/presentation.ts";
 import { compactWidget } from "../ui/compact-widget.ts";
+import { buildCommunicationCardDetails } from "../ui/communication-card.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { type InstanceDescriptor, type PeerDescriptor } from "../telemetry/contract.ts";
 import type { TelemetryProducer } from "../telemetry/producer.ts";
@@ -28,6 +29,7 @@ import {
 	shouldReportHeartbeatFailure,
 	toastCause,
 	type ExocomQueuedToast,
+	type PresentedNotice,
 } from "../extension/shared.ts";
 import { SeenMessages, SenderBudget } from "./guards.ts";
 import { EXOCOM } from "./limits.ts";
@@ -59,6 +61,7 @@ import { registerExocomProfileTool } from "../tools/exocom-profile.ts";
 import { collaborationWriteIntent, deliverCollaborationOffer } from "./collaboration-delivery.ts";
 import type { SessionIdentity } from "../extension/identity.ts";
 import { WriteWarnings } from "./write-guard.ts";
+import { ExocomPeerPresenceStore, projectExocomPeerPresence, type ExocomPeerPresence } from "./presence.ts";
 
 export interface ExocomHost {
 	readonly pi: ExtensionAPI;
@@ -86,6 +89,10 @@ export interface ExocomInstall {
 	currentTelemetryInstance(ctx: ExtensionContext): InstanceDescriptor;
 	publishTelemetryPeers(peers?: DisplayPeer[]): void;
 	get plane(): ExocomPlane | undefined;
+	/** Safe human-facing peer presence only; no session ids, routes, endpoints, or controls. */
+	peerSnapshot(): readonly ExocomPeerPresence[];
+	/** Fires when the safe peer projection changes; read `peerSnapshot()` for current values. */
+	onPeersChanged(listener: () => void): () => void;
 	get name(): string;
 	get namedByModel(): boolean;
 	get scope(): ExocomScope | undefined;
@@ -101,8 +108,8 @@ export interface ExocomInstall {
 	peerLabelFor(sessionId: string): string | undefined;
 	/** Warn-once memory for writes landing inside a peer's open claim (Task 7). Cleared on stop(). */
 	readonly writeWarnings: WriteWarnings;
-	get notifier(): IdleCoalescingNotifier<string> | undefined;
-	get waitNotifier(): IdleCoalescingNotifier<string> | undefined;
+	get notifier(): IdleCoalescingNotifier<PresentedNotice> | undefined;
+	get waitNotifier(): IdleCoalescingNotifier<PresentedNotice> | undefined;
 	kickWait(): void;
 }
 
@@ -115,6 +122,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// persona ⇒ unrestricted (mirrors delegationBrief's own reading of an absent capability set,
 	// rather than silently refusing to join for an unpersona'd session — see startExocom below).
 	let exocomPlane: ExocomPlane | undefined;
+	const peerPresence = new ExocomPeerPresenceStore();
 	let exocomLedgerFile = "";
 	let exocomSessionId = "";
 	let refreshIdentity: (() => void) | undefined;
@@ -122,10 +130,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	interface ExocomWaiter { id: string; work_key: string; ask_id: string; handle: ReturnType<typeof setTimeout>; }
 	const exocomWaiters: ExocomWaiter[] = [];
 	let exocomWaitSeq = 0;
-	let exocomWaitNotifier: IdleCoalescingNotifier<string> | undefined;
+	let exocomWaitNotifier: IdleCoalescingNotifier<PresentedNotice> | undefined;
 	let exocomBudget: SenderBudget | undefined;
 	let exocomSeen: SeenMessages | undefined;
-	let exocomNotifier: IdleCoalescingNotifier<string> | undefined;
+	let exocomNotifier: IdleCoalescingNotifier<PresentedNotice> | undefined;
 	/** Latched while the inbox is at EXOCOM_INBOX_MAX, so a peer hammering a full inbox produces one
 	 *  operator warning rather than one per refused message. */
 	let exocomInboxFull = false;
@@ -188,7 +196,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			if (!gone.has(waiter.ask_id)) continue;
 			clearTimeout(waiter.handle);
 			exocomWaiters.splice(i, 1);
-			exocomWaitNotifier?.notify(`[pi-persona] exocom wait ended: the peer left the pool before answering · work_key=${waiter.work_key} ask_id=${waiter.ask_id}`);
+			exocomWaitNotifier?.notify({ text: `[pi-persona] exocom wait ended: the peer left the pool before answering · work_key=${waiter.work_key} ask_id=${waiter.ask_id}` });
 		}
 	}
 
@@ -227,6 +235,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			`[pi-persona] exocom answer · work_key=${answer.work_key} ask_id=${answer.ask_id} ok=${answer.ok}`,
 			attributePeer(label, answer.evidence),
 		].join("\n");
+	}
+	function answerNotice(answer: LedgerAnswer, label = peerLabelFor(answer.from_session) ?? answer.from_session): PresentedNotice {
+		return { text: renderLedgerAnswer(answer, label), message: { from: label, text: answer.evidence, id: answer.ask_id, kind: answer.ok ? "answer" : "decline" } };
+	}
+	function deliverNotice(text: string, notices: readonly PresentedNotice[], customType = "exocom_received"): void {
+		sendPersonaFollowUp(pi, text, customType, buildCommunicationCardDetails("exocom", notices.map((notice) => notice.message ?? { text: notice.text.replace(/^\[pi-persona\]\s*/, "") })));
 	}
 
 	// A tiny, stable name→color hash for the pool widget's swatch — exocom peers carry no
@@ -299,9 +313,17 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		} catch {
 			return;
 		}
+		const now = Date.now();
+		peerPresence.publish(projectExocomPeerPresence(peers.map((peer) => ({
+			sessionId: peer.session_id,
+			name: sanitizePeerField(peer.displayName, 48) || "peer",
+			persona: sanitizePeerField(peer.persona, 48),
+			model: sanitizePeerField(peer.model, 96),
+			contextPercent: peer.context_pct,
+			heartbeatAt: peer.heartbeat_at,
+		})), now, EXOCOM.QUIET_AFTER_MS));
 		publishTelemetryPeers(peers);
 		try {
-			const now = Date.now();
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const selfModel = sanitizePeerField(host.lastCtx.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
 			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
@@ -409,10 +431,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			exocomBudget = new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES });
 			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
 			exocomLedgerFile = ledgerPath(agentDir, hash);
-			exocomWaitNotifier = new IdleCoalescingNotifier<string>({
+			exocomWaitNotifier = new IdleCoalescingNotifier<PresentedNotice>({
 				isIdle: () => host.canDeliverNotifications(),
-				deliver: (message) => sendPersonaFollowUp(pi, message, "pi-persona"),
-				render: (items) => items.join("\n\n"),
+				deliver: (message, items) => deliverNotice(message, items, "pi-persona"),
+				render: (items) => items.map((item) => item.text).join("\n\n"),
 				setTimer: (fn, ms) => { const h = setTimeout(fn, ms); h.unref?.(); return h; },
 				clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 			});
@@ -420,19 +442,19 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// discipline completionNotifier/intercomNotifier/timerNotifier apply above, but through
 			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
 			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
-			exocomNotifier = new IdleCoalescingNotifier<string>({
+			exocomNotifier = new IdleCoalescingNotifier<PresentedNotice>({
 				isIdle: () => host.canDeliverNotifications(),
-				deliver: (message) => sendPersonaFollowUp(pi, message, "exocom_received"),
+				deliver: deliverNotice,
 				// A burst of independent peers must not turn one idle wake into an unbounded model
 				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;
 				// boundCompletionSurface keeps complete lines (including quote prefixes) intact while
 				// retaining a bounded head/tail sample and an actionable drill-down marker.
-				render: boundExocomInboundBatch,
+				render: (items) => boundExocomInboundBatch(items.map((item) => item.text)),
 				// Deliver whole peer messages — as many as one wake renders untruncated — and retain the
 				// rest in FIFO order; truncating a coalesced burst would silently lose communication that
 				// has no other retrieval path. Sized by content, so the drain keeps pace with ordinary
 				// traffic instead of being pinned to one message per wake (see exocomInboundBatchSize).
-				maxBatchItems: exocomInboundBatchSize,
+				maxBatchItems: (items) => exocomInboundBatchSize(items.map((item) => item.text)),
 				setTimer: (fn, ms) => {
 					const h = setTimeout(fn, ms);
 					h.unref?.();
@@ -469,7 +491,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					if (waiter.work_key !== answer.work_key || waiter.ask_id !== answer.ask_id) continue;
 					clearTimeout(waiter.handle);
 					exocomWaiters.splice(i, 1);
-					exocomWaitNotifier?.notify(renderLedgerAnswer(answer, label));
+					exocomWaitNotifier?.notify(answerNotice(answer, label));
 					fired = true;
 				}
 				return fired;
@@ -483,8 +505,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				const existing = answerFor(initial, ask_id, sessionId);
 				if (existing) {
 					if (existing.work_key !== work_key) throw new Error("exocom_wait: work_key does not match the retained answer");
-					exocomWaitNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
-					exocomNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
+					exocomWaitNotifier?.discard((item) => waitNoticeMatchesAskId(item.text, ask_id));
+					exocomNotifier?.discard((item) => waitNoticeMatchesAskId(item.text, ask_id));
 					return { status: "answered" as const, answer: existing };
 				}
 				const pending = initial.asks.find((ask) => ask.ask_id === ask_id && ask.from_session === sessionId);
@@ -497,10 +519,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					try {
 						const landed = answerFor(currentLedgerState(), ask_id, sessionId);
 						exocomWaitNotifier?.notify(landed
-							? renderLedgerAnswer(landed)
-							: `[pi-persona] exocom wait timed out after ${timeoutMs}ms · work_key=${work_key} ask_id=${ask_id}`);
+							? answerNotice(landed)
+							: { text: `[pi-persona] exocom wait timed out after ${timeoutMs}ms · work_key=${work_key} ask_id=${ask_id}` });
 					} catch (error) {
-						exocomWaitNotifier?.notify(`[pi-persona] exocom wait could not read the ledger · ask_id=${ask_id} · ${error instanceof Error ? error.message : String(error)}`);
+						exocomWaitNotifier?.notify({ text: `[pi-persona] exocom wait could not read the ledger · ask_id=${ask_id} · ${error instanceof Error ? error.message : String(error)}` });
 					}
 				}, timeoutMs);
 				handle.unref?.();
@@ -523,8 +545,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				}
 				if (raced) {
 					disarm();
-					exocomWaitNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
-					exocomNotifier?.discard((item) => waitNoticeMatchesAskId(item, ask_id));
+					exocomWaitNotifier?.discard((item) => waitNoticeMatchesAskId(item.text, ask_id));
+					exocomNotifier?.discard((item) => waitNoticeMatchesAskId(item.text, ask_id));
 					return { status: "answered" as const, answer: raced };
 				}
 				return { status: "waiting" as const, id };
@@ -659,7 +681,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						...(msg.in_reply_to ? { replyTo: msg.in_reply_to } : {}),
 					});
 					if ("deliver" in decision) {
-						exocomNotifier?.notify(decision.deliver);
+						exocomNotifier?.notify({ text: decision.deliver, message: { ...decision.message, from: peerName } });
 						// Never inject peer text into a live model turn. A compact human-only toast makes
 						// receipt visible while a long tool loop keeps the follow-up idle-gated.
 						if (host.lastCtx?.isIdle() !== true) {
@@ -704,7 +726,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					if (frame.kind === "offer") {
 						const delivery = deliverCollaborationOffer(frame, state, sessionId, label, Date.now());
 						if (!delivery.accepted) { exocomSeen?.forget(frame.from_session, frame.msg_id); return delivery; }
-						if (delivery.notice) exocomNotifier?.notify(delivery.notice);
+						if (delivery.notice) exocomNotifier?.notify({ text: delivery.notice.text, message: { from: label, text: delivery.notice.preview, id: frame.offer_id, kind: "offer" } });
 					} else if (frame.kind === "ask") {
 						if (frame.to_session !== sessionId) {
 							exocomSeen?.forget(frame.from_session, frame.msg_id);
@@ -716,14 +738,14 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 							return { accepted: false, reason: "ask is not durable in the shared ledger" };
 						}
 						const block = pendingAskBlock([stored], () => label);
-						if (block) exocomNotifier?.notify(block);
+						if (block) exocomNotifier?.notify({ text: block, message: { from: label, text: stored.question, id: stored.ask_id, kind: "ask" } });
 					} else if (frame.kind === "answer") {
 						const stored = answerFor(state, frame.ask_id, sessionId);
 						if (!stored || stored.msg_id !== frame.msg_id || stored.work_key !== frame.work_key) {
 							exocomSeen?.forget(frame.from_session, frame.msg_id);
 							return { accepted: false, reason: "answer is not durable for this requester" };
 						}
-						if (!fireWaiters(stored, label)) exocomNotifier?.notify(renderLedgerAnswer(stored, label));
+						if (!fireWaiters(stored, label)) exocomNotifier?.notify(answerNotice(stored, label));
 					} else if (!state.seen.includes(frame.msg_id)) {
 						exocomSeen?.forget(frame.from_session, frame.msg_id);
 						return { accepted: false, reason: "semantic event is not durable in the shared ledger" };
@@ -945,6 +967,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		if (exocomPlane) {
 			const plane = exocomPlane;
 			exocomPlane = undefined;
+			peerPresence.publish([]);
 			try {
 				publishTelemetryPeers([]);
 			} catch {
@@ -980,6 +1003,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		currentTelemetryInstance,
 		publishTelemetryPeers,
 		get plane() { return exocomPlane; },
+		peerSnapshot: () => peerPresence.snapshot(),
+		onPeersChanged: (listener) => peerPresence.onChange(listener),
 		get name() { return host.identity.name; },
 		get namedByModel() { return host.identity.chosen; },
 		get scope() { return exocomScope; },

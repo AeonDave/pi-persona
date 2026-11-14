@@ -19,7 +19,7 @@ introduced a behavior. An `Unreleased` entry is not yet part of a published rele
 - [`COLLABORATION.md`](./COLLABORATION.md)
   - Intercom supervision, voluntary peer tasks, invitations, evidence, retention and runtime contracts.
 - [`MONITORS.md`](./MONITORS.md)
-  - Clock snapshots, timers, and background event sources that wake the supervisor.
+  - Clock snapshots, timers, event monitors, asynchronous scripts, resource groups and retained logs.
 - [`REFERENCE.md`](./REFERENCE.md)
   - Canonical Core API, configuration, environment variables, commands, and data-driven recipes.
 
@@ -32,11 +32,13 @@ introduced a behavior. An `Unreleased` entry is not yet part of a published rele
 
 ## Research and verification records
 
+- [Post-release architecture and supervision audit](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-11-12-post-release-audit.md)
+  reviews the changes after `v1.17.6`, their concrete value, the defects corrected and the verified scope.
 - [`The pi-subagents comparison`](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-24-pi-subagents.md) records the bounded source
   study and links its evidence and source notes.
 - [`Current-host cleanup and final requalification`](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-25-current-host-cleanup.md)
-  is the latest qualification report and links the preceding implementation review for its distinct
-  behavioral and live-run evidence.
+  records the 2026-10-25 snapshot and links the preceding implementation review for its distinct
+  behavioral and live-run evidence. Historical reports do not qualify subsequent source changes.
 - [`ROADMAP.md`](https://github.com/AeonDave/pi-persona/blob/main/ROADMAP.md) tracks the remaining work, including the unqualified
   [compaction proposal](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md): idle timing code is restored but activation is hard-blocked by a reproduced Pi 1.4.0 lifecycle defect; summary/checkpoint experiments remain deferred.
 

@@ -46,7 +46,8 @@ function boot(t: TestContext, prepare?: (dir: string, file: string) => void) {
 		registerShortcut: (key: unknown) => shortcuts.push(key),
 		registerFlag: (name: string, def: { default?: boolean | string }) => flags.set(name, def.default ?? false),
 		getFlag: (name: string) => flags.get(name), sendMessage: () => {},
-		getAllTools: () => [...tools.keys()].map((name) => ({ name })),
+		getAllTools: () => [...tools.keys()].map((name) => ({ name, sourceInfo: { source: "extension" } })),
+		getSettings: () => ({}),
 		getActiveTools: () => [...tools.keys()], setActiveTools: () => {},
 		getThinkingLevel: () => "medium", setThinkingLevel: () => {}, setModel: async () => true,
 	};

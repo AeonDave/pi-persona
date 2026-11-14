@@ -69,6 +69,54 @@ function assertLinearRenderWork(work: { settledChars: number; wrappedChars: numb
 	assert.ok(work.wrappedChars <= reportLength * 2, `wrapping processed ${work.wrappedChars} chars for a ${reportLength}-char report`);
 }
 
+test("F9 closes the list, group, detail, and steering views without actions and allows a fresh reopen", () => {
+	const tree = new AgentTree();
+	tree.add({ id: "batch", label: "Batch" });
+	tree.add({ id: "worker", parentId: "batch", label: "Worker", status: "running" });
+	tree.add({ id: "worker-2", parentId: "batch", label: "Worker 2", status: "running" });
+	const stopped: string[] = [];
+	const steered: string[] = [];
+	let closes = 0;
+	const actions: AgentOverlayActions = {
+		canSteer: () => true,
+		onStop: (id) => { stopped.push(id); return true; },
+		onSteer: (id, text) => { steered.push(`${id}:${text}`); return true; },
+	};
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => closes++, actions);
+	const f9 = "\u001b[20~"; // Pi TUI's current xterm F9 sequence.
+	const pressAndClose = (): void => { overlay.handleInput(f9); };
+
+	overlay.handleInput("X"); // arm the bulk-stop confirmation
+	pressAndClose(); // F9 must close, not confirm the armed X action
+	assert.equal(closes, 1, "F9 closes from the list");
+	const groupView = new AgentOverlay(tree, TUI_STUB, THEME, () => closes++, actions);
+	groupView.handleInput("k"); // the default cursor prefers the first worker; move to Batch
+	groupView.handleInput("\n"); // open Batch overview
+	assert.match(groupView.render(120).join("\n"), /Group overview · Batch/, "exercise the actual group view before closing");
+	groupView.handleInput(f9);
+	assert.equal(closes, 2, "F9 closes from a group overview");
+	const detailView = new AgentOverlay(tree, TUI_STUB, THEME, () => closes++, actions);
+	detailView.handleInput("\n"); // default cursor opens the first worker
+	assert.match(detailView.render(120).join("\n"), /esc back.*↑↓ scroll/, "exercise worker detail before closing");
+	detailView.handleInput(f9);
+	assert.equal(closes, 3, "F9 closes from worker detail");
+	const steeringView = new AgentOverlay(tree, TUI_STUB, THEME, () => closes++, actions);
+	steeringView.handleInput("s");
+	for (const ch of "unsent draft") steeringView.handleInput(ch);
+	assert.match(steeringView.render(120).join("\n"), /steer ▸ unsent draft/, "exercise the real steering composer before closing");
+	steeringView.handleInput(f9);
+	assert.equal(closes, 4, "F9 closes while steering");
+	assert.deepEqual(stopped, [], "closing must not stop any agent (including the X action)");
+	assert.deepEqual(steered, [], "closing must discard rather than submit the steering draft");
+
+	const reopened = new AgentOverlay(tree, TUI_STUB, THEME, () => closes++, actions);
+	reopened.handleInput("\n");
+	assert.match(reopened.render(80).join("\n"), /Worker/, "a fresh overlay can open and render normally");
+	reopened.handleInput(f9);
+	assert.equal(closes, 5, "the reopened overlay also closes with F9");
+	for (const view of [overlay, groupView, detailView, steeringView, reopened]) view.dispose();
+});
+
 test("a half-typed steer does not follow the user to another agent when the drilled agent vanishes", () => {
 	const tree = new AgentTree();
 	tree.add({ id: "async:A", label: "A" });
@@ -649,6 +697,100 @@ test("X is offered only for two or more stoppable agents, and counts nothing it 
 	partial.dispose();
 });
 
+test("X stop-all includes delegate children whether the batch is open or collapsed", () => {
+	for (const collapsed of [false, true]) {
+		const tree = new AgentTree(() => 0);
+		tree.add({ id: "batch", label: "delegate", kind: "delegate" });
+		tree.add({ id: "a", parentId: "batch", label: "a", kind: "subagent" });
+		tree.add({ id: "b", parentId: "batch", label: "b", kind: "subagent" });
+		tree.add({ id: "c", label: "c" });
+		tree.add({ id: "d", label: "d" });
+		const stopped: string[] = [];
+		const collapsedGroups = new Set(collapsed ? ["batch"] : []);
+		const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+			collapsedGroups,
+			canStop: (id) => ["a", "b", "c", "d"].includes(id),
+			onStop: (id) => { stopped.push(id); return true; },
+		});
+		const view = overlay.render(120).join("\n");
+		assert.match(view, /X stop all \(4\)/, `${collapsed ? "collapsed" : "open"} batch reports all four workers`);
+		if (collapsed) assert.doesNotMatch(view, /first worker|second worker/, "folding remains a presentation choice");
+		overlay.handleInput("X");
+		assert.match(overlay.render(120).join("\n"), /press X again to stop 4 running agents/);
+		overlay.handleInput("X");
+		assert.deepEqual(stopped, ["a", "b", "c", "d"], "bulk stop uses the complete runtime target set");
+		overlay.dispose();
+	}
+});
+
+test("X stop-all includes descendants through nested collapsed delegate groups", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "outer", label: "outer batch", kind: "delegate" });
+	tree.add({ id: "inner", parentId: "outer", label: "inner batch", kind: "delegate" });
+	tree.add({ id: "a", parentId: "inner", label: "a", kind: "subagent" });
+	tree.add({ id: "b", parentId: "inner", label: "b", kind: "subagent" });
+	tree.add({ id: "c", label: "c" });
+	tree.add({ id: "d", label: "d" });
+	const stopped: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		collapsedGroups: new Set(["outer", "inner"]),
+		canStop: (id) => ["a", "b", "c", "d"].includes(id),
+		onStop: (id) => { stopped.push(id); return true; },
+	});
+	assert.match(overlay.render(120).join("\n"), /X stop all \(4\)/);
+	overlay.handleInput("X");
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b", "c", "d"]);
+	overlay.dispose();
+});
+
+test("collapsed resource groups, local activity and peers never enter X stop-all", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "a", label: "a" });
+	tree.add({ id: "b", label: "b" });
+	tree.add(MONITOR_ROW);
+	tree.add(TIMER_ROW);
+	tree.add({ id: "script:1", label: "script", kind: "script" });
+	tree.add({ id: "mind:1", label: "activity", kind: "activity" });
+	const stopped: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		collapsedGroups: new Set(["ui:resources:monitor", "ui:resources:timer", "ui:resources:script", "ui:resources:peers"]),
+		peerSnapshot: () => [{ key: "peer-1", name: "peer", status: "online" }],
+		canStop: () => true,
+		onStop: (id) => { stopped.push(id); return true; },
+	});
+	assert.match(overlay.render(120).join("\n"), /X stop all \(2\)/);
+	overlay.handleInput("X");
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b"], "only the two actual agent leaves are in the bulk target set");
+	overlay.dispose();
+});
+
+test("X confirmation target identity ignores folds but re-arms when runtime stoppability changes", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "batch", label: "delegate", kind: "delegate" });
+	tree.add({ id: "a", parentId: "batch", label: "a", kind: "subagent" });
+	tree.add({ id: "b", parentId: "batch", label: "b", kind: "subagent" });
+	const stopped: string[] = [];
+	const collapsedGroups = new Set(["batch"]);
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
+		collapsedGroups,
+		canStop: (id) => ["a", "b", "c"].includes(id),
+		onStop: (id) => { stopped.push(id); return true; },
+	});
+	assert.match(overlay.render(120).join("\n"), /X stop all \(2\)/);
+	overlay.handleInput("X");
+	collapsedGroups.clear(); // folding changes the navigation projection, not the target set
+	assert.match(overlay.render(120).join("\n"), /X stop all \(2\)/);
+	tree.add({ id: "c", label: "c" }); // an actual stoppable runtime leaf changes the set
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, [], "a changed runtime set cannot use the old confirmation");
+	assert.match(overlay.render(120).join("\n"), /press X again to stop 3 running agents/);
+	overlay.handleInput("X");
+	assert.deepEqual(stopped, ["a", "b", "c"]);
+	overlay.dispose();
+});
+
 test("a run root that carries its own stop is a selectable row: x ends the whole run, not one leg", () => {
 	const tree = new AgentTree(() => 0);
 	tree.add({ id: "async:run-1", label: "council magi", kind: "council" });
@@ -748,7 +890,7 @@ test("x on a selected wake row is offered and stops it through the normal stop p
 		723_000,
 	);
 	const view = overlay.render(120).join("\n");
-	assert.match(view, /⏎ open {3}x stop {3}esc close/, "the hint offers x stop for the selected wake row");
+	assert.match(view, /⏎ open {3}x stop {3}esc\/F9 close/, "the hint offers x stop for the selected wake row and F9 close");
 	assert.doesNotMatch(view, /X stop all/, "a wake row alone is never a stop-all group");
 	overlay.handleInput("x");
 	assert.deepEqual(stopped, ["monitor:monitor-2"]);
@@ -774,8 +916,9 @@ test("steer follows the row: an agent beside a wake row keeps s steer, the wake 
 	tree.add(TIMER_ROW);
 	const overlay = wakeOverlay(tree, { canSteer: (id) => id === "async:A" });
 	assert.match(overlay.render(120).join("\n"), /s steer/, "the agent is selected first and can be steered");
-	overlay.handleInput("j"); // onto the timer
-	assert.match(overlay.render(120).join("\n"), /▸ ⏰ status review/);
+	overlay.handleInput("j"); // category
+	overlay.handleInput("j"); // timer
+	assert.match(overlay.render(120).join("\n"), /▸\s+⏰ status review/);
 	assert.doesNotMatch(overlay.render(120).join("\n"), /s steer/);
 	overlay.handleInput("s");
 	assert.doesNotMatch(overlay.render(120).join("\n"), /steer ▸/);
@@ -825,6 +968,75 @@ test("X is not offered for one agent plus a monitor: wake rows do not make a gro
 	overlay.handleInput("X");
 	assert.deepEqual(stopped, []);
 	overlay.dispose();
+});
+
+test("resource category can fold and open an overview with individually stoppable scripts", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "script:1", label: "build", kind: "script", output: "build output" });
+	const stopped: string[] = [];
+	const overlay = wakeOverlay(tree, { canStop: (id) => id === "script:1", onStop: (id) => { stopped.push(id); return true; } });
+	overlay.handleInput("k"); // select Scripts category
+	assert.match(overlay.render(120).join("\n"), /▾ Scripts/);
+	overlay.handleInput(" ");
+	assert.doesNotMatch(overlay.render(120).join("\n"), /build/);
+	overlay.handleInput(" ");
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /Group overview · Scripts/);
+	overlay.handleInput("x");
+	assert.deepEqual(stopped, ["script:1"]);
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /build output/);
+	overlay.dispose();
+});
+
+test("clicking a category in F9 folds only that category", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "script:1", label: "build", kind: "script" });
+	const overlay = wakeOverlay(tree, {});
+	overlay.render(120);
+	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 3, screenX: 4, screenY: 3, width: 120, height: 10, shift: false, alt: false, ctrl: false });
+	assert.doesNotMatch(overlay.render(120).join("\n"), /build/);
+	overlay.dispose();
+});
+
+test("delegate fold state is shared with the widget, and Enter still opens its group", () => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "batch", label: "delegate", kind: "delegate", detail: "2 legs" });
+	tree.add({ id: "leg1", parentId: "batch", label: "first worker", kind: "subagent" });
+	tree.add({ id: "leg2", parentId: "batch", label: "second worker", kind: "subagent" });
+	const collapsedGroups = new Set<string>();
+	const overlay = wakeOverlay(tree, { collapsedGroups });
+	overlay.render(120);
+	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 3, screenX: 4, screenY: 3, width: 120, height: 10, shift: false, alt: false, ctrl: false });
+	assert.ok(collapsedGroups.has("batch"));
+	assert.doesNotMatch(overlay.render(120).join("\n"), /first worker|second worker/);
+	overlay.handleInput(" ");
+	assert.ok(!collapsedGroups.has("batch"));
+	assert.match(overlay.render(120).join("\n"), /first worker/);
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /Group overview/);
+	overlay.dispose();
+});
+
+test("Exocom peer presence refreshes in F9 without gaining worker controls", () => {
+	const tree = new AgentTree(() => 0);
+	let peers: { key: string; name: string; status: "online" | "idle" }[] = [{ key: "1", name: "Ada", status: "online" }];
+	let notify = () => {};
+	let unsubscribed = false;
+	const overlay = wakeOverlay(tree, {
+		peerSnapshot: () => peers,
+		onPeersChanged: (listener) => { notify = listener; return () => { unsubscribed = true; }; },
+		canStop: () => true,
+	});
+	assert.match(overlay.render(120).join("\n"), /Exocom peers/);
+	assert.doesNotMatch(overlay.render(120).join("\n"), /x stop|s steer|X stop all/);
+	peers = [{ key: "2", name: "Bea", status: "idle" }];
+	notify();
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /Bea/);
+	assert.doesNotMatch(view, /Ada/);
+	overlay.dispose();
+	assert.equal(unsubscribed, true);
 });
 
 test("drilling into a monitor row shows its output, the armed marker and the monitor glyph in the header", () => {
@@ -920,7 +1132,7 @@ test("the marker falls back to a wake row only when no agent is left", () => {
 	assert.match(overlay.render(120).join("\n"), /▸ ⏳ worker/);
 	tree.remove("async:A"); // the aimed-at agent settles; only the monitor remains
 	const view = overlay.render(120).join("\n");
-	assert.match(view, /▸ ◉ qualify batch1/, "nothing else to aim at, so the monitor takes the marker");
+	assert.match(view, /▸\s+◉ qualify batch1/, "nothing else to aim at, so the monitor takes the marker");
 	overlay.handleInput("x");
 	assert.deepEqual(stopped, [], "the lost-aim guard still swallows the first directed key");
 	overlay.dispose();

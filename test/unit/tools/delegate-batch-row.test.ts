@@ -36,6 +36,7 @@ function harness() {
 		tracker,
 		completionNotifier: { discard: () => {} },
 		config: { ledgerV2: false },
+		launchThinking: (spec: any) => spec.thinking,
 		RUN_LIMITS: { maxConcurrency: 8, maxChildren: 8, timeoutMs: 1000 },
 		publishAgentTool: () => {},
 		stopRegistry: new Map(),

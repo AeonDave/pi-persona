@@ -111,6 +111,9 @@ const PLANNER_REQUIRED_ADDITIONS = ["agents/architect.md"] as const;
 
 export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>> = {
 	"personas/dev.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 3013, sha256: "fb5dc172b1831e4511746bc454cf455ecd65de6651d269d0508e050ba33195b9" },
+		{ size: 3063, sha256: "63e31bee43dded900afaa48f9e1d824b22689c31c126f6dd1f3c5ce12b86c096" },
 		// v1.17.2 pristine seed (LF and CRLF checkout variants).
 		{ size: 2712, sha256: "2dff44e3c6626d5eb35c5a9d74d77e345c95319bb6d310101ba53f6f330165b4" },
 		{ size: 2757, sha256: "afdafb105c14a4e4ed960969779f4059491d85bf463739cf01079fe9831ace5b" },
@@ -129,7 +132,15 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 3292, sha256: "d058a5cf683fa178ffb6c6fc98172328680d0fb19e21cf46a24d42613b5c48de" },
 		{ size: 3344, sha256: "a11cd85fd22b1c426c5fe148ceab8550f1815aace0702566fea3ad742bc25c13" },
 	],
+	"personas/data.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2976, sha256: "d88a8ccb1b9867dc918ad3fb372847dfd71e47136dc5cdd30907c2cd8b2bfd1f" },
+		{ size: 3023, sha256: "a4ae943475720691c7207c3b6448f1a069d1102658ec35732c9025c80d9be0be" },
+	],
 	"personas/planner.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2820, sha256: "93e000f0dd79ed7019ccc0f48fa4138751469827b7d65040eb8b5ff1cd5b8056", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
+		{ size: 2863, sha256: "550608142f2b26a44a66d76d51e69e187b1e51ae3912888b718dae417438d25e", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 3350, sha256: "78a1f1c88d4d779dca46414029a247e8c48db85b3b7266be9366c6dc23714d87", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
 		{ size: 3397, sha256: "8055b7440f2cf1e79378196eda675bdeb5d58b8941d450f8901672cf82a9e876", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
@@ -138,6 +149,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 2493, sha256: "f8f8a8cdb6110022984556a7102f523411053282f818249c20ec8e0153c810e1", requiredAdditions: PLANNER_REQUIRED_ADDITIONS },
 	],
 	"personas/researcher.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2497, sha256: "718e858bee53fd28291a3d16ce402612efb8ed61cc550b519cecf0a511ecd31f" },
+		{ size: 2532, sha256: "181f9f0a24a6b9230d5a997119aac3d8839ff31f07ca2caa4567768c34052f48" },
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 4441, sha256: "a3819ea76afee2a2f14d50c99198a09d4a4bd858e22ea9e4ceb3d868dcbb78c8" },
 		{ size: 4498, sha256: "2bd9dcaf47bd4ef3d139be361d260fbf7c9caa523144548593cdfc7ea4a2246c" },
@@ -146,6 +160,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 2643, sha256: "717fcd632de176e339928158516f35a6a4d82588e6ca36083726d1dbcfdc0e18" },
 	],
 	"personas/audit.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2549, sha256: "2449d2e5ceb709867e8d3b318ab43cc2a9c0accfb9e3f72d85d8b4036a56da3d" },
+		{ size: 2588, sha256: "53c827d54267d6190653db8e0e92ceeca9bbd0a928f9724dac50210c2fa832e6" },
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 2110, sha256: "ea893333fc128a760455bb4eaac3ee2d384163f40950fca2c201b41860bd9d8a" },
 		{ size: 2145, sha256: "04f2167437081d69806a704238411275006df98e6ee902bc0a8cb6eb81b0ef14" },
@@ -154,6 +171,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 1665, sha256: "0c8dd4e637570aa82b25070a9027a2f46bda25a25f2195d06df0ccb6d98bb211" },
 	],
 	"personas/verify.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2561, sha256: "4b657ea6aafa627fe13af5e37728c3f279d96d2646ebd56e1c18cd39219e3df4" },
+		{ size: 2602, sha256: "8e94f788fc9e89b232e0268bc94ea317ba767363def80b035834cd2e75e0dace" },
 		// v1.13.4 pristine seed (LF and CRLF checkout variants)
 		{ size: 1927, sha256: "4c670aba28ce15937d60074ec4ac7d50f6db3cccf137b60d9758627d69e82a0f" },
 		{ size: 1955, sha256: "9696278c243f83c9e8ee5f128faacebb8a89f85464b2c182f1bb77365a6d5643" },
@@ -167,6 +187,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 1810, sha256: "3f0287dd7052f1f0bc65b40dc3af52847c0e5b2295cfcb4001ebe345b9e3fadc" },
 	],
 	"personas/magi.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2462, sha256: "c6e33eb98cd73f31e0d24784782466a8752efde4ec510c9b8f643b12b6f0be0e" },
+		{ size: 2499, sha256: "78d205a3291bfb26cfad8a1eec9bed7e19b3445aa81d6e9644427f1ae30ccd04" },
 		{ size: 2361, sha256: "a608fc26a13070fad79b84f9d1a5f39fd3b760aefb98732f1f95134a89cd0366" },
 		{ size: 2402, sha256: "0b24f01d93517d5fc56a7318d374ee679fa146e919e86e753f422f9f10a37bda" },
 	],
@@ -217,18 +240,36 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 4661, sha256: "9031054af66bca2b726536e5348f6d0223f66bb7b544cc256457b015d55c850f" },
 	],
 	"agents/reviewer.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 2574, sha256: "28b4282286c1b74164c3b24e6201513b696b3be86dca38e563aa31a957ba2871" },
+		{ size: 2604, sha256: "4d8605a637d4e1787690be8ef991eff7e840eb5167da628d2e95f1986c95a987" },
 		{ size: 3427, sha256: "8570b80e48a2b44dc364f7a41b3cd06741507329d91b0b9d7e1b716e7eaf7ee2" },
 		{ size: 3476, sha256: "73f404259730719051f8e9aedb17ddd398304ed40068128cd97eae3a884b0912" },
 	],
 	"agents/scout.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 1276, sha256: "8ba1a09175ccb5994286730f60596acc9bc3096a973f729ade0b689d8a960501" },
+		{ size: 1298, sha256: "6bdc361d3473dd8f7088a742fdcd0774ad38a85ab775c79392730bccaed7f457" },
 		{ size: 1341, sha256: "ffea9fe3643dbc0e5dea8ffc0722f41050374daed33e7f3a46378de36a630a62" },
 		{ size: 1364, sha256: "425b8ef2c1141b602b2f67e47224f855a8a11f936affd4429272347678de8b58" },
 	],
+	"agents/architect.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 1380, sha256: "907d1edb8e31a2fca66cee3a7508b88ea14275f36c7d272e3dd1a865813014fc" },
+		{ size: 1401, sha256: "1fd36722b5c3834fec27eb139a78abbf928a3efb04e6d57ac8137b10cb14ed90" },
+	],
 	"agents/verifier.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 1979, sha256: "eeb8f50e21bd1f8ca3d821d45a9b99b37f21c2987bce7c93d647666054245c2e" },
+		{ size: 1998, sha256: "66aa4b460b1183a0448fa7b210fc2308da37ce62f8e588dbbbda0bf53c0d2bb7" },
+		// v1.17.1 pristine seed (LF and CRLF checkout variants).
 		{ size: 1037, sha256: "ce8f161b1879084b336e2f24495a82aba7279f099b450852ba02db8b4850def5" },
 		{ size: 1058, sha256: "78d7c9e7e6d961b0005d216968196dea28b8ef09a8ccd52b0f7a4de97754a800" },
 	],
 	"personas/elite.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 17767, sha256: "187d854e1a920a04c86964c15b7832e3c17e75e04c053f0efee11011e749b262", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
+		{ size: 18025, sha256: "38d0c7d610f8163521237ed0a0b037b8c74716d58360f5c77f09440e4ef0cb2f", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
 		// v1.17.2 pristine seed (LF and CRLF checkout variants).
 		{ size: 17580, sha256: "5a45759f0c94ea090c8a537c59a6549449ed089d0f02fac9a09ba14b01a09ff2", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
 		{ size: 17835, sha256: "425e0f4fbeb855a788706eb278db4ed4c1026c59bedcca9768c258966ede1654", requiredAdditions: ELITE_REQUIRED_ADDITIONS },
@@ -318,6 +359,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 	// Live-peer collaboration landed in v1.12.2. Without these, a seeded copy from 1.7–1.12.1
 	// (and the two earlier untouched hashes) keeps the pre-collaboration prompt forever.
 	"personas/swarm.md": [
+		// v1.17.6 pristine seed (LF and CRLF checkout variants).
+		{ size: 3003, sha256: "0e99ce86374b81abdf4577bb5fe661f0cd336a7b12239e914656906c850d93d7" },
+		{ size: 3051, sha256: "da9e3f8ed7a667d1d19573bf936b6893016553b4eaf6826874f49b2cee4b9320" },
 		// v1.17.2 pristine seed (LF and CRLF checkout variants).
 		{ size: 2694, sha256: "72d17416941edb6f31ca86cff1de6fa6d85c5ba7ae0cd269d104c770c9e42bf2" },
 		{ size: 2737, sha256: "303ddc6bd44f2f909765d99d8f753136dae9d8a635616d6e65523814e06131a1" },

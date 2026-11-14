@@ -34,6 +34,28 @@ test("the settings registry covers every public config value except process and 
 	assert.ok(!ids.includes("disabled") && !ids.includes("stateFile"));
 });
 
+test("changeReport registry metadata and mindCapture description state their current semantics", () => {
+	const changeReport = PERSONA_SETTINGS.find(({ id }) => id === "changeReport");
+	assert.ok(changeReport);
+	assert.equal(changeReport.id, "changeReport");
+	assert.equal(changeReport.label, "Report checkout status changes");
+	assert.equal(changeReport.kind, "boolean");
+	assert.equal(changeReport.env, "PI_PERSONA_LEG_CHANGE_REPORT");
+	assert.match(changeReport.description, /Git status-path\/status-code deltas/);
+	assert.match(changeReport.description, /not proof of per-agent authorship/);
+	assert.match(changeReport.description, /concurrent work may appear/);
+	assert.match(changeReport.description, /same-status edits to already-dirty paths are missed/);
+	assert.match(changeReport.description, /No report does not prove no writes/);
+
+	const mindCapture = PERSONA_SETTINGS.find(({ id }) => id === "mindCapture");
+	assert.ok(mindCapture);
+	assert.equal(mindCapture.id, "mindCapture");
+	assert.deepEqual(mindCapture.choices, ["auto", "prompt", "off"]);
+	assert.equal(mindCapture.env, "PI_PERSONA_MIND_CAPTURE");
+	assert.equal(mindCapture.description, "Capture explicit user requests as session notes (auto), suggest only (prompt), or disable cue detection (off). Durable saves require an explicit scope; the memory tool remains available.");
+	assert.equal(resolveSettingsValues({}, {}).mindCapture, "auto");
+});
+
 test("companion preferences validate strictly with their current ranges", () => {
 	assert.deepEqual(validatePreferences({
 		mindCapture: "prompt",

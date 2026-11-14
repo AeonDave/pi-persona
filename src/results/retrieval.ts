@@ -12,6 +12,29 @@ export interface ResultReceipt {
 	warning?: string;
 }
 
+export type SelectedTerminalOutput = {
+	body: string;
+	provenance: "result-output" | "partial-output";
+};
+
+/** Select one retained result body without merging unrelated transcripts. On interrupted runs,
+ *  recover progress only when it is a strict exact-prefix extension of the final partial result. */
+export function selectTerminalOutput(
+	resultOutput: string,
+	partialOutput: string,
+	status: TerminalStatus | "running",
+): SelectedTerminalOutput | undefined {
+	const hasResult = resultOutput.trim().length > 0;
+	const hasPartial = partialOutput.trim().length > 0;
+	if (hasResult && hasPartial && (status === "stopped" || status === "failed")
+		&& partialOutput.length > resultOutput.length && partialOutput.startsWith(resultOutput)) {
+		return { body: partialOutput, provenance: "partial-output" };
+	}
+	if (hasResult) return { body: resultOutput, provenance: "result-output" };
+	if (hasPartial) return { body: partialOutput, provenance: "partial-output" };
+	return undefined;
+}
+
 export function resultReceipt(outcome: SaveOutcome): ResultReceipt {
 	if (!outcome.ok) return { warning: `Terminal report not archived (${outcome.reason}).` };
 	return {

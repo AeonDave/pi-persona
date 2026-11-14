@@ -10,6 +10,8 @@ export type MonitorMode = "output" | "exit";
 export interface MonitorSpec {
 	command: string;
 	args?: string[];
+	/** Internal explicit input transport, used for host shells which accept source on stdin. */
+	stdin?: string;
 	cwd: string;
 	label: string;
 	mode: MonitorMode;
@@ -22,6 +24,7 @@ export interface MonitorEntry {
 	label: string;
 	command: string;
 	args: string[];
+	stdin?: string;
 	cwd: string;
 	mode: MonitorMode;
 	startedAtEpochMs: number;
@@ -45,6 +48,9 @@ export interface MonitorOutput {
 	text: string;
 }
 
+/** Silent removal has an explicit cause: rejected startup must not appear operator-cancelled. */
+export type MonitorRemovalReason = { kind: "cancelled" } | { kind: "error"; text: string };
+
 export interface MonitorProcessHandlers {
 	onStdout: (chunk: string) => void;
 	onStderr: (chunk: string) => void;
@@ -57,6 +63,8 @@ export interface MonitorProcess {
 }
 
 export interface MonitorManagerDeps {
+	/** Process source identity affects diagnostics only; all lifecycle invariants stay shared. */
+	source?: "monitor" | "script";
 	/** Internal activation namespace for persisted ids; not a user-facing monitor parameter. */
 	idPrefix?: string;
 	now: () => number;
@@ -72,7 +80,7 @@ export interface MonitorManagerDeps {
 	onArmed?: (entry: MonitorEntry) => void;
 	/** Called once per monitor dropped WITHOUT a wake event: `cancel`, `cancelAll`, or a start that
 	 *  failed before it ran. A terminal event is never followed by this. */
-	onRemoved?: (entry: MonitorEntry) => void;
+	onRemoved?: (entry: MonitorEntry, reason: MonitorRemovalReason) => void;
 }
 
 export type MonitorArmResult =
@@ -93,6 +101,15 @@ export const MONITOR_MAX_ARG_CHARS = 8_192;
 export const MONITOR_MAX_ARGV_CHARS = 24_000;
 export const MONITOR_MAX_LABEL_CHARS = 120;
 export const MONITOR_TRUNCATION_MARKER = "…[truncated]";
+
+/** Run passive UI/archive observation without letting it change monitor lifecycle behavior. */
+export function observeMonitor(callback: () => void): void {
+	try {
+		callback();
+	} catch {
+		/* Passive observers cannot change process lifetime or semantic delivery. */
+	}
+}
 
 interface ActiveMonitor {
 	entry: MonitorEntry;
@@ -144,29 +161,32 @@ function copyEntry(entry: MonitorEntry): MonitorEntry {
 
 export class MonitorManager {
 	private readonly deps: MonitorManagerDeps;
+	private readonly source: "monitor" | "script";
 	private readonly monitors = new Map<string, ActiveMonitor>();
 	private sequence = 0;
 
 	constructor(deps: MonitorManagerDeps) {
 		this.deps = deps;
+		this.source = deps.source ?? "monitor";
 	}
 
 	arm(request: MonitorSpec): MonitorArmResult {
 		const validation = this.validate(request);
 		if (validation) return { ok: false, error: validation };
 		if (this.monitors.size >= MONITOR_MAX_ACTIVE) {
-			return { ok: false, error: `too many active monitors (maximum ${MONITOR_MAX_ACTIVE}); cancel one before arming another.` };
+			return { ok: false, error: `too many active ${this.source}s (maximum ${MONITOR_MAX_ACTIVE}); ${this.source === "script" ? "stop" : "cancel"} one before starting another.` };
 		}
 
 		const timeoutMs = request.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS;
 		const maxEvents = request.maxEvents ?? MONITOR_DEFAULT_MAX_EVENTS;
 		const now = this.deps.now();
-		const id = `${this.deps.idPrefix ?? "monitor"}-${++this.sequence}`;
+		const id = `${this.deps.idPrefix ?? this.source}-${++this.sequence}`;
 		const entry: MonitorEntry = {
 			id,
 			label: request.label.trim(),
 			command: request.command,
 			args: [...(request.args ?? [])],
+			...(request.stdin === undefined ? {} : { stdin: request.stdin }),
 			cwd: request.cwd,
 			mode: request.mode,
 			startedAtEpochMs: now,
@@ -187,7 +207,7 @@ export class MonitorManager {
 			lineLength: 0,
 		};
 		this.monitors.set(id, active);
-		this.deps.onArmed?.(copyEntry(entry));
+		observeMonitor(() => this.deps.onArmed?.(copyEntry(entry)));
 
 		const handlers: MonitorProcessHandlers = {
 			onStdout: (chunk) => this.receiveStdout(id, chunk),
@@ -214,7 +234,7 @@ export class MonitorManager {
 				} catch {
 					/* best effort; the synchronous start failure is already terminal */
 				}
-				return { ok: false, error: `could not start monitor: ${active.startError}` };
+				return { ok: false, error: `could not start ${this.source}: ${active.startError}` };
 			}
 			// A synchronous fake or spawn wrapper can finish before start() returns. In that
 			// case terminal() already removed the monitor, but the returned process still needs
@@ -231,8 +251,8 @@ export class MonitorManager {
 				active.hasHandle = true;
 			}
 		} catch (error) {
-			this.removeWithoutEvent(active);
-			return { ok: false, error: `could not start monitor: ${errorText(error)}` };
+			this.removeWithoutEvent(active, { kind: "error", text: `could not start ${this.source}: ${errorText(error)}` });
+			return { ok: false, error: `could not start ${this.source}: ${errorText(error)}` };
 		}
 
 		return { ok: true, entry: copyEntry(entry) };
@@ -256,30 +276,31 @@ export class MonitorManager {
 	}
 
 	private validate(request: MonitorSpec): string | undefined {
-		if (!request || typeof request !== "object") return "monitor spec is required.";
-		if (typeof request.command !== "string" || request.command.trim().length === 0) return "monitor command must be a non-empty executable name.";
-		if (request.command.length > MONITOR_MAX_COMMAND_CHARS) return `monitor command exceeds the maximum ${MONITOR_MAX_COMMAND_CHARS} characters.`;
-		if (request.command.includes("\0")) return "monitor command cannot contain NUL bytes.";
-		if (typeof request.cwd !== "string" || request.cwd.trim().length === 0) return "monitor cwd must be a non-empty directory.";
-		if (request.cwd.includes("\0")) return "monitor cwd cannot contain NUL bytes.";
-		if (typeof request.label !== "string" || request.label.trim().length === 0) return "monitor label must be non-empty.";
-		if (request.label.length > MONITOR_MAX_LABEL_CHARS) return `monitor label exceeds the maximum ${MONITOR_MAX_LABEL_CHARS} characters.`;
-		if (request.label.includes("\0")) return "monitor label cannot contain NUL bytes.";
-		if (request.mode !== "output" && request.mode !== "exit") return "monitor mode must be `output` or `exit`.";
-		if (request.args !== undefined && (!Array.isArray(request.args) || request.args.some((arg) => typeof arg !== "string"))) return "monitor args must be an array of strings.";
-		if (request.args !== undefined && request.args.length > MONITOR_MAX_ARGS) return `monitor args exceeds the maximum ${MONITOR_MAX_ARGS} items.`;
-		if (request.args?.some((arg) => arg.includes("\0"))) return "monitor args cannot contain NUL bytes.";
-		if (request.args?.some((arg) => arg.length > MONITOR_MAX_ARG_CHARS)) return `a monitor argument exceeds the maximum ${MONITOR_MAX_ARG_CHARS} characters.`;
+		if (!request || typeof request !== "object") return `${this.source} spec is required.`;
+		if (typeof request.command !== "string" || request.command.trim().length === 0) return `${this.source} command must be a non-empty executable name.`;
+		if (request.command.length > MONITOR_MAX_COMMAND_CHARS) return `${this.source} command exceeds the maximum ${MONITOR_MAX_COMMAND_CHARS} characters.`;
+		if (request.command.includes("\0")) return `${this.source} command cannot contain NUL bytes.`;
+		if (typeof request.cwd !== "string" || request.cwd.trim().length === 0) return `${this.source} cwd must be a non-empty directory.`;
+		if (request.cwd.includes("\0")) return `${this.source} cwd cannot contain NUL bytes.`;
+		if (typeof request.label !== "string" || request.label.trim().length === 0) return `${this.source} label must be non-empty.`;
+		if (request.label.length > MONITOR_MAX_LABEL_CHARS) return `${this.source} label exceeds the maximum ${MONITOR_MAX_LABEL_CHARS} characters.`;
+		if (request.label.includes("\0")) return `${this.source} label cannot contain NUL bytes.`;
+		if (request.mode !== "output" && request.mode !== "exit") return `${this.source} mode must be output or exit.`;
+		if (request.args !== undefined && (!Array.isArray(request.args) || request.args.some((arg) => typeof arg !== "string"))) return `${this.source} args must be an array of strings.`;
+		if (request.args !== undefined && request.args.length > MONITOR_MAX_ARGS) return `${this.source} args exceeds the maximum ${MONITOR_MAX_ARGS} items.`;
+		if (request.args?.some((arg) => arg.includes("\0"))) return `${this.source} args cannot contain NUL bytes.`;
+		if (request.args?.some((arg) => arg.length > MONITOR_MAX_ARG_CHARS)) return `a ${this.source} argument exceeds the maximum ${MONITOR_MAX_ARG_CHARS} characters.`;
+		if (request.stdin !== undefined && (typeof request.stdin !== "string" || request.stdin.includes("\0") || request.stdin.length > MONITOR_MAX_ARG_CHARS)) return `${this.source} stdin must be a string without NUL bytes, at most ${MONITOR_MAX_ARG_CHARS} characters.`;
 		const argvChars = (request.args ?? []).reduce((total, arg) => total + arg.length, 0);
-		if (argvChars > MONITOR_MAX_ARGV_CHARS) return `monitor arguments exceed the maximum ${MONITOR_MAX_ARGV_CHARS} characters combined.`;
+		if (argvChars > MONITOR_MAX_ARGV_CHARS) return `${this.source} arguments exceed the maximum ${MONITOR_MAX_ARGV_CHARS} characters combined.`;
 
 		const timeoutMs = request.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS;
-		if (!Number.isFinite(timeoutMs) || timeoutMs < MONITOR_MIN_TIMEOUT_MS) return `monitor timeoutMs must be at least ${MONITOR_MIN_TIMEOUT_MS}ms.`;
-		if (timeoutMs > MONITOR_MAX_TIMEOUT_MS) return `monitor timeoutMs exceeds the maximum ${MONITOR_MAX_TIMEOUT_MS}ms.`;
+		if (!Number.isFinite(timeoutMs) || timeoutMs < MONITOR_MIN_TIMEOUT_MS) return `${this.source} timeoutMs must be at least ${MONITOR_MIN_TIMEOUT_MS}ms.`;
+		if (timeoutMs > MONITOR_MAX_TIMEOUT_MS) return `${this.source} timeoutMs exceeds the maximum ${MONITOR_MAX_TIMEOUT_MS}ms.`;
 
 		const maxEvents = request.maxEvents ?? MONITOR_DEFAULT_MAX_EVENTS;
-		if (!Number.isInteger(maxEvents) || maxEvents < 1) return "monitor maxEvents must be a positive integer.";
-		if (maxEvents > MONITOR_MAX_EVENTS) return `monitor maxEvents exceeds the maximum ${MONITOR_MAX_EVENTS}.`;
+		if (!Number.isInteger(maxEvents) || maxEvents < 1) return `${this.source} maxEvents must be a positive integer.`;
+		if (maxEvents > MONITOR_MAX_EVENTS) return `${this.source} maxEvents exceeds the maximum ${MONITOR_MAX_EVENTS}.`;
 		return undefined;
 	}
 
@@ -293,7 +314,7 @@ export class MonitorManager {
 			label: active.entry.label,
 			kind: "timeout",
 			atEpochMs: this.deps.now(),
-			text: `monitor timed out after ${active.entry.expiresAtEpochMs - active.entry.startedAtEpochMs}ms${suffix}`,
+			text: `${this.source} timed out after ${active.entry.expiresAtEpochMs - active.entry.startedAtEpochMs}ms${suffix}`,
 			terminal: true,
 		});
 	}
@@ -346,11 +367,7 @@ export class MonitorManager {
 	}
 
 	private observeOutput(id: string, stream: MonitorOutput["stream"], text: string): void {
-		try {
-			this.deps.onOutput?.({ id, stream, text });
-		} catch {
-			/* UI/log observers cannot suppress a semantic event or interrupt process cleanup. */
-		}
+		observeMonitor(() => this.deps.onOutput?.({ id, stream, text }));
 	}
 
 	private receiveExit(id: string, code: number | null, signal?: string): void {
@@ -371,7 +388,7 @@ export class MonitorManager {
 		if (!active || active.terminal) return;
 		if (active.starting) {
 			active.startError = error.message;
-			this.removeWithoutEvent(active);
+			this.removeWithoutEvent(active, { kind: "error", text: `could not start ${this.source}: ${error.message}` });
 			return;
 		}
 		const diagnostics = this.diagnostics(active);
@@ -380,7 +397,7 @@ export class MonitorManager {
 			label: active.entry.label,
 			kind: "error",
 			atEpochMs: this.deps.now(),
-			text: `monitor process error: ${error.message}${diagnostics ? `\n${diagnostics}` : ""}`,
+			text: `${this.source} process error: ${error.message}${diagnostics ? `\n${diagnostics}` : ""}`,
 			terminal: true,
 		});
 	}
@@ -432,7 +449,7 @@ export class MonitorManager {
 		this.deps.onEvent(event);
 	}
 
-	private removeWithoutEvent(active: ActiveMonitor): void {
+	private removeWithoutEvent(active: ActiveMonitor, reason: MonitorRemovalReason = { kind: "cancelled" }): void {
 		if (active.terminal || this.monitors.get(active.entry.id) !== active) return;
 		active.terminal = true;
 		this.monitors.delete(active.entry.id);
@@ -442,6 +459,6 @@ export class MonitorManager {
 		} catch {
 			/* best effort; cancellation remains terminal */
 		}
-		this.deps.onRemoved?.(copyEntry(active.entry));
+		observeMonitor(() => this.deps.onRemoved?.(copyEntry(active.entry), reason));
 	}
 }

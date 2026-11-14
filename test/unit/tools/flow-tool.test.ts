@@ -114,7 +114,7 @@ test("missing flow launch metadata is explicit and never blocks the run", async 
 	});
 	const receipt = await runInteractive(harness.tool);
 	assert.equal(receipt.isError, false);
-	assert.deepEqual(receipt.details.launch, { participants: [], unavailable: true });
+	assert.deepEqual(receipt.details.launch, { participants: [], unavailable: true, request: { task: "ship it" } });
 	assert.match(render(harness.tool, receipt), /Launch metadata unavailable/);
 });
 

@@ -98,7 +98,7 @@ test("real Pi JSONL owns terminal monitor logs across reopen, excludes them from
 			archive.armed(cancelled);
 			archive.output({ id: cancelled.id, stream: "stdout", text: "MONITOR_CANCELLED_SESSION_ONLY_5d76" });
 			assert.equal(readFileSync(path, "utf8"), beforeAppend, "arming/output do not write per-chunk entries");
-			archive.removed(cancelled);
+			archive.removed(cancelled, { kind: "cancelled" });
 			const cancelledRecord: MonitorLogRecord = {
 				version: 1, entry: cancelled, outcome: "cancelled", text: "",
 				stdout: "MONITOR_CANCELLED_SESSION_ONLY_5d76", stderr: "", truncated: false,
@@ -107,7 +107,7 @@ test("real Pi JSONL owns terminal monitor logs across reopen, excludes them from
 			const afterAppend = readFileSync(path, "utf8");
 			assert.ok(afterAppend.startsWith(beforeAppend), "archive persistence only appends to the existing JSONL");
 			assert.equal(afterAppend.slice(beforeAppend.length).trim().split("\n").length, 1, "one cancellation snapshot, not stream sidecars");
-			archive.removed(cancelled);
+			archive.removed(cancelled, { kind: "cancelled" });
 			archive.event({ id: entry.id, label: entry.label, kind: "exit", atEpochMs: entry.startedAtEpochMs + 600, text: "duplicate", terminal: true });
 			assert.equal(readFileSync(path, "utf8"), afterAppend, "duplicate terminal callbacks do not append again");
 			assert.deepEqual(manager.buildSessionContext().messages, messages);

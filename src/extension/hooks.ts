@@ -7,6 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { buildExocomBrief, RUNTIME_CONTEXT_GUIDANCE } from "../core/brief.ts";
+import { EVIDENCE_GUIDANCE } from "../core/evidence.ts";
 import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
@@ -89,6 +90,7 @@ export interface HookHost {
 	timerNotifier: IdleCoalescingNotifier<TimerEntry>;
 	timerScheduler: { cancelAll(): void; readonly size: number };
 	monitors: MonitorSession;
+	scripts: MonitorSession;
 	peekWatcher: PeekWatcher;
 	stopPeek(): void;
 	stopRegistry: Map<string, () => void>;
@@ -163,8 +165,10 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				runs: [...new Set([...h.tracker.running(), ...h.completionNotifier.peekPending()].map((run) => run.id))],
 				timers: h.timerScheduler.size,
 				monitors: h.monitors.list().length,
+				scripts: h.scripts.list().length,
+				notifications: h.timerNotifier.peekPending().length + h.monitors.pendingCount() + h.scripts.pendingCount(),
 			};
-			if (lost.runs.length === 0 && lost.timers === 0 && lost.monitors === 0 && h.tracker.issued <= restoredIssued) return;
+			if (lost.runs.length === 0 && lost.timers === 0 && lost.monitors === 0 && lost.scripts === 0 && lost.notifications === 0 && h.tracker.issued <= restoredIssued) return;
 			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(sessionId, h.tracker.issued, lost));
 		} catch { /* shutdown must complete */ }
 	}
@@ -179,7 +183,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			if (!notice) return;
 			pi.sendMessage({ customType: "pi-persona", content: notice, display: true }, { deliverAs: "nextTurn" }); // passive: never starts a turn
 			// Acknowledge so the newest entry is an empty loss: the same loss can never be announced twice.
-			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0 }));
+			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 0 }));
 		} catch { /* the session start must complete */ }
 	}
 
@@ -308,6 +312,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
 		h.timerNotifier.cancel();
 		h.monitors.cancelAll();
+		h.scripts.cancelAll();
 		// This instance is being torn down (a h.reload/new/resume rebinds a fresh one); abort in-flight
 		// sub-h.agents and reset control state so nothing is left orphaned or rendered stale.
 		for (const abort of [...h.stopRegistry.values()]) {
@@ -400,6 +405,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.intercomNotifier.kick();
 		h.timerNotifier.kick();
 		h.monitors.kick();
+		h.scripts.kick();
 		exocom.notifier?.kick();
 		exocom.waitNotifier?.kick();
 	});
@@ -413,7 +419,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		let prompt = h.controller.composePrompt(event.systemPrompt, h.spineText) ?? noPersona;
 		// Stable system-level interpretation of runtime metadata. Never append an acknowledgement
 		// request to the conversation: that would recreate the old identity pseudo-turn loop.
-		prompt = `${prompt}\n\n${RUNTIME_CONTEXT_GUIDANCE}`;
+		prompt = `${prompt}\n\n${RUNTIME_CONTEXT_GUIDANCE}\n\n${EVIDENCE_GUIDANCE}`;
 		// The session time anchor (core/time.ts). Unconditional, unlike both briefs below: a supervisor
 		// that has been working for hours needs to know it whether or not h.agents or peers exist. It goes
 		// in the SYSTEM prompt because the prompt is re-composed and re-sent every turn rather than

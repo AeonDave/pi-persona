@@ -37,6 +37,7 @@ const POISON = {
 	PI_PERSONA_SEED: "on",
 	PI_PERSONA_EXOCOM: "1",
 	PI_AGENT_DIR: path.join(REPO_ROOT, "not-a-sandbox"),
+	PI_CODING_AGENT_DIR: path.join(REPO_ROOT, "not-an-sdk-sandbox"),
 };
 
 /** The node flags an npm script passes before `--test` — i.e. the loader chain every test file
@@ -67,13 +68,13 @@ const POISON_MIXED_CASE = {
 function probe(
 	script: "test" | "test:unit",
 	poison: Record<string, string> = POISON,
-): { leaked: string[]; agentDir: string | null } {
+): { leaked: string[]; agentDir: string | null; sdkDir: string } {
 	const out = execFileSync(process.execPath, [...runnerFlags(script), PROBE], {
 		cwd: REPO_ROOT,
 		env: { ...process.env, ...poison },
 		encoding: "utf8",
 	});
-	return JSON.parse(out.trim().split("\n").pop() ?? "{}") as { leaked: string[]; agentDir: string | null };
+	return JSON.parse(out.trim().split("\n").pop() ?? "{}") as { leaked: string[]; agentDir: string | null; sdkDir: string };
 }
 
 for (const script of ["test", "test:unit"] as const) {
@@ -96,6 +97,12 @@ for (const script of ["test", "test:unit"] as const) {
 			agentDir?.startsWith(os.tmpdir()),
 			`persona data must land in a sandbox, not ~/.pi/agent — got ${agentDir}`,
 		);
+	});
+
+	test(`npm run ${script} pins the SDK agent dir to the same sandbox despite an exported override`, () => {
+		const { agentDir, sdkDir } = probe(script);
+		assert.ok(agentDir, "PI_AGENT_DIR is set by the choke point");
+		assert.equal(sdkDir, agentDir, "SDK getAgentDir() must resolve to the pi-persona sandbox");
 	});
 
 	test(`npm run ${script} takes its sandbox back out of the temp dir when the process ends`, () => {

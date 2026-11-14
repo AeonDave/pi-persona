@@ -28,7 +28,7 @@ export class ActivityRows {
 		const record = { event, startedAt: existing?.startedAt ?? now };
 		this.records.set(id, record);
 		const detail = description(event);
-		return { removed, node: { id, label: "Mind", kind: "activity", status: event.state === "running" ? "running" : event.state === "failed" ? "failed" : "done", detail, output: `${detail}.\nLocal memory operation; no sub-agent or model execution is implied.\nInspect the memory tool or command result for the full receipt.`, startedAt: record.startedAt, lastAdvanceAt: now } };
+		return { removed, node: { id, label: "mind", kind: "activity", status: event.state === "running" ? "running" : event.state === "failed" ? "failed" : "done", detail, output: `${detail}.\nLocal memory operation; no sub-agent or model execution is implied.\nInspect the memory tool or command result for the full receipt.`, startedAt: record.startedAt, lastAdvanceAt: now } };
 	}
 	clear(): string[] { const ids = [...this.records.keys()]; this.records.clear(); return ids; }
 }

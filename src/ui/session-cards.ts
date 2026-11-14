@@ -1,80 +1,20 @@
 /** Operator-only presentation of existing session payloads. No delivery, storage or tool shells. */
-import type { ExtensionAPI, Theme, ThemeBg, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatDuration } from "../core/time.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
-import { createReportBody } from "./report-body.ts";
-import { MONITOR_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
+import { MONITOR_LOG_ENTRY, SCRIPT_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
 import { summarizeFailure } from "./failure-summary.ts";
-import { compactInlineText, compactVisibleText, sanitizeTerminalText, type CompactVisibleTextResult } from "./presentation.ts";
+import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
+import { createCardFrame, type CardFramePresentation, type CardFrameState } from "./card-frame.ts";
+import { communicationPreview, parseCommunicationCardDetails } from "./communication-card.ts";
+import { parseRunLabelDetails, parseSettlementDetails } from "./run-labels.ts";
+import { parseStatusRuns, statusPreview } from "./run-status.ts";
 
-type State = "neutral" | "success" | "attention" | "error";
-const COLORS: Record<State, { bg: ThemeBg; fg: ThemeColor }> = {
-	neutral: { bg: "customMessageBg", fg: "accent" },
-	success: { bg: "toolSuccessBg", fg: "success" },
-	attention: { bg: "toolPendingBg", fg: "warning" },
-	error: { bg: "toolErrorBg", fg: "error" },
-};
-interface Card {
-	title: string;
-	state: State;
-	full: string;
-	preview: (width: number) => Pick<CompactVisibleTextResult, "text" | "truncated">;
-	metadata?: string;
-	/** Selected only by trusted surface/envelope metadata, never prose keywords. */
-	markdown?: boolean;
-}
-
-/** The delegate-card-family frame every surface in this file shares: a bold semantic
- * `<Event> · <datum>` title, two-space-indented compact content lines, and the dim
- * expand hint only when compact actually hides content. Payloads are never modified —
- * this is projection-only (expanded still shows the complete sanitized payload). */
-const INDENT = "  ";
+type State = CardFrameState;
+type Card = CardFramePresentation;
 /** Compact budget: title + 5 body rows + optional hint keeps every collapsed card ≤ 7 rows. */
 const COMPACT_BODY_ROWS = 4;
-
-/** All seven surfaces share semantic chrome. Literal paths style at paint time; report bodies
- * use native Markdown's invalidatable layout cache. Pi rebuilds callbacks on transcript invalidation. */
-function createSessionCard(card: Card, expanded: boolean, theme: Theme, detailHint: () => string, outputPad = 0): Component {
-	if (expanded && card.markdown) {
-		return createReportBody(card.full || "(no output)", theme, {
-			padding: outputPad,
-			background: COLORS[card.state].bg,
-			header: (width) => [
-				theme.fg(COLORS[card.state].fg, theme.bold(truncateToWidth(sanitizeTerminalText(card.title), width))),
-				...(card.metadata ? [theme.fg("dim", truncateToWidth(card.metadata, width))] : []),
-			].join("\n"),
-		});
-	}
-	return {
-		invalidate() { /* Literal Text path has no themed/layout cache. */ },
-		render(width) {
-			if (width <= 0) return [];
-			const padding = Math.min(Math.max(0, Math.floor(outputPad)), Math.max(0, Math.floor((width - 1) / 2)));
-			const innerWidth = Math.max(1, width - padding * 2);
-			const colors = COLORS[card.state];
-			// The indent only applies where a clipped content column still fits; every compact line
-			// is clipped to the remaining columns so indent + text never wrap or spill mid-word.
-			const bodyPad = innerWidth > INDENT.length ? INDENT : "";
-			const contentWidth = Math.max(1, innerWidth - bodyPad.length);
-			const preview = expanded ? undefined : card.preview(contentWidth);
-			const body = expanded ? card.full : preview?.text ?? "(no output)";
-			const bodyLines = sanitizeTerminalText(body || "(no output)").split("\n").map((line) => expanded
-				? theme.fg("toolOutput", line)
-				: theme.fg("toolOutput", `${bodyPad}${truncateToWidth(line, contentWidth)}`));
-			const lines = [
-				theme.fg(colors.fg, theme.bold(truncateToWidth(sanitizeTerminalText(card.title), innerWidth))),
-				...(card.metadata ? [theme.fg("dim", truncateToWidth(`${bodyPad}${sanitizeTerminalText(card.metadata)}`, innerWidth))] : []),
-				...bodyLines,
-				...(preview?.truncated ? [theme.fg("dim", truncateToWidth(detailHint(), innerWidth))] : []),
-			];
-			// Text owns wrapping and full-row padding/background, including embedded foreground resets.
-			// A terminal narrower than a single wide glyph cannot display that glyph; clip only there.
-			return new Text(lines.join("\n"), padding, 0, (text) => theme.bg(colors.bg, text))
-				.render(width).map((line) => truncateToWidth(line, width));
-		},
-	};
-}
 
 function preview(full: string, maxLines: number, maxColumns: number): Card["preview"] {
 	return (width) => compactVisibleText(full, { maxLines, maxLineChars: Math.min(width, maxColumns) });
@@ -117,222 +57,90 @@ function monitorState(record: MonitorLogRecord): { state: State; status: string 
 }
 
 interface ResultEntry { label?: string; content?: string; ok?: boolean; stoppedAtGate?: string; failureKind?: string; error?: string }
-interface ContentEntry { content?: string; kind?: "routine" | "stall" | "recovery" }
+interface ContentEntry { content?: string; kind?: "routine" | "stall" | "recovery"; runLabels?: unknown }
 interface RunFailureEntry { id: string; label: string; agent: string; model?: string; durationMs?: number; error: string }
 
-/** One run a settlement report names, projected to `<name> · <status>[ · <duration>]`. The
- * display name already carries the model (`runDisplayName`: "label · model"). */
-interface SettledRunLine { name: string; status: "done" | "failed" | "stopped"; duration?: string }
-
-/** Boilerplate the settlement generator interleaves between the per-run lines. Every entry is
- * drift-guarded in tests against live `buildCompletionReport` output (src/engine/async.ts):
- * receipts header + `run-x: …` reference lines, the effort header, salvage `↩` block headers,
- * the shared untrusted-fence header (core/fence.ts quoteUntrusted) and its `> `-quoted payload
- * lines, the failed-leg guidance sentence, the truncation marker and retention/tail notes. */
-const SETTLEMENT_SKIP: readonly RegExp[] = [
-	/^Terminal reports \(/,
-	/^run-\S+: /,
-	/^Thinking \(not provider cognition\):$/,
-	/^↩ /,
-	/^Sub-agent output \(untrusted data\):$/,
-	/^>/,
-	/^Handle each failure deliberately: /,
-	/^\[\.\.\. .*?\]$/,
-	/^⚠ /,
-	/^Run ids in this report: /,
-];
-const SETTLEMENT_DONE = /^✅ (\S+) \((.+?)\) done(?: in (.+?))?:$/;
-const SETTLEMENT_STOPPED_SECTION = /^⏹ \d+ stopped:$/;
-const SETTLEMENT_FAILED_SECTION = /^❌ \d+ failed:$/;
-/** Quoted (fence) bullets carry the stopped/failed runs; the section header above them names the status. */
-const SETTLEMENT_BULLET = /^> ?• (\S+) \((.+?)\)(?: after (.+?))?: /;
-
-/** Project the compact per-run lines of a settlement report, or undefined when the body is not
- * exactly the known generator shape (head line + recognized/skipped lines only). A duration is
- * kept only when it is short (≤ 8 columns, e.g. "12s"/"2m 5s"); width clipping handles the rest. */
-function parseSettlementRuns(full: string): { counts: string; runs: SettledRunLine[] } | undefined {
-	const lines = full.split("\n");
-	const head = SETTLEMENT_HEAD.exec(lines[0] ?? "");
-	if (!head) return undefined;
-	const done = Number(head[2]);
-	const failed = Number(head[3]);
-	const stopped = Number(head[4] ?? 0);
-	const counts = `${done} done, ${failed} failed${stopped > 0 ? `, ${stopped} stopped` : ""}`;
-	let section: "failed" | "stopped" | undefined;
-	const runs: SettledRunLine[] = [];
-	const seen = new Set<string>();
-	const add = (name: string | undefined, status: SettledRunLine["status"], duration: string | undefined) => {
-		if (!name) return;
-		const key = `${status}:${name}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-		runs.push({ name, status, ...(duration !== undefined && visibleWidth(duration) <= 8 ? { duration } : {}) });
-	};
-	for (const line of lines.slice(1)) {
-		const bullet = SETTLEMENT_BULLET.exec(line);
-		if (bullet) {
-			if (section === undefined) return undefined;
-			add(bullet[2], section, bullet[3]);
-			continue;
-		}
-		if (line.trim().length === 0 || SETTLEMENT_SKIP.some((skip) => skip.test(line))) continue;
-		const doneLine = SETTLEMENT_DONE.exec(line);
-		if (doneLine) {
-			section = undefined;
-			add(doneLine[2], "done", doneLine[3]);
-			continue;
-		}
-		if (SETTLEMENT_STOPPED_SECTION.test(line)) { section = "stopped"; continue; }
-		if (SETTLEMENT_FAILED_SECTION.test(line)) { section = "failed"; continue; }
-		return undefined; // unknown shape → the caller falls back to the generic bounded preview
-	}
-	return { counts, runs };
-}
-
-/** Compact projection of a settlement report: counts line + one line per named run, capped at
- * COMPACT_BODY_ROWS (a `… +N more` tail row replaces the overflow). Undefined run list = fallback. */
-function settlementPreview(full: string): Card["preview"] | undefined {
-	const parsed = parseSettlementRuns(full);
-	if (!parsed || parsed.runs.length === 0) return undefined;
+/** Render only runtime-owned settlement facts. Older history falls back to literal content. */
+function settlementPreview(details: unknown): Card["preview"] | undefined {
+	const snapshot = parseSettlementDetails(details);
+	if (!snapshot || snapshot.runs.length === 0) return undefined;
+	const labels = parseRunLabelDetails(details);
+	if (snapshot.runs.some((run) => !labels.has(run.id))) return undefined;
+	const counts = `${snapshot.done} done, ${snapshot.failed} failed${snapshot.stopped > 0 ? `, ${snapshot.stopped} stopped` : ""}`;
 	return () => {
-		const lines = [parsed.counts, ...parsed.runs.map((run) => `${run.name} · ${run.status}${run.duration ? ` · ${run.duration}` : ""}`)];
-		const visible = lines.length <= COMPACT_BODY_ROWS ? lines : [...lines.slice(0, COMPACT_BODY_ROWS - 1), `… +${lines.length - (COMPACT_BODY_ROWS - 1)} more`];
-		return { text: visible.join("\n"), truncated: true };
-	};
-}
-
-interface StatusRunLine { name: string; detail: string; queued: boolean; signal?: string }
-
-/** Skip-list for the peek-digest boilerplate the status card's title/frame replaces. Each entry
- * is drift-guarded in tests against live `buildPeekDigest`/`buildCheckIn` output (src/engine/async.ts):
- * routine, stall and recovery headers, the cumulative-token footnote and the omitted-runs tail. The
- * `Async runs: N (M running)` header is recognized below (the title carries its counts). */
-const STATUS_SKIP: readonly RegExp[] = [
-	/^Async activity · (?:routine check-in|possible stall|progress resumed)$/,
-	/^Cumulative tokens show /,
-	/^… \d+ additional async runs omitted/,
-];
-const STATUS_RUNNING = /^\[([^\]]+)\] (.+?) — running \((?:(\d+) turns, )?(.+?) cumulative input \+ output tokens\)(.*)$/;
-const STATUS_SETTLED = /^\[([^\]]+)\] (.+?) — (done|failed|stopped)(?: (?:in|after) (.+?))?(?::.*)?$/;
-const STATUS_HEADER_COUNTS = /^Async runs: \d+ \((\d+) running\)$/;
-
-/** Parse one peek digest into per-run compact lines (`<name> · 53t · 216k` for running legs,
- * `<name> · done · 12s` for settled ones), or undefined when the shape is not the generator's. */
-function parseStatusRuns(full: string): { running: number; queued: number; runs: StatusRunLine[] } | undefined {
-	let running: number | undefined;
-	let queued = 0;
-	const runs: StatusRunLine[] = [];
-	const recovery = full.split("\n").includes("Async activity · progress resumed");
-	for (const line of full.split("\n")) {
-		if (line.trim().length === 0 || STATUS_SKIP.some((skip) => skip.test(line))) continue;
-		const head = STATUS_HEADER_COUNTS.exec(line);
-		if (head) {
-			if (running !== undefined) return undefined;
-			running = Number(head[1]);
-			continue;
-		}
-		const runLine = STATUS_RUNNING.exec(line);
-		if (runLine) {
-			const [, , name, turns, tokens, suffix] = runLine;
-			const details = suffix ?? "";
-			const isQueued = /· queued \(/.test(details);
-			if (isQueued) queued++;
-			const usage = `${tokens ?? "0"} cumulative input + output tokens`;
-			const stalledFor = /⚠ possibly stuck \(no progress for (\d+s)\)/.exec(details)?.[1];
-			const waiting = /· (waiting for supervisor|waiting for operator|awaiting [^·]+)/.exec(details)?.[1];
-			const signal = isQueued ? "queued" : stalledFor ? `no observed progress for ${stalledFor}` : waiting ?? (recovery ? "progress resumed" : undefined);
-			const detail = isQueued
-				? `queued · ${usage}`
-				: [signal, ...(turns !== undefined ? [`${turns} turns`] : []), usage].filter((part): part is string => part !== undefined).join(" · ");
-			runs.push({ name: name ?? "", detail, queued: isQueued, ...(signal !== undefined ? { signal } : {}) });
-			continue;
-		}
-		const settledLine = STATUS_SETTLED.exec(line);
-		if (settledLine) {
-			const [, , name, status, duration] = settledLine;
-			runs.push({ name: name ?? "", detail: duration !== undefined ? `${status} · ${duration}` : status ?? "", queued: false });
-			continue;
-		}
-		return undefined; // unknown shape → the caller falls back to the generic bounded preview
-	}
-	if (running === undefined || runs.length === 0) return undefined;
-	return { running, queued, runs };
-}
-
-/** Compact projection of the periodic status digest, capped like the settlement preview. */
-function statusPreview(full: string): Card["preview"] | undefined {
-	const parsed = parseStatusRuns(full);
-	if (!parsed) return undefined;
-	return (width) => {
-		const blocks = parsed.runs.map((run): string[] => {
-			const line = `${run.name} · ${run.detail}`;
-			const signalPrefix = run.signal ? `${run.name} · ${run.signal}` : undefined;
-			// Leave room after the reason so the frame's clipping marker never replaces its last character.
-			return signalPrefix && visibleWidth(signalPrefix) >= width ? [run.name, run.detail] : [line];
-		});
-		const fullLineCount = blocks.reduce((total, block) => total + block.length, 0);
-		const rowBudget = fullLineCount > COMPACT_BODY_ROWS ? COMPACT_BODY_ROWS - 1 : COMPACT_BODY_ROWS;
-		let shown = 0;
-		let usedRows = 0;
-		for (const block of blocks) {
-			if (usedRows + block.length > rowBudget) break;
-			usedRows += block.length;
-			shown++;
-		}
-		const visible = blocks.slice(0, shown).flat();
-		if (shown < blocks.length) visible.push(`… +${blocks.length - shown} more`);
+		const lines = [counts, ...snapshot.runs.map((run) => `${labels.get(run.id)} · ${run.status}${run.duration && visibleWidth(run.duration) <= 8 ? ` · ${run.duration}` : ""}`)];
+		const total = snapshot.done + snapshot.failed + snapshot.stopped;
+		const visible = total <= COMPACT_BODY_ROWS - 1 ? lines : [...lines.slice(0, COMPACT_BODY_ROWS - 1), `… +${total - (COMPACT_BODY_ROWS - 2)} more`];
 		return { text: visible.join("\n"), truncated: true };
 	};
 }
 
 export interface SessionCardOptions {
 	detailHint: () => string;
+	/** Read the current native transcript padding when Pi rebuilds a custom entry renderer. */
+	getOutputPad: () => number;
 	/** Existing bounded/fenced runtime formatter, injected to keep UI independent of tool wiring. */
-	monitorLog: (record: MonitorLogRecord) => string;
+	processLog: (record: MonitorLogRecord) => string;
 }
 
 export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRenderer" | "registerEntryRenderer">, options: SessionCardOptions): void {
-	const sessionCard = (card: Card, expanded: boolean, theme: Theme, outputPad = 0): Component =>
-		createSessionCard(card, expanded, theme, options.detailHint, outputPad);
+	const sessionCard = (card: Card, expanded: boolean, theme: Theme, outputPad = 0, keyHint?: KeybindingHints["keyHint"], expansionKey?: object): Component =>
+		createCardFrame(card, {
+			expanded,
+			theme,
+			outputPad,
+			detailHint: keyHint ? () => keyHint("app.tools.expand", "to expand") : options.detailHint,
+			...(expansionKey ? { expansionKey } : {}),
+		});
 	for (const customType of ["pi-persona", "exocom_received"] as const) {
-		pi.registerMessageRenderer(customType, (message, { expanded, outputPad }, theme) => {
+		pi.registerMessageRenderer(customType, (message, { expanded, outputPad, keyHint }, theme) => {
 			const raw = typeof message.content === "string" ? message.content
 				: message.content.map((part) => part.type === "text" ? part.text : "[image]").join("\n");
 			const full = sanitizeTerminalText(raw);
+			const communication = parseCommunicationCardDetails(message.details);
+			if (communication && (communication.messages.length > 0 || communication.plane === "exocom")) {
+				const compact = communication.messages.length > 0
+					? (width: number) => { const result = communicationPreview(communication, width); return { ...result, truncated: result.truncated || result.text !== full }; }
+					: preview(full, 4, 100);
+				return sessionCard({ title: `${communication.plane} update · info`, state: "neutral", full, preview: compact }, expanded, theme, outputPad, keyHint, message);
+			}
 			const { state, status } = customType === "pi-persona" ? followUpState(full) : { state: "neutral" as const, status: "inbound" };
 			// Only the validated settlement envelope is a pi-persona report. Unknown is NOT
 			// Markdown: monitor stdout/stderr, timers and operational notices share this type.
 			const markdown = customType === "exocom_received" || status !== "info";
-			const projected = customType === "pi-persona" ? settlementPreview(full) : undefined;
+			const projected = customType === "pi-persona" ? settlementPreview(message.details) : undefined;
+			const fallback = preview(full, 4, 100);
 			return sessionCard({
-				title: customType === "pi-persona" ? `Update · ${status}` : "Exocom · inbound",
+				title: customType === "pi-persona" ? `${status === "info" ? "update" : "intercom update"} · ${status}` : "exocom update · info",
 				state, full, markdown,
-				preview: projected ?? preview(full, 4, 100),
-			}, expanded, theme, outputPad);
+				preview: projected ?? (customType === "pi-persona" && status !== "info" ? (width) => ({ ...fallback(width), truncated: true }) : fallback),
+			}, expanded, theme, outputPad, keyHint, message);
 		});
 	}
-	pi.registerEntryRenderer(MONITOR_LOG_ENTRY, (entry, { expanded }, theme) => {
-		const record = parseMonitorLogRecord(entry.data);
-		if (!record) return undefined;
-		const { state, status } = monitorState(record);
-		return sessionCard({
-			title: `Monitor · ${compactInlineText(record.entry.label)}`,
-			state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
-			full: sanitizeTerminalText(options.monitorLog(record)),
-			preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · monitor result`, truncated: true }),
-		}, expanded, theme);
-	});
-	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded }, theme) => {
+	for (const [entryType, source] of [[MONITOR_LOG_ENTRY, "monitor"], [SCRIPT_LOG_ENTRY, "script"]] as const) {
+		pi.registerEntryRenderer(entryType, (entry, { expanded, keyHint }, theme) => {
+			const record = parseMonitorLogRecord(entry.data);
+			if (!record) return undefined;
+			const { state, status } = monitorState(record);
+			return sessionCard({
+				title: `${source} · ${compactInlineText(record.entry.label)}`,
+				state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
+				full: sanitizeTerminalText(options.processLog(record)),
+				preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · ${source.toLowerCase()} result`, truncated: true }),
+			}, expanded, theme, options.getOutputPad(), keyHint, entry);
+		});
+	}
+	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
 		if (!data) return undefined;
-		const metadata = [compactInlineText(data.agent, { maxChars: 48 }), ...(data.model ? [compactInlineText(data.model, { maxChars: 96 })] : []), ...(data.durationMs !== undefined ? [formatDuration(data.durationMs)] : [])].join(" · ");
+		const metadata = [compactInlineText(data.agent, { maxChars: 48 }), ...(data.durationMs !== undefined ? [formatDuration(data.durationMs)] : [])].join(" · ");
 		return sessionCard({
-			title: `Failed · ${compactInlineText(data.label || data.agent, { maxChars: 80 })}`, state: "error", metadata,
-			full: `Run ${compactInlineText(data.id)}\n${sanitizeTerminalText(data.error)}`,
+			title: `failed · ${compactInlineText(data.label || data.agent, { maxChars: 80 })}`, state: "error", metadata,
+			full: `Run ${compactInlineText(data.id)}${data.model ? `\nModel: ${compactInlineText(data.model, { maxChars: 96 })}` : ""}\n${sanitizeTerminalText(data.error)}`,
 			preview: (width) => ({ text: compactVisibleText(summarizeFailure(data.error), { maxLines: 2, maxLineChars: Math.min(width, 100) }).text, truncated: true }),
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
-	pi.registerEntryRenderer<ResultEntry>("pi-persona-result", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<ResultEntry>("pi-persona-result", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
 		if (!data) return undefined;
 		const full = sanitizeTerminalText(data.content || "(no output)");
@@ -342,11 +150,11 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		const cause = compactVisibleText([data.failureKind, data.error].filter(Boolean).join(" · "), { maxLines: 1, maxLineChars: 80 }).text;
 		const label = compactInlineText(data.label ?? "", { maxChars: 96 });
 		return sessionCard({
-			title: `${label || "Result"} · ${status}${state === "error" && cause !== "(no output)" ? ` · ${cause}` : ""}`,
+			title: `${label || "result"} · ${status}${state === "error" && cause !== "(no output)" ? ` · ${cause}` : ""}`,
 			state, full, markdown: true, preview: preview(full, 3, 100),
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
-	pi.registerEntryRenderer<ContentEntry>("pi-persona-nudge", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<ContentEntry>("pi-persona-nudge", (entry, { expanded, keyHint }, theme) => {
 		if (!entry.data) return undefined;
 		const full = sanitizeTerminalText(entry.data.content || "⟢ pi-persona · checkpoint");
 		const lines = full.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -360,30 +168,31 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		const selected = [trigger, action].filter((line): line is string => line !== undefined);
 		const chosen = selected.length > 0 ? selected : details.slice(0, 2);
 		return sessionCard({
-			title: datum ? `Checkpoint · ${datum}` : "Checkpoint", state: "attention", full,
+			title: datum ? `checkpoint · ${datum}` : "checkpoint", state: "attention", full,
 			preview: (width) => {
 				const result = preview(chosen.join("\n"), 2, 100)(width);
 				return { text: result.text, truncated: result.truncated || details.some((line) => !chosen.includes(line)) };
 			},
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
-	pi.registerEntryRenderer<ContentEntry>("pi-persona-status", (entry, { expanded }, theme) => {
+	pi.registerEntryRenderer<ContentEntry>("pi-persona-status", (entry, { expanded, keyHint }, theme) => {
 		if (!entry.data) return undefined;
 		const full = sanitizeTerminalText(entry.data.content || "Async activity · routine check-in");
 		const stall = entry.data.kind === "stall";
 		const recovery = entry.data.kind === "recovery";
-		const event = stall ? "Stall warning" : recovery ? "Progress resumed" : "Status";
+		const event = stall ? "stalled" : recovery ? "resumed" : "running";
 		const digest = full.split("\n").slice(1).filter((line) => line.trim().length > 0);
-		const parsed = parseStatusRuns(full);
+		const labels = parseRunLabelDetails(entry.data);
+		const parsed = parseStatusRuns(full, labels);
 		return sessionCard({
 			title: parsed
-				? `${event} · ${parsed.running} running${parsed.queued > 0 ? ` · ${parsed.queued} queued` : ""}`
-				: `${event} · check-in`,
+				? `intercom update · ${event} · ${parsed.running} running${parsed.queued > 0 ? ` · ${parsed.queued} queued` : ""}`
+				: `intercom update · ${event}`,
 			state: stall ? "attention" : recovery ? "success" : "neutral", full,
-			preview: parsed ? statusPreview(full)! : (width) => {
+			preview: parsed ? statusPreview(full, labels)! : (width) => {
 				const result = preview(digest.slice(0, 2).join("\n") || full, 2, 140)(width);
 				return { text: result.text, truncated: result.truncated || digest.length > 2 };
 			},
-		}, expanded, theme);
+		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 }

@@ -36,6 +36,7 @@ function render(tool: ToolDefinition, result: { content: { type: "text"; text: s
 		args: {}, toolCallId: "host-call", invalidate() {}, lastComponent, state: {}, cwd: "/repo",
 		executionStarted: true, argsComplete: true, isPartial: false, expanded, showImages: false,
 		isError, durationMs: undefined, outputPad: 0,
+		keyText: () => "alt+e", keyHint: (_id: string, description: string) => `alt+e ${description}`,
 	});
 }
 function text(component: Component): string {

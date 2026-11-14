@@ -11,6 +11,35 @@ import assert from "node:assert/strict";
 
 import { InProcessBus, MAX_RETAINED_MESSAGE_CHARS, MAX_RETAINED_MESSAGES } from "../../../src/bus/inproc.ts";
 
+test("sender label is snapshotted and survives registration refresh and sender teardown", () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.register("operator#7", "Moss-native-tool-exposure");
+	bus.register("operator#7");
+	assert.equal(bus.send("operator#7", "supervisor", "hello"), true);
+	const [message] = bus.take("supervisor");
+	bus.unregister("operator#7");
+	bus.register("operator#7", "New name");
+	assert.equal(message?.fromLabel, "Moss-native-tool-exposure");
+	assert.equal(bus.retrieve(message!.id)?.fromLabel, "Moss-native-tool-exposure");
+});
+
+test("displayLabel reads registered bus identity, disambiguates collisions and never reroutes", () => {
+	const bus = new InProcessBus();
+	bus.register("operator#5", "Amber-runtime");
+	bus.register("operator#5");
+	assert.equal(bus.displayLabel("operator#5"), "Amber-runtime");
+	bus.register("other-handle", "Amber-runtime");
+	assert.equal(bus.displayLabel("operator#5"), "Amber-runtime [operator#5]");
+	assert.equal(bus.displayLabel("other-handle"), "Amber-runtime [other-handle]");
+	bus.unregister("other-handle");
+	assert.equal(bus.displayLabel("operator#5"), "Amber-runtime");
+	bus.unregister("operator#5");
+	assert.equal(bus.displayLabel("operator#5"), "operator#5", "live accessor cannot invent an alias after teardown");
+	assert.equal(bus.send("supervisor", "Amber-runtime", "no implicit alias routing"), false);
+	assert.deepEqual(bus.participants(), []);
+});
+
 test("send delivers a one-way message to a registered recipient, or fails for unknown", () => {
 	const bus = new InProcessBus();
 	bus.register("sup");

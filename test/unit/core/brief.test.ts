@@ -226,6 +226,29 @@ test("model sizing prioritizes neighbors before cost without treating naming or 
 	}
 });
 
+test("model fit guidance is shared across discovery availability and stays task-justified", () => {
+	for (const standing of [true, false]) {
+		for (const canListModels of [true, false]) {
+			const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing, background: true, canListModels }) ?? "";
+			assert.match(brief, /model capability and supported thinking effort independently.*task/i);
+			assert.match(brief, /effort.*bounded\/simple work.*higher effort for greater complexity/i);
+			assert.match(brief, /price.*not.*quality/i);
+			assert.match(brief, /aggregator|gateway/i);
+			assert.match(brief, /when delegation is useful.*small, task-justified number of workers/i);
+			assert.match(brief, /exact supervisor provider\/model/i);
+			assert.match(brief, /do not scan.*entire catalog/i);
+			assert.match(brief, /aggregator.*not one model family.*treat its models as one family/i);
+			assert.match(brief, /alternative only as a targeted task-fit choice or at the user's choice/i);
+			assert.match(brief, /saved per-persona role\/agent assignment/);
+			assert.match(brief, /only when explicitly authorized/);
+			assert.match(brief, /Never silently switch providers or billing routes/);
+			if (standing) assert.match(brief, /delegate bounded execution when it saves supervisor time or enables parallel progress/);
+			assert.doesNotMatch(brief, /always delegate|must use.*worker/i, "delegation remains opportunistic");
+			assert.doesNotMatch(brief, /permission.*granted|all agents available/i, "prompt does not promise capabilities");
+		}
+	}
+});
+
 test("model selection advice remains truthful in discovery, no-discovery, soft, and Exocom prompt variants", () => {
 	for (const standing of [true, false]) {
 		for (const canListModels of [true, false]) {
