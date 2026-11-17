@@ -15,6 +15,7 @@
 
 import type { Usage } from "@earendil-works/pi-ai";
 import { emptyUsage, type ChildUsage } from "../engine/stream.ts";
+import { parseTerminalResultRecord } from "../results/record.ts";
 import { TERMINAL_RESULT_ENTRY } from "../results/types.ts";
 
 /** Extension status key owned by pi-persona; pi-theme-1337 adds it to the frame $ . */
@@ -65,7 +66,8 @@ export function toolUsageField(u: ChildUsage): { usage: Usage } | Record<string,
  */
 export function formatPersonaCostStatus(u: ChildUsage): string | undefined {
 	if (!(u.cost > 0) || !Number.isFinite(u.cost)) return undefined;
-	return u.cost < 1 ? `$${u.cost.toFixed(3)}` : `$${u.cost.toFixed(2)}`;
+	const cost = u.cost.toFixed(u.cost < 1 ? 3 : 2);
+	return Number(cost) > 0 ? `$${cost}` : undefined;
 }
 
 function plus(a: ChildUsage, b: ChildUsage): ChildUsage {
@@ -99,27 +101,17 @@ function record(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-function count(value: unknown, optional: boolean): number | undefined {
-	if (value === undefined && optional) return 0;
+function count(value: unknown): number | undefined {
+	if (value === undefined) return 0;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
-
-/** A terminal record's cumulative usage, or undefined when it is not a well-formed count set. */
-function terminalUsage(value: unknown): ChildUsage | undefined {
-	const u = record(value);
-	if (!u) return undefined;
-	const input = count(u.input, false), output = count(u.output, false), cacheRead = count(u.cacheRead, true);
-	const cacheWrite = count(u.cacheWrite, true), cost = count(u.cost, true), turns = count(u.turns, true);
-	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined || cost === undefined || turns === undefined) return undefined;
-	return { input, output, cacheRead, cacheWrite, cost, contextTokens: 0, turns };
 }
 
 /** Pi's persisted tool-result `Usage` (the footer reads `cost.total`). */
 function toolResultUsage(value: unknown): ChildUsage | undefined {
 	const u = record(value);
 	if (!u) return undefined;
-	const input = count(u.input, true), output = count(u.output, true), cacheRead = count(u.cacheRead, true);
-	const cacheWrite = count(u.cacheWrite, true), cost = count(record(u.cost)?.total, true);
+	const input = count(u.input), output = count(u.output), cacheRead = count(u.cacheRead);
+	const cacheWrite = count(u.cacheWrite), cost = count(record(u.cost)?.total);
 	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined || cost === undefined) return undefined;
 	return { input, output, cacheRead, cacheWrite, cost, contextTokens: 0, turns: 0 };
 }
@@ -149,7 +141,7 @@ interface CountedRecord {
 /**
  * Rebuild the ledger from ONE session file's entries (all branches, like Pi's footer). Pure.
  *
- * Counted records: every `pi-persona-terminal-result` record carrying an `originRunId` — a tracker
+ * Counted records: every canonically valid `pi-persona-terminal-result` record carrying an `originRunId` — a tracker
  * run (`run-<n>`) or a top-level untracked root (`root:<uuid>`) — once per record identity (its
  * `ref`; the same record appended twice is one record). Two records sharing a run id are two runs:
  * ids repeated across owner generations before ids were made file-unique. A background
@@ -178,10 +170,10 @@ export function reconstructChildSpend(entries: readonly unknown[]): ChildSpendHi
 		const entry = record(raw);
 		if (!entry) continue;
 		if (entry.type === "custom" && entry.customType === TERMINAL_RESULT_ENTRY) {
-			const data = record(entry.data);
+			const data = parseTerminalResultRecord(entry.data);
 			const id = data?.originRunId, ref = data?.ref;
-			const usage = terminalUsage(data?.usage);
-			if (typeof id !== "string" || typeof ref !== "string" || !usage || byRef.has(ref)) continue;
+			if (!id || !ref || !data.usage || byRef.has(ref)) continue;
+			const usage: ChildUsage = { ...emptyUsage(), ...data.usage };
 			const counted: CountedRecord = { usage, billed: false };
 			records.push(counted);
 			byRef.set(ref, counted);

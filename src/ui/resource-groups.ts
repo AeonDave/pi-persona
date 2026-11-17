@@ -131,15 +131,18 @@ export function resourceSummary(nodes: readonly AgentNode[], collapsed: Readonly
 	}
 	const alerts = foldedAlerts(omitted, opts);
 	if (alerts.length) {
-		const digest = `⚠ folded delegates · ${foldedAlerts(allFolded, opts).join(" · ")}`;
+		const counts = foldedAlerts(allFolded, opts);
 		if (styled.length) {
 			const navigation = summary.findIndex((item) => item.kind === "overflow");
 			const lastDigest = summary.findLastIndex((item) => item.kind !== "node");
 			const index = navigation >= 0 ? navigation : lastDigest >= 0 ? lastDigest : styled.length - 1;
 			styled[index] = [
 				...summary[index]!.compactSpans,
-				{ text: " · ", token: "dim", keep: true },
-				{ text: digest, token: "warning", keep: true },
+				{ text: " · ⚠ folded delegates", token: "warning" },
+				...counts.flatMap((count) => [
+					{ text: " · ", token: "dim" as const, keep: true },
+					{ text: count, token: "warning" as const, keep: true },
+				]),
 				...(navigation >= 0 ? [{ text: " · F9 or /agents", token: "dim" as const }] : []),
 			];
 		}

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { emptyUsage } from "../../../src/engine/stream.ts";
+import { createTerminalResultRecord } from "../../../src/results/record.ts";
 import {
 	ChildUsageLedger,
 	reconstructChildSpend,
@@ -53,6 +54,15 @@ test("formatPersonaCostStatus matches pi-theme-1337's frame $0.423 / $2.50 conve
 	assert.equal(formatPersonaCostStatus(emptyUsage()), undefined);
 	assert.equal(formatPersonaCostStatus({ ...emptyUsage(), cost: 0.999 }), "$0.999");
 	assert.equal(formatPersonaCostStatus({ ...emptyUsage(), cost: 1.92 }), "$1.92");
+	assert.equal(formatPersonaCostStatus({ ...emptyUsage(), cost: 0.0005 }), "$0.001");
+});
+
+test("formatPersonaCostStatus clears a fully billed ledger's floating point residue", () => {
+	const ledger = new ChildUsageLedger();
+	for (const cost of [0.1, 0.2, 0.3]) ledger.add({ ...emptyUsage(), cost });
+	for (const cost of [0.3, 0.2, 0.1]) ledger.account({ ...emptyUsage(), cost });
+	assert.ok(ledger.pending().cost > 0, "different summation orders leave a floating point residue");
+	assert.equal(formatPersonaCostStatus(ledger.pending()), undefined);
 });
 
 test("ChildUsageLedger pending is engine-added spend not yet on a tool result", () => {
@@ -95,7 +105,7 @@ let refSeq = 0;
 /** A terminal record; every call is a DISTINCT record (fresh ref) unless `ref` is given. */
 const terminal = (runId: string | undefined, cost: number, ref = `result:00000000-0000-4000-8000-${String(++refSeq).padStart(12, "0")}`) => ({
 	type: "custom", customType: "pi-persona-terminal-result",
-	data: { version: 1, ref, originKey: `gen-${refSeq}:tracker:${runId}`, ...(runId ? { originRunId: runId } : {}), status: "done", agent: "scout", body: "x", provenance: "result-output", usage: { input: 10, output: 5, cost } },
+	data: createTerminalResultRecord({ originKey: `gen-${refSeq}:tracker:${runId}`, ...(runId ? { originRunId: runId } : {}), status: "done", agent: "scout", body: "x", provenance: "result-output", usage: { input: 10, output: 5, cost } }, ref, 1),
 });
 const refOf = (entry: ReturnType<typeof terminal>): string => entry.data.ref;
 const billing = (toolName: string, cost: number, details: Record<string, unknown>) => ({
@@ -111,6 +121,23 @@ test("reconstructChildSpend: an empty or unrelated history is zero", () => {
 	const history = reconstructChildSpend([{ type: "message", message: { role: "assistant", usage: { cost: { total: 9 } } } }, null, 7, { type: "custom", customType: "other", data: {} }]);
 	assert.equal(history.total.cost, 0);
 	assert.equal(history.billed.cost, 0);
+});
+
+test("reconstructChildSpend: corrupted terminal records cannot invent spend or hide a valid record", () => {
+	const valid = terminal("run-1", 0.5);
+	const corruptions = [
+		{ version: 999 },
+		{ ref: "not-a-result-ref" },
+		{ originRunId: "" },
+		{ originKey: "" },
+		{ usage: { input: 0.5, output: 0, cost: 7 } },
+		{ usage: { input: 0, output: 0, cost: Number.MAX_SAFE_INTEGER + 1 } },
+	];
+	for (const patch of corruptions) {
+		const corrupted = { ...valid, data: { ...valid.data, ...patch } };
+		assert.deepEqual(reconstructChildSpend([corrupted]).total, emptyUsage(), JSON.stringify(patch));
+		assert.equal(reconstructChildSpend([corrupted, valid]).total.cost, 0.5, "a rejected record cannot reserve the valid record's ref");
+	}
 });
 
 test("reconstructChildSpend: unbilled runs are pending; each billing path removes exactly its record", () => {

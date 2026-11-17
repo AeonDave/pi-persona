@@ -121,6 +121,11 @@ test("saturated folded batches retain alerts from omitted groups", () => {
 	const summary = resourceSummary(tree.snapshot(), collapsed, 8, { waitingForSupervisor: new Set(["waiter"]) });
 	assert.match(summary.lines.join("\n"), /1 failed/);
 	assert.match(summary.lines.join("\n"), /1 waiting/);
+	for (const width of [40, 30]) {
+		const painted = compactWidget(summary.styled, summary.targets)().render(width).join("\n");
+		assert.match(painted, /1 failed/, `failure remains visible at ${width} columns`);
+		assert.match(painted, /1 waiting/, `waiting remains visible at ${width} columns`);
+	}
 });
 
 test("folded alerts survive even when failure, active and navigation rows fill the summary", () => {

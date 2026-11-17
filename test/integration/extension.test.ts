@@ -49,6 +49,7 @@ import { parseTelemetryEvent } from "../../src/telemetry/contract.ts";
 import { makeEngine as makeThinkingChildEngine, type EngineAdapterDeps } from "../../src/engine/adapter.ts";
 import { makeInProcessEngine as makeThinkingInProcEngine, type InProcessDeps } from "../../src/engine/inproc.ts";
 import { emptyUsage, type ProgressSnapshot } from "../../src/engine/stream.ts";
+import { createTerminalResultRecord } from "../../src/results/record.ts";
 import type { AgentRunSpec, StrategyEngine } from "../../src/orchestration/sdk.ts";
 import { InProcessBus } from "../../src/bus/inproc.ts";
 import { makeBrokerClient } from "../../src/bus/broker/client.ts";
@@ -5927,8 +5928,9 @@ test("session_start rebuilds persona-cost from the session file; a fresh session
 	const costs: Array<string | undefined> = [];
 	const ui = { ...ctx.ui, setStatus: (id: string, value?: string) => { if (id === "persona-cost") costs.push(value); } };
 	const resumed = SessionManager.inMemory(os.tmpdir());
-	resumed.appendCustomEntry("pi-persona-terminal-result", { ref: "result:00000000-0000-4000-8000-000000000007", originRunId: "run-7", originKey: "g:tracker:run-7", usage: { input: 10, output: 2, cost: 0.42 } });
-	resumed.appendCustomEntry("pi-persona-terminal-result", { ref: "result:00000000-0000-4000-8000-000000000008", originRunId: "run-8", originKey: "g:tracker:run-8", usage: { input: 10, output: 2, cost: 0.1 } });
+	resumed.appendCustomEntry("pi-persona-terminal-result", createTerminalResultRecord({ originRunId: "run-7", originKey: "g:tracker:run-7", status: "done", agent: "scout", body: "report", provenance: "result-output", usage: { input: 10, output: 2, cost: 0.42 } }, "result:00000000-0000-4000-8000-000000000007", 1));
+	resumed.appendCustomEntry("pi-persona-terminal-result", createTerminalResultRecord({ originRunId: "run-8", originKey: "g:tracker:run-8", status: "done", agent: "scout", body: "report", provenance: "result-output", usage: { input: 10, output: 2, cost: 0.1 } }, "result:00000000-0000-4000-8000-000000000008", 1));
+	resumed.appendCustomEntry("pi-persona-terminal-result", { version: 999, ref: "invalid", originRunId: "", usage: { input: 0, output: 0, cost: 7 } });
 	resumed.appendMessage({ role: "toolResult", toolCallId: "c8", toolName: "intercom", content: [], details: { action: "result", ok: true, runId: "run-8" }, isError: false, timestamp: 1,
 		usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1 } } } as any);
 	await m.fire("session_start", { reason: "resume" }, { ...ctx, ui, sessionManager: resumed });

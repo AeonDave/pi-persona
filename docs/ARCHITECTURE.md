@@ -1238,7 +1238,7 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
 
 ## Companion status keys
 
-pi-persona publishes three extension statuses for a companion UI to read through Pi's footer data:
+This companion contract covers three extension statuses published by pi-persona through Pi's footer data:
 `persona` (the compact label of the active persona) and the two below. Companions only read them;
 pi-persona owns all three. pi-theme-1337 reads `persona` and `persona-cost`, and — for its
 end-of-run summary and terminal title only — `persona-background`.
@@ -1254,15 +1254,15 @@ end-of-run summary and terminal title only — `persona-background`.
   as the widget and published only when the text changes, so arming, firing, cancelling, finishing
   and every agent start/settle update it within one 16 ms frame.
 - **`persona-cost`** — child spend that is NOT on a supervisor tool result yet (and so not in Pi's
-  footer): `$0.423` below one dollar, `$2.50` from one dollar, cleared when zero. The
+  footer): `$0.423` below one dollar, `$2.50` from one dollar, cleared when it rounds to zero. The
   `ChildUsageLedger` adds every engine run and bills a tracker run once per instance (keyed by run
   id) when its usage is attached to a `delegate` / `council` / `flow` / `intercom result` tool
   result. On every `session_start` (startup, reload, new, resume, fork) the ledger is rebuilt once
   from the new session's `getEntries()` (`reconstructChildSpend`) — all branches, the scope Pi's
   footer sums. Only the two sums are restored, never billed run ids: a restarted instance cannot
   collect a historical run, so history never vetoes billing a new run.
-  - *Counted records*: each `pi-persona-terminal-result` record carrying an `originRunId` — a
-    tracker run (`run-<n>`) or a top-level untracked root (`root:<uuid>`, below) — once per record
+  - *Counted records*: each canonically valid `pi-persona-terminal-result` record carrying an
+    `originRunId` — a tracker run (`run-<n>`) or a top-level untracked root (`root:<uuid>`, below) — once per record
     identity, its `ref` (the same record twice is one record; two records sharing a run id are two
     runs). Per-leg/per-phase records carry no `originRunId` and are never added beside the run or
     root aggregate.
@@ -1278,8 +1278,8 @@ end-of-run summary and terminal title only — `persona-background`.
     was added.
   - *Invariant* (property-tested over random runs, collections, forks with reused ids and restarts):
     rebuilt pending = Σ counted records' usage − Σ usage of the counted records a billing claims,
-    never negative in any field, and LIVE == REBUILT: the published text is identical before and
-    after a restart, outside the under-counts listed below.
+    never negative in any field. Live and rebuilt totals agree within floating-point precision,
+    outside the under-counts listed below; different summation orders may leave a rounding residue.
   - *Run ids the file names are never reissued*: before any launch, `session_start` continues the
     tracker counter past the highest `run-<n>` the file names (`highestIssuedRun`), then past this
     session's own shutdown entry. Read, whatever session id wrote them: terminal records'

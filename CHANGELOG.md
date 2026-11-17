@@ -57,6 +57,12 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Folded delegate failures and pending asks keep their `N failed` / `N waiting` alerts visible
+  at 30- and 40-column widget widths by shortening the descriptive label first.
+- Cost reconstruction uses the terminal archive's canonical record parser: malformed records
+  cannot invent spend or reserve the reference of a later valid record.
+- Pending costs that round to zero clear their status instead of leaving a `$0.000` ghost
+  after fully billed runs settle in a different summation order.
 - A flow checkpoint whose phase id imitated the queued or stall wording no longer made its run read
   `queued` or stalled on a check-in card: both are recognized only as the whole runtime suffix of the
   run's line.
