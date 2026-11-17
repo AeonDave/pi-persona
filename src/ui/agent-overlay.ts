@@ -205,7 +205,8 @@ export class AgentOverlay extends Container {
 		}
 		const inner = this.inner();
 		const t = this.theme;
-		const b = (s: string): string => t.fg("accent", s);
+		// Frame lines use the host dialogs' `border` token, so a theme tunes them apart from highlights.
+		const b = (s: string): string => t.fg("border", s);
 		const framed = super.render(inner).map((line) => {
 			const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));
 			return `${b("│")} ${line}${pad} ${b("│")}`;

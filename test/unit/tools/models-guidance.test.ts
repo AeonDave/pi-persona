@@ -71,7 +71,8 @@ test("models shortlist and empty results carry a purpose-bearing collapsed line"
 	const shortlist = await catalogResult(tool);
 	const card = renderCard(tool, shortlist, false);
 	assert.match(card, /30 catalog models/);
-	assert.match(card, /showing 1 nearby candidates/);
+	assert.match(card, /showing 1 nearby candidate\s*$/m, "the count agrees with its noun");
+	assert.doesNotMatch(card, /^models · /, "the call line above already says models");
 	assert.doesNotMatch(card, /a\/b/);
 
 	const empty = await modelsHarness(() => ({ lines: [], total: 0, capped: false, shortlist: false })).execute("call", { query: "sonnet" }, undefined, undefined, { cwd: "D:/project" });

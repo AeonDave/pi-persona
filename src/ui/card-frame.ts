@@ -53,6 +53,8 @@ const COLORS: Record<CardFrameState, { bg: ThemeBg; fg: ThemeColor }> = {
 };
 
 const INDENT = "  ";
+/** Every clip in a card ends the same way (pi-tui's default would end it in "..."). */
+const ELLIPSIS = "…";
 const expansionStates = new WeakMap<object, { lastHostExpanded: boolean; expanded: boolean }>();
 
 /** Render one semantic card without owning its source data, status, or lifecycle. */
@@ -89,8 +91,8 @@ export function createCardFrame(card: CardFramePresentation, context: CardFrameC
 				padding: outputPad,
 				background: colors.bg,
 				header: (width) => [
-					theme.fg(colors.fg, theme.bold(truncateToWidth(title, width))),
-					...(metadata ? [theme.fg("dim", truncateToWidth(metadata, width))] : []),
+					theme.fg(colors.fg, theme.bold(truncateToWidth(title, width, ELLIPSIS))),
+					...(metadata ? [theme.fg("dim", truncateToWidth(metadata, width, ELLIPSIS))] : []),
 				].join("\n"),
 			});
 		}
@@ -110,19 +112,26 @@ export function createCardFrame(card: CardFramePresentation, context: CardFrameC
 				const hidden = preview !== undefined && previewClipped(preview, contentWidth);
 				const bodyLines = (titleOnly ? [] : sanitizeTerminalText(body || "(no output)").split("\n")).map((line) => isExpanded
 					? theme.fg("toolOutput", line)
-					: theme.fg("toolOutput", `${bodyPad}${truncateToWidth(line, contentWidth)}`));
+					: theme.fg("toolOutput", `${bodyPad}${truncateToWidth(line, contentWidth, ELLIPSIS)}`));
+				// The expand hint rides on the title row, `title (ctrl+o to expand)`, only when the whole
+				// title fits beside it: a title's counts are never clipped to make room. Otherwise the
+				// hint takes its own row, as the last one.
+				const hint = hidden ? compactInlineText(detailHint(), { maxChars: MAX_COLLAPSED_CARD_COLUMNS }) : "";
+				const titleHint = hint ? ` (${hint})` : "";
+				const hintOnTitle = titleHint !== "" && visibleWidth(title) + visibleWidth(titleHint) <= innerWidth;
+				const titleLine = hintOnTitle
+					? `${theme.fg(colors.fg, theme.bold(title))}${theme.fg("dim", titleHint)}`
+					: theme.fg(colors.fg, theme.bold(truncateToWidth(title, innerWidth, ELLIPSIS)));
 				const lines = [
-					theme.fg(colors.fg, theme.bold(truncateToWidth(title, innerWidth))),
-					...(metadata ? [theme.fg("dim", truncateToWidth(`${bodyPad}${metadata}`, innerWidth))] : []),
+					titleLine,
+					...(metadata ? [theme.fg("dim", truncateToWidth(`${bodyPad}${metadata}`, innerWidth, ELLIPSIS))] : []),
 					...bodyLines,
-					...(hidden ? [theme.fg("dim", truncateToWidth(
-						compactInlineText(detailHint(), { maxChars: MAX_COLLAPSED_CARD_COLUMNS }), innerWidth,
-					))] : []),
+					...(hint && !hintOnTitle ? [theme.fg("dim", truncateToWidth(hint, innerWidth, ELLIPSIS))] : []),
 				];
 				// Text owns wrapping and full-row padding/background, including embedded foreground resets.
 				// A terminal narrower than a single wide glyph cannot display that glyph; clip only there.
 				return new Text(lines.join("\n"), padding, 0, (text) => theme.bg(colors.bg, text))
-					.render(width).map((line) => truncateToWidth(line, width));
+					.render(width).map((line) => truncateToWidth(line, width, ELLIPSIS));
 			},
 		};
 	};

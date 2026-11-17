@@ -117,8 +117,11 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			if (!isArm || expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
 			const left = fireAt - Date.now();
 			const due = left > 0 ? `fires in ${formatDuration(left)}` : "due now";
-			const summary = compactInlineText(`${details.label ?? details.id ?? "alarm"} · ${due}`, { maxChars: 140 });
-			return new Text(`${theme.fg("toolTitle", theme.bold("armed "))}${theme.fg("accent", summary)}`, 0, 0);
+			// The label is optional (it defaults to the id): repeat it only when the call line did not show it.
+			const name = compactInlineText(details.label ?? details.id ?? "alarm", { maxChars: 96 });
+			const callLabel = typeof context?.args?.label === "string" ? compactInlineText(context.args.label, { maxChars: 96 }) : "";
+			const summary = callLabel && callLabel === name ? ` · ${due}` : ` ${compactInlineText(`${name} · ${due}`, { maxChars: 140 })}`;
+			return new Text(`${theme.fg("toolTitle", theme.bold("armed"))}${theme.fg("accent", summary)}`, 0, 0);
 		},
 	});
 }

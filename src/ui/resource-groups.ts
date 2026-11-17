@@ -1,5 +1,6 @@
 import type { AgentNode, RenderOptions } from "./agent-tree.ts";
 import { flattenTree, isStalledNode, projectAgentTreeSummary, type FlatRow } from "./agent-tree.ts";
+import { rowText, type StyledRow } from "./styled-row.ts";
 
 export type ResourceKind = "timer" | "monitor" | "script";
 export const RESOURCE_GROUP_IDS: Record<ResourceKind, string> = {
@@ -55,9 +56,20 @@ function foldedAlerts(descendants: AgentNode[], opts: RenderOptions): string[] {
 
 /** Hide all descendants while keeping actionable aggregate signals on a folded delegate root. */
 export function foldedRows(nodes: AgentNode[], collapsed: ReadonlySet<string>, opts: RenderOptions = {}): FlatRow[] {
+	const { rows, alerts } = foldRows(nodes, collapsed, opts);
+	return rows.map((row) => {
+		const leading = alerts.get(row.node.id);
+		return leading ? { ...row, node: { ...row.node, detail: [...leading, row.node.detail].filter(Boolean).join(" · ") } } : row;
+	});
+}
+
+/** The folding walk with each folded root's alerts kept apart from its detail, so the widget can
+ *  paint them as attention spans that survive clipping. */
+function foldRows(nodes: AgentNode[], collapsed: ReadonlySet<string>, opts: RenderOptions): { rows: FlatRow[]; alerts: Map<string, string[]> } {
 	const flat = flattenTree(nodes);
 	const hiddenDepths: number[] = [];
-	return flat.flatMap((row, index) => {
+	const alerts = new Map<string, string[]>();
+	const rows = flat.flatMap((row, index) => {
 		while (hiddenDepths.length && hiddenDepths[hiddenDepths.length - 1]! >= row.depth) hiddenDepths.pop();
 		if (hiddenDepths.length) return [];
 		if (!collapsed.has(row.node.id) || !isFoldableRow(row.node, nodes)) return [row];
@@ -65,10 +77,11 @@ export function foldedRows(nodes: AgentNode[], collapsed: ReadonlySet<string>, o
 		if (row.node.kind !== "delegate") return [row];
 		let end = index + 1;
 		while (end < flat.length && flat[end]!.depth > row.depth) end++;
-		const descendants = flat.slice(index + 1, end).map((item) => item.node);
-		const alerts = foldedAlerts(descendants, opts);
-		return [{ ...row, node: { ...row.node, detail: [...alerts, row.node.detail].filter(Boolean).join(" · ") } }];
+		const found = foldedAlerts(flat.slice(index + 1, end).map((item) => item.node), opts);
+		if (found.length) alerts.set(row.node.id, found);
+		return [row];
 	});
+	return { rows, alerts };
 }
 
 /** Presentation-only categories; the runtime tree and its stop/telemetry identifiers stay intact. */
@@ -85,14 +98,18 @@ export function projectResourceGroups(nodes: readonly AgentNode[]): AgentNode[] 
 	return result;
 }
 
-/** Keep click targets aligned with the actual bounded summary, including synthetic digest rows. */
-export function resourceSummary(nodes: readonly AgentNode[], collapsed: ReadonlySet<string>, maxRows: number, opts: RenderOptions = {}): { lines: string[]; targets: (string | undefined)[] } {
+/** Keep click targets aligned with the actual bounded summary, including synthetic digest rows.
+ *  `styled[i]` paints `lines[i]` (`rowText(styled[i]) === lines[i]`); `targets[i]` is its control.
+ *  Only collapsed controls are reserved: an expanded group header whose children fall below the
+ *  fold folds into the wake digest, so its row goes to legs. */
+export function resourceSummary(nodes: readonly AgentNode[], collapsed: ReadonlySet<string>, maxRows: number, opts: RenderOptions = {}): { lines: string[]; targets: (string | undefined)[]; styled: StyledRow[] } {
 	const all = projectResourceGroups(nodes);
-	const projected = foldedRows(all, collapsed, opts).map((row) => row.node);
+	const folded = foldRows(all, collapsed, opts);
+	const projected = folded.rows.map((row) => row.node);
 	const flat = flattenTree(projected);
-	const preferred = flat.filter((row) => isResourceGroup(row.node.id) || (row.node.kind === "delegate" && collapsed.has(row.node.id))).map((row) => row.node.id);
-	const summary = projectAgentTreeSummary(projected, maxRows, opts, preferred);
-	const lines = summary.map((row) => row.text);
+	const preferred = flat.filter((row) => collapsed.has(row.node.id) && (isResourceGroup(row.node.id) || row.node.kind === "delegate")).map((row) => row.node.id);
+	const summary = projectAgentTreeSummary(projected, maxRows, { ...opts, alerts: folded.alerts }, preferred);
+	const styled: StyledRow[] = summary.map((row) => row.spans);
 	const targets = summary.map((item) => {
 		const node = item.nodeId ? all.find((candidate) => candidate.id === item.nodeId) : undefined;
 		return node && isFoldableRow(node, all) ? node.id : undefined;
@@ -115,17 +132,21 @@ export function resourceSummary(nodes: readonly AgentNode[], collapsed: Readonly
 	const alerts = foldedAlerts(omitted, opts);
 	if (alerts.length) {
 		const digest = `⚠ folded delegates · ${foldedAlerts(allFolded, opts).join(" · ")}`;
-		if (lines.length) {
+		if (styled.length) {
 			const navigation = summary.findIndex((item) => item.kind === "overflow");
 			const lastDigest = summary.findLastIndex((item) => item.kind !== "node");
-			const index = navigation >= 0 ? navigation : lastDigest >= 0 ? lastDigest : lines.length - 1;
-			const brief = summary[index]!.compact;
-			lines[index] = `${brief} · ${digest}${navigation >= 0 ? " · F9 or /agents" : ""}`;
+			const index = navigation >= 0 ? navigation : lastDigest >= 0 ? lastDigest : styled.length - 1;
+			styled[index] = [
+				...summary[index]!.compactSpans,
+				{ text: " · ", token: "dim", keep: true },
+				{ text: digest, token: "warning", keep: true },
+				...(navigation >= 0 ? [{ text: " · F9 or /agents", token: "dim" as const }] : []),
+			];
 		}
 	}
-	for (let i = 0; i < lines.length; i++) {
+	for (let i = 0; i < styled.length; i++) {
 		const id = targets[i];
-		if (id) lines[i] = `${collapsed.has(id) ? "▸" : "▾"} ${lines[i]}`;
+		if (id) styled[i] = [{ text: `${collapsed.has(id) ? "▸" : "▾"} `, token: "muted" }, ...styled[i]!];
 	}
-	return { lines, targets };
+	return { lines: styled.map(rowText), targets, styled };
 }

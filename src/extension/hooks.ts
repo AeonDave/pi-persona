@@ -12,7 +12,7 @@ import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { HANDOFF_TOOL_NAMES, longWaitSeconds, type DelegationNudge, type PersistenceNudge, type PollGuard } from "../core/nudge.ts";
-import { findStoredRuns, makeRunsEntry, restoreNotice, RUNS_ENTRY_CUSTOM_TYPE } from "../core/session-runs.ts";
+import { findStoredRuns, highestIssuedRun, makeRunsEntry, restoreNotice, RUNS_ENTRY_CUSTOM_TYPE } from "../core/session-runs.ts";
 import { buildSessionAnchor } from "../core/time.ts";
 import { readClockSnapshot } from "./clock.ts";
 import { type AsyncRun, type AsyncRunTracker, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
@@ -125,7 +125,7 @@ export interface HookHost {
 	intercomRecipient(input: Record<string, unknown>, askId: string | undefined): string;
 	idleDelivery: unknown;
 	drainBusBlock: () => string;
-	childUsage: { reset(): void };
+	childUsage: { restore(entries: readonly unknown[]): void };
 	publishPersonaCost: () => void;
 }
 
@@ -175,10 +175,14 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 	function announceLostWork(ctx: ExtensionContext): void {
 		try {
 			const manager = ctx.sessionManager;
-			const stored = findStoredRuns(manager.getEntries(), manager.getSessionId());
-			if (!stored) return;
-			h.tracker.continueFrom(stored.issued);
+			const entries = manager.getEntries();
+			// Before any launch: past every run id the FILE names (a fork or a crash leaves no entry for
+			// this session id), then past this session's own shutdown entry (the normal resume path).
+			h.tracker.continueFrom(highestIssuedRun(entries));
+			const stored = findStoredRuns(entries, manager.getSessionId());
+			if (stored) h.tracker.continueFrom(stored.issued);
 			restoredIssued = h.tracker.issued;
+			if (!stored) return;
 			const notice = restoreNotice(stored.lost);
 			if (!notice) return;
 			pi.sendMessage({ customType: "pi-persona", content: notice, display: true }, { deliverAs: "nextTurn" }); // passive: never starts a turn
@@ -195,7 +199,12 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.lastCtx = ctx;
 		h.results.activate(ctx);
 		h.delegationNudge.reset(); // a fresh session starts with a clean by-hand run
-		h.childUsage.reset();
+		// Every start reason rebuilds from THIS session file (all branches, like Pi's footer): a new
+		// session is empty, a resume/restart/fork shows what its own history records. Once per start,
+		// never on a render path; an unreadable history degrades to zero, never to a failed start.
+		let history: readonly unknown[] = [];
+		try { history = ctx.sessionManager?.getEntries() ?? []; } catch { /* zero, not a broken start */ }
+		h.childUsage.restore(history);
 		h.publishPersonaCost();
 		announceLostWork(ctx);
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —

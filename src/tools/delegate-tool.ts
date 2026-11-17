@@ -875,11 +875,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				const ids = details.runIds?.length ? details.runIds.slice(0, 3) : [details.runId as string];
 				const omitted = (details.runIds?.length ?? 0) - ids.length;
 				const dropped = details.dropped ? ` · ${details.dropped} task${details.dropped === 1 ? "" : "s"} dropped (max children)` : "";
-				return new Text(`${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", `launched ${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
+				// The call line above already says "delegate"; the receipt carries only what happened.
+				return new Text(`${theme.fg("toolTitle", theme.bold("launched "))}${theme.fg("accent", `${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
 			}
 			if (isError) {
 				const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
-				return new Text(`${theme.fg("error", theme.bold("delegate failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
+				return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
 			return new Text(theme.fg("toolOutput", compactVisibleText(text, { maxLines: 4, maxLineChars: 100 }).text), 0, 0);
 		},

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createEventBus, SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import piPersona, { inFlightAgentCount } from "../../../src/extension.ts";
+import piPersona from "../../../src/extension.ts";
 import { ACTIVITY_EVENT, COMPANION_EVENT, parseCompanionActivity, type CompanionPresence } from "../../../src/core/companion.ts";
 import { installActivityIngress } from "../../../src/extension/companion.ts";
-import { AgentTree, isNonAgentNode, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, inFlightAgentCount, isNonAgentNode, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
 
 const activity = { version: 1, producerId: "pi-persona-mind", activityId: "operation-1", sessionId: "session-one", phase: "inspect", state: "running", target: "project" };
 

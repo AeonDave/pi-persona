@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { inFlightAgentCount } from "../../../src/extension.ts";
+import { inFlightAgentCount } from "../../../src/ui/agent-tree.ts";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 import { Semaphore } from "../../../src/orchestration/parallel.ts";

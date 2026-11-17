@@ -202,8 +202,37 @@ test("a failed settled council still shows its saved requested models and effort
 	const result = await h.headless({ question: "q", strategy: "fanout", members: ["reviewer"] });
 	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
 	const rendered = h.tool.renderResult(result, { expanded: false }, theme).render(200).join("\n");
-	assert.match(rendered, /council failed/);
+	assert.match(rendered, /^failed · provider unavailable/, "the call line names the council; the heading names the outcome");
 	assert.match(rendered, /requested model openai\/requested.*requested effort xhigh/);
+});
+
+test("the council launch receipt repeats only what the call line could not show", async () => {
+	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+	const receipt = (args: Record<string, unknown>, details: Record<string, unknown>, withArgs = true) => {
+		const h = councilHarness();
+		const result = { content: [{ type: "text", text: "Launched council run-5 (…) in the background" }], details: { launch: { participants: [] }, ...details }, isError: false };
+		const call = h.tool.renderCall(args, theme).render(200).join("\n").trimEnd();
+		const line = h.tool.renderResult(result, { expanded: false }, theme, { isError: false, ...(withArgs ? { args } : {}) }).render(200)[0]!.trimEnd();
+		return { call, line };
+	};
+	const explicit = receipt({ question: "q", strategy: "debate", roster: "security-board" }, { runId: "run-5", strategy: "debate", roster: "security-board" });
+	assert.equal(explicit.call, "council debate · security-board");
+	assert.equal(explicit.line, "launched run-5", "strategy and roster are already on the call line");
+	// Omitted defaults: the call line says "profile defaults · profile roster", so the resolved
+	// values are new facts — and a roster named after its strategy is said once, like the call label.
+	const defaults = receipt({ question: "q" }, { runId: "run-5", strategy: "magi", roster: "magi" });
+	assert.equal(defaults.call, "council profile defaults · profile roster");
+	assert.equal(defaults.line, "launched run-5 · magi");
+	const rosterOnly = receipt({ question: "q", strategy: "debate" }, { runId: "run-5", strategy: "debate", roster: "security-board" });
+	assert.equal(rosterOnly.line, "launched run-5 · security-board");
+	// Without the call's args (an older renderer context) nothing can be proven shown: keep both.
+	assert.equal(receipt({}, { runId: "run-5", strategy: "debate", roster: "security-board" }, false).line, "launched run-5 · debate · security-board");
+	for (const width of [100, 60]) {
+		const h = councilHarness();
+		const args = { question: "q", strategy: "debate", roster: "security-board" };
+		const rows = h.tool.renderResult({ content: [{ type: "text", text: "Launched" }], details: { runId: "run-5", strategy: "debate", roster: "security-board", launch: { participants: [] } } }, { expanded: false }, theme, { isError: false, args }).render(width);
+		assert.ok(rows.every((row: string) => row.length <= width), `width ${width}`);
+	}
 });
 
 test("pending council setup stays immediate and explicit while its original snapshot survives headless settlement", async () => {

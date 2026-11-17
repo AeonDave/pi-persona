@@ -344,3 +344,14 @@ test("escape and Ctrl+C cancel; empty options stay safe", () => {
 		assert.deepEqual(p.results, [undefined]);
 	}
 });
+
+test("the picker frame uses the host dialogs' border token; title and selection keep accent", () => {
+	const tagged = { fg: (role: string, text: string) => `<${role}>${text}`, bold: (text: string) => text } as Theme;
+	const rows = picker(["p/alpha", "p/beta"], {}, "Pick a model", tagged).component.render(80);
+	assert.match(rows[0]!, /^<border>┌─+┐$/);
+	assert.match(rows.at(-1)!, /^<border>└─+┘$/);
+	for (const row of rows.slice(1, -1)) assert.match(row, /^<border>│ .* <border>│$/, row);
+	assert.ok(rows.some((row) => row.includes("<accent>Pick a model")), "the title keeps accent");
+	assert.ok(rows.some((row) => /<accent>▸ /.test(row)), "the selected row keeps accent");
+	assert.doesNotMatch(rows.join("\n"), /<accent>[┌└│]/, "no frame line is painted with accent");
+});

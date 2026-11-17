@@ -73,9 +73,9 @@ and trust diagnostics. A receipt confirms submission, not that the worker follow
   stall card and `/peek`, "stalled" is stricter: 90 seconds with no assistant output, tokens, turns or
   completed tool call, so a tool that only streams output (`npm run dev`, `tail -f`) is flagged too. It is
   advice only: nothing is killed. The collapsed warning shows the quiet duration; a later
-  `intercom update · resumed` card records new observed progress once per reported episode, without claiming
-  completion. Stall and completion cards use that same heading with their own states.
-  Ordinary progress stays in the live view; periodic `intercom update · running` cards are off by default
+  `resumed · 1 running` card records new observed progress once per reported episode, without claiming
+  completion. Stall (`stalled · …`) and completion (`settled · …`) cards name their own events.
+  Ordinary progress stays in the live view; periodic `check-in · …` cards are off by default
   and may be enabled with the progress check-in interval in `/persona-settings`.
   A parent is waiting only when all its live descendant branches are waiting. Enter on a group opens
   a scrollable overview of its worker legs, with separate queued/running/terminal counts, model,

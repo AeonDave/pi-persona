@@ -81,9 +81,10 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as { ok?: boolean; label?: string; mode?: string; expiresAtEpochMs?: number };
+			// A successful arm always had a label, and the call line above already shows it.
 			return renderProcessStartResult(result, { expanded }, theme, context,
 				typeof details.label === "string" && (details.mode === "output" || details.mode === "exit")
-					? { verb: "armed", label: details.label, mode: details.mode, ...(details.expiresAtEpochMs === undefined ? {} : { expiresAtEpochMs: details.expiresAtEpochMs }) }
+					? { verb: "armed", mode: details.mode, ...(details.expiresAtEpochMs === undefined ? {} : { expiresAtEpochMs: details.expiresAtEpochMs }) }
 					: undefined);
 		},
 	});

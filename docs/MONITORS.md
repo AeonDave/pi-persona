@@ -92,7 +92,7 @@ model wake or consume an output-event allowance. `⏎` opens the command, cwd, t
 lines (monitor), or the fire time and message (timer); `x` cancels that
 one item like `monitor cancel` / `timer cancel` / `script stop`. These are rows, not agents: no steer, `X` stop-all
 skips them (`intercom stop { to: "all" }` likewise leaves them alone; cancel with `monitor cancel` /
-`timer cancel` / `script stop` or `x`), and they never count in `N agents` or reach agent telemetry. A finished row settles
+`timer cancel` / `script stop` or `x`), and they never count as agents (the `persona-background` status gives them their own `monitors=` / `timers=` / `scripts=` counts) or reach agent telemetry. A finished row settles
 and leaves like an async run: its final ✓/✗/■ goes to the tree change stream (telemetry excluded), not
 to the screen.
 

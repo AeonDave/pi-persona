@@ -266,7 +266,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   The bus snapshots the registered alias on each envelope, including broker workers. Intercom/Exocom
   compact messages share `ui/communication-card.ts`; expanded content remains the canonical delivered
   source. Model metadata belongs in launch details/F9 and expanded communication diagnostics.
-  Completion, stall and recovery share lowercase `intercom update` headings. Keep these projections
+  Completion, check-in, stall and recovery titles name their event (`settled`, `check-in`, `stalled`,
+  `resumed`) with the counts once; the expand hint rides on the title row when the whole title and
+  hint fit, otherwise it takes the last row. Keep these projections
   in `ui/session-cards.ts`, with the shared frame and native tool expansion/click handling. Custom
   message/entry consumers opt into shared primary-click expansion with `CardFrameContext.expansionKey`
   (stable envelope object); native tool consumers omit it. The frame keeps only weakly keyed booleans.
@@ -275,7 +277,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Runtime metadata guidance belongs in the stable supervisor system prompt, not a new user-like
   acknowledgement message. Keep initial setup/actionable asks working, preserve user-visible history,
   and never re-inject a chosen identity. Progress `tokens` is cumulative input/output usage, not live
-  context occupancy; labels must make that distinction explicit.
+  context occupancy; the model-facing digest and expanded cards say so explicitly, while compact rows
+  use the agent widget's `tok` unit.
 
 - Session clock and event wakes: `timer now` refreshes the run-start clock snapshot; timer alarms
   require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs
@@ -286,7 +289,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   agents): `src/ui/wake-rows.ts` is the pure projection, fed by the core seams `TimerScheduler`
   `onArmed`/`onCancelled`, `MonitorManager` `onArmed`/`onRemoved` and `createMonitorSession`'s `observe`
   option (a terminal event is observed before the permission gate). A countdown replaces the stall clock; `x`
-  cancels one via the stop registry; `X`, the `N agents` count and telemetry exclude them.
+  cancels one via the stop registry; `X`, the agent count and telemetry exclude them. The one
+  `persona-background` status counts them per kind beside in-flight agents (`ui/agent-tree.ts`;
+  contract with `persona-cost` in `docs/ARCHITECTURE.md#companion-status-keys`).
   `script` runs asynchronous exit-only jobs using the same process lifecycle, with a separate
   session, ID namespace and `pi-persona-script-log` archive. It accepts executable/args or inline
   Pi shell source; both script and bash permissions are required. `resource-groups.ts` adds

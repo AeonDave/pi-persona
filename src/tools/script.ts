@@ -86,9 +86,10 @@ export function registerScriptTool(pi: ExtensionAPI, d: ScriptToolDeps): void {
 		},
 		renderResult(result, options, theme, context) {
 			const details = (result.details ?? {}) as { ok?: boolean; label?: string; expiresAtEpochMs?: number };
+			// A successful run always had a label, and the call line above already shows it.
 			return renderProcessStartResult(result, options, theme, context,
 				details.ok === true && typeof details.label === "string"
-					? { verb: "started", label: details.label, ...(details.expiresAtEpochMs === undefined ? {} : { expiresAtEpochMs: details.expiresAtEpochMs }) }
+					? { verb: "started", ...(details.expiresAtEpochMs === undefined ? {} : { expiresAtEpochMs: details.expiresAtEpochMs }) }
 					: undefined);
 		},
 	});

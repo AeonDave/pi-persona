@@ -57,8 +57,9 @@ export function registerModelsTool(pi: ExtensionAPI, d: ModelsToolDeps): void {
 			const shown = typeof details.shown === "number" && Number.isFinite(details.shown) ? details.shown : 0;
 			const summary = shown === 0
 				? "no catalog matches"
-				: `${total} catalog models · showing ${shown}${details.shortlist ? " nearby candidates" : " matches"}`;
-			return new Text(`${theme.fg("toolTitle", theme.bold("models · "))}${theme.fg("accent", compactInlineText(summary, { maxChars: 96 }))}`, 0, 0);
+				: `${total} catalog model${total === 1 ? "" : "s"} · showing ${shown}${details.shortlist ? ` nearby candidate${shown === 1 ? "" : "s"}` : ` match${shown === 1 ? "" : "es"}`}`;
+			// The call line above already says "models <query>"; the receipt carries only the counts.
+			return new Text(theme.fg("accent", compactInlineText(summary, { maxChars: 96 })), 0, 0);
 		},
 	});
 }

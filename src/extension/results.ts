@@ -14,6 +14,16 @@ export interface CaptureMetadata {
 	status?: TerminalStatus;
 	partial?: string;
 }
+/**
+ * Origin run id of a top-level UNTRACKED root record (`/orchestrate`, `/flow`, a mandated
+ * `orchestration:` turn): `root:<uuid>`, unique per process and session, 41 characters (within the
+ * record's 128 limit) and never shaped like a tracker id (`run-<n>`), so the persona-cost rebuild
+ * counts that root's aggregate once and the run-id counter scan ignores it. Never given to a tracked
+ * run (its tracker record already carries `run-<n>`), a flow phase root or a leg.
+ */
+export function untrackedRootRunId(): string {
+	return `root:${randomUUID()}`;
+}
 export type CaptureResult = (origin: string, result: AgentResult, meta?: CaptureMetadata) => ResultReceipt;
 interface Owner {
 	id: string;

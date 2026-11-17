@@ -6,6 +6,80 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Changed
+
+- One `persona-background` status replaces the bare-number `persona-agents` status: `kind=count`
+  pairs in the order `agents monitors timers scripts`, zero counts omitted, cleared when nothing is
+  in the background, so a companion frame can show that monitors, timers and scripts will report
+  back too. The `persona-agents` widget is unchanged. Compatibility: a frame that read the removed
+  `persona-agents` status (pi-theme-1337 0.4.2 and earlier) no longer shows a live agent count;
+  current pi-theme-1337 reads `persona-background` for its end-of-run summary and terminal title
+  instead, alongside `persona` and `persona-cost`.
+- Tool receipts say only what the call line above them does not: `armed · exit · deadline in 9m 59s`
+  under `monitor arm CI run finished`, `armed · fires in 14m 59s`, `started · deadline in 9m 59s`,
+  `launched run-5` for `council` and `flow` (the resolved strategy, roster or flow name stays when
+  the call omitted or differed from it), `launched run-1, run-2` for `delegate`, and `failed`,
+  `complete` or `stopped · checkpoint <id>` headings without the tool name. Model-facing results are
+  unchanged.
+- Card titles name the event and carry its counts once — `settled · 1 done, 1 failed`,
+  `check-in · 2 running, 1 done`, `stalled · 1 running`, `timer fired · status review`,
+  `monitor exited · <label>`, `monitor event · watch ended · <label>`, `4 monitor events`,
+  `session restored`, `intercom question`, `exocom answer` — instead of `intercom update · <state>` /
+  `update · info`. A busy-session backlog leads a collapsed event card as `5 older events omitted`.
+  The host's expand hint sits on the title row (`(ctrl+o to expand)`) whenever the whole title fits
+  beside it, and otherwise takes the last row, so a title's counts are never clipped to seat it.
+  Names and counts come only from runtime-owned lines: a watched process's fenced output cannot add
+  a monitor or script event, and a wake message cannot rename its alarm.
+- Check-in titles count queued runs apart from running ones also when the digest omitted runs
+  (`2 running, 1 queued, 64 settled`).
+- Compact status rows count `1 turn` / `2 turns` and show usage as `216k tok`, like the agent
+  widget; the expanded digest keeps its cumulative-usage wording. Every clip in a card ends in `…`.
+- The agent widget paints with the active theme's tokens, read at every render so a theme switch
+  repaints it: names `text`, detail and clocks `muted`, tree connectors, separators and the
+  `… +N more` hint `dim`, status glyphs in their state tokens, and stall, wait and failure flags in
+  `warning`/`error`. A clipped row shortens its detail first and keeps those flags whole, spaced
+  from the ellipsis.
+- The agent and Exocom widgets inset their rows one column, as Pi does for string widgets, and
+  append no blank row: the gap toward the editor belongs to the editor and the theme.
+- An expanded Timers, Monitors or Scripts heading whose rows all fall below the widget's fold
+  folds into the wake digest instead of spending a row on a restated count; a collapsed heading
+  keeps its row as a control. `… +N more` counts every tree row not drawn, folded headings
+  included. An expanded `delegate · N legs` heading keeps one leg under it (a failed, stalled or
+  waiting one first) whenever that still fits beside every digest, instead of showing an open
+  heading with nothing under it.
+- Hidden stalled workers get their own digest row (`⚠ 2 stalled: <first leg>`) instead of being
+  counted as active workers.
+- The F9 overlay and the model picker draw their frame lines with the `border` token, like Pi's
+  own dialogs; titles and the selected row keep `accent`.
+- The Exocom widget's own row no longer repeats this session's model and context percentage, which
+  Pi's footer already shows live (`📡 Nova · planner · workspace repo [ab12]`). Peer rows keep
+  theirs, and what the session publishes to the registry is unchanged.
+
+### Fixed
+
+- A flow checkpoint whose phase id imitated the queued or stall wording no longer made its run read
+  `queued` or stalled on a check-in card: both are recognized only as the whole runtime suffix of the
+  run's line.
+- `persona-cost` (child spend not yet on a tool result) survives a restart, `/resume` or fork: every
+  session start rebuilds it from the session's terminal-result records and billing tool results,
+  never counting spend already in Pi's footer twice. Each record counts once per record (two runs
+  that shared a run id in older files are two runs); a billing claims the record its receipt names,
+  or the most recent earlier record with its run id; a billing whose run left no record changes
+  nothing. Only the sums are restored, so history can never stop a new run's usage from reaching
+  its collecting tool result. `/orchestrate`, `/flow` and mandated `orchestration:` turns now record
+  their root with a `root:<uuid>` run id so their spend survives too (older sessions stay
+  under-counted). A run settling after a session change no longer lands in the next session's
+  figure. Still lost on restart: spend of runs whose record was never saved, of an untracked root
+  or a tracked `council`/`flow` whose strategy threw (its record holds no leg usage), and failed
+  model-recovery attempts (full list in `docs/ARCHITECTURE.md#companion-status-keys`).
+- Run ids no longer repeat within a session file after a fork or a crash for any run the file
+  names: every session start continues the id counter past the highest run id in terminal records,
+  `pi-persona:runs` entries, and `delegate`/`council`/`flow` launch receipts, `delegate` settles
+  and successful `intercom result`s, whatever session id wrote them — so a background run still in
+  flight at a crash, or whose record was dropped, keeps its id. A run nothing in the file names (a
+  headless call still in flight at the crash, or a headless `council`/`flow` or Mind worker run
+  whose record was not saved) can still be reissued.
+
 ## [1.18.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.18.0) - 2026-11-13
 
 ### Added

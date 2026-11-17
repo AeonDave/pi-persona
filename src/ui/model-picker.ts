@@ -187,7 +187,8 @@ export class ModelPicker extends Container implements Focusable {
 			`${keys("tui.select.up")}/${keys("tui.select.down")} move · ${keys("tui.select.confirm")} select · ${keys("tui.select.cancel")} keep default`,
 		)));
 		if (!framed) return lines;
-		const b = (text: string): string => t.fg("accent", text);
+		// Frame lines use the host dialogs' `border` token; the title and selection keep `accent`.
+		const b = (text: string): string => t.fg("border", text);
 		return [
 			b(`┌${"─".repeat(inner + 2)}┐`),
 			...lines.map((line) => `${b("│")} ${line}${" ".repeat(Math.max(0, inner - visibleWidth(line)))} ${b("│")}`),

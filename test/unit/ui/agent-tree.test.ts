@@ -6,7 +6,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 import { formatUsage } from "../../../src/ui/usage.ts";
 
-import { AgentTree, type AgentNode, type AgentNodeStatus, deriveWaitingNodeIds, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, type AgentNodeStatus, backgroundCounts, deriveWaitingNodeIds, formatBackgroundStatus, PERSONA_BACKGROUND_STATUS_KEY, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
 
 test("overflow worker counts exclude delegate and structural containers and separate waiting workers", () => {
 	const tree = new AgentTree();
@@ -724,4 +724,30 @@ test("width clipping still holds with the appended effort field (tree rows)", ()
 	]).join("\n");
 	assert.ok(visibleWidth(line) <= 210, `tree row with effort occupied ${visibleWidth(line)} columns`);
 	assert.match(line, / · xh /, "the sigla is present, not clipped away by the label clamp");
+});
+
+test("backgroundCounts: in-flight agent leaves plus running wake sources by kind", () => {
+	const nodes: Array<Pick<AgentNode, "id" | "status" | "kind"> & { parentId?: string }> = [
+		{ id: "async:1", status: "running", kind: "subagent" },
+		{ id: "council#1", status: "running", kind: "council" },
+		{ id: "council#1/a", parentId: "council#1", status: "running", kind: "subagent" },
+		{ id: "council#1/b", parentId: "council#1", status: "done", kind: "subagent" },
+		{ id: "delegate:batch-0", status: "running", kind: "delegate" },
+		{ id: "monitor:m1", status: "running", kind: "monitor" },
+		{ id: "monitor:m2", status: "done", kind: "monitor" },
+		{ id: "timer:timer-1", status: "running", kind: "timer" },
+		{ id: "timer:timer-2", status: "running", kind: "timer" },
+		{ id: "script:s1", status: "running", kind: "script" },
+		{ id: "mind", status: "running", kind: "activity" },
+		{ id: "mind/child", parentId: "mind", status: "running", kind: "activity" },
+	];
+	assert.deepEqual(backgroundCounts(nodes), { agents: 2, monitors: 1, timers: 2, scripts: 1 });
+	assert.deepEqual(backgroundCounts([]), { agents: 0, monitors: 0, timers: 0, scripts: 0 });
+});
+
+test("formatBackgroundStatus: fixed kind order, zero counts omitted, cleared when idle", () => {
+	assert.equal(PERSONA_BACKGROUND_STATUS_KEY, "persona-background");
+	assert.equal(formatBackgroundStatus({ agents: 2, monitors: 1, timers: 1, scripts: 1 }), "agents=2 monitors=1 timers=1 scripts=1");
+	assert.equal(formatBackgroundStatus({ scripts: 3, timers: 0, monitors: 2, agents: 0 }), "monitors=2 scripts=3");
+	assert.equal(formatBackgroundStatus({ agents: 0, monitors: 0, timers: 0, scripts: 0 }), undefined);
 });

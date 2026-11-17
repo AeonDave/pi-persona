@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { compactVisibleText, sanitizeTerminalText } from "../../../src/ui/presentation.ts";
@@ -55,7 +56,8 @@ test("standalone literal frame sanitizes its own preview and chrome, keeps the f
 	assert.equal(rows[2], "   short");
 	assert.equal(rows.length, 3, "a complete preview has no expand hint");
 	const hinted = visibleRows(createCardFrame({ ...input, preview: () => ({ text: "short", truncated: true }) }, context({ detailHint: () => "expand\u001b[2J" })), 80);
-	assert.equal(hinted.at(-1), "expand", "the sanitized expand hint appears only for hidden content");
+	assert.equal(hinted[0], "Update · complete (expand)", "the sanitized expand hint rides on the title row, only for hidden content");
+	assert.equal(hinted.length, 3, "the hint takes no row of its own");
 	assert.deepEqual([...new Set(backgrounds)], ["toolSuccessBg"]);
 	assert.equal(JSON.stringify(input), before, "presentation model remains untouched");
 
@@ -114,7 +116,7 @@ test("frame chrome is one sanitized line while expanded literal and Markdown bod
 	const collapsedRows = visibleRows(createCardFrame(literal, context({
 		detailHint: () => "to expand\n\n\u001b[33mdetails",
 	})), 80);
-	assert.deepEqual(collapsedRows, ["Update · complete", "  worker active", "  preview body", "to expand details"]);
+	assert.deepEqual(collapsedRows, ["Update · complete (to expand details)", "  worker active", "  preview body"]);
 
 	const expandedLiteral = visibleRows(createCardFrame(literal, context({ expanded: true })), 80);
 	assert.deepEqual(expandedLiteral.slice(2), ["line one", "", "line three!"]);
@@ -155,8 +157,7 @@ test("an explicitly empty collapsed preview hides its body but hints at full det
 	const input = presentation({ full: "full detail\nTAIL", preview: () => ({ text: "", truncated: false }) });
 	for (const outputPad of [0, 1]) {
 		const rows = visibleRows(createCardFrame(input, context({ outputPad })), 80);
-		assert.equal(rows.length, 2);
-		assert.match(rows[1]!, /to expand/);
+		assert.deepEqual(rows, [`${" ".repeat(outputPad)}Update · complete (to expand)`], "a title-only card is one row, hint included");
 		assert.doesNotMatch(rows.join("\n"), /no output|full detail/);
 		const expanded = visibleRows(createCardFrame(input, context({ outputPad, expanded: true })), 80).join("\n");
 		assert.match(expanded, /full detail/);
@@ -212,6 +213,39 @@ test("width-clipped full previews are clickable whenever the frame displays an e
 	assert.deepEqual(visibleRows(frame, 12), visibleRows(createCardFrame(input, context({ expanded: true })), 12));
 	assert.equal(frame.handleMouse?.(click)?.handled, true);
 	assert.deepEqual(visibleRows(frame, 12), collapsed, "the same click collapses again");
+});
+
+test("the expand hint sits on the title row only beside the whole title; otherwise it is the last row", () => {
+	const hint = () => "ctrl+o to expand";
+	const longTitle = `settled · ${"very-long-worker-alias-".repeat(6)}end`;
+	for (const outputPad of [0, 1]) {
+		for (const width of [100, 60]) {
+			const short = visibleRows(createCardFrame(presentation({ title: "check-in · 2 running, 1 done" }), context({ detailHint: hint, outputPad })), width);
+			assert.equal(short[0], `${" ".repeat(outputPad)}check-in · 2 running, 1 done (ctrl+o to expand)`, `width ${width}`);
+			assert.ok(short.slice(1).every((row) => !row.includes("to expand")), "no separate hint row");
+			// A title wider than the row beside the hint clips to the row; the hint moves below it.
+			const long = createCardFrame(presentation({ title: longTitle }), context({ detailHint: hint, outputPad })).render(width).map((row) => stripVTControlCharacters(row).trimEnd());
+			assert.ok(long.every((row) => visibleWidth(row) <= width), `nothing wider than ${width}`);
+			assert.ok(long[0]!.endsWith("…") && !long[0]!.includes("to expand"), `the clipped title keeps its row: ${long[0]}`);
+			assert.equal(long.at(-1), `${" ".repeat(outputPad)}ctrl+o to expand`);
+			assert.doesNotMatch(long.join("\n"), /\.\.\./, "every clip uses the one-column ellipsis");
+		}
+	}
+	// The title's counts are never clipped to seat the hint: one column short moves it below.
+	const title = "settled · 1 done, 1 failed";
+	const fits = visibleWidth(`${title} (ctrl+o to expand)`);
+	assert.equal(visibleRows(createCardFrame(presentation({ title }), context({ detailHint: hint })), fits)[0], `${title} (ctrl+o to expand)`);
+	const narrow = visibleRows(createCardFrame(presentation({ title }), context({ detailHint: hint })), fits - 1);
+	assert.equal(narrow[0], title);
+	assert.equal(narrow.at(-1), "ctrl+o to expand");
+	assert.ok(createCardFrame(presentation({ title: longTitle }), context({ detailHint: hint })).render(30).every((row) => visibleWidth(row) <= 30));
+});
+
+test("body lines clipped by the frame end in the one-column ellipsis", () => {
+	const input = presentation({ preview: () => ({ text: `output ${"x".repeat(200)}`, truncated: false }) });
+	const rows = visibleRows(createCardFrame(input, context()), 60).map((row) => stripVTControlCharacters(row));
+	assert.ok(rows[1]!.endsWith("…"), rows[1]);
+	assert.doesNotMatch(rows.join("\n"), /\.\.\./);
 });
 
 test("empty full and preview bodies retain the nonempty literal fallback", () => {

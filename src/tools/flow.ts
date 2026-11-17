@@ -156,8 +156,11 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 			const hostError = context?.isError ?? result.isError;
 			if (details.runId) {
 				// Interactive launch receipt: the outcome arrives later as the completion follow-up.
-				const launched = hostError || details.ok === false ? theme.fg("error", theme.bold("flow failed"))
-					: `${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(`launched ${details.runId} · ${details.flow ?? "?"}`, { maxChars: 120 }))}`;
+				// The call line already shows "flow <name>"; repeat the resolved name only when it differs.
+				const callName = typeof context?.args?.name === "string" ? compactInlineText(context.args.name, { maxChars: 64 }) : undefined;
+				const name = details.flow !== undefined && callName === compactInlineText(details.flow, { maxChars: 64 }) ? undefined : details.flow ?? "?";
+				const launched = hostError || details.ok === false ? theme.fg("error", theme.bold("failed"))
+					: `${theme.fg("toolTitle", theme.bold("launched "))}${theme.fg("accent", compactInlineText([details.runId, ...(name === undefined ? [] : [name])].join(" · "), { maxChars: 120 }))}`;
 				const metadata = orchestrationLaunchLines(details.launch, expanded, context).join("\n");
 				return new Text([launched, theme.fg("dim", metadata), expanded ? theme.fg("toolOutput", full) : ""].filter(Boolean).join("\n"), 0, 0);
 			}
@@ -171,11 +174,12 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 						{ maxChars: 160 },
 					)
 				: "";
+			// The call line above already says "flow <name>"; the heading carries only the outcome.
 			const title = () => disposition === "stopped"
-				? theme.fg("warning", theme.bold(`flow stopped · checkpoint ${compactInlineText(details.stoppedAtGate ?? "", { maxChars: 64 })}`))
+				? theme.fg("warning", theme.bold(`stopped · checkpoint ${compactInlineText(details.stoppedAtGate ?? "", { maxChars: 64 })}`))
 				: failed
-					? theme.fg("error", theme.bold(`flow failed${failureBits ? ` · ${failureBits}` : ""}`))
-					: theme.fg("success", theme.bold("flow complete"));
+					? theme.fg("error", theme.bold(`failed${failureBits ? ` · ${failureBits}` : ""}`))
+					: theme.fg("success", theme.bold("complete"));
 			const metadata = details.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(details.launch, expanded, context).join("\n")}` : "";
 			if (expanded) {
 				// Real flow outcomes are fenced even after a phase fails; host/preflight errors are not.

@@ -241,7 +241,8 @@ and control contracts; merging them into a universal task engine would hide thos
   card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
   (token/usage formatting, `ChildUsageLedger` / `toToolUsage` — sub-agent spend is
   attached as Pi `toolResult.usage` so the footer and pi-theme-1337's frame count it;
-  leftover background-leg cost is published on the `persona-cost` status key).
+  leftover background-leg cost is published on the `persona-cost` status key; see
+  [Companion status keys](#companion-status-keys)).
 - **`src/loader.ts`** — the discovery loader (`loadDefinitions`/`loadContracts`/`loadPresets`/
   `loadTeams`), the concrete read-side of the discovery precedence table.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
@@ -754,8 +755,16 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - custom follow-ups and operator-only entries use the single composable frame in `ui/card-frame.ts`;
   `ui/session-cards.ts` supplies surface-specific content and status projections. The frame owns
   glyph-free lowercase headings, explicit textual state, width-aware layout and semantic theme backgrounds.
-  Completion, routine status, stall and recovery use the same `intercom update` heading with their
-  respective state; assigned names retain their capitalization. Neutral
+  Titles name the event and carry its counts once: `settled · 1 done, 1 failed`, `check-in · 2 running,
+  1 done`, `stalled · 1 running`, `resumed · 1 running`, `timer fired · <label>`, `monitor exited · <label>`,
+  `monitor event · watch ended · <label>`, `4 monitor events` (a busy-session backlog leads the body as
+  `5 older events omitted`), `session restored`, `intercom question`/`exocom answer`/`intercom · 3 messages`;
+  an unrecognized follow-up is a plain `update`. Queued runs are counted apart from running ones
+  (`2 running, 1 queued, 64 settled` when the digest omitted runs). Follow-ups without display metadata
+  are named only from their runtime-owned lines, drift-guarded against their generator: a monitor or
+  script event line is anchored on its runtime id and every fenced output line is consumed as output
+  first, so observed output can add no event, count or title; an alarm's label ends at its runtime id;
+  queued/stalled are read only from the whole runtime suffix of a run line. Assigned names retain their capitalization. Neutral
   information/unknown state uses `customMessageBg`, verified completion `toolSuccessBg`, attention
   (nudge/stall/stopped) `toolPendingBg`, and verified failure `toolErrorBg`. Only runtime-owned status
   evidence selects chrome, never peer/child prose. Colors are resolved from the active theme at render
@@ -767,6 +776,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   stored or model-facing payloads, nor creates a wake. Message cards use the host-supplied padding;
   entry cards read current `pi.getSettings().outputPad` (native 0/1, default 1), because entry renderer
   options do not carry padding. Titles, bodies and expand hints receive that outer padding once.
+  The host's expand hint rides on the title row, `title (ctrl+o to expand)`, only when the whole title
+  fits beside it; otherwise the hint takes a row of its own, as the last one, so a title's counts are
+  never clipped to seat it. Every clip ends in `…`.
   An explicitly empty compact preview produces a title-only informational note rather than a false
   `(no output)` body; hidden full detail still exposes the expansion hint. Expansion remains complete.
   Custom message/entry consumers may opt into primary-click expansion with the additive optional
@@ -793,7 +805,15 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   when expanded. Native tool shells remain host-owned;
 - the sticky agent and exocom widgets have fixed physical-row budgets: the shared width-aware
   `ui/compact-widget.ts` clips each already-budgeted row instead of letting native Text wrap it.
-  F9/`/agents` and paginated
+  Rows are styled spans (`ui/styled-row.ts`) painted with the theme the host passes at render
+  time, never captured: names `text`, detail and clocks `muted`, connectors, separators and the
+  overflow hint `dim`, glyphs and stall/wait/failure flags in their state tokens. Clipping shortens
+  ordinary spans first; `keep` spans (those flags, with the gap before them) stay whole. Rows are
+  inset one column, the host's own `Text(line, 1, 0)` padding; the widget appends no spacing row
+  (the host spaces only above the widget block, and the gap toward the editor is the editor's and
+  the theme's), so row `i` is drawn at `y = i` and is the click target `targets[i]`. The exocom
+  widget's local row shows identity, persona and scope only — the session's own model and context
+  are Pi's footer's — while peer rows keep model, context and traffic. F9/`/agents` and paginated
   `exocom_list({ offset, limit })` are the explicit detail surfaces, so a wide fan-out cannot push the
   editor off screen or dump an entire peer registry into model context. Agent-tree deltas share one
   16 ms widget composition per terminal frame; identical lines/status are not republished, hierarchy
@@ -812,10 +832,13 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   Selection and drill-in/back navigation preserve worker IDs; a lost target consumes the next
   directed key instead of applying it to a different worker. The overview controls its selected leg;
   root-wide cancellation remains on the root in the tree;
-- overflowing sticky summaries preserve failure, pending-ask, wake/activity and active-worker
-  digests before the generic overflow line, in that priority order when space is insufficient.
-  Hidden active workers exclude queued/waiting/settled rows and containers; the representative follows
-  tree order rather than changing with each progress event;
+- overflowing sticky summaries preserve failure, pending-ask, stalled-worker, wake/activity and
+  active-worker digests before the generic overflow line, in that priority order when space is
+  insufficient. Hidden stalled workers get their own `⚠ N stalled` digest; hidden active workers
+  exclude queued/waiting/stalled/settled rows and containers; each representative follows tree order
+  rather than changing with each progress event. `… +N more` counts the tree rows the final
+  selection does not draw (rows displaced by a reserved control and folded-away headings included),
+  computed after the last selection step;
 - `X` is not a directed key: it uses the complete runtime tree, independently of presentation folding,
   and acts on the whole stoppable set of leaf rows after a confirmation that
   states how many agents it covers, and a changed set is re-confirmed. The set is every agent leaf (wake
@@ -843,7 +866,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   neither carries the `⚠ stalled` badge or `waiting for supervisor`. `x` cancels
   one through the same stop registry as an agent (the `monitor cancel` / `timer cancel` effect); `s` steer
   is never offered. They are excluded from the `X` stop-all count, confirmation and bulk stop, from the
-  `N agents` in-flight status, and from telemetry (`agent.*` events are agents only). They settle and
+  `agents=` count of the `persona-background` status (which gives them their own `monitors=` /
+  `timers=` / `scripts=` counts), and from telemetry (`agent.*` events are agents only). They settle and
   leave like an async row: the final ✓/✗/■ goes to the tree change stream (telemetry excluded), not to
   the screen, because the update and the removal are synchronous and the widget frame is coalesced. They
   live only in the arming session, never restored. Raw monitor stdout/stderr has a separate passive
@@ -863,7 +887,14 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
 - `src/ui/resource-groups.ts` adds presentation-only Timers/Monitors/Scripts categories without
   changing runtime parentage, routing IDs or telemetry. Widget and F9 share fold state; clicks use
   Pi's public component mouse API in alternate-screen mode, with Space/Left/Right in F9 as the
-  keyboard path. A bounded digest preserves category controls even during a large fan-out.
+  keyboard path. In the bounded widget only collapsed controls (categories and delegate batches)
+  are reserved a row during a large fan-out; an expanded category heading drawn without any of its
+  rows would only restate the wake digest, so it folds away and its row goes to legs. An expanded
+  delegate heading (`▾ delegate · N legs`) is not dropped — it is the batch's fold control — but it
+  keeps one of its legs under it whenever that leg plus every digest still fits the budget (a
+  failed, then stalled, then waiting leg is chosen first); only when no leg fits is the heading drawn
+  alone, its legs counted by the digests below. `projectAgentTreeSummary` in `src/ui/agent-tree.ts`
+  owns this.
   F9 observes Exocom through its bounded peer snapshot/change subscription and grants no peer
   stop/steer controls. Peer heartbeat presence and agent execution state remain distinct facts.
 - Scripts are exit-only sessions over the existing process lifecycle (`src/script/session.ts`),
@@ -1116,13 +1147,18 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
   as do the `/orchestrate` and `/flow` slash commands; those runs register their own abort under their root
   row, so shutdown ends the whole run. Operator-run results also reach the supervisor's next turn as a
   passive, fenced, 12k-bounded message.
-  Progress tokens are labelled **cumulative input/output**, not context occupancy; cache-read/write
+  Progress tokens are labelled **cumulative input/output** (in the model-facing digest and expanded
+  cards; compact rows use the agent widget's `tok`), not context occupancy; cache-read/write
   accounting is separate. Do not infer a full context window from that counter. File age or line-count
   changes alone likewise do not establish a stall, a passing test or completed work.
   **Restore honesty:** `session_shutdown` records lost run ids, timers, monitors and the run-id counter
   in a `pi-persona:runs` session entry (`core/session-runs.ts`). The next `session_start` (reload,
   in-session resume, `pi -c`; not fork or `/new`) tells the supervisor once through a passive `nextTurn`
   message, acknowledges it, and continues run ids so they never restart at `run-1` within a session.
+  Every `session_start` (fork and crash recovery included) first continues the counter past the
+  highest run id the session file names (`highestIssuedRun`), so those ids are never reissued even
+  when no entry for this session id exists; which runs the file names, and which it can miss, is in
+  [Companion status keys](#companion-status-keys).
   Only ids matching a strict shape and capped counts are ever read back.
   Async failures are ALWAYS reported; the runtime `DelegationLedger` vetoes a blind retry loop (an
   identical agent+model+task delegation that failed twice is stopped before it spawns). Coaching is
@@ -1199,6 +1235,86 @@ a persona directive lives at the TOP of the prompt and its pull decays as recent
   row (and skips in CI's depth-1 checkout). With zero personas installed, F8 and `/doctor` point to
   `/persona seed`, like `/persona list`.
   Contracts/presets/teams keep a builtin layer (they aren't personas).
+
+## Companion status keys
+
+pi-persona publishes three extension statuses for a companion UI to read through Pi's footer data:
+`persona` (the compact label of the active persona) and the two below. Companions only read them;
+pi-persona owns all three. pi-theme-1337 reads `persona` and `persona-cost`, and — for its
+end-of-run summary and terminal title only — `persona-background`.
+
+- **`persona-background`** — everything that will report back later, as space-separated
+  `kind=count` pairs in the fixed order `agents monitors timers scripts`, zero counts omitted
+  (`agents=2 monitors=1 timers=1 scripts=1`, `timers=1`). Cleared (`undefined`) when every count is
+  zero, and on `session_shutdown` (the agent tree is cleared). `agents` = in-flight agent leaves
+  (`inFlightAgentCount`: running nodes without children, never a `delegate` header, wake row, Mind
+  activity row or synthetic group); `monitors` / `timers` / `scripts` = running tree rows of that
+  kind (an active monitor, an armed timer, an active script). Computed by the pure
+  `backgroundCounts` / `formatBackgroundStatus` (`src/ui/agent-tree.ts`) from the same tree snapshot
+  as the widget and published only when the text changes, so arming, firing, cancelling, finishing
+  and every agent start/settle update it within one 16 ms frame.
+- **`persona-cost`** — child spend that is NOT on a supervisor tool result yet (and so not in Pi's
+  footer): `$0.423` below one dollar, `$2.50` from one dollar, cleared when zero. The
+  `ChildUsageLedger` adds every engine run and bills a tracker run once per instance (keyed by run
+  id) when its usage is attached to a `delegate` / `council` / `flow` / `intercom result` tool
+  result. On every `session_start` (startup, reload, new, resume, fork) the ledger is rebuilt once
+  from the new session's `getEntries()` (`reconstructChildSpend`) — all branches, the scope Pi's
+  footer sums. Only the two sums are restored, never billed run ids: a restarted instance cannot
+  collect a historical run, so history never vetoes billing a new run.
+  - *Counted records*: each `pi-persona-terminal-result` record carrying an `originRunId` — a
+    tracker run (`run-<n>`) or a top-level untracked root (`root:<uuid>`, below) — once per record
+    identity, its `ref` (the same record twice is one record; two records sharing a run id are two
+    runs). Per-leg/per-phase records carry no `originRunId` and are never added beside the run or
+    root aggregate.
+  - *Billing*: a persisted billing tool result with `usage` claims the record its
+    `details.resultReceipt.ref` names exactly (council/flow/intercom; nothing when that ref is not
+    in the file), otherwise, per named run id (`settledRuns[].id`, intercom `runId`), the most
+    recent record with that id that precedes it in file order (records are appended at settle
+    time, before any collection). A record is claimed at most once and subtracts its own usage.
+  - A billing resolving to no counted record adds and subtracts nothing: its run's record never
+    reached the file, so its spend was never in the total. A billing can name no run at all only
+    for council/flow when the archive saved no record (the receipt then carries a warning, no ref),
+    which is that same case. No billing can double count: what is subtracted is a sub-sum of what
+    was added.
+  - *Invariant* (property-tested over random runs, collections, forks with reused ids and restarts):
+    rebuilt pending = Σ counted records' usage − Σ usage of the counted records a billing claims,
+    never negative in any field, and LIVE == REBUILT: the published text is identical before and
+    after a restart, outside the under-counts listed below.
+  - *Run ids the file names are never reissued*: before any launch, `session_start` continues the
+    tracker counter past the highest `run-<n>` the file names (`highestIssuedRun`), then past this
+    session's own shutdown entry. Read, whatever session id wrote them: terminal records'
+    `originRunId`; every `pi-persona:runs` entry (`issued` and lost run ids); and persisted tool
+    results — `delegate` launch receipts (`runId`, `runIds[]`, `runs[].id`) and headless settles
+    (`settledRuns[].id`), `council`/`flow` launch receipts (`runId`), and a successful live
+    `intercom result` (`ok: true` with a `status`; its `runId` is the found run's id). Every other
+    intercom `runId` echoes the model's `to` argument and is never read; malformed or out-of-range
+    ids are ignored. So a fork (new session id), or a crash (no shutdown entry) while a background
+    run was still in flight or after the archive quota or an append failure dropped a record,
+    reissues no id that reached the file in any of those places. Still reissuable after a crash
+    (nothing in the file names the id): a run launched by a headless `delegate`/`council`/`flow`
+    call still in flight, or an interactive launch before its receipt was appended; a headless
+    `council`/`flow` run whose record was not saved (its result names no run id); a Mind worker
+    run whose record was not saved (no launch receipt names it; only a later successful
+    `intercom result` would); and a launch made inside another tool's call (codemode
+    `ctx.executeTool`) unless its result reaches the file as a `delegate`/`council`/`flow`
+    tool-result message.
+  - *Untracked roots*: `/orchestrate`, `/flow` and a mandated `orchestration:` turn record their
+    top-level root with `originRunId: root:<uuid>` (`untrackedRootRunId`); its usage is the sum of
+    the legs the engine wrapper already added. Tracked `council`/`flow` runs keep only their tracker
+    record; flow phase roots and legs never get one.
+
+  A new session starts at zero, a fork shows the history it copied, and tree navigation (no
+  `session_start`) leaves it unchanged. A run that settles after the session changed is dropped
+  (`ledger.session()` token). Still under-counted after a restart: runs whose record was never
+  persisted (archive quota of 128 records, memory-only owner, append failure); untracked roots in
+  sessions written before root records carried an id (no backfill from key suffixes); an untracked
+  root whose strategy threw (its record holds no leg usage); a tracked `council`/`flow` run whose
+  strategy or flow threw without an abort (its record holds empty usage while the legs' spend was
+  added live, and the settle bills nothing, so live `persona-cost` keeps that spend until the
+  restart drops it); failed model-recovery attempts not
+  folded into a leg's final usage; and, in files written before run ids were file-unique, a
+  `delegate` billing (run ids only, no ref) whose run's record is missing resolves to an older
+  record sharing that id.
 
 ## Cross-OS constructs
 

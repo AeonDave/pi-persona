@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
 	findStoredRuns,
+	highestIssuedRun,
 	makeRunsEntry,
 	restoreNotice,
 	RUNS_ENTRY_CUSTOM_TYPE,
@@ -123,4 +124,39 @@ test("a maximum-width fan-out (64 runs) is counted whole in the notice", () => {
 	const ids = Array.from({ length: 64 }, (_, i) => `run-${(i + 1).toString(36)}`);
 	const text = restoreNotice(makeRunsEntry("s1", 64, lost(ids)).lost) ?? "";
 	assert.match(text, / \+56 more \(stopped or never reported\)/);
+});
+
+test("highestIssuedRun: the highest tracker counter anywhere in the file, under any session id", () => {
+	const record = (originRunId: unknown) => ({ type: "custom", customType: "pi-persona-terminal-result", data: { originRunId } });
+	assert.equal(highestIssuedRun([]), 0);
+	// A fork copies a parent's runs entry under ANOTHER session id; a crash leaves only records.
+	assert.equal(highestIssuedRun([record("run-5"), record("run-a"), entry({ version: 1, sessionId: "parent", issued: 7, lost: lost() })]), 10);
+	assert.equal(highestIssuedRun([entry({ version: 1, sessionId: "parent", issued: 3, lost: lost(["run-c"]) })]), 12);
+	// Untracked roots, legs, foreign shapes and out-of-range values never move it.
+	assert.equal(highestIssuedRun([
+		record("root:4f1c2b9e-0000-4000-8000-000000000001"), record(undefined), record("run-0"), record("run-zzzzzzzz"), record("async:9"),
+		entry({ issued: 2e9 }), entry({ issued: -4 }), entry({ issued: 2.5 }), { type: "message", customType: RUNS_ENTRY_CUSTOM_TYPE, data: { issued: 50 } }, null, 7,
+	]), 0);
+});
+
+test("highestIssuedRun: run ids named by persisted tool results count, so a run with no record or runs entry is never reissued", () => {
+	const result = (toolName: string, details: unknown, role = "toolResult") => ({ type: "message", message: { role, toolName, details } });
+	// Interactive launch receipts of runs still in flight at a crash (no record, no shutdown entry).
+	assert.equal(highestIssuedRun([result("delegate", { runId: "run-4", runs: [{ id: "run-4" }] })]), 4);
+	assert.equal(highestIssuedRun([result("delegate", { runIds: ["run-2", "run-7"], runs: [{ id: "run-2" }, { id: "run-8" }] })]), 8);
+	assert.equal(highestIssuedRun([result("council", { runId: "run-b", strategy: "magi" }), result("flow", { runId: "run-c", flow: "ship" })]), 12);
+	// Settling results whose record the quota or an append failure dropped (failed settles included).
+	assert.equal(highestIssuedRun([result("delegate", { settledRuns: [{ id: "run-5" }, { id: "run-9" }], __piPersonaToolError: true })]), 9);
+	assert.equal(highestIssuedRun([result("intercom", { action: "result", ok: true, status: "done", runId: "run-d", target: "run-d" })]), 13);
+	// Model-supplied targets (every other intercom runId), other tools/roles, foreign shapes and
+	// out-of-range ids never move it.
+	assert.equal(highestIssuedRun([
+		result("intercom", { action: "peek", ok: true, runId: "run-z" }),
+		result("intercom", { action: "result", ok: false, status: "running", runId: "run-z" }),
+		result("intercom", { action: "result", ok: true, runId: "run-z" }),
+		result("intercom", { action: "steer", ok: true, runId: "run-z" }),
+		result("bash", { runId: "run-z" }), result("delegate", { runId: "run-z" }, "assistant"),
+		result("delegate", { runId: "root:4f1c2b9e", runIds: "run-z", runs: [null, { id: 3 }], settledRuns: [{ id: "run-zzzzzzzz" }] }),
+		result("council", null), result("flow", { runId: "async:run-z" }), { type: "message", message: null },
+	]), 0);
 });

@@ -127,8 +127,9 @@ test("a flow stopped at a checkpoint is a result, not a tool error: the plan is 
 	assert.match(result.content[0].text, /the plan/);
 	assert.match(result.content[0].text, /flow stopped at checkpoint "plan"/);
 	const card = render(tool, result);
-	assert.match(card, /flow stopped · checkpoint plan/);
-	assert.doesNotMatch(card, /flow failed/);
+	// The call line above already says "flow gated-build"; the heading names only the outcome.
+	assert.match(card, /^stopped · checkpoint plan/);
+	assert.doesNotMatch(card, /failed/);
 });
 
 test("an ordinary flow failure is still a tool error with the 'failed' card", async () => {
@@ -136,14 +137,29 @@ test("an ordinary flow failure is still a tool error with the 'failed' card", as
 	const result = await run(tool);
 	assert.equal(result.isError, true);
 	assert.ok(piPersonaToolErrorPatch(result.details), "the failure marker stays on ordinary failures");
-	assert.match(render(tool, result), /flow failed · phase plan · boom/);
+	assert.match(render(tool, result), /^failed · phase plan · boom/);
 });
 
 test("a completed flow is neither stopped nor failed", async () => {
 	const { tool } = register({ ok: true, results: {}, output: "all done" });
 	const result = await run(tool);
 	assert.equal(result.isError, false);
-	assert.match(render(tool, result), /flow complete/);
+	assert.match(render(tool, result), /^complete\s*\n/);
+});
+
+test("the flow launch receipt repeats the flow name only when the call line did not show it", async () => {
+	const { tool } = register({ ok: true, results: {}, output: "x" });
+	const result = await runInteractive(tool);
+	const id = result.details.runId as string;
+	const line = (context: unknown) => tool.renderResult(result, { expanded: false }, plainTheme, context).render(200)[0].trimEnd();
+	assert.equal(tool.renderCall({ name: "gated-build" }, plainTheme).render(200)[0].trimEnd(), "flow gated-build");
+	assert.equal(line({ isError: false, args: { name: "gated-build", task: "ship it" } }), `launched ${id}`);
+	assert.equal(line({ isError: false, args: { name: "other-name", task: "ship it" } }), `launched ${id} · gated-build`, "a resolved name that differs is a new fact");
+	assert.equal(line({ isError: false }), `launched ${id} · gated-build`, "without the call's args the name is kept");
+	for (const width of [100, 60]) {
+		const rows = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false, args: { name: "gated-build" } }).render(width);
+		assert.ok(rows.every((row: string) => row.length <= width), `width ${width}`);
+	}
 });
 
 // ── interactive: ONE tracked background run, one wake ───────────────────────────────────────
@@ -160,7 +176,7 @@ test("an interactive flow returns a receipt at once and settles as ONE tracked r
 	assert.match(result.content[0].text, /woken ONCE/);
 	assert.match(result.content[0].text, /checkpoint waits for the operator, not for you/);
 	assert.match(result.content[0].text, /never sleep, poll, peek/);
-	assert.match(render(tool, result), /flow launched run-\S+ · gated-build/);
+	assert.match(render(tool, result), /^launched run-\S+ · gated-build/, "no call args in this render: the name is kept");
 	assert.equal(stopRegistry.has(`async:${id}`), true, "the run is reachable through intercom stop / the overlay key");
 
 	await tick();

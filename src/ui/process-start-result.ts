@@ -6,7 +6,8 @@ import { renderLiteralToolResult } from "./literal-tool-result.ts";
 
 interface ProcessStart {
 	verb: "armed" | "started";
-	label: string;
+	/** Omitted when the call line above already names it: the receipt carries only new facts. */
+	label?: string;
 	mode?: string;
 	expiresAtEpochMs?: number;
 }
@@ -20,7 +21,11 @@ export function renderProcessStartResult(
 ): Text {
 	if (!start || options.expanded || (context?.isError ?? result.isError ?? false)) return renderLiteralToolResult(result, options, theme, context);
 	const left = typeof start.expiresAtEpochMs === "number" && Number.isFinite(start.expiresAtEpochMs) ? start.expiresAtEpochMs - Date.now() : undefined;
-	const deadline = left === undefined ? "" : left > 0 ? ` · deadline in ${formatDuration(left)}` : " · deadline reached";
-	const summary = compactInlineText(`${start.label}${start.mode ? ` · ${start.mode}` : ""}${deadline}`, { maxChars: 140 });
-	return new Text(`${theme.fg("toolTitle", theme.bold(`${start.verb} `))}${theme.fg("accent", summary)}`, 0, 0);
+	const facts = [
+		...(start.mode ? [start.mode] : []),
+		...(left === undefined ? [] : [left > 0 ? `deadline in ${formatDuration(left)}` : "deadline reached"]),
+	];
+	const label = start.label ? compactInlineText(start.label, { maxChars: 120 }) : "";
+	const summary = compactInlineText([label, ...facts].filter(Boolean).join(" · "), { maxChars: 140 });
+	return new Text(`${theme.fg("toolTitle", theme.bold(start.verb))}${summary ? theme.fg("accent", `${label ? " " : " · "}${summary}`) : ""}`, 0, 0);
 }

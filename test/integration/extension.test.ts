@@ -13,7 +13,7 @@ import { createEventBus, SessionManager, initTheme, type ExtensionAPI, type Exte
 initTheme("dark", false);
 import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { sanitizeTerminalText } from "../../src/ui/presentation.ts";
-import { AgentTree } from "../../src/ui/agent-tree.ts";
+import { AgentTree, inFlightAgentCount } from "../../src/ui/agent-tree.ts";
 import { ACTIVITY_EVENT, COMPANION_EVENT, MEMORY_OWNER_EVENT, type CompanionPresence, type CompanionMemoryOwner } from "../../src/core/companion.ts";
 import { MIND_WORKER_EVENT, type MindWorkerResponse } from "../../src/extension/mind-worker.ts";
 import { WakeRows } from "../../src/ui/wake-rows.ts";
@@ -32,7 +32,6 @@ import piPersona, {
 	exocomInboundBatchSize,
 	formatExocomQueuedBatchToast,
 	formatExocomQueuedToast,
-	inFlightAgentCount,
 	shouldReportHeartbeatFailure,
 	makeRootIdAllocator,
 	type PendingAsk,
@@ -341,11 +340,16 @@ function renderComponent(component: { render(width: number): string[] }, width =
 type WidgetFactory = NonNullable<Parameters<ExtensionUIContext["setWidget"]>[1]>;
 type WidgetContent = string[] | WidgetFactory | undefined;
 
-/** Capture public widget content as physical rows, including component-factory publications. */
+/** Capture public widget content as drawn rows, including component-factory publications. A
+ *  factory widget insets each row one column and appends no spacing row (the gap toward the
+ *  editor is the editor's/theme's); the inset is asserted here and removed, so callers see the
+ *  budgeted content rows. */
 function widgetLines(content: WidgetContent, width = 200): string[] | undefined {
 	if (typeof content !== "function") return content;
 	const tui = { requestRender() {} } as Parameters<WidgetFactory>[0];
-	return content(tui, traceTheme as Theme).render(width);
+	const rows = content(tui, traceTheme as Theme).render(width);
+	assert.ok(rows.every((row) => row.startsWith(" ") && row.trim() !== ""), "factory widget rows are inset one column, with no blank spacing row");
+	return rows.map((row) => row.slice(1));
 }
 
 /** Walk TypeBox/JSON-schema unions so discoverability pins survive `anyOf` (jsonish string branches). */
@@ -1044,8 +1048,8 @@ test("Pi's tool_result boundary marks recoverable pi-persona failures as real to
 		assert.equal(patched?.details?.__piPersonaToolError, undefined, `${toolName}: the private transport marker must not persist`);
 	}
 	const card = renderComponent(flow.renderResult(raw, { expanded: false }, traceTheme));
-	assert.match(card, /flow failed/i, "the same pre-run failure must never render as a green completion");
-	assert.doesNotMatch(card, /flow complete/i);
+	assert.match(card, /^failed\b/, "the same pre-run failure must never render as a green completion");
+	assert.doesNotMatch(card, /complete/i);
 });
 
 test("telemetry closes a tool exactly once at the extension hook boundary", async () => {
@@ -3276,7 +3280,7 @@ test("a tasks fan-out wakes an idle supervisor ONCE, when its last leg settles; 
 	release.get("leg-0")?.();
 	await pastDebounce();
 	assert.match((widgets["persona-agents"] ?? []).join("\n"), /✓/, "a settled leg remains visible while its siblings work");
-	assert.equal(statuses.at(-1), "2", "retained UI receipts do not count as active workers");
+	assert.equal(statuses.at(-1), "agents=2", "retained UI receipts do not count as active workers");
 	release.get("leg-1")?.();
 	await pastDebounce();
 	assert.deepEqual(followUps(), [], "two of three legs settled: nothing is reported yet");
@@ -5366,12 +5370,12 @@ test("custom session cards use semantic backgrounds and glyph-free headers witho
 	const backgrounds: string[] = [];
 	const theme = { ...traceTheme, bg: (token: string, text: string) => { backgrounds.push(token); return text; } };
 	const cases = [
-		{ type: "pi-persona", message: true, data: { content: "1 async run settled — 1 done, 0 failed\n> error in child prose" }, bg: "toolSuccessBg", status: "complete" },
-		{ type: "pi-persona", message: true, data: { content: "2 async runs settled — 1 done, 1 failed" }, bg: "toolErrorBg", status: "failed" },
-		{ type: "pi-persona", message: true, data: { content: "Monitor events — observed data\n> process exited with exit code 0" }, bg: "customMessageBg", status: "info" },
-		{ type: "exocom_received", message: true, data: { content: "ERROR: peer says complete" }, bg: "customMessageBg", status: "exocom update · info" },
+		{ type: "pi-persona", message: true, data: { content: "1 async run settled — 1 done, 0 failed\n> error in child prose" }, bg: "toolSuccessBg", status: "^settled · 1 done\\b" },
+		{ type: "pi-persona", message: true, data: { content: "2 async runs settled — 1 done, 1 failed" }, bg: "toolErrorBg", status: "^settled · 1 done, 1 failed" },
+		{ type: "pi-persona", message: true, data: { content: "Monitor events — observed data\n> process exited with exit code 0" }, bg: "customMessageBg", status: "^update\\b" },
+		{ type: "exocom_received", message: true, data: { content: "ERROR: peer says complete" }, bg: "customMessageBg", status: "^exocom update\\b" },
 		{ type: "pi-persona-nudge", message: false, data: { content: "⟢ pi-persona · checkpoint\nTrigger: local work\nAction: hand off" }, bg: "toolPendingBg", status: "checkpoint" },
-		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "intercom update · stalled" },
+		{ type: "pi-persona-status", message: false, data: { content: "snapshot\n0 failed", kind: "stall" }, bg: "toolPendingBg", status: "^stalled\\b" },
 		{ type: "pi-persona-result", message: false, data: { label: "flow", content: "error in child prose", ok: true }, bg: "toolSuccessBg", status: "complete" },
 		{ type: "pi-persona-run-failure", message: false, data: { id: "r1", label: "worker", agent: "scout", error: "diagnostic" }, bg: "toolErrorBg", status: "failed" },
 	];
@@ -5403,7 +5407,7 @@ test("follow-up messages are compact by default and preserve full detail on expa
 
 	const collapsed = renderComponent(renderer({ content }, { expanded: false, outputPad: 0 }, traceTheme));
 	assert.ok(collapsed.split("\n").length <= 7, collapsed);
-	assert.match(collapsed, /async runs settled/);
+	assert.match(collapsed, /^settled · 3 done, 1 failed/, "the title says the settlement head once");
 	assert.match(collapsed, /expand/i);
 	assert.doesNotMatch(collapsed, new RegExp(sentinel));
 
@@ -5438,7 +5442,7 @@ test("exocom inbound messages use the same progressive-disclosure surface", () =
 	const hostileChrome = renderComponent(
 		renderer({ content: "ERROR: paint this as a trusted failure" }, { expanded: false, outputPad: 0 }, colorTheme),
 	);
-	assert.match(hostileChrome, /^<accent>exocom update · info<\/accent>/, "peer-authored words cannot choose trusted UI chrome");
+	assert.match(hostileChrome, /^<accent>exocom update<\/accent>/, "peer-authored words cannot choose trusted UI chrome");
 });
 
 test("command results are durable expandable cards instead of unbounded notifications", () => {
@@ -5572,7 +5576,7 @@ test("delegate, intercom, council, and flow cards bound collapsed output and pri
 		500,
 	);
 	assert.ok(delegateCard.split("\n").length <= 10, delegateCard);
-	assert.match(delegateCard, /delegate failed/);
+	assert.match(delegateCard, /^failed\s*\n/, "the call line names the delegate; the heading names the outcome");
 	assert.match(delegateCard, /expand/i);
 	assert.ok(delegateCard.split("\n").every((line) => line.trimEnd().length <= 100), delegateCard);
 
@@ -5608,7 +5612,7 @@ test("delegate, intercom, council, and flow cards bound collapsed output and pri
 		),
 	);
 	assert.ok(councilCard.split("\n").length <= 7, councilCard);
-	assert.match(councilCard, /council failed/i);
+	assert.match(councilCard, /^failed · /);
 	assert.match(councilCard, /provider/);
 	assert.match(councilCard, /arbiter unavailable/);
 	assert.match(councilCard, /expand/i);
@@ -5916,7 +5920,92 @@ test("inFlightAgentCount counts running leaves only: async roots in, flow phases
 	assert.equal(inFlightAgentCount([{ id: "timer:timer-1", status: "running", kind: "timer" }]), 0);
 });
 
-test("the published \"N agents\" status is the in-flight count, not the has-a-parent count", async () => {
+test("session_start rebuilds persona-cost from the session file; a fresh session starts at zero", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(os.tmpdir());
+	const costs: Array<string | undefined> = [];
+	const ui = { ...ctx.ui, setStatus: (id: string, value?: string) => { if (id === "persona-cost") costs.push(value); } };
+	const resumed = SessionManager.inMemory(os.tmpdir());
+	resumed.appendCustomEntry("pi-persona-terminal-result", { ref: "result:00000000-0000-4000-8000-000000000007", originRunId: "run-7", originKey: "g:tracker:run-7", usage: { input: 10, output: 2, cost: 0.42 } });
+	resumed.appendCustomEntry("pi-persona-terminal-result", { ref: "result:00000000-0000-4000-8000-000000000008", originRunId: "run-8", originKey: "g:tracker:run-8", usage: { input: 10, output: 2, cost: 0.1 } });
+	resumed.appendMessage({ role: "toolResult", toolCallId: "c8", toolName: "intercom", content: [], details: { action: "result", ok: true, runId: "run-8" }, isError: false, timestamp: 1,
+		usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1 } } } as any);
+	await m.fire("session_start", { reason: "resume" }, { ...ctx, ui, sessionManager: resumed });
+	assert.equal(costs.at(-1), "$0.420", "the unbilled background run's spend is back after a resume");
+	await m.fire("session_start", { reason: "new" }, { ...ctx, ui, sessionManager: SessionManager.inMemory(os.tmpdir()) });
+	assert.equal(costs.at(-1), undefined, "another session shows its own figure");
+	await m.fire("session_shutdown", {}, { ...ctx, ui });
+});
+
+test("session_start continues run ids past every id the session file holds, so a fork or a crash never reissues one", async () => {
+	const cwd = tempDir("pi-persona-run-ids-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "scout.md"), "---\nname: scout\n---\nScout.");
+	// A fork: the parent's records and its shutdown entry, copied under ANOTHER session id.
+	const forked = SessionManager.create(cwd, tempDir("pi-persona-run-ids-sessions-"));
+	forked.appendCustomEntry("pi-persona-terminal-result", { ref: "result:00000000-0000-4000-8000-000000000005", originRunId: "run-5", originKey: "g:tracker:run-5", usage: { input: 1, output: 1, cost: 0.5 } });
+	forked.appendCustomEntry("pi-persona:runs", { version: 1, sessionId: "parent-session", issued: 7, lost: { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 0 } });
+	const engine: StrategyEngine = { run: async (spec) => ({ agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true }) };
+	const m = makeMockPi(forked);
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const ctx = { ...makeCtx(cwd).ctx, hasUI: true, sessionManager: forked };
+	await m.fire("session_start", { reason: "fork" }, ctx);
+	try {
+		const launched = await (m.tool("delegate") as { execute: AnyFn }).execute("ids-1", { agent: "scout", task: "t" }, undefined, undefined, ctx);
+		assert.equal(launched.details.runId, "run-8", "the next id follows the highest one in the file, whatever session id wrote it");
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("untracked /orchestrate and /flow roots carry a root:<uuid> origin id so persona-cost survives a restart; tracked runs, phases and legs never do", async () => {
+	const cwd = tempDir("pi-persona-root-ids-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "root-orch.md"), "---\nname: root-orch\npersona: true\norchestration:\n  mode: strategy\n  strategy: fanout\n  roster: magi\n---\nRoot id probe.");
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "two.flow.json"), JSON.stringify({ name: "two", phases: [{ id: "a", strategy: "fanout", roster: "magi" }, { id: "b", strategy: "fanout", roster: "magi", needs: ["a"] }] }));
+	let spent = 0;
+	const engine: StrategyEngine = {
+		run: async (spec) => { spent += 0.125; return { agent: spec.agent, output: `${spec.agent} says`, usage: { ...emptyUsage(), input: 10, output: 3, cost: 0.125 }, ok: true }; },
+	};
+	const manager = SessionManager.create(cwd, tempDir("pi-persona-root-ids-sessions-"));
+	const m = makeMockPi(manager);
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const costs: Array<string | undefined> = [];
+	const base = makeCtx(cwd).ctx;
+	const ctx = { ...base, sessionManager: manager, ui: { ...base.ui, setStatus: (id: string, value?: string) => { if (id === "persona-cost") costs.push(value); } } };
+	const records = () => manager.getEntries().flatMap((entry) => entry.type === "custom" && entry.customType === "pi-persona-terminal-result" ? [entry.data as { originKey: string; originRunId?: string; usage: { cost: number } }] : []);
+	await m.fire("session_start", undefined, ctx);
+	try {
+		await m.cmd("persona", "root-orch", ctx);
+		await m.cmd("orchestrate", "decide", ctx);
+		const orchestrateSpent = spent;
+		await m.cmd("flow", "two build it", ctx);
+		const flowSpent = spent - orchestrateSpent;
+		// A tracked (headless, inline-joined) council: its tracker record is the run; Pi persists the billing result.
+		const council = await (m.tool("council") as { execute: AnyFn }).execute("council-1", { question: "decide", strategy: "fanout", roster: "magi" }, undefined, undefined, ctx);
+		assert.ok(council.usage?.cost.total > 0, "the inline council bills its run on its own tool result");
+		manager.appendMessage({ role: "toolResult", toolCallId: "council-1", toolName: "council", content: council.content, details: council.details, isError: false, usage: council.usage, timestamp: 5 } as any);
+
+		const roots = records().filter((record) => record.originRunId?.startsWith("root:"));
+		assert.equal(roots.length, 2, "exactly the two untracked top-level roots: never the tracked council");
+		for (const record of roots) assert.match(record.originRunId!, /^root:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+		assert.notEqual(roots[0]!.originRunId, roots[1]!.originRunId);
+		assert.deepEqual(roots.map((record) => record.usage.cost), [orchestrateSpent, flowSpent], "each root's usage is the sum its legs already added, never more");
+		assert.ok(records().filter((record) => /:(leg|phase):/.test(record.originKey)).every((record) => record.originRunId === undefined), "phase roots and legs carry no origin run id");
+		assert.equal(records().filter((record) => /^run-/.test(record.originRunId ?? "")).length, 1, "the tracked council is counted through its own tracker record");
+
+		const live = costs.at(-1);
+		assert.equal(live, `$${(orchestrateSpent + flowSpent).toFixed(2)}`,"live: the untracked roots' spend is pending, the council's is on its tool result");
+		await m.fire("session_start", { reason: "resume" }, ctx); // a restart re-reads the same file
+		assert.equal(costs.at(-1), live, "the rebuilt persona-cost equals the live one");
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+	}
+});
+
+test("the published background status counts in-flight agents, not the has-a-parent count", async () => {
 	const m = makeMockPi();
 	piPersona(m.pi);
 	const { ctx } = makeCtx(os.tmpdir());
@@ -5926,7 +6015,8 @@ test("the published \"N agents\" status is the in-flight count, not the has-a-pa
 		ui: {
 			...ctx.ui,
 			setStatus: (id: string, value?: string) => {
-				if (id === "persona-agents") statuses.push(value);
+				if (id === "persona-agents") assert.fail("the agent count is published only as persona-background");
+				if (id === "persona-background") statuses.push(value);
 			},
 		},
 	};
@@ -5936,9 +6026,10 @@ test("the published \"N agents\" status is the in-flight count, not the has-a-pa
 	// seed → tear-down sequence of a visible run lands without needing a model.
 	await council.execute("count-1", { question: "decide", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, statusCtx);
 
-	assert.equal(statuses[0], "1", "a run root that has not seeded its cores yet IS the one agent in flight");
+	assert.equal(statuses[0], "agents=1", "a run root that has not seeded its cores yet IS the one agent in flight");
+	assert.ok(statuses.every((s) => s === undefined || /^agents=[1-9]\d*$/.test(s)), `never agents=0: ${statuses.join(",")}`);
 	assert.equal(
-		Math.max(...statuses.filter((s): s is string => s !== undefined).map(Number)),
+		Math.max(...statuses.filter((s): s is string => s !== undefined).map((s) => Number(s.slice("agents=".length)))),
 		3,
 		"…and once the 3-member roster is seeded the root stops counting: only its leaves are agents",
 	);
@@ -6055,7 +6146,7 @@ function wakeWidgetCtx(cwd: string, width = 200) {
 		ui: {
 			...base.ui,
 			setWidget: (id: string, content: WidgetContent) => { widgets[id] = widgetLines(content, width); },
-			setStatus: (id: string, text: string | undefined) => { if (id === "persona-agents") statuses.push(text); },
+			setStatus: (id: string, text: string | undefined) => { if (id === "persona-background") statuses.push(text); },
 		},
 	};
 	return { ctx, widgets, statuses };
@@ -6093,10 +6184,15 @@ test("the live widget groups scripts, timers and monitors and folds only the cli
 		assert.doesNotMatch(folded, /script child/);
 		assert.match(folded, /timer child/);
 		assert.match(folded, /monitor child/);
-		assert.deepEqual(statuses.filter((status) => status !== undefined), [], "resources never count as agents");
+		assert.ok(statuses.every((status) => status === undefined || !status.includes("agents=")), `resources never count as agents: ${statuses.join(",")}`);
+		assert.equal(statuses.at(-1), "monitors=1 timers=1 scripts=1", "one background status names every kind, in fixed order");
 		assert.equal((await script.execute("list", { action: "list" }, undefined, undefined, ctx)).details.count, 1, "folding never cancels runtime work");
 		assert.equal((await script.execute("stop", { action: "stop", id: result.details.id }, undefined, undefined, ctx)).details.stopped, true);
+		await waitUntil(() => statuses.at(-1) === "monitors=1 timers=1", "the stopped script to leave the background status");
+		await (m.tool("timer") as { execute: AnyFn }).execute("cancel", { action: "cancel", id: "timer-1" }, undefined, undefined, ctx);
+		await waitUntil(() => statuses.at(-1) === "monitors=1", "the cancelled timer to leave the background status");
 	} finally { await m.fire("session_shutdown", {}, ctx); }
+	assert.equal(statuses.at(-1), undefined, "shutdown clears the background status");
 });
 
 test("monitor raw output projects and publishes on the SAME shared UI frame, never on each chunk", { timeout: 10_000 }, async () => {
@@ -6139,7 +6235,7 @@ test("monitor raw output projects and publishes on the SAME shared UI frame, nev
 		mock.timers.tick(16);
 		assert.equal(frames.mock.callCount(), 2, "publishing a projection must not schedule a redundant frame");
 		assert.equal(changes().length, 1);
-		assert.deepEqual(statuses.filter((status) => status !== undefined), []);
+		assert.deepEqual(statuses.filter((status) => status !== undefined), ["monitors=1"], "raw output never republishes the background status");
 		assert.equal(m.sentMessages().length, 0, "raw progress produces no wake");
 		await tool.execute("cancel", { action: "cancel", id: armed.details.id }, undefined, undefined, ctx);
 		const stored = m.entries().find((entry) => entry.customType === "pi-persona-monitor-log")?.data as { stdout: string };
@@ -6272,12 +6368,13 @@ test("an active monitor is a row in the agent widget until it is cancelled", asy
 			() => widgets["persona-agents"]?.some((line) => line.includes("◉ qualify batch1") && line.includes(`${armed.details.id} · exit`) && line.includes("deadline in")) ?? false,
 			"the armed monitor's row in the widget",
 		);
-		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "a lone wake row publishes no \"N agents\" count");
+		assert.deepEqual(statuses.filter((s) => s !== undefined), ["monitors=1"], "a lone wake row is a monitor in the background status, never an agent");
 
 		const cancelled = await tool.execute("cancel", { action: "cancel", id: armed.details.id }, undefined, undefined, ctx);
 		assert.equal(cancelled.details.cancelled, true);
 		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled monitor to leave the widget");
-		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "no count was ever published for the monitor");
+		assert.deepEqual(statuses.filter((s) => s !== undefined), ["monitors=1"], "the monitor was only ever counted as a monitor");
+		assert.equal(statuses.at(-1), undefined, "cancelling the monitor clears the background status");
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
 
@@ -6346,7 +6443,9 @@ test("an armed timer is a row with its countdown and leaves when it fires", asyn
 		await waitUntil(() => widgets["persona-agents"]?.some((line) => line.includes("⏰ cancel me") && line.includes("timer-2")) ?? false, "the second timer's row");
 		assert.equal((await tool.execute("cancel-2", { action: "cancel", id: "timer-2" }, undefined, undefined, ctx)).details.ok, true);
 		await waitUntil(() => widgets["persona-agents"] === undefined, "the cancelled timer to leave the widget");
-		assert.deepEqual(statuses.filter((s) => s !== undefined), [], "timers are never counted as agents");
+		const timerStatuses = statuses.filter((s) => s !== undefined);
+		assert.ok(timerStatuses.length > 0 && timerStatuses.every((s) => s === "timers=1"), `timers are counted as timers, never as agents: ${timerStatuses.join(",")}`);
+		assert.equal(statuses.at(-1), undefined, "a fired or cancelled timer clears the background status");
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
 
@@ -6444,7 +6543,7 @@ test("an async fan-out shows one batch header with k/N settled and the status co
 		ui: {
 			...base.ui,
 			setWidget: (id: string, content: WidgetContent) => { widgets[id] = widgetLines(content); },
-			setStatus: (id: string, text: string | undefined) => { if (id === "persona-agents") statuses.push(text); },
+			setStatus: (id: string, text: string | undefined) => { if (id === "persona-background") statuses.push(text); },
 		},
 	};
 	await m.fire("session_start", undefined, ctx);
@@ -6463,7 +6562,7 @@ test("an async fan-out shows one batch header with k/N settled and the status co
 	release.get("leg-2")?.();
 	await waitUntil(() => widgets["persona-agents"] === undefined, "the header to leave with its last leg");
 
-	const counts = statuses.filter((status): status is string => status !== undefined).map(Number);
+	const counts = statuses.filter((status): status is string => status !== undefined).map((status) => Number(/^agents=(\d+)$/.exec(status)?.[1]));
 	assert.equal(Math.max(...counts), 3, "the header row itself is never counted as an agent");
 	const draining = counts.slice(counts.indexOf(3));
 	assert.deepEqual(draining, [...draining].sort((a, b) => b - a), `the status count only falls while the batch drains: ${counts.join(",")}`);
@@ -6496,7 +6595,7 @@ test("coalesces structural and streamed agent widget work and suppresses duplica
 				if (id === "persona-agents") widgetCalls++;
 			},
 			setStatus: (id: string) => {
-				if (id === "persona-agents") statusCalls++;
+				if (id === "persona-background") statusCalls++;
 			},
 		},
 	};
@@ -6641,7 +6740,7 @@ test("an aborted flow PHASE reaches its strategy's own cooperative check, not ju
 			setStatus: (id: string, value?: string) => {
 				// The synchronous semantic count reaches three only after the phase has seeded all
 				// roster cores; unlike a coalesced widget frame, it is safe as an execution witness.
-				if (id === "persona-agents" && value === "3") ac.abort();
+				if (id === "persona-background" && value === "agents=3") ac.abort();
 			},
 			setWidget: (_id: string, content: WidgetContent) => {
 				const lines = widgetLines(content);
@@ -7040,9 +7139,10 @@ for (const routineEnabled of [false, true]) test(`routine async check-ins are ${
 		const renderer = m.entryRenderer("pi-persona-status");
 		assert.ok(renderer, "routine status entries have a native expandable entry renderer");
 		const collapsed = renderComponent(renderer(checkIns[0], { expanded: false }, traceTheme));
-		assert.match(collapsed, /intercom update · running · 1 running/);
+		assert.match(collapsed, /^check-in · 1 running/);
 		assert.match(collapsed, /quiet-scout/);
-		assert.match(collapsed, /quiet-scout · 1 turns · 5 cumulative input \+ output tokens/i, "the compact per-run projection preserves the cumulative usage meaning");
+		// Compact uses the agent widget's unit; the expanded digest below keeps the cumulative wording.
+		assert.match(collapsed, /quiet-scout · 1 turn · 5 tok/i, "the compact per-run projection counts in the widget's unit");
 		assert.match(collapsed, /expand/i);
 		const expanded = renderComponent(renderer(checkIns[0], { expanded: true }, traceTheme));
 		assert.match(expanded, /cumulative input \+ output tokens/i);
@@ -7113,7 +7213,7 @@ test("stall and recovery episodes replace coincident routine entries without mod
 		assert.match(String((statuses[0]?.data as { content?: string }).content ?? ""), /possible stall/);
 		const renderer = m.entryRenderer("pi-persona-status");
 		assert.ok(renderer);
-		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /intercom update · stalled · 1 running/i, "stall entries use warning-specific UI chrome");
+		assert.match(renderComponent(renderer(statuses[0]!, { expanded: false }, traceTheme)), /^stalled · 1 running/i, "stall entries use warning-specific UI chrome");
 		assert.equal(m.sentMessages().length, 0, "interactive stall detection never creates a model wake");
 		now += 30_000;
 		tick();
@@ -7123,7 +7223,7 @@ test("stall and recovery episodes replace coincident routine entries without mod
 		tick();
 		const episodes = m.entries().filter((entry) => entry.customType === "pi-persona-status");
 		assert.deepEqual(episodes.map((entry) => (entry.data as { kind: string }).kind), ["stall", "recovery"]);
-		assert.match(renderComponent(renderer(episodes[1]!, { expanded: false }, traceTheme)), /intercom update · resumed · 1 running/i);
+		assert.match(renderComponent(renderer(episodes[1]!, { expanded: false }, traceTheme)), /^resumed · 1 running/i);
 		now += 30_000;
 		advance?.({ output: "work continues", turns: 2, tokens: 20 });
 		tick();
@@ -8010,7 +8110,7 @@ test("an aborted run reaches the strategy's own cooperative check — no member 
 			// The synchronous semantic count reaches three only once the council has seeded its whole roster —
 			// the operator stops the run exactly then, before the strategy has convened anyone.
 			setStatus: (id: string, value?: string) => {
-				if (id === "persona-agents" && value === "3") ac.abort();
+				if (id === "persona-background" && value === "agents=3") ac.abort();
 			},
 			setWidget: (_id: string, content: WidgetContent) => {
 				const lines = widgetLines(content);
@@ -8144,6 +8244,35 @@ test("sticky agent and Exocom widgets cap physical rows at 8 and 7 with long lab
 			assert.equal(physicalRows, cap, `${id} obeys its physical row cap`);
 			t.diagnostic(`${id}: ${physicalRows} physical rows at 80 columns (cap ${cap})`);
 		}
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		if (previous === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = previous;
+	}
+});
+
+test("the Exocom widget's local row leaves this session's model and context to Pi's footer; peer rows keep theirs", async () => {
+	const previous = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const agentDir = process.env.PI_AGENT_DIR as string;
+	const hash = workspaceHash(cwd);
+	const m = makeMockPi();
+	const { ctx: base, widgets } = makeExocomCtx(cwd, "local-row-session");
+	const ctx = { ...base, hasUI: true };
+	writeEntry(agentDir, hash, registryEntryFixture({
+		session_id: "local-row-peer", name: "Vega", model: "provider/peer-model", context_pct: 52,
+		pid: process.pid, endpoint: endpointFor(agentDir, hash, "local-row-peer", process.platform),
+		cwd, heartbeat_at: new Date().toISOString(),
+	}));
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", {}, ctx);
+		await waitUntil(() => (widgets["persona-exocom"]?.length ?? 0) >= 2, "the Exocom widget with one peer row");
+		const [local, peer] = widgets["persona-exocom"]!;
+		assert.match(local!, /^📡 .* · workspace /, "the local row keeps identity and scope");
+		assert.doesNotMatch(local!, /ctx \d+%| · \? · /, "this session's model and context are not repeated");
+		assert.match(peer!, /Vega .*peer-model · ctx 52%/, "peer rows keep their model and context");
 	} finally {
 		await m.fire("session_shutdown", {}, ctx);
 		if (previous === undefined) delete process.env.PI_PERSONA_EXOCOM;

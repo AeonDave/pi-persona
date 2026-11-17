@@ -243,9 +243,10 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		sendPersonaFollowUp(pi, text, customType, buildCommunicationCardDetails("exocom", notices.map((notice) => notice.message ?? { text: notice.text.replace(/^\[pi-persona\]\s*/, "") })));
 	}
 
-	// A tiny, stable name→color hash for the pool widget's swatch — exocom peers carry no
-	// persona "label colour" of their own to read, so this derives one deterministically
-	// instead of hardcoding one default for every peer.
+	// A tiny, stable name→color hash for the `color` this session publishes in its registry entry
+	// and telemetry descriptor — exocom peers carry no persona "label colour" of their own to read,
+	// so this derives one deterministically instead of hardcoding one default for every peer. The
+	// pool widget paints no swatch.
 	const EXOCOM_PALETTE = ["#36F9F6", "#FF6B6B", "#FFD93D", "#6BCB77", "#4D96FF", "#C780FA", "#FF9F1C", "#00C2A8"];
 	function exocomColorFor(name: string): string {
 		let h = 0;
@@ -325,8 +326,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		publishTelemetryPeers(peers);
 		try {
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
-			const selfModel = sanitizePeerField(host.lastCtx.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96);
-			const selfContextPct = Math.max(0, Math.min(100, Math.round(host.lastCtx.getContextUsage()?.percent ?? 0)));
 			const ident = exocomSelfWidgetLabel(host.identity.chosen, host.identity.name, selfPersona);
 			const roleBit = host.identity.chosen && selfPersona ? ` · ${selfPersona}` : "";
 			const scopeBit = exocomScope
@@ -334,7 +333,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					? ` · home ${exocomScope.homeWorkspaceLabel} [${exocomScope.homeWorkspaceCode}] → scope [${exocomScope.scopeCode}]`
 					: ` · workspace ${exocomScope.homeWorkspaceLabel} [${exocomScope.scopeCode}]`
 				: "";
-			const local = `📡 ${ident}${roleBit} · ${shortModel(selfModel) || "?"} · ctx ${selfContextPct}%${scopeBit}`;
+			// This session's own model and context are Pi's footer's to show (live, not on this
+			// heartbeat); peer rows keep theirs, which nothing else displays.
+			const local = `📡 ${ident}${roleBit}${scopeBit}`;
 			const peerRows = peers.map((p) => {
 							const quiet = now - Date.parse(p.heartbeat_at) > EXOCOM.QUIET_AFTER_MS;
 							const name = sanitizePeerField(p.displayName, 48) || "peer";

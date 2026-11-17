@@ -49,7 +49,7 @@ class ReportBody implements Component {
 		];
 		const background = this.options.background;
 		return new Text(lines.join("\n"), padding, 0, background ? (text) => this.theme.bg(background, text) : undefined)
-			.render(width).map((line) => truncateToWidth(line, width));
+			.render(width).map((line) => truncateToWidth(line, width, "…"));
 	}
 }
 

@@ -164,12 +164,44 @@ test("reserving a folded header never hides a visible supervisor request", () =>
 	assert.ok(summary.targets.includes("batch"));
 });
 
-test("a wide worker fanout cannot hide the resource category controls", () => {
+test("an expanded delegate header keeps one leg under it while every digest still fits; otherwise it stays a lone control", () => {
+	const fixture = (legs: number, stalled?: number) => {
+		const tree = new AgentTree(() => 0);
+		tree.add({ id: "batch", label: `delegate · ${legs} legs`, kind: "delegate", detail: `0/${legs} settled`, startedAt: 100_000, lastAdvanceAt: 100_000 });
+		for (let i = 0; i < legs; i++) {
+			const at = i === stalled ? 0 : 100_000;
+			tree.add({ id: `leg:${i}`, label: `leg ${i}`, parentId: "batch", kind: "subagent", startedAt: at, lastAdvanceAt: at });
+		}
+		for (const kind of ["timer", "monitor", "script"] as const) tree.add({ id: `${kind}:1`, label: kind, kind });
+		return tree.snapshot();
+	};
+	const collapsed = new Set([RESOURCE_GROUP_IDS.timer, RESOURCE_GROUP_IDS.monitor]);
+	// The gate's example: before, the leg folded into `⏳ 1 active worker: leg 0` under an empty `▾` header.
+	const one = resourceSummary(fixture(1), collapsed, 5);
+	assert.deepEqual(one.lines, ["▾ ⏳ delegate · 1 legs  0/1 settled", "└─ ⏳ leg 0", "▸ ◆ Timers  1 active", "▸ ◆ Monitors  1 active", "⚙ 1 script"]);
+	assert.deepEqual(one.targets, ["batch", undefined, RESOURCE_GROUP_IDS.timer, RESOURCE_GROUP_IDS.monitor, undefined]);
+	// A stalled leg is the one kept, ahead of an earlier healthy sibling.
+	const stalled = resourceSummary(fixture(2, 1), collapsed, 6, { now: 100_000, stallMs: 90_000 });
+	assert.deepEqual(stalled.lines.slice(0, 2), ["▾ ⏳ delegate · 2 legs  0/2 settled · <1s", "└─ ⏳ leg 1  ⚠ stalled 1m 40s"]);
+	assert.match(stalled.lines.join("\n"), /⏳ 1 active worker: leg 0/);
+	// No room for a leg once the remaining digests are counted: the header stays alone, as the fold control.
+	const tight = resourceSummary(fixture(2), collapsed, 5);
+	assert.deepEqual(tight.lines, ["▾ ⏳ delegate · 2 legs  0/2 settled", "▸ ◆ Timers  1 active", "▸ ◆ Monitors  1 active", "⚙ 1 script", "⏳ 2 active workers: leg 0"]);
+	assert.equal(tight.targets[0], "batch");
+});
+
+test("a wide worker fanout folds expanded category headers into the wake digest; collapsed ones stay controls", () => {
 	const tree = new AgentTree(() => 0);
 	for (let i = 0; i < 20; i++) tree.add({ id: `worker:${i}`, label: `worker ${i}` });
 	for (const kind of ["timer", "monitor", "script"] as const) tree.add({ id: `${kind}:1`, label: kind, kind });
-	const summary = resourceSummary(tree.snapshot(), new Set(), 8);
-	assert.ok(summary.lines.length <= 8);
-	for (const id of Object.values(RESOURCE_GROUP_IDS)) assert.ok(summary.targets.includes(id), id);
-	assert.match(summary.lines.join("\n"), /F9/);
+	const open = resourceSummary(tree.snapshot(), new Set(), 8);
+	assert.ok(open.lines.length <= 8);
+	for (const id of Object.values(RESOURCE_GROUP_IDS)) assert.ok(!open.targets.includes(id), `${id} does not restate the digest`);
+	assert.doesNotMatch(open.lines.join("\n"), /◆/);
+	assert.match(open.lines.join("\n"), /◉ 1 monitor · ⏰ 1 timer · ⚙ 1 script/);
+	assert.match(open.lines.join("\n"), /F9/);
+	const closed = resourceSummary(tree.snapshot(), new Set(Object.values(RESOURCE_GROUP_IDS)), 8);
+	assert.ok(closed.lines.length <= 8);
+	for (const id of Object.values(RESOURCE_GROUP_IDS)) assert.ok(closed.targets.includes(id), `${id} stays reachable while collapsed`);
+	assert.match(closed.lines.join("\n"), /F9/);
 });

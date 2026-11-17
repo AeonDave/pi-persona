@@ -223,6 +223,23 @@ test("timer collapsed arm cards are escape-free even for hostile labels", async 
 	assert.match(collapsed, /armed build REDACTED safe\.exe/);
 });
 
+test("timer arm receipt drops the label the call line already shows, and keeps the id when the call had none", async () => {
+	const tool = renderHarness();
+	const line = (result: unknown, args: Record<string, unknown>) =>
+		stripVTControlCharacters(tool.renderResult(result, { expanded: false }, plainTheme, { isError: false, args }).render(200).join("\n")).trimEnd();
+	const labelled = { action: "arm", label: "status review", message: "check the batch", delaySeconds: 900 };
+	assert.equal(stripVTControlCharacters(tool.renderCall(labelled, plainTheme).render(200).join("\n")).trimEnd(), "timer arm status review");
+	assert.match(line(await armResult(tool, "status review"), labelled), /^armed · fires in \d+m \d+s$/);
+	// No label: the scheduler names the alarm by its id, which the bare `timer arm` call line never showed.
+	const bare = { action: "arm", message: "check the batch", delaySeconds: 900 };
+	assert.equal(stripVTControlCharacters(tool.renderCall(bare, plainTheme).render(200).join("\n")).trimEnd(), "timer arm");
+	assert.match(line(await armResult(tool), bare), /^armed timer-2 · fires in \d/);
+	for (const width of [100, 60]) {
+		const rows = tool.renderResult(await armResult(tool, "status review"), { expanded: false }, plainTheme, { isError: false, args: labelled }).render(width);
+		assert.ok(rows.every((row: string) => row.length <= width), `width ${width}`);
+	}
+});
+
 test("timer arm card says due-now instead of a negative countdown", () => {
 	const tool = renderHarness();
 	const past = { content: [{ type: "text", text: "Armed timer-1 (late)." }], details: { action: "arm", id: "timer-1", fireAtEpochMs: Date.now() - 5_000, ok: true, label: "late" }, isError: false };

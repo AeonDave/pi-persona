@@ -139,7 +139,7 @@ import { sumUsage } from "./orchestration/reducers.ts";
 import type { AgentResult, FailureKind } from "./orchestration/types.ts";
 import { defaultChildThinking, resolveLegThinking } from "./core/leg-thinking.ts";
 import { snapshotOrchestrationParticipants, type OrchestrationLaunchSnapshot } from "./ui/orchestration-launch.ts";
-import { SessionResults } from "./extension/results.ts";
+import { SessionResults, untrackedRootRunId } from "./extension/results.ts";
 import { readArchivedBody, resultReceiptHint, type ResultReceipt } from "./results/retrieval.ts";
 type SavedFlowOutcome = FlowOutcome & { resultReceipt?: ResultReceipt };
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
@@ -164,7 +164,7 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatIntercomDelivery, formatIntercomSender } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
-import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, deriveWaitingNodeIds, isQueuedMarker, isNonAgentNode, progressPatch } from "./ui/agent-tree.ts";
+import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, backgroundCounts, deriveWaitingNodeIds, formatBackgroundStatus, isQueuedMarker, isNonAgentNode, PERSONA_BACKGROUND_STATUS_KEY, progressPatch } from "./ui/agent-tree.ts";
 import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
 import { filterModels, ModelPicker, orderModelRefs, type ModelPickerMetadata } from "./ui/model-picker.ts";
@@ -268,24 +268,6 @@ export function renderOperatorResult(label: string, output: string, ok: boolean,
 		`[pi-persona] The operator ran ${compactInlineText(label, { maxChars: 96 })} (${state}); its output:\n${fenceUntrusted(output)}`,
 		"operator result truncated at 12000 characters; only the operator can see the rest (ask them to paste what you need)",
 	);
-}
-
-/** Agents actually IN FLIGHT: a RUNNING node with no children of its own. "Has a parent" is not the
- *  same as "is an agent" — a flow phase is a container that also has a parent, a root-level `async:`
- *  run is a leaf that has none, and a settled leg still sits in the tree until its root is torn
- *  down. A fan-out's `delegate` header row is a container even in the beat after its last leg
- *  left, so it never counts. A wake source (a timer or monitor row) is not an agent at all and
- *  never counts, running or not. Exported for direct unit testing. */
-export function inFlightAgentCount(nodes: ReadonlyArray<{ id: string; parentId?: string | undefined; status: AgentNodeStatus; kind?: NonNullable<AgentNode["kind"]> }>): number {
-	const parents = new Set<string>();
-	for (const node of nodes) {
-		if (node.parentId !== undefined) parents.add(node.parentId);
-	}
-	let count = 0;
-	for (const node of nodes) {
-		if (node.status === "running" && node.kind !== "delegate" && !isNonAgentNode(node) && !parents.has(node.id)) count++;
-	}
-	return count;
 }
 
 /** Per-invocation tree root ids. Two concurrent runs of the SAME strategy or flow (two
@@ -801,9 +783,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 	}
 
-	// The live count of agents in flight (leaf cores/legs), published as a status so a
-	// custom UI (e.g. pi-1337's frame) can show "N agents" — covers strategy/council
-	// cores too, which pi-1337's own delegate-only counter misses.
+	// Everything in the background that will report back later — in-flight agents (leaf cores/legs,
+	// strategy/council cores included), armed timers, active monitors and scripts — published as ONE
+	// status (`persona-background`) so a custom UI (e.g. pi-theme-1337's frame) can say so.
 	const WIDGET_RENDER_DELAY_MS = 16;
 	let widgetTimer: ReturnType<typeof setTimeout> | undefined;
 	let widgetRenderPending = false;
@@ -819,12 +801,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (!a || !b || a.length !== b.length) return false;
 		return a.every((line, i) => line === b[i]);
 	}
-	/** The "N agents" status answers how many agents are working, so a tree holding only wake rows
-	 *  (timers, monitors) publishes none, while the widget lines still show them. */
-	function agentCountStatus(nodes: readonly AgentNode[]): string | undefined {
-		const agents = nodes.filter((node) => !isNonAgentNode(node));
-		return agents.length === 0 ? undefined : String(inFlightAgentCount(agents));
-	}
+	const backgroundStatus = (nodes: readonly AgentNode[]): string | undefined => formatBackgroundStatus(backgroundCounts(nodes));
 	function renderAgentWidget(): void {
 		if (!lastCtx) return;
 		// Publish dirty monitor tails into the tree BEFORE this frame takes its snapshot. The tree's
@@ -841,11 +818,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const empty = nodes.length === 0;
 		const summary = resourceSummary(nodes, collapsedResourceGroups, 8, { now: Date.now(), stallMs: STALL_FLAG_MS, waitingForSupervisor: waitingTreeIds(nodes) });
 		const lines = empty ? undefined : summary.lines;
-		const status = agentCountStatus(nodes);
+		const status = backgroundStatus(nodes);
 		try {
 			if (!widgetLinesInitialized || !sameWidgetLines(lastWidgetLines, lines)
 				|| summary.targets.length !== lastWidgetTargets.length || summary.targets.some((id, index) => id !== lastWidgetTargets[index])) {
-				lastCtx.ui.setWidget("persona-agents", lines ? compactWidget(lines, summary.targets, (id) => {
+				lastCtx.ui.setWidget("persona-agents", lines ? compactWidget(summary.styled, summary.targets, (id) => {
 					if (!collapsedResourceGroups.delete(id)) collapsedResourceGroups.add(id);
 					renderAgentWidget();
 				}) : undefined, { placement: "aboveEditor" });
@@ -858,7 +835,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		}
 		try {
 			if (!widgetStatusInitialized || lastWidgetStatus !== status) {
-				lastCtx.ui.setStatus("persona-agents", status);
+				lastCtx.ui.setStatus(PERSONA_BACKGROUND_STATUS_KEY, status);
 				lastWidgetStatus = status;
 				widgetStatusInitialized = true;
 			}
@@ -868,10 +845,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 	function renderAgentStatus(): void {
 		if (!lastCtx) return;
-		const status = agentCountStatus(agentTree.snapshot());
+		const status = backgroundStatus(agentTree.snapshot());
 		try {
 			if (!widgetStatusInitialized || lastWidgetStatus !== status) {
-				lastCtx.ui.setStatus("persona-agents", status);
+				lastCtx.ui.setStatus(PERSONA_BACKGROUND_STATUS_KEY, status);
 				lastWidgetStatus = status;
 				widgetStatusInitialized = true;
 			}
@@ -1580,8 +1557,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const engine = innerBuildEngine(signal, onProgress, engOpts);
 		return {
 			run: async (spec, progress, sig, steer) => {
+				const session = childUsage.session(); // a run settling after a session change is not this session's spend
 				const result = await engine.run(spec, progress, sig, steer);
-				childUsage.add(result.usage);
+				childUsage.add(result.usage, session);
 				publishPersonaCost();
 				return result;
 			},
@@ -1943,8 +1921,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		results.activate(ctx);
 		const { rootId, signal, live } = visibleRoot(`${idPrefix}:${label}`, tracked);
 		const capture = results.bind(rootId);
+		// Only the top-level UNTRACKED root carries an origin run id (`untrackedRootRunId`), so the
+		// persona-cost rebuild counts its aggregate once; a tracked run's own tracker record does that.
 		const finish = (result: AgentResult): AgentResult => {
-			if (!tracked) result.resultReceipt = capture("root", result, { label });
+			if (!tracked) result.resultReceipt = capture("root", result, { label, originRunId: untrackedRootRunId() });
 			return result;
 		};
 		const onAgentResult = (result: AgentResult, key: string): void => { result.resultReceipt = capture(`leg:${key}`, result); };
@@ -2057,7 +2037,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		const finish = (outcome: FlowOutcome): SavedFlowOutcome => {
 			if (tracked) return outcome;
 			const result: AgentResult = { agent: `flow ${spec.name}`, output: outcome.output, ok: outcome.ok, usage: sumUsage(Object.values(outcome.results).map((result) => result.usage)), ...(outcome.error ? { error: outcome.error } : {}), ...(outcome.failureKind ? { failureKind: outcome.failureKind } : {}) };
-			return { ...outcome, resultReceipt: capture("root", result, { status: outcome.stoppedAtGate || outcome.cancelled ? "stopped" : outcome.ok ? "done" : "failed" }) };
+			return { ...outcome, resultReceipt: capture("root", result, { originRunId: untrackedRootRunId(), status: outcome.stoppedAtGate || outcome.cancelled ? "stopped" : outcome.ok ? "done" : "failed" }) };
 		};
 		const hash = flowRunHash(spec, baseTask, ctx.cwd);
 		const journalDir = join(personaDataDir(), "flows");

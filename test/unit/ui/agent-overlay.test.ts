@@ -1201,3 +1201,17 @@ test("the F9 drill-in shows the effort with FULL names, divergence included", (t
 	tree.update("a", { thinking: "off" });
 	assert.doesNotMatch(overlay.render(80).join("\n"), /thinking:/, "off renders nothing — absence means off");
 });
+
+test("the overlay frame uses the host dialogs' border token; the title keeps accent", (t: TestContext) => {
+	const tagged = { fg: (role: string, s: string) => `<${role}>${s}`, bold: (s: string) => s } as unknown as Theme;
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "leg", status: "running" });
+	const overlay = new AgentOverlay(tree, TUI_STUB, tagged, () => {}, { canSteer: () => true });
+	t.after(() => overlay.dispose());
+	const rows = overlay.render(80);
+	assert.match(rows[0]!, /^<border>┌─+┐$/);
+	assert.match(rows.at(-1)!, /^<border>└─+┘$/);
+	for (const row of rows.slice(1, -1)) assert.match(row, /^<border>│ .* <border>│$/, row);
+	assert.ok(rows.some((row) => row.includes("<accent>Agents")), "the title keeps accent");
+	assert.doesNotMatch(rows.join("\n"), /<accent>[┌└│]/, "no frame line is painted with accent");
+});

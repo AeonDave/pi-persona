@@ -46,6 +46,17 @@ function panelLabel(value: { roster: string; members?: RosterMember[] | undefine
 	return value.members.map((m) => memberBaseLabel(m)).join(", ");
 }
 
+/** The strategy and roster the call line shows: args only, neutral about omitted defaults. */
+function councilCallParts(args: { strategy?: string; roster?: string; persona?: string; members?: unknown }): { strategy: string; roster: string } {
+	const members = Array.isArray(args.members) ? args.members.flatMap((raw: unknown) => {
+		const parsed = parseRuntimeRosterMember(raw);
+		return parsed.ok ? [parsed.member] : [];
+	}) : [];
+	const strategy = args.strategy ?? "profile defaults";
+	const roster = members.length ? panelLabel({ roster: "", members }) : args.roster ?? args.persona ?? "profile roster";
+	return { strategy, roster };
+}
+
 export function registerCouncilTool(pi: ExtensionAPI, d: CouncilToolDeps): void {
 	// ── council tool (deliberate → vote → ruling; the executor then applies it) ───
 	const CouncilParams = Type.Object({
@@ -213,12 +224,7 @@ ${strategyCatalog()}`,
 		renderCall(args, theme) {
 			// Native Pi draws the call before its saved result. Keep this title args-only and
 			// neutral about omitted defaults; the receipt below carries the resolved snapshot.
-			const members = Array.isArray(args.members) ? args.members.flatMap((raw) => {
-				const parsed = parseRuntimeRosterMember(raw);
-				return parsed.ok ? [parsed.member] : [];
-			}) : [];
-			const strategy = args.strategy ?? "profile defaults";
-			const roster = members?.length ? panelLabel({ roster: "", members }) : args.roster ?? args.persona ?? "profile roster";
+			const { strategy, roster } = councilCallParts(args);
 			return new Text(theme.fg("toolTitle", theme.bold(formatCouncilCallLabel(strategy, roster))), 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
@@ -239,9 +245,18 @@ ${strategyCatalog()}`,
 			const first = result.content[0];
 			const failed = (context?.isError ?? result.isError) || d.ok === false || !!d.error;
 			if (d.runId) {
-				// Interactive launch receipt: the ruling arrives later as the completion follow-up.
-				const launched = failed ? theme.fg("error", theme.bold("council failed"))
-					: `${theme.fg("toolTitle", theme.bold("council "))}${theme.fg("accent", compactInlineText(`launched ${d.runId} · ${d.strategy ?? "?"} · ${d.roster ?? "?"}`, { maxChars: 120 }))}`;
+				// Interactive launch receipt: the ruling arrives later as the completion follow-up. The
+				// call line already names the tool and whatever strategy/roster the args gave; repeat
+				// only the resolved parts it could not show (omitted defaults, or no saved args at all).
+				const call = context?.args ? councilCallParts(context.args) : undefined;
+				const same = (resolved: string | undefined, shown: readonly string[]) =>
+					resolved !== undefined && shown.some((value) => compactInlineText(value, { maxChars: 80 }) === compactInlineText(resolved, { maxChars: 80 }));
+				const strategy = call && same(d.strategy, [call.strategy]) ? undefined : d.strategy ?? "?";
+				const roster = call && same(d.roster, [call.roster]) ? undefined : d.roster ?? "?";
+				// Like the call label, a roster named after its strategy is said once.
+				const facts = [strategy, roster === strategy ? undefined : roster].filter((part): part is string => part !== undefined);
+				const launched = failed ? theme.fg("error", theme.bold("failed"))
+					: `${theme.fg("toolTitle", theme.bold("launched "))}${theme.fg("accent", compactInlineText([d.runId, ...facts].join(" · "), { maxChars: 120 }))}`;
 				const metadata = orchestrationLaunchLines(d.launch, expanded, context).join("\n");
 				return new Text([launched, theme.fg("dim", metadata), expanded && first?.type === "text" ? theme.fg("toolOutput", sanitizeTerminalText(first.text)) : ""].filter(Boolean).join("\n"), 0, 0);
 			}
@@ -249,7 +264,8 @@ ${strategyCatalog()}`,
 			const metadata = d.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(d.launch, expanded, context).join("\n")}` : "";
 			if (failed) {
 				const cause = compactInlineText([d.failureKind, d.error].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
-				const title = () => theme.fg("error", theme.bold(`council failed${cause ? ` · ${cause}` : ""}`));
+				// The call line above already says "council"; the heading carries only the outcome.
+				const title = () => theme.fg("error", theme.bold(`failed${cause ? ` · ${cause}` : ""}`));
 				if (expanded) {
 					// Only a completed council retains a ruling body; preflight/host errors are literal.
 					if (typeof d.body === "string") return createReportBody(body || "(no ruling)", theme, { header: title, footer: metadata }, context?.lastComponent);

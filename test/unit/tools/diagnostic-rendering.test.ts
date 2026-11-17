@@ -51,7 +51,8 @@ for (const [name, tool] of tools()) {
 		const rendered = text(render(tool, result, true, true));
 		assert.ok(rendered.includes(diagnostic.replace("\u001b[2J", "")), rendered);
 		assert.doesNotMatch(rendered, /\u001b/);
-		if (name !== "delegate") assert.match(rendered, new RegExp(`^${name} failed\\n`));
+		// The call line above already names the tool; the result heading carries only the outcome.
+		if (name !== "delegate") assert.match(rendered, /^failed\n/);
 		assert.notEqual(tool.renderShell, "self", "the native host still owns the tool shell");
 		assert.equal(JSON.stringify(result), before, "rendering never changes the model/stored diagnostic");
 	});
@@ -59,12 +60,12 @@ for (const [name, tool] of tools()) {
 	test(`${name}: host error context remains authoritative and collapsed diagnostics stay bounded`, () => {
 		const result = { content: [{ type: "text" as const, text: Array.from({ length: 40 }, (_, i) => `evidence ${i} **literal**`).join("\n") }], details: {}, isError: true };
 		const failed = text(render(tool, result, false, true));
-		assert.match(failed, new RegExp(`^${name} failed\\n`));
+		assert.match(failed, /^failed\n/);
 		assert.ok(failed.split("\n").length <= 6);
 		assert.match(failed, /expand/);
 		assert.doesNotMatch(failed, /evidence 39/);
 		const hostSuccess = text(render(tool, result, false, false));
-		assert.doesNotMatch(hostSuccess, new RegExp(`^${name} failed`), "a stale result.isError cannot overrule context.isError=false");
+		assert.doesNotMatch(hostSuccess, /^failed/, "a stale result.isError cannot overrule context.isError=false");
 	});
 }
 
@@ -104,4 +105,11 @@ test("both delegate model parameters distinguish omission from deliberately sele
 		assert.match(description, /provider\/billing authorization/i);
 		assert.doesNotMatch(description, /omit to inherit the working session model/i);
 	}
+});
+
+test("delegate's id-only launch fallback says what launched without repeating the tool name", () => {
+	// Reached only by saved details whose ids yield no launch rows (malformed history).
+	const tool = tools().get("delegate")!;
+	const card = text(render(tool, { content: [{ type: "text", text: "Launched." }], details: { runIds: [7, 8], dropped: 1 } }, false, false));
+	assert.equal(card, "launched 7, 8 · 1 task dropped (max children)");
 });

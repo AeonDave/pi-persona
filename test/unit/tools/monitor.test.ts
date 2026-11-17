@@ -163,7 +163,7 @@ function renderHarness() {
 
 const armResult = async (tool: any) => tool.execute("call", { action: "arm", command: "node", label: "build finished", mode: "output" }, undefined, undefined, { cwd: "D:/project" });
 
-test("monitor arm result card collapses to label, mode and a relative deadline — no advice paragraph, no ISO", async () => {
+test("monitor arm result card collapses to mode and a relative deadline — the call line owns the label", async () => {
 	const tool = renderHarness();
 	const result = await armResult(tool);
 	assert.equal(result.details.ok, true);
@@ -171,10 +171,13 @@ test("monitor arm result card collapses to label, mode and a relative deadline �
 	assert.equal(result.details.label, "build finished");
 	assert.equal(result.details.mode, "output");
 	const before = JSON.stringify(result);
-	const raw = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false }).render(200).join("\n");
+	const args = { action: "arm", command: "node", label: "build finished", mode: "output" };
+	assert.equal(stripVTControlCharacters(tool.renderCall(args, plainTheme).render(200).join("\n")).trimEnd(), "monitor arm build finished");
+	const raw = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false, args }).render(200).join("\n");
 	const collapsed = stripVTControlCharacters(raw);
-	assert.match(collapsed, /armed build finished · output/);
-	assert.match(collapsed, /deadline in /);
+	assert.match(collapsed, /^armed · output · deadline in \d/, "only facts the call line does not carry");
+	assert.doesNotMatch(collapsed, /build finished/);
+	for (const width of [100, 60]) assert.ok(tool.renderResult(result, { expanded: false }, plainTheme, { isError: false, args }).render(width).every((row: string) => row.length <= width));
 	assert.doesNotMatch(collapsed, /wakes on relevant stdout lines|wakes you by itself|sleep, poll/);
 	assert.doesNotMatch(collapsed, /\d{4}-\d{2}-\d{2}T/);
 	assert.equal(JSON.stringify(result), before, "rendering never mutates the tool result");

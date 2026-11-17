@@ -44,14 +44,17 @@ test("headless script receipts describe shutdown honestly instead of promising a
 	assert.doesNotMatch(result.content[0].text, /completion wakes you when/i);
 });
 
-test("script start cards show label and countdown, with the complete literal receipt on expansion", async () => {
+test("script start cards show only the countdown under the labelled call line, with the complete literal receipt on expansion", async () => {
 	const h = harness();
 	const result = await h.run({ action: "run", command: "node", label: "build project" });
 	result.details.expiresAtEpochMs = Date.now() + 60_000;
 	const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 	const render = (expanded: boolean) => h.tool.renderResult(result, { expanded }, theme).render(180).join("\n");
-	assert.match(render(false), /^started build project · deadline in /);
+	assert.equal(h.tool.renderCall({ action: "run", label: "build project" }, theme).render(180).join("\n").trimEnd(), "script run build project");
+	assert.match(render(false), /^started · deadline in \d/);
+	assert.doesNotMatch(render(false), /build project/, "the call line already names the job");
 	assert.doesNotMatch(render(false), /Started script-1|wakes you|1970-/);
+	for (const width of [100, 60]) assert.ok(h.tool.renderResult(result, { expanded: false }, theme).render(width).every((row: string) => row.length <= width));
 	assert.match(render(true), /Started script-1/);
 	assert.match(render(true), /end your\s+turn/);
 });
