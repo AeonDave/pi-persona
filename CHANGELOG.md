@@ -57,6 +57,7 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- `code_outline` now reports JavaScript function-expression bindings and class arrow fields, callable C/C++ declarators (excluding function-pointer data), C++ destructors and fully qualified out-of-line methods, Rust trait methods, and members under C# file-scoped namespaces. Separate declaration and definition nodes remain separate syntax rows.
 - Folded delegate failures and pending asks keep their `N failed` / `N waiting` alerts visible
   at 30- and 40-column widget widths by shortening the descriptive label first.
 - Cost reconstruction uses the terminal archive's canonical record parser: malformed records

@@ -131,3 +131,57 @@ test("language selection is explicit and unsupported extensions fail without a r
 	aborted.abort();
 	await assert.rejects(withParsedCodeOutline(bytes("def f(): pass"), "cancel.py", aborted.signal, () => true), /cancel/i);
 });
+
+test("JS callable bindings and class arrow fields retain declared names without duplicate inner function names", async () => {
+	const source = `const bound = function recursive() {};\nconst anonymous = function() {};\nconst generator = function* internalGenerator() {};\nclass C {\n  field = () => { function nested() {} };\n  ['literal'] = () => 1;\n  [dynamic] = () => 2;\n}\n`;
+	const result = await run(source, "bindings.js");
+	assert.deepEqual(result.symbols.map(({ name, kind, container, startLine, endLine }) => [name, kind, container, startLine, endLine]), [
+		["bound", "function", undefined, 1, 1], ["anonymous", "function", undefined, 2, 2], ["generator", "function", undefined, 3, 3],
+		["C", "class", undefined, 4, 8], ["field", "arrow", "C", 5, 5], ["nested", "function", "C.field", 5, 5], ["literal", "arrow", "C", 6, 6],
+	]);
+	assert.deepEqual((await run("class C { field = () => 1 }", "bindings.ts")).symbols.map(({ name, kind }) => [name, kind]), [["C", "class"], ["field", "arrow"]]);
+});
+
+test("C-family includes each callable declarator and destructor while excluding function pointer data", async () => {
+	const c = await run("int f(void), g(void);\nint (*callback)(int), h(void);\nint (*factory(void))(int);\n", "declarations.c");
+	assert.deepEqual(c.symbols.map(({ name, kind, startLine, endLine }) => [name, kind, startLine, endLine]), [
+		["f", "function", 1, 1], ["g", "function", 1, 1], ["h", "function", 2, 2], ["factory", "function", 3, 3],
+	]);
+	const cpp = await run("class C { public: ~C(); void f(), g(); int (*callback)(int); };\nC::~C() {}\n", "declarations.cpp");
+	assert.deepEqual(cpp.symbols.map(({ name, kind, container }) => [name, kind, container]), [
+		["C", "class", undefined], ["~C", "method", "C"], ["f", "method", "C"], ["g", "method", "C"], ["~C", "method", "C"],
+	]);
+});
+
+test("qualified C++ methods retain lexical namespace containers without duplicating explicit scopes", async () => {
+	const source = "namespace N {\nclass C { public: void f(), g(); };\nvoid C::f() { struct Local {}; }\nvoid N::C::g() {}\n}\nvoid ::N::C::f() {}\nnamespace Outer { namespace N { void N::C::f() {} } }\n";
+	const result = await run(source, "scopes.cpp");
+	assert.deepEqual(result.symbols.filter(({ kind }) => kind === "method").map(({ name, container }) => [name, container]), [
+		["f", "N.C"], ["g", "N.C"], ["f", "N.C"], ["g", "N.C"], ["f", "N.C"], ["f", "Outer.N.C"],
+	]);
+	assert.equal(result.symbols.find(({ name }) => name === "Local")?.container, "N.C.f");
+});
+
+test("C# file-scoped namespace contains subsequent sibling types and their methods", async () => {
+	const result = await run("namespace Demo.Tools;\nclass C { void Run() {} }\nrecord Person(string Name);\n", "scopes.cs");
+	assert.deepEqual(result.symbols.map(({ name, kind, container, startLine, endLine }) => [name, kind, container, startLine, endLine]), [
+		["Demo.Tools", "namespace", undefined, 1, 1], ["C", "class", "Demo.Tools", 2, 2],
+		["Run", "method", "Demo.Tools.C", 2, 2], ["Person", "class", "Demo.Tools", 3, 3],
+	]);
+});
+
+test("Rust trait signatures and implementations share the existing method kind", async () => {
+	const result = await run("trait Reader { fn read(&self); fn default_read(&self) {} }\nstruct C;\nimpl Reader for C { fn read(&self) {} }\n", "traits.rs");
+	assert.deepEqual(result.symbols.map(({ name, kind, container }) => [name, kind, container]), [
+		["Reader", "interface", undefined], ["read", "method", "Reader"], ["default_read", "method", "Reader"],
+		["C", "struct", undefined], ["read", "method", "C"],
+	]);
+});
+
+test("C++ qualifier ancestry work is bounded before repeated suffix expansion even for a nonmatching query", async () => {
+	const source = `namespace ${"N".repeat(2000)} {`.repeat(20) + "void Relative::f() {}" + "}".repeat(20);
+	for (const query of ["", "nonmatch"]) {
+		await assert.rejects(withParsedCodeOutline(bytes(source), "qualifiers.cpp", undefined, (root, selected, byteLength) =>
+			outlineParsedCode(root, { filename: "qualifiers.cpp", bytes: byteLength, ...selected, query, limit: 1 })), /resource limit.*work/i);
+	}
+});

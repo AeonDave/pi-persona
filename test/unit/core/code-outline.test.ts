@@ -32,6 +32,7 @@ class FakeNode implements OutlineSyntaxNode {
 		this.isMissing = flags.missing ?? false;
 	}
 	childForFieldName(name: string): OutlineSyntaxNode | null { return this.fields[name] ?? null; }
+	childrenForFieldName(name: string): readonly OutlineSyntaxNode[] { const child = this.fields[name]; return child ? [child] : []; }
 }
 
 const id = (name: string, row: number) => new FakeNode("identifier", name, { row, column: 0 }, { row, column: name.length });

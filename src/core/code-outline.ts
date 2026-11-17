@@ -47,6 +47,7 @@ export interface OutlineSyntaxNode {
 	readonly isError: boolean;
 	readonly isMissing: boolean;
 	childForFieldName(name: string): OutlineSyntaxNode | null;
+	childrenForFieldName(name: string): readonly (OutlineSyntaxNode | null)[];
 }
 
 export interface ParsedCodeOutlineOptions {
@@ -103,10 +104,13 @@ class WalkBudget {
 		// siblings and unnamed syntax children. The root has no parent to charge it.
 		this.spend(depth === 0 ? 1 : 0);
 	}
-	chargeMetadata(characters: number): void {
+	checkMetadata(characters: number): void {
 		const bytes = characters * 2;
 		if (bytes > CODE_OUTLINE_MAX_METADATA_BYTES - this.metadata) resourceLimit(`symbol metadata exceeds ${CODE_OUTLINE_MAX_METADATA_BYTES} UTF-16 bytes`);
-		this.metadata += bytes;
+	}
+	chargeMetadata(characters: number): void {
+		this.checkMetadata(characters);
+		this.metadata += characters * 2;
 	}
 }
 
@@ -115,6 +119,14 @@ function field(node: OutlineSyntaxNode, name: string, budget: WalkBudget): Outli
 	const child = node.childForFieldName(name) ?? undefined;
 	if (child) budget.child(node, child);
 	return child;
+}
+
+function fields(node: OutlineSyntaxNode, name: string, budget: WalkBudget): readonly OutlineSyntaxNode[] {
+	// Repeated fields allocate an array in the parser, so charge its maximum width first.
+	budget.spend(node.childCount + 1);
+	const children = node.childrenForFieldName(name).filter((child): child is OutlineSyntaxNode => child !== null);
+	for (const child of children) budget.child(node, child);
+	return children;
 }
 
 function namedChildren(node: OutlineSyntaxNode, budget: WalkBudget, mainWalk = false): OutlineSyntaxNode[] {
@@ -150,18 +162,12 @@ function literalComputedName(node: OutlineSyntaxNode, budget: WalkBudget): strin
 function identifierName(node: OutlineSyntaxNode | undefined, budget: WalkBudget): string | undefined {
 	while (node) {
 		budget.spend();
-		if (["identifier", "property_identifier", "private_property_identifier", "type_identifier", "field_identifier", "namespace_identifier", "operator_name"].includes(node.type)) return textName(node);
+		if (["identifier", "property_identifier", "private_property_identifier", "type_identifier", "field_identifier", "namespace_identifier", "operator_name", "destructor_name"].includes(node.type)) return textName(node);
 		if (node.type === "qualified_identifier") node = field(node, "name", budget) ?? namedChildren(node, budget).at(-1);
 		else if (["pointer_declarator", "reference_declarator", "parenthesized_declarator", "function_declarator", "array_declarator", "abstract_function_declarator", "abstract_pointer_declarator"].includes(node.type)) node = field(node, "declarator", budget) ?? namedChildren(node, budget)[0];
 		else return undefined;
 	}
 	return undefined;
-}
-
-function qualifiedContainer(node: OutlineSyntaxNode | undefined, budget: WalkBudget): string | undefined {
-	if (node?.type !== "qualified_identifier") return undefined;
-	const scope = textName(field(node, "scope", budget));
-	return scope?.replaceAll("::", ".");
 }
 
 function goReceiverContainer(node: OutlineSyntaxNode, budget: WalkBudget): string | undefined {
@@ -183,18 +189,22 @@ function goReceiverContainer(node: OutlineSyntaxNode, budget: WalkBudget): strin
 	return receiverBaseType(type);
 }
 
-function cDeclaratorName(node: OutlineSyntaxNode | undefined, budget: WalkBudget): { name?: string; container?: string } {
+function cDeclaratorName(node: OutlineSyntaxNode | undefined, budget: WalkBudget): { name?: string; container?: string; absolute?: boolean } {
+	const scopes: string[] = [];
+	let absolute = false;
 	while (node) {
 		budget.spend();
 		if (node.type === "qualified_identifier") {
-			const name = identifierName(field(node, "name", budget) ?? namedChildren(node, budget).at(-1), budget);
-			const container = qualifiedContainer(node, budget);
-			return { ...(name ? { name } : {}), ...(container ? { container } : {}) };
+			if (node.text.startsWith("::")) absolute = true;
+			const scope = textName(field(node, "scope", budget));
+			if (scope) scopes.push(scope.replaceAll("::", ".").replace(/^\./, ""));
+			node = field(node, "name", budget) ?? namedChildren(node, budget).at(-1);
 		}
-		if (["function_declarator", "pointer_declarator", "reference_declarator", "parenthesized_declarator", "array_declarator"].includes(node.type)) node = field(node, "declarator", budget) ?? namedChildren(node, budget)[0];
+		else if (["function_declarator", "pointer_declarator", "reference_declarator", "parenthesized_declarator", "array_declarator"].includes(node.type)) node = field(node, "declarator", budget) ?? namedChildren(node, budget)[0];
 		else {
 			const name = identifierName(node, budget);
-			return name ? { name } : {};
+			const container = scopes.join(".");
+			return { ...(name ? { name } : {}), ...(container ? { container } : {}), ...(absolute ? { absolute } : {}) };
 		}
 	}
 	return {};
@@ -213,19 +223,19 @@ function firstDescendant(node: OutlineSyntaxNode, predicate: (candidate: Outline
 	return undefined;
 }
 
-function cppMemberDeclarator(node: OutlineSyntaxNode, budget: WalkBudget): OutlineSyntaxNode | undefined {
-	return isCppFunctionDeclaration(node, budget);
-}
-
-function isCppFunctionDeclaration(node: OutlineSyntaxNode, budget: WalkBudget): OutlineSyntaxNode | undefined {
-	const declarator = field(node, "declarator", budget);
+function isCppFunctionDeclarator(declarator: OutlineSyntaxNode | undefined, budget: WalkBudget): OutlineSyntaxNode | undefined {
 	if (!declarator) return undefined;
 	const functionDecl = declarator.type === "function_declarator" ? declarator : firstDescendant(declarator, (candidate) => candidate.type === "function_declarator", budget);
 	if (!functionDecl) return undefined;
 	// A pointer-to-function data member is not a method. Ordinary methods have a direct
 	// identifier/qualified-identifier path beneath function_declarator.
 	const inner = field(functionDecl, "declarator", budget) ?? namedChildren(functionDecl, budget)[0];
-	if (!inner || ["parenthesized_declarator", "pointer_declarator", "reference_declarator"].includes(inner.type)) return undefined;
+	if (!inner) return undefined;
+	if (["parenthesized_declarator", "pointer_declarator", "reference_declarator"].includes(inner.type)) {
+		// A function returning a function pointer has its own nested function declarator;
+		// a pointer-to-function variable has only a nested identifier, so remains excluded.
+		return isCppFunctionDeclarator(inner, budget);
+	}
 	return functionDecl;
 }
 
@@ -237,7 +247,40 @@ interface Container {
 	length: number;
 }
 
-function classify(node: OutlineSyntaxNode, containers: Container | undefined, cppTypeContext: boolean, budget: WalkBudget): FoundSymbol | undefined {
+function cppContainer(scope: string, absolute: boolean | undefined, containers: Container | undefined, budget: WalkBudget): string {
+	if (absolute || !containers) return scope;
+	// Reserve room for the longest possible result before materializing ancestry.
+	// emit charges the exact chosen metadata immediately after this helper returns.
+	budget.checkMetadata(containers.length + scope.length + 1);
+	budget.spend(containers.length + containers.depth + 1);
+	const lexical = containerText(containers);
+	if (scope === lexical || scope.startsWith(`${lexical}.`)) return scope;
+	// A qualifier may repeat the innermost namespace, e.g. N::C inside Outer::N.
+	const parts = lexical.split(".");
+	let prefixLength = (parts[0]?.length ?? 0) + 1;
+	for (let index = 1; index < parts.length; index++) {
+		budget.spend(lexical.length - prefixLength + 1);
+		const suffix = lexical.slice(prefixLength);
+		if (scope === suffix || scope.startsWith(`${suffix}.`)) return `${lexical.slice(0, prefixLength - 1)}.${scope}`;
+		prefixLength += (parts[index]?.length ?? 0) + 1;
+	}
+	return `${lexical}.${scope}`;
+}
+
+function forEachCppDeclaration(node: OutlineSyntaxNode, containers: Container | undefined, cppTypeContext: boolean, budget: WalkBudget, emit: (found: FoundSymbol) => void): void {
+	if (node.type !== "declaration" && !(node.type === "field_declaration" && cppTypeContext)) return;
+	for (const declarator of fields(node, "declarator", budget)) {
+		const functionDecl = isCppFunctionDeclarator(declarator, budget);
+		if (!functionDecl) continue;
+		const declared = cDeclaratorName(functionDecl, budget);
+		if (!declared.name) continue;
+		emit({ name: declared.name, kind: cppTypeContext || declared.container ? "method" : "function", pushContainer: false,
+			...(declared.container ? { containerOverride: cppContainer(declared.container, declared.absolute, containers, budget) } : {}),
+		});
+	}
+}
+
+function classify(node: OutlineSyntaxNode, containers: Container | undefined, budget: WalkBudget): FoundSymbol | undefined {
 	const type = node.type;
 	const named = (kind: CodeSymbolKind, pushContainer = true): FoundSymbol | undefined => {
 		const name = textName(field(node, "name", budget));
@@ -252,17 +295,17 @@ function classify(node: OutlineSyntaxNode, containers: Container | undefined, cp
 	if (["function_definition", "function_declaration", "generator_function_declaration", "function_signature", "function_item", "function_signature_item", "local_function_statement"].includes(type)) {
 		const declarator = field(node, "declarator", budget);
 		if (type === "function_definition" && declarator) {
-			const functionDecl = isCppFunctionDeclaration(node, budget);
+			const functionDecl = isCppFunctionDeclarator(declarator, budget);
 			const name = cDeclaratorName(functionDecl ?? declarator, budget);
 			if (!name.name) return undefined;
-			if (name.container) return { name: name.name, kind: "method", pushContainer: true, containerOverride: name.container };
+			if (name.container) return { name: name.name, kind: "method", pushContainer: true, containerOverride: cppContainer(name.container, name.absolute, containers, budget) };
 			const enclosing = containers;
 			return { name: name.name, kind: enclosing && ["class", "struct", "interface"].includes(enclosing.kind) ? "method" : "function", pushContainer: true };
 		}
 		const name = textName(field(node, "name", budget));
 		if (!name) return undefined;
 		const enclosing = containers;
-		const kind: CodeSymbolKind = (type === "function_item" || type === "function_definition" || type === "function_declaration") && enclosing && ["class", "struct", "interface"].includes(enclosing.kind) ? "method" : type === "local_function_statement" && enclosing && ["class", "struct"].includes(enclosing.kind) ? "method" : "function";
+		const kind: CodeSymbolKind = ["function_item", "function_signature_item", "function_definition", "function_declaration"].includes(type) && enclosing && ["class", "struct", "interface"].includes(enclosing.kind) ? "method" : type === "local_function_statement" && enclosing && ["class", "struct"].includes(enclosing.kind) ? "method" : "function";
 		return { name, kind, pushContainer: true };
 	}
 
@@ -299,37 +342,21 @@ function classify(node: OutlineSyntaxNode, containers: Container | undefined, cp
 		if (!name) return undefined;
 		return { name, kind: "method", pushContainer: true };
 	}
-	if (["field_declaration", "declaration"].includes(type)) {
-		if (cppTypeContext) {
-			const functionDecl = cppMemberDeclarator(node, budget);
-			if (!functionDecl) return undefined;
-			const declared = cDeclaratorName(functionDecl, budget);
-			return declared.name ? { name: declared.name, kind: "method", pushContainer: true } : undefined;
-		}
-		if (type === "declaration") {
-			const functionDecl = isCppFunctionDeclaration(node, budget);
-			if (!functionDecl) return undefined;
-			const declared = cDeclaratorName(functionDecl, budget);
-			if (!declared.name) return undefined;
-			return declared.container
-				? { name: declared.name, kind: "method", pushContainer: true, containerOverride: declared.container }
-				: { name: declared.name, kind: "function", pushContainer: true };
-		}
-	}
 	if (type === "variable_declarator") {
 		const value = field(node, "value", budget) ?? field(node, "init", budget);
 		const name = textName(field(node, "name", budget));
 		if (!name || !value) return undefined;
 		if (["arrow_function", "arrow_function_expression"].includes(value.type)) return { name, kind: "arrow", pushContainer: true };
+		if (["function_expression", "generator_function"].includes(value.type)) return { name, kind: "function", pushContainer: true };
 		if (["class", "class_expression"].includes(value.type)) return { name, kind: "class", pushContainer: true };
 		return undefined;
 	}
 	if (["field_definition", "public_field_definition", "property_declaration"].includes(type)) {
 		const value = field(node, "value", budget);
 		if (!value || !["arrow_function", "arrow_function_expression"].includes(value.type)) return undefined;
-		const key = field(node, "name", budget) ?? field(node, "declarator", budget);
+		const key = field(node, "name", budget) ?? field(node, "property", budget) ?? field(node, "declarator", budget);
 		const name = key ? literalComputedName(key, budget) : undefined;
-		return name ? { name, kind: "arrow", pushContainer: false } : undefined;
+		return name ? { name, kind: "arrow", pushContainer: true } : undefined;
 	}
 	return undefined;
 }
@@ -399,12 +426,15 @@ function findSymbols(root: OutlineSyntaxNode, needle: string, limit: number, sig
 		budget.visit(node, frame.depth);
 		const { containers, cppTypeContext } = frame;
 		if (node.isError || node.isMissing) throw new Error("Code outline syntax error: parser returned an ERROR or missing AST node");
-		const found = classify(node, containers, cppTypeContext, budget);
+		forEachCppDeclaration(node, containers, cppTypeContext, budget, (declaration) => emit(declaration, node, containers));
+		const found = classify(node, containers, budget);
 		if (found) emit(found, node, containers);
 		const synthetic = syntheticDefault(node, budget);
 		const syntheticNode = synthetic ? (field(node, "value", budget) ?? field(node, "declaration", budget)) : undefined;
 		if (synthetic && syntheticNode) emit(synthetic, syntheticNode);
-		let nextContainers = found?.pushContainer ? pushContainer(containers, found.name, found.kind) : containers;
+		const enclosing = found?.containerOverride ? pushContainer(undefined, found.containerOverride, "class") : containers;
+		let nextContainers = found?.pushContainer ? pushContainer(enclosing, found.name, found.kind) : containers;
+		if (node.type === "file_scoped_namespace_declaration") frame.containers = nextContainers;
 		if (node.type === "impl_item") {
 			const target = textName(field(node, "type", budget));
 			if (target) {

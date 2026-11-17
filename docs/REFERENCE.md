@@ -112,6 +112,11 @@ rendering and output caps remain Pi-owned.
 Explicit allowlists, exclusions, empty worker grants and persona permissions remain restrictive;
 custom tools with these names are not replaced.
 
+A configured `defaultTools` list is treated as an explicit selection even when it contains only
+Pi's `+name` modifiers. To opt those tools in while keeping a modifier-based loadout, include them
+in the list yourself, for example `defaultTools: ["+codemode", "+grep", "+find", "+ls"]`;
+on Windows, add `"+powershell"` when you want Pi's native PowerShell tool too.
+
 Pi's SDK `noTools: "builtin"` selects the initial loadout; it is not a hard allowlist and the public
 extension API does not expose that flag. If an SDK caller explicitly restores all four native base
 tools, that selection is indistinguishable from implicit defaults and may receive the additions.
@@ -122,6 +127,17 @@ Pi's grep/find implementations may download their native `rg`/`fd` helper binari
 ### Multilanguage code outline
 
 `code_outline({ path, query?, limit? })` reads one regular source file from the project cwd (or an absolute path) and returns named syntax declarations, their kind/container and inclusive physical line ranges. `query` is a literal case-insensitive substring over the name, kind or container. `limit` is 1–200 (default 80); a matching count, `hasMore` and `truncated` report omitted rows. Input is capped at 256 KiB and rendered output at 16 KiB. Fatal UTF-8, parser syntax errors and unsupported extensions are errors rather than empty outlines or text-search fallbacks. The output header reports the selected language and grammar plus a SHA-256 computed from the bytes read; it does not claim an external hash match.
+
+This is a bounded syntax outline, not a complete symbol index. It recognizes JavaScript function
+expression bindings and class arrow fields, callable C/C++ declarators (including functions that
+return function pointers, while excluding function-pointer data), C++ destructors and qualified
+out-of-line methods, Rust trait methods, and C# file-scoped namespaces. Recognized namespace and
+type scopes are attached to their members; C++ qualified methods are placed under their declared
+scope without duplicating lexical namespace prefixes, including when globally qualified. A
+declaration and its separate out-of-line definition can appear as separate rows; names are not
+resolved or deduplicated across syntax nodes.
+In particular, a C++ namespace-qualified free function can be labeled `method`: the kind is a
+syntax classification and does not establish whether its qualifier names a class or a namespace.
 
 Extraction also rejects inputs exceeding depth 256 (root-relative AST/helper traversal or container
 nesting), 100,000 shared traversal/helper work units, or 4 MiB of aggregate UTF-16 symbol metadata

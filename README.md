@@ -11,7 +11,7 @@
 personas to Pi. Describe an outcome; a supervisor can delegate bounded work, gather results and
 check the outcome while you inspect, redirect or stop workers.
 
-[Install](#install) · [Team workflow](#work-with-your-team) · [Cross-session collaboration](#collaborate-with-another-pi) · [Personas](#choose-a-persona) · [Documentation](#documentation)
+[Install](#install) · [Team workflow](#work-with-your-team) · [Explore source code](#explore-source-code) · [Cross-session collaboration](#collaborate-with-another-pi) · [Personas](#choose-a-persona) · [Documentation](#documentation)
 
 ## Install
 
@@ -105,11 +105,39 @@ restored after restart. See [timers, monitors and scripts](docs/MONITORS.md) for
 
 Pi's native `grep`, `find` and `ls` are available to default supervisors and workers; Windows also
 gets native PowerShell. Pi's own grants and exclusions remain authoritative, and Pi may download
-missing `rg`/`fd` helpers on first use. `code_outline` reads declarations and line ranges from one
-source file using a lazy local WASM parser: JavaScript/TypeScript, Python, Go, Rust, C-family and C#.
-It is bounded, not a project index or compiler; C-family uses the C++ grammar and C# means source,
-not .NET binaries. Unsupported files and syntax errors fail explicitly. See the
-[outline reference](docs/REFERENCE.md#multilanguage-code-outline).
+missing `rg`/`fd` helpers on first use.
+
+## Explore source code
+
+Use `code_outline` to find declarations and their line ranges in one source file, then read only the
+relevant excerpt. For example, given:
+
+```ts
+export class Cart {
+  total() { return 0; }
+}
+```
+
+`code_outline({ path: "src/cart.ts" })` returns rows like:
+
+```text
+"Cart" [class] L1-3
+"total" [method] in "Cart" L2-2
+```
+
+Narrow a large file by searching a literal name, kind or container, then pass the returned line range
+to Pi's `read` tool:
+
+```text
+code_outline({ path: "src/cart.ts", query: "total" })
+read({ path: "src/cart.ts", offset: 2, limit: 1 })
+```
+
+The lazy local WASM parser supports JavaScript/TypeScript, Python, Go, Rust, C-family and C# source.
+This is a bounded syntax outline, not a project index or compiler: names are not resolved, C-family
+uses the C++ grammar, and C# support covers source rather than .NET binaries. Unsupported files,
+syntax errors and resource-limit overruns fail explicitly. See the
+[outline reference](docs/REFERENCE.md#multilanguage-code-outline) for limits and supported syntax.
 
 ## Collaborate with another Pi
 
