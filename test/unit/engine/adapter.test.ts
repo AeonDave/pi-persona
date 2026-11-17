@@ -234,7 +234,7 @@ test("child prompt keeps evidence guidance with role, skills, contract and assig
 	assert.match(composed, /\[pi-persona assigned identity\][\s\S]*\{"name":"Atlas-CSS"\}/);
 	assert.ok(composed.includes("Focus on correctness"));
 	assert.doesNotMatch(composed, /OPTIONAL WORKER SPINE/);
-	assert.match(result.output, /Load these skills before starting.*python-testing/);
+	assert.doesNotMatch(result.output, /Load these skills before starting/);
 	assert.match(result.output, /inspect the implementation/);
 	assert.match(result.output, /output contract \(default\)/);
 });
@@ -827,4 +827,42 @@ test("child engine scrubs a stale supervisor PI_PERSONA_RESULT_READER_TOKEN from
 		delete process.env.PI_PERSONA_RESULT_READER_TOKEN;
 		delete process.env.PI_PERSONA_BUS_TOOLS;
 	}
+});
+
+test("child selected skills use isolated entry and sanitized per-leg environment", async () => {
+	const calls: string[][] = [];
+	const script = `process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_PERSONA_SELECTED_SKILLS ?? 'absent'}],stopReason:'end'}})+'\\n');`;
+	const engine = makeEngine({
+		resolveAgent,
+		childOptions: {
+			resolveInvocation: (args) => {
+				calls.push(args);
+				return { command: process.execPath, args: ["-e", script] };
+			},
+		},
+	});
+	const previous = process.env.PI_PERSONA_SELECTED_SKILLS;
+	process.env.PI_PERSONA_SELECTED_SKILLS = "inherited";
+	try {
+		const selected = await engine.run({ agent: "a", task: "x", skills: ["alpha", "beta", "alpha"] });
+		const absent = await engine.run({ agent: "a", task: "x" });
+		assert.equal(selected.output, '["alpha","beta"]');
+		assert.equal(absent.output, "absent");
+		assert.ok(calls[0]!.includes("--extension"));
+		assert.match(calls[0]![calls[0]!.indexOf("--extension") + 1]!, /skills-extension\.ts$/);
+		assert.ok(!calls[1]!.includes("--extension"));
+	} finally {
+		if (previous === undefined) delete process.env.PI_PERSONA_SELECTED_SKILLS;
+		else process.env.PI_PERSONA_SELECTED_SKILLS = previous;
+	}
+});
+
+test("selected skill child failure is contract and keeps its diagnostic", async () => {
+	const script = `process.stderr.write('[pi-persona:selected-skills] Selected skill alpha missing\\n'); process.exitCode=1;`;
+	const result = await makeEngine({
+		resolveAgent,
+		childOptions: { resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }) },
+	}).run({ agent: "a", task: "x", skills: ["alpha"] });
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /Selected skill alpha missing/);
 });

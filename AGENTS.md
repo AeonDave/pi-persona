@@ -136,7 +136,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   blind retry loops are stopped by the runtime `DelegationLedger` (an identical agent+model+task
   delegation that failed twice is vetoed before it spawns).
 - Dynamic sub-agents: `delegate` shapes an on-the-fly specialist with `role` (extra system prompt,
-  appended to the agent's own) + `skills` — prompt-level only, capabilities stay the gate.
+  appended to the agent's own) + selected `skills` (loaded into the native worker skills section;
+  missing or model-disabled names fail closed). Skills do not grant tools; runtime capabilities stay
+  the gate. Empty/omitted selections preserve Pi's native catalog.
   `delegate` has NO `sync`/`async` parameter and `intercom` has NO `wait`: interactive sessions
   (`ctx.hasUI`, TUI and RPC) ALWAYS run `delegate` in the background (each result an idle-gated
   completion follow-up; a `tasks` fan-out is ONE follow-up when its last member settles), headless

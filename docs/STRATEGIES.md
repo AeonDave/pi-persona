@@ -76,6 +76,11 @@ invalid list is an error, not a request to silently fall back to MAGI. External 
 accept a bare agent name
 or an inline member specification, so the arbiter can have its own role and model too.
 
+A member's nonempty `skills` list is an exact-name worker instruction handoff: Pi loads those
+instruction bodies into that leg's native skills section before its first model request. Missing or
+model-disabled skills fail the leg; this changes no tool permissions. Other installed skills remain
+available as metadata to discovery extensions for on-demand loading.
+
 Same-agent members are disambiguated in the live `f9` tree by a role hint (`reviewer · SECURITY`) via
 `rosterNodeKeys`/`roleHint` (`roster.ts`) + the SDK's per-run key (`sdk.ts`). If you touch either, keep
 the seeding loop and the SDK key derivation in lockstep, and inject any per-run protocol via the TASK

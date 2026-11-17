@@ -18,7 +18,8 @@
  * `ChildProcessEngine`. It drops in behind the seam without touching strategies/UI.
  */
 
-import { createAgentSession, DefaultResourceLoader, type ModelRegistry, SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, type ExtensionFactory, type ModelRegistry, SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { encodeSelectedSkills, installSelectedSkills, SelectedSkillsError } from "./skills.ts";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
@@ -76,6 +77,8 @@ export interface CreateSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** The agent's persona (its .md) — appended to the base system prompt. */
 	systemPrompt?: string;
+	/** Exact host skill names whose instructions are prepared once for this worker. */
+	skills?: readonly string[];
 	/** Extra tools injected into the child session (e.g. `contact_supervisor`). */
 	customTools?: ToolDefinition[];
 }
@@ -198,11 +201,20 @@ const createPiSession: CreateInProcSession = async (opts) => {
 	const manager = SessionManager.inMemory(opts.cwd);
 	const settingsManager = SettingsManager.create(opts.cwd, opts.agentDir);
 	const memoryPersona = opts.memoryPersona;
+	const factories: ExtensionFactory[] = [];
+	let selectedSkills: ReturnType<typeof installSelectedSkills> | undefined;
+	if (memoryPersona !== undefined) factories.push((pi) => installFrozenMemoryOwner(pi, manager, memoryPersona));
+	if (opts.skills?.length) {
+		const names = [...opts.skills];
+		factories.push((pi) => {
+			selectedSkills = installSelectedSkills(pi, names, opts.signal ? { signal: opts.signal } : {});
+		});
+	}
 	const loader = new DefaultResourceLoader({
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
 		settingsManager,
-		...(memoryPersona !== undefined ? { extensionFactories: [(pi) => installFrozenMemoryOwner(pi, manager, memoryPersona)] } : {}),
+		...(factories.length ? { extensionFactories: factories } : {}),
 		...(opts.systemPrompt ? { appendSystemPrompt: [opts.systemPrompt] } : {}),
 	});
 	await loader.reload();
@@ -258,6 +270,8 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		subscribe: (l) => session.subscribe(l as Parameters<typeof session.subscribe>[0]),
 		prompt: async (input) => {
 			await session.prompt(input);
+			const failure = selectedSkills?.getFailure();
+			if (failure !== undefined) throw new SelectedSkillsError(failure);
 		},
 		agent: {
 			abort: () => session.agent.abort(),
@@ -343,6 +357,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let thinkingRequested: ThinkingLevel | undefined;
 			try {
 				thinkingRequested = resolveLegThinking(spec, cfg, deps.childThinking);
+				if (spec.skills !== undefined) encodeSelectedSkills(spec.skills);
 			} catch (error) {
 				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` };
 			}
@@ -437,6 +452,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (memoryPersona !== undefined) sessionOpts.memoryPersona = memoryPersona;
 			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
 			if (thinkingRequested !== undefined) sessionOpts.thinkingLevel = thinkingRequested;
+			if (spec.skills?.length) sessionOpts.skills = [...spec.skills];
 			// The optional worker spine leads; the agent prompt, assigned identity and on-the-fly
 			// role follow; stable evidence guidance is last so saved agent prose cannot override it.
 			// These reach the session through the loader's `appendSystemPrompt`, preserving Pi's base prompt.
@@ -817,15 +833,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				}
 
 				// The agent's persona is now the session's appended system prompt (see the
-				// resource loader); the user turn carries just the task (+ any skills to load,
-				// + the output-contract format when one is requested — resolved and pinned HERE
+				// resource loader); selected skills are prepared in the session's skills section.
+				// The user turn carries the task + the output-contract format when requested,
+				// resolved and pinned HERE
 				// so the def that instructs the member is the def that validates it below).
-				const skillsPreamble =
-					spec.skills && spec.skills.length > 0
-						? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n`
-						: "";
 				const contractTail = contractDef ? `\n\n${contractInstructions(contractDef)}` : "";
-				task = `${skillsPreamble}Task: ${spec.task}${contractTail}`;
+				task = `Task: ${spec.task}${contractTail}`;
 			} catch (e) {
 				disarmIdle();
 				disarmHard();
@@ -844,6 +857,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// folded into the AgentResult below. Otherwise the stream state stays empty
 			// and the user sees an opaque "agent failed (unknown)".
 			let thrownError: string | undefined;
+			let selectedSkillsFailed = false;
 			let thinkingEffective: ThinkingLevel | undefined;
 			try {
 				armIdle(); // start the idle clock (reset on every session event)
@@ -858,6 +872,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				else await Promise.race([runToIdle(), abortGate]);
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
+				selectedSkillsFailed = e instanceof SelectedSkillsError;
 			} finally {
 				disarmIdle();
 				disarmHard();
@@ -911,6 +926,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				result.error = `${tag} agent produced no output within the ${startupMs}ms startup window — either it never started (a stalled init) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (hardTimedOut) result.error = `${tag} agent exceeded the ${hardMs}ms hard cap${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
+			else if (selectedSkillsFailed) result.error = `${tag} ${thrownError}`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
@@ -926,11 +942,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 						? "timeout"
 						: aborted
 							? "abort"
-							: hostModuleHint
-								? "agent"
-								: state.stopReason === "error" || (thrownError !== undefined && looksLikeProviderError(thrownError))
-									? "provider"
-									: "agent";
+							: selectedSkillsFailed
+								? "contract"
+								: hostModuleHint
+									? "agent"
+									: state.stopReason === "error" || (thrownError !== undefined && looksLikeProviderError(thrownError))
+										? "provider"
+										: "agent";
 
 			if (contractDef) {
 				const v = parseAndValidate(state.output, contractDef);

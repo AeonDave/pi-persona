@@ -50,8 +50,9 @@ to avoid loading the extension twice.
 - **Coordinate work:** delegate independent investigations or edits; use councils and flows for
   alternative perspectives, review loops or staged work. Results return to the same supervisor.
 - **Stay in control:** see live activity, steer a worker, retrieve retained results and stop runs.
-- **Choose the approach:** switch personas and adapt worker roles, skills, models and thinking effort
-  to the task rather than fixing a team size in advance.
+- **Specialize each worker:** assign the skills, role, model and thinking effort for its task. Load
+  [selected skill instructions](docs/REFERENCE.md) directly, without sending the full skill catalog;
+  tool permissions remain separate.
 - **Collaborate beyond one team:** Exocom connects independent Pi sessions to exchange findings and
   voluntarily coordinate work.
 - **Watch for events:** timers, monitors and background scripts bring results back when ready.

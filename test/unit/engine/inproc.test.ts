@@ -27,6 +27,7 @@ import {
 	withOrchestrationToolsExcluded,
 } from "../../../src/engine/inproc.ts";
 import { mergeSessionToolAllowlist } from "../../../src/engine/session-tools.ts";
+import { SelectedSkillsError } from "../../../src/engine/skills.ts";
 import type { AgentProgress, AgentRunSpec } from "../../../src/orchestration/sdk.ts";
 import type { ThinkingLevel } from "../../../src/core/types.ts";
 import { specOf } from "../../../src/tools/delegate.ts";
@@ -694,9 +695,36 @@ test("inproc worker prompt keeps evidence guidance with role, skills, contract a
 	assert.match(prompt, /\[pi-persona assigned identity\][\s\S]*\{"name":"Atlas-CSS"\}/);
 	assert.ok(prompt.includes("Focus on correctness"));
 	assert.doesNotMatch(prompt, /OPTIONAL WORKER SPINE/);
-	assert.match(spy.promptText ?? "", /Load these skills before starting.*python-testing/);
+	assert.deepEqual(spy.opts?.skills, ["python-testing"], "the session receives the exact skill selection");
+	assert.doesNotMatch(spy.promptText ?? "", /Load these skills|nearest affine/, "skill delivery must not depend on a worker following a loading hint");
 	assert.match(spy.promptText ?? "", /inspect the implementation/);
 	assert.match(spy.promptText ?? "", /output contract \(default\)/);
+});
+
+test("inproc rejects malformed skill names before building a session", async () => {
+	let created = false;
+	const engine = makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+		createSession: async () => { created = true; return fakeSession([]); },
+	});
+	const result = await engine.run({ agent: "a", task: "inspect", skills: [" alpha "] });
+	assert.equal(result.ok, false);
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /skill names/i);
+	assert.equal(created, false, "Pi catches extension factory errors, so selection validation must precede that boundary");
+});
+
+test("inproc selected-skill failure remains a contract failure instead of triggering provider fallback", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent, modelRegistry: fakeRegistry, cwd: ".",
+		createSession: async () => ({
+			...fakeSession([]),
+			prompt: async () => { throw new SelectedSkillsError('Selected skill "provider-api" is unavailable in this worker'); },
+		}),
+	});
+	const result = await engine.run({ agent: "a", task: "inspect", skills: ["provider-api"] });
+	assert.equal(result.failureKind, "contract");
+	assert.match(result.error ?? "", /Selected skill "provider-api" is unavailable/);
 });
 
 test("inproc worker keeps the internal tool-less JSON prompt minimal", async () => {

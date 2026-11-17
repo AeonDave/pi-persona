@@ -267,7 +267,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		description: "Requested effort for this leg (off, minimal, low, medium, high, xhigh, max). Overrides the agent and shared child defaults; Pi clamps to the selected model's capabilities. Results distinguish requested from observed Pi effort, not provider cognition.",
 	});
 	const SkillsSchema = Type.Array(Type.String(), {
-		description: "Skills the sub-agent loads first — spawns a dynamic specialist (skills are inherited from the host)",
+		description: "Exact installed skill names to preload for this worker. A nonempty selection supplies those instructions once instead of the full skill catalog; missing or model-disabled names fail before inference. Does not grant tools. Omit or use [] for normal discovery.",
 	});
 	const RoleSchema = Type.String({
 		description:

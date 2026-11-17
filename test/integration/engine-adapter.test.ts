@@ -33,11 +33,11 @@ test("makeEngine runs a named agent and returns its output", async () => {
 	assert.equal(r.usage.input, 5);
 });
 
-test("makeEngine prepends a skill-load directive when skills are requested (dynamic sub-agent)", async () => {
-	const r = await engine().run({ agent: "scout", task: "explore", skills: ["python-patterns", "python-testing"] });
+test("makeEngine loads selected skills through the worker extension, not task text or argv", async () => {
+	const r = await engine().run({ agent: "scout", task: "explore [args]", skills: ["python-patterns", "python-testing"] });
 	assert.equal(r.ok, true);
-	assert.match(r.output, /Load these skills/);
-	assert.match(r.output, /python-patterns/);
+	assert.match(r.output, /--extension .*skills-extension\.ts/, "the worker loads pi-persona's selected-skill extension");
+	assert.doesNotMatch(r.output, /python-patterns|python-testing/, "skill names are transported out-of-band, not exposed in the command line");
 });
 
 test("makeEngine applies a per-agent model override from modelFor (spec.model > modelFor > agent default)", async () => {

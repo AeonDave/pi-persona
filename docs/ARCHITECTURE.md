@@ -526,6 +526,24 @@ allowances remain explicit untested cases, not passed cases; unexpected or newly
 still block approval. The private tool-less Mind review worker retains its dedicated minimal
 structured-output prompt.
 
+## Selected skills on worker legs
+
+`AgentRunSpec.skills` is an exact-name instruction handoff. When nonempty, both engines use
+`engine/skills.ts` to resolve names against the worker's Pi skill registry and replace the native
+`skills` prompt section with the selected instruction bodies, read once before the first model
+request. Pi's frontmatter parser extracts the bodies; each includes its source directory for
+relative references. Missing or `disable-model-invocation` skills fail the leg before provider use;
+unreadable, invalid UTF-8, or oversized files also fail closed. The limits are 64 KiB per file,
+256 KiB total, and 8 KiB for the encoded name list. A final `agent_start` check rejects an opaque
+system-prompt override or a replaced skills section instead of silently losing the instructions.
+
+Pi's `options.skills` metadata remains intact for installed discovery extensions to resolve
+additional skills on demand; it is not duplicated into the prompt section. Empty or omitted
+selection preserves Pi's native skills catalog. Skill selection changes prompt content only:
+tool grants and capability checks remain separate. The handoff is worker-local, so concurrent legs
+can load different selections without sharing body state. pi-skill-optimizer preserves an explicit
+skills section, including catalog-shaped examples within it, and keeps granted on-demand loading.
+
 ## Time awareness — one rule, three granularities
 
 Pi's base prompt carries no date and no time, so from inside a turn five minutes of work and five

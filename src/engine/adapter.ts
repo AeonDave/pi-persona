@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
@@ -15,6 +16,7 @@ import { resolveLegThinking } from "../core/leg-thinking.ts";
 import type { ThinkingLevel } from "../core/types.ts";
 import { assignedIdentityPrompt } from "../core/naming.ts";
 import { MEMORY_PERSONA_ENV } from "../core/companion.ts";
+import { encodeSelectedSkills, SELECTED_SKILLS_ENV, SELECTED_SKILLS_ERROR_MARKER } from "./skills.ts";
 import { roleHint } from "../orchestration/roster.ts";
 import { type AgentProgress, type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -172,12 +174,12 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const requestedContract = spec.outputContract?.trim();
 			const contractDef = requestedContract ? pinnedDef(requestedContract) : undefined;
 			if (requestedContract && !contractDef) return unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []);
-			const withSkills =
-				spec.skills && spec.skills.length > 0
-					? `Load these skills before starting (use the nearest affine if one is missing): ${spec.skills.join(", ")}.\n\n${spec.task}`
-					: spec.task;
-			const task = contractDef ? `${withSkills}\n\n${contractInstructions(contractDef)}` : withSkills;
+			let encodedSkills: string | undefined;
+			try { if (spec.skills && spec.skills.length > 0) encodedSkills = encodeSelectedSkills(spec.skills); }
+			catch (error) { return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` }; }
+			const task = contractDef ? `${spec.task}\n\n${contractInstructions(contractDef)}` : spec.task;
 			const childSpec: ChildRunSpec = { task };
+			if (encodedSkills) childSpec.extensionPath = fileURLToPath(new URL("./skills-extension.ts", import.meta.url));
 			const model = spec.model ?? deps.modelFor?.(spec.agent, spec.role) ?? cfg.model;
 			if (model) childSpec.model = model;
 			if (thinkingRequested !== undefined) childSpec.thinking = thinkingRequested;
@@ -195,6 +197,8 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const childOptions: ChildEngineOptions = { ...deps.childOptions };
 			const childEnv = { ...childOptions.env };
 			delete childEnv.PI_PERSONA_CODE_OUTLINE;
+			delete childEnv[SELECTED_SKILLS_ENV];
+			if (encodedSkills) childEnv[SELECTED_SKILLS_ENV] = encodedSkills;
 			childOptions.env = childEnv;
 			const outlineExcluded = cfg.excludeTools?.some((pattern) => pattern === "code_outline" || (pattern.endsWith("*") && "code_outline".startsWith(pattern.slice(0, -1))));
 			if (admittedTools?.includes("code_outline") && !outlineExcluded) {
@@ -301,7 +305,11 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
 			const modelRef = childSpec.model ?? "(no model)";
 			const tag = `[${spec.agent} · ${modelRef}${dyn}]`;
-			if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
+			const selectedFailure = encodedSkills && !child.ok
+				? child.stderr.split(/\r?\n/).find((line) => line.startsWith(SELECTED_SKILLS_ERROR_MARKER))?.slice(SELECTED_SKILLS_ERROR_MARKER.length)
+				: undefined;
+			if (selectedFailure && !child.timedOut && !child.aborted) result.error = `${tag} ${selectedFailure}`;
+			else if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
 			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
 			const hostModuleHint = !child.ok ? piHostModuleHint(`${child.errorMessage ?? ""}\n${child.stderr}`) : undefined;
 			if (hostModuleHint && result.error) result.error += ` — ${hostModuleHint}`;
@@ -312,7 +320,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// Keyed on turns===0 (never really started), not empty output, so an early tool/log line
 			// can't mask it. Name the cause + the fix so the operator never has to guess (a real prod
 			// report: a dead `mcp: true` async delegation with an opaque timeout).
-			if (!child.ok && !hostModuleHint && spec.mcp === true && child.usage.turns === 0) {
+			if (!child.ok && !selectedFailure && !hostModuleHint && spec.mcp === true && child.usage.turns === 0) {
 				result.error =
 					`${result.error ?? `${tag} agent failed`} — mcp:true leg never completed a turn: the MCP adapter likely hung initializing in the headless child ` +
 					`(a server needing interactive OAuth can't authenticate without a UI). Fix: authenticate the MCP server once in a normal \`pi\` session (\`/mcp auth\`) so its token is cached — the headless child reuses it; ` +
@@ -329,6 +337,8 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					? "timeout"
 					: child.aborted
 						? "abort"
+						: selectedFailure
+							? "contract"
 						: hostModuleHint
 							? "agent"
 							: child.stopReason === "error" || looksLikeProviderError(`${child.errorMessage ?? ""}\n${child.stderr}`)

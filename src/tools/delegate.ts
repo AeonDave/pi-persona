@@ -17,7 +17,7 @@ export interface DelegateTask {
 	brief?: Partial<DelegationBrief>;
 	/** A friendly display name (the loader's choice), to tell sub-agents apart. */
 	name?: string;
-	/** Skills the sub-agent must load first (dynamic specialisation). */
+	/** Exact host skill names preloaded for the worker (dynamic specialisation). */
 	skills?: string[];
 	/** Model override for this sub-agent. */
 	model?: string;

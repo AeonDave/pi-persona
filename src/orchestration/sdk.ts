@@ -27,7 +27,7 @@ export interface AgentRunSpec {
 	/** Requested per-leg effort, before Pi applies the selected model's capability clamp. */
 	thinking?: ThinkingLevel;
 	tools?: string[];
-	/** Skills the sub-agent must load first (dynamic specialisation). */
+	/** Exact host skill names preloaded once; a nonempty selection replaces the worker's catalog. */
 	skills?: string[];
 	/** Extra system-prompt text appended to the agent's own prompt — an on-the-fly
 	 *  specialist persona. Prompt-level only; capabilities remain the enforced gate. */

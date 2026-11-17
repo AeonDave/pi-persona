@@ -8,6 +8,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Added
 
+- Delegate, council and strategy workers can receive selected skill instructions directly in Pi's
+  native skills section; missing or model-disabled selections fail before provider use.
 - `show_image` displays bounded local PNG/JPEG/GIF/WebP previews with Pi terminal graphics when
   available and ANSI/ASCII cell fallbacks. Image pixels are kept out of model-facing tool results;
   use `read` for visual analysis.

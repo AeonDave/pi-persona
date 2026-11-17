@@ -50,6 +50,12 @@ hard-fail.
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
+For `delegate`, `council` inline members and `sdk.agent`, nonempty `skills` selects exact installed
+skill names for that leg. Their instruction bodies are loaded into Pi's native worker skills section
+before the first provider request; absent or model-disabled names fail closed. The native metadata
+list remains available to discovery extensions for additional on-demand loads, and the selection
+does not add tool grants. With `skills` omitted or empty, Pi's ordinary skills catalog is unchanged.
+
 `models` without a query shows up to 40 entries total, including the current model when available,
 with the current model first. Recommendations stay within its provider, textual name root and
 numbered major generation, retaining the newest representative of each distinct variant. Remaining

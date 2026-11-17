@@ -15,6 +15,8 @@ import { applyEvent, type ChildUsage, createStreamState, feedLines, type Progres
 
 export interface ChildRunSpec {
 	task: string;
+	/** Private session-local extension entry, when selected skill preload is requested. */
+	extensionPath?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
 	tools?: string[];
@@ -168,6 +170,7 @@ export async function runChildAgent(
 	const maxLineBytes = 1024 * 1024; // a single unterminated >1 MiB line is stream noise — loud failure, never a silent drop
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	if (spec.extensionPath) args.push("--extension", spec.extensionPath);
 	if (spec.model) args.push("--model", spec.model);
 	if (spec.thinking !== undefined) args.push("--thinking", spec.thinking);
 	if (spec.tools !== undefined) {
@@ -217,6 +220,7 @@ export async function runChildAgent(
 			delete inherited.PI_PERSONA_MEMORY_PERSONA;
 			delete inherited.PI_PERSONA_RESULT_READER_TOKEN;
 			delete inherited.PI_PERSONA_CODE_OUTLINE;
+			delete inherited.PI_PERSONA_SELECTED_SKILLS;
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
