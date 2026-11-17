@@ -52,6 +52,7 @@ import { configuredModels, createBuildEngine, DEFAULT_ENGINE_FACTORIES, type Eng
 import { installHooks, type HookHost } from "./extension/hooks.ts";
 import { activateNativeTools } from "./extension/native-tools.ts";
 import { makeCodeOutlineTool } from "./tools/code-outline.ts";
+import { makeShowImageTool } from "./tools/show-image.ts";
 import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
 import { installCardFrameProvider } from "./extension/card-frame.ts";
@@ -1171,6 +1172,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	pi.registerTool(makeCodeOutlineTool({ authorize: () => {
 		const caps = controller.capabilities;
 		return pi.getActiveTools().includes("code_outline") && (!caps || canCallTool(caps, "code_outline"));
+	} }));
+	pi.registerTool(makeShowImageTool({ authorize: () => {
+		const caps = controller.capabilities;
+		return pi.getActiveTools().includes("show_image") && (!caps || canCallTool(caps, "show_image"));
 	} }));
 
 	// The semantic comm plane (guardrails §4.2/§4.9): the in-process bus carries a child's

@@ -253,3 +253,11 @@ test("empty full and preview bodies retain the nonempty literal fallback", () =>
 	assert.match(visibleRows(createCardFrame(input, context()), 80).join("\n"), /\(no output\)/);
 	assert.match(visibleRows(createCardFrame(input, context({ expanded: true })), 80).join("\n"), /\(no output\)/);
 });
+
+test("frame hosts trusted graphics rows without sanitizing and retains the expanded receipt", () => {
+ const body = { invalidate() {}, render: () => ["\u001b_Gtrusted-graphic\u001b\\", ""] };
+	const frame = createCardFrame(presentation({ full: "do not duplicate", body: () => body }), context({ expanded:true, outputPad: 2 }));
+ const rows = frame.render(40);
+	assert.ok(rows.some((row) => row.startsWith("  \u001b_Gtrusted-graphic\u001b\\")));
+	assert.ok(rows.join("").includes("do not duplicate"));
+});

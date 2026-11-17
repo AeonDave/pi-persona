@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { fenceUntrusted } from "../core/fence.ts";
 import { CODE_OUTLINE_MAX_INPUT_BYTES, CODE_OUTLINE_MAX_OUTPUT_BYTES, outlineParsedCode } from "../core/code-outline.ts";
+import { readBoundedRegularFile } from "../io/read-bounded-file.ts";
 
 const parameters = Type.Object({
 	path: Type.String({ description: "One local JavaScript, TypeScript, Python, Go, Rust, C-family, C# source file; absolute or relative to the current project cwd" }),
@@ -14,31 +13,6 @@ const parameters = Type.Object({
 });
 
 type AuthorizationCheck = () => boolean | Promise<boolean>;
-
-async function readBounded(path: string, signal?: AbortSignal): Promise<Buffer> {
-	if (signal?.aborted) throw new Error("Code outline cancelled");
-	const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK);
-	const handle = await open(path, flags);
-	try {
-		if (signal?.aborted) throw new Error("Code outline cancelled");
-		const stat = await handle.stat();
-		if (!stat.isFile()) throw new Error("Code outline accepts regular files only");
-		if (stat.size > CODE_OUTLINE_MAX_INPUT_BYTES) throw new Error("Code outline input exceeds 256 KiB");
-		const buffer = Buffer.allocUnsafe(CODE_OUTLINE_MAX_INPUT_BYTES + 1);
-		let length = 0;
-		while (length < buffer.length) {
-			if (signal?.aborted) throw new Error("Code outline cancelled");
-			const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
-			if (bytesRead === 0) break;
-			length += bytesRead;
-		}
-		if (length > CODE_OUTLINE_MAX_INPUT_BYTES) throw new Error("Code outline input exceeds 256 KiB");
-		if (signal?.aborted) throw new Error("Code outline cancelled");
-		return buffer.subarray(0, length);
-	} finally {
-		await handle.close();
-	}
-}
 
 export interface CodeOutlineToolOptions {
 	/** Call-time gate supplied by the eventual integration; this module defines no permission policy. */
@@ -65,7 +39,7 @@ export function makeCodeOutlineTool(options: CodeOutlineToolOptions = {}): ToolD
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (options.authorize && !(await options.authorize())) throw new Error("code_outline is not authorized in this context");
 			const target = isAbsolute(params.path) ? params.path : resolve(ctx.cwd, params.path);
-			const bytes = await readBounded(target, signal);
+			const bytes = await readBoundedRegularFile(target, { label: "Code outline", maxBytes: CODE_OUTLINE_MAX_INPUT_BYTES, limitLabel: "256 KiB" }, signal);
 			if (signal?.aborted) throw new Error("Code outline cancelled");
 			const sha256 = createHash("sha256").update(bytes).digest("hex");
 			const { withParsedCodeOutline } = await import("./code-outline-parser.ts");

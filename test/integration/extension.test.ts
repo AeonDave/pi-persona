@@ -457,8 +457,24 @@ test("piPersona registers the delegate tool, f8/f9 shortcuts, and agents/doctor/
 	assert.ok(m.toolNames().includes("council"));
 	assert.ok(m.toolNames().includes("intercom"));
 	assert.ok(m.toolNames().includes("models"));
+	assert.ok(m.toolNames().includes("show_image"));
 	assert.deepEqual(m.commandNames().sort(), ["agents", "doctor", "exocom", "flow", "models", "orchestrate", "peek", "persona", "persona-settings"]);
 	assert.equal(m.shortcutCount(), 2); // f8 (cycle persona) + f9 (agent overlay)
+});
+
+test("show_image uses the active tool grant at call time", async () => {
+	const m = makeMockPi();
+	piPersona(m.pi);
+	const { ctx } = makeCtx(REPO_ROOT);
+	const tool = m.tool("show_image") as { execute: AnyFn };
+	const denied = await tool.execute("image-denied", { path: "missing-image.png" }, undefined, undefined, ctx);
+	assert.equal(denied.isError, true);
+	assert.match(String(denied.content[0]?.text), /not authorized/);
+	m.pi.setActiveTools([...m.activeToolNames(), "show_image"]);
+	const admitted = await tool.execute("image-admitted", { path: "missing-image.png" }, undefined, undefined, ctx);
+	assert.equal(admitted.isError, true);
+	assert.doesNotMatch(String(admitted.content[0]?.text), /not authorized/);
+	assert.match(String(admitted.content[0]?.text), /ENOENT|no such file/);
 });
 
 test("models includes installed native-provider catalogs when the auth snapshot is partial", async () => {

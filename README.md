@@ -56,6 +56,7 @@ to avoid loading the extension twice.
   voluntarily coordinate work.
 - **Watch for events:** timers, monitors and background scripts bring results back when ready.
 - **Explore code:** use Pi's native search tools and bounded, multilingual source outlines.
+- **Show an image:** display a local image in the terminal; use Pi's native graphics when available or a bounded text preview.
 
 ## Work with your team
 
@@ -138,6 +139,15 @@ This is a bounded syntax outline, not a project index or compiler: names are not
 uses the C++ grammar, and C# support covers source rather than .NET binaries. Unsupported files,
 syntax errors and resource-limit overruns fail explicitly. See the
 [outline reference](docs/REFERENCE.md#multilanguage-code-outline) for limits and supported syntax.
+
+## Display an image
+
+Use `show_image({ path: "assets/diagram.png" })` to show a local PNG, JPEG, GIF or WebP to the
+user. Pi's Kitty or iTerm2 graphics are used when available; otherwise the preview uses ANSI color
+cells or plain ASCII, without installing external image programs. It shows the first frame only and is bounded to 8 MiB and 16 million source
+pixels. The pixels stay out of the model result; use Pi's `read` tool when the model needs to inspect
+an image. See the [image reference](docs/REFERENCE.md#terminal-image-preview) for display modes and
+limits.
 
 ## Collaborate with another Pi
 

@@ -153,6 +153,27 @@ Supported filename families are JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), Type
 
 The tool is available to the enabled supervisor subject to call-time persona permissions. Only the bundled read-only `scout`, `reviewer`, and `architect` agent allowlists include it by default; custom explicit allowlists and exclusions are not widened.
 
+### Terminal image preview
+
+`show_image({ path, mode? })` displays one local image to the user. `path` may be absolute or
+relative to the current working directory; URLs and network paths are rejected. Supported inputs
+are PNG, JPEG, GIF and WebP. APNG is rejected, and animated GIF/WebP show only the first frame.
+`mode` is `auto` (default), `ansi` or `ascii`: auto uses Pi's Kitty or iTerm2 graphics when
+available and otherwise renders terminal cells; ansi requests color cells (unless color is disabled
+by the terminal environment) and ascii forces plain characters. Pi's `showImages` terminal setting
+can hide the preview.
+
+The tool returns image metadata to the model, not image pixels; use Pi's `read` tool for model-side
+visual analysis. A headless call prepares the bounded preview but has no attached terminal to show
+it. This is a supervisor tool and is not automatically granted to workers.
+
+Input is limited to 8 MiB, 16 million source pixels and 16,384 pixels per axis. PNG inspection
+accepts at most 4,096 chunks and 256 palette entries. Animated GIF/WebP inspection is limited to
+256 frames and 16 million aggregate canvas pixels (canvas width × height × frame count). The display
+payload is resized to at most 640×480 for native graphics, with a 160×160 RGBA thumbnail for text
+rendering; the collapsed card shows up to 8 rows and the expanded card up to 20, both at 60 columns.
+These are bounded previews rather than full-resolution image viewing.
+
 ### Native codemode
 
 Pi's native `codemode` can call callable pi-persona tools through the normal nested-tool pipeline.

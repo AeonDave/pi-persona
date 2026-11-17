@@ -100,6 +100,7 @@
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^22.20.4",
+    "@types/pngjs": "6.0.5",
     "fast-check": "^4.10.2",
     "tsx": "^4.23.13",
     "typebox": "1.4.2",
@@ -113,6 +114,7 @@
     ]
   },
   "dependencies": {
-    "@vscode/tree-sitter-wasm": "0.3.1"
+    "@vscode/tree-sitter-wasm": "0.3.1",
+    "pngjs": "7.0.0"
   }
 }

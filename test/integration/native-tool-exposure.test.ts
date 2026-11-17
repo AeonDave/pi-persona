@@ -7,10 +7,12 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { nativeToolNames, withNativeToolDefaults } from "../../src/extension/native-tools.ts";
 import { makeCodeOutlineTool } from "../../src/tools/code-outline.ts";
+import { makeShowImageTool } from "../../src/tools/show-image.ts";
+import { PNG } from "pngjs";
 import { makeInProcessEngine } from "../../src/engine/inproc.ts";
 import piPersona from "../../src/extension.ts";
 
-test("Pi SDK exposes native search and code-outline tools and runs them offline against the session cwd", { timeout: 20_000 }, async () => {
+test("Pi SDK exposes native search, code-outline and image preview tools against the session cwd", { timeout: 20_000 }, async () => {
 	const previousOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
 	const root = await mkdtemp(join(tmpdir(), "pi-persona-native-tools-"));
@@ -24,7 +26,7 @@ test("Pi SDK exposes native search and code-outline tools and runs them offline 
 	const settings = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
 	const loader = new DefaultResourceLoader({ cwd, agentDir: root, settingsManager: settings,
 		noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
-		extensionFactories: [(pi) => pi.registerTool(makeCodeOutlineTool())] });
+		extensionFactories: [(pi) => { pi.registerTool(makeCodeOutlineTool()); pi.registerTool(makeShowImageTool()); }] });
 	await loader.reload();
 	const nativeNames = nativeToolNames([
 		{ name: "grep", sourceInfo: { source: "builtin" } }, { name: "find", sourceInfo: { source: "builtin" } },
@@ -42,6 +44,7 @@ test("Pi SDK exposes native search and code-outline tools and runs them offline 
 		assert.ok(names.includes("ls"));
 		assert.equal(names.includes("powershell"), process.platform === "win32");
 		assert.ok(names.includes("code_outline"), "the real SDK registers the local outline tool");
+		assert.ok(names.includes("show_image"), "the real SDK registers the display tool");
 		const execute = async (name: string, params: Record<string, unknown>) => {
 			const tool = session.agent.state.tools.find((candidate) => candidate.name === name);
 			assert.ok(tool, `${name} is callable`);
@@ -53,6 +56,14 @@ test("Pi SDK exposes native search and code-outline tools and runs them offline 
 		assert.match(find.content.map((part) => part.type === "text" ? part.text : "").join("\n"), /needle\.txt/);
 		const ls = await execute("ls", { path: "." });
 		assert.match(ls.content.map((part) => part.type === "text" ? part.text : "").join("\n"), /needle\.txt/);
+		const pixel = new PNG({ width: 1, height: 1 });
+		pixel.data.set([255, 0, 0, 128]);
+		await writeFile(join(cwd, "pixel.png"), PNG.sync.write(pixel));
+		const image = await execute("show_image", { path: "pixel.png", mode: "ascii" });
+		assert.deepEqual(image.content.map((part) => part.type), ["text"], "display pixels never enter model content");
+		assert.deepEqual(image.structuredContent, { path: join(cwd, "pixel.png"), mimeType: "image/png", width: 1, height: 1,
+			previewWidth: 1, previewHeight: 1, frame: "first" }, "codemode receives the small metadata contract");
+		assert.ok((image.details as { image?: { pngBase64?: string } }).image?.pngBase64, "the TUI gets its serialized preview");
 		await writeFile(join(cwd, "fixture.tsx"), "// function fake() {}\nclass Box { hiddenMethod() {} }\n");
 		const tsx = await execute("code_outline", { path: "fixture.tsx" });
 		assert.deepEqual((tsx.details as { symbols: Array<{ name: string }> }).symbols.map((symbol) => symbol.name), ["Box", "hiddenMethod"]);
@@ -82,11 +93,12 @@ test("Pi SDK exposes native search and code-outline tools and runs them offline 
 		const excludedTools = withNativeToolDefaults(undefined, nativeNames);
 		const excluded = await createAgentSession({ cwd, agentDir: root, model: faux.models[0]!, modelRuntime: runtime,
 			settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } }),
-			resourceLoader: loader, sessionManager: SessionManager.inMemory(cwd), excludeTools: ["gr*"],
+			resourceLoader: loader, sessionManager: SessionManager.inMemory(cwd), excludeTools: ["gr*", "show_image"],
 			...(excludedTools !== undefined ? { tools: excludedTools } : {}),
 		});
 		try {
 			assert.ok(!excluded.session.agent.state.tools.some((tool) => tool.name === "grep"), "Pi's exclusion matcher remains authoritative");
+			assert.ok(!excluded.session.agent.state.tools.some((tool) => tool.name === "show_image"), "display tool exclusions remain authoritative");
 			assert.ok(excluded.session.agent.state.tools.some((tool) => tool.name === "find"));
 		} finally {
 			await excluded.session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });

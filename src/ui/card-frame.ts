@@ -21,6 +21,8 @@ export interface CardFramePresentation {
 	metadata?: string;
 	/** Selected only by trusted surface/envelope metadata, never prose keywords. */
 	markdown?: boolean;
+	/** Trusted, preconstructed TUI body; image protocol rows must bypass text sanitization. */
+	body?: (expanded: boolean) => Component;
 }
 
 export interface CardFrameContext {
@@ -85,7 +87,7 @@ export function createCardFrame(card: CardFramePresentation, context: CardFrameC
 		(value.text === "" && full.length > 0) || value.truncated
 		|| sanitizeTerminalText(value.text).split("\n").some((line) => visibleWidth(line) > width);
 
-	const createContent = (isExpanded: boolean): Component => {
+	const createTextContent = (isExpanded: boolean): Component => {
 		if (isExpanded && card.markdown) {
 			return createReportBody(full || "(no output)", theme, {
 				padding: outputPad,
@@ -132,6 +134,20 @@ export function createCardFrame(card: CardFramePresentation, context: CardFrameC
 				// A terminal narrower than a single wide glyph cannot display that glyph; clip only there.
 				return new Text(lines.join("\n"), padding, 0, (text) => theme.bg(colors.bg, text))
 					.render(width).map((line) => truncateToWidth(line, width, ELLIPSIS));
+			},
+		};
+	};
+	const createContent = (isExpanded: boolean): Component => {
+		const text = createTextContent(isExpanded);
+		if (!card.body) return text;
+		const body = card.body(isExpanded);
+		return {
+			invalidate() { text.invalidate(); body.invalidate(); },
+			render(width) {
+				if (width <= 0) return [];
+				const padding = Math.min(Math.max(0, Math.floor(outputPad)), Math.max(0, Math.floor((width - 1) / 2)));
+				const prefix = " ".repeat(padding);
+				return [...text.render(width), ...body.render(width - 2 * padding).map((line) => prefix + line)];
 			},
 		};
 	};
