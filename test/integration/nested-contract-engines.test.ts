@@ -39,8 +39,10 @@ for (const backend of ["inproc", "child"] as const) {
 			...dependencies,
 			childOptions: { resolveInvocation: () => {
 				launches++;
-				const source = `let prompt = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => { prompt += chunk; }); process.stdin.on("end", () => { process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:JSON.stringify({...${JSON.stringify(output)},receivedPrompt:prompt})}],stopReason:"end"}}) + "\\n"); });`;
-				return { command: process.execPath, args: ["-e", source] };
+				// The stub's code is a constant; the scripted reply travels as an argument and is parsed,
+				// never spliced into the source.
+				const source = `const output = JSON.parse(process.argv[1]); let prompt = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => { prompt += chunk; }); process.stdin.on("end", () => { process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:JSON.stringify({...output,receivedPrompt:prompt})}],stopReason:"end"}}) + "\\n"); });`;
+				return { command: process.execPath, args: ["-e", source, JSON.stringify(output)] };
 			} },
 		});
 		return { engine, launches: () => launches, output };
