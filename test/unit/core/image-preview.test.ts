@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resizeRgba, renderImageCells } from "../../../src/core/image-preview.ts";
+import { resizeRgba, renderImageCells, useNativeImagePreview } from "../../../src/core/image-preview.ts";
+
+test("native preview needs explicit graphics selection inside Herdr's opaque outer terminal", () => {
+	assert.equal(useNativeImagePreview("kitty", "herdr"), false);
+	assert.equal(useNativeImagePreview("kitty", "HERDR", "invalid"), false);
+	assert.equal(useNativeImagePreview("kitty", "herdr", "kitty"), true);
+	assert.equal(useNativeImagePreview("iterm2", "herdr", "ITERM2"), true);
+	assert.equal(useNativeImagePreview(null, "herdr", "kitty"), false, "host-disabled images remain disabled");
+	assert.equal(useNativeImagePreview("kitty", "kitty"), true);
+	assert.equal(useNativeImagePreview("iterm2", "iTerm.app"), true);
+	assert.equal(useNativeImagePreview("kitty"), true);
+	assert.equal(useNativeImagePreview(null, "Windows_Terminal"), false);
+});
 
 test("resizeRgba fits without enlargement and preserves RGBA", () => {
  const source = { width: 2, height: 2, data: Uint8Array.from([255,0,0,255, 0,255,0,128, 0,0,255,0, 255,255,255,255]) };

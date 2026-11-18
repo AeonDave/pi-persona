@@ -11,11 +11,12 @@ test("showImages false prevents graphics and remains explicit", () => {
  finally {resetCapabilitiesCache();}
 });
 test("auto uses host native graphics and dynamically falls back when unavailable", () => {
+ const oldProgram=process.env.TERM_PROGRAM; process.env.TERM_PROGRAM="kitty";
  const oldTerm=process.env.TERM, oldLocale=process.env.LC_ALL, oldColor=process.env.NO_COLOR; process.env.TERM="xterm"; process.env.LC_ALL="C.UTF-8"; delete process.env.NO_COLOR;
  const component=createImagePreview(data,{theme,showImages:true,expanded:true,mode:"auto"});
  try {setCapabilities({images:"kitty",trueColor:true,hyperlinks:false}); assert.match(component.render(30).join(""),/\x1b_G/);
  setCapabilities({images:null,trueColor:true,hyperlinks:false}); assert.doesNotMatch(component.render(30).join(""),/\x1b_G|\x1b\]1337/);}
- finally {if(oldTerm===undefined) delete process.env.TERM; else process.env.TERM=oldTerm; if(oldLocale===undefined) delete process.env.LC_ALL; else process.env.LC_ALL=oldLocale; if(oldColor===undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR=oldColor; resetCapabilitiesCache();}
+ finally {if(oldProgram===undefined) delete process.env.TERM_PROGRAM; else process.env.TERM_PROGRAM=oldProgram; if(oldTerm===undefined) delete process.env.TERM; else process.env.TERM=oldTerm; if(oldLocale===undefined) delete process.env.LC_ALL; else process.env.LC_ALL=oldLocale; if(oldColor===undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR=oldColor; resetCapabilitiesCache();}
 });
 test("ascii mode never outputs escape sequences and handles narrow widths", () => {
  const component=createImagePreview(data,{theme,showImages:true,expanded:false,mode:"ascii"});
@@ -30,11 +31,12 @@ test("malformed persisted previews are bounded and produce a safe textual fallba
 });
 
 test("native protocol changes invalidate host Image cache at equal width", () => {
+ const oldProgram=process.env.TERM_PROGRAM; process.env.TERM_PROGRAM="kitty";
  const oldTerm=process.env.TERM, oldLocale=process.env.LC_ALL, oldColor=process.env.NO_COLOR; process.env.TERM="xterm"; process.env.LC_ALL="C.UTF-8"; delete process.env.NO_COLOR;
  const component=createImagePreview(data,{theme,showImages:true,expanded:true,mode:"auto"});
  try {setCapabilities({images:"kitty",trueColor:true,hyperlinks:false}); assert.match(component.render(30).join(""),/\x1b_G/);
  setCapabilities({images:"iterm2",trueColor:true,hyperlinks:false}); assert.match(component.render(30).join(""),/\x1b\]1337;File=/);}
- finally {if(oldTerm===undefined) delete process.env.TERM; else process.env.TERM=oldTerm; if(oldLocale===undefined) delete process.env.LC_ALL; else process.env.LC_ALL=oldLocale; if(oldColor===undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR=oldColor; resetCapabilitiesCache();}
+ finally {if(oldProgram===undefined) delete process.env.TERM_PROGRAM; else process.env.TERM_PROGRAM=oldProgram; if(oldTerm===undefined) delete process.env.TERM; else process.env.TERM=oldTerm; if(oldLocale===undefined) delete process.env.LC_ALL; else process.env.LC_ALL=oldLocale; if(oldColor===undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR=oldColor; resetCapabilitiesCache();}
 });
 
 test("history requires PNG signature and IHDR dimensions matching metadata", () => {

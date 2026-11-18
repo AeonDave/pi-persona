@@ -3,7 +3,7 @@ import { getCapabilities, Image, type Component } from "@earendil-works/pi-tui";
 import {
 	IMAGE_MAX_AXIS, IMAGE_MAX_FILE_BYTES, IMAGE_MAX_PIXELS, IMAGE_MAX_PNG_BASE64,
 	IMAGE_NATIVE_HEIGHT, IMAGE_NATIVE_WIDTH, IMAGE_THUMBNAIL_AXIS,
-	renderImageCells, type ImagePreviewData, type ImagePreviewMode, type PreviewColor,
+	renderImageCells, useNativeImagePreview, type ImagePreviewData, type ImagePreviewMode, type PreviewColor,
 } from "../core/image-preview.ts";
 export interface ImagePreviewContext { theme: Theme; showImages: boolean; expanded: boolean; mode: ImagePreviewMode }
 
@@ -33,7 +33,7 @@ export function isImagePreviewData(value: unknown): value is ImagePreviewData {
 		&& base64Length(t.rgbaBase64, IMAGE_THUMBNAIL_AXIS ** 2 * 4) === t.width * t.height * 4;
 }
 
-/** Pi owns graphics protocol detection and its alternate-screen overrides. */
+/** Pi owns graphics protocols and alternate-screen overrides; uncertain Herdr output uses cells. */
 export function createImagePreview(data: ImagePreviewData, context: ImagePreviewContext): Component {
 	if (!isImagePreviewData(data)) return { invalidate() {}, render: (width) => width > 0 ? ["Image preview unavailable".slice(0, width)] : [] };
 	const maxHeight = context.expanded ? 20 : 8;
@@ -52,7 +52,7 @@ export function createImagePreview(data: ImagePreviewData, context: ImagePreview
 			const locale = (process.env.LC_ALL ?? process.env.LC_CTYPE ?? process.env.LANG ?? "").toLowerCase();
 			const noColor = process.env.NO_COLOR !== undefined || term === "dumb";
 			const unicode = !noColor && (!locale || /utf-?8/.test(locale)) && context.mode !== "ascii";
-			if (context.mode === "auto" && caps.images && unicode) return native.render(width);
+			if (context.mode === "auto" && unicode && useNativeImagePreview(caps.images, process.env.TERM_PROGRAM, process.env.PI_IMAGE_PROTOCOL)) return native.render(width);
 			let color: PreviewColor = "none";
 			if (unicode) color = caps.trueColor ? "truecolor" : term.includes("256color") ? "256" : "16";
 			return renderImageCells({ width: data.thumbnail.width, height: data.thumbnail.height, data: pixels },

@@ -169,6 +169,13 @@ available and otherwise renders terminal cells; ansi requests color cells (unles
 by the terminal environment) and ascii forces plain characters. Pi's `showImages` terminal setting
 can hide the preview.
 
+Inside Herdr, `auto` conservatively uses terminal cells: Herdr advertises Kitty graphics to Pi
+but hides the outer terminal's identity, and Windows Terminal cannot display that graphics path.
+For Herdr attached to a known-compatible terminal, launch Pi with `PI_IMAGE_PROTOCOL=kitty`
+to opt back into native graphics. This does not change
+Pi's image settings; hidden previews and no-color/ASCII environments still take precedence.
+See [Herdr's Windows support](https://herdr.dev/tui/docs/windows-beta/).
+
 The tool returns image metadata to the model, not image pixels; use Pi's `read` tool for model-side
 visual analysis. A headless call prepares the bounded preview but has no attached terminal to show
 it. This is a supervisor tool and is not automatically granted to workers.

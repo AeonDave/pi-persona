@@ -1,4 +1,4 @@
-/** Pixel-only helpers: no terminal detection, filesystem, or decoding. */
+/** Bounded pixel helpers and display policy: no host imports, filesystem, or decoding. */
 export interface RgbaImage {
 	width: number;
 	height: number;
@@ -6,6 +6,15 @@ export interface RgbaImage {
 }
 export type ImagePreviewMode = "auto" | "ansi" | "ascii";
 export type PreviewColor = "truecolor" | "256" | "16" | "none";
+
+/** Herdr hides its outer terminal, so its Kitty advertisement alone cannot prove display support. */
+export function useNativeImagePreview(protocol: "kitty" | "iterm2" | null, terminalProgram?: string, protocolOverride?: string): boolean {
+	if (!protocol) return false;
+	if (terminalProgram?.toLowerCase() !== "herdr") return true;
+	const explicit = protocolOverride?.toLowerCase();
+	return explicit === "kitty" || explicit === "iterm2";
+}
+
 export const IMAGE_MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const IMAGE_MAX_PIXELS = 16_000_000;
 export const IMAGE_MAX_AXIS = 16_384;

@@ -78,6 +78,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- `show_image` no longer leaves a blank preview in Herdr over Windows Terminal. Auto mode uses
+  terminal cells inside Herdr unless `PI_IMAGE_PROTOCOL=kitty` or `iterm2` explicitly selects a
+  known-compatible graphics path; native previews outside Herdr keep Pi's capability detection.
 - Rapid persona switches now apply in order with their remembered choice and Exocom state.
   Queued selections use the current definitions after reload, and shutdown invalidates pending
   selections and late controller commits.

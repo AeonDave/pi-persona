@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PNG } from "pngjs";
 import { initTheme, ToolExecutionComponent, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, KeybindingsManager, resetCapabilitiesCache, setCapabilities, setKeybindings, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { getCapabilities, getKeybindings, KeybindingsManager, resetCapabilitiesCache, setCapabilities, setKeybindings, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { stripVTControlCharacters } from "node:util";
 import { makeShowImageTool } from "../../../src/tools/show-image.ts";
 
@@ -101,4 +101,49 @@ test("show_image native shell handles errors and malformed persisted image detai
  component.updateResult({content:[{type:"text",text:"saved image"}],details:{mode:"auto",image:{pngBase64:"bogus"}},isError:false});
  text=stripVTControlCharacters(component.render(60).join("\n"));
  assert.match(text,/preview unavailable/i);
+});
+
+test("auto show_image renders saved color pixels in Herdr without an outer graphics capability", async () => {
+	const keys = ["TERM_PROGRAM", "TERM", "COLORTERM", "LC_ALL", "NO_COLOR", "PI_IMAGE_PROTOCOL", "TMUX", "WT_SESSION"] as const;
+	const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+	const dir = await mkdtemp(join(tmpdir(), "persona-show-image-herdr-"));
+	try {
+		// Herdr advertises Kitty to Pi but removes the outer terminal's markers.
+		process.env.TERM_PROGRAM = "herdr";
+		process.env.TERM = "xterm-256color";
+		process.env.COLORTERM = "truecolor";
+		process.env.LC_ALL = "C.UTF-8";
+		for (const key of ["NO_COLOR", "PI_IMAGE_PROTOCOL", "TMUX", "WT_SESSION"]) delete process.env[key];
+		resetCapabilitiesCache();
+		assert.equal(getCapabilities().images, "kitty");
+		initTheme("dark", false);
+		const image = new PNG({ width: 128, height: 128 });
+		for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+			image.data.set(x >= 32 && x < 96 && y >= 32 && y < 96 ? [255, 208, 0, 255] : [0, 0, 0, 255], (y * 128 + x) * 4);
+		}
+		await writeFile(join(dir, "sample.png"), PNG.sync.write(image));
+		const tool = makeShowImageTool();
+		const result = await tool.execute("preview", { path: "sample.png" }, undefined, undefined, { cwd: dir, hasUI: true } as ExtensionToolContext);
+		assert.equal(result.isError, false);
+		const component = new ToolExecutionComponent("show_image", "preview", { path: "sample.png" }, { showImages: true }, tool, { requestRender() {} } as unknown as TUI, dir);
+		component.updateResult(JSON.parse(JSON.stringify(result)));
+		const rows = component.render(80);
+		assert.equal(rows.filter(line => line.includes("▀")).length, 8);
+		assert.match(rows.join(""), /\x1b\[38;2;255;208;0m/);
+		assert.doesNotMatch(rows.join(""), /\x1b_G|\x1b\]1337;File=/);
+		// The documented Pi override opts a known-compatible outer terminal back in.
+		for (const [protocol, sequence] of [["kitty", "\x1b_G"], ["iterm2", "\x1b]1337;File="]] as const) {
+			process.env.PI_IMAGE_PROTOCOL = protocol;
+			resetCapabilitiesCache();
+			assert.ok(component.render(80).join("").includes(sequence));
+		}
+		process.env.NO_COLOR = "1";
+		const plain = component.render(80).join("");
+		assert.doesNotMatch(plain, /\x1b_G|\x1b\]1337;File=|▀/);
+		assert.match(stripVTControlCharacters(plain), /#{8}/);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+		for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
+		resetCapabilitiesCache();
+	}
 });

@@ -118,3 +118,16 @@ passed the three-worker single-wake contract and two independent Exocom sessions
 discovery, offer, automatic wake, pickup, evidence publication and completion. The wake harness
 reported a Windows temporary-directory cleanup warning after its assertions passed; this is not
 counted as an additional functional check.
+
+The Linux CI follow-up found a fixture collision with Pi's startup migration: child test
+transcripts were stored directly in the temporary agent directory. They now use a dedicated
+subdirectory, matching the production conversation store. Contract assertions remain unchanged;
+the continuation checks pass on Linux and Windows, and the subsequent CI run passed both OS jobs.
+
+An operator report then reproduced blank `show_image` previews inside Herdr on Windows Terminal.
+Pi advertises Kitty for Herdr, while Herdr hides the outer terminal identity. The display policy
+now uses the existing ANSI/ASCII renderer inside Herdr unless a native protocol is explicitly
+selected. No global terminal capabilities or user configuration are changed. The regression failed
+with zero colored rows before the fix and passes with eight afterward; all 18 focused image tests
+pass on Windows and Linux. Both saved PNG/WebP results were checked through Pi's real tool component
+with the Cosmos theme, and the operator confirmed automatic color display after `/reload` in Herdr.
