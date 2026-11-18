@@ -155,12 +155,12 @@ test("judge launch card persists every lens model and full requested effort with
 	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
 	const expanded = h.tool.renderResult(receipt, { expanded: true }, theme).render(200).join("\n");
 	for (const model of ["openai/model-0", "openai/model-1", "openai/model-2", "openai/judge"]) assert.ok(expanded.includes(model), expanded);
-	assert.match(expanded, /requested effort xhigh/);
-	assert.match(expanded, /requested effort max/);
+	assert.match(expanded, /reviewer · BREAK · openai\/model-0 · xhigh/);
+	assert.match(expanded, /arbiter · openai\/judge · max/);
 	assert.doesNotMatch(expanded, /changed\/later/);
 	assert.equal(reads, 1, "history rendering never rereads model settings");
 	const collapsed = h.tool.renderResult(receipt, { expanded: false }, theme).render(200).join("\n");
-	assert.match(collapsed, /openai\/model-0.*requested effort xhigh/);
+	assert.match(collapsed, /^ {2}reviewer · BREAK · model-0 · xhigh *$/m, "one short row per member, the delegate grammar");
 	assert.match(collapsed, /\+1 more/);
 	for (const width of [1, 12, 24, 80]) {
 		const lines = h.tool.renderResult(receipt, { expanded: false }, theme).render(width);
@@ -203,7 +203,7 @@ test("a failed settled council still shows its saved requested models and effort
 	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
 	const rendered = h.tool.renderResult(result, { expanded: false }, theme).render(200).join("\n");
 	assert.match(rendered, /^failed · provider unavailable/, "the call line names the council; the heading names the outcome");
-	assert.match(rendered, /requested model openai\/requested.*requested effort xhigh/);
+	assert.match(rendered, /reviewer · requested · xhigh/);
 });
 
 test("the council launch receipt repeats only what the call line could not show", async () => {
@@ -241,9 +241,10 @@ test("pending council setup stays immediate and explicit while its original snap
 	const receipt = await h.interactive({ question: "q", strategy: "fanout", members: ["reviewer"] });
 	const theme = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
 	const text = h.tool.renderResult(receipt, { expanded: false }, theme).render(200).join("\n");
-	assert.match(text, /model pending/);
-	assert.match(text, /openai\/default/);
-	assert.match(text, /requested effort off/);
+	assert.match(text, /^ {2}reviewer · model pending · off *$/m, "a short honest marker while the operator picks the model");
+	assert.doesNotMatch(text, /setup may change/);
+	const expanded = h.tool.renderResult(receipt, { expanded: true }, theme).render(200).join("\n");
+	assert.match(expanded, /model pending \(current default openai\/default; setup may change\) · off/, "the expansion keeps the explanation");
 	const inline = await h.headless({ question: "q", strategy: "fanout", members: ["reviewer"] });
 	assert.deepEqual(inline.details.launch, { ...launchSnapshot(), request: { task: "q" } });
 });

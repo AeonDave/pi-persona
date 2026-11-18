@@ -192,6 +192,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		{ size: 2499, sha256: "78d205a3291bfb26cfad8a1eec9bed7e19b3445aa81d6e9644427f1ae30ccd04" },
 		{ size: 2361, sha256: "a608fc26a13070fad79b84f9d1a5f39fd3b760aefb98732f1f95134a89cd0366" },
 		{ size: 2402, sha256: "0b24f01d93517d5fc56a7318d374ee679fa146e919e86e753f422f9f10a37bda" },
+		// v1.18.1 pristine seed, before the core roles were renamed to English (LF and CRLF).
+		{ size: 2720, sha256: "fb24616f7c92163e2c632e6d084b344baf2e76a7b28418808f7e8243ad61a640" },
+		{ size: 2759, sha256: "4c53cd5022266863ff979b07a6ab5786c0c6eaf6397d0d350d84a3d5d076ec3a" },
 	],
 	// The MAGI cores gained `purpose:` (their verticalization) in v1.10.6. Agents are seeded COPIES,
 	// not a live layer read from the package, so without these an existing install keeps three cores
@@ -203,6 +206,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		// v1.17.1 pristine seed (LF and CRLF checkout variants).
 		{ size: 1747, sha256: "43ab5f65ecb89260c09b7e33daef3b68b1bc1c60c81b73b245fdf9984f601044" },
 		{ size: 1779, sha256: "6b4dcc0cc7416ac9a4543b7330edaeefb29b1006cc5e67b86f15ca94c4eaaf24" },
+		// v1.18.1 pristine seed, before the core roles were renamed to English (LF and CRLF).
+		{ size: 1459, sha256: "fe0acd1b1644c61cd3f57bfe6d936895aecf19273066a5db0ef349ce9baeec0e" },
+		{ size: 1486, sha256: "4f6404a188d02ffa89241739c7a97aa14399753845a149999035fbf15d820107" },
 	],
 	"agents/balthasar.md": [
 		{ size: 1527, sha256: "27273ed49ea265f528efad4724e6abec6d051fa60d1f4fa678982e7383364981" },
@@ -210,6 +216,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		// v1.17.1 pristine seed (LF and CRLF checkout variants).
 		{ size: 1773, sha256: "6716f5c68f2eb0bc1e72b33cef3e78b062efa07a01d12edb95e671a482832753" },
 		{ size: 1805, sha256: "baafecc02b01c962bfc933b3f3f768808d541c85b0e01b29f6ff04a710f6d716" },
+		// v1.18.1 pristine seed, before the core roles were renamed to English (LF and CRLF).
+		{ size: 1474, sha256: "c0fddc597de0c052bc8051207f5355624913d71c13ea4259479ad4f0e5a61c3f" },
+		{ size: 1501, sha256: "2d319ce458f793a5557c82aa8d11bb72a76f5c6bcd5b0c4fc8152b2b5e8db91b" },
 	],
 	"agents/casper.md": [
 		{ size: 1508, sha256: "5074341b7e1ae7e9a44bc71de0405a17ccb404eacfaeb2fcf40f2ac4c23828ea" },
@@ -217,6 +226,9 @@ export const LEGACY_SEEDED_DEFAULTS: Readonly<Record<string, SeededDefaultEntry>
 		// v1.17.1 pristine seed (LF and CRLF checkout variants).
 		{ size: 1832, sha256: "32effd595231b7bb6ce6af01c87108bb030d489cc8758946206161e148e270e4" },
 		{ size: 1865, sha256: "9d22349de3252074ba7d1482ee942c36e384181939ec71f1fddfd4c527d3d436" },
+		// v1.18.1 pristine seed, before the core roles were renamed to English (LF and CRLF).
+		{ size: 1554, sha256: "5c7ce9b5e3e4177c52cae544cd2ae614c7ee4b9a18669b5b1ae682d64447b2ab" },
+		{ size: 1581, sha256: "ba04dfb0be41dbd9de86f15fa44c5f91a2e98e5057fb3069222d91b97af43b37" },
 	],
 	// Current pristine seed before the compact-digest/reusable-artifact prompt update (LF and CRLF).
 	"agents/research.md": [

@@ -9,25 +9,13 @@
 
 import { createHash } from "node:crypto";
 
-export type FieldType = "string" | "number" | "boolean" | "enum";
+import { contractPath } from "./contract-data.ts";
+import { type ContractDef, type FieldSpec, validateContractDefinition } from "./contract-schema.ts";
+import { validateContractValue, type ValidationResult } from "./contract-value.ts";
 
-export interface FieldSpec {
-	type: FieldType;
-	required?: boolean;
-	/** Allowed values for `type: "enum"`. */
-	values?: string[];
-	/** Inclusive bounds for `type: "number"`. */
-	min?: number;
-	max?: number;
-	/** Minimum string length for `type: "string"` — a non-empty / substantive gate (e.g. a proof
-	 *  line that must carry a real command + live output, not an empty placeholder). */
-	minLength?: number;
-}
-
-export interface ContractDef {
-	name: string;
-	fields: Record<string, FieldSpec>;
-}
+export { CONTRACT_LIMITS } from "./contract-data.ts";
+export { type ContractDef, type ContractParse, type FieldSpec, type FieldType, parseContract } from "./contract-schema.ts";
+export type { ValidationResult } from "./contract-value.ts";
 
 export interface PinnedContract {
 	name: string;
@@ -35,14 +23,7 @@ export interface PinnedContract {
 	def: ContractDef;
 }
 
-export interface ValidationResult {
-	ok: boolean;
-	errors: string[];
-	/** The validated object (present only when `ok`). */
-	value?: Record<string, unknown>;
-}
-
-/** The built-in default contract: pi-fork's four sections + voting substrate. */
+/** The default result, evidence and learning fields, plus fields for voting and review. */
 export const DEFAULT_CONTRACT: ContractDef = {
 	name: "default",
 	fields: {
@@ -56,48 +37,6 @@ export const DEFAULT_CONTRACT: ContractDef = {
 		dissent: { type: "string" },
 	},
 };
-
-const FIELD_TYPES: readonly FieldType[] = ["string", "number", "boolean", "enum"];
-
-export type ContractParse = { ok: true; def: ContractDef } | { ok: false; error: string };
-
-/** Parse a `contracts/<name>.contract.json` file into a validated {@link ContractDef}.
- *  Data-driven authoring surface (spec §4.6): drop a JSON file, reference it by name via a
- *  persona/strategy `outputContract`. Reducers then read its fields generically. */
-export function parseContract(content: string): ContractParse {
-	let raw: unknown;
-	try {
-		raw = JSON.parse(content);
-	} catch {
-		return { ok: false, error: "contract is not valid JSON" };
-	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, error: "contract must be a JSON object" };
-	const o = raw as Record<string, unknown>;
-	if (typeof o.name !== "string" || !o.name.trim()) return { ok: false, error: "contract.name is required" };
-	if (typeof o.fields !== "object" || o.fields === null || Array.isArray(o.fields)) return { ok: false, error: "contract.fields must be an object" };
-
-	const fields: Record<string, FieldSpec> = {};
-	for (const [fname, rawSpec] of Object.entries(o.fields as Record<string, unknown>)) {
-		if (typeof rawSpec !== "object" || rawSpec === null || Array.isArray(rawSpec)) return { ok: false, error: `field "${fname}" must be an object` };
-		const s = rawSpec as Record<string, unknown>;
-		if (typeof s.type !== "string" || !(FIELD_TYPES as readonly string[]).includes(s.type)) {
-			return { ok: false, error: `field "${fname}" has an invalid type (string|number|boolean|enum)` };
-		}
-		const spec: FieldSpec = { type: s.type as FieldType };
-		if (s.required === true) spec.required = true;
-		if (spec.type === "enum") {
-			if (!Array.isArray(s.values) || !s.values.every((v): v is string => typeof v === "string") || s.values.length === 0) {
-				return { ok: false, error: `enum field "${fname}" needs a non-empty string "values" list` };
-			}
-			spec.values = s.values;
-		}
-		if (typeof s.min === "number") spec.min = s.min;
-		if (typeof s.max === "number") spec.max = s.max;
-		if (typeof s.minLength === "number") spec.minLength = s.minLength;
-		fields[fname] = spec;
-	}
-	return { ok: true, def: { name: o.name, fields } };
-}
 
 /** Does this text parse as JSON? The only honest test of a candidate. */
 function parses(candidate: string): boolean {
@@ -159,8 +98,8 @@ function balancedFrom(s: string, close: number): string | undefined {
 	return undefined;
 }
 
-/** Candidates are cheap; the cap only bounds pathological prose dense with closers. */
-const MAX_JSON_CANDIDATES = 64;
+/** Every backwards scan spends this budget, even when it finds no new candidate. */
+const MAX_JSON_SCAN_ATTEMPTS = 64;
 
 /**
  * Every balanced object/array in the text, walking closers RIGHT-TO-LEFT (the contract
@@ -170,15 +109,20 @@ const MAX_JSON_CANDIDATES = 64;
  */
 function* balancedFromEnd(s: string): Generator<string> {
 	const seen = new Set<string>();
-	let yielded = 0;
-	for (let close = s.length - 1; close >= 0 && yielded < MAX_JSON_CANDIDATES; close--) {
+	let attempts = 0;
+	for (let close = s.length - 1; close >= 0 && attempts < MAX_JSON_SCAN_ATTEMPTS; close--) {
 		const ch = s[close];
 		if (ch !== "}" && ch !== "]") continue;
+		attempts++;
 		const slice = balancedFrom(s, close);
-		if (slice !== undefined && !seen.has(slice)) {
-			seen.add(slice);
-			yielded++;
-			yield slice;
+		if (slice !== undefined) {
+			if (!seen.has(slice)) {
+				seen.add(slice);
+				yield slice;
+			}
+			// A parseable enclosing object/array owns its nested data. Those excerpts are
+			// not separate answers, even when the enclosing answer fails its contract.
+			if (parses(slice)) close -= slice.length - 1;
 		}
 	}
 }
@@ -260,7 +204,24 @@ function fieldLine(name: string, spec: FieldSpec): string {
 	else if (spec.min !== undefined) parts.push(`>= ${spec.min}`);
 	else if (spec.max !== undefined) parts.push(`<= ${spec.max}`);
 	if (spec.minLength !== undefined) parts.push(`min ${spec.minLength} chars`);
+	if (spec.type === "array") {
+		if (spec.minItems !== undefined) parts.push(`min ${spec.minItems} items`);
+		if (spec.maxItems !== undefined) parts.push(`max ${spec.maxItems} items`);
+	}
 	return `- ${name} (${parts.join(", ")})`;
+}
+
+function* fieldLines(name: string, spec: FieldSpec): Generator<string> {
+	yield fieldLine(name, spec);
+	if (spec.type === "object") {
+		for (const [key, child] of Object.entries(spec.fields!)) yield* fieldLines(contractPath(name, key), child);
+	} else if (spec.type === "array") yield* fieldLines(`${name}[]`, spec.items!);
+}
+
+function admittedContract(def: ContractDef): ContractDef {
+	const parsed = validateContractDefinition(def);
+	if (!parsed.ok) throw new Error(`invalid contract: ${parsed.error}`);
+	return parsed.def;
 }
 
 /**
@@ -272,12 +233,14 @@ function fieldLine(name: string, spec: FieldSpec): string {
  * verified: debate over two bare `operator`s fails exactly that way without it.
  */
 export function contractInstructions(def: ContractDef): string {
+	admittedContract(def);
 	const lines = [
 		`--- output contract (${def.name}) ---`,
 		"End your FINAL answer with a single JSON object (prose before it is fine, nothing after it) with these fields:",
-		...Object.entries(def.fields).map(([n, s]) => fieldLine(n, s)),
+		...Object.entries(def.fields).flatMap(([n, s]) => [...fieldLines(contractPath("", n), s)]),
 		"The object is parsed mechanically. Include every required field; omit fields you have nothing for.",
 	];
+	if (Object.values(def.fields).some((field) => field.type === "array" || field.type === "object")) lines.push("Paths with [] describe each array item; nested paths describe fields inside that object. Required item fields apply to every item.");
 	if (def.fields.vote) {
 		// Vote hygiene (the MAGI cores hand-write this in their .md; a generic agent needs it
 		// here): qualifiers make equivalent votes tally apart ("esm" vs "esm (but only if…)").
@@ -296,22 +259,25 @@ export interface ParseResult {
 }
 
 /** Unwrap (fences/prose), JSON-parse, and validate an agent's raw output against a
- *  contract in one step — the shared path for every engine backend. Every candidate is
- *  tried until one BOTH parses and validates: a candidate that parses but is not the
- *  answer object (trailing "option [2]", quoted code) must not quarantine a correct,
- *  already-billed leg as an invalid output. */
+ *  contract in one step — the shared path for every engine backend. A complete JSON
+ *  reply is authoritative: invalid outer data cannot be bypassed by an inner object.
+ *  Prose/fenced replies still try candidates until one parses and validates. */
 export function parseAndValidate(output: string, def: ContractDef): ParseResult {
+	const schema = validateContractDefinition(def);
+	if (!schema.ok) return { ok: false, error: `contract failed: ${schema.error}` };
+	const wholeReply = output.trim();
 	let firstErrors: string[] | undefined;
-	for (const candidate of jsonCandidates(output)) {
+	for (const candidate of jsonCandidates(wholeReply)) {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(candidate);
 		} catch {
 			continue;
 		}
-		const v = validateAgainst(def, parsed);
+		const v = validateContractValue(schema.def, parsed);
 		if (v.ok && v.value) return { ok: true, value: v.value };
 		firstErrors ??= v.errors;
+		if (candidate === wholeReply) break;
 	}
 	const errors = firstErrors ?? ["output was not valid JSON"];
 	return { ok: false, error: `contract ${def.name} failed: ${errors.join("; ")}` };
@@ -333,7 +299,13 @@ export function stableHash(value: unknown): string {
 
 /** Freeze a contract for a run: `name` + a stable sha256 over its definition. */
 export function pinContract(def: ContractDef): PinnedContract {
-	return { name: def.name, hash: stableHash(def), def };
+	const snapshot = structuredClone(admittedContract(def));
+	const freeze = (value: object): void => {
+		for (const child of Object.values(value)) if (child !== null && typeof child === "object") freeze(child);
+		Object.freeze(value);
+	};
+	freeze(snapshot);
+	return Object.freeze({ name: snapshot.name, hash: stableHash(snapshot), def: snapshot });
 }
 
 /** Every contract name a spec may reference: the built-in `default` plus the installed files. */
@@ -341,51 +313,8 @@ export function installedContractNames(defs: Record<string, ContractDef>): strin
 	return [...new Set(["default", ...Object.keys(defs)])];
 }
 
-/** Validate a structured value against a contract. Unknown extra fields are kept. */
+/** Validate a structured value against an admitted contract. Unknown extra fields are kept. */
 export function validateAgainst(def: ContractDef, value: unknown): ValidationResult {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return { ok: false, errors: ["expected a JSON object"] };
-	}
-	const obj = value as Record<string, unknown>;
-	const errors: string[] = [];
-
-	for (const [name, spec] of Object.entries(def.fields)) {
-		const fv = obj[name];
-		const present = fv !== undefined && fv !== null;
-		if (!present) {
-			if (spec.required) errors.push(`missing required field: ${name}`);
-			continue;
-		}
-		switch (spec.type) {
-			case "string":
-				if (typeof fv !== "string") {
-					errors.push(`field ${name} must be a string`);
-					break;
-				}
-				if (spec.minLength !== undefined && fv.length < spec.minLength) {
-					errors.push(`field ${name} must be at least ${spec.minLength} characters`);
-				}
-				break;
-			case "number":
-				if (typeof fv !== "number" || Number.isNaN(fv)) {
-					errors.push(`field ${name} must be a number`);
-					break;
-				}
-				if (spec.min !== undefined && fv < spec.min) errors.push(`field ${name} must be >= ${spec.min}`);
-				if (spec.max !== undefined && fv > spec.max) errors.push(`field ${name} must be <= ${spec.max}`);
-				break;
-			case "boolean":
-				if (typeof fv !== "boolean") errors.push(`field ${name} must be a boolean`);
-				break;
-			case "enum": {
-				const values = spec.values ?? [];
-				if (typeof fv !== "string" || !values.includes(fv)) {
-					errors.push(`field ${name} must be one of: ${values.join(", ")}`);
-				}
-				break;
-			}
-		}
-	}
-
-	return errors.length === 0 ? { ok: true, errors, value: obj } : { ok: false, errors };
+	const schema = validateContractDefinition(def);
+	return schema.ok ? validateContractValue(schema.def, value) : { ok: false, errors: [schema.error] };
 }

@@ -13,6 +13,7 @@ import { resolveCouncilInvocation } from "../persona/persona.ts";
 import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { orchestrationLaunchLines, withOrchestrationRequest, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../ui/presentation.ts";
@@ -221,7 +222,9 @@ ${strategyCatalog()}`,
 				return { content: [{ type: "text", text: `council failed: ${message}` }], details: failureDetails({ error: message, strategy, roster: panel, ...(launch ? { launch } : {}) }), isError: true };
 			}
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("council", theme, context);
+			if (pending) return pending;
 			// Native Pi draws the call before its saved result. Keep this title args-only and
 			// neutral about omitted defaults; the receipt below carries the resolved snapshot.
 			const { strategy, roster } = councilCallParts(args);

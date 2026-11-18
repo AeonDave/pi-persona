@@ -6,6 +6,94 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.19.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.19.0) - 2026-11-18
+
+### Added
+
+- F9 worker chats with expandable tool arguments/results and reasoning, search, anchored scrolling
+  and a recent-workers group using existing async retention. Both engines share the bounded chat
+  projection; viewing creates no model request or additional transcript archive.
+- `/agents send <name|run-id> <message>` with live worker autocomplete and explicit ambiguity
+  handling, reusing F9 steering without automatically starting or resuming workers.
+- Nested output contracts with objects, arrays, integer fields and bounded validation. The bundled
+  `findings` contract carries file, line, severity and evidence without replacing `finding`.
+- Optional worktree verification commands before artifact export, with runtime-observed evidence,
+  permission rechecks, bounded output and retained recovery work on failure.
+
+### Changed
+
+- Every pi-persona window uses one frame: F9, the model picker and `/persona-settings` share its
+  border, a margin above and below the content, an accent title, rules between title, content and
+  keys, and one key legend (`↑↓ move · ⏎ select · esc keep default`) with labels taken from your
+  keybindings, wrapped between entries. Input rows are titled fields (`Steer <worker>`, `Search`,
+  `Filter`). The companion's F10 inspector receives the margins through the shared frame. The model
+  picker opens as the same 90%-wide overlay from council setup and from the settings Models action
+  (it used to replace the editor there), and its list uses the rows the window has instead of a
+  fixed twelve. The settings page stays in the editor slot, centred at the same width, and leaves
+  room for Pi's footer. Short terminals drop decoration before content, so the selected row stays
+  visible.
+- The MAGI cores' roles are named in English (Driver, Regulator, Synthesizer) like the rest of the
+  interface. Existing installs receive the renamed defaults unless the files were edited.
+- A finished `script` or a terminal `monitor` event shows one transcript card instead of two: the
+  wake the model received, titled like a timer card (`script exited · build`,
+  `monitor event · watch ended · status`) and coloured by outcome. Expanding it also shows the
+  run's complete retained log. The saved log entry draws only when no wake for it is queued or on
+  the current branch (a cancellation, a start failure, a wake discarded before delivery), in the
+  same grammar (`monitor cancelled · deploy`). Compaction keeps or drops the card together with the
+  model text.
+- A worker's reasoning effort follows its model in one format everywhere a model is shown: launch
+  cards, the live tree and widget, F9 rows and headers, council/flow launch rows, run-failure cards
+  and Exocom peer rows. Levels are always written in full (`haiku-5 · medium`, `xhigh→high` when
+  Pi reports a different level);
+  the one-letter tree siglas are gone, a known `off` is shown and an unknown effort is omitted.
+  Exocom peers self-report their effort through an optional, validated registry field.
+- Council and flow launch cards list one short `<member> · <model> · <effort>` row per participant,
+  like delegate cards. A model the operator has yet to pick reads `model pending`; the current
+  default and the full model references stay in the expanded card.
+- While the model is still writing a tool call, every pi-persona tool card shows one line, the tool
+  name and Pi's spinner (`delegate ⠋ preparing…`), instead of flashing placeholder cards such as
+  `delegate ?`; the full card appears once the arguments are complete.
+- Render the `agent_name` card like `exocom_name` and the other tool cards: a lowercase title and
+  the shared literal result renderer instead of a one-off accent-coloured receipt.
+- `code_outline` shows matching counts, declarations, containers and line ranges in an expandable
+  card. Technical provenance stays in expanded details; model-facing output is unchanged.
+- `show_image` displays a centered image without a success card or metadata rows; click and
+  keyboard expansion still enlarge it. Pixel averaging preserves fine features when reducing
+  images, and plain ASCII follows the theme's light or dark background.
+- `delegate` advertises one canonical nested argument shape. Pi's preparation hook decodes
+  supported string-wrapped inputs before validation, reducing schema duplication while preserving
+  ownership, tool grants, briefs and launch gates.
+- Active delegation guidance separates single, batch and continuation calls and makes tool-grant
+  ownership rules visible before model-selection advice.
+- The README shows the interface at work: five recordings of the real TUI with scripted model
+  replies (`scripts/demo`), a table of every council strategy and which persona defaults to it, and
+  a workflow diagram redrawn in the banner's palette from `assets/workflow.svg`.
+
+### Fixed
+
+- Show the resolved effort on running delegate and council/flow rows in the live tree. A delegate
+  leg without an explicit `thinking` (agent or child default) and a council member without a
+  declared one previously showed no effort until it settled, although the launch card showed it.
+- Draw the separator rows F9 already reserved. Blank rows were dropped by the host text component
+  while the row budget and pointer mapping still counted them, which crowded the panel and put list
+  clicks one row off.
+- Refresh the Exocom widget and status line as soon as a send is delivered. The per-peer `sent`
+  and aggregate `out` counters previously stayed stale until the next 30-second heartbeat, while
+  received counts updated immediately.
+- Bound compact tool results and F9 tool/reasoning previews by visible terminal rows, including
+  narrow widths and wide characters. Long output no longer pushes a collapsed tool's status out
+  of view; expansion preserves the full retained text.
+- Release conversation leases when admission, policy or fingerprint checks fail before a worker
+  takes ownership, avoiding stale busy locks and blocked continuation.
+- Retire F9 reader state when a worker attempt resets, and release orphaned chat caches on exit,
+  tree reset and panel disposal.
+- Reject invalid programmatic output contracts before launching either engine; a complete JSON
+  reply cannot bypass its root contract by supplying a valid object nested inside it.
+- Keep runtime verification summaries compact and preserve observed command evidence when a
+  later worktree check fails, including across bounded terminal-result reads.
+- Bound every JSON-recovery scan attempt, including unmatched delimiters, so malformed worker
+  output cannot trigger quadratic rescanning of the whole reply.
+
 ## [1.18.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.18.1) - 2026-11-18
 
 ### Added

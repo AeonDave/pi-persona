@@ -13,8 +13,10 @@ import type { PiPersonaConfig } from "../core/config.ts";
 import { canCallTool, canParticipateInExocom, EXOCOM_TOOL_NAMES } from "../core/capabilities.ts";
 import type { DelegationNudge } from "../core/nudge.ts";
 import { shortModel } from "../tools/delegate.ts";
+import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { boundDisplayRows } from "../ui/presentation.ts";
 import { compactWidget } from "../ui/compact-widget.ts";
+import { modelEffortText } from "../ui/model-effort.ts";
 import { buildCommunicationCardDetails } from "../ui/communication-card.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { type InstanceDescriptor, type PeerDescriptor } from "../telemetry/contract.ts";
@@ -129,6 +131,15 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// rather than silently refusing to join for an unpersona'd session — see startExocom below).
 	let exocomPlane: ExocomPlane | undefined;
 	const peerPresence = new ExocomPeerPresenceStore();
+	/** This session's own Pi effort, self-reported beside its model; omitted unless a valid level. */
+	const selfThinking = (): { thinking?: ThinkingLevel } => {
+		try {
+			const level: unknown = host.pi.getThinkingLevel();
+			return isThinkingLevel(level) ? { thinking: level } : {};
+		} catch {
+			return {};
+		}
+	};
 	let exocomLedgerFile = "";
 	let exocomSessionId = "";
 	let refreshIdentity: (() => void) | undefined;
@@ -358,6 +369,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			name: sanitizePeerField(peer.displayName, 48) || "peer",
 			persona: sanitizePeerField(peer.persona, 48),
 			model: sanitizePeerField(peer.model, 96),
+			...(peer.thinking ? { thinking: peer.thinking } : {}),
 			contextPercent: peer.context_pct,
 			heartbeatAt: peer.heartbeat_at,
 		})), now, EXOCOM.QUIET_AFTER_MS));
@@ -384,7 +396,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 							// the peer's own global self-report (which reads inverted from our side).
 							const workspace = peerWorkspace(p);
 							const workspaceBit = workspace ? ` · ${workspace.same ? "ws" : "external"} ${workspace.label} [${workspace.code}]` : "";
-							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${shortModel(model) || "?"} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}${workspaceBit}`;
+							return `${quiet ? "💤" : "📡"} ${name}${persona ? ` (${persona})` : ""} · ${modelEffortText(shortModel(model) || "?", p.thinking)} · ctx ${contextPct}% · recv ${exocomPlane?.receivedFromPeer(p.session_id) ?? 0} · sent ${exocomPlane?.sentToPeer(p.session_id) ?? 0}${workspaceBit}`;
 						});
 			const lines = boundDisplayRows(local, peerRows, 7, "exocom_list for the full pool");
 			host.lastCtx.ui.setWidget("persona-exocom", compactWidget(lines), { placement: "aboveEditor" });
@@ -420,6 +432,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			purpose: host.controller.activePersona?.description ?? "",
 			color: exocomColorFor(host.identity.name),
 			model,
+			...selfThinking(),
 			pid: process.pid,
 			endpoint: ep,
 			cwd,
@@ -668,6 +681,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					name: host.identity.name,
 					persona: sanitizePeerField(host.controller.activePersona?.name ?? "", 48),
 					model: sanitizePeerField(host.lastCtx?.model ? `${host.lastCtx.model.provider}/${host.lastCtx.model.id}` : "", 96),
+					...selfThinking(),
 					context_pct: Math.round(host.lastCtx?.getContextUsage()?.percent ?? 0),
 					inbox: exocomNotifier?.peekPending().length ?? 0,
 				}),
@@ -804,6 +818,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					return { accepted: true };
 				},
 				onPoolChange: () => renderExocomWidget(),
+				onSent: () => renderExocomWidget(),
 			});
 			// Seed before binding: fresh arrivals must follow the restored FIFO backlog.
 			if (reloadSnapshot) {

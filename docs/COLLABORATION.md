@@ -7,8 +7,10 @@ do not make it a subordinate or grant it permission to act.
 ## Supervising a leg
 
 Choose `thinking` independently of `model` in a delegate or roster entry. The runtime preserves an
-explicit provider choice and reports requested and observed thinking separately. A compact tree
-label is only a projection; it does not prove the provider's internal reasoning effort.
+explicit provider choice and reports requested and observed thinking separately. Every surface that
+names a worker's model follows it with the full effort level (`haiku-5 · medium`, or
+`xhigh→high` once Pi reports a different level); an unknown effort is omitted. The label is only
+a projection; it does not prove the provider's internal reasoning effort.
 
 Use `intercom peek` to inspect a particular uncertainty, `steer` to queue an instruction, and `stop`
 to stop work. A steering receipt proves acceptance, not that the worker acted on it. Interactive
@@ -45,6 +47,8 @@ its code as described in [the user guide](EXPERIENCE.md#work-with-another-pi-thr
 Use `exocom_list` to find stable qualified targets and self-reported profiles. A profile's capabilities
 and availability are suggestions for choosing a colleague, not verified skills, reservations or tool
 permissions. Missing availability is **unknown**. Profiles disappear when the Exocom plane stops.
+Peer rows show each peer's model with its self-reported Pi effort (`opus-5 · high`); a peer that
+does not report one shows the model alone.
 
 For a first exchange, start two Pi sessions in the same workspace with `pi --exocom`. Enter in Pi A:
 `Name yourself Ember for this session and list your Exocom peers.` Then enter in Pi B:

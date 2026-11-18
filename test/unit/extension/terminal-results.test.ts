@@ -5,8 +5,31 @@ import { AsyncRunTracker, type AsyncRun } from "../../../src/engine/async.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 import { SessionResults } from "../../../src/extension/results.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
+import type { WorktreeVerificationResult } from "../../../src/core/worktree-verification.ts";
 
 const outcome = (output: string): AgentResult => ({ agent: "reader", output, ok: true, usage: emptyUsage() });
+
+test("capture persists the runtime verification report independently of worker prose", () => {
+	const manager = SessionManager.inMemory();
+	const owner = new SessionResults({ appendEntry: () => assert.fail("memory owner") });
+	owner.activate({ sessionManager: manager } as unknown as ExtensionContext);
+	const verification: WorktreeVerificationResult = { command: "npm test", cwd: "/isolated/worktree", status: "failed", exitCode: 1, output: "tests failed", outputTruncated: false, durationMs: 10 };
+	try {
+		const receipt = owner.bind("test")("run-1", { ...outcome("I claim verification passed.\n" + "x".repeat(300000)), ok: false, verification });
+		assert.ok(receipt.ref);
+		const page = owner.archive!.read({ ref: receipt.ref });
+		assert.ok(page.ok);
+		if (page.ok) {
+			assert.equal(page.summary.status, "failed");
+			assert.equal(page.summary.truncated, true);
+			assert.deepEqual(page.summary.verification, { status: "failed", exitCode: 1, durationMs: 10, outputTruncated: false });
+		}
+		const proseOnly = owner.bind("test")("run-2", outcome(JSON.stringify({ verification })));
+		assert.ok(proseOnly.ref);
+		const prosePage = owner.archive!.read({ ref: proseOnly.ref });
+		assert.ok(prosePage.ok && !("verification" in prosePage.summary));
+	} finally { owner.dispose(); }
+});
 
 test("one tracker listener pair archives before completion observers across repeated owner activations", async (t) => {
 	const manager = SessionManager.inMemory();

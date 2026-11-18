@@ -15,6 +15,28 @@ export function useNativeImagePreview(protocol: "kitty" | "iterm2" | null, termi
 	return explicit === "kitty" || explicit === "iterm2";
 }
 
+/**
+ * Columns the host reserves for a native image. Mirrors pi-tui's `calculateImageCellSize`, which
+ * its package root does not export: Pi's extension loader resolves host packages by root entry, so
+ * a deep `dist/` import fails when the extension loads. The unit test pins this to the host's.
+ */
+export function nativeImageColumns(image: { width: number; height: number }, maxColumns: number, maxRows: number,
+	cell: { widthPx: number; heightPx: number }, optimizeAspectRatio: boolean): number {
+	const maxWidth = Math.max(1, Math.floor(maxColumns));
+	const maxHeight = Math.max(1, Math.floor(maxRows));
+	const width = Math.max(1, image.width);
+	const height = Math.max(1, image.height);
+	const widthScale = maxWidth * cell.widthPx / width;
+	const heightScale = maxHeight * cell.heightPx / height;
+	const scale = Math.min(widthScale, heightScale);
+	const columns = Math.max(1, Math.min(maxWidth, Math.ceil(width * scale / cell.widthPx)));
+	if (!optimizeAspectRatio || widthScale <= heightScale || columns <= 1) return columns;
+	const rows = Math.min(maxHeight, Math.max(1, Math.ceil(height * scale / cell.heightPx)));
+	const ideal = rows * cell.heightPx * width / (height * cell.widthPx);
+	const distortion = (count: number): number => Math.max(count / ideal, ideal / count);
+	return distortion(columns - 1) < distortion(columns) ? columns - 1 : columns;
+}
+
 export const IMAGE_MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const IMAGE_MAX_PIXELS = 16_000_000;
 export const IMAGE_MAX_AXIS = 16_384;
@@ -43,24 +65,48 @@ function validate(image: RgbaImage): void {
 	}
 }
 
-/** Fit within bounds, never upscale. Nearest-neighbour preserves the source alpha. */
+/** Fit within bounds, never upscale. Average covered pixels in premultiplied-alpha space. */
 export function resizeRgba(image: RgbaImage, maxWidth: number, maxHeight: number): RgbaImage {
 	validate(image);
 	if (!Number.isSafeInteger(maxWidth) || !Number.isSafeInteger(maxHeight) || maxWidth < 1 || maxHeight < 1) throw new Error("Invalid image bounds");
 	const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
 	const width = Math.max(1, Math.floor(image.width * scale));
 	const height = Math.max(1, Math.floor(image.height * scale));
+	if (width === image.width && height === image.height) return { width, height, data: image.data.slice() };
 	const data = new Uint8Array(width * height * 4);
 	for (let y = 0; y < height; y++) {
+		const y0 = y * image.height / height, y1 = (y + 1) * image.height / height;
 		for (let x = 0; x < width; x++) {
-			const source = (Math.floor((y + 0.5) * image.height / height) * image.width + Math.floor((x + 0.5) * image.width / width)) * 4;
-			data.set(image.data.subarray(source, source + 4), (y * width + x) * 4);
+			const x0 = x * image.width / width, x1 = (x + 1) * image.width / width;
+			let alpha = 0, red = 0, green = 0, blue = 0;
+			for (let sy = Math.floor(y0); sy < Math.ceil(y1); sy++) {
+				const vertical = Math.min(sy + 1, y1) - Math.max(sy, y0);
+				for (let sx = Math.floor(x0); sx < Math.ceil(x1); sx++) {
+					const weight = vertical * (Math.min(sx + 1, x1) - Math.max(sx, x0));
+					const source = (sy * image.width + sx) * 4;
+					const opacity = image.data[source + 3]! * weight;
+					alpha += opacity;
+					red += image.data[source]! * opacity;
+					green += image.data[source + 1]! * opacity;
+					blue += image.data[source + 2]! * opacity;
+				}
+			}
+			const target = (y * width + x) * 4;
+			if (alpha > 0) {
+				data[target] = Math.round(red / alpha);
+				data[target + 1] = Math.round(green / alpha);
+				data[target + 2] = Math.round(blue / alpha);
+			}
+			data[target + 3] = Math.round(alpha / ((x1 - x0) * (y1 - y0)));
 		}
 	}
 	return { width, height, data };
 }
 
 type Rgb = readonly [number, number, number];
+function luminance([r, g, b]: Rgb): number {
+	return r * 0.2126 + g * 0.7152 + b * 0.0722;
+}
 const PALETTE: readonly Rgb[] = [
 	[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0], [0, 0, 128], [128, 0, 128], [0, 128, 128], [192, 192, 192],
 	[128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0], [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
@@ -83,6 +129,7 @@ export function renderImageCells(image: RgbaImage, options: { width: number; hei
 	const width = Math.floor(options.width), height = Math.floor(options.height);
 	if (width < 1 || height < 1) return [];
 	const useBlocks = options.unicode && options.color !== "none";
+	const invertAscii = luminance(options.background) >= 128;
 	const sampled = resizeRgba(image, width, height * 2);
 	const pixel = (x: number, y: number): Rgb => {
 		const i = (Math.min(y, sampled.height - 1) * sampled.width + x) * 4;
@@ -97,8 +144,9 @@ export function renderImageCells(image: RgbaImage, options: { width: number; hei
 			const top = pixel(x, y), bottom = pixel(x, y + 1);
 			if (useBlocks) line += `${ansi(top, false, options.color)}${ansi(bottom, true, options.color)}▀`;
 			else {
-				const value = (top[0] + bottom[0]) * 0.1063 + (top[1] + bottom[1]) * 0.3576 + (top[2] + bottom[2]) * 0.0361;
-				line += " .:-=+*#%@"[Math.min(9, Math.floor(value / 256 * 10))];
+				const value = (luminance(top) + luminance(bottom)) / 2;
+				const index = Math.min(9, Math.floor(value / 256 * 10));
+				line += " .:-=+*#%@"[invertAscii ? 9 - index : index];
 			}
 		}
 		rows.push(line + (useBlocks ? "\x1b[0m" : ""));

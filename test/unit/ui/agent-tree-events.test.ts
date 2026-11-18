@@ -57,6 +57,15 @@ test("AgentTree remove reports descendants and clear reports the prior snapshot"
   if (cleared?.type === "cleared") assert.deepEqual(cleared.nodes.map((n) => n.id), ["x"]);
 });
 
+test("AgentTree explicit clear notifies lifecycle listeners even when already empty", () => {
+  const tree = new AgentTree();
+  const changes: AgentTreeChange[] = [];
+  tree.onChange((change) => changes.push(change));
+  tree.clear();
+  tree.clear();
+  assert.deepEqual(changes, [{ type: "cleared", nodes: [] }, { type: "cleared", nodes: [] }]);
+});
+
 test("effort metadata rides the tree store: add carries it, a settle patch sets it, changes report both", () => {
   const tree = new AgentTree();
   const changes: AgentTreeChange[] = [];

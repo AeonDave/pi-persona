@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { isThinkingLevel } from "../core/types.ts";
+import { parseVerification } from "../core/worktree-verification.ts";
 import type { ConversationCommit, ConversationLease, ConversationListing, ConversationRecord, ConversationResult, ConversationStoreDeps } from "./types.ts";
 
 export const CONVERSATION_ENTRY = "pi-persona:conversation:v1";
@@ -14,7 +15,7 @@ const MAX_METADATA_BYTES = 64 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RUN = /^run-[a-z0-9-]{1,80}$/i;
 const HASH = /^[a-f0-9]{64}$/i;
-const SPEC_KEYS = new Set(["agent", "task", "name", "model", "thinking", "tools", "skills", "role", "outputContract", "isolation", "mcp", "timeoutMs", "writeSet"]);
+const SPEC_KEYS = new Set(["agent", "task", "name", "model", "thinking", "tools", "skills", "role", "outputContract", "isolation", "verification", "mcp", "timeoutMs", "writeSet"]);
 const fail = <T>(code: string, error: string): ConversationResult<T> => ({ ok: false, code, error });
 
 function regularPath(path: string): boolean {
@@ -46,6 +47,7 @@ function validRecord(value: unknown, owner: string): value is ConversationRecord
 		for (const key of ["name", "model", "role", "outputContract"] as const) if (r.spec[key] !== undefined && typeof r.spec[key] !== "string") return false;
 		if (r.spec.thinking !== undefined && !isThinkingLevel(r.spec.thinking)) return false;
 		if (r.spec.isolation !== undefined && r.spec.isolation !== "none" && r.spec.isolation !== "worktree") return false;
+		if (r.spec.verification !== undefined && !parseVerification(r.spec.verification).ok) return false;
 		if (r.spec.mcp !== undefined && typeof r.spec.mcp !== "boolean") return false;
 		if (r.spec.timeoutMs !== undefined && (typeof r.spec.timeoutMs !== "number" || !Number.isFinite(r.spec.timeoutMs))) return false;
 		if (r.worktree && (!isAbsolute(r.worktree.path) || !isAbsolute(r.worktree.root) || !/^[a-f0-9]{40,64}$/i.test(r.worktree.baseCommit))) return false;
@@ -82,6 +84,7 @@ export class ConversationStore {
 	}
 
 	acquire(runId: string, branchEntries?: readonly unknown[]): ConversationResult<{ record: ConversationRecord; lease: ConversationLease }> {
+		let pendingLease: ConversationLease | undefined;
 		try {
 			const prepared = this.prepare();
 			if (!prepared.ok) return prepared;
@@ -95,12 +98,15 @@ export class ConversationStore {
 			if (this.expired(latest)) return fail("expired", "Conversation retention has expired");
 			const lease = this.makeLease(latest.key, latest);
 			if (!lease.ok) return lease;
+			pendingLease = lease.value;
 			// Re-read after the lock: another owner may have settled while we were acquiring it.
 			const check = this.records(this.deps.entries()).findLast((r) => r.key === latest.key);
-			if (!check || check.runId !== latest.runId) { lease.value.release(); return fail("stale", "Conversation changed during admission"); }
-			if (!this.usableFile(lease.value.file) || this.hashFile(lease.value.file) !== latest.transcriptHash) { lease.value.release(); return fail("unavailable", "Conversation transcript is missing, incomplete or changed since settlement"); }
+			if (!check || check.runId !== latest.runId) return fail("stale", "Conversation changed during admission");
+			if (!this.usableFile(lease.value.file) || this.hashFile(lease.value.file) !== latest.transcriptHash) return fail("unavailable", "Conversation transcript is missing, incomplete or changed since settlement");
+			pendingLease = undefined; // The successful caller now owns the lease and its writer lifecycle.
 			return { ok: true, value: { record: latest, lease: lease.value } };
 		} catch (e) { return fail("storage", String(e)); }
+		finally { pendingLease?.release(); }
 	}
 
 	list(branchEntries?: readonly unknown[]): ConversationRecord[] {

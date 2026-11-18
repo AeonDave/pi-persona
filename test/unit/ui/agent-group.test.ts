@@ -43,7 +43,7 @@ test("group metadata reserves the effort tag when a long model must shorten", ()
 	const worker = node("a", { model: "provider/a-very-long-model-name", thinking: "xhigh", thinkingEffective: "high" });
 	const text = groupLegMetadata(worker, 36);
 	assert.ok(visibleWidth(text) <= 36);
-	assert.match(text, /xh→h$/);
+	assert.match(text, /xhigh→high$/);
 	assert.match(text, /^model:/);
 });
 

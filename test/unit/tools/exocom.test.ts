@@ -69,6 +69,17 @@ test("exocom_send returns the msg_id from the plane", async () => {
 	assert.doesNotMatch(r.content[0].text, /do not poll exocom_list/, "the tool result stays concise; the contract is in the tool description/brief");
 });
 
+test("the exocom_list card shows each peer's model with its self-reported effort; the model-facing roster is unchanged", async () => {
+	const m = mockPi();
+	registerExocomTools(m.pi, () => stubPlane({ listPeers: () => [{ name: "dev", persona: "dev", model: "provider/opus-5", thinking: "high", context_pct: 10, session_id: "0123456789abcdef01234567", heartbeat_at: new Date().toISOString(), displayName: "dev", target: "dev@0123456789abcdef01234567" }] }) as never);
+	const r = await m.tools.get("exocom_list").execute("c", {}, undefined, undefined, {});
+	assert.doesNotMatch(r.content[0].text, /high/, "model-facing text is unchanged");
+	const card = m.tools.get("exocom_list").renderResult(r, { expanded: false }, plainTheme, {}).render(160).join("\n");
+	assert.match(card, /dev · dev · provider\/opus-5 · high · ctx 10%/);
+	const expanded = m.tools.get("exocom_list").renderResult(r, { expanded: true }, plainTheme, {}).render(160).join("\n");
+	assert.match(expanded, /model: provider\/opus-5 · high/);
+});
+
 test("exocom_list renders the peers", async () => {
 	const m = mockPi();
 	registerExocomTools(m.pi, () => stubPlane() as never);

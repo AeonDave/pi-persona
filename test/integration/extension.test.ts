@@ -214,13 +214,22 @@ test("scripts run asynchronously, retain their result and wake only when idle", 
 		const saved = await tool.execute("result", { action: "result", id: result.details.id }, undefined, undefined, ctx);
 		assert.match(JSON.stringify(saved), /SCRIPT_EXTENSION_EVENT/);
 		assert.match(JSON.stringify(saved), /SCRIPT_STDERR/);
-		assert.ok(storage.getEntries().some((entry) => entry.type === "custom" && entry.customType === "pi-persona-script-log"));
+		const log = storage.getEntries().find((entry) => entry.type === "custom" && entry.customType === "pi-persona-script-log");
+		assert.ok(log);
+		// One transcript card per completion: the queued wake is that card, so the log entry draws nothing.
+		const logCard = () => m.entryRenderer("pi-persona-script-log")!(log, { expanded: false, keyText: () => "ctrl+o", keyHint: (_id: string, d: string) => d }, { fg: (_t: string, s: string) => s, bold: (s: string) => s, bg: (_t: string, s: string) => s });
+		assert.equal(logCard(), undefined, "the pending wake is the card");
 		idle = true;
 		await m.fire("agent_settled", {}, ctx);
 		const messages = m.sentMessages().filter((entry) => JSON.stringify(entry.message).includes("SCRIPT_EXTENSION_EVENT"));
 		assert.equal(messages.length, 1);
 		assert.deepEqual(messages[0]?.options, { deliverAs: "followUp", triggerTurn: true });
 		assert.match(JSON.stringify(messages[0]?.message), /untrusted/i);
+		const wake = messages[0]?.message as { content: string; display?: boolean };
+		assert.equal(wake.display, true);
+		assert.ok(logCard(), "this mock host never appends the delivered wake, so the log entry is the fallback card");
+		storage.appendCustomMessageEntry("pi-persona", wake.content, true);
+		assert.equal(logCard(), undefined, "once the wake is on the branch it is the card again");
 	} finally { await m.fire("session_shutdown", {}, ctx); }
 });
 
@@ -353,7 +362,7 @@ function widgetLines(content: WidgetContent, width = 200): string[] | undefined 
 	return rows.map((row) => row.slice(1));
 }
 
-/** Walk TypeBox/JSON-schema unions so discoverability pins survive `anyOf` (jsonish string branches). */
+/** Find fields through TypeBox/JSON-schema object, array and union nodes. */
 function jsonSchemaProperties(schema: unknown): Record<string, unknown> | undefined {
 	if (!schema || typeof schema !== "object") return undefined;
 	const node = schema as { properties?: Record<string, unknown>; anyOf?: unknown[]; oneOf?: unknown[]; items?: unknown };
@@ -375,13 +384,6 @@ function jsonSchemaArrayItems(schema: unknown): unknown {
 		if (items !== undefined) return items;
 	}
 	return undefined;
-}
-
-function jsonSchemaAcceptsString(schema: unknown): boolean {
-	if (!schema || typeof schema !== "object") return false;
-	const node = schema as { type?: string | string[]; anyOf?: unknown[]; oneOf?: unknown[] };
-	if (node.type === "string" || (Array.isArray(node.type) && node.type.includes("string"))) return true;
-	return [...(node.anyOf ?? []), ...(node.oneOf ?? [])].some((branch) => jsonSchemaAcceptsString(branch));
 }
 
 const registryDefaults = {
@@ -439,6 +441,30 @@ function cleanGitRepo(): string {
 	gitAt(cwd, "commit", "-qm", "base");
 	return cwd;
 }
+
+test("delegate rejects invalid verification in the whole batch before admitting any worker", async () => {
+	const cwd = tempDir("persona-verification-preflight-");
+	const m = makeMockPi();
+	let starts = 0;
+	const engine: StrategyEngine = { async run(spec) { starts++; return { agent: spec.agent, output: "unexpected", usage: emptyUsage(), ok: true }; } };
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(cwd);
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		const invalid = await delegate.execute("bad", { tasks: [
+			{ agent: "scout", task: "inspect" },
+			{ agent: "operator", task: "fix", verification: { command: "node check.cjs" } },
+		] }, undefined, undefined, ctx);
+		assert.equal(invalid.isError, true);
+		assert.match(invalid.content[0].text, /verification requires isolation/);
+		m.pi.setActiveTools(["delegate", "read"]);
+		const denied = await delegate.execute("denied", { agent: "operator", task: "fix", isolation: "worktree", verification: { command: "node check.cjs" } }, undefined, undefined, ctx);
+		assert.equal(denied.isError, true);
+		assert.match(denied.content[0].text, /supervisor bash permission/);
+		assert.equal(starts, 0);
+	} finally { await m.fire("session_shutdown", {}, ctx); }
+});
 
 test("registered delegate continues its saved worker and intercom exposes the new turn", async () => {
 	const cwd = tempDir("persona-delegate-resume-wiring-");
@@ -850,7 +876,10 @@ test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable pe
 	// identify schema drift, mapping drift, or lifecycle drift precisely.
 	const m = makeMockPi();
 	piPersona(m.pi);
-	const delegate = m.tool("delegate") as { parameters: { properties: Record<string, unknown> } };
+	const delegate = m.tool("delegate") as {
+		parameters: { properties: Record<string, unknown> };
+		prepareArguments(input: unknown): unknown;
+	};
 	const properties = jsonSchemaProperties(delegate.parameters) ?? {};
 	const taskItems = jsonSchemaArrayItems(properties.tasks);
 	const taskProperties = jsonSchemaProperties(taskItems) ?? {};
@@ -860,7 +889,9 @@ test("delegate tool's tasks[] schema declares timeoutMs (NP2 — discoverable pe
 		assert.ok(taskProperties[field], `tasks[].${field} is declared in the tool schema`);
 		assert.ok(properties[field], `top-level ${field} is declared in the tool schema`);
 	}
-	assert.equal(jsonSchemaAcceptsString(properties.tasks), true, "a stringified tasks payload must not hard-fail schema validation");
+	assert.equal((properties.tasks as { type?: string }).type, "array", "the model sees one canonical tasks shape");
+	assert.deepEqual(delegate.prepareArguments({ tasks: JSON.stringify([{ agent: "scout", task: "inspect", timeoutMs: 50 }]) }),
+		{ tasks: [{ agent: "scout", task: "inspect", timeoutMs: 50 }] }, "stringified tasks are decoded before host schema validation");
 });
 
 for (const backend of ["inproc", "child"] as const) {
@@ -964,10 +995,10 @@ test("a failed strategy leg replaces its last activity with the terminal cause w
 	}
 });
 
-test("strategy-seeded tree rows carry the member's effort sigla and stamp the settle divergence", async () => {
+test("strategy-seeded tree rows carry the member's full effort name and stamp the settle divergence", async () => {
 	// Three distinct members (distinct agents, so each gets its OWN participant): one with effort
 	// that is held running, one with effort held live, one with none — plus the settle stamp that
-	// shows the honest `xh→h` divergence from a REAL terminal result while a sibling still runs.
+	// shows the honest `xhigh→high` divergence from a REAL terminal result while a sibling still runs.
 	const cwd = tempDir("pi-persona-effort-tree-");
 	const dir = path.join(cwd, ".pi", "agents");
 	fs.mkdirSync(dir, { recursive: true });
@@ -999,21 +1030,21 @@ test("strategy-seeded tree rows carry the member's effort sigla and stamp the se
 		}, undefined, undefined, ctx);
 		// Seeded AND live rows alike name the member's effort after the model (write point: the
 		// participant channel through coreTelemetryMeta). The held members keep their rows up; the
-		// elapsed clock follows the sigla, so the sigla is matched without an end anchor.
+		// elapsed clock follows the effort, so the effort is matched without an end anchor.
 		const rowOf = (agent: string): string | undefined => (widgets["persona-agents"] ?? []).find((line) => line.includes(agent));
-		await waitUntil(() => rowOf("thinker")?.includes("· xh") === true, "the seeded xhigh row's compact sigla");
-		assert.equal(rowOf("thinker")?.includes("xh→h") ?? false, false, "requested-only frame shows the plain sigla, no invented observation");
-		await waitUntil(() => rowOf("waiter")?.includes("· h") === true, "the high row's compact sigla while it runs");
-		assert.match(rowOf("waiter") as string, /· h {2}/);
+		await waitUntil(() => rowOf("thinker")?.includes("· xhigh") === true, "the seeded xhigh row's full effort name");
+		assert.equal(rowOf("thinker")?.includes("→") ?? false, false, "requested-only frame shows the plain level, no invented observation");
+		await waitUntil(() => rowOf("waiter")?.includes("· high") === true, "the high row's effort while it runs");
+		assert.match(rowOf("waiter") as string, /· high {2}/);
 		const plainRow = rowOf("plain");
-		assert.ok(plainRow, "the effort-less member still has a row");
-		assert.doesNotMatch(plainRow as string, /· (?:mn|l|m|h|xh|mx)(?:→|\b)/, "absence renders nothing — no borrowed sigla");
+		assert.ok(plainRow, "the member without a declared effort still has a row");
+		assert.match(plainRow as string, /· medium(?!→)\b/, "it shows the inherited child default, as on its launch card — never a sibling's level");
 
 		// Settle divergence: the terminal result's observed effort stamps the row BEFORE removal —
 		// visible for as long as the run stays up (a sibling leg is still held).
 		gates.get("thinker:xhigh")?.();
-		await waitUntil(() => rowOf("thinker")?.includes("xh→h") === true, "the settle stamp's honest divergence");
-		assert.match(rowOf("thinker") as string, /· xh→h/);
+		await waitUntil(() => rowOf("thinker")?.includes("xhigh→high") === true, "the settle stamp's honest divergence");
+		assert.match(rowOf("thinker") as string, /· xhigh→high/);
 		// A member whose observation MATCHES its request never grows an arrow.
 		gates.get("waiter:high")?.();
 		await receipt;
@@ -6402,8 +6433,8 @@ test("the agent widget shows a running leg's elapsed time and stopAgent acknowle
 	assert.ok(legLine, `expected a running leg row in the widget: ${JSON.stringify(runningLines)}`);
 	// The stub reports steerable, so the leg has left "queued" by the time we read the widget: the
 	// row is anchored end-to-end — no stray "queued" text and no false stall badge, just the label
-	// and an honest elapsed reading.
-	assert.match(legLine as string, /^⏳ scout {2}(<1s|\d+s)$/, "the widget row for a running leg is clean once it leaves \"queued\"");
+	// and its inherited launch effort, then an honest elapsed reading.
+	assert.match(legLine as string, /^⏳ scout · medium {2}(<1s|\d+s)$/, "the widget row for a running leg is clean once it leaves \"queued\"");
 
 	// Act: stop it the way the F9 overlay does — through the same stopAgent the intercom "stop" action reaches.
 	const stopped = await intercom.execute("widget-clock-stop", { action: "stop", to: id }, undefined, undefined, ctx);
@@ -8337,7 +8368,7 @@ test("explicit participant model picker receives eligible metadata and the parti
 });
 
 test("the model picker names the core's verticalization, so the choice is made for a ROLE", async () => {
-	// Choosing a model "for the Conservatore" is a different judgement than choosing one for a bare
+	// Choosing a model "for the Regulator" is a different judgement than choosing one for a bare
 	// "balthasar" — the picker title is the other place, besides the tree, where a human meets a core.
 	const fresh = tempDir("pi-persona-pickertitle-");
 	seedDefaults(REPO_ROOT, path.join(fresh, "persona"), true);
@@ -8368,7 +8399,7 @@ test("the model picker names the core's verticalization, so the choice is made f
 		await waitUntil(() => m.sentMessages().length > 0, "the failed run's completion");
 
 		assert.ok(titles.length > 0, "the picker was never opened");
-		for (const [core, purpose] of [["melchior", "Propulsore"], ["balthasar", "Conservatore"], ["casper", "Catalizzatore"]] as const) {
+		for (const [core, purpose] of [["melchior", "Driver"], ["balthasar", "Regulator"], ["casper", "Synthesizer"]] as const) {
 			const asked = titles.find((t) => t.includes(`"${core}"`));
 			assert.ok(asked, `no picker for ${core}: ${JSON.stringify(titles)}`);
 			assert.ok(asked.includes(`(${purpose})`), `${core}'s picker must name its lens, got "${asked}"`);
@@ -10781,7 +10812,7 @@ test("an explicitly collected async result reports how long the leg took", async
 test("a MAGI core is watched and chosen by its verticalization, not just its name", async () => {
 	// A roster of three names says nothing about which lens argued what. The seeded tree node
 	// carries the core's declared purpose, so a watcher reads roles; the same field titles the
-	// model picker, where "a model for the Conservatore" is a different judgement than "for
+	// model picker, where "a model for the Regulator" is a different judgement than "for
 	// balthasar". Both surfaces are asserted here because they are the two places a human meets
 	// a core, and they derive from the same declaration.
 	const cwd = tempDir("pi-persona-magi-purpose-");
@@ -10799,7 +10830,7 @@ test("a MAGI core is watched and chosen by its verticalization, not just its nam
 	const labels = readTelemetryEvents(cwd)
 		.filter((event) => event.type === "agent.added")
 		.map((event) => String(event.payload.label ?? ""));
-	for (const [core, purpose] of [["melchior", "Propulsore"], ["balthasar", "Conservatore"], ["casper", "Catalizzatore"]] as const) {
+	for (const [core, purpose] of [["melchior", "Driver"], ["balthasar", "Regulator"], ["casper", "Synthesizer"]] as const) {
 		const seeded = labels.find((label) => label.startsWith(core));
 		assert.ok(seeded, `no tree node was seeded for ${core}: ${JSON.stringify(labels)}`);
 		assert.ok(seeded.includes(purpose), `${core}'s node must name its lens, got "${seeded}"`);
@@ -10830,11 +10861,11 @@ test("a core listed twice keeps its lens; a roster-ROLE member does not repeat o
 	const labels = readTelemetryEvents(cwd).filter((e) => e.type === "agent.added").map((e) => String(e.payload.label ?? ""));
 	const repeat = labels.find((l) => l.startsWith("melchior#2"));
 	assert.ok(repeat, `no node for the repeated core: ${JSON.stringify(labels)}`);
-	assert.ok(repeat.includes("Propulsore"), `a repeated core keeps its lens, got "${repeat}"`);
+	assert.ok(repeat.includes("Driver"), `a repeated core keeps its lens, got "${repeat}"`);
 
 	const lensed = labels.find((l) => l.startsWith("melchior · SECURITY"));
 	assert.ok(lensed, `no node for the role-specialised core: ${JSON.stringify(labels)}`);
-	assert.ok(!lensed.includes("Propulsore"), `a role member must not show two lenses, got "${lensed}"`);
+	assert.ok(!lensed.includes("Driver"), `a role member must not show two lenses, got "${lensed}"`);
 });
 
 test("judge tree sanitizes technical-only labels and preserves per-occurrence model/effort pins", async () => {

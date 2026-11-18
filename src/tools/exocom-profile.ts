@@ -2,6 +2,7 @@
 import { type Static, Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { normalizeExocomProfile, type ExocomProfile } from "../exocom/profile.ts";
 import type { ExocomPlane } from "../exocom/plane.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
@@ -83,7 +84,9 @@ export function registerExocomProfileTool(pi: ExtensionAPI, getPlane: () => Exoc
 				details: { action: "set", profile: next } satisfies ProfileToolDetails,
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom profile", theme, context);
+			if (pending) return pending;
 			const action = typeof args.action === "string" ? args.action : "get";
 			return new Text(theme.fg("toolTitle", theme.bold(`exocom profile ${action}`)), 0, 0);
 		},

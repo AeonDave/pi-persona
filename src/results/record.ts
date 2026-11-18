@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { isThinkingLevel } from "../core/types.ts";
+import { parseWorktreeVerificationResult } from "../core/worktree-verification-record.ts";
 import {
 	RESULT_MAX_BODY_CHARS, RESULT_MAX_RECORD_BYTES, RESULT_READ_DEFAULT, RESULT_READ_MAX,
 	type TerminalResultInput, type TerminalResultRecord, type TerminalUsage,
 } from "./types.ts";
 
 const INPUT_KEYS = ["originKey", "originRunId", "status", "agent", "label", "model", "thinkingRequested",
-	"thinkingEffective", "usage", "createdAt", "body", "provenance", "error"];
+	"thinkingEffective", "usage", "verification", "createdAt", "body", "provenance", "error"];
 const RECORD_KEYS = [...INPUT_KEYS, "version", "ref", "payloadHash", "originalChars", "storedChars", "truncated"];
 const USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "cost", "turns"];
 const REF_PATTERN = /^result:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -61,6 +62,8 @@ function validFields(value: Record<string, unknown>): boolean {
 /** Fixed key order and detached metadata for canonical equality and caller immutability. */
 function fields(value: TerminalResultInput): TerminalResultInput {
 	const u = value.usage;
+	const verification = value.verification === undefined ? undefined : parseWorktreeVerificationResult(value.verification);
+	if (value.verification !== undefined && !verification) throw new Error("Invalid runtime verification report");
 	return {
 		originKey: value.originKey, status: value.status, agent: value.agent,
 		...(value.originRunId === undefined ? {} : { originRunId: value.originRunId }),
@@ -75,6 +78,7 @@ function fields(value: TerminalResultInput): TerminalResultInput {
 			...(u.cost === undefined ? {} : { cost: u.cost }),
 			...(u.turns === undefined ? {} : { turns: u.turns }),
 		} }),
+		...(verification === undefined ? {} : { verification }),
 		...(value.createdAt === undefined ? {} : { createdAt: value.createdAt }),
 		body: value.body, provenance: value.provenance,
 		...(value.error === undefined ? {} : { error: value.error }),
@@ -143,13 +147,13 @@ export function parseTerminalResultRecord(value: unknown): TerminalResultRecord 
 			|| !counter(value.originalChars) || !counter(value.storedChars) || typeof value.truncated !== "boolean"
 			|| typeof value.body !== "string" || value.body.length > RESULT_MAX_BODY_CHARS
 			|| value.storedChars !== value.body.length || value.originalChars < value.storedChars
-			|| value.truncated !== (value.originalChars > value.storedChars)
-			|| payloadBytes(value) > RESULT_MAX_RECORD_BYTES) return undefined;
-		return {
+			|| value.truncated !== (value.originalChars > value.storedChars)) return undefined;
+		const record: TerminalResultRecord = {
 			...fields(value as unknown as TerminalResultInput), version: 1, ref: value.ref, createdAt: value.createdAt,
 			payloadHash: value.payloadHash, originalChars: value.originalChars,
 			storedChars: value.storedChars, truncated: value.truncated,
 		};
+		return payloadBytes(record) <= RESULT_MAX_RECORD_BYTES ? record : undefined;
 	} catch { return undefined; }
 }
 

@@ -1,6 +1,7 @@
 /** One display tool: Pi owns native graphics; bounded pixels support basic terminals. */
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { pendingCallLine } from "../ui/pending-call.ts";
 import { Type } from "typebox";
 import type { ImagePreviewMode } from "../core/image-preview.ts";
 import type { ImagePreviewData } from "../image/local-image.ts";
@@ -55,25 +56,24 @@ export function makeShowImageTool(options: ShowImageToolOptions = {}): ToolDefin
 			}
 		},
 		renderCall(args, theme, context) {
+			if (context?.isPartial === false && !context.isError) return new Text("", 0, 0);
 			const path = compactInlineText(typeof args.path === "string" ? args.path : "", { maxChars: 100 });
-			return new Text(`${theme.fg("toolTitle", theme.bold("show_image"))}${path ? ` ${theme.fg("dim", path)}` : ""}`, context?.outputPad ?? 0, 0);
+			const line = pendingCallLine("show_image", theme, context) ?? `${theme.fg("toolTitle", theme.bold("show_image"))}${path ? ` ${theme.fg("dim", path)}` : ""}`;
+			return new Text(line, context?.outputPad ?? 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const failed = context?.isError ?? result.isError ?? false;
 			const image = result.details?.image;
 			const valid = !failed && isImagePreviewData(image);
 			const mode = result.details?.mode ?? "auto";
-			const full = valid
-				? `File: ${image.path}\nSource: ${image.sourceMime} · ${image.sourceWidth}×${image.sourceHeight} · ${image.sourceBytes} bytes\nPreview: ${image.width}×${image.height}\nFrame: first\nMode: ${mode}`
-				: result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+			if (valid) return createImagePreview(image, { theme, expanded, showImages: context?.showImages ?? true, mode });
+			if (!failed) return new Text("Image preview unavailable", context?.outputPad ?? 0, 0);
+			const full = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 			return createCardFrame({
-				title: failed ? "failed" : valid ? `preview · ${image.sourceMime.replace("image/", "").toUpperCase()} · ${image.sourceWidth}×${image.sourceHeight}` : "preview",
-				state: failed ? "error" : "success",
+				title: "failed",
+				state: "error",
 				full,
-				preview: (width) => failed ? compactVisibleText(full, { maxLines: 2, maxLineChars: width }) : { text: "", truncated: true },
-				...(!failed && image ? { body: (isExpanded: boolean) => createImagePreview(image, {
-					theme, expanded: isExpanded, showImages: context?.showImages ?? true, mode,
-				}) } : {}),
+				preview: (width) => compactVisibleText(full, { maxLines: 2, maxLineChars: width }),
 			}, { expanded, theme, outputPad: context?.outputPad ?? 0, detailHint: () => expandDetailHint(context) });
 		},
 	};

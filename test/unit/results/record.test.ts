@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import { parseTerminalResultRecord } from "../../../src/results/record.ts";
 import { RESULT_MAX_BODY_CHARS, RESULT_MAX_RECORD_BYTES, type TerminalResultInput } from "../../../src/results/types.ts";
+import type { WorktreeVerificationResult } from "../../../src/core/worktree-verification.ts";
 
 const REF = "result:12345678-1234-4123-8123-123456789abc";
 function fixture(body = "body") {
@@ -14,6 +15,56 @@ function fixture(body = "body") {
 	});
 	return { input, writes, archive };
 }
+
+const verification = (): WorktreeVerificationResult => ({ command: "npm test", cwd: "D:\\isolated\\worktree", status: "passed", exitCode: 0, output: "tests passed", outputTruncated: false, durationMs: 123 });
+
+test("bounded runtime verification evidence is detached and retained independently of a truncated report body", () => {
+	const h = fixture("x".repeat(RESULT_MAX_BODY_CHARS + 100));
+	const evidence = verification();
+	const result = h.archive.save({ ...h.input, verification: evidence } as TerminalResultInput);
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	const record = parseTerminalResultRecord(h.writes[0]);
+	assert.ok(record);
+	assert.equal(record.truncated, true);
+	assert.deepEqual((record as unknown as { verification: unknown }).verification, evidence);
+	evidence.output = "caller mutation";
+	const stored = parseTerminalResultRecord(h.writes[0]) as unknown as { verification: WorktreeVerificationResult };
+	assert.equal(stored.verification.output, "tests passed");
+	stored.verification.command = "changed";
+	assert.equal((parseTerminalResultRecord(h.writes[0]) as unknown as { verification: WorktreeVerificationResult }).verification.command, "npm test");
+});
+
+test("malformed runtime verification reports are rejected rather than truncated or inferred", () => {
+	const h = fixture();
+	const report = verification();
+	const bad = [
+		{ ...report, extra: "untrusted" }, { ...report, status: "claimed-passed" },
+		{ ...report, status: "passed", exitCode: 1 }, { ...report, exitCode: undefined },
+		{ ...report, command: "" }, { ...report, command: "x".repeat(8193) },
+		{ ...report, command: "npm\0test" }, { ...report, cwd: "." }, { ...report, cwd: "a".repeat(32769) },
+		{ ...report, output: "x".repeat(16001) }, { ...report, outputTruncated: "false" },
+		{ ...report, durationMs: NaN }, { ...report, durationMs: -1 }, { ...report, durationMs: 0.5 },
+		{ ...report, exitCode: 1.5 }, { ...report, reason: "x".repeat(1001) },
+		Object.defineProperty({ ...report }, "output", { enumerable: true, get: () => assert.fail("report getter must never execute") }),
+		Object.assign(Object.create({ inherited: true }) as Record<string, unknown>, report),
+	];
+	for (const value of bad) assert.equal(h.archive.save({ ...h.input, verification: value } as TerminalResultInput).ok, false);
+	assert.equal(h.writes.length, 0);
+	assert.equal(h.archive.save({ ...h.input, verification: { ...report, status: "failed", exitCode: 1 } } as TerminalResultInput).ok, true);
+	const raw = h.writes[0] as Record<string, unknown>;
+	assert.equal(parseTerminalResultRecord({ ...raw, verification: { ...report, status: "passed", exitCode: 7 } }), undefined);
+});
+
+test("a failed postcondition preserves the observed command exit code in runtime error evidence", () => {
+	const h = fixture();
+	const report: WorktreeVerificationResult = { ...verification(), status: "error", reason: "The original verification worktree directory was replaced" };
+	const result = h.archive.save({ ...h.input, status: "failed", verification: report });
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	assert.deepEqual(result.summary.verification, { status: "error", exitCode: 0, durationMs: 123, outputTruncated: false });
+	assert.equal(parseTerminalResultRecord(h.writes[0])?.verification?.exitCode, 0);
+});
 
 test("UTF16 ceiling preserves the report prefix and never cuts a surrogate pair", () => {
 	const h = fixture("a".repeat(RESULT_MAX_BODY_CHARS - 1) + "😀last");

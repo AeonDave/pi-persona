@@ -18,7 +18,7 @@ export interface AgentConfig {
 	name: string;
 	description?: string;
 	/** The agent's standing verticalization — one or two words naming the lens it argues from
-	 *  ("Propulsore", "Critico", "Scienziato"). Shown beside the name wherever a council member
+	 *  ("Driver", "Critic", "Scientist"). Shown beside the name wherever a council member
 	 *  is chosen or watched, so a roster reads as a set of ROLES rather than a set of names. Not
 	 *  prompt text: the body already carries the behaviour, this only labels it. */
 	purpose?: string;
@@ -52,7 +52,7 @@ export interface AgentConfig {
 
 /** A verticalization is a one- or two-word lens, not a sentence. Kept short deliberately: it shares a
  *  tree/overlay row with the core's name AND its model, and at 32 it could push the model off. The
- *  shipped cores are 10-13 characters ("Catalizzatore"). */
+ *  shipped cores are 6-11 characters ("Synthesizer"). */
 export const MAX_PURPOSE_CHARS = 24;
 
 export function parseAgent(content: string, source: string): AgentConfig | null {

@@ -18,6 +18,7 @@ import {
 	setKeybindings,
 	Input,
 	matchesKey,
+	Spacer,
 	Text,
 	truncateToWidth,
 	type TUI,
@@ -34,7 +35,9 @@ import { inspectorFrame } from "./inspector-frame.ts";
 import { cumulativeUsageLine, groupLegBrief, groupLegMetadata, groupLegStatus, isAgentGroup, projectAgentGroup } from "./agent-group.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
-import { foldedRows, isFoldableRow, projectPeers, projectResourceGroups, type PeerPresence } from "./resource-groups.ts";
+import { foldedRows, isFoldableRow, projectPeers, projectResourceGroups, RECENT_WORKERS_GROUP_ID, type PeerPresence } from "./resource-groups.ts";
+import { WorkerChatView } from "./worker-chat.ts";
+import { fieldPrefix, keyLabel, legendRows, navigationKeys, TITLED_FIELD_MIN_WIDTH, titledField, windowRule, type LabelledAction } from "./window-chrome.ts";
 
 function safeInline(value: string, maxChars = 96): string {
 	return compactInlineText(value, { maxChars });
@@ -110,6 +113,8 @@ export interface AgentOverlayActions {
 	onGroupToggle?: () => void;
 	peerSnapshot?: () => readonly PeerPresence[];
 	onPeersChanged?: (listener: () => void) => () => void;
+	/** Existing tracker retention, projected here only; settled workers never regain controls. */
+	recentWorkers?: () => readonly AgentNode[];
 	keybindings?: KeybindingsManager;
 	/** Same row allocation used by the host's overlay options. */
 	viewportHeight?: () => number;
@@ -142,6 +147,8 @@ export class AgentOverlay extends Container implements Focusable {
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
 	private steering = false; // typing a steer message into the drilled-in agent
 	private steerInput = new Input({ prompt: "" });
+	/** Whether the composer was last drawn as a titled field; pointer mapping uses the same prompt. */
+	private steerTitled = false;
 	private _focused = false;
 	private readonly keybindings: KeybindingsManager;
 	readonly capturesViewportInput = true;
@@ -156,6 +163,10 @@ export class AgentOverlay extends Container implements Focusable {
 	/** A host frame has already been requested for the current invalidation burst. */
 	private frameRequested = false;
 	private displayCache: { source: string; width: number; rows: string[] } | undefined;
+	private readonly workerChats = new Map<string, { node: AgentNode; view: WorkerChatView }>();
+	private mouseChatStart = -1;
+	private mouseChatRows = 0;
+	private chatInfo = false;
 
 	constructor(tree: AgentTree, tui: TUI, theme: Theme, done: () => void, actions: AgentOverlayActions = {}) {
 		super();
@@ -167,9 +178,23 @@ export class AgentOverlay extends Container implements Focusable {
 		this.keybindings = actions.keybindings ?? getKeybindings();
 		this.resetSteerInput();
 		this.collapsedGroups = actions.collapsedGroups ?? new Set();
+		this.collapsedGroups.add(RECENT_WORKERS_GROUP_ID);
 		this.now = actions.now ?? Date.now;
 		this.clock = new LiveClock({ intervalMs: 1_000, isLive: () => tree.hasRunning(), onTick: () => this.refresh() });
-		this.unsubscribe = tree.onChange(() => {
+		this.unsubscribe = tree.onChange((change) => {
+			if (change.type === "cleared") {
+				this.workerChats.clear();
+				this.displayCache = undefined;
+			} else {
+				const changed = change.type === "removed" ? change.nodes : [change.node];
+				for (const node of changed) {
+					// A reused row is a new attempt. Retiring its prior reader also clears search,
+					// expansion and scroll state before identically named blocks arrive again.
+					if (change.type === "added" || !node.chat) this.workerChats.delete(node.id);
+					if (node.chat && !isNonAgentNode(node) && (node.id === this.detailId || this.workerChats.has(node.id))) this.chatFor(node);
+				}
+				this.pruneWorkerChats();
+			}
 			// A tree change can arrive while a compose is open. If its live handle disappeared,
 			// retire the compose state now; the next key must not be interpreted with stale text
 			// while the lazy rebuild waits for the host's paint.
@@ -189,7 +214,10 @@ export class AgentOverlay extends Container implements Focusable {
 	get focused(): boolean { return this._focused; }
 	set focused(value: boolean) { this._focused = value; this.syncFocus(); }
 
-	private syncFocus(): void { this.steerInput.focused = this._focused && this.steering; }
+	private syncFocus(): void {
+		this.steerInput.focused = this._focused && this.steering;
+		for (const [id, chat] of this.workerChats) chat.view.focused = this._focused && !this.steering && id === this.detailId;
+	}
 
 	private viewportRows(): number {
 		return Math.max(1, Math.floor(this.actions.viewportHeight?.() ?? inspectorFrame.viewportRows(this.tui.terminal?.rows ?? 24)));
@@ -226,6 +254,7 @@ export class AgentOverlay extends Container implements Focusable {
 	override invalidate(): void {
 		this.dirty = true;
 		this.steerInput.invalidate();
+		for (const chat of this.workerChats.values()) chat.view.invalidate();
 		super.invalidate();
 	}
 
@@ -236,25 +265,18 @@ export class AgentOverlay extends Container implements Focusable {
 	private contentRows(): number { return inspectorFrame.layout(this.lastWidth, this.lastHeight).contentRows; }
 
 	private addLine(text: string): void {
+		// The SDK's Text draws nothing for blank text, which would drop every separator row while
+		// the row budgets and pointer offsets still count it.
+		if (text.trim() === "") { this.addChild(new Spacer(1)); return; }
 		const fit = truncateToWidth(text, this.inner(), "…");
 		// The SDK adds reset sequences when truncating even uncoloured text.
 		this.addChild(new Text(text.includes("\x1b") ? fit : sanitizeTerminalText(fit), 0, 0));
 	}
 
-	private keyLabel(action: "tui.select.confirm" | "tui.select.cancel" | "tui.input.submit" | "tui.select.pageUp" | "tui.select.pageDown"): string {
-		const keys = this.keybindings.getKeys(action);
-		if (action !== "tui.select.cancel" && keys.includes("enter")) return "⏎";
-		if (action === "tui.select.cancel" && keys.includes("escape")) return "esc";
-		return keys.map((key) => key.replace(/pageUp/i, "PgUp").replace(/pageDown/i, "PgDn")).join("/") || "unbound";
-	}
+	private keyLabel(action: LabelledAction): string { return keyLabel(this.keybindings, action); }
 
 	private hintRows(full: string, compact: string, primary: string): string[] {
-		const limit = Math.max(1, Math.min(3, this.contentRows() - 2));
-		for (const text of [full, compact]) {
-			const rows = wrapTextWithAnsi(text, this.inner());
-			if (rows.length <= limit) return rows;
-		}
-		return [primary];
+		return legendRows(this.inner(), this.contentRows(), full, compact, primary);
 	}
 
 	private resetSteerInput(): void {
@@ -268,13 +290,26 @@ export class AgentOverlay extends Container implements Focusable {
 		this.syncFocus();
 	}
 
-	private steerPrefix(): string { return this.inner() >= 12 ? "steer ▸ " : this.inner() >= 4 ? "› " : ""; }
+	/** The composer's prompt: a bare chevron under its titled rule, a labelled one when compact. */
+	private steerPrefix(): string { return fieldPrefix(this.inner(), this.steerTitled, "steer"); }
 
-	private navigationKeys(): string {
-		const up = this.keybindings.getKeys("tui.select.up");
-		const down = this.keybindings.getKeys("tui.select.down");
-		return up.includes("up") && down.includes("down") ? "↑↓" : `${up.join("/") || "unbound"}/${down.join("/") || "unbound"}`;
+	private rule(title = ""): string { return windowRule(this.theme, this.inner(), title); }
+
+	/**
+	 * The steering composer. With room it is a titled field closed by a rule, so the row being
+	 * typed into reads as an input; a short host keeps the input and its keys. `input` is the
+	 * index of the row that takes pointer events.
+	 */
+	private steerRows(target: string, roomy: boolean): { rows: string[]; input: number } {
+		this.steerTitled = roomy && this.inner() >= TITLED_FIELD_MIN_WIDTH;
+		roomy = this.steerTitled;
+		const prefix = this.steerPrefix();
+		const field = this.theme.fg("accent", prefix) + (this.steerInput.render(Math.max(1, this.inner() - visibleWidth(prefix)))[0] ?? "");
+		const keys = this.hintRows(`${this.keyLabel("tui.input.submit")} send · ${this.keyLabel("tui.select.cancel")} cancel · F9 close`, `${this.keyLabel("tui.input.submit")} send · F9 close`, "F9 close").map((line) => this.theme.fg("dim", line));
+		return roomy ? { rows: [...titledField(this.theme, this.inner(), `Steer ${target}`, field), ...keys], input: 1 } : { rows: [field, ...keys], input: 0 };
 	}
+
+	private navigationKeys(): string { return navigationKeys(this.keybindings); }
 
 	private pageDelta(data: string, capacity: number): number | undefined {
 		if (this.keybindings.matches(data, "tui.select.pageUp") || this.keybindings.matches(data, "tui.altScreen.pageUp")) return -Math.max(1, capacity);
@@ -288,7 +323,18 @@ export class AgentOverlay extends Container implements Focusable {
 
 	/** Every row can be inspected; inspection does not confer a stop or steer handle. */
 	private viewNodes(): AgentNode[] {
-		return [...projectResourceGroups(this.tree.snapshot()), ...projectPeers(this.actions.peerSnapshot?.() ?? [])];
+		const nodes = projectResourceGroups(this.tree.snapshot());
+		const ids = new Set(nodes.map((node) => node.id));
+		const recent = (this.actions.recentWorkers?.() ?? []).filter((node) => node.status !== "running" && node.chat && !ids.has(node.id));
+		if (recent.length) {
+			nodes.push({ id: RECENT_WORKERS_GROUP_ID, label: "Recent workers", kind: "resource-group", status: "done", parentId: undefined, detail: `${recent.length} retained` });
+			for (const node of recent) {
+				if (ids.has(node.id)) continue;
+				ids.add(node.id);
+				nodes.push({ ...node, parentId: RECENT_WORKERS_GROUP_ID });
+			}
+		}
+		return [...nodes, ...projectPeers(this.actions.peerSnapshot?.() ?? [])];
 	}
 
 	private selectableRows(snap: AgentNode[] = this.viewNodes()): FlatRow[] {
@@ -340,7 +386,10 @@ export class AgentOverlay extends Container implements Focusable {
 
 	private rebuild(): void {
 		this.clear();
+		this.pruneWorkerChats();
 		this.mouseInputRow = -1;
+		this.mouseChatStart = -1;
+		this.mouseChatRows = 0;
 		if (this.detailId) this.renderDetail();
 		else if (this.groupId) this.renderGroup();
 		else this.renderList();
@@ -357,14 +406,14 @@ export class AgentOverlay extends Container implements Focusable {
 		this.mouseListIds = [];
 		const stoppable = selected !== undefined && this.canStopNode(selected, nodes);
 		const steerable = selected !== undefined && this.canSteerNode(selected, nodes);
-		const foldHint = selected && isFoldableRow(selected, nodes) ? "   space fold" : "";
+		const foldHint = selected && isFoldableRow(selected, nodes) ? " · space fold" : "";
 		const closeHint = `${this.keyLabel("tui.select.cancel")}/F9 close`;
-		const hint = `${this.navigationKeys()} navigate   ${this.keyLabel("tui.select.confirm")} open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   ${closeHint}`;
-		const header = available >= 7 ? [t.fg("accent", t.bold("Agents")), ""] : available >= 4 ? [t.fg("accent", t.bold("Agents"))] : [];
+		const hint = `${this.navigationKeys()} navigate · ${this.keyLabel("tui.select.confirm")} open${foldHint}${this.hintLine(stoppable, steerable, this.stoppableIds(nodes).length)} · ${closeHint}`;
+		const header = available >= 7 ? [t.fg("accent", t.bold("Agents")), this.rule()] : available >= 4 ? [t.fg("accent", t.bold("Agents"))] : [];
 		const footer = available >= 3 ? this.hintRows(hint, `${this.navigationKeys()} select · ${this.keyLabel("tui.select.confirm")} open · ${closeHint}`, closeHint).map((line) => t.fg("dim", line)) : [];
 		if (this.notice && available - header.length - footer.length >= 2) footer.push(t.fg("dim", safeInline(this.notice, 240)));
 		const spaced = available - header.length - footer.length >= 5;
-		if (spaced) footer.unshift("");
+		if (spaced) footer.unshift(this.rule());
 		let capacity = Math.max(1, available - header.length - footer.length);
 		const showMarkers = rows.length > capacity && capacity >= 3;
 		if (showMarkers) capacity -= 2;
@@ -377,7 +426,7 @@ export class AgentOverlay extends Container implements Focusable {
 			this.listScroll = visibleWindow(selIdx, capacity, rows.length, this.listScroll);
 			const end = Math.min(rows.length, this.listScroll + capacity);
 			const above = showMarkers && this.listScroll > 0;
-			this.mouseListStart = (inspectorFrame.layout(this.lastWidth, this.lastHeight).framed ? 1 : 0) + header.length + Number(above);
+			this.mouseListStart = inspectorFrame.layout(this.lastWidth, this.lastHeight).top + header.length + Number(above);
 			this.mouseListIds = rows.slice(this.listScroll, end).map((row) => row.node.id);
 			if (above) this.addLine(t.fg("dim", `▲ ${this.listScroll} above`));
 			for (const row of rows.slice(this.listScroll, end)) this.addLine(this.inner() < 16 ? `${row.node.id === selected?.id ? "▸ " : ""}${safeInline(row.node.label)}` : composeAgentRow({
@@ -410,11 +459,11 @@ export class AgentOverlay extends Container implements Focusable {
 		const navigationHint = `${this.navigationKeys()} select · ${this.keyLabel("tui.select.confirm")} output · ${this.keyLabel("tui.select.cancel")} back · F9 close`;
 		const controlHint = [selected !== undefined && this.canStopNode(selected, nodes) ? "x stop leg" : "", selected !== undefined && this.canSteerNode(selected, nodes) ? "s steer leg" : ""].filter(Boolean).join(" · ");
 		const fullHint = [navigationHint, controlHint].filter(Boolean).join(" · ");
-		const header = available >= 8 ? [`Group overview · ${group.root.label}`, group.summary, ""] : available >= 4 ? [`Group overview · ${group.root.label}`] : [];
+		const header = available >= 8 ? [`Group overview · ${group.root.label}`, group.summary, this.rule()] : available >= 4 ? [`Group overview · ${group.root.label}`] : [];
 		const footer = available >= 3 ? this.hintRows(fullHint, navigationHint, `${this.keyLabel("tui.select.cancel")} back · F9 close`) : [];
 		if (this.notice && available - header.length - footer.length >= 2) footer.push(safeInline(this.notice, 240));
 		const expanded = available - header.length - footer.length >= 7;
-		if (expanded) footer.unshift("");
+		if (expanded) footer.unshift(this.rule());
 		const cards = group.legs.map((leg) => {
 			const clock = runningAnnotation(leg, this.now(), this.actions.stallMs ?? 0, waitingIds.has(leg.id));
 			const prefix = `${leg.id === selected?.id ? "▸" : " "} ${nodeGlyph(leg)} `;
@@ -506,6 +555,8 @@ export class AgentOverlay extends Container implements Focusable {
 		const nodes = this.viewNodes();
 		const node = nodes.find((n) => n.id === this.detailId);
 		if (!node) {
+			const retained = this.detailId ? this.workerChats.get(this.detailId) : undefined;
+			if (retained) { this.renderChatDetail(retained.node, nodes, false); return; }
 			this.detailId = undefined;
 			this.steering = false;
 			this.resetSteerInput();
@@ -513,10 +564,12 @@ export class AgentOverlay extends Container implements Focusable {
 			if (this.groupId) this.renderGroup(); else this.renderList();
 			return;
 		}
+		if (node.chat && !isNonAgentNode(node)) { this.renderChatDetail(node, nodes, true); return; }
 		const live = node.status === "running";
 		const wake = isWakeSource(node);
 		const localActivity = node.kind === "activity";
-		const header = [`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", node.kind === "peer" ? "  ● peer" : localActivity ? "  ● local work" : node.kind === "script" ? "  ● running" : wake ? "  ● armed" : "  ● live") : ""}`];
+		const effort = effortTag(node.thinking, node.thinkingEffective);
+		const header = [`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${effort ? t.fg("muted", effort) : ""}${live ? t.fg("success", node.kind === "peer" ? "  ● peer" : localActivity ? "  ● local work" : node.kind === "script" ? "  ● running" : wake ? "  ● armed" : "  ● live") : ""}`];
 		if (this.waitingNodeIds(nodes).has(node.id)) header.push(t.fg("dim", "waiting for supervisor"));
 		const usageLine = cumulativeUsageLine(node);
 		if (node.detail && usageLine !== `cumulative usage: ${node.detail}`) header.push(t.fg("dim", safeInline(node.detail)));
@@ -529,12 +582,11 @@ export class AgentOverlay extends Container implements Focusable {
 		if (this.steering && !steerable) { this.steering = false; this.resetSteerInput(); }
 		this.syncFocus();
 		const footer: string[] = [];
-		if (this.steering) {
-			const prefix = this.steerPrefix();
-			footer.push(prefix + (this.steerInput.render(this.inner() - visibleWidth(prefix))[0] ?? ""));
-			footer.push(...this.hintRows(`${this.keyLabel("tui.input.submit")} send · ${this.keyLabel("tui.select.cancel")} cancel · F9 close`, `${this.keyLabel("tui.input.submit")} send · F9 close`, "F9 close").map((line) => t.fg("dim", line)));
-		} else {
-			footer.push(...this.hintRows(`${this.keyLabel("tui.select.cancel")} back   ·   ${this.navigationKeys()} scroll   ·   F9 close${this.hintLine("detail", stoppable, steerable)} · ${this.keyLabel("tui.select.pageUp")}/${this.keyLabel("tui.select.pageDown")} page`, `${this.keyLabel("tui.select.cancel")} back · ${this.navigationKeys()} scroll · F9 close`, `${this.keyLabel("tui.select.cancel")} back · F9 close`).map((line) => t.fg("dim", line)));
+		// A titled composer brings its own top rule; the plain footer gets one when there is room.
+		const composer = this.steering ? this.steerRows(safeInline(node.label) || "agent", this.contentRows() >= header.length + 9) : undefined;
+		if (composer) footer.push(...composer.rows);
+		else {
+			footer.push(...this.hintRows(`${this.keyLabel("tui.select.cancel")} back · ${this.navigationKeys()} scroll${this.hintLine(stoppable, steerable)} · ${this.keyLabel("tui.select.pageUp")}/${this.keyLabel("tui.select.pageDown")} page · F9 close`, `${this.keyLabel("tui.select.cancel")} back · ${this.navigationKeys()} scroll · F9 close`, `${this.keyLabel("tui.select.cancel")} back · F9 close`).map((line) => t.fg("dim", line)));
 			if (this.notice) footer.push(t.fg("dim", safeInline(this.notice, 240)));
 			if (live && !steerable && !isNonAgentNode(node)) footer.push(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"));
 		}
@@ -545,7 +597,11 @@ export class AgentOverlay extends Container implements Focusable {
 		if (available < header.length + footer.length + 1) footer.splice(this.steering ? 1 : available >= 3 ? 1 : 0);
 		if (this.steering && available === 1) header.splice(0);
 		const spaced = available >= header.length + footer.length + 5;
-		if (spaced) { header.push(""); footer.unshift(""); }
+		// Whether the composer survived the compaction above with its own titled rule.
+		const titled = composer !== undefined && composer.input === 1 && footer.length === composer.rows.length;
+		const ruled = spaced && !titled;
+		if (spaced) header.push(this.rule());
+		if (ruled) footer.unshift(this.rule());
 		const raw = node.output?.trim() ? node.output : live ? "(working… the report appears here when the agent writes text — see its current tool above)" : "(no output)";
 		const all = this.displayRows(raw, this.inner());
 		let capacity = Math.max(this.steering ? 0 : 1, available - header.length - footer.length);
@@ -560,8 +616,83 @@ export class AgentOverlay extends Container implements Focusable {
 		if (showMarkers && start > 0) this.addLine(t.fg("dim", `▲ ${start} earlier`));
 		for (const text of all.slice(start, end)) this.addLine(t.fg("toolOutput", text));
 		if (showMarkers && this.detailScroll > 0) this.addLine(t.fg("dim", `▼ ${this.detailScroll} newer`));
-		this.mouseInputRow = this.steering ? (inspectorFrame.layout(this.lastWidth, this.lastHeight).framed ? 1 : 0) + super.render(this.inner()).length + Number(spaced) : -1;
+		this.mouseInputRow = composer ? inspectorFrame.layout(this.lastWidth, this.lastHeight).top + super.render(this.inner()).length + Number(ruled) + (titled ? composer.input : 0) : -1;
 		for (const text of footer) this.addLine(text);
+	}
+
+	private chatFor(node: AgentNode): WorkerChatView {
+		let chat = this.workerChats.get(node.id);
+		if (!chat) {
+			chat = { node, view: new WorkerChatView(this.theme, this.keybindings) };
+			// Only reader-local state is retained, bounded independently from the existing tracker.
+			if (this.workerChats.size >= 8) this.workerChats.delete(this.workerChats.keys().next().value!);
+			this.workerChats.set(node.id, chat);
+		}
+		chat.node = node;
+		if (node.chat) chat.view.update(node.chat);
+		chat.view.focused = this._focused && !this.steering && node.id === this.detailId;
+		return chat.view;
+	}
+
+	private pruneWorkerChats(): void {
+		if (!this.workerChats.size) return;
+		const retainedIds = new Set(this.viewNodes().filter((node) => node.chat && !isNonAgentNode(node)).map((node) => node.id));
+		for (const id of this.workerChats.keys()) {
+			// Keep a pruned chat only while the operator is reading it. Recent/live owners
+			// retain their bounded reader state; leaving an orphan releases its payload.
+			if (id !== this.detailId && !retainedIds.has(id)) this.workerChats.delete(id);
+		}
+	}
+
+	private detailChat(): WorkerChatView | undefined {
+		if (!this.detailId) return undefined;
+		const node = this.viewNodes().find((candidate) => candidate.id === this.detailId);
+		return node ? node.chat && !isNonAgentNode(node) ? this.chatFor(node) : undefined : this.workerChats.get(this.detailId)?.view;
+	}
+
+	private renderChatDetail(node: AgentNode, nodes: readonly AgentNode[], present: boolean): void {
+		const view = this.chatFor(node);
+		const t = this.theme;
+		const steerable = present && this.canSteerNode(node, nodes);
+		const stoppable = present && this.canStopNode(node, nodes);
+		if (this.steering && !steerable) { this.steering = false; this.resetSteerInput(); }
+		const effort = effortTag(node.thinking, node.thinkingEffective);
+		const header = [`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label)))}${effort ? t.fg("muted", effort) : ""} · ${present ? node.status : "retained view · no live controls"}`];
+		// Engine-level aborts/timeouts can settle without emitting a chat error event.
+		// Preserve their recorded cause without manufacturing conversation content.
+		const terminalFailure = node.status === "failed" || node.status === "stopped";
+		if (node.detail && (terminalFailure || this.chatInfo)) {
+			const detail = safeInline(node.detail, 600);
+			for (const row of this.wrapRows(detail, this.inner()).slice(0, 3)) header.push(t.fg(terminalFailure ? "error" : "dim", row));
+		}
+		if (this.chatInfo) {
+			header.push(t.fg("dim", `model: ${safeInline(node.model ?? "pending / unknown", 160)}`));
+			const usage = cumulativeUsageLine(node), effort = thinkingDetailLine(node.thinking, node.thinkingEffective);
+			if (usage) header.push(t.fg("dim", usage));
+			if (effort) header.push(t.fg("dim", effort));
+		}
+		const available = this.contentRows();
+		// Rules separate identity, conversation and keys once the conversation keeps a useful height.
+		const roomy = available >= header.length + 10;
+		const footer: string[] = [];
+		const composer = this.steering ? this.steerRows(safeInline(node.label) || "agent", roomy) : undefined;
+		if (composer) footer.push(...composer.rows);
+		else {
+			const controls = this.hintLine(stoppable, steerable);
+			if (roomy) footer.push(this.rule());
+			footer.push(...this.hintRows(`esc back · ↑↓/Pg scroll · / search · e expand · i info · m raw/md${controls} · F9 close`, `esc back · ↑↓/Pg scroll · / search${controls} · F9 close`, "esc back · F9 close").map((line) => t.fg("dim", line)));
+		}
+		if (this.notice) footer.push(t.fg("dim", safeInline(this.notice, 240)));
+		if (roomy) header.push(this.rule());
+		while (header.length + footer.length + 1 > available && header.length > 0) header.pop();
+		while (header.length + footer.length + Number(!this.steering) > available && footer.length > 0) footer.pop();
+		for (const line of header) this.addLine(line);
+		this.mouseChatStart = inspectorFrame.layout(this.lastWidth, this.lastHeight).top + header.length;
+		this.mouseChatRows = Math.max(0, available - header.length - footer.length);
+		if (this.mouseChatRows) for (const line of view.render(this.inner(), this.mouseChatRows)) this.addLine(line);
+		this.mouseInputRow = composer ? this.mouseChatStart + this.mouseChatRows + (footer.length > composer.input ? composer.input : 0) : -1;
+		for (const line of footer) this.addLine(line);
+		this.syncFocus();
 	}
 
 	private submitSteer(): void {
@@ -608,6 +739,9 @@ export class AgentOverlay extends Container implements Focusable {
 				this.refresh();
 				return;
 			}
+			const chat = this.detailChat();
+			if (chat?.handleInput(keyData)) { this.refresh(); return; }
+			if (chat && keyData === "i") { this.chatInfo = !this.chatInfo; this.refresh(); return; }
 			const detailNode = this.tree.snapshot().find((node) => node.id === this.detailId);
 			const page = this.pageDelta(keyData, this.detailCapacity);
 			if (keyData === "s" && detailNode && this.canSteerNode(detailNode, this.tree.snapshot())) {
@@ -693,6 +827,14 @@ export class AgentOverlay extends Container implements Focusable {
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const chat = this.detailId ? this.workerChats.get(this.detailId)?.view : undefined;
+		if (chat && !this.steering && event.y >= this.mouseChatStart && event.y < this.mouseChatStart + this.mouseChatRows) {
+			const layout = inspectorFrame.layout(this.lastWidth, this.lastHeight);
+			if (chat.handleMouse({ ...event, x: event.x - (layout.framed ? 1 + layout.gutter : 0), y: event.y - this.mouseChatStart, height: this.mouseChatRows, width: layout.contentWidth })) {
+				this.refresh();
+				return { handled: true, target: { component: this, originX: event.screenX - event.x, originY: event.screenY - event.y, width: event.width, height: event.height } };
+			}
+		}
 		if (this.steering && event.y === this.mouseInputRow) {
 			const layout = inspectorFrame.layout(this.lastWidth, this.lastHeight);
 			const prefixWidth = visibleWidth(this.steerPrefix());
@@ -785,12 +927,11 @@ export class AgentOverlay extends Container implements Focusable {
 		return snap.filter((node) => !isNonAgentNode(node) && this.canStopNode(node, snap)).map((node) => node.id);
 	}
 
-	/** The trailing "x stop"/"X stop all"/"s steer" hint fragment for an action line — the list's
-	 *  three-space style or the detail view's " · " style, the two views' only difference here.
-	 *  `stopAll` (list only) is the stoppable count; one agent is what plain `x` is for. */
-	private hintLine(kind: "list" | "detail", stoppable: boolean, steerable: boolean, stopAll = 0): string {
-		const sep = kind === "list" ? "   " : "   ·   ";
-		return `${stoppable ? `${sep}x stop` : ""}${stopAll >= 2 ? `${sep}X stop all (${stopAll})` : ""}${steerable ? `${sep}s steer` : ""}`;
+	/** The trailing "x stop"/"X stop all"/"s steer" entries of a key legend, in the one " · "
+	 *  style every view uses. `stopAll` (list only) is the stoppable count; one agent is what
+	 *  plain `x` is for. */
+	private hintLine(stoppable: boolean, steerable: boolean, stopAll = 0): string {
+		return `${stoppable ? " · x stop" : ""}${stopAll >= 2 ? ` · X stop all (${stopAll})` : ""}${steerable ? " · s steer" : ""}`;
 	}
 
 	/** Stop (abort) one agent by id. A refusal — the node is gone, not stoppable, or the caller
@@ -832,6 +973,9 @@ export class AgentOverlay extends Container implements Focusable {
 		this.clock.stop();
 		this.unsubscribe();
 		this.unsubscribePeers();
+		this.workerChats.clear();
+		this.displayCache = undefined;
+		this.clear();
 	}
 
 	/** Read-only for tests: whether the live-clock tick is still armed. */

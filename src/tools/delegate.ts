@@ -8,6 +8,7 @@
 import { cappedList } from "../core/format.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../core/types.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
+import { parseVerification, type WorktreeVerificationSpec } from "../core/worktree-verification.ts";
 import { type AgentRunSpec, type InfrastructureFailure, isInfrastructureFailure, isPositiveFiniteMs } from "../orchestration/sdk.ts";
 
 export interface DelegateTask {
@@ -30,6 +31,7 @@ export interface DelegateTask {
 	role?: string;
 	/** Run this task in an isolated git worktree (edits never touch the main tree). */
 	isolation?: "none" | "worktree";
+	verification?: WorktreeVerificationSpec;
 	/** Route this task through the child engine so the sub-agent's MCP (`mcp*`/direct)
 	 *  tools initialize and work (the in-process engine leaves them "not initialized"). */
 	mcp?: boolean;
@@ -56,6 +58,7 @@ export interface DelegateParams {
 	tools?: string[];
 	role?: string;
 	isolation?: "none" | "worktree";
+	verification?: WorktreeVerificationSpec;
 	mcp?: boolean;
 	/** Per-leg override (ms) of the shared idle-timeout ceiling (single mode). Ignored unless a
 	 *  finite, positive number (junk/≤0 falls back to the engine's default). */
@@ -220,6 +223,14 @@ function decodedTaskFieldError(bag: Record<string, unknown>, index: number): str
 	return undefined;
 }
 
+function coerceVerification(value: unknown, label: string): { ok: true; value?: WorktreeVerificationSpec } | { ok: false; error: string } {
+	if (value === undefined) return { ok: true };
+	const parsed = unwrapJsonish(value, label);
+	if (!parsed.ok) return parsed;
+	const checked = parseVerification(parsed.value);
+	return checked.ok ? checked : { ok: false, error: `delegate: ${label}: ${checked.error}` };
+}
+
 function coerceOneTask(raw: unknown, index: number): { ok: true; task: DelegateTask } | { ok: false; error: string } {
 	const parsed = unwrapJsonish(raw, `tasks[${index}]`);
 	if (!parsed.ok) return parsed;
@@ -229,6 +240,9 @@ function coerceOneTask(raw: unknown, index: number): { ok: true; task: DelegateT
 	const bag = { ...(parsed.value as Record<string, unknown>) };
 	const fieldError = decodedTaskFieldError(bag, index);
 	if (fieldError) return { ok: false, error: fieldError };
+	const verification = coerceVerification(bag.verification, `tasks[${index}].verification`);
+	if (!verification.ok) return verification;
+	if (verification.value !== undefined) bag.verification = verification.value;
 	const brief = coerceBriefField(bag.brief, `tasks[${index}].brief`);
 	if (!brief.ok) return brief;
 	if (brief.value !== undefined) bag.brief = brief.value;
@@ -260,6 +274,53 @@ function coerceTaskList(value: unknown): { ok: true; value?: DelegateTask[] } | 
 	return { ok: true, value: tasks };
 }
 
+/** Decode only the string-wrapped forms before Pi validates the canonical tool schema.
+ * Native objects stay subject to Pi's own optional-null and primitive coercion. A decoded
+ * JSON string retains the existing stricter decoder contract (it previously bypassed Pi's
+ * nested schema), rather than acquiring new coercions merely because the wire schema shrank. */
+export function prepareDelegateArguments(raw: unknown): Record<string, unknown> {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error("delegate: arguments must be an object.");
+	}
+	const valueOf = <T>(result: { ok: true; value?: T } | { ok: false; error: string }): T | undefined => {
+		if (!result.ok) throw new Error(result.error);
+		return result.value;
+	};
+	const decodeFields = (value: unknown, label: string): unknown => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+		const bag = { ...(value as Record<string, unknown>) };
+		// Reject unsupported execution options before the host strips unknown schema keys.
+		if (bag.verification !== undefined && bag.verification !== null) bag.verification = valueOf(coerceVerification(bag.verification, `${label}verification`));
+		for (const field of ["tools", "skills", "writeSet"] as const) {
+			if (typeof bag[field] === "string") bag[field] = valueOf(coerceStringList(bag[field], `${label}${field}`));
+		}
+		if (typeof bag.brief === "string") {
+			bag.brief = valueOf(coerceBriefField(bag.brief, `${label}brief`));
+		} else if (bag.brief && typeof bag.brief === "object" && !Array.isArray(bag.brief)) {
+			const brief = { ...(bag.brief as Record<string, unknown>) };
+			for (const field of ["constraints", "requiredArtifacts", "stopConditions"] as const) {
+				if (typeof brief[field] === "string") brief[field] = valueOf(coerceStringList(brief[field], `${label}brief.${field}`));
+			}
+			bag.brief = brief;
+		}
+		return bag;
+	};
+	const bag = decodeFields(raw, "") as Record<string, unknown>;
+	if (typeof bag.tasks === "string") {
+		bag.tasks = valueOf(coerceTaskList(bag.tasks));
+	} else if (Array.isArray(bag.tasks)) {
+		bag.tasks = bag.tasks.map((task: unknown, index: number) => {
+			if (typeof task !== "string") return decodeFields(task, `tasks[${index}].`);
+			const decoded = coerceOneTask(task, index);
+			if (!decoded.ok) throw new Error(decoded.error);
+			return decoded.task;
+		});
+	} else if (bag.tasks && typeof bag.tasks === "object") {
+		bag.tasks = decodeFields(bag.tasks, "tasks[0].");
+	}
+	return bag;
+}
+
 /**
  * Models often stringify nested `tasks`/`brief`/`writeSet`. Unwrap JSON text so a 9k-character
  * string is not validated as `tasks.0` (first character) or rendered as `parallel (9445)`.
@@ -269,6 +330,9 @@ export function coerceDelegateParams(raw: unknown): { ok: true; params: Delegate
 		return { ok: false, error: "delegate: arguments must be an object." };
 	}
 	const bag = { ...(raw as Record<string, unknown>) };
+	const verification = coerceVerification(bag.verification, "verification");
+	if (!verification.ok) return verification;
+	if (verification.value !== undefined) bag.verification = verification.value;
 	if (bag.thinking !== undefined && !isThinkingLevel(bag.thinking)) {
 		return { ok: false, error: `delegate: thinking must be one of: ${THINKING_LEVELS.join(", ")}.` };
 	}
@@ -334,6 +398,7 @@ export function specOf(t: DelegateTask, index = 0): AgentRunSpec {
 	if (t.role?.trim()) spec.role = t.role.trim();
 	if (t.outputContract?.trim()) spec.outputContract = t.outputContract.trim();
 	if (t.isolation !== undefined) spec.isolation = t.isolation;
+	if (t.verification !== undefined) spec.verification = { ...t.verification };
 	if (t.mcp !== undefined) spec.mcp = t.mcp;
 	if (isPositiveFiniteMs(t.timeoutMs)) spec.timeoutMs = t.timeoutMs;
 	if (t.writeSet && t.writeSet.length > 0) spec.writeSet = [...t.writeSet];

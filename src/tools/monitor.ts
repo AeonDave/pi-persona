@@ -2,6 +2,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import type { MonitorManager } from "../core/monitor.ts";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { compactInlineText } from "../ui/presentation.ts";
@@ -74,7 +75,9 @@ export function registerMonitorTool(pi: ExtensionAPI, d: MonitorToolDeps): void 
 			if (!result.ok) return fail(result.error);
 			return { content: [{ type: "text" as const, text: `Armed ${result.entry.id} (${compactInlineText(result.entry.label, { maxChars: 120 })}); ${params.mode === "exit" ? "wakes when this job exits" : "wakes on relevant stdout lines"}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. ${armWakeAdvice(ctx, "watch", "condition", "Keep this session open. Continue independent work, or end your turn; it wakes you by itself, so never sleep, poll, or arm a `timer` to wait for it.")}` }], details: { ok: true, id: result.entry.id, expiresAtEpochMs: result.entry.expiresAtEpochMs, label: compactInlineText(result.entry.label, { maxChars: 120 }), mode: params.mode } };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("monitor", theme, context);
+			if (pending) return pending;
 			const action = compactInlineText(args.action ?? "", { maxChars: 12 });
 			const label = compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 });
 			return new Text(`${theme.fg("toolTitle", theme.bold(`monitor ${action}`))}${label ? ` ${theme.fg("dim", label)}` : ""}`, 0, 0);

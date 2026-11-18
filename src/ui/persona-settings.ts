@@ -8,7 +8,9 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 
+import { inspectorFrame } from "./inspector-frame.ts";
 import { compactInlineText, sanitizeTerminalText } from "./presentation.ts";
+import { composeWindow, inlineWindowColumns, keyLabel, navigationKeys } from "./window-chrome.ts";
 import type { SettingId, SettingKind } from "../core/settings.ts";
 
 export interface SettingsPanelRow {
@@ -139,17 +141,18 @@ function listLines(
 ): { lines: string[]; scroll: number } {
 	const limit = Math.max(1, height);
 	if (rows.length === 0) return { lines: [theme.fg("dim", "No settings match this filter.")], scroll: 0 };
-	const needsMarkers = rows.length > limit;
+	// Markers only when they leave the selected row room; a one- or two-row list shows the row itself.
+	const needsMarkers = rows.length > limit && limit >= 3;
 	const itemCount = Math.max(1, limit - (needsMarkers ? 2 : 0));
 	const scroll = visibleSettingsWindow(selectedIndex, itemCount, rows.length, previousScroll);
 	const end = Math.min(rows.length, scroll + itemCount);
 	const lines: string[] = [];
-	if (scroll > 0) lines.push(theme.fg("dim", `↑ ${scroll} settings above`));
+	if (needsMarkers && scroll > 0) lines.push(theme.fg("dim", `↑ ${scroll} settings above`));
 	for (let index = scroll; index < end; index++) {
 		const row = rows[index];
 		if (row) lines.push(composeSettingsRow(row, index === selectedIndex, width, theme));
 	}
-	if (end < rows.length) lines.push(theme.fg("dim", `↓ ${rows.length - end} settings below`));
+	if (needsMarkers && end < rows.length) lines.push(theme.fg("dim", `↓ ${rows.length - end} settings below`));
 	return { lines: lines.slice(0, limit).map((line) => fitLine(line, width)), scroll };
 }
 
@@ -166,13 +169,20 @@ function columnLines(left: readonly string[], right: readonly string[], leftWidt
 	return lines;
 }
 
+/** The end of the query with its cursor, so typing stays visible in a narrow field. */
+function queryTail(query: string, width: number): string {
+	let shown = Array.from(query);
+	while (shown.length && visibleWidth(shown.join("")) + 1 > width) shown = shown.slice(1);
+	return `${shown.join("")}▌`;
+}
+
 function isPrintable(key: string): boolean {
 	if (key.length !== 1) return false;
 	const code = key.charCodeAt(0);
 	return code >= 0x20 && code !== 0x7f;
 }
 
-/** Full-page settings workbench. Dialogs are returned as actions so command handlers can use Pi's native prompts. */
+/** Settings page in the shared window frame. Dialogs are returned as actions so command handlers can use Pi's native prompts. */
 export class PersonaSettingsPanel implements Component {
 	private query: string;
 	private searchMode = false;
@@ -217,56 +227,62 @@ export class PersonaSettingsPanel implements Component {
 		// Rendering is derived entirely from the small immutable snapshot passed by the command.
 	}
 
+	/**
+	 * A page in the editor slot rather than an overlay: it and Pi's native edit dialogs take turns
+	 * there. It still takes the shared window geometry (the overlay's centred columns and the frame's
+	 * row allocation), so the page and Pi's footer fit on screen together.
+	 */
 	render(width: number): string[] {
 		const pageWidth = Math.max(1, Math.floor(width));
 		this.lastWidth = pageWidth;
 		const rows = filterSettingsRows(this.data.rows, this.query);
 		if (this.selectedIndex >= rows.length) this.selectedIndex = Math.max(0, rows.length - 1);
 		const selected = rows[this.selectedIndex];
-		const terminalRows = Math.max(8, Math.floor(this.tui.terminal.rows || 24));
-		const title = this.theme.fg("accent", this.theme.bold("Persona settings"));
-		const file = fitLine(this.theme.fg("dim", `Configuration file: ${compactInlineText(this.data.file, { maxChars: 240 })}`), pageWidth);
-		const remembered = fitLine(this.theme.fg("dim", `Remembered persona: ${this.data.lastPersona ? compactInlineText(this.data.lastPersona, { maxChars: 120 }) : "none"}`), pageWidth);
-		// Show the configured primary binding; listing every alias would hide close/edit on narrow screens.
-		const keys = (action: "tui.select.up" | "tui.select.down" | "tui.select.confirm" | "tui.select.cancel"): string =>
-			this.keybindings.getKeys(action).slice(0, 1).map((key) => key === "escape" ? "esc" : key).join("/") || "unbound";
-		const move = `${keys("tui.select.up")}/${keys("tui.select.down")}`;
-		const confirm = keys("tui.select.confirm");
-		const cancel = keys("tui.select.cancel");
-		const filter = this.searchMode
-			? this.theme.fg("accent", `Filter (type, backspace, ${confirm}): ${compactInlineText(this.query, { maxChars: 120 })}▌`)
-			: this.query
-				? this.theme.fg("dim", `Filter: ${compactInlineText(this.query, { maxChars: 120 })}`)
-				: this.theme.fg("dim", "Filter: press / to search");
-		const header = [fitLine(title, pageWidth), file, remembered, fitLine(filter, pageWidth), ""];
-		const footer = [
-			...(this.data.notice ? [fitLine(this.theme.fg("warning", compactInlineText(this.data.notice, { maxChars: 200 })), pageWidth)] : []),
-			...(pageWidth < 76
-				? [`${move} move  ${confirm} edit  r reset`, `/ filter  m models  d info  ${cancel} close`]
-				: [`${move} move  ${confirm} edit  r reset  / filter  m models  d diagnostics  ${cancel} close`])
-				.map((hint) => fitLine(this.theme.fg("dim", hint), pageWidth)),
+		const columns = inlineWindowColumns(pageWidth);
+		const layout = inspectorFrame.layout(columns.width, inspectorFrame.viewportRows(this.tui.terminal?.rows || 24));
+		const t = this.theme;
+		const kb = this.keybindings;
+		const confirm = keyLabel(kb, "tui.select.confirm");
+		const cancel = keyLabel(kb, "tui.select.cancel");
+		const query = sanitizeTerminalText(this.query);
+		// Meta rows are given up from the last: an applied filter outlives the file and persona.
+		const meta = [
+			...(query && !this.searchMode ? [t.fg("dim", `Filter: ${compactInlineText(query, { maxChars: 120 })} · ${cancel} clears`)] : []),
+			t.fg("dim", `Configuration file: ${compactInlineText(this.data.file, { maxChars: 240 })}`),
+			t.fg("dim", `Remembered persona: ${this.data.lastPersona ? compactInlineText(this.data.lastPersona, { maxChars: 120 }) : "none"}`),
 		];
-		const bodyHeight = Math.max(1, terminalRows - header.length - footer.length);
-		let body: string[];
-		if (!selected) {
-			body = [this.theme.fg("dim", "No settings match this filter.")];
-		} else if (pageWidth >= 80) {
-			const leftWidth = Math.max(24, Math.floor((pageWidth - 2) * 0.42));
-			const rightWidth = Math.max(1, pageWidth - leftWidth - 2);
+		const split = layout.contentWidth >= 74;
+		const window = composeWindow(t, layout, {
+			title: "Persona settings",
+			meta,
+			field: this.searchMode ? { title: "Filter", label: "filter", render: (room) => queryTail(query, room) } : undefined,
+			legend: this.searchMode
+				? [`type to filter · backspace delete · ${confirm} apply · ${cancel} clear`, `${confirm} apply · ${cancel} clear`, `${confirm} apply`]
+				: [`${navigationKeys(kb)} move · ${confirm} edit · r reset · / filter · m models · d diagnostics · ${cancel} close`, `${confirm} edit · m models · ${cancel} close`, `${cancel} close`],
+			notice: this.data.notice ? t.fg("warning", compactInlineText(this.data.notice, { maxChars: 200 })) : undefined,
+			// The details need label, group, a description line, active, saved, source and applies.
+			minBody: split ? 7 : 9,
+			body: (bodyHeight, bodyWidth) => this.body(rows, selected, bodyHeight, bodyWidth, split),
+		});
+		const margin = " ".repeat(columns.left);
+		return inspectorFrame.render(window.lines, layout, (text) => t.fg("border", text)).map((line) => margin + line);
+	}
+
+	private body(rows: readonly SettingsPanelRow[], selected: SettingsPanelRow | undefined, bodyHeight: number, width: number, columns: boolean): string[] {
+		if (!selected) return [this.theme.fg("dim", "No settings match this filter.")];
+		if (columns) {
+			const leftWidth = Math.max(24, Math.floor((width - 2) * 0.42));
+			const rightWidth = Math.max(1, width - leftWidth - 2);
 			const listing = listLines(rows, this.selectedIndex, bodyHeight, leftWidth, this.scroll, this.theme);
 			this.scroll = listing.scroll;
-			const details = detailLines(selected, rightWidth, bodyHeight, this.theme);
-			body = columnLines(listing.lines, details, leftWidth, rightWidth, pageWidth);
-		} else {
-			const detailsBudget = Math.min(Math.max(3, Math.floor(bodyHeight * 0.55)), Math.max(1, bodyHeight - 1));
-			const listBudget = Math.max(1, bodyHeight - detailsBudget - 1);
-			const listing = listLines(rows, this.selectedIndex, listBudget, pageWidth, this.scroll, this.theme);
-			this.scroll = listing.scroll;
-			const details = detailLines(selected, pageWidth, Math.max(1, bodyHeight - listing.lines.length - 1), this.theme);
-			body = [...listing.lines, "", ...details].slice(0, bodyHeight);
+			return columnLines(listing.lines, detailLines(selected, rightWidth, bodyHeight, this.theme), leftWidth, rightWidth, width);
 		}
-		const output = [...header, ...body, ...footer].slice(0, terminalRows);
-		return output.map((line) => fitLine(line, pageWidth));
+		const detailsBudget = Math.min(Math.max(3, Math.floor(bodyHeight * 0.55)), Math.max(1, bodyHeight - 1));
+		const listBudget = Math.max(1, bodyHeight - detailsBudget - 1);
+		const listing = listLines(rows, this.selectedIndex, listBudget, width, this.scroll, this.theme);
+		this.scroll = listing.scroll;
+		const details = detailLines(selected, width, Math.max(1, bodyHeight - listing.lines.length - 1), this.theme);
+		return [...listing.lines, "", ...details].slice(0, bodyHeight);
 	}
 
 	handleInput(key: string): void {

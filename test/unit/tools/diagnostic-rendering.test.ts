@@ -98,7 +98,7 @@ for (const [name, tool] of tools()) {
 
 test("both delegate model parameters distinguish omission from deliberately selecting the supervisor", () => {
 	const schema = tools().get("delegate")!.parameters as any;
-	const descriptions = [schema.properties.model.description, schema.properties.tasks.anyOf[0].items.anyOf[0].properties.model.description];
+	const descriptions = [schema.properties.model.description, schema.properties.tasks.items.properties.model.description];
 	for (const description of descriptions) {
 		assert.match(description, /omission retains saved\/agent selections and defaults/i);
 		assert.match(description, /explicit current supervisor provider\/id selects it deliberately/i);

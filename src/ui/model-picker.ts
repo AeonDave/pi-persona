@@ -1,5 +1,6 @@
 /**
- * A focusable, searchable model picker opened with ctx.ui.custom (overlay: true).
+ * A focusable, searchable model picker opened with ctx.ui.custom (overlay: true) in the shared
+ * window frame (`window-chrome.ts`): title, titled search field, list, rule and key legend.
  * Type to filter, ↑↓ to move, ⏎ to choose, esc to keep the default. Unlike the
  * built-in `ui.select`, the list is filterable (essential when a provider exposes
  * hundreds of models) and the viewport *follows the selection* — the highlighted
@@ -12,9 +13,11 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container, CURSOR_MARKER, type Focusable, fuzzyFilter, getKeybindings, Input,
-	renderFakeCursor, setKeybindings, type TUI, truncateToWidth, visibleWidth,
+	renderFakeCursor, setKeybindings, type TUI, type TuiMouseEvent, truncateToWidth, visibleWidth,
 } from "@earendil-works/pi-tui";
+import { inspectorFrame, type InspectorFrameLayout } from "./inspector-frame.ts";
 import { sanitizeTerminalText } from "./presentation.ts";
+import { composeWindow, keyLabel, navigationKeys } from "./window-chrome.ts";
 
 /** Structural subset of host snapshots; no registry lookup or availability policy here. */
 export interface ModelPickerMetadata {
@@ -31,8 +34,6 @@ export interface ModelPickerConfig {
 	models?: readonly ModelPickerMetadata[];
 	keybindings?: KeybindingsManager;
 }
-
-const VIEWPORT = 12; // rows shown at once (the rest scrolls)
 
 /** Case-insensitive substring filter over model refs; order preserved, empty query = all. */
 export function filterModels(options: string[], query: string): string[] {
@@ -97,6 +98,8 @@ export class ModelPicker extends Container implements Focusable {
 	private scroll = 0;
 	private pastePending = false;
 	private pasteTail = "";
+	/** Where the last render drew the search row, for pointer mapping. */
+	private pointer: { layout: InspectorFrameLayout; inputRow: number; inputColumn: number } | undefined;
 
 	get focused(): boolean { return this.input.focused; }
 	set focused(value: boolean) { this.input.focused = value; }
@@ -148,52 +151,66 @@ export class ModelPicker extends Container implements Focusable {
 		this.selected = previous === undefined ? 0 : Math.max(0, this.list.indexOf(previous));
 	}
 
+	/** Drawn in the shared window frame, sized from the terminal the way every window is. */
 	override render(width: number): string[] {
-		const outer = Math.max(0, Math.min(104, Math.floor(width)));
-		if (outer === 0) return [];
-		const framed = outer >= 8;
-		const inner = framed ? outer - 4 : outer;
-		const t = this.theme;
-		const fit = (line: string): string => truncateToWidth(line, inner, "…");
-		let inputLine = this.input.render(inner)[0] ?? "";
-		// Native Input can overrun a one-column viewport with a wide cursor grapheme.
-		if (visibleWidth(inputLine) > inner) {
-			inputLine = `${this.focused ? CURSOR_MARKER : ""}${renderFakeCursor(" ")}`;
-		}
-		const lines = [
-			t.fg("accent", t.bold(fit(this.title))),
-			t.fg("dim", fit(`${this.list.length}/${this.options.length} · fuzzy search`)),
-			inputLine,
-			"",
-		];
-		this.scroll = visibleWindow(this.selected, VIEWPORT, this.list.length, this.scroll);
-		if (!this.list.length) {
-			lines.push(t.fg("dim", fit("(no model matches — edit search to widen)")));
-		} else {
-			const end = Math.min(this.list.length, this.scroll + VIEWPORT);
-			if (this.scroll > 0) lines.push(t.fg("dim", fit(`▲ ${this.scroll} above`)));
-			for (let i = this.scroll; i < end; i++) {
-				const ref = this.list[i]!;
-				const current = ref === this.currentRef ? "✓" : " ";
-				const star = this.sessionProvider && ref.startsWith(`${this.sessionProvider}/`) ? "★" : " ";
-				// Ref comes first; friendly name and bounded, explicit metadata spend only spare columns.
-				const row = fit(`${i === this.selected ? "▸" : " "} ${current}${star} ${displayText(ref)}${metadataText(this.models.get(ref))}`);
-				lines.push(i === this.selected ? t.fg("accent", row) : row);
-			}
-			if (end < this.list.length) lines.push(t.fg("dim", fit(`▼ ${this.list.length - end} below`)));
-		}
-		const keys = (action: Parameters<typeof this.keybindings.getKeys>[0]): string => this.keybindings.getKeys(action).join("/");
-		lines.push("", t.fg("dim", fit("✓ current · ★ session provider")), t.fg("dim", fit(
-			`${keys("tui.select.up")}/${keys("tui.select.down")} move · ${keys("tui.select.confirm")} select · ${keys("tui.select.cancel")} keep default`,
-		)));
-		if (!framed) return lines;
+		const columns = Math.max(0, Math.floor(width));
+		if (columns === 0) return [];
+		const layout = inspectorFrame.layout(columns, inspectorFrame.viewportRows(this.tui.terminal?.rows ?? 24));
+		const kb = this.keybindings;
+		const cancel = keyLabel(kb, "tui.select.cancel");
+		const keys = `${navigationKeys(kb)} move · ${keyLabel(kb, "tui.select.confirm")} select · ${cancel} keep default`;
+		const window = composeWindow(this.theme, layout, {
+			title: this.title,
+			field: { title: `Search · ${this.list.length}/${this.options.length}`, label: "search", render: (columns) => this.searchRow(columns) },
+			legend: [`${keys} · ✓ current · ★ session provider`, keys, `${cancel} keep default`],
+			minBody: 3,
+			body: (rows, columns) => this.listRows(rows, columns),
+		});
+		this.pointer = { layout, inputRow: window.inputRow, inputColumn: window.inputColumn };
 		// Frame lines use the host dialogs' `border` token; the title and selection keep `accent`.
-		const b = (text: string): string => t.fg("border", text);
-		return [
-			b(`┌${"─".repeat(inner + 2)}┐`),
-			...lines.map((line) => `${b("│")} ${line}${" ".repeat(Math.max(0, inner - visibleWidth(line)))} ${b("│")}`),
-			b(`└${"─".repeat(inner + 2)}┘`),
-		];
+		return inspectorFrame.render(window.lines, layout, (text) => this.theme.fg("border", text));
+	}
+
+	private searchRow(columns: number): string {
+		const line = this.input.render(columns)[0] ?? "";
+		// Native Input can overrun a one-column viewport with a wide cursor grapheme.
+		return visibleWidth(line) > columns ? `${this.focused ? CURSOR_MARKER : ""}${renderFakeCursor(" ")}` : line;
+	}
+
+	private listRows(rows: number, columns: number): string[] {
+		const t = this.theme;
+		const fit = (line: string): string => truncateToWidth(line, columns, "…");
+		if (!this.list.length) return [t.fg("dim", fit("(no model matches — edit search to widen)"))];
+		const markers = this.list.length > rows && rows >= 3;
+		const capacity = Math.max(1, rows - (markers ? 2 : 0));
+		this.scroll = visibleWindow(this.selected, capacity, this.list.length, this.scroll);
+		const end = Math.min(this.list.length, this.scroll + capacity);
+		const lines: string[] = [];
+		if (markers && this.scroll > 0) lines.push(t.fg("dim", fit(`▲ ${this.scroll} above`)));
+		for (let i = this.scroll; i < end; i++) {
+			const ref = this.list[i]!;
+			const current = ref === this.currentRef ? "✓" : " ";
+			const star = this.sessionProvider && ref.startsWith(`${this.sessionProvider}/`) ? "★" : " ";
+			// Ref comes first; friendly name and bounded, explicit metadata spend only spare columns.
+			const row = fit(`${i === this.selected ? "▸" : " "} ${current}${star} ${displayText(ref)}${metadataText(this.models.get(ref))}`);
+			lines.push(i === this.selected ? t.fg("accent", row) : row);
+		}
+		if (markers && end < this.list.length) lines.push(t.fg("dim", fit(`▼ ${this.list.length - end} below`)));
+		return lines;
+	}
+
+	/** A press on the search row goes to the native Input, offset by the frame and the field prefix. */
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const pointer = this.pointer;
+		if (!pointer || pointer.inputRow < 0 || event.y !== pointer.layout.top + pointer.inputRow) return undefined;
+		const width = pointer.layout.contentWidth - pointer.inputColumn;
+		const x = event.x - (pointer.layout.framed ? 1 + pointer.layout.gutter : 0) - pointer.inputColumn;
+		if (x < 0 || x >= width) return undefined;
+		const result = this.input.handleMouse({ ...event, x, y: 0, width, height: 1 });
+		if (!result?.handled && !result?.focus) return undefined;
+		this.invalidate();
+		this.tui.requestRender();
+		return { ...result, handled: true, focusTarget: this, target: { component: this, originX: event.screenX - event.x, originY: event.screenY - event.y, width: event.width, height: event.height } };
 	}
 
 	handleInput(keyData: string): void {

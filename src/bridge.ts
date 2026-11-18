@@ -3,8 +3,8 @@
  * extension when `PI_PERSONA_BUS` is set (see `extension.ts`'s factory dispatch). Connects
  * a `BrokerClient` (relay to the supervisor's `InProcessBus`), registers `contact_supervisor`
  * + `contact_peer` bound to the wire, and surfaces inbound frames as `pi.sendMessage`
- * follow-ups — the same mechanism comtac's `index.ts` uses for inbound bus traffic, and the
- * same fencing rule the in-process delivery bridge (`engine/inproc.ts`) enforces: untrusted
+ * follow-ups, using the same fencing rule as the in-process delivery bridge
+ * (`engine/inproc.ts`): untrusted
  * sub-agent/peer text goes through `fenceUntrusted`, with attribution OUTSIDE the fence so a
  * malicious payload can never spoof its own sender.
  *
@@ -77,8 +77,7 @@ class BrokerBus implements ContactTransport {
 	}
 }
 
-/** Wrap fenced, attributed follow-up text as a `pi.sendMessage` custom message (comtac's
- *  inbound-surfacing mechanism — see `index.ts`'s `surface()`). */
+/** Wrap fenced, attributed follow-up text as a `pi.sendMessage` custom message. */
 function sendFollowUp(pi: ExtensionAPI, content: string): void {
 	pi.sendMessage({ customType: BRIDGE_MESSAGE_TYPE, content, display: true }, { deliverAs: "followUp", triggerTurn: true });
 }

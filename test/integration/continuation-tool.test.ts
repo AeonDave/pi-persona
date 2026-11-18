@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -20,12 +20,15 @@ function fixture() {
 	writeFileSync(file, "supervisor");
 	let persona: string | null = "engineer";
 	let fingerprint = "a".repeat(64);
+	let policyFails = false;
 	let denied = false;
 	const ctx = { cwd, sessionManager: { getSessionId: () => "owner", getSessionFile: () => file, getLeafId: () => null, getEntries: () => entries, getBranch: () => entries } } as unknown as ExtensionContext;
 	let current: ExtensionContext | undefined = ctx;
 	let appendFails = false;
 	const pi = { appendEntry: (customType: string, data: unknown) => { if (appendFails) throw new Error("append failed"); entries.push({ type: "custom", customType, data }); } } as unknown as ExtensionAPI;
-	const runtime = new WorkerConversations(pi, { currentContext: () => current, persona: () => persona, fingerprint: () => fingerprint, gate: () => denied ? "target not allowed" : undefined });
+	const runtime = new WorkerConversations(pi, { currentContext: () => current, persona: () => persona,
+		fingerprint: () => { if (policyFails) throw new Error("policy temporarily unavailable"); return fingerprint; },
+		gate: () => denied ? "target not allowed" : undefined });
 	const spec: AgentRunSpec = { agent: "scout", task: "inspect", name: "atlas", role: "audit", tools: ["read"], skills: ["review"], model: "native/model", thinking: "high" };
 	const result: AgentResult = { agent: "scout", ok: true, output: "first report", modelUsed: "native/model", thinkingRequested: "high", sessionSaved: true, usage: emptyUsage() };
 	const brief = { objective: "inspect", scopeRoe: "repository", position: "supervisor", constraints: "read only", requiredArtifacts: "report", stopConditions: "unsafe" };
@@ -39,8 +42,32 @@ function fixture() {
 		turn.release();
 		return { receipt, file: prepared.session.file };
 	}
-	return { cwd, ctx, runtime, spec, result, brief, start, setPersona: (s: string | null) => { persona = s; }, changeDefinition: () => { fingerprint = "b".repeat(64); }, deny: () => { denied = true; }, switchOwner: () => { current = undefined; }, failAppend: () => { appendFails = true; }, close: () => rmSync(cwd, { recursive: true, force: true }) };
+	return { cwd, ctx, runtime, spec, result, brief, start, setPersona: (s: string | null) => { persona = s; }, changeDefinition: () => { fingerprint = "b".repeat(64); }, deny: () => { denied = true; }, switchOwner: () => { current = undefined; }, failAppend: () => { appendFails = true; }, setPolicyFailure: (value: boolean) => { policyFails = value; }, close: () => rmSync(cwd, { recursive: true, force: true }) };
 }
+
+test("a policy exception before a fresh turn is built releases its unused storage reservation", () => {
+	const h = fixture();
+	try {
+		h.setPolicyFailure(true);
+		const turn = h.runtime.start(h.ctx, h.spec, h.brief);
+		assert.ok(turn);
+		assert.equal(turn.prepare(h.spec).session, undefined, "ordinary delegation remains available without continuation storage");
+		assert.deepEqual(readdirSync(h.cwd, { recursive: true }).filter((path) => String(path).endsWith(".lock")), [], "failed construction must leave no unowned lease");
+	} finally { h.close(); }
+});
+
+test("a policy exception after resume acquisition releases the saved conversation for another attempt", () => {
+	const h = fixture();
+	try {
+		h.start();
+		h.setPolicyFailure(true);
+		assert.equal(h.runtime.resume(h.ctx, { resume: "run-1", task: "again" }).ok, false);
+		h.setPolicyFailure(false);
+		const resumed = h.runtime.resume(h.ctx, { resume: "run-1", task: "retry admission" });
+		assert.ok(resumed.ok, "failed policy validation must not leave the saved worker busy");
+		resumed.value.turn.release();
+	} finally { h.close(); }
+});
 
 test("continuation retains worker identity, configuration and provider while preserving prior report", () => {
 	const h = fixture();
@@ -63,6 +90,21 @@ test("continuation retains worker identity, configuration and provider while pre
 		assert.doesNotMatch(receipt.output, /second report/);
 		assert.equal(h.runtime.resume(h.ctx, { resume: "run-1", task: "again" }).ok, false);
 		assert.equal(h.runtime.list(h.ctx)[0]?.runId, "run-2");
+	} finally { h.close(); }
+});
+
+test("continuation retains its verification command and rejects replacing it in a resume request", () => {
+	const h = fixture();
+	try {
+		h.spec.verification = { command: "node check.cjs", timeoutMs: 5_000 };
+		h.start();
+		const override = h.runtime.resume(h.ctx, { resume: "run-1", task: "check again", verification: { command: "echo bypass" } });
+		assert.equal(override.ok, false);
+		const resumed = h.runtime.resume(h.ctx, { resume: "run-1", task: "check again" });
+		assert.ok(resumed.ok);
+		assert.deepEqual(resumed.value.params.verification, h.spec.verification);
+		assert.deepEqual(specOf(resumed.value.params as AgentRunSpec).verification, h.spec.verification);
+		resumed.value.turn.release();
 	} finally { h.close(); }
 });
 

@@ -584,12 +584,38 @@ test("delegate launch cards surface the declared effort in FULL, collapsed and e
 	const plainCard = render(h.tool, plainLaunch, false, 120);
 	assert.doesNotMatch(plainCard, / · (off|minimal|low|medium|high|xhigh|max)/);
 
-	// A declared `off` selection still renders nothing.
+	// A declared `off` selection is a known level and is shown like any other.
 	const offLaunch = await h.tool.execute("single", { agent: "operator", name: "Off-worker", task: "t", thinking: "off" }, undefined, undefined, ctx());
 	assert.equal((offLaunch.details as { runs: Array<{ thinking?: string }> }).runs[0]?.thinking, "off");
 	assert.match(render(h.tool, offLaunch, false, 120), /Off-worker/);
-	assert.doesNotMatch(render(h.tool, offLaunch, false, 120), /· off/);
-	assert.doesNotMatch(render(h.tool, offLaunch, true, 240), /· off/);
+	assert.match(render(h.tool, offLaunch, false, 120), /operator · off/);
+	assert.match(render(h.tool, offLaunch, true, 240), /operator · off/);
+});
+
+test("the live tree row carries the same resolved effort as the launch card, inherited defaults included", async () => {
+	const added: any[] = [];
+	const agents = [{ name: "operator", thinking: "low" as const }, { name: "scout" }];
+	const h = register({ agents, agentTree: { add: (node: any) => added.push(node), update: () => {}, remove: () => {} },
+		launchThinking: (spec: any) => resolveLegThinking(spec, agents.find((agent) => agent.name === spec.agent) ?? {}, "medium") });
+	await h.tool.execute("tree-effort", { tasks: [
+		{ agent: "operator", name: "Agent-default", model: "provider/haiku-5", task: "one" },
+		{ agent: "scout", name: "Child-default", model: "provider/haiku-5", task: "two" },
+		{ agent: "scout", name: "Explicit", model: "provider/haiku-5", task: "three", thinking: "xhigh" },
+	] }, undefined, undefined, ctx());
+	const legs = added.filter((node) => node.kind === "subagent");
+	assert.deepEqual(legs.map((node) => [node.label, node.thinking]), [
+		["Agent-default · haiku-5", "low"], ["Child-default · haiku-5", "medium"], ["Explicit · haiku-5", "xhigh"],
+	], "every leg row shows the effort its launch card shows");
+});
+
+test("while the model streams the call's arguments the card is one pending line, then the full card", () => {
+	const h = register();
+	const composing = { isPartial: true, argsComplete: false, executionStarted: false, state: {}, invalidate: () => {} };
+	for (const args of [{}, { tasks: "[{\"agent\":\"sc" }, { tasks: [{ agent: "scout", task: "a" }] }, { agent: "scout" }]) {
+		assert.match(renderCall(h.tool, args, 120, composing).trimEnd(), /^delegate . preparing…$/, `no placeholder card for ${JSON.stringify(args)}`);
+	}
+	const complete = renderCall(h.tool, { tasks: [{ agent: "scout", task: "a" }, { agent: "scout", task: "b" }] }, 120, { ...composing, argsComplete: true });
+	assert.match(complete, /delegate parallel \(2\)/);
 });
 
 test("launch rendering never mutates the model-facing payload, launch details, or call args", async () => {

@@ -337,7 +337,7 @@ test("snapshot of a brand-new stream state is zeroed", () => {
 	assert.deepEqual(snapshot(createStreamState()), { output: "", turns: 0, tokens: 0, usage: emptyUsage() });
 });
 
-test("raw tool output updates are not progress: the snapshot, transcript and answer stay put", () => {
+test("raw tool output updates change operator chat without changing stall headway or the answer", () => {
 	const s = createStreamState();
 	applyEvent(s, { type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "ls" } });
 	const before = snapshot(s);
@@ -348,8 +348,25 @@ test("raw tool output updates are not progress: the snapshot, transcript and ans
 			"an update is not a lifecycle transition",
 		);
 	}
-	assert.deepEqual(snapshot(s), before, "a chatty tool leaves nothing for the tracker to read as headway");
+	const after = snapshot(s);
+	assert.deepEqual({ ...after, chat: undefined }, { ...before, chat: undefined }, "a chatty tool leaves nothing for the tracker to read as headway");
+	assert.notEqual(after.chat, before.chat, "operator chat can show tool output without granting runtime headway");
 	assert.equal(s.output, "", "tool output never becomes the returned answer");
+});
+
+test("stream chat snapshots capture bounded runtime detail without changing semantic tool events", () => {
+	const state = createStreamState();
+	const start = applyEvent(state, { type: "tool_execution_start", toolCallId: "edit-a", toolName: "edit", args: { path: "a.ts" } });
+	assert.deepEqual(start, { phase: "start", callId: "edit-a", name: "edit" }, "semantic events never gain tool payloads");
+	const before = snapshot(state).chat;
+	applyEvent(state, { type: "tool_execution_update", toolCallId: "edit-a", toolName: "edit", partialResult: { content: [{ type: "text", text: "working" }] } });
+	const chat = snapshot(state).chat;
+	assert.ok(chat && chat !== before);
+	const tool = chat.blocks[0];
+	assert.equal(tool?.kind === "tool" && tool.output, "working");
+	applyEvent(state, { type: "turn_start" });
+	assert.equal(snapshot(state).chat, chat, "unrelated events keep the immutable chat reference");
+	assert.equal(snapshot(createStreamState()).chat, undefined, "a new attempt has no previous chat");
 });
 
 // --- G1: cacheWrite is num-guarded like the other usage fields ---

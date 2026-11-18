@@ -1,5 +1,6 @@
 /** exocom wire envelopes + validators + truncation. Pure. */
-export interface AgentCard { name: string; persona: string; model: string; context_pct: number; inbox: number; }
+import type { ThinkingLevel } from "../core/types.ts";
+export interface AgentCard { name: string; persona: string; model: string; thinking?: ThinkingLevel; context_pct: number; inbox: number; }
 export interface ExocomMessage {
 	kind: "message"; msg_id: string; from_session: string; from_endpoint: string; from_name: string;
 	text: string; in_reply_to?: string; hops: number; ts: string; signature?: string;

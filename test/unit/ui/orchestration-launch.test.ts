@@ -25,11 +25,30 @@ test("launch formatting keeps each member's metadata, bounded collapsed rows, an
 	snapshot.participants[0]!.phase = "review";
 	const collapsed = orchestrationLaunchLines(snapshot, false);
 	assert.equal(collapsed.length, 4);
-	for (const line of collapsed.slice(0, 3)) assert.match(line, /provider\/model.*requested effort max/);
+	assert.match(collapsed[0]!, /^ {2}review \/ bad.*name · model · max$/);
+	assert.deepEqual(collapsed.slice(1, 3), ["  two · model · max", "  three · model · max"], "the delegate grammar: member · model · effort");
 	assert.match(collapsed[3]!, /\+1 more/);
 	assert.doesNotMatch(collapsed.join("\n"), /\u001b|\nname/);
-	assert.match(orchestrationLaunchLines(snapshot, true).join("\n"), /four.*provider\/model.*requested effort max/);
+	assert.match(orchestrationLaunchLines(snapshot, true).join("\n"), /^ {2}four · provider\/model · max$/m, "expansion keeps the full model ref");
 	assert.deepEqual(orchestrationLaunchLines({ participants: [], unavailable: true }, false), ["Launch metadata unavailable"]);
+});
+
+test("an undecided model is a short marker collapsed; the expansion keeps the explanation", () => {
+	const snapshot = { participants: [
+		{ key: "melchior", label: "melchior", agent: "melchior", model: "demo/opus-5", modelSource: "session" as const, thinkingRequested: "medium" as const, setupPending: true },
+		{ key: "casper", label: "casper", agent: "casper", model: "demo/haiku-5", modelSource: "agent" as const, setupPending: false },
+		{ key: "judge", label: "arbiter", agent: "arbiter", modelSource: "none" as const, thinkingRequested: "off" as const, setupPending: false, param: "judge" },
+	] };
+	assert.deepEqual(orchestrationLaunchLines(snapshot, false), [
+		"  melchior · model pending · medium",
+		"  casper · haiku-5",
+		"  arbiter [judge] · off",
+	], "unknown effort and unknown model are omitted, never a placeholder");
+	assert.deepEqual(orchestrationLaunchLines(snapshot, true), [
+		"  melchior · model pending (current default demo/opus-5; setup may change) · medium",
+		"  casper · demo/haiku-5",
+		"  arbiter [judge] · off",
+	]);
 });
 
 test("orchestration requests reuse the literal task snapshot and native expand hint", () => {

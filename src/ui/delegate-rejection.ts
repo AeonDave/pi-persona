@@ -10,7 +10,7 @@ export function renderDelegateRejection(
 	options: Parameters<typeof renderLiteralToolResult>[1],
 	theme: Parameters<typeof renderLiteralToolResult>[2],
 	context: Parameters<typeof renderLiteralToolResult>[3],
-): Text | undefined {
+): ReturnType<typeof renderLiteralToolResult> | undefined {
 	const details = result.details as { rejection?: { code?: unknown; tasks?: unknown; diagnostics?: unknown } } | undefined;
 	const rejection = details?.rejection;
 	if (rejection?.code !== "parallel-write-set-required" || !Array.isArray(rejection.tasks)) return undefined;

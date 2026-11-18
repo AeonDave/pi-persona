@@ -165,6 +165,16 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
   drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears
   unread and buffered prompts; broker errors/cancellation remain correlated to the original request.
+- **Worktree verification**: optional `AgentRunSpec.verification` / `delegate.verification` runs
+  a bounded foreground shell command in the exact isolated checkout before artifact export.
+  `core/worktree-verification.ts` owns the spec; `engine/worktree-verification.ts` reuses the
+  monitor process lifecycle and Pi shell resolution. Supervisor and effective worker bash grants
+  must permit it before launch and before execution. Snapshot the validated command/deadline;
+  worker prose cannot supply runtime evidence. Preserve `AgentResult.verification` in terminal
+  metadata independently of body truncation. Nonzero checks retain exported work; uncertain
+  termination/directory state retains without export. No automatic retry, background services or
+  extra archive. Successful continuation inherits the command. Command-specific host policy
+  inspects the delegate field; this is not a separate native bash tool call.
 - **Worker continuation**: a successful saved delegate can be continued with
   `delegate { resume: <latestRunId>, task, brief? }`; `intercom conversations` lists the current
   branch's availability and `intercom forget { to: <latestRunId> }` explicitly deletes its saved
@@ -309,11 +319,24 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   context occupancy; the model-facing digest and expanded cards say so explicitly, while compact rows
   use the agent widget's `tok` unit.
 
-- F9 and companion F10 share `ui/inspector-frame.ts` through
-  `pi-persona:inspector-frame:v1`: one geometry/painter contract, theme `border` role, 90% host
-  width and bounded height with margins. Keep content budgets and page movement tied to actual
+- Every window shares `ui/inspector-frame.ts` (companion F10 through
+  `pi-persona:inspector-frame:v1`, whose `viewportRows`/`layout`/`render` must not change): one
+  geometry/painter contract, theme `border` role, 90% host width and bounded height with margins.
+  F9, the model picker (overlay, both open sites) and `/persona-settings` (editor slot, centred with
+  the overlay's columns) also share `ui/window-chrome.ts`: accent title, dim rules, titled input
+  fields, key legends packed between entries with labels from the live keybindings, and
+  `composeWindow`'s shedding order for short hosts. A new window uses both; never a private border.
+  Keep content budgets and page movement tied to actual
   visible rows, including height-only resize; do not reintroduce independent frame implementations.
   Steering uses native Pi Input with focus limited to composition; directed-target guards still apply.
+  Worker chats use `core/worker-chat.ts` snapshots owned by each engine's `StreamState`, projected
+  through progress into the tree; never put them in model-facing results or telemetry. The view is
+  current-run-only and bounded to 128 blocks / 96,000 text characters, with explicit trimming.
+  F9's recent group derives from existing async retention, not another store. `ui/worker-chat.ts`
+  and `ui/chat-viewport.ts` own cached block rendering, search and anchored reading; rendering
+  never reads files or executes child tool renderers. `/agents send` reuses exact live steering
+  handles; display IDs and aliases are not reconstructed into routing addresses, and unavailable
+  workers are never implicitly resumed.
 
 - Session clock and event wakes: `timer now` refreshes the run-start clock snapshot; timer alarms
   require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs
@@ -365,11 +388,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `.pi-persona-seeded`). Release prep: add the previous tag's digest
   to `LEGACY_SEEDED_DEFAULTS` for every changed persona/agent (the guard test in `seed.test.ts` prints the row).
   F8 and `/doctor` point to `/persona seed` when no personas are installed. Contracts/presets/teams keep a builtin layer (they aren't personas).
-- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic claim; run via `npm run smoke:exocom`). `test/` — unit + integration.
+- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic claim; run via `npm run smoke:exocom`). `demo/` records the README GIFs: the real Pi TUI in a pseudo-terminal with scripted model replies (`record.mjs` → `render.mjs`; scenarios in `demo/scenarios/`, recorder dependencies live outside the repository — see the `record.mjs` header); `demo/svg.mjs` renders `assets/workflow.svg` to `assets/workflow.png`. `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
 
-Settings use `/persona-settings`, a full-page registry-driven UI independent of Pi's `/settings`.
+Settings use `/persona-settings`, a registry-driven page in the shared window frame, independent of Pi's `/settings`.
 The only active preferences file is `<agentDir>/persona/settings.json` (version, sparse preferences,
 per-persona model assignments, last selection). `src/core/settings.ts` owns row metadata and validation;
 add/remove public preferences there rather than special-casing UI fields. Route every write through
@@ -406,9 +429,8 @@ of a service other Pi sessions are using. Skill Optimizer remains independent.
 - **`context: fork`** is deliberately deferred: `fresh` is the right child default. The
   **cross-process bus broker** is NO LONGER deferred — see the engine/broker bullet above and
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-- This repo is `D:\Sources\pi-persona`. The separate `D:\Sources\pi-subagents-persona` (flat
-  `src/index.ts`, `VALID_THINKING`, …) is a **legacy** package — different project. Always use
-  explicit `pi-persona` paths in shells and sub-agent prompts (the env default cwd is the legacy one).
+- This repo is `D:\Sources\pi-persona`. Use explicit workspace paths in shells and sub-agent
+  prompts; do not assume that an inherited working directory selects this checkout.
 
 ## Accepted diagnostics
 

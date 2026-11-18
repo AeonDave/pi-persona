@@ -6,14 +6,11 @@
  * `replied{askId}`, 10-minute cap, mirrors `bus.ask`, and sends `cancel{msgId}` when
  * aborted), `reply` (answers a host-issued
  * blocking `deliver`), `list` (the engine-scoped peer roster, B7), and `onDeliver`/`onSteer`
- * for inbound frames. A future bridge (`src/bridge.ts`) wires these onto Pi tools; this
+ * for inbound frames. The bridge (`src/bridge.ts`) wires these onto Pi tools; this
  * module has no Pi imports.
  *
- * Ported from comtac `broker/client.ts`, slimmed to the B6 frame set and to what a
- * per-session child — which lives strictly less than the run — actually needs: capped
- * exponential backoff (250ms–5s) on the INITIAL connect only (comtac's presence tracking,
- * roster cache, and endless reconnect-after-disconnect "storm" are dropped — YAGNI here,
- * see spec B6/Task 4 brief). An unexpected disconnect (host died
+ * Per-session children use capped exponential backoff (250ms–5s) on the INITIAL
+ * connection only. An unexpected disconnect (host died
  * mid-run) is NOT auto-reconnected: sends resolve false, while in-flight asks/lists
  * reject promptly and clean up their timers. Authenticated result readers are stricter:
  * one connect attempt, bounded handshake/reads, closed failure replies, never mute success.
@@ -229,8 +226,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		});
 	}
 
-	/** Capped exponential backoff (250ms → 5s) on the INITIAL connect only — comtac's
-	 *  endless reconnect-after-disconnect loop is deliberately not ported (see header). */
+	/** Capped exponential backoff (250ms → 5s) on the initial connection only. */
 	async function connectWithBackoff(): Promise<net.Socket> {
 		let lastErr: unknown;
 		for (let attempt = 0; attempt < CONNECT_MAX_ATTEMPTS; attempt += 1) {

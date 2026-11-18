@@ -10,6 +10,7 @@ import { Semaphore } from "../../../src/orchestration/parallel.ts";
 import { createBackgroundRuns, type TrackedRun } from "../../../src/tools/background-run.ts";
 import { registerFlowTool, type FlowToolDeps } from "../../../src/tools/flow.ts";
 import { AgentTree } from "../../../src/ui/agent-tree.ts";
+import { orchestrationLaunchLines } from "../../../src/ui/orchestration-launch.ts";
 import { ChildUsageLedger } from "../../../src/ui/usage.ts";
 
 const plainTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
@@ -87,8 +88,7 @@ test("flow receipts persist an immutable phase-scoped launch snapshot and render
 	participant.model = "changed/later";
 	const expanded = harness.tool.renderResult(receipt, { expanded: true }, plainTheme).render(240).join("\n");
 	assert.match(expanded, /plan \/ reviewer · SECURITY/);
-	assert.match(expanded, /openai\/original/);
-	assert.match(expanded, /requested effort high/);
+	assert.match(expanded, /openai\/original · high/);
 	assert.doesNotMatch(expanded, /changed\/later/);
 	assert.equal(reads, 1, "history rendering only uses the persisted launch snapshot");
 });
@@ -102,10 +102,9 @@ test("headless and pending flow launches retain their request-time metadata", as
 	const result = await run(harness.tool);
 	assert.deepEqual(result.details.launch.participants, snapshot.participants);
 	const card = harness.tool.renderResult(result, { expanded: false }, plainTheme).render(240).join("\n");
-	assert.match(card, /build \/ operator/);
-	assert.match(card, /model pending/);
-	assert.match(card, /openai\/default/);
-	assert.match(card, /requested effort xhigh/);
+	assert.match(card, /build \/ operator · model pending · xhigh/);
+	assert.doesNotMatch(card, /setup may change/);
+	assert.match(orchestrationLaunchLines(result.details.launch, true).join("\n"), /current default openai\/default/);
 });
 
 test("missing flow launch metadata is explicit and never blocks the run", async () => {

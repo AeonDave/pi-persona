@@ -4,9 +4,10 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, getKeybindings, Input, KeybindingsManager, TUI_KEYBINDINGS, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, getKeybindings, Input, KeybindingsManager, TUI_KEYBINDINGS, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager as HostKeybindingsManager } from "@earendil-works/pi-coding-agent";
 
+import { inspectorFrame } from "../../../src/ui/inspector-frame.ts";
 import { filterModels, ModelPicker, type ModelPickerConfig, type ModelPickerMetadata, orderModelRefs, visibleWindow } from "../../../src/ui/model-picker.ts";
 
 test("filterModels: case-insensitive substring, order preserved, empty query returns all", () => {
@@ -50,11 +51,14 @@ const theme = {
 	bold: (text: string) => text,
 } as Theme;
 
-function picker(options: string[], config: ModelPickerConfig = {}, title = "Pick a model", skin = theme) {
+function picker(options: string[], config: ModelPickerConfig = {}, title = "Pick a model", skin = theme, terminalRows?: number) {
 	const results: (string | undefined)[] = [];
 	let renders = 0;
+	// Most hosts in these tests are bare stubs without a terminal: the picker falls back to 24 rows.
+	const requestRender = () => { renders++; };
+	const tui = terminalRows === undefined ? { requestRender } : { requestRender, terminal: { rows: terminalRows } };
 	const component = new ModelPicker(
-		{ requestRender: () => { renders++; } } as TUI,
+		tui as unknown as TUI,
 		skin, title, options, "p", (ref) => results.push(ref), config,
 	);
 	return {
@@ -223,6 +227,7 @@ test("injected keybindings control selection, confirm, cancel and native editor 
 	assert.match(p.text(), /2\/2/u, "injected Ctrl+R clears the native Input");
 	p.component.handleInput("\x0e");
 	assert.match(p.text(), /▸.*p\/beta/u);
+	assert.match(p.text(), /up\/ctrl\+n move · ctrl\+s select · ctrl\+q keep default/u, "the legend names the injected keys");
 	p.component.handleInput("\x13");
 	assert.deepEqual(p.results, ["p/beta"]);
 	assert.equal(getKeybindings(), global);
@@ -329,9 +334,60 @@ test("viewport follows eligible current ref and arrow navigation stays on screen
 	const p = picker(options, { currentRef: options[30]! });
 	assert.match(p.text(), /▸.*p\/model-30/u);
 	assert.match(p.text(), /above/u);
+	// A long, scrolled list fills the shared frame: 24 terminal rows give 21; the border and margins
+	// take 4, title, search field, rule and legend 6, and the ▲/▼ markers 2.
+	assert.equal(p.component.render(104).length, inspectorFrame.viewportRows(24));
 	for (let i = 0; i < 30; i++) p.component.handleInput("\x1b[A");
 	assert.match(p.text(), /▸.*p\/model-0\s/u);
-	assert.equal(rows(p.text()).length, 12);
+	assert.equal(rows(p.text()).length, 9);
+});
+
+test("the list uses the rows the frame gives it and keeps the selection on screen at every size", () => {
+	const options = Array.from({ length: 40 }, (_, i) => `p/model-${i}`);
+	for (const terminalRows of [3, 5, 8, 10, 12, 24, 40]) for (const width of [12, 28, 80, 104]) {
+		const p = picker(options, {}, "Pick a model", theme, terminalRows);
+		for (let i = 0; i < 25; i++) p.component.handleInput("\x1b[B");
+		const lines = p.component.render(width);
+		assert.ok(lines.length <= inspectorFrame.viewportRows(terminalRows), `${terminalRows}x${width}: ${lines.length}`);
+		for (const line of lines) assert.ok(visibleWidth(line) <= width, `${terminalRows}x${width}`);
+		assert.match(lines.map(stripVTControlCharacters).join("\n"), /▸/u, `the selection stays visible at ${terminalRows}x${width}`);
+	}
+	const tall = picker(options, {}, "Pick a model", theme, 40);
+	for (let i = 0; i < 25; i++) tall.component.handleInput("\x1b[B");
+	assert.equal(tall.component.render(104).length, inspectorFrame.viewportRows(40), "a tall terminal shows more models, never past the frame");
+});
+
+test("the picker reads like every window: title, titled search field, list, rule, legend from the bindings", () => {
+	const p = picker(["p/alpha", "other/beta"], { currentRef: "other/beta" });
+	const lines = p.text(80).split("\n").map((line) => line.replace(/^│ {2}/u, "").replace(/\s*│$/u, ""));
+	const title = lines.indexOf("Pick a model");
+	assert.ok(title > 1, "a blank margin row separates the border from the title");
+	assert.equal(lines[title - 1], "");
+	assert.match(lines[title + 1]!, /^── Search · 2\/2 ─+$/u);
+	assert.match(lines[title + 2]!, /^› /u, "the search row reads as a field under its titled rule");
+	assert.match(lines[title + 3]!, /^─+$/u);
+	assert.match(lines[title + 4]!, /p\/alpha/u);
+	assert.match(lines[title + 6]!, /^─+$/u);
+	assert.equal(lines[title + 7], "↑↓ move · ⏎ select · esc keep default · ✓ current · ★ session provider");
+	const narrow = picker(["p/alpha"]).text(40);
+	assert.match(narrow, /↑↓ move · ⏎ select/u);
+	assert.match(narrow, /esc keep default/u, "a narrow legend wraps between entries instead of dropping them");
+});
+
+test("a click on the search row reaches the native Input through the frame's offsets; other rows do not", () => {
+	const p = picker(["p/alpha", "p/beta"]);
+	paste(p.component, "alpha");
+	p.component.render(80);
+	const input = p.component.children.find((child): child is Input => child instanceof Input)!;
+	const layout = inspectorFrame.layout(80, inspectorFrame.viewportRows(24));
+	const press = (x: number, y: number) => p.component.handleMouse({ type: "press", button: "left", x, y, screenX: x, screenY: y, width: 80, height: 21, shift: false, alt: false, ctrl: false } as TuiMouseEvent);
+	const fieldStart = 1 + layout.gutter + 2; // border, gutter, then the "› " prefix
+	assert.equal(press(fieldStart, 0), undefined, "the top border is not the field");
+	const row = layout.top + 2; // title, the field's titled rule, then the input row
+	assert.equal(press(fieldStart, row - 1), undefined, "the field's rule is not the field");
+	assert.ok(press(fieldStart, row)?.handled, "the first column of the field is the Input's first column");
+	p.component.handleInput("X");
+	assert.equal(input.getValue(), "Xalpha");
 });
 
 test("escape and Ctrl+C cancel; empty options stay safe", () => {
@@ -350,7 +406,8 @@ test("the picker frame uses the host dialogs' border token; title and selection 
 	const rows = picker(["p/alpha", "p/beta"], {}, "Pick a model", tagged).component.render(80);
 	assert.match(rows[0]!, /^<border>┌─+┐$/);
 	assert.match(rows.at(-1)!, /^<border>└─+┘$/);
-	for (const row of rows.slice(1, -1)) assert.match(row, /^<border>│ .* <border>│$/, row);
+	assert.match(rows[1]!, /^<border>│ +<border>│$/, "the shared frame keeps a blank margin row under its border");
+	for (const row of rows.slice(1, -1)) assert.match(row, /^<border>│ {2}.* <border>│$/, row);
 	assert.ok(rows.some((row) => row.includes("<accent>Pick a model")), "the title keeps accent");
 	assert.ok(rows.some((row) => /<accent>▸ /.test(row)), "the selected row keeps accent");
 	assert.doesNotMatch(rows.join("\n"), /<accent>[┌└│]/, "no frame line is painted with accent");

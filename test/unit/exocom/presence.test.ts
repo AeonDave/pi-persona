@@ -28,6 +28,19 @@ function withoutKey<T extends { key: string }>(row: T): Omit<T, "key"> {
 	return copy;
 }
 
+test("peer presence carries a valid self-reported effort and notices when it changes", () => {
+	const [withEffort] = projectExocomPeerPresence([peer({ thinking: "xhigh" })], NOW, 10_000);
+	assert.equal(withEffort?.thinking, "xhigh");
+	const [without] = projectExocomPeerPresence([peer({ thinking: "bogus" as never })], NOW, 10_000);
+	assert.equal("thinking" in without!, false);
+	const store = new ExocomPeerPresenceStore();
+	let changes = 0;
+	store.onChange(() => { changes++; });
+	store.publish(projectExocomPeerPresence([peer({ thinking: "low" })], NOW, 10_000));
+	store.publish(projectExocomPeerPresence([peer({ thinking: "high" })], NOW, 10_000));
+	assert.equal(changes, 2, "an effort change is a meaningful presence change");
+});
+
 test("peer presence projects heartbeat freshness without routing or workload authority", () => {
 	const presence = projectExocomPeerPresence([
 		peer({ name: "Quartz" }),

@@ -5,6 +5,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { fenceUntrusted } from "../core/fence.ts";
 import { CODE_OUTLINE_MAX_INPUT_BYTES, CODE_OUTLINE_MAX_OUTPUT_BYTES, outlineParsedCode } from "../core/code-outline.ts";
 import { readBoundedRegularFile } from "../io/read-bounded-file.ts";
+import { renderOutlineCall, renderOutlineResult } from "../ui/code-outline.ts";
 
 const parameters = Type.Object({
 	path: Type.String({ description: "One local JavaScript, TypeScript, Python, Go, Rust, C-family, C# source file; absolute or relative to the current project cwd" }),
@@ -36,6 +37,9 @@ export function makeCodeOutlineTool(options: CodeOutlineToolOptions = {}): ToolD
 		description: "Read one JavaScript, TypeScript, Python, Go, Rust, C-family, or C# source file and return a compact syntax-AST symbol outline. C-family files use the C++ grammar, so C is not compiler-validated. Structural/work/metadata limits reject overly complex files: use a smaller or less deeply nested source file; query/limit do not bypass these limits. Does not dump source or prove runtime behavior.",
 		promptSnippet: "Inspect declarations in one supported source file with code_outline",
 		parameters,
+		renderShell: "self",
+		renderCall: renderOutlineCall,
+		renderResult: renderOutlineResult,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (options.authorize && !(await options.authorize())) throw new Error("code_outline is not authorized in this context");
 			const target = isAbsolute(params.path) ? params.path : resolve(ctx.cwd, params.path);

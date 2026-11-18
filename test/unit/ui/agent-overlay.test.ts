@@ -90,7 +90,7 @@ test("native steering keeps split-paste Enter/Escape as text and strips pasted t
 	for (const chunk of ["\x1b[200~first", "\r", "\x1b", "]0;hidden\x07 last", "\x1b[20", "1~"]) overlay.handleInput(chunk);
 	assert.deepEqual(sent, [], "a pasted Enter never submits the draft");
 	const frame = overlay.render(80).join("\n");
-	assert.match(frame, /steer ▸ first last/);
+	assert.match(frame, /── Steer .*\n.*› first last/, "the draft sits in the titled steering field");
 	assert.doesNotMatch(frame, /\x1b\]|\x1b\[|hidden/, "pasted OSC/CSI are absent; native cursor markers remain intentional");
 	overlay.handleInput("\r");
 	assert.deepEqual(sent, ["first last"]);
@@ -234,7 +234,7 @@ test("F9 closes the list, group, detail, and steering views without actions and 
 	const steeringView = new AgentOverlay(tree, TUI_STUB, THEME, () => closes++, actions);
 	steeringView.handleInput("s");
 	for (const ch of "unsent draft") steeringView.handleInput(ch);
-	assert.match(steeringView.render(120).join("\n"), /steer ▸ unsent draft/, "exercise the real steering composer before closing");
+	assert.match(steeringView.render(120).join("\n"), /── Steer .*\n.*› unsent draft/, "exercise the real steering composer before closing");
 	steeringView.handleInput(f9);
 	assert.equal(closes, 4, "F9 closes while steering");
 	assert.deepEqual(stopped, [], "closing must not stop any agent (including the X action)");
@@ -277,7 +277,7 @@ test("re-opening the steer compose starts from an empty buffer", () => {
 	steerable = true;
 	overlay.handleInput("s");
 	const text = overlay.render(80).join("\n");
-	assert.ok(text.includes("steer ▸"), "the compose line re-opens");
+	assert.match(text, /── Steer .*\n.*› /, "the compose field re-opens");
 	assert.ok(!text.includes("stale text"), "the previous half-typed message is gone");
 	overlay.dispose();
 });
@@ -529,7 +529,7 @@ test("agent list clamps hostile label and detail metadata", () => {
 	tree.add({ id: "async:huge", label: "L".repeat(500), detail: "D".repeat(500) });
 	const overlay = openOverlay(tree);
 	const text = overlay.render(80).join("\n");
-	assert.ok(text.length < 700, `overlay list was not bounded: ${text.length}`);
+	assert.ok(text.length < 1000, `overlay list was not bounded: ${text.length}`);
 	assert.match(text, /…/);
 	overlay.dispose();
 });
@@ -1021,7 +1021,7 @@ test("x on a selected wake row is offered and stops it through the normal stop p
 		723_000,
 	);
 	const view = overlay.render(120).join("\n");
-	assert.match(view, /⏎ open {3}x stop {3}esc\/F9 close/, "the hint offers x stop for the selected wake row and F9 close");
+	assert.match(view, /⏎ open · x stop · esc\/F9 close/, "the hint offers x stop for the selected wake row and F9 close");
 	assert.doesNotMatch(view, /X stop all/, "a wake row alone is never a stop-all group");
 	overlay.handleInput("x");
 	assert.deepEqual(stopped, ["monitor:monitor-2"]);
@@ -1125,7 +1125,7 @@ test("clicking a category in F9 folds only that category", () => {
 	tree.add({ id: "script:1", label: "build", kind: "script" });
 	const overlay = wakeOverlay(tree, {});
 	overlay.render(120);
-	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 3, screenX: 4, screenY: 3, width: 120, height: 10, shift: false, alt: false, ctrl: false });
+	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 4, screenX: 4, screenY: 4, width: 120, height: 10, shift: false, alt: false, ctrl: false });
 	assert.doesNotMatch(overlay.render(120).join("\n"), /build/);
 	overlay.dispose();
 });
@@ -1138,7 +1138,7 @@ test("delegate fold state is shared with the widget, and Enter still opens its g
 	const collapsedGroups = new Set<string>();
 	const overlay = wakeOverlay(tree, { collapsedGroups });
 	overlay.render(120);
-	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 3, screenX: 4, screenY: 3, width: 120, height: 10, shift: false, alt: false, ctrl: false });
+	overlay.handleMouse({ type: "click", button: "left", x: 4, y: 4, screenX: 4, screenY: 4, width: 120, height: 10, shift: false, alt: false, ctrl: false });
 	assert.ok(collapsedGroups.has("batch"));
 	assert.doesNotMatch(overlay.render(120).join("\n"), /first worker|second worker/);
 	overlay.handleInput(" ");
@@ -1307,12 +1307,12 @@ test("composeAgentRow keeps the width invariant with the appended compact effort
 	};
 	const wide = composeAgentRow({ node, depth: 0, selected: false, inner: 56, now: 75_000, stallMs: 90_000, theme: THEME });
 	assert.ok(visibleWidth(wide) <= 56, `row exceeds inner=56 (${visibleWidth(wide)}): ${JSON.stringify(wide)}`);
-	assert.match(wide, / · xh(?![→])/, "the requested sigla shows in the overlay list too");
+	assert.match(wide, / · xhigh(?![→])/, "the requested level shows in the overlay list too");
 	assert.ok(wide.includes("↑217k"), "usage detail still renders");
 
 	const divergence = composeAgentRow({ node: { ...node, thinkingEffective: "high" }, depth: 0, selected: false, inner: 56, now: 75_000, stallMs: 90_000, theme: THEME });
 	assert.ok(visibleWidth(divergence) <= 56, `row exceeds inner=56 (${visibleWidth(divergence)}): ${JSON.stringify(divergence)}`);
-	assert.match(divergence, /xh→h/, "the settled divergence renders in the list row");
+	assert.match(divergence, /xhigh→high/, "the settled divergence renders in the list row");
 
 	const tight = composeAgentRow({ node: { ...node, label: "L".repeat(200), detail: "D".repeat(200) }, depth: 0, selected: true, inner: 30, now: 1_000_000, stallMs: 1, theme: THEME });
 	assert.ok(visibleWidth(tight) <= 30, `row exceeds inner=30 (${visibleWidth(tight)}): ${JSON.stringify(tight)}`);
@@ -1325,12 +1325,13 @@ test("the F9 drill-in shows the effort with FULL names, divergence included", (t
 	t.after(() => overlay.dispose());
 	overlay.handleInput("\n"); // drill in
 	assert.match(overlay.render(80).join("\n"), /thinking: requested xhigh/, "requested full name only before any observation");
+	assert.match(overlay.render(80).join("\n"), /leg · glm-5\.3 · xhigh/, "the header names the effort after the model, like the row");
 
 	tree.update("a", { thinkingEffective: "high" });
 	assert.match(overlay.render(80).join("\n"), /thinking: requested xhigh → observed high/, "the observed full name appears only once a result reported it");
 
 	tree.update("a", { thinking: "off" });
-	assert.doesNotMatch(overlay.render(80).join("\n"), /thinking:/, "off renders nothing — absence means off");
+	assert.match(overlay.render(80).join("\n"), /thinking: requested off/, "off is a known level and is shown");
 });
 
 test("the overlay frame uses the host dialogs' border token; the title keeps accent", (t: TestContext) => {

@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { agentsDir, registryPath } from "./paths.ts";
+import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { normalizeExocomProfile, type ExocomProfile } from "./profile.ts";
 
 export interface RegistryEntry {
@@ -19,6 +20,8 @@ export interface RegistryEntry {
 	workspace_label?: string;
 	/** Optional self-reported presence; it is descriptive and never grants capability. */
 	profile?: ExocomProfile;
+	/** Optional self-reported Pi reasoning effort, shown beside `model`; display-only. */
+	thinking?: ThinkingLevel;
 }
 
 /** The fields that prove which process owns a registry slot.  `session_id` is the
@@ -88,6 +91,7 @@ export function normalizeRegistryEntry(value: unknown): RegistryEntry | undefine
 		heartbeat_at: new Date(Date.parse(heartbeatAt)).toISOString(),
 		...(publicKey && /^[A-Za-z0-9+/]+={0,2}$/.test(publicKey) ? { public_key: publicKey } : {}),
 		...(profile ? { profile } : {}),
+		...(isThinkingLevel(e.thinking) ? { thinking: e.thinking } : {}),
 		...workspace,
 	};
 }

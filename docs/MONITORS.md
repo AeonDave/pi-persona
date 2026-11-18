@@ -110,9 +110,18 @@ transcript. Branch navigation changes the transcript, not archive visibility or 
 retention budgets below are shared across all branches and remain shared after reload.
 
 A terminal event or cancellation saves one bounded stdout/stderr snapshot and outcome as a custom
-entry in the owning Pi session. An expandable operator-only log card exposes it without adding the
-raw log to model context or triggering another turn. No per-chunk session entries or sidecar files
-are written. Shutdown/reload stops processes and saves their available diagnostics; resume can read
+entry in the owning Pi session, without adding the raw log to model context or triggering another
+turn. Each event has one transcript card, titled like a `timer fired · <label>` card:
+`script exited · build`, `monitor timed out · deploy`, `monitor event · watch ended · status` or
+`script cancelled · lint`, coloured by outcome and previewing the observed output. That card is the
+wake the model received, so compaction keeps or drops card and model text together. Expanding it
+with Pi's expand key shows the wake text followed by the run's complete retained stdout/stderr
+capture while the archive holds it. The saved entry draws nothing while its wake is queued or on the
+current branch. It becomes the card only when no wake exists there: a cancellation, a start failure,
+a branch that never received the wake, or a wake discarded before delivery. A wake discarded while
+the session runs (permission loss, stopping a finished-but-queued run, or a busy-backlog overflow)
+leaves its entry hidden until the transcript is next rebuilt, for example on reload or resume.
+No per-chunk session entries or sidecar files are written. Shutdown/reload stops processes and saves their available diagnostics; resume can read
 the snapshots but never restarts the processes. A hard crash can lose a running job's not-yet-saved
 capture. In a non-persistent session, logs remain in memory only.
 
@@ -172,8 +181,6 @@ Archive and UI observers are passive: an observer failure cannot strand an admit
 prevent cancellation, or suppress its semantic event delivery. Lifecycle admission and notification
 remain owned by the manager/session adapters.
 
-The design follows the background-program model described in the official
-[Claude Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool).
 Protocol-specific integrations can be ordinary adapter programs; direct WebSocket connections
 and persistent services are outside this tool's current scope.
 

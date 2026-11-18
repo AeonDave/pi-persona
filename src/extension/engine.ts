@@ -1,11 +1,11 @@
 /**
  * Engine construction: in-process vs child, worktree isolation, MCP-child routing, provider fallback.
  */
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, DEFAULT_CONTRACT, installedContractNames } from "../core/contract.ts";
-import type { RunLimits } from "../core/capabilities.ts";
+import { canCallTool, type RunLimits } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { defaultChildThinking } from "../core/leg-thinking.ts";
 import type { ModelCostMetadata } from "../core/model-tier.ts";
@@ -24,6 +24,9 @@ import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
 import type { ResultArchiveView } from "../results/retrieval.ts";
+import { parseVerification, verificationAllowsBash, type WorktreeVerificationSpec } from "../core/worktree-verification.ts";
+import { applyWorktreeVerification, captureVerificationTarget } from "../engine/worktree-verification.ts";
+import { combineSignals } from "../engine/signals.ts";
 
 export interface EngineFactories {
 	makeEngine: typeof makeEngine;
@@ -57,6 +60,9 @@ export interface BuildEngineDeps {
 	/** Injected git runner for the non-worktree files-changed report (tests only); defaults to
 	 *  `defaultGitExec`. */
 	gitExec?: GitExec;
+	/** Live host shell gate: active tool selection and persona permission must both allow bash. */
+	canVerify?: () => boolean;
+	verificationShellPath?: () => string | undefined;
 }
 
 export type BuildEngine = (
@@ -260,6 +266,20 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				async run(spec, perProgress, perSignal, perSteer) {
 					const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
 					const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
+					let verification: WorktreeVerificationSpec | undefined;
+					const canVerify = (): boolean => {
+						const current = d();
+						const caps = current.controller.capabilities;
+						return current.canVerify?.() === true && (!caps || canCallTool(caps, "bash"));
+					};
+					if (spec.verification !== undefined) {
+						const parsed = parseVerification(spec.verification);
+						if (!parsed.ok) return beforeStart(isolatedWorktreeFailure(spec, parsed.error));
+						verification = Object.freeze(parsed.value);
+						if (iso !== "worktree") return beforeStart(isolatedWorktreeFailure(spec, "verification requires worktree isolation"));
+						const agent = resolveAgent(spec.agent);
+						if (!canVerify() || !verificationAllowsBash(spec.tools ?? agent?.tools, undefined, agent?.excludeTools)) return beforeStart(isolatedWorktreeFailure(spec, "verification requires effective bash permission for the supervisor and worker"));
+					}
 					if (spec.session?.resume && spec.session.worktree && iso !== "worktree") {
 						return { ...isolatedWorktreeFailure(spec, "A retained worktree conversation must resume with worktree isolation"), sessionSaved: false, sessionQuiescent: true };
 					}
@@ -278,9 +298,26 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 							if (!preflight.ok) return beforeStart(isolatedWorktreeFailure(spec, preflight.error));
 						}
 						const runWorktree = async (dir: string, baseCommit: string) => {
-								const result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
-								if (spec.session && result.sessionQuiescent !== true) {
-									const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, "The isolated worker may still be writing; retained without capturing an artifact");
+								const workerDefaults = verification ? SettingsManager.create(dir, userAgentDir()).getDefaultTools() : undefined;
+								const workerAllowed = (): boolean => {
+									const agent = resolveAgent(spec.agent);
+									return verificationAllowsBash(spec.tools ?? agent?.tools, workerDefaults, agent?.excludeTools);
+								};
+								if (verification && !workerAllowed()) return { cleanup: "remove" as const, value: beforeStart(isolatedWorktreeFailure(spec, "verification requires bash in the worker's effective host defaults")) };
+								const target = verification ? await captureVerificationTarget(dir) : undefined;
+								let result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
+								// Only worker prose may supply a fallback patch; verification output is never an artifact.
+								const hasOutputArtifact = hasUnifiedDiff(result.output);
+								let verificationCanExport = true;
+								if (verification && target) {
+									const verificationSignal = combineSignals(signal, perSignal);
+									const shellPath = d().verificationShellPath?.();
+									const verified = await applyWorktreeVerification(verification, { path: dir, baseCommit, root }, target, result, { allowed: () => canVerify() && workerAllowed(), ...(verificationSignal ? { signal: verificationSignal } : {}), ...(shellPath ? { shellPath } : {}) });
+									result = verified.result;
+									verificationCanExport = verified.canExport;
+								}
+								if ((spec.session && result.sessionQuiescent !== true) || !verificationCanExport) {
+									const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, "The isolated worker or verification process may still be writing, or its directory identity changed; retained without capturing an artifact");
 									const notice = formatWorktreeRecovery(worktreeRecovery);
 									return { cleanup: "retain" as const, value: { ...result, ...(result.ok ? { ok: false, failureKind: "agent" as const, error: notice } : {}), sessionSaved: false, worktreeRecovery, output: `${notice}\n\n${result.output}`.trimEnd() } };
 								}
@@ -288,7 +325,6 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 									ok: false as const,
 									error: error instanceof Error ? error.message : String(error),
 								}));
-								const hasOutputArtifact = hasUnifiedDiff(result.output);
 								if (!artifact.ok) {
 									if (spec.session) result.sessionSaved = false;
 									const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, `Worktree artifact capture failed: ${artifact.error}`);
@@ -303,8 +339,8 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 									return { cleanup: "retain" as const, value: { ...result, output, worktreeRecovery, ok: false, failureKind: "contract" as const, error: `${notice} The isolated leg returned success without an exportable diff/artifact.` } };
 								}
 								if (!result.ok) {
-									if (resumed) {
-										const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, "Isolated worker did not complete; retained for recovery");
+									if (resumed || (verification && result.verification?.status !== "skipped") || (verification && result.failureKind !== "provider")) {
+										const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, result.verification ? `Worktree verification ${result.verification.status}; retained for recovery` : "Isolated worker did not complete; retained for recovery");
 										const notice = formatWorktreeRecovery(worktreeRecovery);
 										const reported = artifact.diff.trim() ? appendWorktreeArtifact(result, artifact.diff) : result;
 										return { cleanup: "retain" as const, value: { ...reported, ...(reported.ok ? { ok: false, failureKind: "agent" as const, error: notice } : {}), sessionSaved: false, worktreeRecovery, output: `${notice}\n\n${reported.output}`.trimEnd() } };

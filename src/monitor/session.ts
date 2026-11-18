@@ -55,15 +55,20 @@ export function createMonitorSession(d: MonitorSessionDeps) {
 		} : {}),
 		onOutput: (output) => observeMonitor(() => d.observe?.output?.(output)),
 		onEvent: (event) => {
-			// Observed BEFORE the permission gate: a terminal event has already left the manager, so the
+			const allowed = d.canRun();
+			if (allowed) {
+				const oldest = notifier.peekPending()[0];
+				if (notifier.peekPending().length >= 64 && oldest) {
+					notifier.discard((e) => e === oldest); omitted++;
+				}
+				// Queued (never delivered synchronously) BEFORE it is observed: the archived log entry the
+				// observer appends must already see its pending wake, which is the event's one card.
+				notifier.notify(event);
+			}
+			// Observed BEFORE the permission sweep: a terminal event has already left the manager, so the
 			// `cancelAll` below could never announce it, and its row would stay on screen forever.
 			observeMonitor(() => d.observe?.event(event));
-			if (!d.canRun()) { cancelAll(); return; }
-			const oldest = notifier.peekPending()[0];
-			if (notifier.peekPending().length >= 64 && oldest) {
-				notifier.discard((e) => e === oldest); omitted++;
-			}
-			notifier.notify(event);
+			if (!allowed) cancelAll();
 		},
 	});
 	function cancelAll(): void { manager.cancelAll(); notifier.cancel(); omitted = 0; }
@@ -81,6 +86,8 @@ export function createMonitorSession(d: MonitorSessionDeps) {
 		kick: () => notifier.kick(),
 		flush: () => notifier.flushIfIdle(),
 		pendingCount: () => notifier.peekPending().length,
+		/** Whether this program's terminal event is queued: its wake will be the event's card. */
+		wakePending: (id: string) => notifier.peekPending().some((e) => e.id === id && e.terminal),
 	};
 }
 

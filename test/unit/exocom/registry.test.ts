@@ -22,6 +22,16 @@ test("write then read round-trips an entry", () => {
 	assert.equal(all[0]?.name, "elite");
 });
 
+test("a self-reported effort round-trips only as a valid Pi level", () => {
+	writeEntry(dir, H, entry({ session_id: "effort-ok", thinking: "high" }));
+	assert.equal(readAll(dir, H).find((e) => e.session_id === "effort-ok")?.thinking, "high");
+	writeEntry(dir, H, entry({ session_id: "effort-bad", thinking: "ultra" as never }));
+	const bad = readAll(dir, H).find((e) => e.session_id === "effort-bad");
+	assert.ok(bad, "an invalid optional effort never rejects the entry");
+	assert.equal("thinking" in bad!, false, "an invalid effort is dropped, never normalized into another level");
+	removeEntry(dir, H, "effort-ok"); removeEntry(dir, H, "effort-bad");
+});
+
 test("workspace identity round-trips as a safe label plus stable id/code", () => {
 	writeEntry(dir, H, entry({
 		session_id: "workspace-metadata",

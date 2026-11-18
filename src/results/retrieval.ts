@@ -2,7 +2,7 @@
 import { fenceUntrusted } from "../core/fence.ts";
 import { readFailure, type ReadReply, type ScopedReader } from "../bus/result-reader.ts";
 import { RESULT_MAX_BODY_CHARS, RESULT_READ_DEFAULT, RESULT_READ_MAX, type ArchiveFailure, type ResultPage, type ResultReadRequest,
-	type ResultStorage, type SaveOutcome, type TerminalStatus } from "./types.ts";
+	type ResultStorage, type SaveOutcome, type TerminalStatus, type VerificationSummary } from "./types.ts";
 import type { StoredBodyPage } from "./record.ts";
 
 export interface ResultReceipt {
@@ -62,11 +62,18 @@ export function pageLiveResult(body: string, offset = 0, limit = RESULT_READ_DEF
 	return { body: body.slice(offset, end), offset, endOfStoredBody: end === body.length, ...(end < body.length ? { nextOffset: end } : {}) };
 }
 
+/** Only runtime enum/numeric observations become trusted text; command content stays paged. */
+export function runtimeVerificationSummary(report: VerificationSummary | undefined): string {
+	if (!report) return "";
+	return `Runtime verification observation: ${report.status} · ${report.exitCode === undefined ? "no exit observed" : `exit ${report.exitCode}`} · ${report.durationMs} ms${report.outputTruncated ? " · command output truncated" : ""}.`;
+}
+
 /** Metadata is caller-owned; report and diagnostic text are always independently fenced. */
-export function projectResultPage(page: StoredBodyPage, error?: string): string {
+export function projectResultPage(page: StoredBodyPage, error?: string, verification?: VerificationSummary): string {
 	const cause = error ? `\nFailure detail:\n${fenceUntrusted(error.slice(0, 2048))}` : "";
+	const observed = runtimeVerificationSummary(verification);
 	const next = page.nextOffset === undefined ? "end of stored body" : `next offset: ${page.nextOffset}`;
-	return `Page offset ${page.offset}; ${page.body.length} UTF-16 units; ${next}.${cause}\n${page.body === "(no output)" ? page.body : fenceUntrusted(page.body)}`;
+	return `Page offset ${page.offset}; ${page.body.length} UTF-16 units; ${next}.${observed ? `\n${observed}` : ""}${cause}\n${page.body === "(no output)" ? page.body : fenceUntrusted(page.body)}`;
 }
 
 // ── reference handoff (flow reference mode): scoped reads over the terminal archive ──

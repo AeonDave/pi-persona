@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const root = new URL("../../", import.meta.url);
@@ -48,7 +48,7 @@ test("npm publication is public and explicitly allowlists documentation and artw
 	};
 	assert.equal(pkg.publishConfig?.access, "public");
 	assert.equal(pkg.repository?.url, "git+https://github.com/AeonDave/pi-persona.git");
-	for (const [url, asset] of [[pkg.pi.image, "assets/banner.png"], [pkg.pi.video, "assets/demo1.mp4"]]) {
+	for (const [url, asset] of [[pkg.pi.image, "assets/banner.png"], [pkg.pi.video, "assets/demo.mp4"]]) {
 		assert.ok(url && asset);
 		assert.equal(new URL(url).protocol, "https:");
 		assert.ok(url.endsWith(`/${asset}`));
@@ -62,5 +62,20 @@ test("npm publication is public and explicitly allowlists documentation and artw
 	for (const path of pkg.files) {
 		assert.doesNotMatch(path, /^(?:docs|assets)\/?$|\*|reddit-post|banner-options|^scripts(?:\/|$)/,
 			"drafts, alternative artwork and development harnesses must not enter npm artifacts");
+	}
+});
+
+test("sources import host packages only through entries Pi's extension loader resolves", () => {
+	// Pi aliases each host package to its root entry, so `<package>/dist/...` type-checks and runs
+	// under Node but fails when Pi loads the extension.
+	const resolvable = new Set(["@earendil-works/pi-coding-agent", "@earendil-works/pi-agent-core", "@earendil-works/pi-tui",
+		"@earendil-works/pi-ai", "@earendil-works/pi-ai/compat", "@earendil-works/pi-ai/models", "@earendil-works/pi-ai/oauth",
+		"@earendil-works/pi-ai/providers/all", "typebox", "typebox/compile", "typebox/value"]);
+	const src = new URL("src/", root);
+	for (const file of readdirSync(src, { recursive: true, encoding: "utf8" })) {
+		if (!file.endsWith(".ts")) continue;
+		const source = readFileSync(new URL(file.replaceAll("\\", "/"), src), "utf8");
+		for (const [, specifier] of source.matchAll(/(?:from|import\()\s*"((?:@earendil-works\/|typebox)[^"]*)"/g))
+			assert.ok(resolvable.has(specifier!), `${file} imports ${specifier}, which Pi's extension loader cannot resolve`);
 	}
 });

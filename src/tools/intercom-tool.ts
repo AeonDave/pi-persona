@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { failureDetails } from "../extension/shared.ts";
 import { deliverPendingNotes, formatPendingNotes } from "../extension/completion-delivery.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
@@ -27,7 +28,7 @@ import type { PersonaController } from "../persona/controller.ts";
 import { emptyUsage } from "../engine/stream.ts";
 import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
 import type { TerminalResultArchive } from "../results/archive.ts";
-import { pageLiveResult, projectResultPage, resultReceiptHint } from "../results/retrieval.ts";
+import { pageLiveResult, projectResultPage, resultReceiptHint, runtimeVerificationSummary } from "../results/retrieval.ts";
 import type { WorkerConversations } from "../extension/conversations.ts";
 
 export interface IntercomToolDeps {
@@ -220,7 +221,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				const archive = d.archive(ctx);
 				if (params.action === "results") {
 					const page = archive.list({ ...(params.cursor !== undefined ? { cursor: params.cursor } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) });
-					const text = page.ok ? ["Saved terminal reports (not live workers):", ...page.results.map((r) => `${r.ref} · ${sanitizeDisplayLabel(r.label ?? r.agent)} · ${r.status} · ${r.storage}${r.truncated ? " · truncated" : ""}`), ...(page.nextCursor !== undefined ? [`nextCursor: ${page.nextCursor}`] : []), ...(page.warnings.length ? [`Storage warnings: ${page.warnings.join(", ")}`] : [])].join("\n") : page.message;
+					const text = page.ok ? ["Saved terminal reports (not live workers):", ...page.results.map((r) => `${r.ref} · ${sanitizeDisplayLabel(r.label ?? r.agent)} · ${r.status} · ${r.storage}${r.truncated ? " · truncated" : ""}${r.verification ? ` · ${runtimeVerificationSummary(r.verification)}` : ""}`), ...(page.nextCursor !== undefined ? [`nextCursor: ${page.nextCursor}`] : []), ...(page.warnings.length ? [`Storage warnings: ${page.warnings.join(", ")}`] : [])].join("\n") : page.message;
 					return { content: [{ type: "text", text }], details: { action: "results", ...page }, isError: !page.ok };
 				}
 				const page = archive.read({ ref: params.ref!, ...(params.offset !== undefined ? { offset: params.offset } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) });
@@ -231,7 +232,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				// bounded metadata exactly like the live result path (no whole page hidden there).
 				const { body: _pageBody, ...pageMeta } = page;
 				return {
-					content: [{ type: "text", text: `${page.summary.ref} · ${page.summary.status} · ${page.summary.storage}${page.summary.truncated ? " · saved body truncated" : ""}\n${projectResultPage(page, page.summary.error)}` }],
+					content: [{ type: "text", text: `${page.summary.ref} · ${page.summary.status} · ${page.summary.storage}${page.summary.truncated ? " · saved body truncated" : ""}\n${projectResultPage(page, page.summary.error, page.summary.verification)}` }],
 					details: { action: "result", ...pageMeta }, isError: false,
 				};
 			}
@@ -368,6 +369,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			return { content: [{ type: "text", text }], details: out.details.ok ? { ...out.details, ...communication } : failureDetails(out.details), isError: !out.details.ok };
 		},
 		renderCall(args, theme, context) {
+			const pending = renderPendingCall("intercom", theme, context);
+			if (pending) return pending;
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = compactInlineText(args.action ?? "?", { maxChars: 24 }) || "?";
 			let target = "";

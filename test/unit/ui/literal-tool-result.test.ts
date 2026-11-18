@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderLiteralToolResult } from "../../../src/ui/literal-tool-result.ts";
 
 initTheme("dark");
@@ -63,4 +64,33 @@ test("native context is authoritative; legacy direct calls can still provide res
 	const result = { content: [{ type: "text", text: "diagnostic" }], isError: true };
 	assert.match(text(renderLiteralToolResult(result, { expanded: false }, h.theme)), /^failed/);
 	assert.doesNotMatch(text(renderLiteralToolResult(result, { expanded: false }, h.theme, { isError: false })), /^failed/);
+});
+
+test("collapsed literal results bound actual terminal rows on resize and retain literal indentation", () => {
+	const h = harness();
+	const source = ["  indented " + "界".repeat(100), ...Array.from({ length: 3 }, () => "x".repeat(100))].join("\n");
+	const result = { content: [{ type: "text", text: source }] };
+	const before = JSON.stringify(result);
+	const view = renderLiteralToolResult(result, { expanded: false }, h.theme, { isError: true, keyHint: () => "alt+e to expand" });
+	for (const width of [100, 40, 20, 4, 1]) {
+		const rows = view.render(width).map((row) => stripVTControlCharacters(row).trimEnd());
+		assert.ok(rows.length <= 6, `${width} columns produced ${rows.length} rows`);
+		assert.ok(rows.every((row) => visibleWidth(row) <= width));
+		if (width >= 20) {
+			assert.equal(rows[0], "failed");
+			assert.match(rows[1]!, /^  indented/);
+			assert.match(rows.at(-1)!, /alt\+e to expand/);
+		}
+	}
+	const expanded = renderLiteralToolResult(result, { expanded: true }, h.theme).render(400).map((row) => stripVTControlCharacters(row).trimEnd()).join("\n");
+	assert.equal(expanded, source);
+	assert.equal(JSON.stringify(result), before);
+});
+
+test("literal preview adds an expand hint only when the current width hides text", () => {
+	const h = harness();
+	const view = renderLiteralToolResult({ content: [{ type: "text", text: "a".repeat(40) }] }, { expanded: false }, h.theme);
+	assert.doesNotMatch(view.render(80).join("\n"), /expand/);
+	assert.match(view.render(20).join("\n"), /expand/);
+	assert.doesNotMatch(view.render(80).join("\n"), /expand/);
 });

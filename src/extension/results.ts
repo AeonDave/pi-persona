@@ -103,6 +103,7 @@ export class SessionResults {
 				...(result.modelUsed ? { model: result.modelUsed.slice(0, 512) } : {}),
 				...(result.thinkingRequested ? { thinkingRequested: result.thinkingRequested } : {}),
 				...(result.thinkingEffective ? { thinkingEffective: result.thinkingEffective } : {}),
+				...(result.verification === undefined ? {} : { verification: result.verification }),
 				...(result.error ? { error: result.error.slice(0, 2048) } : {}),
 				usage: { input: result.usage.input, output: result.usage.output,
 					...(result.usage.cacheRead !== undefined ? { cacheRead: result.usage.cacheRead } : {}),

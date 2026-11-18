@@ -1,6 +1,6 @@
 {
   "name": "@aeondave/pi-persona",
-  "version": "1.18.1",
+  "version": "1.19.0",
   "private": false,
   "type": "module",
   "description": "Supervised multi-agent orchestration for Pi — async workers, live steering, cross-session collaboration, and switchable personas.",
@@ -50,8 +50,12 @@
     "docs/TELEMETRY.md",
     "assets/banner.png",
     "assets/workflow.png",
-    "assets/demo1.gif",
-    "assets/demo1.mp4",
+    "assets/demo-team.gif",
+    "assets/demo-steer.gif",
+    "assets/demo-council.gif",
+    "assets/demo-exocom.gif",
+    "assets/demo-jobs.gif",
+    "assets/demo.mp4",
     "teams.yaml",
     "README.md",
     "AGENTS.md",
@@ -107,8 +111,8 @@
     "typescript": "^7.0.2"
   },
   "pi": {
-    "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.18.1/assets/banner.png",
-    "video": "https://cdn.jsdelivr.net/gh/AeonDave/pi-persona@6655d281ce7965a75303dd704bd29db73db04070/assets/demo1.mp4",
+    "image": "https://raw.githubusercontent.com/AeonDave/pi-persona/v1.19.0/assets/banner.png",
+    "video": "https://cdn.jsdelivr.net/gh/AeonDave/pi-persona@v1.19.0/assets/demo.mp4",
     "extensions": [
       "./src/extension.ts"
     ]

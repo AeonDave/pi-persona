@@ -1,9 +1,6 @@
 /**
- * Slimmed wire-frame catalog + validators (spec B6) — comtac's protocol trimmed to the
- * frames pi-persona actually needs: register/send/cancel/reply/list/bye (client→host) and
- * registered/sent/deliver/steer/peers/replied/error (host→client). Mirrors comtac's
- * `messages.ts` validation STYLE (structural per-field checks, one explicit assert per
- * case) but drops presence/sessions/attachments/broadcasts entirely (YAGNI here).
+ * Wire-frame catalog and validators (spec B6). Child registration, messaging, steering,
+ * peer discovery and result reads share explicit structural checks per frame type.
  *
  * Authenticated result_read/result_read_reply/result_read_cancel frames extend the same
  * connection with a closed bounded page contract. No archive summaries or client grants.

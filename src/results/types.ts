@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "../core/types.ts";
+import type { WorktreeVerificationResult } from "../core/worktree-verification.ts";
 
 export const TERMINAL_RESULT_ENTRY = "pi-persona-terminal-result";
 export const RESULT_MAX_ENTRIES = 128;
@@ -41,6 +42,8 @@ export interface TerminalResultInput {
 	thinkingRequested?: ThinkingLevel;
 	thinkingEffective?: ThinkingLevel;
 	usage?: TerminalUsage;
+	/** Runtime-observed evidence, separate from worker prose and retained if body is truncated. */
+	verification?: WorktreeVerificationResult;
 	/** Epoch milliseconds. Omit to stamp a NEW record with the injected clock. */
 	createdAt?: number;
 	body: string;
@@ -60,7 +63,11 @@ export interface TerminalResultRecord extends Omit<TerminalResultInput, "created
 	truncated: boolean;
 }
 
-export interface ResultSummary extends Omit<TerminalResultRecord, "body" | "payloadHash"> {
+/** Small observations only; command text/output remain in the record and paged body. */
+export type VerificationSummary = Pick<WorktreeVerificationResult, "status" | "exitCode" | "durationMs" | "outputTruncated">;
+
+export interface ResultSummary extends Omit<TerminalResultRecord, "body" | "payloadHash" | "verification"> {
+	verification?: VerificationSummary;
 	storage: ResultStorage;
 }
 

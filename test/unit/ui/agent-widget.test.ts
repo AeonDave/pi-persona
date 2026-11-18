@@ -67,9 +67,9 @@ test("the audit fixture keeps all three legs and folds the restating group heade
 	const { summary, rows } = paint(auditFixture(), new Set(), 200);
 	assert.deepEqual(rows, [
 		" ▾ ⏳ delegate · 3 legs  1/3 settled · 1m 35s",
-		" ├─ ⏳ auth-review · h  reading src/auth/session.ts · 12.4k tok · 1m 35s",
-		" ├─ ✓ token-tests · h  8.1k tok · ~$0.04",
-		" └─ ⏳ perf-scan · h  bash: npm run bench · 5.2k tok · ⚠ stalled 1m 40s",
+		" ├─ ⏳ auth-review · high  reading src/auth/session.ts · 12.4k tok · 1m 35s",
+		" ├─ ✓ token-tests · high  8.1k tok · ~$0.04",
+		" └─ ⏳ perf-scan · high  bash: npm run bench · 5.2k tok · ⚠ stalled 1m 40s",
 		" ⏳ perf-probe  bash: hyperfine … · 3.0k tok · 40s",
 		" ◉ 1 monitor · ⏰ 1 timer · ⚙ 1 script · next due in 8m 30s",
 		" … +6 more · F9 or /agents for the full live tree",
@@ -104,7 +104,7 @@ test("semantic tokens: names keep text, detail and clocks are muted, connectors 
 	for (const [token, text] of [
 		["dim", "├─ "], ["dim", "└─ "], ["dim", "  "], ["dim", " · "],
 		["text", " auth-review"], ["text", " token-tests"], ["text", " perf-scan"], ["text", " perf-probe"], ["text", " bad-leg"],
-		["muted", " · h"], ["muted", "reading src/auth/session.ts · 12.4k tok"], ["muted", "8.1k tok · ~$0.04"], ["muted", "1m 35s"],
+		["muted", " · high"], ["muted", "reading src/auth/session.ts · 12.4k tok"], ["muted", "8.1k tok · ~$0.04"], ["muted", "1m 35s"],
 		["muted", "fires in 8m 30s"],
 		["success", "✓"], ["error", "✗"], ["warning", "⚠ stalled 1m 40s"], ["accent", "◉"],
 	] as const) assert.ok(has(token, text), `${token} paints ${JSON.stringify(text)}`);

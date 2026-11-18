@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, KeybindingsManager, setKeybindings, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { AsyncRunTracker } from "../../src/engine/async.ts";
@@ -7,6 +7,7 @@ import { registerDelegateTool } from "../../src/tools/delegate-tool.ts";
 import { registerCouncilTool } from "../../src/tools/council.ts";
 import { registerFlowTool } from "../../src/tools/flow.ts";
 import { sanitizeTerminalText } from "../../src/ui/presentation.ts";
+import { PENDING_CALL_FRAME_MS, PENDING_CALL_QUIET_MS } from "../../src/ui/pending-call.ts";
 // Test-only qualification of the pinned host's real result mouse region and expansion state.
 import { ToolExecutionComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
@@ -65,9 +66,34 @@ test("native delegate first frame and saved receipt preserve explicit or inherit
 	] as const) {
 		const component = new ToolExecutionComponent("delegate", "saved-delegate", args, {}, tool, { requestRender() {} } as unknown as TUI, process.cwd());
 		const render = () => sanitizeTerminalText(component.render(140).join("\n"));
+		assert.match(render(), /delegate . preparing…/, "while arguments stream the card is one pending line");
+		assert.doesNotMatch(render(), /Cedar|scout/, "no card is built from arguments Pi has not completed");
+		component.setArgsComplete();
 		if ("thinking" in args) assert.match(render(), /xhigh/, "complete call shows explicit effort before the receipt");
 		const model = args.model.split("/").at(-1)!;
 		component.updateResult({ content: [{ type: "text", text: "Launched delegate." }], details: { runId: "run-1", runs: [{ id: "run-1", label: "Cedar", agent: "scout", model, thinking: effort, request: { task: args.task } }] }, isError: false });
 		assert.match(render(), new RegExp(effort), "saved launch makes the selected effort visible even when call and receipt are deduplicated");
+	}
+});
+
+test("a restored delegate row saved without its result settles on its full card in Pi's real tool row", () => {
+	initTheme("dark", false);
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_000 });
+	try {
+		let tool!: Parameters<ExtensionAPI["registerTool"]>[0];
+		const api = { registerTool(definition: typeof tool) { tool = definition; } } as ExtensionAPI;
+		registerDelegateTool(api, { tracker: new AsyncRunTracker(), RUN_LIMITS: { maxChildren: 4, maxConcurrency: 4 }, config: { ledgerV2: false }, launchThinking: () => "low" } as any);
+		let renders = 0;
+		// Pi's restore loop: constructed with the saved arguments, never marked complete, no result follows.
+		const component = new ToolExecutionComponent("delegate", "orphan", { agent: "scout", name: "Cedar", task: "inspect" }, {}, tool, { requestRender() { renders++; } } as unknown as TUI, process.cwd());
+		const render = () => sanitizeTerminalText(component.render(140).join("\n"));
+		assert.match(render(), /delegate . preparing…/);
+		mock.timers.tick(PENDING_CALL_QUIET_MS + PENDING_CALL_FRAME_MS);
+		assert.match(render(), /delegate Cedar/, "the resting state is the normal call card");
+		const settled = renders;
+		mock.timers.tick(PENDING_CALL_QUIET_MS);
+		assert.equal(renders, settled, "no further render requests");
+	} finally {
+		mock.timers.reset();
 	}
 });

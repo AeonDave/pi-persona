@@ -94,9 +94,17 @@ The model-facing report remains independently idle-gated; a UI notification fail
 `intercom send` uses the registered recipient's assigned name in its card. Expansion retains the
 exact bus handle and sent message; the saved receipt preserves that identity after the worker exits.
 Delegate launch receipts retain the requested effort selected at launch, including agent defaults
-and the configured or inherited child setting. Enabled levels appear in full beside the model;
-long model names cannot consume the effort's reserved space. History uses the saved selection,
-not current settings. This launch snapshot is separate from Pi's observed runtime effort in F9.
+and the configured or inherited child setting. Every known level, `off` included, appears in full
+beside the model through one shared `model · effort` formatter (also used by the live tree, F9,
+council/flow launch rows and Exocom peer rows); an unknown effort is omitted. The live tree row
+shows the same resolved effort as the card, and `requested→observed` once Pi reports a different
+level. Long model names cannot consume the effort's reserved space. History uses the saved
+selection, not current settings. This launch snapshot is separate from Pi's observed runtime effort
+in F9. While a call's arguments are still streaming, every pi-persona tool card renders one pending
+line (`<tool> ⠋ preparing…`, Pi's Loader frames) and switches to the full card when Pi reports the
+arguments complete. The spinner also needs the arguments to keep changing: after 3 s of unchanged
+arguments it stops and the card renders from the arguments at hand, so a restored call saved
+without its result, a discarded row or a stalled stream settles on its normal card.
 
 A parallel `delegate` refusal for missing `writeSet` keeps its short remedy in the collapsed card.
 Expansion also shows a bounded snapshot of the original arguments, the effective concurrency, and
@@ -134,6 +142,11 @@ Pi's grep/find implementations may download their native `rg`/`fd` helper binari
 
 `code_outline({ path, query?, limit? })` reads one regular source file from the project cwd (or an absolute path) and returns named syntax declarations, their kind/container and inclusive physical line ranges. `query` is a literal case-insensitive substring over the name, kind or container. `limit` is 1–200 (default 80); a matching count, `hasMore` and `truncated` report omitted rows. Input is capped at 256 KiB and rendered output at 16 KiB. Fatal UTF-8, parser syntax errors and unsupported extensions are errors rather than empty outlines or text-search fallbacks. The output header reports the selected language and grammar plus a SHA-256 computed from the bytes read; it does not claim an external hash match.
 
+In the TUI, the compact card shows returned/matching counts and up to four declaration rows with
+their containers and line ranges. Click or use Pi's expand binding to see all returned rows and
+technical metadata. Expansion cannot recover rows omitted by the query/output limits; `hasMore`
+and `truncated` remain explicit. The model-facing result retains its canonical text and provenance.
+
 This is a bounded syntax outline, not a complete symbol index. It recognizes JavaScript function
 expression bindings and class arrow fields, callable C/C++ declarators (including functions that
 return function pointers, while excluding function-pointer data), C++ destructors and qualified
@@ -169,6 +182,12 @@ available and otherwise renders terminal cells; ansi requests color cells (unles
 by the terminal environment) and ascii forces plain characters. Pi's `showImages` terminal setting
 can hide the preview.
 
+A successful preview shows only the image, centered horizontally. Click it or use Pi's tool
+expansion key (Ctrl+O by default) to switch between compact and enlarged views. Loading and errors
+remain visible. Downsampling averages the covered pixels with alpha weighting to preserve thin
+features without color bleeding from transparent pixels. Plain ASCII adapts its brightness ramp
+to light or dark themes.
+
 Inside Herdr, `auto` conservatively uses terminal cells: Herdr advertises Kitty graphics to Pi
 but hides the outer terminal's identity, and Windows Terminal cannot display that graphics path.
 For Herdr attached to a known-compatible terminal, launch Pi with `PI_IMAGE_PROTOCOL=kitty`
@@ -184,7 +203,7 @@ Input is limited to 8 MiB, 16 million source pixels and 16,384 pixels per axis. 
 accepts at most 4,096 chunks and 256 palette entries. Animated GIF/WebP inspection is limited to
 256 frames and 16 million aggregate canvas pixels (canvas width × height × frame count). The display
 payload is resized to at most 640×480 for native graphics, with a 160×160 RGBA thumbnail for text
-rendering; the collapsed card shows up to 8 rows and the expanded card up to 20, both at 60 columns.
+rendering; the compact image shows up to 8 rows and the enlarged image up to 20, both at 60 columns.
 These are bounded previews rather than full-resolution image viewing.
 
 ### Native codemode
@@ -211,12 +230,142 @@ expandable (`Ctrl+O` by default; `/hotkeys` shows active bindings). `Ctrl+T` tog
 separately. A smaller script output also reduces model context; merely collapsing its card does not.
 No replacement sandbox or renderer is required for this integration.
 
-`outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed
-(the built-in `default` and bundled `finding` are available without custom files). Naming one that
+### Structured results
+
+`outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed.
+`default` is built in; `/persona seed` installs bundled contracts including `finding` and `findings`.
+Naming one that
 isn't installed is rejected before any worker
 spawns, checked across every task in a parallel batch: `delegate: unknown output contract(s) "x" —
 nothing was spawned. Installed contracts: default, finding` (the list is capped at 16 names; a
 `, …` marker is appended only when more than 16 are installed).
+
+The `findings` contract returns a required `result` string and up to 50 `findings`, each with
+`file`, a positive integer `line`, `severity` (`low`, `medium`, `high`, `critical`) and `evidence`.
+An empty findings array is valid. Shape validation does not prove the factual claim or read the file.
+
+Custom `contracts/<name>.contract.json` files use the same schema recursively: scalar `string`,
+`number`, `integer`, `boolean` and `enum`; `object` with `fields`; `array` with `items` and optional
+`minItems`/`maxItems`. `required` applies within each containing object. Existing numeric bounds
+and `minLength` retain their meaning. Errors identify the exact path, such as `findings[0].line`.
+Both engines instruct and validate against a deep-frozen schema pinned at run start.
+
+Definitions are bounded to 65,536 characters, depth 8, 256 field/item schemas and 128 enum values.
+Results are bounded to depth 16, 1,024 items per array, 10,000 nodes and 1,048,576 characters in
+strings and keys; diagnostics stop at 32 errors. Ordinary undeclared fields remain available;
+non-JSON values, hostile keys, cycles and accessors are rejected. No second schema engine or
+dependency is involved.
+
+JSON recovery accepts fenced answers and surrounding prose, but never treats an inner object as
+a replacement for its invalid outer JSON. Each backward recovery scan inspects at most 64 closing
+delimiters, including malformed ones, to bound work on noisy replies.
+
+### Verifying isolated changes
+
+Add a foreground shell command to a single delegate or each relevant `tasks[]` entry:
+
+```json
+{
+  "agent": "operator",
+  "task": "Fix the regression and explain the change",
+  "isolation": "worktree",
+  "verification": { "command": "npm test", "timeoutMs": 120000 }
+}
+```
+
+Include the active persona's required `brief` and any parallel ownership declarations as usual.
+Verification is also available on `sdk.agent` run specs. It requires worktree isolation, callable
+supervisor `bash`, and effective worker `bash` permission; empty grants and exclusions win.
+The runtime checks permissions again before executing, after the worker has completed successfully and stopped writing,
+before capturing its diff. The command always uses that exact registered worktree and Pi's
+configured shell; there is no caller-supplied `cwd`. Commands must stay in the foreground.
+
+The run records command, cwd, status, exit code when observed, duration and up to 16,000 output
+characters as runtime evidence, separately from the worker's claims. The launch card exposes
+the requested command when expanded. The evidence precedes worker prose in the paged terminal
+report and is also retained in its canonical record. Listings carry only compact status metadata,
+so they do not repeat command output or bypass page limits. No extra log store is created.
+
+A nonzero exit fails the run and retains the worktree and safely exported changes for recovery.
+Timeout, cancellation or uncertain process/directory state retain the worktree without exporting
+an artifact. Failed workers skip the check. Verification failure never causes an automatic model
+retry. A successful saved continuation keeps the same command and checks permissions again;
+changing it requires a new worker. Default timeout is 120 seconds; the explicit range is 1 ms to
+one hour. Shell source is limited to 8,192 characters.
+
+This command is part of `delegate`, not a separate host `bash` tool invocation. Extensions that
+apply command-specific policy must inspect `verification.command` on the delegate call, just as
+they inspect inline source passed to other process tools. Foreground completion is not proof
+that a command did not create detached processes, and worktrees are not a filesystem sandbox.
+
+### Reading and messaging workers
+
+Open **F9** or `/agents`, select a worker and press Enter. Its current run has a separate
+conversation view with user messages, assistant text, reasoning, tool arguments, results and
+reported errors. Tool calls and reasoning start compact; click one to expand it, or use `e` /
+Pi's configured expand binding (`Ctrl+O` by default) for all blocks. Arrow keys and the mouse
+wheel scroll; Page Up/Down move a page, Home goes to the beginning and End follows new output.
+Scrolling away from the end holds the reading position while the worker continues. `/` opens
+search; `n` and `N` move through matching blocks. `m` switches assistant messages between
+Markdown and literal text; tool data stays literal. `i` shows model, effort and cumulative usage.
+Escape closes search first, then returns to the same list/group selection.
+
+Collapsed tool and reasoning blocks use at most two visible preview rows, even for long unbroken
+output or narrow terminals. Expand or search to inspect the complete retained text. Other compact
+literal tool results use up to four preview rows and show an expansion hint when content is hidden.
+
+The collapsed **recent workers** group uses Persona's existing retained async runs. It creates
+no new archive, worker or model request. A chat already open remains readable when its live row
+is removed; controls then become unavailable. Strategy legs are available while their tree exists
+or while already open, rather than becoming a second archive of completed strategies.
+
+Chats are bounded operator views of the **current run**, on both execution engines: at most
+128 blocks and 96,000 text characters, with 16,000 per text/result and 4,000 for arguments.
+Trimming is labelled. Images are placeholders, and recorded edit diffs are read from tool results,
+never recomputed against current files. This view is not restored after reload and does not replay
+the earlier turns of a resumed worker. Saved worker conversations and durable terminal reports
+keep their separate retention and retrieval contracts. Nothing from this view is added to model
+context or counted as new progress.
+
+To send a correction without asking the supervisor model, use:
+
+```text
+/agents send Copper Check the empty-input case before finishing.
+/agents send run-2 Focus on the parser only.
+/agents send "Source reader" Summarize the public API.
+```
+
+Autocomplete after `/agents send ` lists workers that currently accept messages, using stable
+routing IDs with their display names. A typed name must match exactly and uniquely; duplicate
+names require the ID. Sending uses the same live steering handle as F9 `s`, with an 8,000-character
+limit. The toast confirms acceptance, not that the worker has acted on it. An unavailable worker
+is never restarted automatically; continuing a saved worker still uses `delegate { resume, task }`.
+
+### Data retention and cleanup
+
+Temporary views and saved work have different owners and deletion rules:
+
+| Data | Limit and cleanup |
+|---|---|
+| Live run state and F9 chats | The async tracker retains 64 settled runs by default (`PI_PERSONA_ASYNC_RETAIN`), evicting collected results first, then older completions. Running workers are not evicted. Each chat has the bounds above. F9 keeps at most eight reader caches; obsolete attempts and abandoned views are released, and closing F9 releases its reader caches. Native `/new`, `/resume` and `/reload` replace the extension runtime. |
+| Saved worker conversations | Admission/settlement limits are 8 MiB per transcript, 64 MiB and 64 lineages per owning session. Seven days limits continuation availability, **not file lifetime**. Expired files still count against quota. Use `intercom { action: "conversations" }`, then explicitly `forget` the latest run ID to remove its transcript and retained worktree. See [continuation](#continuing-a-worker-conversation). |
+| Terminal reports | At most 128 entries / 8 MiB of cumulative result payload in the native session. Quota stops additional persistence; it does not rewrite or erase the session's historical entries. `forget` leaves these reports intact. |
+| Monitor and script logs | Each archive admits at most 64 terminal records / 2 MiB per session. Active processes stop on shutdown; historical entries remain in the owning session. See [log retention](MONITORS.md). |
+| Isolated worktrees | Ordinary temporary worktrees are removed after safe export. Continuation and recovery worktrees remain until explicitly discarded, so unapplied changes are not deleted by an age sweep. |
+| Telemetry | On activation, a maintenance pass removes eligible owned telemetry older than 30 days by default. Live or unverifiable writer leases protect their data. See [telemetry retention](TELEMETRY.md). |
+
+A fresh unsaved transcript is removed once its writer is known to have stopped. Failed admission
+also releases its temporary lease. Crash-orphan worker files have no global scavenger, and saved
+conversations are never silently evicted to make room for new ones. A storage limit can disable
+continuation for a new worker without preventing its task from running.
+Transcript quotas do not include retained worktree contents or native session history, and are
+per owner rather than a global disk quota across all sessions. Expired recorded conversations can
+still be removed with `forget`; crash-orphan files without a recorded run require manual inspection.
+
+Removing a native session removes its embedded reports/logs, but does not promise deletion of
+separate worker transcripts, retained worktrees, exports or backups. Review and discard saved
+conversations before removing their owning session. There is no command that purges all of these
+different data owners together.
 
 ### Supervising running sub-agents — the `intercom` plane
 
@@ -452,7 +601,8 @@ files are seed sources. A fresh install has no installed personas until `/person
 
 `/persona-settings` opens pi-persona's own settings editor in the TUI or RPC UI. It is a separate
 extension command; it does not replace Pi's native `/settings` or edit native Pi preferences such
-as compaction. The TUI is a full-page, filterable panel (`/` to search, `r` to reset the selected
+as compaction. The TUI is a filterable page drawn in the same window frame as F9, centred in the
+editor area and leaving Pi's footer visible (`/` for a titled filter field, `r` to reset the selected
 saved override, `m` for model assignments, `d` for diagnostics); the RPC UI offers the same
 settings, model, and diagnostics flows. `/persona-settings show` emits a read-only report and is
 available in headless sessions.
@@ -538,7 +688,10 @@ Reset removes only that saved key (`null` in a settings patch), revealing lower-
 such as a bare agent assignment; inline model pins remain read-only. “Other saved assignments” lets
 you remove keys outside the selected profile without exposing unsafe legacy key text.
 
-In the TUI, the picker uses Pi's native editable search field (including paste and cursor movement).
+In the TUI, the picker is an overlay in the same window frame as F9 (title, a titled `Search` field
+with the match count, the list, a rule and the key legend) wherever it opens, and its list uses the
+rows the window has. Its search field is Pi's native editable input (including paste, cursor
+movement and pointer placement).
 Search matches model names, IDs and providers; an exact qualified reference takes precedence. The
 participant's current eligible model is selected initially and marked separately from the session
 provider indicator. Editing the query keeps the selected model while it still matches. Rows retain
@@ -581,7 +734,7 @@ members specialise one agent with a role, model, or skills without requiring ano
 
 ### Multi-agent quick start
 
-Follow the [installation instructions](../README.md#install), then start a coding supervisor:
+Follow the [installation instructions](../README.md#quick-start), then start a coding supervisor:
 
 ```bash
 pi --persona dev

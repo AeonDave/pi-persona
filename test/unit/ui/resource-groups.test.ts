@@ -21,6 +21,8 @@ test("resource categories group only matching roots without changing the source 
 });
 
 test("peer projection is inspectable read-only metadata", () => {
+	const withEffort = projectPeers([{ key: "2", name: "Bo", status: "online", model: "provider/opus-5", thinking: "high" }]);
+	assert.match(withEffort[1]!.output ?? "", /^model: provider\/opus-5 · high$/m, "the peer drill-in shows the self-reported effort after the model");
 	const peers = projectPeers([{ key: "1", name: "Ada", status: "idle", persona: "reviewer" }]);
 	assert.equal(peers[0]?.label, "Exocom peers");
 	assert.equal(peers[1]?.kind, "peer");

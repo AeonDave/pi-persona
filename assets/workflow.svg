@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 780" width="2000" height="780" font-family="'Segoe UI', Inter, system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="brand" gradientUnits="userSpaceOnUse" x1="330" x2="1770" y1="0" y2="0">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <radialGradient id="glowCyan" cx="0.22" cy="0.3" r="0.55">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowViolet" cx="0.82" cy="0.7" r="0.55">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1 1.5 L10.5 6 L1 10.5 Z" fill="#9fb4d6"/>
+    </marker>
+    <marker id="arrowSoft" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M1 1.5 L10.5 6 L1 10.5 Z" fill="#6b7a96"/>
+    </marker>
+  </defs>
+
+  <rect width="2000" height="780" fill="#0a0d14"/>
+  <rect width="2000" height="780" fill="url(#glowCyan)"/>
+  <rect width="2000" height="780" fill="url(#glowViolet)"/>
+
+  <!-- lane separators and labels -->
+  <g stroke="#1b2333" stroke-width="2">
+    <line x1="70" y1="240" x2="1930" y2="240"/>
+    <line x1="70" y1="430" x2="1930" y2="430"/>
+  </g>
+  <g fill="#7c89a3" font-size="22" font-weight="600" letter-spacing="5">
+    <text x="70" y="78">YOU</text>
+    <text x="70" y="286">SUPERVISOR</text>
+    <text x="70" y="476">WORKERS</text>
+  </g>
+
+  <!-- connectors (drawn first, under the nodes) -->
+  <g fill="none" stroke="#9fb4d6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- goal to plan -->
+    <path d="M400 190 V302" marker-end="url(#arrow)"/>
+    <!-- delegate fan-out -->
+    <path d="M700 358 V500 Q700 520 720 520 H796" marker-end="url(#arrow)"/>
+    <path d="M700 500 V592 Q700 612 720 612 H796" marker-end="url(#arrow)"/>
+    <path d="M700 592 V684 Q700 704 720 704 H796" marker-end="url(#arrow)"/>
+    <!-- reports converge -->
+    <path d="M1304 520 H1380 Q1400 520 1400 500 V358" marker-end="url(#arrow)"/>
+    <path d="M1304 612 H1380 Q1400 612 1400 592 V500"/>
+    <path d="M1304 704 H1380 Q1400 704 1400 684 V592"/>
+    <!-- verify to result -->
+    <path d="M1700 302 V190" marker-end="url(#arrow)"/>
+  </g>
+  <!-- live control: dashed, from the operator to the running workers -->
+  <path d="M1050 176 V470" fill="none" stroke="#6b7a96" stroke-width="2.5" stroke-dasharray="3 9" stroke-linecap="round" marker-end="url(#arrowSoft)"/>
+
+  <!-- supervisor timeline -->
+  <line x1="330" y1="330" x2="1770" y2="330" stroke="url(#brand)" stroke-width="6" stroke-linecap="round"/>
+  <g font-size="26" font-weight="600" fill="#eef3fb" text-anchor="middle">
+    <g>
+      <circle cx="400" cy="330" r="26" fill="#0a0d14" stroke="#7dd3fc" stroke-width="4"/>
+      <circle cx="400" cy="330" r="9" fill="#7dd3fc"/>
+      <text x="400" y="392">Plan</text>
+    </g>
+    <g>
+      <circle cx="700" cy="330" r="26" fill="#0a0d14" stroke="#8ac6fb" stroke-width="4"/>
+      <circle cx="700" cy="330" r="9" fill="#8ac6fb"/>
+      <text x="610" y="392">Delegate</text>
+    </g>
+    <g>
+      <circle cx="1400" cy="330" r="26" fill="#0a0d14" stroke="#9ea5fa" stroke-width="4"/>
+      <circle cx="1400" cy="330" r="9" fill="#9ea5fa"/>
+      <text x="1492" y="392">Integrate</text>
+    </g>
+    <g>
+      <circle cx="1700" cy="330" r="26" fill="#0a0d14" stroke="#a78bfa" stroke-width="4"/>
+      <circle cx="1700" cy="330" r="9" fill="#a78bfa"/>
+      <text x="1700" y="392">Verify</text>
+    </g>
+  </g>
+  <text x="1028" y="296" font-size="21" fill="#7c89a3" text-anchor="end">free for other work</text>
+  <text x="1072" y="296" font-size="21" fill="#7c89a3">while the team runs</text>
+
+  <!-- you: goal, live control, result -->
+  <g font-size="26" font-weight="600" text-anchor="middle">
+    <rect x="250" y="112" width="300" height="76" rx="38" fill="#111827" stroke="#7dd3fc" stroke-width="2.5"/>
+    <text x="400" y="159" fill="#eef3fb">Describe the outcome</text>
+
+    <rect x="830" y="112" width="440" height="64" rx="32" fill="#0f1522" stroke="#3b4760" stroke-width="2"/>
+    <text x="1050" y="153" font-size="23" font-weight="500" fill="#c3cee2"><tspan font-family="'Cascadia Mono', Consolas, monospace" font-weight="700" fill="#7dd3fc">F9</tspan>  inspect · steer · stop</text>
+
+    <rect x="1550" y="112" width="300" height="76" rx="38" fill="#111827" stroke="#a78bfa" stroke-width="2.5"/>
+    <text x="1700" y="159" fill="#eef3fb">Verified result</text>
+  </g>
+
+  <!-- workers -->
+  <g font-size="25">
+    <g>
+      <rect x="800" y="486" width="500" height="68" rx="14" fill="#111827" stroke="#2a3447" stroke-width="2"/>
+      <rect x="800" y="486" width="8" height="68" rx="4" fill="#7dd3fc"/>
+      <text x="836" y="529" font-weight="600" fill="#eef3fb">Code paths</text>
+      <text x="1276" y="529" font-size="21" fill="#7c89a3" text-anchor="end">scout</text>
+    </g>
+    <g>
+      <rect x="800" y="578" width="500" height="68" rx="14" fill="#111827" stroke="#2a3447" stroke-width="2"/>
+      <rect x="800" y="578" width="8" height="68" rx="4" fill="#93b8fb"/>
+      <text x="836" y="621" font-weight="600" fill="#eef3fb">Tests</text>
+      <text x="1276" y="621" font-size="21" fill="#7c89a3" text-anchor="end">scout</text>
+    </g>
+    <g>
+      <rect x="800" y="670" width="500" height="68" rx="14" fill="#111827" stroke="#2a3447" stroke-width="2"/>
+      <rect x="800" y="670" width="8" height="68" rx="4" fill="#a78bfa"/>
+      <text x="836" y="713" font-weight="600" fill="#eef3fb">API contract</text>
+      <text x="1276" y="713" font-size="21" fill="#7c89a3" text-anchor="end">reviewer</text>
+    </g>
+  </g>
+  <g font-size="21" fill="#7c89a3">
+    <text x="676" y="616" text-anchor="end">in parallel</text>
+    <text x="1426" y="616">reports return</text>
+    <text x="1426" y="644">on their own</text>
+  </g>
+</svg>

@@ -37,8 +37,8 @@ introduced a behavior. An `Unreleased` entry is not yet part of a published rele
   and the decision against an unproven result-cache optimization.
 - [Post-release architecture and supervision audit](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-11-12-post-release-audit.md)
   reviews the changes after `v1.17.6`, their concrete value, the defects corrected and the verified scope.
-- [`The pi-subagents comparison`](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-24-pi-subagents.md) records the bounded source
-  study and links its evidence and source notes.
+- [Runtime reproductions](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-24-runtime-reproductions.json)
+  preserve the original worktree-export and unanswered-decision failure evidence.
 - [`Current-host cleanup and final requalification`](https://github.com/AeonDave/pi-persona/blob/main/docs/reviews/2026-10-25-current-host-cleanup.md)
   records the 2026-10-25 snapshot and links the preceding implementation review for its distinct
   behavioral and live-run evidence. Historical reports do not qualify subsequent source changes.

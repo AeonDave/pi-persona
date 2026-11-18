@@ -2,7 +2,8 @@
 
 Three banner concepts. **A — Prism** was selected and copied unchanged to [`../banner.png`](../banner.png).
 The alternatives are retained for reference. B also supplied the visual style for the explanatory
-[workflow illustration](../workflow.png); its [edit prompt](../workflow.prompt.md) records that adaptation.
+first workflow illustration. The current [workflow diagram](../workflow.png) is drawn from
+[`workflow.svg`](../workflow.svg) in the banner's palette and rendered with `scripts/demo/svg.mjs`.
 
 Generated with the built-in image generation tool. These are branding illustrations, not product screenshots.
 

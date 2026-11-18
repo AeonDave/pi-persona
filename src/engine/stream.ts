@@ -10,6 +10,7 @@
  */
 
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
+import { WorkerChat, type WorkerChatSnapshot } from "../core/worker-chat.ts";
 
 export interface ChildUsage {
 	input: number;
@@ -30,6 +31,8 @@ export interface ToolEvent {
 }
 
 export interface StreamState {
+	/** Operator-only bounded conversation projection, owned by this engine attempt. */
+	chat: WorkerChat;
 	/** The last assistant text content seen (the agent's answer — the returned result). */
 	output: string;
 	/** The chronological live log shown in the f9 detail view: every completed message's
@@ -77,6 +80,7 @@ export function emptyUsage(): ChildUsage {
 
 export function createStreamState(): StreamState {
 	return {
+		chat: new WorkerChat(),
 		output: "",
 		transcript: "",
 		partial: "",
@@ -247,6 +251,7 @@ function appendTranscript(state: StreamState, chunk: string, sep: string): void 
  * deduplicated structured lifecycle transition when the runtime supplied a stable call id. */
 export function applyEvent(state: StreamState, event: unknown): ToolEvent | undefined {
 	if (!isObject(event)) return undefined;
+	state.chat.observe(event);
 
 	// Track the current tool so the UI can show "running: grep src/…" while a
 	// tool-heavy agent reads before it has written any text. The tool line also goes
@@ -347,6 +352,8 @@ export function applyEvent(state: StreamState, event: unknown): ToolEvent | unde
 
 /** A compact live progress view of a running agent (for peek / ProgressView). */
 export interface ProgressSnapshot {
+	/** Operator-only conversation view; never a source for model output or stall headway. */
+	chat?: WorkerChatSnapshot;
 	output: string;
 	turns: number;
 	tokens: number;
@@ -368,6 +375,8 @@ export function snapshot(state: StreamState, toolEvent?: ToolEvent): ProgressSna
 		usage: { ...state.usage },
 	};
 	if (state.activity !== undefined) snap.activity = state.activity;
+	const chat = state.chat.snapshot();
+	if (chat.blocks.length > 0 || chat.truncated) snap.chat = chat;
 	if (toolEvent !== undefined) snap.toolEvent = toolEvent;
 	return snap;
 }

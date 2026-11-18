@@ -1,9 +1,10 @@
 import { compactTokens } from "../core/format.ts";
-import { effortFullName, effortSigla } from "../core/leg-thinking.ts";
 import { formatDuration } from "../core/time.ts";
-import type { ThinkingLevel } from "../core/types.ts";
+import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
+import type { WorkerChatSnapshot } from "../core/worker-chat.ts";
 import type { ChildUsage } from "../engine/stream.ts";
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
+import { effortText } from "./model-effort.ts";
 import { compactInlineText } from "./presentation.ts";
 import { type RowSpan, rowText, type StyledRow } from "./styled-row.ts";
 import { formatUsage } from "./usage.ts";
@@ -29,12 +30,12 @@ export interface AgentNode {
 	/** Configured agent definition (operator/reviewer/…), if known. */
 	agent?: string;
 	model?: string;
-	/** Requested per-leg thinking effort, known at launch (the spec-level value the launch row
-	 *  carried). Rendered as the compact sigla right after the model; absent/off render nothing. */
+	/** Requested per-leg thinking effort, known at launch (what the launch card showed). Rendered
+	 *  by {@link effortTag} right after the model; absent renders nothing. */
 	thinking?: ThinkingLevel;
 	/** Observed effective Pi effort from the terminal result. Set ONLY from a real
 	 *  AgentResult.thinkingEffective (never invented); when it diverges from `thinking`, the row
-	 *  renders the honest `xh→h` form. */
+	 *  renders the honest `xhigh→high` form. */
 	thinkingEffective?: ThinkingLevel;
 	/** Latest cumulative usage snapshot, retained independently from the compact row detail. */
 	usage?: ChildUsage;
@@ -42,6 +43,8 @@ export interface AgentNode {
 	detail: string | undefined;
 	/** The agent's output buffer, shown when the user drills into the node. */
 	output?: string;
+	/** Bounded, immutable UI-only conversation; never a progress or control authority. */
+	chat?: WorkerChatSnapshot;
 	/** Clock data (ms since epoch). Set by the tree on add; `lastAdvanceAt` moves on real progress.
 	 *  Excluded from change notifications — the live clock paints them. */
 	startedAt?: number;
@@ -166,26 +169,20 @@ export interface RenderOptions {
 	alerts?: ReadonlyMap<string, readonly string[]>;
 }
 
-/** The frozen compact effort tag for a tree/overlay row: ` · xh` after the model, or ` · xh→h`
- *  when the terminal result reported a DIFFERENT observed effective level. `off`/absent render
- *  nothing — absence means off, and an observation is never invented: the divergence form shows
- *  only when both sides are known and genuinely differ (an observed `off` never leaves a dangling
- *  `→`). Pure. */
+/** The effort segment a row appends after a label that already carries the model: ` · medium`,
+ *  ` · xhigh→high` on divergence, nothing when unknown — {@link effortText}'s rule. Pure. */
 export function effortTag(requested: ThinkingLevel | undefined, effective?: ThinkingLevel): string {
-	const req = requested !== undefined ? effortSigla(requested) : "";
-	if (!req) return "";
-	const obs = effective !== undefined ? effortSigla(effective) : "";
-	return obs && obs !== req ? ` · ${req}→${obs}` : ` · ${req}`;
+	const text = effortText(requested, effective);
+	return text ? ` · ${text}` : "";
 }
 
-/** The F9 drill-in line for a leg's effort — FULL names, the drill-in has the room (the compact
- *  siglas live only on the rows): `thinking: requested xhigh → observed high`. Same honesty rules
- *  as {@link effortTag}; the line is omitted entirely when nothing was requested. Pure. */
+/** The F9 drill-in line naming both sides explicitly: `thinking: requested xhigh → observed high`.
+ *  Same honesty rules as {@link effortText}; omitted entirely when neither side is known. Pure. */
 export function thinkingDetailLine(requested: ThinkingLevel | undefined, effective?: ThinkingLevel): string {
-	const req = requested !== undefined ? effortFullName(requested) : "";
-	if (!req) return "";
-	const obs = effective !== undefined && effective !== requested ? effortFullName(effective) : "";
-	return obs ? `thinking: requested ${req} → observed ${obs}` : `thinking: requested ${req}`;
+	const req = isThinkingLevel(requested) ? requested : undefined;
+	const obs = isThinkingLevel(effective) && effective !== req ? effective : undefined;
+	if (req === undefined) return obs === undefined ? "" : `thinking: observed ${obs}`;
+	return obs === undefined ? `thinking: requested ${req}` : `thinking: requested ${req} → observed ${obs}`;
 }
 
 /** Whether `detail` is the literal "queued" marker a seeded-but-not-yet-live leg carries — shared
@@ -256,9 +253,10 @@ export function deriveWaitingNodeIds(nodes: readonly AgentNode[], isWaiting: (id
 
 /** Every snapshot advances the clock. Compact activity wins over usage while the detailed
  *  usage snapshot remains available independently. Aggregate-only progress stays a neutral count. */
-export function progressPatch(snap: { output?: string; activity?: string; tokens?: number; usage?: ChildUsage }, now: number): AgentNodePatch {
+export function progressPatch(snap: { output?: string; activity?: string; tokens?: number; usage?: ChildUsage; chat?: WorkerChatSnapshot }, now: number): AgentNodePatch {
 	const patch: AgentNodePatch = { lastAdvanceAt: now };
 	if (snap.output) patch.output = snap.output;
+	if (snap.chat !== undefined) patch.chat = snap.chat;
 	if (snap.usage !== undefined) patch.usage = { ...snap.usage };
 	if (snap.activity) patch.detail = snap.activity;
 	else if (snap.usage) patch.detail = formatUsage(snap.usage);
@@ -314,8 +312,8 @@ export function renderAgentTreeRows(nodes: AgentNode[], opts: RenderOptions = {}
 			const isLast = i === kids.length - 1;
 			const branch = isRoot ? "" : isLast ? "└─ " : "├─ ";
 			const base = safeInline(node.label) || safeInline(node.id) || "agent";
-			// The compact effort sigla rides AFTER the label clamp — the existing per-part clipping is
-			// untouched; the appended field is at most ` · xh→h` wide.
+			// The effort rides AFTER the label clamp — the existing per-part clipping is untouched;
+			// the appended field is at most ` · minimal→xhigh` wide.
 			const effort = effortTag(node.thinking, node.thinkingEffective);
 			const detailText = node.detail ? safeInline(node.detail) : "";
 			const waiting = opts.waitingForSupervisor?.has(node.id) ?? false;
@@ -378,13 +376,19 @@ function isWorkerNode(node: AgentNode, parents: ReadonlySet<string>): boolean {
 
 type DigestLine = { spans: StyledRow; compactSpans: StyledRow };
 
+/** A digest's representative reads like its own row would: the label, then its effort. */
+function digestRepresentative(node: AgentNode): RowSpan[] {
+	const identity = safeDigestInline(node.label) || safeDigestInline(node.agent ?? "") || safeDigestInline(node.id) || "worker";
+	const effort = effortTag(node.thinking, node.thinkingEffective);
+	return [{ text: `: ${identity}`, token: "text" }, ...(effort ? [{ text: effort, token: "muted" as const }] : [])];
+}
+
 function waitingDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, waitingForSupervisor: ReadonlySet<string> | undefined): DigestLine | undefined {
 	if (!waitingForSupervisor) return undefined;
 	const waiting = hidden.filter((node) => node.status === "running" && isWorkerNode(node, parents) && !isQueuedMarker(node.detail) && waitingForSupervisor.has(node.id));
 	if (waiting.length === 0) return undefined;
-	const representative = safeDigestInline(waiting[0]!.label) || safeDigestInline(waiting[0]!.id) || "worker";
 	const compact: RowSpan = { text: `? ${waiting.length} waiting for supervisor`, token: "warning", keep: true };
-	return { spans: [compact, { text: `: ${representative}`, token: "text" }], compactSpans: [compact] };
+	return { spans: [compact, ...digestRepresentative(waiting[0]!)], compactSpans: [compact] };
 }
 
 /** A hidden running worker past the stall window: its own digest, so truncation never turns a
@@ -397,9 +401,8 @@ function isHiddenStalledWorker(node: AgentNode, parents: ReadonlySet<string>, op
 function stalledDigestLine(hidden: readonly AgentNode[], parents: ReadonlySet<string>, opts: RenderOptions): DigestLine | undefined {
 	const stalled = hidden.filter((node) => isHiddenStalledWorker(node, parents, opts));
 	if (stalled.length === 0) return undefined;
-	const representative = safeDigestInline(stalled[0]!.label) || safeDigestInline(stalled[0]!.id) || "worker";
 	const compact: RowSpan = { text: `⚠ ${stalled.length} stalled`, token: "warning", keep: true };
-	return { spans: [compact, { text: `: ${representative}`, token: "text" }], compactSpans: [compact] };
+	return { spans: [compact, ...digestRepresentative(stalled[0]!)], compactSpans: [compact] };
 }
 
 /** Counts only hidden running workers and uses the first one in tree order as a stable representative. */
@@ -408,12 +411,11 @@ function activeWorkerDigestLine(hidden: readonly AgentNode[], parents: ReadonlyS
 		&& !isQueuedMarker(node.detail) && !opts.waitingForSupervisor?.has(node.id) && !isHiddenStalledWorker(node, parents, opts));
 	if (workers.length === 0) return undefined;
 	const representative = workers[0]!;
-	const identity = safeDigestInline(representative.label) || safeDigestInline(representative.agent ?? "") || safeDigestInline(representative.id) || "worker";
 	const detail = representative.detail ? safeDigestInline(representative.detail) : "";
 	const glyph: RowSpan = { text: nodeGlyph({ status: "running", kind: "subagent" }), token: "accent" };
 	const count: RowSpan = { text: ` ${workers.length} active worker${workers.length === 1 ? "" : "s"}`, token: "text" };
 	return {
-		spans: [glyph, count, { text: `: ${identity}`, token: "text" }, ...(detail ? [{ text: " · ", token: "dim" as const }, { text: detail, token: "muted" as const }] : [])],
+		spans: [glyph, count, ...digestRepresentative(representative), ...(detail ? [{ text: " · ", token: "dim" as const }, { text: detail, token: "muted" as const }] : [])],
 		compactSpans: [glyph, count],
 	};
 }
@@ -619,6 +621,7 @@ export interface AddNodeInput {
 	usage?: ChildUsage | undefined;
 	detail?: string;
 	output?: string;
+	chat?: WorkerChatSnapshot | undefined;
 	startedAt?: number;
 	lastAdvanceAt?: number;
 	dueAt?: number;
@@ -634,6 +637,7 @@ export interface AgentNodePatch {
 	usage?: ChildUsage | undefined;
 	detail?: string;
 	output?: string;
+	chat?: WorkerChatSnapshot | undefined;
 	startedAt?: number;
 	lastAdvanceAt?: number;
 	dueAt?: number;
@@ -664,6 +668,10 @@ function applyPatch(node: AgentNode, patch: AgentNodePatch): void {
 	}
 	if (patch.detail !== undefined) node.detail = patch.detail;
 	if (patch.output !== undefined) node.output = patch.output;
+	if (Object.hasOwn(patch, "chat")) {
+		if (patch.chat === undefined) delete node.chat;
+		else node.chat = patch.chat;
+	}
 	if (patch.startedAt !== undefined) node.startedAt = patch.startedAt;
 	if (patch.lastAdvanceAt !== undefined) node.lastAdvanceAt = patch.lastAdvanceAt;
 	if (patch.dueAt !== undefined) node.dueAt = patch.dueAt;
@@ -706,6 +714,7 @@ export class AgentTree {
 			...(input.thinkingEffective !== undefined ? { thinkingEffective: input.thinkingEffective } : {}),
 			...(input.usage !== undefined ? { usage: { ...input.usage } } : {}),
 			...(input.output !== undefined ? { output: input.output } : {}),
+			...(input.chat !== undefined ? { chat: input.chat } : {}),
 			...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
 		};
 		this.nodes.push(node);
@@ -744,8 +753,8 @@ export class AgentTree {
 		this.emit({ type: "removed", nodes: removed });
 	}
 
+	/** Explicit lifecycle reset: readers may retain a pruned node after the registry empties. */
 	clear(): void {
-		if (this.nodes.length === 0) return;
 		const removed = this.snapshot();
 		this.nodes = [];
 		this.emit({ type: "cleared", nodes: removed });

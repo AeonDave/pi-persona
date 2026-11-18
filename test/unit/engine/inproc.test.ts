@@ -207,8 +207,8 @@ test("inproc engine propagates each authoritative tool lifecycle event once with
 	assert.equal(JSON.stringify(events).includes("sensitive"), false, "tool output is not propagated");
 });
 
-test("inproc engine never forwards raw tool-output text through the progress seam", async () => {
-	const progress: Array<{ output: string }> = [];
+test("inproc engine keeps raw tool output in operator chat and out of model-facing output", async () => {
+	const progress: AgentProgress[] = [];
 	const engine = makeInProcessEngine({
 		resolveAgent,
 		contracts,
@@ -223,7 +223,8 @@ test("inproc engine never forwards raw tool-output text through the progress sea
 	const result = await engine.run({ agent: "a", task: "inspect" }, (snap) => progress.push(snap));
 	assert.equal(result.output, "answer");
 	assert.ok(progress.length > 0);
-	assert.equal(progress.some((snap) => snap.output.includes("secret tool output")), false, "tool contents never cross the progress seam");
+	assert.equal(progress.some((snap) => snap.output.includes("secret tool output")), false, "tool contents never become model-facing progress text");
+	assert.ok(progress.some((snap) => snap.chat?.blocks.some((block) => block.kind === "tool" && block.output === "secret tool output")));
 });
 
 test("inproc engine forwards copied directional usage in progress", async () => {
@@ -935,6 +936,7 @@ test("inproc engine closes a tool abandoned by an abort (the late end is lost wi
 	// time the engine has already run unsub()/dispose(). Without a synthetic close the
 	// consumer keeps that tool "running" forever. Mirrors the child engine's finish().
 	const events: unknown[] = [];
+	let terminalChat: AgentProgress["chat"];
 	const ac = new AbortController();
 	let markToolRunning!: () => void;
 	const toolRunning = new Promise<void>((resolve) => {
@@ -974,6 +976,7 @@ test("inproc engine closes a tool abandoned by an abort (the late end is lost wi
 	const pending = engine.run(
 		{ agent: "a", task: "t" },
 		(progress) => {
+			terminalChat = progress.chat;
 			if (progress.toolEvent) events.push(progress.toolEvent);
 		},
 		ac.signal,
@@ -988,6 +991,8 @@ test("inproc engine closes a tool abandoned by an abort (the late end is lost wi
 		{ phase: "end", callId: "call-1", name: "bash", failed: true },
 	]);
 	assert.equal(JSON.stringify(events).includes("sleep 300"), false, "the synthetic close carries no tool args");
+	const tool = terminalChat?.blocks.find((block) => block.kind === "tool");
+	assert.equal(tool?.kind === "tool" && tool.status, "failed", "the operator chat does not retain an abandoned tool as running");
 });
 
 test("a consumer that throws on the synthetic tool close still gets the full teardown", async () => {

@@ -365,7 +365,10 @@ export async function runChildAgent(
 				// exactly once, mirroring what applyEvent would have produced. Without it the consumer
 				// shows that tool "running" forever and its telemetry record is pinned by the replay
 				// seed. A child that ended normally has nothing open, so nothing is double-closed.
-				for (const [callId, name] of openToolCalls) emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
+				for (const [callId, name] of openToolCalls) {
+					state.chat.observe({ type: "tool_execution_end", toolCallId: callId, toolName: name, isError: true });
+					emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
+				}
 				openToolCalls.clear();
 				emitProgress(snapshot(state));
 				resolveP(code);

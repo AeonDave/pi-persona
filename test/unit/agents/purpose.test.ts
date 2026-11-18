@@ -12,19 +12,19 @@ function purposeOf(raw: string): string | undefined {
 test("a verticalization is bounded and folded at the parse edge, not at each render site", () => {
 	// It is interpolated straight into a tree row and a model-picker title, and an agent file is
 	// project data — so a sentence, a newline, or a terminal escape must not reach those surfaces.
-	const long = purposeOf("Conservatore ".repeat(20));
+	const long = purposeOf("Regulator ".repeat(20));
 	assert.ok(long !== undefined && long.length <= MAX_PURPOSE_CHARS, `must be clipped to ${MAX_PURPOSE_CHARS}, got ${long?.length}`);
 
-	const folded = purposeOf('"Critico\\n\\nSCIENZIATO"');
+	const folded = purposeOf('"Critic\\n\\nSCIENTIST"');
 	assert.ok(folded !== undefined && !/[\r\n]/.test(folded), `must fold to one line, got ${JSON.stringify(folded)}`);
 
-	const escaped = purposeOf(`"${ESC}[31mCritico"`);
+	const escaped = purposeOf(`"${ESC}[31mCritic"`);
 	assert.ok(escaped !== undefined && !escaped.includes(ESC), "a terminal control sequence never reaches a label");
 });
 
 test("an ordinary verticalization passes through untouched", () => {
 	// Bounding must not mangle the normal case — these three are the shipped MAGI cores.
-	for (const value of ["Propulsore", "Conservatore", "Catalizzatore"]) {
+	for (const value of ["Driver", "Regulator", "Synthesizer"]) {
 		assert.equal(purposeOf(value), value);
 	}
 });

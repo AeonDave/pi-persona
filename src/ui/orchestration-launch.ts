@@ -2,8 +2,10 @@
 import { resolveLegThinking } from "../core/leg-thinking.ts";
 import type { ThinkingLevel } from "../core/types.ts";
 import type { ModelParticipant, ModelSource } from "../persona/model-participants.ts";
+import { shortModel } from "../tools/delegate.ts";
 import { compactInlineText, sanitizeTerminalText } from "./presentation.ts";
 import { hiddenLaunchRequestHint, launchRequestLines, snapshotLaunchRequest, type LaunchRequest } from "./launch-request.ts";
+import { modelEffortText } from "./model-effort.ts";
 import type { KeybindingHints } from "@earendil-works/pi-coding-agent";
 
 export interface OrchestrationLaunchParticipant {
@@ -44,16 +46,19 @@ export function snapshotOrchestrationParticipants(
 	}), ...(opts.request ? { request: snapshotLaunchRequest(opts.request) } : {}) };
 }
 
-/** Three individually bounded rows collapsed; expansion retains every participant and full model ref. */
+/** The delegate launch grammar, one row per participant: `<member> · <model> · <effort>`. Collapsed
+ *  shows three bounded rows with the short model, and a model the operator has yet to pick reads
+ *  `model pending`; expansion keeps every participant, the full model ref and the pending
+ *  explanation. Unknown model or effort is omitted ({@link modelEffortText}). */
 export function orchestrationLaunchLines(snapshot: OrchestrationLaunchSnapshot | undefined, expanded: boolean, hints?: Pick<KeybindingHints, "keyHint">): string[] {
 	if (!snapshot) return ["Launch metadata unavailable"];
 	const rows = expanded ? snapshot.participants : snapshot.participants.slice(0, 3);
 	const lines = snapshot.unavailable ? ["Launch metadata unavailable"] : rows.map((p) => {
 		const clean = (value: string, maxChars: number): string => expanded ? sanitizeTerminalText(value) : compactInlineText(value, { maxChars });
 		const label = clean(`${p.phase ? `${p.phase} / ` : ""}${p.label}${p.param ? ` [${p.param}]` : ""}`, 48);
-		const model = p.model ? clean(p.model, 64) : "unknown";
-		const modelText = p.setupPending ? `model pending (current default ${model}; setup may change)` : `requested model ${model}`;
-		return `  ${label} · ${modelText} · requested effort ${p.thinkingRequested ?? "unknown"}`;
+		const model = p.model ? clean(expanded ? p.model : shortModel(p.model), 64) : "";
+		const modelText = !p.setupPending ? model : expanded && model ? `model pending (current default ${model}; setup may change)` : "model pending";
+		return `  ${[label, modelEffortText(modelText, p.thinkingRequested)].filter(Boolean).join(" · ")}`;
 	});
 	if (!expanded && snapshot.participants.length > rows.length) lines.push(`  +${snapshot.participants.length - rows.length} more · expand for launch details`);
 	if (snapshot.request) {

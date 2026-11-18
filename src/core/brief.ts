@@ -237,13 +237,25 @@ export function buildDelegationBrief(input: BriefInput): string | undefined {
 	}
 	if (input.outputContract?.trim()) callFields.push(`outputContract: ${JSON.stringify(input.outputContract.trim())}`);
 	const discipline: string[] = [];
-	if (input.requireBrief) discipline.push("A complete brief is required for every worker, including read-only scouts. For parallel calls, put the same six fields in every tasks[].brief; the top-level brief is single-mode only. Task prose does not replace the structured brief.");
-	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. Read-only scout (or tools limited to read/grep/find/ls/code_outline) may fan out without writeSet.");
+	if (input.requireBrief) discipline.push("Required briefs also apply to read-only scouts. Put the six fields shown above in every tasks[].brief; task prose does not replace the structured brief.");
+	if (input.requireDisjointWrites) discipline.push("Parallel writers must declare non-empty, disjoint `writeSet` values; overlapping ownership is rejected before any child starts. With MCP off, only recognized read-only tools (read/grep/find/ls/code_outline) or no tools exempt a worker. Task labels and promises do not change the tool grant: session-default tools, shell, MCP, unknown or overridden tools may write. Do not invent a writeSet or restrict required tools just to pass this gate; bound actual ownership or serialize with concurrency: 1.");
 	if (input.requireFreshVerification) discipline.push("After a material mutation, start a fresh verifier sequentially against the resulting state; a verifier launched before or during the mutation cannot approve completion.");
 	const handoffShape = `Hand-off shape: delegate({ ${callFields.join(", ")} }).${discipline.length > 0 ? ` ${discipline.join(" ")}` : ""}`;
+	if (input.standing) {
+		// Current policy belongs beside the call shapes, before model-choice guidance. Tool schemas
+		// stay stable across persona changes; this is the live, per-turn policy projection.
+		const briefFields = input.requireBrief ? " + a complete brief" : " + an optional brief";
+		const ownershipDecision = input.requireDisjointWrites
+			? " Ownership decision: for multiple workers with session-default, shell, MCP or unknown tool grants and no known disjoint writable paths, set concurrency: 1 even for read-only investigations. Preserve the tools the task requires."
+			: "";
+		lines.push("Active delegation call policy: Single: agent + task" + briefFields +
+			". Batch: tasks[], every entry carries its own agent + task" + briefFields +
+			"; top-level single-mode fields are not shared. Resume: resume + task + an optional brief override; only resume, task and brief are accepted, configuration stays pinned. Use the latest successful saved run id; a live, failed or cancelled worker cannot be resumed." + ownershipDecision);
+		lines.push(handoffShape);
+	}
 	lines.push(
 		input.standing
-			? `You are the supervisor: you own the objective, plan, major choices and final synthesis. Workers execute well-bounded work — reads, writes, code, checks, independent sweeps — and return evidence; they do not own major choices. Default to an early hand-off for bounded, multi-step or parallel work; keep the task in view while workers execute. Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${modelSizing} ${handoffShape}`
+			? `You are the supervisor: you own the objective, plan, major choices and final synthesis. Workers execute well-bounded work — reads, writes, code, checks, independent sweeps — and return evidence; they do not own major choices. Default to an early hand-off for bounded, multi-step or parallel work; keep the task in view while workers execute. Fan independent legs out in one \`delegate\` call (${delivery}).${methods}${flowHint} ${inline} Name each leg yourself. ${inventedLegNameHint()} ${modelSizing}`
 			: `Reach for \`delegate\` when a task has independent or heavy parts (${delivery}) — e.g. delegate({ agent: "${example}", task: "<self-contained brief>" }).${softModelSizing}`,
 	);
 	return lines.join("\n");

@@ -10,6 +10,7 @@ import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../
 import { toolUsageField } from "../ui/usage.ts";
 import { sumUsage } from "../orchestration/reducers.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { orchestrationLaunchLines, withOrchestrationRequest, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
 import type { AgentResult, FailureKind } from "../orchestration/types.ts";
@@ -137,8 +138,8 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 				return { content: [{ type: "text", text: `flow failed: ${message}` }], details: failureDetails({ ok: false, error: message, ...(launch ? { launch } : {}) }), isError: true };
 			}
 		},
-		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(args.name ?? "?", { maxChars: 96 }) || "?")}`, 0, 0);
+		renderCall(args, theme, context) {
+			return renderPendingCall("flow", theme, context) ?? new Text(`${theme.fg("toolTitle", theme.bold("flow "))}${theme.fg("accent", compactInlineText(args.name ?? "?", { maxChars: 96 }) || "?")}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as {

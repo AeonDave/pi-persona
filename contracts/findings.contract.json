@@ -1,0 +1,18 @@
+{
+	"name": "findings",
+	"fields": {
+		"result": { "type": "string", "required": true },
+		"findings": {
+			"type": "array", "required": true, "maxItems": 50,
+			"items": {
+				"type": "object",
+				"fields": {
+					"file": { "type": "string", "required": true, "minLength": 1 },
+					"line": { "type": "integer", "required": true, "min": 1 },
+					"severity": { "type": "enum", "required": true, "values": ["low", "medium", "high", "critical"] },
+					"evidence": { "type": "string", "required": true, "minLength": 12 }
+				}
+			}
+		}
+	}
+}

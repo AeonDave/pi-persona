@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
+import type { WorktreeVerificationResult } from "../../../src/core/worktree-verification.ts";
 import {
 	TERMINAL_RESULT_ENTRY, RESULT_MAX_ENTRIES, RESULT_MAX_PAYLOAD_BYTES, RESULT_MAX_RECORD_BYTES,
 	type TerminalResultInput, type SaveOutcome,
@@ -34,6 +35,30 @@ function saved(outcome: SaveOutcome) {
 function custom(data: unknown): unknown {
 	return { type: "custom", customType: TERMINAL_RESULT_ENTRY, data };
 }
+
+test("runtime verification evidence survives reopen and participates in immutable payload identity", () => {
+	const h = host();
+	const verification: WorktreeVerificationResult = { command: "npm test", cwd: "/isolated/worktree", status: "failed", exitCode: 2, output: "1 failed", outputTruncated: false, durationMs: 20 };
+	const source = { ...input("verified", "x".repeat(300000)), verification } as TerminalResultInput;
+	const first = saved(h.archive.save(source));
+	assert.equal(first.summary.truncated, true);
+	const summary = { status: "failed", exitCode: 2, durationMs: 20, outputTruncated: false };
+	assert.deepEqual(first.summary.verification, summary);
+	const reordered = { durationMs: 20, outputTruncated: false, output: "1 failed", exitCode: 2, status: "failed", cwd: "/isolated/worktree", command: "npm test" };
+	assert.equal(saved(h.archive.save({ ...source, verification: reordered } as TerminalResultInput)).idempotent, true);
+	const changed = h.archive.save({ ...source, verification: { ...verification, output: "another failure" } } as TerminalResultInput);
+	assert.ok(!changed.ok && changed.reason === "conflict");
+	const reopened = new TerminalResultArchive({ ...h.deps, append: () => assert.fail("read does not append") });
+	const page = reopened.read({ ref: first.ref });
+	assert.ok(page.ok);
+	if (!page.ok) return;
+	assert.deepEqual(page.summary.verification, summary);
+	page.summary.verification!.status = "passed";
+	const list = reopened.list();
+	assert.ok(list.ok);
+	if (list.ok) assert.deepEqual(list.results[0]?.verification, summary);
+	assert.equal(h.writes.length, 1);
+});
 
 test("three large readonly reports survive reopen, paged without writes or input mutation", () => {
 	const h = host();

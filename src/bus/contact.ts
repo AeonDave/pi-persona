@@ -1,7 +1,7 @@
 /**
  * `contact_supervisor` — the CHILD-side tool of the communication plane. A sub-agent
- * calls it to reach its supervisor while it runs (guardrails §4.9, the comtac
- * `contact_supervisor` semantic). Injected into an in-process child session as a
+ * calls it to reach its supervisor while it runs (guardrails §4.9).
+ * Injected into an in-process child session as a
  * `customTool` by the engine, bound to the shared {@link InProcessBus} + the child's
  * handle.
  *

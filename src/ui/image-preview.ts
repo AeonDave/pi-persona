@@ -1,9 +1,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { getCapabilities, Image, type Component } from "@earendil-works/pi-tui";
+import { getCapabilities, getCellDimensions, Image, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import {
 	IMAGE_MAX_AXIS, IMAGE_MAX_FILE_BYTES, IMAGE_MAX_PIXELS, IMAGE_MAX_PNG_BASE64,
 	IMAGE_NATIVE_HEIGHT, IMAGE_NATIVE_WIDTH, IMAGE_THUMBNAIL_AXIS,
-	renderImageCells, useNativeImagePreview, type ImagePreviewData, type ImagePreviewMode, type PreviewColor,
+	nativeImageColumns, renderImageCells, useNativeImagePreview, type ImagePreviewData, type ImagePreviewMode, type PreviewColor,
 } from "../core/image-preview.ts";
 export interface ImagePreviewContext { theme: Theme; showImages: boolean; expanded: boolean; mode: ImagePreviewMode }
 
@@ -41,6 +41,8 @@ export function createImagePreview(data: ImagePreviewData, context: ImagePreview
 		{ maxWidthCells: 60, maxHeightCells: maxHeight }, { widthPx: data.width, heightPx: data.height });
 	const pixels = Uint8Array.from(Buffer.from(data.thumbnail.rgbaBase64, "base64"));
 	let previousProtocol: ReturnType<typeof getCapabilities>["images"] | undefined;
+	let previousCellWidth: number | undefined;
+	let previousCellHeight: number | undefined;
 	return {
 		invalidate() { native.invalidate(); },
 		render(width) {
@@ -52,11 +54,23 @@ export function createImagePreview(data: ImagePreviewData, context: ImagePreview
 			const locale = (process.env.LC_ALL ?? process.env.LC_CTYPE ?? process.env.LANG ?? "").toLowerCase();
 			const noColor = process.env.NO_COLOR !== undefined || term === "dumb";
 			const unicode = !noColor && (!locale || /utf-?8/.test(locale)) && context.mode !== "ascii";
-			if (context.mode === "auto" && unicode && useNativeImagePreview(caps.images, process.env.TERM_PROGRAM, process.env.PI_IMAGE_PROTOCOL)) return native.render(width);
+			if (context.mode === "auto" && unicode && useNativeImagePreview(caps.images, process.env.TERM_PROGRAM, process.env.PI_IMAGE_PROTOCOL)) {
+				const cells = getCellDimensions();
+				if (cells.widthPx !== previousCellWidth || cells.heightPx !== previousCellHeight) {
+					native.invalidate(); previousCellWidth = cells.widthPx; previousCellHeight = cells.heightPx;
+				}
+				// Use the host's own reservation geometry, including Kitty's cell aspect adjustment.
+				const columns = nativeImageColumns(data, Math.max(1, Math.min(width - 2, 60)), maxHeight, cells, caps.images === "kitty");
+				const padding = " ".repeat(Math.max(0, Math.floor((width - columns) / 2)));
+				return native.render(width).map(line => line ? padding + line : line);
+			}
 			let color: PreviewColor = "none";
 			if (unicode) color = caps.trueColor ? "truecolor" : term.includes("256color") ? "256" : "16";
-			return renderImageCells({ width: data.thumbnail.width, height: data.thumbnail.height, data: pixels },
-				{ width: Math.min(width, 60), height: maxHeight, color, unicode, background: [0, 0, 0] });
+			const rows = renderImageCells({ width: data.thumbnail.width, height: data.thumbnail.height, data: pixels },
+				{ width: Math.min(width, 60), height: maxHeight, color, unicode, background: context.theme.appearance === "light" ? [255, 255, 255] : [0, 0, 0] });
+			const columns = rows.reduce((maximum, line) => Math.max(maximum, visibleWidth(line)), 0);
+			const padding = " ".repeat(Math.max(0, Math.floor((width - columns) / 2)));
+			return rows.map(line => padding + line);
 		},
 	};
 }

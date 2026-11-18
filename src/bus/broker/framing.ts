@@ -1,5 +1,5 @@
 /**
- * Length-prefixed JSON framing (ported from pi-subagents-comtac): a 4-byte big-endian
+ * Length-prefixed JSON framing: a 4-byte big-endian
  * length header + a UTF-8 JSON payload. A reader accumulates chunks, emits complete frames
  * greedily, caps a single frame at 16 MiB (DoS guard), and POISONS itself on the first
  * error (oversize / bad JSON) — the caller destroys the socket. Pure, identical on all OSes.

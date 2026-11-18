@@ -59,6 +59,37 @@ test("a verifiably stale lock remains visible as resumable without a listing mut
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("failed post-lock continuation validation releases its lease without deleting the saved transcript", () => {
+	const dir = mkdtempSync(join(tmpdir(), "persona-conversation-admission-error-"));
+	try {
+		const entries: unknown[] = [];
+		let failAfterLock = false;
+		let file: string;
+		const store = new ConversationStore({ sessionId: "owner", sessionFile: join(dir, "parent"),
+			entries: () => {
+				if (failAfterLock && existsSync(file.replace(/\.jsonl$/, ".lock"))) throw new Error("history temporarily unavailable");
+				return entries;
+			},
+			append: (customType, data) => { entries.push({ type: "custom", customType, data }); } });
+		const created = store.create();
+		assert.ok(created.ok);
+		file = created.value.file;
+		writeFileSync(file, "saved transcript");
+		assert.ok(created.value.commit({ rootRunId: "run-1", runId: "run-1", cwd: dir, persona: null,
+			fingerprint: "a".repeat(64), spec: { agent: "scout", task: "inspect" }, model: "provider/model" }).ok);
+		created.value.release();
+		failAfterLock = true;
+		const rejected = store.acquire("run-1");
+		assert.equal(rejected.ok, false);
+		assert.equal(existsSync(file.replace(/\.jsonl$/, ".lock")), false, "no writer was admitted, so the failed admission must release its lease");
+		assert.equal(existsSync(file), true, "saved transcripts remain available for another admission");
+		failAfterLock = false;
+		const resumed = store.acquire("run-1");
+		assert.ok(resumed.ok);
+		resumed.value.lease.release();
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("sessionless storage and invalid model metadata fail closed", () => {
 	const store = new ConversationStore({ sessionId: "s", sessionFile: undefined, entries: () => [], append: () => {} });
 	assert.equal(store.create().ok, false);

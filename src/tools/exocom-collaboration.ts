@@ -4,6 +4,7 @@ import { type Static } from "typebox";
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 
 import { attributePeer } from "../core/fence.ts";
 import { collaborationOfferStatus, collaborationStatus } from "../exocom/collaboration.ts";
@@ -209,7 +210,9 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 				...dispatchDetails(sent.peerWakeDeferred === true),
 			});
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom task", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom task "))}${theme.fg("accent", normalizeMetadataText(args.action, 24, "task"))}${args.work_key ? ` ${normalizeMetadataText(args.work_key, 80, "work")}` : ""}`, 0, 0);
 		},
 		renderResult(res, options, theme, context) {
@@ -251,7 +254,9 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 				expires_at, ...(to_session === undefined ? {} : { to_session }), ...dispatchDetails(sent.peerWakeDeferred === true),
 			});
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom offer", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom offer "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -300,7 +305,9 @@ export function registerExocomCollaborationTools(pi: ExtensionAPI, deps: ExocomC
 				action: "publish", work_key: params.work_key, task_id: params.task_id, msg_id: sent.msg_id, ...dispatchDetails(sent.peerWakeDeferred === true),
 			});
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom evidence", theme, context);
+			if (pending) return pending;
 			const label = args.action === "read" ? normalizeMetadataText(args.msg_id ?? args.work_key, 80, "evidence") : normalizeMetadataText(args.work_key, 80, "work");
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom evidence "))}${theme.fg("accent", label)}`, 0, 0);
 		},

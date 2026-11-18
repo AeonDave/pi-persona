@@ -19,6 +19,7 @@ import { type Static, Type } from "typebox";
 
 import { type ExtensionAPI, type KeybindingHints } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 
 import { fencePeer } from "../core/fence.ts";
@@ -29,6 +30,8 @@ import { normalizeExocomProfile, type ExocomProfile } from "../exocom/profile.ts
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 import type { ExocomScope } from "../exocom/scope.ts";
 import { compactInlineText } from "../ui/presentation.ts";
+import { modelEffortText } from "../ui/model-effort.ts";
+import { isThinkingLevel } from "../core/types.ts";
 
 const COLLAPSED_PEER_LIMIT = 8;
 /** Model-facing presence is a sample, not a dump. Keep the count and a refresh action below. */
@@ -82,7 +85,7 @@ type ExocomSendDetails =
 		omittedFailures: number;
 	};
 
-type ExocomPeerSummary = Pick<DisplayPeer, "displayName" | "persona" | "model" | "context_pct" | "target"> & {
+type ExocomPeerSummary = Pick<DisplayPeer, "displayName" | "persona" | "model" | "thinking" | "context_pct" | "target"> & {
 	workspace_id?: string;
 	workspace_code?: string;
 	workspace_label?: string;
@@ -113,12 +116,12 @@ function peerRows(peer: ExocomPeerSummary, expanded: boolean): string[] {
 		const name = compactInlineText(peer.displayName, { maxChars: 48 }) || "peer";
 		const persona = compactInlineText(peer.persona, { maxChars: 32 }) || "unknown";
 		const model = compactInlineText(peer.model, { maxChars: 88 }) || "unknown";
-		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${model}`, profileLine, ...(workspace ? [workspace] : [])];
+		return [`- ${name} · ${persona} · ctx ${context}`, `  model: ${modelEffortText(model, peer.thinking)}`, profileLine, ...(workspace ? [workspace] : [])];
 	}
 	const name = compactInlineText(peer.displayName, { maxChars: 24 }) || "peer";
 	const persona = compactInlineText(peer.persona, { maxChars: 18 }) || "unknown";
 	const model = compactInlineText(peer.model, { maxChars: 36 }) || "unknown";
-	return [`- ${name} · ${persona} · ${model} · ctx ${context}`, profileLine, ...(workspace ? [workspace] : [])];
+	return [`- ${name} · ${persona} · ${modelEffortText(model, peer.thinking)} · ctx ${context}`, profileLine, ...(workspace ? [workspace] : [])];
 }
 
 /** The model-facing row carries the ROUTE as well as the human label: a display name is
@@ -143,6 +146,7 @@ function summarizePeer(peer: DisplayPeer, scope: ExocomScope | undefined): Exoco
 			target: normalizeMetadataText(peer.target, 80, "peer"),
 			persona: normalizeMetadataText(peer.persona, 64, "unknown"),
 			model: normalizeMetadataText(peer.model, 160, "unknown"),
+			...(isThinkingLevel(peer.thinking) ? { thinking: peer.thinking } : {}),
 			context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
 			...(profile ? { profile } : {}),
 		};
@@ -158,6 +162,7 @@ function summarizePeer(peer: DisplayPeer, scope: ExocomScope | undefined): Exoco
 		target: normalizeMetadataText(peer.target, 80, "peer"),
 		persona: normalizeMetadataText(peer.persona, 64, "unknown"),
 		model: normalizeMetadataText(peer.model, 160, "unknown"),
+		...(isThinkingLevel(peer.thinking) ? { thinking: peer.thinking } : {}),
 		context_pct: Math.max(0, Math.min(100, Number(peer.context_pct) || 0)),
 		workspace_id: workspaceId,
 		...(workspaceCode ? { workspace_code: workspaceCode } : {}),
@@ -308,7 +313,9 @@ export function registerExocomTools(
 				},
 			};
 		},
-		renderCall(_args, theme) {
+		renderCall(_args, theme, context) {
+			const pending = renderPendingCall("exocom list", theme, context);
+			if (pending) return pending;
 			return new Text(theme.fg("toolTitle", theme.bold("exocom list")), 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
@@ -457,7 +464,9 @@ export function registerExocomTools(
 				details: { msg_id, target: params.target },
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom send", theme, context);
+			if (pending) return pending;
 			const target = normalizeMetadataText(args.target, 80, "*");
 			const message = String(args.message ?? "").replace(/\s+/g, " ").trim();
 			const preview = normalizeMetadataText(message, 60);
@@ -487,7 +496,9 @@ export function registerExocomTools(
 			const applied = normalizePeerName(onRename(normalizePeerName(params.name)));
 			return { content: [{ type: "text", text: `exocom: you are now "${applied}"` }], details: { name: applied } };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom name", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom name "))}${theme.fg("accent", normalizeMetadataText(args.name, 96, "peer"))}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {

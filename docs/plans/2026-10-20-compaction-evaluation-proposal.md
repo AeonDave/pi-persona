@@ -114,33 +114,17 @@ improvements from a timing change alone.
   cancellations and paired start/end events, no provider/network calls and no saved summary.
   The installed SDK remains unmodified. Neither result unlocks the feature.
 
-## Research basis and limits
+## Evaluation requirements and limits
 
-- The [Pi context-window proposal](https://www.reddit.com/r/PiCodingAgent/comments/1x776vc/i_built_a_pi_extension_so_my_agent_doesnt_fall/)
-  measures context and asks the agent to write a handoff. It does not compact or create the handoff;
-  its author reports no measurable benchmark.
-- The proposal's [current source](https://github.com/utpalsinghdev/pi-extensions/tree/main/packages/pi-context-window)
-  supports percentage or fixed-token thresholds, but is not an automatic compaction scheduler.
-- [Anthropic's context-engineering guidance](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
-  supports recall-first tuning on complex traces before reducing information.
-- [Chroma's context-rot experiments](https://www.trychroma.com/research/context-rot) show model- and
-  input-dependent degradation; they do not establish a universal cutoff for current coding agents.
-- [Factory's evaluation](https://factory.com/news/evaluating-compression) suggests recall, artifact,
-  decision and continuation probes. Its vendor results do not qualify this design.
-- [OpenAI cache guidance](https://developers.openai.com/cookbook/examples/prompt_caching_201)
-  motivates measuring the complete resumed-task cost instead of assuming a handoff is cheaper.
-- [AutoCompact](https://arxiv.org/abs/2610.02163) studies a trained policy, not a drop-in prompt.
-  Only its abstract was reviewed; its reported gains do not predict this plugin's results.
+Qualification must measure recall of decisions and artifacts, continuation quality and the complete
+resumed-task cost. A smaller summary or earlier trigger does not by itself demonstrate a better
+outcome. Context thresholds need evidence from the supported models and representative coding
+traces; no universal cutoff is assumed.
 
-A second [successor-session proposal](https://www.reddit.com/r/PiCodingAgent/comments/1wqatix/killed_context_anxiety_with_automatic_session/)
-describes a configurable token ladder, stronger wrap-up prompts and eventual handoff to a fresh
-session. It links no implementation or comparative benchmark. A new session tears down runtime
-resources; preserving cwd, model and thinking alone would not settle workers, asks, results,
-timers, monitors, Exocom obligations, permissions or partial-cutover recovery. Do not treat a
-published threshold as a default or add automatic session rollover under this proposal.
-
-Changing what is retained may be worth evaluating. Earlier timing, smaller summaries and better task
-performance are separate outcomes and must be measured separately.
+A new session tears down runtime resources. Preserving cwd, model and thinking alone would not
+settle workers, asks, results, timers, monitors, Exocom obligations, permissions or partial-cutover
+recovery. Automatic session rollover remains outside this proposal. Changes to retained content,
+timing and task performance require separate measurements against native Pi behavior.
 
 ## Runtime boundary
 

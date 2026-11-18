@@ -9,6 +9,7 @@ import type { ModelsRefreshResult } from "@earendil-works/pi-ai";
 import type { ModelParticipant } from "../persona/model-participants.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 import { ModelPicker, orderModelRefs, type ModelPickerMetadata } from "../ui/model-picker.ts";
+import { windowOverlayOptions } from "../ui/window-chrome.ts";
 
 export interface PersonaModelOwner {
 	name: string;
@@ -182,15 +183,20 @@ export async function openPersonaModelSettings(ctx: ExtensionContext, deps: Pers
 			{ maxChars: 180 },
 		);
 		let modelChoice: string | undefined;
+		let pickerRows = (): number => 24;
 		try {
+			// The same overlay window as the council-setup picker: one component, one geometry.
 			modelChoice = ctx.mode === "tui"
 				? await ctx.ui.custom<string | undefined>(
-						(tui, theme, keybindings, done) => new ModelPicker(tui, theme, modelTitle, modelRefs, ctx.model?.provider, done, {
-							models,
-							...(current.currentRef !== undefined ? { currentRef: current.currentRef } : {}),
-							...(keybindings ? { keybindings } : {}),
-						}),
-						{ overlay: false },
+						(tui, theme, keybindings, done) => {
+							pickerRows = () => tui.terminal.rows;
+							return new ModelPicker(tui, theme, modelTitle, modelRefs, ctx.model?.provider, done, {
+								models,
+								...(current.currentRef !== undefined ? { currentRef: current.currentRef } : {}),
+								...(keybindings ? { keybindings } : {}),
+							});
+						},
+						{ overlay: true, overlayOptions: () => windowOverlayOptions(pickerRows()) },
 					)
 				: await select(ctx, modelTitle, modelRefs);
 		} catch {

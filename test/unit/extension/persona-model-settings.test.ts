@@ -5,6 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { openPersonaModelSettings, type PersonaModelSettingsDeps } from "../../../src/extension/persona-model-settings.ts";
 import type { ModelParticipant } from "../../../src/persona/model-participants.ts";
 import { ModelPicker } from "../../../src/ui/model-picker.ts";
+import { windowOverlayOptions } from "../../../src/ui/window-chrome.ts";
 
 interface SelectRequest {
 	title: string;
@@ -24,7 +25,7 @@ interface MockOptions {
 function context(options: MockOptions = {}) {
 	const requests: SelectRequest[] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
-	const customOptions: Array<{ overlay?: boolean }> = [];
+	const customOptions: Array<{ overlay?: boolean; geometry?: unknown }> = [];
 	let availableReads = 0;
 	let refreshCalls = 0;
 	const ctx = {
@@ -48,8 +49,9 @@ function context(options: MockOptions = {}) {
 				requests.push(request);
 				return options.select?.(request);
 			},
-			custom: async (factory: unknown, pickerOptions: { overlay?: boolean }) => {
-				customOptions.push(pickerOptions);
+			custom: async (factory: unknown, pickerOptions: { overlay?: boolean; overlayOptions?: unknown }) => {
+				const geometry = typeof pickerOptions.overlayOptions === "function" ? pickerOptions.overlayOptions() : pickerOptions.overlayOptions;
+				customOptions.push({ ...pickerOptions, geometry });
 				let choice = options.customPick;
 				if (options.mode === "tui") {
 					const render = factory as (tui: unknown, theme: unknown, keybindings: unknown, done: (value: string | undefined) => void) => unknown;
@@ -245,7 +247,7 @@ test("pending reset does not display the removed model as effective", async () =
 	assert.deepEqual(d.writes, [{ owner: "active", patch: { [roleKey]: null } }]);
 });
 
-test("opening performs no catalog refresh; TUI model choices use ModelPicker without an overlay", async () => {
+test("opening performs no catalog refresh; TUI model choices use ModelPicker in the shared overlay window", async () => {
 	const ui = context({ mode: "tui", customPick: "provider/model", select: chooseByTitle({
 		"Persona model owner": ({ options }) => options[0],
 		"Council profile": ({ options }) => options[0],
@@ -259,7 +261,8 @@ test("opening performs no catalog refresh; TUI model choices use ModelPicker wit
 	assert.equal(ui.refreshCalls, 0, "provider discovery is never triggered implicitly");
 	assert.equal(ui.availableReads, 1, "available local catalog is read only when the model action is chosen");
 	assert.equal(ui.customOptions.length, 1);
-	assert.equal(ui.customOptions[0]?.overlay, false);
+	assert.equal(ui.customOptions[0]?.overlay, true, "the picker is the same overlay window as the council-setup picker");
+	assert.deepEqual(ui.customOptions[0]?.geometry, windowOverlayOptions(24), "with the shared window geometry");
 	assert.deepEqual(d.writes[0]?.patch, { "reviewer#0123456789abcdef0123456789abcdef": "provider/model" });
 });
 

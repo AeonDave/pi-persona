@@ -127,6 +127,22 @@ export function sanitizeTerminalText(text: string): string {
 		.replace(TERMINAL_CONTROLS, "");
 }
 
+/** Literal previews keep indentation and fit actual terminal rows, even below 16 columns.
+ * No wrapping: expansion retains the complete text and the caller exposes hidden content. */
+export function compactLiteralText(input: string, maxLines: number, maxColumns: number): { text: string; truncated: boolean } {
+	const width = Math.max(1, Math.floor(maxColumns));
+	const source = sanitizeTerminalText(input).split("\n")
+		.filter((line) => line.trim().length > 0 && !PRESENTATION_WRAPPERS.has(line.trim()));
+	const visible = source.slice(0, Math.max(1, Math.floor(maxLines)));
+	let truncated = visible.length < source.length;
+	const lines = visible.map((line) => {
+		if (visibleWidth(line) <= width) return line;
+		truncated = true;
+		return `${sliceByColumn(line, 0, width - 1, true)}…`;
+	});
+	return { text: lines.join("\n"), truncated };
+}
+
 /**
  * Produce a small, semantic preview for a collapsed Pi card. Boilerplate fence
  * headings are omitted, while quoted payload lines remain visibly quoted.

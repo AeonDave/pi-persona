@@ -93,11 +93,12 @@ These are the guardrails a contributor must not violate. They are enforced in co
   rides alongside `PI_PERSONA_DISABLE` — a **dedicated** worker-leg marker, distinct from the
   user-settable `PI_PERSONA_DISABLE` kill switch, that a companion extension (e.g. pi-persona-mind)
   reads to tell a real delegated leg from a disabled supervisor. Never claim isolation from
-  `fs`/`net`/`process`. The param schema and other convenience checks stay **lenient** (warn, never
-  hard-fail) for the same reason.
+  `fs`/`net`/`process`. This trust boundary does not relax tool-input validation or runtime capabilities.
 - **I3 — Per-run pinning.** A run pins `contract@hash` at start; hot-reload affects **new runs only**;
   an active run never changes schema/logic mid-flight. `makeEngine`/`makeInProcessEngine` pin the
-  contract on first use and reuse the frozen snapshot for the whole run.
+  contract on first use and reuse the frozen snapshot for the whole run. The same bounded schema
+  validator admits files and programmatic definitions; nested object/array fields and enum lists
+  are copied and frozen recursively. Both backends share value validation and path diagnostics.
 - **I4 — Capabilities enforced at call time, never prompt-only.** Every tool call, delegate, and bus
   action passes one `EffectiveCapabilities` (`core/capabilities.ts`: `tools`, `delegateTargets`,
   `canUseBus`), resolved once on persona activation (deny-wins; `allow` present ⇒ allowlist; absent ⇒
@@ -247,7 +248,7 @@ and control contracts; merging them into a universal task engine would hide thos
   Startup checks the disposed state after each asynchronous handoff before opening telemetry;
   late authentication or Exocom reconciliation cannot acquire resources after Persona teardown.
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
-  tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `wake-rows.ts` (the monitor/timer → tree-row projection), `presentation.ts` (the shared
+  tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `inspector-frame.ts` + `window-chrome.ts` (the one window frame and its title/rule/field/legend conventions), `wake-rows.ts` (the monitor/timer → tree-row projection), `presentation.ts` (the shared
   card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
   (token/usage formatting, `ChildUsageLedger` / `toToolUsage` — sub-agent spend is
   attached as Pi `toolResult.usage` so the footer and pi-theme-1337's frame count it;
@@ -350,6 +351,23 @@ a warning that it was worker-provided and not verified against the worktree stat
 authorize deleting the unexported work. `compete` reports recovery locations even for candidates
 that do not win, outside the blind ballot. There is no automatic merge, retry or recovery cleanup.
 Ignored outputs and net-zero commit history remain outside the final-state artifact contract.
+
+An explicit `AgentRunSpec.verification` adds a command gate before export. The run snapshots its
+validated command/deadline before any asynchronous work. `engine/worktree-verification.ts` uses
+the existing monitor process adapter and Pi shell configuration, with no separate scheduler or
+archive. It pins the registered worktree directory identity before worker execution, checks it
+again before/after the command, and rechecks supervisor and effective worker `bash` grants before
+starting. Worker default tools are captured before its edits. No command runs on a failed or
+non-quiescent worker. Foreground shell exit is the observed boundary; detached background work
+is outside the supported verification contract.
+
+`AgentResult.verification` and terminal-result metadata carry the runtime observation independently
+of worker prose and body truncation. Command output is bounded untrusted data. A failed check is
+terminal, never a provider-retry trigger: clean nonzero completion permits export but retains the
+worktree; an uncertain process or directory state retains it without export. Saved successful
+continuations inherit the original verification command. See the [reference](REFERENCE.md#verifying-isolated-changes)
+for bounds and host tool-policy integration.
+
 Every git call is asynchronous so the extension host keeps
 rendering, ticking timers, and serving broker sockets while a large checkout runs.
 
@@ -447,7 +465,7 @@ gate. Automatic model setup for tools, commands and mandated orchestration share
 dialog queue; each run registers its stop handle before entering that queue. Aborting setup discards
 its unsaved choices and removes only prompt markers created by that attempt, so it can be retried.
 
-**Unified settings.** `/persona-settings` is independent of Pi's `/settings`: full-page TUI, native
+**Unified settings.** `/persona-settings` is independent of Pi's `/settings`: a TUI page in the shared window frame, native
 RPC dialogs, and a read-only `show` report. `core/settings.ts` is the public preference registry and
 validator; the UI and environment precedence consume it rather than maintaining duplicate field lists.
 All persistent Persona preferences live in `<agentDir>/persona/settings.json`, version 1: sparse
@@ -850,7 +868,15 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   are named only from their runtime-owned lines, drift-guarded against their generator: a monitor or
   script event line is anchored on its runtime id and every fenced output line is consumed as output
   first, so observed output can add no event, count or title; an alarm's label ends at its runtime id;
-  queued/stalled are read only from the whole runtime suffix of a run line. Assigned names retain their capitalization. Neutral
+  queued/stalled are read only from the whole runtime suffix of a run line. A program event has one
+  card, its wake: the model-facing text, so compaction keeps or drops card and model text together.
+  Its expansion appends each finished run's retained log. The archived
+  `pi-persona-monitor-log`/`pi-persona-script-log` entry draws nothing while that wake is queued
+  (`wakePending`, queued before the archive observer runs) or on the current branch
+  (`programWakeIds`, terminal event lines parsed with the same anchored parser); otherwise it is the
+  fallback card in the same `<kind> <verb> · <label>` grammar, state and quoted preview. A single
+  program event's state comes from its runtime-owned kind and, for an exit, the manager's own first
+  status line. Assigned names retain their capitalization. Neutral
   information/unknown state uses `customMessageBg`, verified completion `toolSuccessBg`, attention
   (nudge/stall/stopped) `toolPendingBg`, and verified failure `toolErrorBg`. Only runtime-owned status
   evidence selects chrome, never peer/child prose. Colors are resolved from the active theme at render
@@ -918,6 +944,26 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   Selection and drill-in/back navigation preserve worker IDs; a lost target consumes the next
   directed key instead of applying it to a different worker. The overview controls its selected leg;
   root-wide cancellation remains on the root in the tree;
+- worker conversation data is a bounded, immutable projection owned by `StreamState` through
+  `core/worker-chat.ts`, shared by the in-process and child event paths. `ProgressSnapshot.chat`
+  reaches `AgentNode.chat` without entering `AgentResult`, completion messages, tool telemetry or
+  stall accounting. Tool lifecycle `ToolEvent` remains payload-free. A snapshot has at most 128
+  blocks / 96,000 text characters, with explicit truncation and no image bytes. Existing async
+  retention owns completed snapshots; the F9-only recent group adds neither a store nor runtime
+  tree nodes. There is no JSONL replay or session reopening for viewing;
+- `ui/worker-chat.ts` caches rendered blocks by identity, width and expansion; `ui/chat-viewport.ts`
+  anchors reading to a block rather than distance from the moving tail. Search and visible-row
+  slicing use the bounded snapshot. Tool data is literal and only captured diffs are displayed:
+  rendering cannot execute tools, read current files, load child extension renderers or wake a model.
+  Returning to the list preserves selection; detached views keep their last snapshot without controls;
+- F9 retains at most eight reader states. Clearing a row for a new attempt retires its previous
+  snapshot, search and scroll state. An orphaned reader survives only while open; leaving it,
+  clearing the runtime tree or disposing the overlay releases its cached payload and rendered rows;
+  `AgentTree.clear()` emits the lifecycle reset even when no runtime nodes remain;
+- `/agents send` is an operator command over the same steering handles as F9. It resolves an exact
+  run ID or unique current name, refuses ambiguous/unavailable targets and never falls through to
+  a supervisor turn, launches a worker or implicitly resumes one. The callable model tool schemas,
+  bus addresses and capability gates retain their existing contracts;
 - overflowing sticky summaries preserve failure, pending-ask, stalled-worker, wake/activity and
   active-worker digests before the generic overflow line, in that priority order when space is
   insufficient. Hidden stalled workers get their own `⚠ N stalled` digest; hidden active workers
@@ -931,11 +977,21 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   rows excepted) plus any run root with a stop handle (council/flow/mandated runs), and `x` on such a
   root stops the whole run.
   `intercom stop` / `stop { to: "all" }` also cover tracker runs, `council` and `flow` included;
-- F9 and Mind's F10 share the stateless `ui/inspector-frame.ts` geometry and painter. The local
+- Every pi-persona window, and Mind's F10, share the stateless `ui/inspector-frame.ts` geometry and
+  painter. The local
   synchronous `pi-persona:inspector-frame:v1` query returns `{ version: 1, provider: "pi-persona",
-  frame }`; the frame exposes `viewportRows`, `layout` and `render`. Both host overlays use 90%
-  width, the same bounded row allocation and one-row margins; the painter uses the theme's
-  `border` token and identical gutters. Content owners reserve their actual header/footer rows,
+  frame }`; the frame exposes `viewportRows`, `layout` and `render`. Every overlay uses 90%
+  width, the same bounded row allocation and one-row margins (`windowOverlayOptions`); the painter
+  uses the theme's `border` token and identical gutters. Inside the frame, `ui/window-chrome.ts`
+  owns the shared content conventions: accent title, dim rules, titled input fields, key legends
+  packed between entries with labels from the live keybindings, and `composeWindow`, which gives
+  up rules, meta rows, field titles, the long legend, notice and title (in that order) before the
+  body's minimum rows. F9 composes its views from those helpers; the model picker (an overlay at
+  both open sites) and `/persona-settings` use `composeWindow`. The settings page stays in the
+  editor slot, where Pi's native edit dialogs take turns with it, but is centred at the overlay's
+  columns (`inlineWindowColumns`) and takes the same row allocation so Pi's footer stays on screen.
+  The picker maps a press on its search row through `layout.top`, the gutter and the field prefix.
+  Content owners reserve their actual header/footer rows,
   keep selection visible and page by the rendered content capacity. Height-only resize invalidates
   F9's layout. Native Input owns steering editing and receives focus only while composing.
   This replaces two drifting frame implementations; it introduces no shared selection, runtime
@@ -979,7 +1035,8 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   lifetime budget. Restored logs never restore processes. Activation-unique monitor ids avoid historical result collisions. A finite
   lifetime serialized-byte/count budget includes all previous entries of the archive type, even
   unreadable versions. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
-  not deletes them. Operator-only expandable log entries do not create model context or extra wakes.
+  not deletes them. Operator-only expandable log entries do not create model context or extra wakes;
+  each draws only as the fallback card for a run whose wake is not queued or on the current branch.
 - `src/ui/resource-groups.ts` adds presentation-only Timers/Monitors/Scripts categories without
   changing runtime parentage, routing IDs or telemetry. Widget and F9 share fold state; clicks use
   Pi's public component mouse API in alternate-screen mode, with Space/Left/Right in F9 as the

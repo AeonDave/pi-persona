@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 
 /**
  * Read-only Exocom presence projection for human-facing surfaces.
@@ -13,6 +14,8 @@ export interface ExocomPeerPresence {
 	name: string;
 	persona?: string;
 	model?: string;
+	/** The peer's self-reported Pi effort; display-only, like every presence field. */
+	thinking?: ThinkingLevel;
 	contextPercent?: number;
 	status: "online" | "idle";
 }
@@ -22,6 +25,7 @@ export interface ExocomPeerPresenceInput {
 	name: string;
 	persona: string;
 	model: string;
+	thinking?: ThinkingLevel;
 	contextPercent: number;
 	heartbeatAt: string;
 }
@@ -42,6 +46,7 @@ export function projectExocomPeerPresence(
 			name: peer.name,
 			...(peer.persona ? { persona: peer.persona } : {}),
 			...(peer.model ? { model: peer.model } : {}),
+			...(isThinkingLevel(peer.thinking) ? { thinking: peer.thinking } : {}),
 			...(contextPercent !== undefined ? { contextPercent } : {}),
 			status: Number.isFinite(now) && Number.isFinite(heartbeatAt) && now - heartbeatAt <= quietAfterMs ? "online" : "idle",
 		};
@@ -82,6 +87,6 @@ function sameSnapshot(a: readonly ExocomPeerPresence[], b: readonly ExocomPeerPr
 	return a.length === b.length && a.every((peer, index) => {
 		const next = b[index];
 		return next !== undefined && peer.key === next.key && peer.name === next.name && peer.persona === next.persona &&
-			peer.model === next.model && peer.contextPercent === next.contextPercent && peer.status === next.status;
+			peer.model === next.model && peer.thinking === next.thinking && peer.contextPercent === next.contextPercent && peer.status === next.status;
 	});
 }

@@ -14,7 +14,19 @@ test("live metadata uses exact roles, inline occurrences and immutable model ass
 	assert.equal(strategyLegMetadata({ agent: "reviewer", role: "OTHER" }, selection).model, "saved/bare");
 	assert.equal(strategyLegMetadata({ agent: "reviewer", role: "HEAD", model: "inline/second", thinking: "xhigh" }, selection).model, "inline/second");
 	assert.equal(strategyLegMetadata({ agent: "reviewer", role: "HEAD", model: "inline/second", thinking: "xhigh" }, selection).thinking, "xhigh");
-	assert.equal(strategyLegMetadata({ agent: "reviewer", role: "HEAD" }, selection).thinking, undefined, "undeclared effort is never invented");
+	assert.equal(strategyLegMetadata({ agent: "reviewer", role: "HEAD" }, selection).thinking, undefined, "with no agent or child default known, undeclared effort is never invented");
+});
+
+test("a running leg shows the effort its engine will request: explicit > agent default > child default", () => {
+	const agents = [{ name: "reviewer", thinking: "low" as const }, { name: "scout" }];
+	const selection = snapshotStrategyModels({ agents, childThinking: "medium" });
+	agents[0]!.thinking = "max" as never;
+	assert.equal(strategyLegMetadata({ agent: "reviewer", thinking: "xhigh" }, selection).thinking, "xhigh");
+	assert.equal(strategyLegMetadata({ agent: "reviewer" }, selection).thinking, "low", "the agent default, frozen at run start");
+	assert.equal(strategyLegMetadata({ agent: "scout" }, selection).thinking, "medium", "the configured/inherited child default");
+	assert.equal(strategyLegMetadata({ agent: "scout" }, snapshotStrategyModels({ agents, childThinking: "adaptive" })).thinking, undefined, "an unknown default is omitted");
+	const settled = { agent: "scout", output: "", usage: emptyUsage(), ok: true, thinkingRequested: "high" as const };
+	assert.equal(strategyLegMetadata({ agent: "scout" }, selection, settled).thinking, "high", "the engine's terminal report wins");
 });
 
 test("terminal metadata prefers observations and never attaches a stale provider to a different bare model", () => {

@@ -1,6 +1,7 @@
 /** Session timer tool — arm a wall-clock wake. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { Type } from "typebox";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { formatRemaining, type TimerScheduler } from "../core/timer.ts";
@@ -102,7 +103,9 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			const text = `Armed ${e.id} (${e.label}) — fires in ${formatRemaining(r.remainingMs ?? e.fireAtEpochMs - e.armedAtEpochMs)} [${new Date(e.fireAtEpochMs).toISOString()}]. ${armWakeAdvice(ctx, "alarm", "time-gated step", "You can end this turn now; keep the session open for the alarm.")}`;
 			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, label: compactInlineText(e.label, { maxChars: 120 }), ok: true }, isError: false };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("timer", theme, context);
+			if (pending) return pending;
 			const action = compactInlineText(args.action ?? "", { maxChars: 12 });
 			const label = compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 });
 			return new Text(`${theme.fg("toolTitle", theme.bold(`timer ${action}`))}${label ? ` ${theme.fg("dim", label)}` : ""}`, 0, 0);

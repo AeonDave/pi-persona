@@ -7,6 +7,7 @@ import { type Static, Type } from "typebox";
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 
 import { attributePeer } from "../core/fence.ts";
 import type { LedgerAnswer, LedgerState } from "../exocom/ledger.ts";
@@ -116,7 +117,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			const { msg_id } = await deps.dispatch(frame);
 			return result(`exocom: claimed ${params.work_key} · msg_id=${msg_id}`, { work_key: params.work_key, msg_id });
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom claim", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom claim "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -150,7 +153,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				{ ask_id: frame.ask_id, msg_id: dispatched.msg_id, work_key: params.work_key, target: safeTarget, ...(deferred ? { peerWakeDeferred: true } : {}) },
 			);
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom ask", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -175,7 +180,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				{ ask_id: params.ask_id, msg_id: dispatched.msg_id, ok: params.ok, ...(deferred ? { peerWakeDeferred: true } : {}) },
 			);
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom answer", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom answer "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -200,7 +207,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 				{ ask_id: params.ask_id, msg_id: dispatched.msg_id, ok: false, ...(deferred ? { peerWakeDeferred: true } : {}) },
 			);
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom decline", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom decline "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -224,7 +233,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			}
 			return result(`exocom: waiting on ${params.work_key} ask_id=${params.ask_id} · timeout ${timeoutMs}ms · ${armed.id}. End this turn; you will be woken.`, { work_key: params.work_key, ask_id: params.ask_id, timeoutMs, id: armed.id, status: "waiting" });
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom wait", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom wait "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult(res, options, theme, context) {
@@ -251,7 +262,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			const { msg_id } = await deps.dispatch(frame);
 			return result(`exocom: released ${params.work_key} · msg_id=${msg_id}`, { work_key: params.work_key, msg_id });
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom release", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom release "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -270,7 +283,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			const { msg_id } = await deps.dispatch(frame);
 			return result(`exocom: progress ${params.work_key} · msg_id=${msg_id}`, { work_key: params.work_key, msg_id });
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("exocom progress", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom progress "))}${theme.fg("accent", normalizeMetadataText(args.work_key, 80, "work"))}`, 0, 0);
 		},
 		renderResult: renderLiteralToolResult,
@@ -285,7 +300,9 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			const state = deps.ledger();
 			return result(formatLedgerStatus(state, deps.sessionId(), deps.labelFor, deps.now()), { claims: state.claims.length, asks: state.asks.length });
 		},
-		renderCall(_args, theme) {
+		renderCall(_args, theme, context) {
+			const pending = renderPendingCall("exocom status", theme, context);
+			if (pending) return pending;
 			return new Text(theme.fg("toolTitle", theme.bold("exocom status")), 0, 0);
 		},
 		renderResult: renderLiteralToolResult,

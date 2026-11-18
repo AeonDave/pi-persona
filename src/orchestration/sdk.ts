@@ -6,7 +6,9 @@
  */
 
 import type { ThinkingLevel } from "../core/types.ts";
+import type { WorkerChatSnapshot } from "../core/worker-chat.ts";
 import type { ConversationWorktree } from "../core/worktree-recovery.ts";
+import type { WorktreeVerificationSpec } from "../core/worktree-verification.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
@@ -38,6 +40,8 @@ export interface AgentRunSpec {
 	outputContract?: string;
 	/** Run this leg in an isolated git worktree (overrides the agent's own setting). */
 	isolation?: "none" | "worktree";
+	/** Explicit shell check in the exact isolated worktree, after the worker and before export. */
+	verification?: WorktreeVerificationSpec;
 	/** Route this leg through the CHILD engine so `pi-mcp-adapter` initializes and the
 	 *  sub-agent's `mcp*`/direct tools actually work (the in-process engine never fires
 	 *  `session_start`, so they come back "MCP not initialized"). Overrides the agent's own
@@ -84,6 +88,8 @@ export function isPositiveFiniteMs(x: number | undefined): x is number {
 
 /** A live snapshot of an agent's progress (for streaming UI). */
 export interface AgentProgress {
+	/** Bounded operator-only conversation, distinct from model-visible output and lifecycle events. */
+	chat?: WorkerChatSnapshot;
 	/** The agent's rolling output so far. */
 	output: string;
 	/** Tokens consumed so far (best-effort). */

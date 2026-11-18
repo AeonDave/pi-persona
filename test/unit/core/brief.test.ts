@@ -161,12 +161,12 @@ test("the standing default delegates bounded multi-step execution while keeping 
 	assert.match(sync, /Fan independent legs out in one `delegate` call \(the call returns when they finish\)\./);
 });
 
-test("the standing brief gives ONE task-tier model-sizing sentence before the hand-off shape, with no model names", () => {
+test("the standing brief gives ONE task-tier model-sizing sentence after the hand-off shape, with no model names", () => {
 	const brief = buildDelegationBrief({ agents: AGENTS, teams: {}, flows: [], standing: true, background: true }) ?? "";
 	const sentence = `Models: reuse supplied cached current-provider candidates across turns and tasks until the base model changes. Use \`models\` for targeted lookup or explicit refresh; do not scan again just because the brief reappears. After a base model/provider change, reassess worker choices using refreshed candidates if supplied (★ = your session provider). Low/medium/high rank relative advertised API cost among recent candidates from the same provider only when numeric prices exist; missing or zero is unknown. An insufficient comparison set is also unknown. Prefer candidates near your current model's name and numbered generation before comparing cost; an older model is not preferred merely because it is cheaper. Choose the least expensive candidate capable of the bounded task; spend more only when task fit warrants it. Cost tier does not imply capability or reasoning effort. Catalog visibility is not account support. ${MODEL_SELECTION_GUIDANCE} Prefer the current provider by default; use another configured provider/model for a leg only if the user explicitly requests or authorizes it. Never guess stale ids or silently switch provider/billing.`;
 	assert.ok(brief.includes(sentence), "the sizing rule is carried verbatim");
 	assert.equal(brief.split(sentence).length - 1, 1, "stated exactly once");
-	assert.ok(brief.indexOf(sentence) < brief.indexOf("Hand-off shape:"), "the sizing rule precedes the example hand-off");
+	assert.ok(brief.indexOf(sentence) > brief.indexOf("Hand-off shape:"), "active policy and call shape precede optional model-sizing advice");
 	assert.ok(brief.indexOf(sentence) > brief.indexOf("Name each leg yourself."), "…and follows the naming rule");
 	assert.doesNotMatch(brief, /\b(claude|gpt|glm|haiku|sonnet|opus|gemini|codex|z\.ai)\b/i, "no model or vendor name in the prompt");
 	assert.doesNotMatch(brief, /lightest|cheapest|fast, current-generation/i, "the model rule uses task tiers instead of reflex speed/price cues");
@@ -327,6 +327,37 @@ test("a generic requireBrief policy advertises the complete cold-start packet", 
 	assert.match(brief ?? "", /outputContract: "finding"/);
 	assert.ok(brief?.includes("tasks[].brief"), "parallel workers need the same per-worker brief as single calls");
 	assert.match(brief ?? "", /read-only/);
+});
+
+test("active call policy precedes model advice and separates single, batch and continuation modes", () => {
+	const brief = buildDelegationBrief({
+		agents: AGENTS, teams: {}, flows: [], standing: true, background: true,
+		requireBrief: true, requireDisjointWrites: true,
+	}) ?? "";
+	const policy = brief.split("\n").find((line) => line.startsWith("Active delegation call policy:"));
+	assert.ok(policy, "current requirements need their own discoverable line");
+	assert.ok(brief.indexOf(policy) < brief.indexOf("Models:"), "requirements precede optional model-sizing advice");
+	assert.match(policy, /Single:.*agent.*task/);
+	assert.match(policy, /Batch:.*tasks.*every entry.*complete.*brief/);
+	assert.match(policy, /top-level.*not shared/);
+	assert.match(policy, /Resume:.*resume.*task.*brief/);
+	assert.match(policy, /only.*resume.*task.*brief.*configuration stays pinned/);
+	assert.match(policy, /successful.*saved.*latest|latest.*successful.*saved/);
+	assert.match(policy, /Ownership decision:.*multiple.*session-default.*shell.*MCP.*unknown.*concurrency: 1.*even.*read-only/);
+	assert.match(policy, /Preserve.*tools.*task requires/);
+	assert.equal((brief.match(/objective: "<verifiable objective/g) ?? []).length, 1, "the six-field packet is shown once");
+});
+
+test("ownership advice follows recognized tool grants rather than read-only task labels", () => {
+	const brief = buildDelegationBrief({
+		agents: [{ name: "research", tools: ["read", "bash"], mcp: true }],
+		teams: {}, flows: [], standing: true, background: true, requireDisjointWrites: true,
+	}) ?? "";
+	assert.match(brief, /Task labels.*do not change.*tool grant/);
+	assert.match(brief, /session-default.*shell.*MCP.*unknown.*overridden.*may write/i);
+	assert.match(brief, /recognized read-only tools/);
+	assert.doesNotMatch(brief, /Read-only scout.*without writeSet/, "agent names do not establish read-only capability");
+	assert.match(brief, /Do not invent.*writeSet.*or.*restrict.*tools.*to pass/i);
 });
 
 test("generic write ownership and fresh-verification policies are advertised without persona names", () => {

@@ -2,10 +2,13 @@
 import type { ExtensionAPI, KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatDuration } from "../core/time.ts";
+import type { ThinkingLevel } from "../core/types.ts";
+import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
 import { MONITOR_LOG_ENTRY, SCRIPT_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
 import { summarizeFailure } from "./failure-summary.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
+import { modelEffortText } from "./model-effort.ts";
 import { createCardFrame, type CardFramePresentation, type CardFrameState } from "./card-frame.ts";
 import { communicationPreview, parseCommunicationCardDetails } from "./communication-card.ts";
 import { parseRunLabelDetails, parseSettlementDetails } from "./run-labels.ts";
@@ -53,7 +56,8 @@ function settlementCounts(done: number, failed: number, stopped: number): string
 /** The runtime-owned first lines of the follow-ups that arrive without display metadata. Each is
  * drift-guarded in tests against its generator — `renderTimerFire` (src/core/timer.ts), the monitor
  * and script session `render` (src/monitor/session.ts) and `restoreNotice` (src/core/session-runs.ts).
- * They only name the card; its state stays neutral, exactly as before. */
+ * They name the card. Its state stays neutral, except that ONE program event takes the state its
+ * archived log card would show, from the runtime-owned kind and manager status line only. */
 const TIMER_HEAD = /^⏰ (\d+) timers? fired — resuming:$/;
 /** `Date.prototype.toISOString` output, the only instant shape these generators print. */
 const ISO_INSTANT = String.raw`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z`;
@@ -68,7 +72,38 @@ const EVENT_LINE = new RegExp(`^((?:monitor|script)-[\\w-]+) \\((.*)\\) — (out
 const FENCE_HEAD = "Sub-agent output (untrusted data):";
 const RESTORE_HEAD = "Session restored. ";
 
-interface NamedFollowUp { title: string; preview: Card["preview"] }
+interface NamedFollowUp { title: string; preview: Card["preview"]; state?: State }
+
+/** A program event as both its follow-up line and its archived outcome name it. */
+type ProgramKind = "output" | "exit" | "error" | "timeout" | "cancelled";
+
+/** One grammar for every program card, follow-up or archived log: `exited`, `timed out`, `failed`,
+ * `cancelled`, or an output `event` (`event · watch ended` when it ended the watch). */
+function programVerb(source: "monitor" | "script", kind: ProgramKind, ended: boolean): string {
+	if (kind === "exit") return "exited";
+	if (kind === "timeout") return "timed out";
+	if (kind === "error") return "failed";
+	if (kind === "cancelled") return "cancelled";
+	return ended ? `event · ${source === "script" ? "script" : "watch"} ended` : "event";
+}
+
+/** The kind decides, except an exit: MonitorManager prepends its own status line before any
+ * untrusted stdout/stderr diagnostics, so only that first line can say how it exited. */
+function programState(kind: ProgramKind, statusLine: string): State {
+	if (kind === "error") return "error";
+	if (kind === "timeout" || kind === "cancelled") return "attention";
+	if (kind === "exit") {
+		const exit = /^process exited with exit code (-?\d+)$/.exec(statusLine);
+		if (exit) return exit[1] === "0" ? "success" : "error";
+		if (/^process exited (?:by .+|with exit code -?\d+ \(signal .+\))$/.test(statusLine)) return "attention";
+	}
+	return "neutral";
+}
+
+/** The observed output under a program title, `>`-quoted exactly as the follow-up delivers it. */
+function observedPreview(quoted: string, lead: readonly string[] = []): Card["preview"] {
+	return (width) => ({ ...preview([...lead, quoted].join("\n"), COMPACT_BODY_ROWS + lead.length, 100)(width), truncated: true });
+}
 
 /** `timer fired · status review` + the wake message, or `2 timers fired` + one row per alarm. */
 function timerFollowUp(full: string): NamedFollowUp | undefined {
@@ -100,17 +135,25 @@ function timerFollowUp(full: string): NamedFollowUp | undefined {
 	};
 }
 
-/** `monitor exited · CI run finished` + its observed output, or `3 monitor events` + one row each.
- * Titles, counts and rows come only from runtime-owned lines: every line of observed output is
+interface ProgramEvent { id: string; label: string; kind: ProgramKind; ended: boolean; output: string[] }
+/** `events` is absent when the body is not the generator's shape. */
+interface ProgramEvents { source: "monitor" | "script"; events?: ProgramEvent[]; omitted: number; body: string }
+
+/** exit/error/timeout always end the program; only an `output` event says so separately. */
+function endsProgram(event: ProgramEvent): boolean {
+	return event.kind !== "output" || event.ended;
+}
+
+/** A monitor/script wake's events, from runtime-owned lines only: every line of observed output is
  * fenced (`>`-quoted after the wrapper) and is consumed as output before any event match. */
-function eventsFollowUp(full: string): NamedFollowUp | undefined {
+function parseProgramEvents(full: string): ProgramEvents | undefined {
 	const [first = "", ...rest] = full.split("\n");
 	const head = EVENTS_HEAD.exec(first);
 	if (!head) return undefined;
 	const source = head[1] === "Script" ? "script" : "monitor";
-	const events: Array<{ label: string; kind: string; ended: boolean; output: string[] }> = [];
+	const body = rest.join("\n");
+	const events: ProgramEvent[] = [];
 	let omitted = 0;
-	let shape = true;
 	for (const line of rest) {
 		if (line.trim() === "") continue;
 		const current = events.at(-1);
@@ -120,30 +163,55 @@ function eventsFollowUp(full: string): NamedFollowUp | undefined {
 		const backlog = events.length === 0 && omitted === 0 ? EVENTS_OMITTED.exec(line) : null;
 		if (backlog) { omitted = Number(backlog[1]); continue; }
 		const event = EVENT_LINE.exec(line);
-		if (event && (!current || current.output.length > 0)) {
-			events.push({ label: event[2] ?? "", kind: event[3] ?? "", ended: event[4] !== undefined, output: [] });
-			continue;
-		}
-		shape = false;
-		break;
+		if (!event || (current && current.output.length === 0)) return { source, omitted, body };
+		events.push({ id: event[1] ?? "", label: event[2] ?? "", kind: (event[3] ?? "output") as ProgramKind, ended: event[4] !== undefined, output: [] });
 	}
-	if (!shape || events.length === 0 || !Number.isSafeInteger(omitted)) return { title: `${source} events`, preview: preview(rest.join("\n"), 4, 100) };
-	// exit/error/timeout always end the watch; only an `output` event says so separately.
-	const ended = source === "script" ? "script ended" : "watch ended";
-	const verb = (event: { kind: string; ended: boolean }) => event.kind === "exit" ? "exited" : event.kind === "timeout" ? "timed out" : event.kind === "error" ? "failed"
-		: event.ended ? `event · ${ended}` : "event";
+	return events.length > 0 && Number.isSafeInteger(omitted) ? { source, events, omitted, body } : { source, omitted, body };
+}
+
+/** The terminal program events whose wake is on this branch, keyed by runtime id. Only a displayed
+ * `pi-persona` wake in the generator's shape counts, so observed output can name no id. */
+export function programWakeIds(entries: readonly unknown[]): Set<string> {
+	const ids = new Set<string>();
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const { type, customType, content, display } = entry as { type?: unknown; customType?: unknown; content?: unknown; display?: unknown };
+		if (type !== "custom_message" || customType !== "pi-persona" || display === false) continue;
+		for (const event of parseProgramEvents(sanitizeTerminalText(messageText(content)))?.events ?? []) if (endsProgram(event)) ids.add(event.id);
+	}
+	return ids;
+}
+
+/** A custom message's text as its card renders it. */
+function messageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.map((part: { type?: unknown; text?: unknown } | null) => part?.type === "text" && typeof part.text === "string" ? part.text : "[image]").join("\n");
+}
+
+/** Optional host lookups never break a card: a failure reads as "unknown". */
+function attempt<T>(lookup: () => T): T | undefined {
+	try { return lookup(); } catch { return undefined; }
+}
+
+/** `monitor exited · CI run finished` + its observed output, or `3 monitor events` + one row each. */
+function eventsFollowUp({ source, events, omitted, body }: ProgramEvents): NamedFollowUp {
+	if (!events) return { title: `${source} events`, preview: preview(body, 4, 100) };
 	// The busy-session backlog leads the body: those events came first.
 	const backlogRow = omitted > 0 ? [`${omitted} older event${omitted === 1 ? "" : "s"} omitted`] : [];
 	if (events.length === 1) {
 		const only = events[0]!;
+		// output[0] is the fence wrapper; output[1] quotes the event text's first line.
+		const statusLine = only.kind === "exit" ? (only.output[1] ?? "").replace(/^> /, "") : "";
 		return {
-			title: `${source} ${verb(only)} · ${compactInlineText(only.label, { maxChars: 80 })}`,
-			preview: (width) => ({ ...preview([...backlogRow, only.output.join("\n") || "(no output)"].join("\n"), 4 + backlogRow.length, 100)(width), truncated: true }),
+			title: `${source} ${programVerb(source, only.kind, only.ended)} · ${compactInlineText(only.label, { maxChars: 80 })}`,
+			state: programState(only.kind, statusLine),
+			preview: observedPreview(only.output.join("\n"), backlogRow),
 		};
 	}
 	return {
 		title: `${events.length} ${source} events`,
-		preview: (width) => ({ ...preview([...backlogRow, ...events.map((event) => `${event.label} · ${verb(event)}`)].join("\n"), 4 + backlogRow.length, 100)(width), truncated: true }),
+		preview: (width) => ({ ...preview([...backlogRow, ...events.map((event) => `${event.label} · ${programVerb(source, event.kind, event.ended)}`)].join("\n"), 4 + backlogRow.length, 100)(width), truncated: true }),
 	};
 }
 
@@ -163,22 +231,23 @@ function communicationTitle(card: { plane: string; messages: ReadonlyArray<{ kin
 	return `${card.plane} ${word}`;
 }
 
-function monitorState(record: MonitorLogRecord): { state: State; status: string } {
-	if (record.outcome === "error") return { state: "error", status: "failed" };
-	if (record.outcome === "timeout" || record.outcome === "cancelled") return { state: "attention", status: "stopped" };
-	if (record.outcome === "exit") {
-		// MonitorManager prepends this line before any untrusted stdout/stderr diagnostics.
-		const first = record.text.split("\n", 1)[0] ?? "";
-		const exit = /^process exited with exit code (-?\d+)$/.exec(first);
-		if (exit) return exit[1] === "0" ? { state: "success", status: "complete" } : { state: "error", status: "failed" };
-		if (/^process exited (?:by .+|with exit code -?\d+ \(signal .+\))$/.test(first)) return { state: "attention", status: "stopped" };
-	}
-	return { state: "neutral", status: "info" };
+/** The fallback card for a run whose wake is not in the transcript (a cancellation, a start failure,
+ * a wake dropped before delivery). It reads exactly like that wake's card would. */
+function archivedProgramCard(source: "monitor" | "script", record: MonitorLogRecord, full: string): Card {
+	const kind: ProgramKind = record.outcome === "ended" || record.outcome === "running" ? "output" : record.outcome;
+	const text = neutralizeMonitorUnicode(stripTerminalControls(record.text));
+	return {
+		title: `${source} ${programVerb(source, kind, record.outcome === "ended")} · ${compactInlineText(record.entry.label, { maxChars: 80 })}`,
+		state: programState(kind, record.text.split("\n", 1)[0] ?? ""),
+		full,
+		preview: observedPreview(sanitizeTerminalText(text.trim() ? fenceUntrusted(text) : "(no output)")),
+	};
 }
 
 interface ResultEntry { label?: string; content?: string; ok?: boolean; stoppedAtGate?: string; failureKind?: string; error?: string }
 interface ContentEntry { content?: string; kind?: "routine" | "stall" | "recovery"; runLabels?: unknown }
-interface RunFailureEntry { id: string; label: string; agent: string; model?: string; durationMs?: number; error: string }
+/** Saved run-failure card data. The effort fields are optional: older entries render without them. */
+export interface RunFailureEntry { id: string; label: string; agent: string; model?: string; thinking?: ThinkingLevel; thinkingEffective?: ThinkingLevel; durationMs?: number; error: string }
 
 /** Render only runtime-owned settlement facts. Older history falls back to literal content. */
 function settlementPreview(details: unknown): Card["preview"] | undefined {
@@ -200,6 +269,11 @@ export interface SessionCardOptions {
 	getOutputPad: () => number;
 	/** Existing bounded/fenced runtime formatter, injected to keep UI independent of tool wiring. */
 	processLog: (record: MonitorLogRecord) => string;
+	/** Whether a wake for this program's terminal event is queued or on the current branch. That wake
+	 * is the event's one card, so its archived log entry draws nothing. */
+	programWake: (id: string) => boolean;
+	/** The archived record behind a wake, appended to that card's expansion while still retained. */
+	programLog: (id: string) => MonitorLogRecord | undefined;
 }
 
 export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRenderer" | "registerEntryRenderer">, options: SessionCardOptions): void {
@@ -213,9 +287,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		});
 	for (const customType of ["pi-persona", "exocom_received"] as const) {
 		pi.registerMessageRenderer(customType, (message, { expanded, outputPad, keyHint }, theme) => {
-			const raw = typeof message.content === "string" ? message.content
-				: message.content.map((part) => part.type === "text" ? part.text : "[image]").join("\n");
-			const full = sanitizeTerminalText(raw);
+			const full = sanitizeTerminalText(messageText(message.content));
 			const communication = parseCommunicationCardDetails(message.details);
 			if (communication && (communication.messages.length > 0 || communication.plane === "exocom")) {
 				const compact = communication.messages.length > 0
@@ -238,33 +310,35 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 			}
 			// Unknown is NOT Markdown: monitor stdout/stderr, timers and operational notices share this
 			// type. Their runtime-owned first line names the card; anything else is a plain update.
-			const named = timerFollowUp(full) ?? eventsFollowUp(full)
+			const programs = parseProgramEvents(full);
+			const named = timerFollowUp(full) ?? (programs && eventsFollowUp(programs))
 				?? (full.startsWith(RESTORE_HEAD) ? { title: "session restored", preview: preview(full.slice(RESTORE_HEAD.length), 4, 100) } : undefined);
+			// A program wake is its event's card: expanding it also shows each finished run's retained log.
+			const logs = (programs?.events ?? []).filter(endsProgram).flatMap((event) => {
+				const record = attempt(() => options.programLog(event.id));
+				return record && record.outcome !== "running" ? [sanitizeTerminalText(options.processLog(record))] : [];
+			});
 			return sessionCard({
-				title: named?.title ?? "update", state, full, markdown: false, preview: named?.preview ?? preview(full, 4, 100),
+				title: named?.title ?? "update", state: named?.state ?? state, full: [full, ...logs].join("\n\n"), markdown: false, preview: named?.preview ?? preview(full, 4, 100),
 			}, expanded, theme, outputPad, keyHint, message);
 		});
 	}
 	for (const [entryType, source] of [[MONITOR_LOG_ENTRY, "monitor"], [SCRIPT_LOG_ENTRY, "script"]] as const) {
 		pi.registerEntryRenderer(entryType, (entry, { expanded, keyHint }, theme) => {
 			const record = parseMonitorLogRecord(entry.data);
-			if (!record) return undefined;
-			const { state, status } = monitorState(record);
-			return sessionCard({
-				title: `${source} · ${compactInlineText(record.entry.label)}`,
-				state, metadata: `${record.outcome} · ${status} · ${compactInlineText(record.entry.id)}`,
-				full: sanitizeTerminalText(options.processLog(record)),
-				preview: (width) => ({ text: `${compactInlineText(neutralizeMonitorUnicode(record.text), { maxChars: Math.min(width, 160) })}\n${compactInlineText(record.entry.id)} · ${source.toLowerCase()} result`, truncated: true }),
-			}, expanded, theme, options.getOutputPad(), keyHint, entry);
+			// Its wake, queued or on this branch, is the event's card; a failing lookup still draws this one.
+			if (!record || attempt(() => options.programWake(record.entry.id)) === true) return undefined;
+			return sessionCard(archivedProgramCard(source, record, sanitizeTerminalText(options.processLog(record))), expanded, theme, options.getOutputPad(), keyHint, entry);
 		});
 	}
 	pi.registerEntryRenderer<RunFailureEntry>("pi-persona-run-failure", (entry, { expanded, keyHint }, theme) => {
 		const data = entry.data;
 		if (!data) return undefined;
 		const metadata = [compactInlineText(data.agent, { maxChars: 48 }), ...(data.durationMs !== undefined ? [formatDuration(data.durationMs)] : [])].join(" · ");
+		const modelLine = modelEffortText(typeof data.model === "string" ? compactInlineText(data.model, { maxChars: 96 }) : undefined, data.thinking, data.thinkingEffective);
 		return sessionCard({
 			title: `failed · ${compactInlineText(data.label || data.agent, { maxChars: 80 })}`, state: "error", metadata,
-			full: `Run ${compactInlineText(data.id)}${data.model ? `\nModel: ${compactInlineText(data.model, { maxChars: 96 })}` : ""}\n${sanitizeTerminalText(data.error)}`,
+			full: `Run ${compactInlineText(data.id)}${modelLine ? `\nModel: ${modelLine}` : ""}\n${sanitizeTerminalText(data.error)}`,
 			preview: (width) => ({ text: compactVisibleText(summarizeFailure(data.error), { maxLines: 2, maxLineChars: Math.min(width, 100) }).text, truncated: true }),
 		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});

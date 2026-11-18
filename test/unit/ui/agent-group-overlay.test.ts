@@ -38,7 +38,7 @@ test("F9 group overview counts legs once and drills into a leg then back to its 
 	assert.match(view, /Brief result: checks passed/);
 	assert.match(view, /waiting for supervisor/);
 	assert.match(view, /provider\/model-a/);
-	assert.match(view, /model-b · h→m/);
+	assert.match(view, /model-b · high→medium/);
 	assert.doesNotMatch(view, /4 legs|5 legs/);
 	overlay.handleInput("\n");
 	assert.doesNotMatch(overlay.render(110).join("\n"), /Group overview/);

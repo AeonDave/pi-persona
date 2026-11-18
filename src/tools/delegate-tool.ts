@@ -2,11 +2,12 @@
 import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, KeybindingHints, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 import type { AgentConfig } from "../agents/agent.ts";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { THINKING_LEVELS, isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { validateParallelWriteSets } from "../core/ownership.ts";
-import { effortFullName } from "../core/leg-thinking.ts";
+import { canCallTool } from "../core/capabilities.ts";
+import { VERIFICATION_MAX_COMMAND_CHARS, VERIFICATION_MAX_TIMEOUT_MS } from "../core/worktree-verification.ts";
 import { END_TURN_NOTE } from "../core/brief.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
@@ -15,6 +16,8 @@ import { compactInlineText, compactVisibleLine, MAX_COLLAPSED_CARD_COLUMNS, sani
 import { compactVisibleText } from "../ui/presentation.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { hiddenLaunchRequestHint, launchRequestLines, readLaunchRequest, snapshotLaunchRequest, type LaunchRequest } from "../ui/launch-request.ts";
+import { effortText, modelEffortText } from "../ui/model-effort.ts";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { renderDelegateRejection } from "../ui/delegate-rejection.ts";
 import { snapshotRejectionDiagnostics, type WorkspaceAssessment } from "./delegate-diagnostics.ts";
 import { resolveModelRef } from "../core/models.ts";
@@ -24,7 +27,7 @@ import { expandDetailHint, failureDetails, isInline } from "../extension/shared.
 import {
 	DelegationLedger, type DelegateParams as DelegateCall, keyInputOf, nameFor, normalizeDelegateConcurrency,
 	shortModel, shouldRecordDelegationOutcome, specOf, unknownAgentError, unknownContractError,
-	validateDelegationBrief, coerceDelegateParams,
+	validateDelegationBrief, coerceDelegateParams, prepareDelegateArguments,
 } from "./delegate.ts";
 import { Semaphore } from "../orchestration/parallel.ts";
 import type { AgentRunSpec, SteerFn, StrategyEngine } from "../orchestration/sdk.ts";
@@ -65,11 +68,11 @@ interface CollapsedLaunchLine {
 
 const COLLAPSED_LAUNCH_ROWS = 3;
 
-/** One full-name formatter for launch intent. Bound the model before hiding a known effort. */
+/** Launch intent in the shared `model · effort` grammar. Bound the model before hiding a known effort. */
 function launchRowMetadata(row: { agent?: string; model?: string; thinking?: ThinkingLevel }, maxChars?: number): string {
 	const base = [row.agent, row.model].filter((value): value is string => !!value).join(" · ");
-	const effort = row.thinking ? effortFullName(row.thinking) : "";
-	const full = [base, effort].filter(Boolean).join(" · ");
+	const effort = effortText(row.thinking);
+	const full = modelEffortText(base, row.thinking);
 	if (maxChars === undefined) return full;
 	if (!effort || visibleWidth(full) <= maxChars) return compactInlineText(full, { maxChars });
 	const baseBudget = maxChars - visibleWidth(` · ${effort}`);
@@ -262,9 +265,6 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		return normalize(info.sourceInfo.path) === normalize(d.ownExtensionPath);
 	};
 	// ── delegate tool (opportunistic L0) ────────────────────────────────────────
-	const JsonString = Type.String({
-		description: "JSON text of the same value — accepted when a client stringifies nested args",
-	});
 	const ThinkingSchema = StringEnum(THINKING_LEVELS, {
 		description: "Requested effort for this leg (off, minimal, low, medium, high, xhigh, max). Overrides the agent and shared child defaults; Pi clamps to the selected model's capabilities. Results distinguish requested from observed Pi effort, not provider cognition.",
 	});
@@ -288,22 +288,26 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	const WriteSetSchema = Type.Array(Type.String(), {
 		description: "Repository-relative files/directories this leg alone may modify. Required for each parallel writer when the persona requires disjoint writes. bash/powershell/script/monitor, MCP and unknown tools may write even if the task says read-only; restrict a reader's tools or use concurrency: 1. Parallel overlaps are rejected.",
 	});
+	const VerificationSchema = Type.Object({
+		command: Type.String({ minLength: 1, maxLength: VERIFICATION_MAX_COMMAND_CHARS }),
+		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: VERIFICATION_MAX_TIMEOUT_MS })),
+	}, { additionalProperties: false, description: "Optional foreground shell check after this worker succeeds, before exporting its isolated worktree. Requires isolation worktree and bash permission for supervisor and worker. Default deadline 120000 ms. A failed check fails the run and retains recovery files; no automatic retry. Never start background services." });
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
-		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString], {
+		brief: Type.Optional(Type.Object(DelegationBriefSchema.properties, {
 			description: "This worker's structured brief. Required when the active persona has requireBrief, including read-only scouts. Supply all six fields here in each tasks[] entry; task prose and a top-level brief do not replace it.",
 		})),
 		name: Type.Optional(
 			Type.String({ description: LeaderNameDescription }),
 		),
-		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
+		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
 		thinking: Type.Optional(ThinkingSchema),
 		model: Type.Optional(
 			Type.String({ description: "Optional exact provider/id. Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omission retains saved/agent selections and defaults; an explicit current supervisor provider/id selects it deliberately, maintaining provider/billing authorization. Explicit user selections win." }),
 		),
-		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" }), JsonString])),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override for this sub-agent; [] explicitly grants no tools" })),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run in an isolated git worktree (edits never touch the main tree)" }),
 		),
@@ -313,22 +317,23 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		timeoutMs: Type.Optional(
 			Type.Number({ description: "Idle window in ms for this worker, reset by any progress. NOT a deadline: a worker that keeps progressing runs past it. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
-		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
+		writeSet: Type.Optional(WriteSetSchema),
+		verification: Type.Optional(VerificationSchema),
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
 	});
 	const DelegateParams = Type.Object({
 		resume: Type.Optional(Type.String({ description: "Exact latest run id of a completed worker to continue with its saved conversation. Supply only resume, task and optionally brief; configuration stays pinned. Use intercom conversations to discover available workers." })),
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
-		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString], {
+		brief: Type.Optional(Type.Object(DelegationBriefSchema.properties, {
 			description: "Single-mode structured brief. Required when the active persona has requireBrief. For parallel mode, provide a separate complete brief inside every tasks[] entry instead; this top-level field is not shared with the batch.",
 		})),
 		name: Type.Optional(Type.String({ description: LeaderNameDescription })),
-		skills: Type.Optional(Type.Union([SkillsSchema, JsonString])),
+		skills: Type.Optional(SkillsSchema),
 		role: Type.Optional(RoleSchema),
 		thinking: Type.Optional(ThinkingSchema),
 		model: Type.Optional(Type.String({ description: "Optional exact provider/id (single mode). Prefer cached nearby family/generation candidates; use `models` for targeted lookup or refresh only when needed. Omission retains saved/agent selections and defaults; an explicit current supervisor provider/id selects it deliberately, maintaining provider/billing authorization. Explicit user selections win." })),
-		tools: Type.Optional(Type.Union([Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" }), JsonString])),
+		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist override (single mode); [] explicitly grants no tools" })),
 		isolation: Type.Optional(
 			Type.Union([Type.Literal("none"), Type.Literal("worktree")], { description: "worktree = run the single sub-agent in an isolated git worktree" }),
 		),
@@ -338,14 +343,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		timeoutMs: Type.Optional(
 			Type.Number({ description: "Single-mode idle window in ms, reset by any progress. NOT a deadline: a worker that keeps progressing runs past it. A positive value overrides the shared default; zero or negative uses the default." }),
 		),
-		writeSet: Type.Optional(Type.Union([WriteSetSchema, JsonString])),
+		writeSet: Type.Optional(WriteSetSchema),
+		verification: Type.Optional(VerificationSchema),
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
-		tasks: Type.Optional(
-			Type.Union([
-				Type.Array(Type.Union([DelegateTaskItem, JsonString])),
-				JsonString,
-			], { description: `Independent tasks as an array of objects (at most ${d.RUN_LIMITS.maxChildren} workers per call; split larger batches). Each entry carries its own agent, task, and any policy-required brief; top-level single-mode fields are not inherited. Give each a bounded scope; parallel writers need disjoint writeSet values.` }),
-		),
+		tasks: Type.Optional(Type.Array(DelegateTaskItem, {
+			description: `Independent tasks as an array of objects (at most ${d.RUN_LIMITS.maxChildren} workers per call; split larger batches). Each entry carries its own agent, task, and any policy-required brief; top-level single-mode fields are not inherited. Give each a bounded scope; parallel writers need disjoint writeSet values.`,
+		})),
 		concurrency: Type.Optional(
 			Type.Integer({ minimum: 1, description: `Max children to run at once (default ${d.RUN_LIMITS.maxConcurrency}; larger requests are clamped)` }),
 		),
@@ -469,6 +472,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, inline: boolean, fanOut?: { batch: string; slots: Semaphore | undefined; groupId: string | undefined }, continuation?: ConversationTurn, brief?: DelegateCall["brief"], ctx = d.lastCtx): string {
 		let turn = continuation;
 		const model = shortModel(runSpec.model);
+		const thinking = d.launchThinking(runSpec);
 		// The writer classification travels WITH the run (d.tracker metadata), not in a side Set keyed by
 		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
 		// registration after launch() returns would re-insert an already-dead run and leak it.
@@ -540,10 +544,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			kind: "subagent",
 			agent,
 			...(runSpec.model ? { model: runSpec.model } : {}),
-			// The requested effort rides the SAME launch seam as the model above — spec-level, what
-			// the launch row carried. Rendered as the compact sigla after the model; the drill-in
-			// uses full names. Absent ⇒ nothing. Nothing observed is claimed here.
-			...(runSpec.thinking ? { thinking: runSpec.thinking } : {}),
+			// The requested effort the launch card shows — the same resolver (explicit > agent >
+			// child default), so the row and the card never disagree. Nothing observed is claimed here.
+			...(thinking ? { thinking } : {}),
 			detail: "queued",
 		});
 		// Arm the async-run status/stall monitor (no-op if both cadences are disabled). A headless leg runs
@@ -591,6 +594,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"candidates. Other options: name, thinking (per-leg effort; Pi clamps), tools, outputContract, writeSet, isolation: \"worktree\", mcp, concurrency, tasks[].timeoutMs.",
 		].join(" "),
 		parameters: DelegateParams,
+		// Pi validates after preparation, including its native primitive/null coercion.
+		prepareArguments: (raw) => prepareDelegateArguments(raw) as Static<typeof DelegateParams>,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			d.lastCtx = ctx;
 			// Interactive sessions (TUI and RPC) ALWAYS run in the background: the supervisor stays free
@@ -612,6 +617,16 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			}
 			const executionGate = d.controller.gate("delegate", params);
 			if (executionGate) return { content: [{ type: "text", text: executionGate.reason }], details: failureDetails({}), isError: true };
+			for (const task of params.tasks?.length ? params.tasks : [params]) {
+				if (!task.verification) continue;
+				const agent = d.agents.find((entry) => entry.name === task.agent);
+				const caps = d.controller.capabilities;
+				const error = (task.isolation ?? agent?.isolation) !== "worktree"
+					? "delegate: verification requires isolation: worktree (or an agent configured for worktree isolation)."
+					: !pi.getActiveTools().includes("bash") || (caps && !canCallTool(caps, "bash"))
+						? "delegate: verification requires callable supervisor bash permission." : undefined;
+				if (error) return { content: [{ type: "text", text: error }], details: failureDetails({}), isError: true };
+			}
 			const policy = d.controller.activePersona?.delegation;
 			const defaultOutputContract = policy?.outputContract;
 			if (defaultOutputContract) {
@@ -808,7 +823,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			} finally { if (!transferred) continuation?.release(); }
 		},
 
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("delegate", theme, context);
+			if (pending) return pending;
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const coerced = coerceDelegateParams(args);
 			const view = coerced.ok ? coerced.params : undefined;
@@ -822,11 +839,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				// stays silent — no re-parsing of stringified tasks); per-leg rows carry their own.
 				const first = view.tasks[0]!;
 				const uniform = view.tasks.every((task) => task.thinking === first.thinking) ? first.thinking : undefined;
-				const effort = uniform ? effortFullName(uniform) : "";
+				const effort = effortText(uniform);
 				return new Text(`${title}${theme.fg("accent", `parallel (${view.tasks.length})${effort ? ` · ${effort}` : ""}`)}`, 0, 0);
-			}
-			if (typeof args.tasks === "string" && args.tasks.trim()) {
-				return new Text(`${title}${theme.fg("accent", "parallel")}`, 0, 0);
 			}
 			const aliasValue = (view?.name?.trim() ? view.name : undefined) ?? view?.agent ?? (typeof args.name === "string" ? args.name : undefined) ?? (typeof args.agent === "string" ? args.agent : "?");
 			const alias = compactInlineText(aliasValue || "?", { maxChars: 80 }) || "?";
@@ -879,7 +893,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						const hint = hiddenLaunchRequestHint(rows[0]!.request, context);
 						// The call header only knows explicit args; keep inherited launch intent visible here.
 						const row = rows[0]!;
-						const effort = row.thinking && row.thinking !== context.args.thinking ? effortFullName(row.thinking) : "";
+						const effort = row.thinking !== context.args.thinking ? effortText(row.thinking) : "";
 						return new Text(`${theme.fg("accent", theme.bold("launched"))}${effort ? theme.fg("dim", ` · ${effort}`) : ""}${hint ? theme.fg("dim", ` · ${hint}`) : ""}`, 0, 0);
 					}
 					if (rows.length === 1 && !hasDroppedTasks) {

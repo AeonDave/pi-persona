@@ -96,7 +96,7 @@ test("Mind launches a real tracked tool-less worker with the current model and t
 	assert.equal(h.tracker.peek(response.runId)?.delivery, "companion");
 	assert.equal(h.tracker.peek(response.runId)?.label, "mind");
 	assert.equal(h.tree.snapshot()[0]?.kind, "subagent");
-	assert.match(renderAgentTree(h.tree.snapshot()).join("\n"), /mind · model · mx/);
+	assert.match(renderAgentTree(h.tree.snapshot()).join("\n"), /mind · model · max/);
 	await h.waitAttempt(1);
 	assert.equal(h.seen[0]?.name, "mind");
 	assert.deepEqual(h.seen[0]?.tools, []);

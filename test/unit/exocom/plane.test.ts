@@ -37,7 +37,7 @@ function planeFor(
 	name: string,
 	inbox: (m: ExocomMessage) => void,
 	decide?: (m: ExocomMessage) => ExocomInboundResult,
-	testSeams: { beforeArtifactRead?: (sourcePath: string) => void; artifactSnapshotId?: () => string } = {},
+	testSeams: { beforeArtifactRead?: (sourcePath: string) => void; artifactSnapshotId?: () => string; onSent?: () => void } = {},
 ) {
 	return planeForHash("h", name, inbox, decide, testSeams);
 }
@@ -47,7 +47,7 @@ function planeForHash(
 	name: string,
 	inbox: (m: ExocomMessage) => void,
 	decide?: (m: ExocomMessage) => ExocomInboundResult,
-	testSeams: { beforeArtifactRead?: (sourcePath: string) => void; artifactSnapshotId?: () => string } = {},
+	testSeams: { beforeArtifactRead?: (sourcePath: string) => void; artifactSnapshotId?: () => string; onSent?: () => void } = {},
 ) {
 	const session_id = `sid-${name}-${process.pid}-${seq++}`;
 	return new ExocomPlane({
@@ -1126,6 +1126,22 @@ test("send()/inbound bump VIEWER-CENTRIC per-peer counters, not a global self-re
 		// From B's side: B received FROM elite, never sent TO elite — the inverse of A's view.
 		assert.equal(b.receivedFromPeer(aSeenFromB.session_id), 1, "receiver's per-peer received bumps for an inbound message frame");
 		assert.equal(b.sentToPeer(aSeenFromB.session_id), 0);
+	} finally { await a.stop(); await b.stop(); }
+});
+
+test("a delivered send notifies the counter observer after the count changes; a failed one does not", async () => {
+	const observed: number[] = [];
+	let peerId = "";
+	const a = planeFor("elite", () => {}, undefined, { onSent: () => { observed.push(a.sentToPeer(peerId)); } });
+	const b = planeFor("dev", () => {});
+	await a.start();
+	await b.start();
+	try {
+		peerId = a.listPeers().find((p) => p.name === "dev")!.session_id;
+		await a.send("dev", "hi");
+		assert.deepEqual(observed, [1], "a display reading the counter from this callback shows the post-ACK value");
+		await assert.rejects(a.send("nobody", "hi"));
+		assert.deepEqual(observed, [1], "an undelivered send changes no counter and notifies nobody");
 	} finally { await a.stop(); await b.stop(); }
 });
 

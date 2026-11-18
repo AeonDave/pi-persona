@@ -1,5 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { Type } from "typebox";
 import { fenceUntrusted } from "../core/fence.ts";
 import { RESULT_READ_DEFAULT, RESULT_READ_MAX } from "../results/types.ts";
@@ -38,7 +39,9 @@ export function makeReadResultTool(reader: Pick<ScopedReader, "read">) {
 			const { body, ...details } = result;
 			return { content: [{ type: "text", text: `${JSON.stringify(details)}\n${fenceUntrusted(body)}` }], details };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("read_result", theme, context);
+			if (pending) return pending;
 			const ref = compactInlineText(args.ref ?? "", { maxChars: 48 });
 			return new Text(`${theme.fg("toolTitle", theme.bold("read_result"))}${ref ? ` ${theme.fg("dim", ref)}` : ""}`, 0, 0);
 		},

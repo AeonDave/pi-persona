@@ -21,8 +21,7 @@
  * consumer — and forwards it as a `deliver` frame (a blocking ask included: the remote
  * side answers with a `reply` frame, resolved via the same `bus.reply` path above).
  *
- * Cross-process safety mirrors comtac's `broker/embedded.ts` MINUS its 12-attempt host
- * election (the supervisor is always the sole host, spec B1): POSIX stale-socket reclaim
+ * The supervisor is always the sole host (spec B1). Cross-process safety uses POSIX stale-socket reclaim
  * before `listen` (unlink only a socket that is provably not connectable), a permanent
  * `error` sink on every server/socket, `server.unref()` so the host never keeps Pi alive,
  * idempotent teardown.
@@ -97,8 +96,8 @@ function isConnectable(netImpl: typeof import("node:net"), endpoint: string): Pr
 
 type ListenAttempt = { server: net.Server } | { code: string };
 
-/** One bind attempt on a FRESH server (a server that failed to listen is not reused —
- *  mirrors comtac's `listenOnce`). Wires the connection handler before `listen()` so no
+/** One bind attempt on a fresh server; a server that failed to listen is not reused.
+ *  Wires the connection handler before `listen()` so no
  *  connection can race the handler being attached. On success: permanent error sink + unref. */
 function attemptListen(netImpl: typeof import("node:net"), endpoint: string, onConnection: (socket: net.Socket) => void): Promise<ListenAttempt> {
 	return new Promise((resolve) => {
@@ -131,8 +130,7 @@ function attemptListen(netImpl: typeof import("node:net"), endpoint: string, onC
 	});
 }
 
-/** Bind `endpoint`, reclaiming a stale POSIX socket file once (comtac `embedded.ts:103-114`,
- *  minus the host-election loop — the supervisor is the sole host). */
+/** Bind `endpoint`, reclaiming a stale POSIX socket file once; the supervisor is the sole host. */
 async function bindServer(netImpl: typeof import("node:net"), endpoint: string, onConnection: (socket: net.Socket) => void): Promise<net.Server> {
 	let attempt = await attemptListen(netImpl, endpoint, onConnection);
 	if (

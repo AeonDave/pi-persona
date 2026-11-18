@@ -58,6 +58,9 @@ export interface ExocomPlaneDeps {
 	 *  removes it from the registry, so the widget should refresh at once rather than wait for the
 	 *  next heartbeat tick. Optional; unset ⇒ no-op. */
 	onPoolChange?: () => void;
+	/** Fired after a delivered send has changed the per-peer sent counter, so a display of those
+	 *  counters refreshes now rather than at the next heartbeat. Optional; unset ⇒ no-op. */
+	onSent?: () => void;
 	now?: () => number;
 	/** Injected transport (tests use real sockets/pipes over a temp dir); defaults to `node:net`. */
 	net?: typeof import("node:net");
@@ -477,6 +480,11 @@ export class ExocomPlane {
 		return this.sentTo.get(sessionId) ?? 0;
 	}
 
+	private countSent(sessionId: string): void {
+		this.sentTo.set(sessionId, (this.sentTo.get(sessionId) ?? 0) + 1);
+		try { this.deps.onSent?.(); } catch { /* a display refresh must never fail a delivered send */ }
+	}
+
 	/** Inbound `message` frames received FROM the given peer (bye/ack don't count — see
 	 *  `handleConnection`'s `onFrame`), keyed by the peer's session_id — 0 for a peer never heard
 	 *  from. */
@@ -545,6 +553,7 @@ export class ExocomPlane {
 			session_id: identity.session_id, name: this.name, persona: identity.persona, purpose: identity.purpose,
 			color: identity.color, model: identity.model, pid: process.pid, endpoint: identity.endpoint,
 			cwd: identity.cwd, context_pct: card.context_pct, inbox: card.inbox,
+			...(card.thinking ? { thinking: card.thinking } : {}),
 			heartbeat_at: new Date(this.now()).toISOString(),
 			public_key: this.publicKey,
 			...(identity.workspace ? {
@@ -1103,7 +1112,7 @@ export class ExocomPlane {
 		// so drop our claim on it — `stop()` must never reap a handed-off artifact, and the TTL /
 		// max-files sweep in `cleanupArtifacts` is what reclaims it.
 		this.artifacts.delete(msg_id);
-		this.sentTo.set(entry.session_id, (this.sentTo.get(entry.session_id) ?? 0) + 1);
+		this.countSent(entry.session_id);
 		return { msg_id };
 	}
 
@@ -1136,7 +1145,7 @@ export class ExocomPlane {
 				throw new Error(`exocom: peer "${target}" unreachable`);
 			}
 		}
-		this.sentTo.set(entry.session_id, (this.sentTo.get(entry.session_id) ?? 0) + 1);
+		this.countSent(entry.session_id);
 		return { msg_id: frame.msg_id };
 	}
 

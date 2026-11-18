@@ -2,6 +2,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { compactInlineText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 
@@ -42,7 +43,9 @@ export function registerModelsTool(pi: ExtensionAPI, d: ModelsToolDeps): void {
 				: `no models match "${params.query ?? ""}"`;
 			return { content: [{ type: "text", text }], details: { total, shown: lines.length, shortlist }, isError: false };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("models", theme, context);
+			if (pending) return pending;
 			const query = compactInlineText(args.query ?? "(shortlist)", { maxChars: 96 }) || "(shortlist)";
 			return new Text(`${theme.fg("toolTitle", theme.bold("models "))}${theme.fg("dim", query)}`, 0, 0);
 		},

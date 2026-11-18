@@ -86,17 +86,22 @@ export class WorkerConversations {
 	resume(ctx: ExtensionContext, input: Record<string, unknown>): ConversationResult<{ params: DelegateParams; turn: ConversationTurn }> {
 		const error = validateResumeRequest(input);
 		if (error) return { ok: false, code: "invalid", error };
+		let pendingLease: ConversationLease | undefined;
 		try {
 			const acquired = this.store(ctx).acquire(input.resume as string, ctx.sessionManager.getBranch());
 			if (!acquired.ok) return acquired;
 			const { record, lease } = acquired.value;
+			pendingLease = lease;
 			const invalid = this.valid(ctx, record);
-			if (invalid) { lease.release(); return { ok: false, code: "changed", error: invalid }; }
+			if (invalid) return { ok: false, code: "changed", error: invalid };
 			const brief = input.brief as Partial<DelegationBrief> | undefined ?? record.brief;
 			const spec: AgentRunSpec = { ...record.spec, model: record.model, task: input.task as string,
 				...(record.thinking ? { thinking: record.thinking } : {}) };
-			return { ok: true, value: { params: { ...spec, ...(brief ? { brief } : {}) }, turn: this.turn(ctx, lease, spec, brief, record) } };
+			const turn = this.turn(ctx, lease, spec, brief, record);
+			pendingLease = undefined;
+			return { ok: true, value: { params: { ...spec, ...(brief ? { brief } : {}) }, turn } };
 		} catch (e) { return { ok: false, code: "storage", error: `Conversation unavailable: ${String(e)}` }; }
+		finally { pendingLease?.release(); }
 	}
 
 	start(ctx: ExtensionContext, spec: AgentRunSpec, brief?: Partial<DelegationBrief>): ConversationTurn | undefined {
@@ -104,11 +109,17 @@ export class WorkerConversations {
 			previous: undefined, prepare: (input) => input,
 			settle: (_id, _spec, result) => unretained(result, `Continuation unavailable: ${reason}`), release: () => {},
 		});
+		let pendingLease: ConversationLease | undefined;
 		try {
 			if (!ctx.sessionManager.getSessionFile()) return undefined;
 			const created = this.store(ctx).create();
-			return created.ok ? this.turn(ctx, created.value, spec, brief) : unavailable(created.error);
+			if (!created.ok) return unavailable(created.error);
+			pendingLease = created.value;
+			const turn = this.turn(ctx, created.value, spec, brief);
+			pendingLease = undefined;
+			return turn;
 		} catch (error) { return unavailable(String(error)); } // persistence must not prevent an ordinary new delegation
+		finally { pendingLease?.release(); }
 	}
 
 	private valid(ctx: ExtensionContext, record: ConversationRecord): string | undefined {

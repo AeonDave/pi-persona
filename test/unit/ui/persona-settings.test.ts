@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import { inspectorFrame } from "../../../src/ui/inspector-frame.ts";
 import {
 	PersonaSettingsPanel,
 	filterSettingsRows,
@@ -188,7 +189,8 @@ test("the split detail column starts at one stable terminal column", () => {
 	assert.equal(detailLines.length, 2);
 	for (const line of detailLines) {
 		const detailStart = line.indexOf(line.includes("Group:") ? "Group:" : "Active now:");
-		assert.equal(visibleWidth(line.slice(0, detailStart)), 43, `detail column drifted: ${line}`);
+		// A 90-column window centred in 100 (5), its border and gutter (3), a 34-column list and the gap (2).
+		assert.equal(visibleWidth(line.slice(0, detailStart)), 44, `detail column drifted: ${line}`);
 	}
 });
 
@@ -203,7 +205,55 @@ test("settings hints reflect the injected navigation and confirmation bindings",
 	assert.match(output, /f4 close/);
 	assert.doesNotMatch(output, /enter edit|esc close/);
 	panel.handleInput("/");
-	assert.match(panel.render(100).join("\n"), /backspace, f3/);
+	assert.match(panel.render(100).join("\n"), /backspace delete · f3 apply · f4 clear/);
+});
+
+/** Content rows of a framed render: page margin, border, gutter and padding stripped. */
+function content(lines: readonly string[]): string[] {
+	return lines.map((line) => line.trimStart().replace(/^│ {2}/u, "").replace(/\s*│$/u, ""));
+}
+
+test("the page takes the shared window geometry: title, meta, rule, body, rule, legend", () => {
+	const panel = new PersonaSettingsPanel(fakeTui(24), theme(), keybindings(), { file: "D:\\persona.json", lastPersona: "reviewer", rows }, () => {});
+	const rendered = panel.render(100);
+	assert.ok(rendered.length <= inspectorFrame.viewportRows(24), "the page leaves Pi's footer its rows, like every window");
+	assert.match(rendered[0]!, /^ {5}┌─{88}┐$/u, "90% of the columns, centred like an overlay");
+	assert.match(rendered.at(-1)!, /^ {5}└─+┘$/u);
+	assert.match(rendered[1]!, /^ {5}│ +│$/u, "a blank margin row under the border");
+	const lines = content(rendered);
+	assert.deepEqual(lines.slice(2, 5), ["Persona settings", "Configuration file: D:\\persona.json", "Remembered persona: reviewer"]);
+	assert.match(lines[5]!, /^─+$/u);
+	assert.match(lines[6]!, /▸ \[Runtime\] Agent engine/u);
+	assert.match(lines.at(-4)!, /^─+$/u);
+	assert.equal(lines.at(-3), "↑↓ move · ⏎ edit · r reset · / filter · m models · d diagnostics · esc close");
+	assert.equal(lines.at(-2), "", "a blank margin row above the bottom border");
+});
+
+test("the filter is a titled field while typing and a meta row once applied", () => {
+	const panel = new PersonaSettingsPanel(fakeTui(24), theme(), keybindings(), { file: "settings.json", lastPersona: null, rows }, () => {});
+	panel.handleInput("/");
+	for (const char of "engine") panel.handleInput(char);
+	const typing = content(panel.render(100));
+	const field = typing.findIndex((line) => /^── Filter ─+$/u.test(line));
+	assert.ok(field > 0, typing.join("\n"));
+	assert.equal(typing[field + 1], "› engine▌");
+	assert.match(typing[field + 2]!, /^─+$/u);
+	assert.equal(typing.at(-3), "type to filter · backspace delete · ⏎ apply · esc clear");
+	panel.handleInput("ENTER");
+	const applied = content(panel.render(100));
+	assert.ok(applied.includes("Filter: engine · esc clears"), applied.join("\n"));
+	assert.equal(applied.some((line) => line.startsWith("── Filter")), false);
+});
+
+test("every size stays inside the terminal and keeps the selected setting visible", () => {
+	for (const terminalRows of [3, 5, 8, 9, 12, 16, 24]) for (const width of [12, 40, 80, 120]) {
+		const panel = new PersonaSettingsPanel(fakeTui(terminalRows), theme(), keybindings(), { file: "D:\\persona.json", lastPersona: null, rows, notice: "Saved Agent engine." }, () => {});
+		panel.handleInput("DOWN");
+		const rendered = panel.render(width);
+		assert.ok(rendered.length <= inspectorFrame.viewportRows(terminalRows), `${terminalRows}x${width}: ${rendered.length}`);
+		for (const line of rendered) assert.ok(visibleWidth(line) <= width, `${terminalRows}x${width}: ${line}`);
+		assert.match(rendered.join("\n"), /▸/u, `the selection stays visible at ${terminalRows}x${width}`);
+	}
 });
 
 test("model access and close hints stay discoverable on a narrow terminal", () => {

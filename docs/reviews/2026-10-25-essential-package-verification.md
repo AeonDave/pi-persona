@@ -11,7 +11,7 @@ record of the essential-package implementation.
 
 ## What was reviewed
 
-Read the [comparative study](2026-10-24-pi-subagents.md), its evidence and public-source notes,
+Reviewed the [runtime reproductions](2026-10-24-runtime-reproductions.json),
 [approved package scope](../../ROADMAP.md), binding architecture,
 strategy/spine contracts and relevant operational documentation before integrating changes.
 The owner explicitly superseded point 6's earlier analysis-only restriction.

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { registerSessionCards } from "./ui/session-cards.ts";
+import { programWakeIds, registerSessionCards, type RunFailureEntry } from "./ui/session-cards.ts";
 
 import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
@@ -122,7 +122,7 @@ import { createBackgroundRuns, type TrackedRun } from "./tools/background-run.ts
 import { registerCouncilTool } from "./tools/council.ts";
 import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
-import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, STALL_FLAG_MS } from "./engine/async.ts";
+import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, runDisplayName, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
@@ -135,6 +135,7 @@ import { flowDisposition, type FlowOutcome } from "./orchestration/flow-run.ts";
 import { type RosterMember, rosterNodeKeys, rosterSpec } from "./orchestration/roster.ts";
 import { agentAttemptIdentity, type AgentAttemptIdentity } from "./orchestration/agent-attempt.ts";
 import { snapshotStrategyModels, strategyLegMetadata, type StrategyLegMetadata, type StrategyModels } from "./ui/strategy-leg.ts";
+import { modelEffortText } from "./ui/model-effort.ts";
 import type { AgentProgress, AgentStatus, SteerFn } from "./orchestration/sdk.ts";
 import { withResultRefs } from "./orchestration/sdk.ts";
 import { knownParams, strategyNames } from "./orchestration/strategy.ts";
@@ -169,7 +170,9 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatIntercomDelivery, formatIntercomSender } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
+import { registerAgentCommand, type AgentMessageTarget } from "./extension/agent-command.ts";
 import { inspectorFrame } from "./ui/inspector-frame.ts";
+import { windowOverlayOptions } from "./ui/window-chrome.ts";
 import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, backgroundCounts, deriveWaitingNodeIds, formatBackgroundStatus, isQueuedMarker, isNonAgentNode, PERSONA_BACKGROUND_STATUS_KEY, progressPatch } from "./ui/agent-tree.ts";
 import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
@@ -221,15 +224,6 @@ interface NudgeEntry {
 interface CheckInEntry extends ReturnType<typeof buildRunLabelDetails> {
 	content: string;
 	kind: "routine" | "stall" | "recovery";
-}
-
-interface RunFailureEntry {
-	id: string;
-	label: string;
-	agent: string;
-	model?: string;
-	durationMs?: number;
-	error: string;
 }
 
 /**
@@ -366,6 +360,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		detailHint: expandDetailHint,
 		getOutputPad: () => pi.getSettings().outputPad ?? 1,
 		processLog: (record) => renderProcessLog(record, true),
+		// One card per program event: its wake, queued or on this branch; otherwise its log entry.
+		programWake: (id) => monitors?.wakePending(id) === true || scripts?.wakePending(id) === true
+			|| programWakeIds(lastCtx?.sessionManager.getBranch() ?? []).has(id),
+		// Never hydrate an archive before its owning session is bound.
+		programLog: (id) => lastCtx ? (id.startsWith("script-") ? scriptArchive : monitorArchive).result(id) : undefined,
 	});
 	const appendNudgeEntry = (content: string): void => {
 		pi.appendEntry("pi-persona-nudge", { content } satisfies NudgeEntry);
@@ -944,6 +943,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					collapsedGroups: collapsedResourceGroups,
 					onGroupToggle: renderAgentWidget,
 					peerSnapshot: () => exocom.peerSnapshot(),
+					recentWorkers: () => tracker.list().filter((run) => run.status !== "running" && run.progress.chat !== undefined)
+						.sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0)).map((run): AgentNode => ({
+							id: `async:${run.id}`, label: runDisplayName(run), parentId: undefined,
+							status: run.status, kind: "subagent", agent: run.agent,
+							detail: run.error ?? run.result?.error, output: run.result?.output ?? run.progress.output,
+							chat: run.progress.chat!,
+							...(run.result ? { usage: run.result.usage } : {}),
+							...(run.result?.modelUsed ? { model: run.result.modelUsed } : run.model ? { model: run.model } : {}),
+							...(run.result?.thinkingRequested ? { thinking: run.result.thinkingRequested } : {}),
+							...(run.result?.thinkingEffective ? { thinkingEffective: run.result.thinkingEffective } : {}),
+						})),
 					onPeersChanged: (listener) => exocom.onPeersChanged(listener),
 					onStop: stopAgent,
 					onSteer: steerAgent,
@@ -954,7 +964,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				});
 			},
 			// Near-fullscreen: watching sub-agents work is a reading surface, not a popup.
-			{ overlay: true, overlayOptions: () => ({ width: "90%", maxHeight: inspectorFrame.viewportRows(terminalRows()), margin: 1 }) },
+			{ overlay: true, overlayOptions: () => windowOverlayOptions(terminalRows()) },
 		);
 	}
 	let personas: Persona[] = [];
@@ -1381,9 +1391,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				const model = failed.result?.modelUsed ?? failed.model;
 				const durationMs = failed.startedAt !== undefined && failed.settledAt !== undefined
 					? Math.max(0, failed.settledAt - failed.startedAt) : undefined;
+				const thinking = failed.result?.thinkingRequested, thinkingEffective = failed.result?.thinkingEffective;
 				pi.appendEntry("pi-persona-run-failure", {
 					id: failed.id, label: failed.label ?? failed.agent, agent: failed.agent,
 					...(model ? { model } : {}), ...(durationMs !== undefined ? { durationMs } : {}),
+					...(thinking ? { thinking } : {}), ...(thinkingEffective ? { thinkingEffective } : {}),
 					error: failed.error ?? "(no detail)",
 				} satisfies RunFailureEntry);
 			} : undefined,
@@ -1562,6 +1574,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		bus,
 		supervisorHandle: SUPERVISOR,
 		resultArchive: () => results.archive,
+		verificationShellPath: () => (pi.getSettings() as { shellPath?: string }).shellPath,
+		canVerify: () => !disposed && pi.getActiveTools().includes("bash") && (!controller.capabilities || canCallTool(controller.capabilities, "bash")),
 		onFallback: (info) => {
 			try {
 				lastCtx?.ui.notify(toastCause(`${info.agent}: ${info.from} failed, retrying on ${info.to}`, 120), "warning");
@@ -1730,7 +1744,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				if (!promptedParticipants.has(promptKey)) addedPromptKeys.add(promptKey);
 				promptedParticipants.add(promptKey);
 				// Name the core's verticalization in the picker too: choosing a model for "the
-				// Conservatore" is a different judgement than choosing one for a bare "balthasar".
+				// Regulator" is a different judgement than choosing one for a bare "balthasar".
 				// An auxiliary actor names the param that declared it ("arbiter judge").
 				const purpose = corePurpose(p.agent);
 				const role = p.param ? ` · ${p.param}` : "";
@@ -1743,10 +1757,12 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				// usefully. Outside the TUI (RPC), fall back to the built-in select.
 				let pick: string | undefined;
 				let cancelPicker: (() => void) | undefined;
+				let pickerRows = (): number => 24;
 				try {
 					pick = ctx.mode === "tui"
 						? await ctx.ui.custom<string | undefined>(
 								(tui, theme, keybindings, done) => {
+									pickerRows = () => tui.terminal.rows;
 									// custom() has no signal option: its factory's done callback owns dismissal.
 									cancelPicker = () => done(undefined);
 									if (signal?.aborted) cancelPicker();
@@ -1757,7 +1773,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 										...(keybindings ? { keybindings } : {}),
 									});
 								},
-								{ overlay: true },
+								{ overlay: true, overlayOptions: () => windowOverlayOptions(pickerRows()) },
 								)
 						: await ctx.ui.select(title, options, signal ? { signal } : undefined);
 				} finally {
@@ -1801,7 +1817,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return true;
 	}
 
-	/** A core's declared verticalization ("Propulsore", "Critico") — the lens it argues from, so a
+	/** A core's declared verticalization ("Driver", "Critic") — the lens it argues from, so a
 	 *  council reads as a set of ROLES rather than a set of names. Absent for an agent that declares
 	 *  none, and the label simply omits it. */
 	function corePurpose(agent: string): string | undefined {
@@ -1829,7 +1845,8 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	function currentStrategyModels(ctx: ExtensionContext): StrategyModels {
 		const persona = controller.activePersona?.name;
 		return snapshotStrategyModels({ agents, ...(persona ? { assigned: personaModels(personaConfigs, persona) } : {}),
-			...(ctx.model ? { sessionModel: `${ctx.model.provider}/${ctx.model.id}` } : {}) });
+			...(ctx.model ? { sessionModel: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+			childThinking: defaultChildThinking(config.childThinking, host.getThinkingLevel()) });
 	}
 	function coreLabel(identity: AgentAttemptIdentity, key: string, metadata: StrategyLegMetadata): string {
 		const short = shortModel(metadata.model);
@@ -1880,7 +1897,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					// time, not run time, so a queued leg would otherwise show elapsed time it never
 					// spent running and could raise a false stall badge once it goes live.
 					const now = Date.now();
-					agentTree.add({ id, label: coreLabel(identity, nodeKey, metadata), parentId: rootId, status: "running", kind: "subagent", ...metadata, detail: "", output: "", usage: undefined, startedAt: now, lastAdvanceAt: now });
+					agentTree.add({ id, label: coreLabel(identity, nodeKey, metadata), parentId: rootId, status: "running", kind: "subagent", ...metadata, detail: "", output: "", chat: undefined, usage: undefined, startedAt: now, lastAdvanceAt: now });
 					return;
 				}
 				stopRegistry.delete(id);
@@ -2689,12 +2706,25 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			await openAgentOverlay(ctx);
 		},
 	});
-	pi.registerCommand("agents", {
-		description: "Open the navigable agent tree overlay (↑↓ navigate, ⏎ open, esc close)",
-		handler: async (_args, ctx) => {
+	registerAgentCommand(pi, {
+		open: async (ctx) => {
 			lastCtx = ctx;
 			await openAgentOverlay(ctx);
 		},
+		targets: () => {
+			const nodes = agentTree.snapshot();
+			const parents = new Set(nodes.flatMap((node) => node.parentId ? [node.parentId] : []));
+			const targets = new Map<string, AgentMessageTarget>();
+			for (const node of nodes) {
+				if (isNonAgentNode(node) || parents.has(node.id) || node.kind === "delegate") continue;
+				const id = node.id.startsWith("async:") ? node.id.slice(6) : node.id;
+				const run = tracker.peek(id);
+				const name = run?.label ?? run?.agent ?? node.agent;
+				targets.set(id, { id, nodeId: node.id, ...(name ? { name } : {}), label: name ?? node.label, sendable: node.status === "running" && steerRegistry.has(node.id) });
+			}
+			return [...targets.values()];
+		},
+		send: steerAgent,
 	});
 
 	// The dedicated settings surface never replaces Pi's /settings and never calls /reload.
@@ -2923,7 +2953,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						80,
 					) || "workspace";
 					const locality = workspaceId === scope?.homeWorkspaceId ? "same workspace" : "external workspace";
-					return `• ${name} (${persona} · ${model}, ctx ${contextPct}%) · ${workspaceLabel} [${workspaceCode}] · ${locality}`;
+					return `• ${name} (${persona} · ${modelEffortText(model, p.thinking)}, ctx ${contextPct}%) · ${workspaceLabel} [${workspaceCode}] · ${locality}`;
 				},
 			);
 			const scopeLine = scope

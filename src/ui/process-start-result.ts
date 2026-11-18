@@ -18,7 +18,7 @@ export function renderProcessStartResult(
 	theme: Parameters<typeof renderLiteralToolResult>[2],
 	context: Parameters<typeof renderLiteralToolResult>[3],
 	start?: ProcessStart,
-): Text {
+): ReturnType<typeof renderLiteralToolResult> {
 	if (!start || options.expanded || (context?.isError ?? result.isError ?? false)) return renderLiteralToolResult(result, options, theme, context);
 	const left = typeof start.expiresAtEpochMs === "number" && Number.isFinite(start.expiresAtEpochMs) ? start.expiresAtEpochMs - Date.now() : undefined;
 	const facts = [

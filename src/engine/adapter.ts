@@ -179,7 +179,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// contract that cannot be resolved is a hard configuration error: running the leg
 			// without its requested guard would silently turn a constrained call into prose.
 			const requestedContract = spec.outputContract?.trim();
-			const contractDef = requestedContract ? pinnedDef(requestedContract) : undefined;
+			let contractDef: ContractDef | undefined;
+			try { contractDef = requestedContract ? pinnedDef(requestedContract) : undefined; }
+			catch (error) { return beforeStart({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` }); }
 			if (requestedContract && !contractDef) return beforeStart(unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []));
 			let encodedSkills: string | undefined;
 			try { if (spec.skills && spec.skills.length > 0) encodedSkills = encodeSelectedSkills(spec.skills); }
@@ -227,7 +229,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			if (isPositiveFiniteMs(spec.timeoutMs)) childOptions.timeoutMs = spec.timeoutMs;
 			if (onProgress) {
 				childOptions.onProgress = (snap) =>
-					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+					onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}), ...(snap.chat ? { chat: snap.chat } : {}) });
 			}
 			// The run aborts if EITHER the whole-run signal or this agent's own (UI stop) fires.
 			const signal = combineSignals(deps.signal, callSignal);
@@ -374,9 +376,9 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				}
 			}
 
+			result.sessionQuiescent = child.quiescent;
 			if (spec.session) {
 				result.sessionSaved = false;
-				result.sessionQuiescent = child.quiescent;
 				if (result.ok && child.quiescent) {
 					try { await validateWorkerSession({ ...spec.session, resume: true }, deps.cwd ?? process.cwd()); result.sessionSaved = true; }
 					catch { /* The result remains valid, but the transcript is not resumable. */ }

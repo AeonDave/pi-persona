@@ -678,52 +678,52 @@ test("the no-overflow path returns every row untouched, wake rows included", () 
 	assert.doesNotMatch(renderAgentTreeSummary(nodes, 6, { now: 1_000 }).join("\n"), /\d+ monitors?\b|next due/);
 });
 
-test("renderAgentTree appends the compact effort sigla after the label; off/absent render nothing", () => {
+test("renderAgentTree appends the full effort name after the label; off is shown, unknown renders nothing", () => {
 	const lines = renderAgentTree([
 		{ id: "a", label: "IronVale-flow-reference · glm-5.3", parentId: undefined, status: "running", detail: "↑217k ↓75k", thinking: "xhigh" },
 		{ id: "b", label: "no-effort", parentId: undefined, status: "running", detail: undefined },
 		{ id: "c", label: "off-leg", parentId: undefined, status: "running", detail: undefined, thinking: "off" },
 		{ id: "d", label: "mx-leg", parentId: undefined, status: "done", detail: undefined, thinking: "max" },
 	]);
-	assert.match(lines[0] ?? "", /⏳ IronVale-flow-reference · glm-5\.3 · xh {2}↑217k ↓75k$/, "the sigla lands right after the model, before the usage detail");
+	assert.match(lines[0] ?? "", /⏳ IronVale-flow-reference · glm-5\.3 · xhigh {2}↑217k ↓75k$/, "the effort lands right after the model, before the usage detail");
 	assert.equal(lines[1], "⏳ no-effort", "unknown requested effort renders nothing");
-	assert.equal(lines[2], "⏳ off-leg", "off renders nothing — absence means off");
-	assert.equal(lines[3], "✓ mx-leg · mx");
+	assert.equal(lines[2], "⏳ off-leg · off", "off is a known level and is shown");
+	assert.equal(lines[3], "✓ mx-leg · max");
 });
 
 test("a settled row renders requested→observed divergence honestly — never fabricated", () => {
 	const row = (thinking?: AgentNode["thinking"], thinkingEffective?: AgentNode["thinkingEffective"]): string =>
 		renderAgentTree([{ id: "x", label: "leg", parentId: undefined, status: "done" as AgentNodeStatus, detail: undefined, ...(thinking !== undefined ? { thinking } : {}), ...(thinkingEffective !== undefined ? { thinkingEffective } : {}) }]).join("\n");
-	assert.match(row("xhigh", "high"), /✓ leg · xh→h$/, "a genuinely different observed level renders the divergence");
+	assert.match(row("xhigh", "high"), /✓ leg · xhigh→high$/, "a genuinely different observed level renders the divergence");
 	assert.doesNotMatch(row("xhigh"), /→/, "no observed value reported ⇒ requested only, no invented arrow");
-	assert.equal(row("high", "high"), "✓ leg · h", "an observed level equal to requested is not a divergence");
-	assert.doesNotMatch(row("xhigh", "off"), /→/, "an observed off renders nothing — no dangling arrow");
-	assert.doesNotMatch(row(undefined, "high"), /·/, "no requested level ⇒ nothing, even with an observed one");
+	assert.equal(row("high", "high"), "✓ leg · high", "an observed level equal to requested is not a divergence");
+	assert.equal(row("xhigh", "off"), "✓ leg · xhigh→off", "Pi clamping the level to off is shown");
+	assert.equal(row(undefined, "high"), "✓ leg · high", "an observed level with no known request is what ran");
 });
 
 test("effortTag/thinkingDetailLine: the pure helpers behind the tree row and the drill-in", () => {
 	assert.equal(effortTag(undefined), "");
-	assert.equal(effortTag("off"), "");
-	assert.equal(effortTag("minimal"), " · mn");
-	assert.equal(effortTag("xhigh"), " · xh");
-	assert.equal(effortTag("xhigh", "high"), " · xh→h");
-	assert.equal(effortTag("high", "high"), " · h");
-	assert.equal(effortTag("xhigh", "off"), " · xh", "observed off renders nothing, never a dangling arrow");
-	assert.equal(effortTag(undefined, "high"), "");
+	assert.equal(effortTag("off"), " · off");
+	assert.equal(effortTag("minimal"), " · minimal");
+	assert.equal(effortTag("xhigh"), " · xhigh");
+	assert.equal(effortTag("xhigh", "high"), " · xhigh→high");
+	assert.equal(effortTag("high", "high"), " · high");
+	assert.equal(effortTag(undefined, "high"), " · high");
 	assert.equal(thinkingDetailLine(undefined), "");
-	assert.equal(thinkingDetailLine("off"), "");
+	assert.equal(thinkingDetailLine("off"), "thinking: requested off");
 	assert.equal(thinkingDetailLine("medium"), "thinking: requested medium");
 	assert.equal(thinkingDetailLine("xhigh", "high"), "thinking: requested xhigh → observed high");
 	assert.equal(thinkingDetailLine("high", "high"), "thinking: requested high", "equal observation is not a divergence");
-	assert.equal(thinkingDetailLine("xhigh", "off"), "thinking: requested xhigh");
+	assert.equal(thinkingDetailLine("xhigh", "off"), "thinking: requested xhigh → observed off");
+	assert.equal(thinkingDetailLine(undefined, "low"), "thinking: observed low");
 });
 
 test("width clipping still holds with the appended effort field (tree rows)", () => {
 	const line = renderAgentTree([
 		{ id: "a", label: "L".repeat(120), parentId: undefined, status: "running", detail: "D".repeat(120), thinking: "xhigh" },
 	]).join("\n");
-	assert.ok(visibleWidth(line) <= 210, `tree row with effort occupied ${visibleWidth(line)} columns`);
-	assert.match(line, / · xh /, "the sigla is present, not clipped away by the label clamp");
+	assert.ok(visibleWidth(line) <= 214, `tree row with effort occupied ${visibleWidth(line)} columns`);
+	assert.match(line, / · xhigh /, "the effort is present, not clipped away by the label clamp");
 });
 
 test("backgroundCounts: in-flight agent leaves plus running wake sources by kind", () => {
@@ -750,4 +750,10 @@ test("formatBackgroundStatus: fixed kind order, zero counts omitted, cleared whe
 	assert.equal(formatBackgroundStatus({ agents: 2, monitors: 1, timers: 1, scripts: 1 }), "agents=2 monitors=1 timers=1 scripts=1");
 	assert.equal(formatBackgroundStatus({ scripts: 3, timers: 0, monitors: 2, agents: 0 }), "monitors=2 scripts=3");
 	assert.equal(formatBackgroundStatus({ agents: 0, monitors: 0, timers: 0, scripts: 0 }), undefined);
+});
+
+test("a folded digest's representative carries the same effort as its row", () => {
+	const legs: AgentNode[] = Array.from({ length: 6 }, (_, i): AgentNode => ({ id: `l${i}`, label: `Leg-${i} · haiku-5`, parentId: undefined, status: "running", detail: undefined, thinking: "medium", startedAt: 0, lastAdvanceAt: 0 }));
+	const lines = renderAgentTreeSummary(legs, 3, { now: 1_000, stallMs: 0 });
+	assert.match(lines.join("\n"), /active workers?: Leg-\d · haiku-5 · medium/);
 });

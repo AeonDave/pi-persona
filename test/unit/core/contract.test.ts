@@ -125,6 +125,15 @@ test("parseAndValidate walks candidates until one VALIDATES, not just parses", (
 	assert.match(r4.error ?? "", /not valid JSON/);
 });
 
+test("JSON recovery bounds every closer attempt, including unmatched and repeated malformed slices", () => {
+	const answer = '{"result":"bounded answer"}';
+	assert.equal(parseAndValidate(`${answer}\n${"}".repeat(63)}`, DEFAULT_CONTRACT).ok, true);
+	for (const suffix of ["}".repeat(65), "{noise}".repeat(65)]) {
+		assert.equal(parseAndValidate(`${answer}\n${suffix}`, DEFAULT_CONTRACT).ok, false, "malformed closers must spend the search budget even without a new candidate");
+		assert.equal(parseAndValidate(`\`\`\`json\n${answer}\n\`\`\`\n${suffix}`, DEFAULT_CONTRACT).ok, true, "an explicit JSON fence is admitted without a prose scan");
+	}
+});
+
 test("DEFAULT_CONTRACT requires result and declares the voting/judging fields", () => {
 	assert.equal(DEFAULT_CONTRACT.name, "default");
 	assert.equal(DEFAULT_CONTRACT.fields.result?.required, true);

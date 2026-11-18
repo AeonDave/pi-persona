@@ -384,7 +384,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// A requested contract is a runtime guard, not merely prompt decoration. Resolve it
 			// before model/session construction so a missing name can never run unconstrained.
 			const requestedContract = spec.outputContract?.trim();
-			const requestedDef = requestedContract ? pinnedDef(requestedContract) : undefined;
+			let requestedDef: ContractDef | undefined;
+			try { requestedDef = requestedContract ? pinnedDef(requestedContract) : undefined; }
+			catch (error) { return beforeStart({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` }); }
 			if (requestedContract && !requestedDef) return beforeStart(unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []));
 
 			const picked = spec.model ? undefined : deps.modelFor?.(spec.agent, spec.role);
@@ -774,7 +776,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// One progress tick, routed exactly as the subscription routes them: the per-call sink
 			// takes the AgentProgress shape (no `turns`), else the construction-time sink.
 			const emitProgress = (snap: ProgressSnapshot): void => {
-				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}) });
+				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}), ...(snap.chat ? { chat: snap.chat } : {}) });
 				else if (deps.onProgress) deps.onProgress(snap);
 			};
 			let contractDef: ContractDef | undefined = requestedDef;
@@ -843,7 +845,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 							// launch path (extension.ts) only has the latter.
 							const snap = snapshot(state);
 							const activity = `✉ from ${env.from}`;
-							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), activity });
+							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.chat ? { chat: snap.chat } : {}), activity });
 							else if (deps.onProgress) deps.onProgress({ ...snap, activity });
 						}
 					};
@@ -938,6 +940,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (!ok) {
 				for (const [callId, name] of openToolCalls) {
 					try {
+						state.chat.observe({ type: "tool_execution_end", toolCallId: callId, toolName: name, isError: true });
 						emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
 					} catch {
 						/* the consumer's sink threw; the tick is lost, the run still settles */

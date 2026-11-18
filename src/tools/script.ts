@@ -3,6 +3,7 @@
 import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import type { MonitorArchive } from "../monitor/archive.ts";
 import type { ScriptSession } from "../script/session.ts";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
@@ -81,7 +82,9 @@ export function registerScriptTool(pi: ExtensionAPI, d: ScriptToolDeps): void {
 			const completion = ctx.hasUI === false ? "completion is retained while this session stays open" : "completion wakes you when the script exits";
 			return { content: [{ type: "text" as const, text: `Started ${result.entry.id} (${compactInlineText(result.entry.label)}); ${completion}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. ${armWakeAdvice(ctx, "script", "completion", "Keep this session open. Continue independent work, or end your turn; it wakes you by itself. Never sleep or poll to wait for it.")}` }], details: { ok: true, id: result.entry.id, label: compactInlineText(result.entry.label), expiresAtEpochMs: result.entry.expiresAtEpochMs } };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("script", theme, context);
+			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold(`script ${compactInlineText(args.action ?? "", { maxChars: 12 })}`))} ${theme.fg("dim", compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 }))}`, 0, 0);
 		},
 		renderResult(result, options, theme, context) {

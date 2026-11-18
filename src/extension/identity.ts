@@ -3,6 +3,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { renderPendingCall } from "../ui/pending-call.ts";
 import { type Static, Type } from "typebox";
 
 import { canCallTool, type EffectiveCapabilities } from "../core/capabilities.ts";
@@ -166,19 +167,15 @@ export function installIdentity(pi: ExtensionAPI, host: IdentityHost): SessionId
 			const text = identityReceipt(name, changed);
 			return { content: [{ type: "text", text }], details: { name, changed } };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			const pending = renderPendingCall("agent name", theme, context);
+			if (pending) return pending;
 			const name = compactInlineText(args.name ?? "", { maxChars: 32 }) || "?";
-			return new Text(`${theme.fg("toolTitle", theme.bold("Agent Name "))}${theme.fg("accent", name)}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("agent name "))}${theme.fg("accent", name)}`, 0, 0);
 		},
+		// Same card as `exocom_name`: the one-line receipt and any failure share the literal renderer.
 		renderResult(result, { expanded }, theme, context) {
-			const failed = context?.isError ?? result.isError ?? false;
-			const details = result.details as unknown as { name?: unknown; changed?: unknown } | undefined;
-			const name = !failed && typeof details?.name === "string" ? details.name : "";
-			// Failures share the one literal renderer (error heading, bounded preview, full expanded
-			// text); a chosen handle is a one-line purpose receipt collapsed and the complete literal
-			// receipt expanded.
-			if (!name || expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
-			return new Text(theme.fg("accent", compactInlineText(identityReceipt(name, details?.changed !== false), { maxChars: 80 })), 0, 0);
+			return renderLiteralToolResult(result, { expanded }, theme, context);
 		},
 	});
 

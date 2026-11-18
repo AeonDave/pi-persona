@@ -80,7 +80,11 @@ and trust diagnostics. A receipt confirms submission, not that the worker follow
   A parent is waiting only when all its live descendant branches are waiting. Enter on a group opens
   a scrollable overview of its worker legs, with separate queued/running/terminal counts, model,
   effort, activity or result preview, and known cumulative usage. Enter again opens the selected
-  worker's output; Escape returns to the same group selection. `s` sends a course correction;
+  worker's searchable run chat, with expandable tool arguments/results and reasoning. Scrolling
+  away from the end holds the reading position; End follows new output again. Recent retained
+  async workers have a separate collapsed group. Escape returns to the same group selection.
+  `s` sends a course correction; `/agents send <name|run-id> <message>` sends one directly
+  from the editor, with current worker IDs available through autocomplete;
   `x` requests cancellation and appears only when the run can actually be stopped, marking the row
   `stopping…` at once; a stop that can't be applied says so instead of doing nothing. Escape goes
   back or closes the panel.
@@ -118,10 +122,18 @@ receipt previews the message that was actually queued; expand it (`Ctrl+O` by de
 configured key) to read the full message and diagnostic run ID. Aliases are display names, not
 addresses: tools still route by run ID, and duplicate aliases show a secondary ID to distinguish them.
 Saved launch/control receipts keep their display names even after the runtime tracker is gone.
-Council and flow launch receipts also retain each participant's model and requested effort, with
-phase and auxiliary roles identified. Expand the card for the full panel. A pending model choice
-is marked explicitly; launch selections are not proof of the effective model or effort after
-setup, provider recovery or Pi's effort adjustment. Later settings changes do not rewrite history.
+Council and flow launch receipts use the delegate grammar, one short row per participant
+(`melchior · opus-5 · medium`), with phase and auxiliary roles identified. A model you have yet to
+pick in the model picker reads `model pending`; expand the card for the full panel, full model
+references and the current default the picker may change. Launch selections are not proof of the
+effective model or effort after setup, provider recovery or Pi's effort adjustment. Later settings
+changes do not rewrite history.
+
+Wherever a worker's model appears — launch cards, the live tree, F9, Exocom peer rows — its effort
+follows in full (`haiku-5 · medium`; `xhigh→high` when Pi reports a different level). An unknown
+effort is omitted rather than guessed. While the model is still writing a tool call, its card is
+one line, the tool name and a spinner (`delegate ⠋ preparing…`), replaced by the full card once
+the arguments are complete.
 
 A truncated message includes a message id. The supervisor can retrieve its retained body with
 `intercom { action: "message", messageId: "m1" }`. A worker's final report has a run id instead:

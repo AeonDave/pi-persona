@@ -5,6 +5,23 @@ Items marked **🔒** are committed; **🔍** need design/research; **💡** are
 
 ---
 
+## Current supervised-worker scope
+
+The current development pass adds structured F9 conversations, direct `/agents send` routing,
+clearer active delegation guidance, recursive output contracts and optional command verification
+before worktree export. These extend the existing engine, communication and result-storage seams.
+
+The following are excluded from this scope, not queued candidates:
+
+| Idea | Decision |
+|---|---|
+| Bare `@name` interception | Use the explicit command and F9 controls; ordinary prompt text must not ambiguously become a worker message. |
+| Raw supervisor-context inheritance | Use bounded briefs, explicit result references and successful saved-worker continuation; do not duplicate the supervisor's chat into fresh reviews. |
+| Resuming failed worker transcripts | Retain reports and recoverable worktrees; a partial or failed native turn is not admitted as a resumable conversation. |
+| A general external terminal-control bridge | Existing Pi UI, observer and communication contracts cover the demonstrated needs; a second lifecycle/transport has no qualified use case. |
+
+---
+
 ## Priority 0 — Essential supervised-work package
 
 **Status: implemented and locally verified (2026-10-25).** This package was the first
@@ -14,8 +31,7 @@ and package metadata.
 Keep the existing supervised-session architecture and address concrete correctness and usability
 problems, without importing a persistent daemon, script runtime, scheduler or default context fork.
 
-Sources: [comparative study](docs/reviews/2026-10-24-pi-subagents.md) ·
-[verified findings](docs/reviews/2026-10-24-pi-subagents-evidence.json) ·
+Evidence: [runtime reproductions](docs/reviews/2026-10-24-runtime-reproductions.json) ·
 [essential-package verification](docs/reviews/2026-10-25-essential-package-verification.md) ·
 [current-host cleanup and final requalification](docs/reviews/2026-10-25-current-host-cleanup.md).
 

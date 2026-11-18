@@ -1,4 +1,6 @@
+import type { ThinkingLevel } from "../core/types.ts";
 import type { AgentNode, RenderOptions } from "./agent-tree.ts";
+import { modelEffortText } from "./model-effort.ts";
 import { flattenTree, isStalledNode, projectAgentTreeSummary, type FlatRow } from "./agent-tree.ts";
 import { rowText, type StyledRow } from "./styled-row.ts";
 
@@ -8,11 +10,15 @@ export const RESOURCE_GROUP_IDS: Record<ResourceKind, string> = {
 };
 const kinds: readonly ResourceKind[] = ["timer", "monitor", "script"];
 export const PEER_GROUP_ID = "ui:resources:peers";
+/** F9-only completed-worker projection; never enters the runtime tree or widget. */
+export const RECENT_WORKERS_GROUP_ID = "ui:resources:recent-workers";
 export interface PeerPresence {
 	key: string;
 	name: string;
 	persona?: string;
 	model?: string;
+	/** Self-reported Pi effort, shown after the model wherever the model is shown. */
+	thinking?: ThinkingLevel;
 	contextPercent?: number;
 	status: "online" | "idle";
 }
@@ -25,13 +31,13 @@ export function projectPeers(peers: readonly PeerPresence[]): AgentNode[] {
 		...peers.map((peer): AgentNode => ({
 			id: `${PEER_GROUP_ID}:${peer.key}`, label: peer.name, parentId: PEER_GROUP_ID, status: "running", kind: "peer",
 			detail: peer.status,
-			output: [`status: ${peer.status}`, ...(peer.persona ? [`persona: ${peer.persona}`] : []), ...(peer.model ? [`model: ${peer.model}`] : []), ...(peer.contextPercent !== undefined ? [`context: ${peer.contextPercent}%`] : [])].join("\n"),
+			output: [`status: ${peer.status}`, ...(peer.persona ? [`persona: ${peer.persona}`] : []), ...(peer.model ? [`model: ${modelEffortText(peer.model, peer.thinking)}`] : []), ...(peer.contextPercent !== undefined ? [`context: ${peer.contextPercent}%`] : [])].join("\n"),
 		})),
 	];
 }
 
 export function isResourceGroup(id: string): boolean {
-	return id === PEER_GROUP_ID || kinds.some((kind) => RESOURCE_GROUP_IDS[kind] === id);
+	return id === PEER_GROUP_ID || id === RECENT_WORKERS_GROUP_ID || kinds.some((kind) => RESOURCE_GROUP_IDS[kind] === id);
 }
 
 /** Retain category preferences but release fold state for delegate batches removed from the tree. */

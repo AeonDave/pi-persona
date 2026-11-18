@@ -72,11 +72,17 @@ test("show_image renders and expands through Pi's real native tool shell", async
   const tool=makeShowImageTool();
   const result=await tool.execute("preview",{path:"sample.png",mode:"ascii"},undefined,undefined,{cwd:dir,hasUI:true} as ExtensionToolContext);
   const component=new ToolExecutionComponent("show_image","preview",{path:"sample.png",mode:"ascii"},{showImages:true,outputPad:2},tool,{requestRender(){}} as unknown as TUI,dir);
+  assert.match(stripVTControlCharacters(component.render(40).join("\n")),/^ {2}show_image . preparing…/m,"while arguments stream: one pending line inside the card's own padding");
+  component.setArgsComplete();
+  assert.match(stripVTControlCharacters(component.render(40).join("\n")),/show_image.*sample\.png/,"the pending call remains identifiable");
+  component.updateResult({...result,isError:false},true);
+  assert.match(stripVTControlCharacters(component.render(40).join("\n")),/show_image.*sample\.png/,"partial output retains the loading call");
   component.updateResult({...result,isError:false});
   const collapsed=component.render(40);
   const text=stripVTControlCharacters(collapsed.join("\n"));
-  assert.match(text,/show_image.*sample\.png/); assert.match(text,/preview/); assert.match(text,/ctrl\+o/i);
-  assert.ok(!text.includes("Prepared a terminal preview"),"the model-facing result is not duplicated into the card");
+  assert.doesNotMatch(text,/show_image|sample\.png|preview|ctrl\+o|File:|Source:|Mode:/i,"success displays only the image");
+  assert.equal(collapsed.length,9,"only Pi's native separator and eight image rows remain");
+  assert.ok(collapsed.slice(1).every(line=>/^ +@+$/.test(line)),"the image is horizontally centered without a card");
   assert.ok(collapsed.every(line=>stripVTControlCharacters(line).length<=40));
   const y=collapsed.length-2;
   const click:TuiMouseEvent={type:"click",button:"left",x:3,y,screenX:3,screenY:y,width:40,height:collapsed.length,shift:false,alt:false,ctrl:false};
@@ -97,6 +103,7 @@ test("show_image native shell handles errors and malformed persisted image detai
  const component=new ToolExecutionComponent("show_image","saved",{path:"example.png"},{showImages:true,outputPad:1},tool,{requestRender(){}} as unknown as TUI,process.cwd());
  component.updateResult({content:[{type:"text",text:"show_image: file missing"}],details:{mode:"auto"},isError:true});
  let text=stripVTControlCharacters(component.render(60).join("\n"));
+ assert.match(text,/show_image.*example\.png/,"failed calls retain their identity");
  assert.match(text,/failed/); assert.match(text,/file missing/);
  component.updateResult({content:[{type:"text",text:"saved image"}],details:{mode:"auto",image:{pngBase64:"bogus"}},isError:false});
  text=stripVTControlCharacters(component.render(60).join("\n"));

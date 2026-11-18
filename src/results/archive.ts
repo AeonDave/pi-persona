@@ -32,10 +32,14 @@ function identity(data: unknown): { ref?: string; originKey?: string } {
 }
 
 function summary(record: TerminalResultRecord, storage: ResultStorage): ResultSummary {
-	// Parse again to detach optional usage too; callers never receive our mutable state.
+	// Parse again to detach metadata; listings and tiny body pages must never smuggle
+	// a full command report through their summaries.
 	const copy = parseTerminalResultRecord(record)!;
-	const { body: _body, payloadHash: _hash, ...metadata } = copy;
-	return { ...metadata, storage };
+	const { body: _body, payloadHash: _hash, verification, ...metadata } = copy;
+	return { ...metadata, storage, ...(verification ? { verification: {
+		status: verification.status, ...(verification.exitCode === undefined ? {} : { exitCode: verification.exitCode }),
+		durationMs: verification.durationMs, outputTruncated: verification.outputTruncated,
+	} } : {}) };
 }
 
 function validQuery(value: unknown, keys: readonly string[]): boolean {

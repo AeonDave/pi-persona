@@ -6,6 +6,7 @@ import type { ThinkingLevel } from "../core/types.ts";
 import type { ChildUsage } from "../engine/stream.ts";
 import type { ConversationWorktree, WorktreeRecovery } from "../core/worktree-recovery.ts";
 import type { ResultReceipt } from "../results/retrieval.ts";
+import type { WorktreeVerificationResult } from "../core/worktree-verification.ts";
 
 export type { ChildUsage };
 
@@ -35,13 +36,15 @@ export interface AgentResult {
 	agent: string;
 	/** The requested worker transcript was saved and is safe to reopen. */
 	sessionSaved?: boolean;
-	/** True only when a session-backed attempt can no longer write its transcript. */
+	/** True only when the worker attempt can no longer write its transcript or checkout. */
 	sessionQuiescent?: boolean;
 	/** Exact isolated checkout retained for this saved worker conversation. */
 	sessionWorktree?: ConversationWorktree;
 	output: string;
 	/** Validated structured fields (when the agent ran against a contract). */
 	structured?: Record<string, unknown>;
+	/** Runtime-observed command evidence; never supplied by worker prose. */
+	verification?: WorktreeVerificationResult;
 	/** Terminal archive observation; memory-only is not a durable receipt. */
 	resultReceipt?: ResultReceipt;
 	/** Runtime-owned location of isolated work retained after artifact export failure. */
