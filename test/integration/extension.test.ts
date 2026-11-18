@@ -2939,6 +2939,7 @@ test("activation folds a legacy pi-persona storage root into the persona data di
 		notes.length = 0;
 		await m.cmd("doctor", "", ctx);
 		assert.match(notes.join("\n"), /data root migration: moved 1/i);
+		assert.match(notes.join("\n"), /^git: (git version |UNUSABLE)/m, "doctor reports whether git works for this process");
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
 		else process.env.PI_AGENT_DIR = previousAgentDir;

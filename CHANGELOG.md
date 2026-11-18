@@ -6,6 +6,17 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Added
+
+- `/doctor` probes git the way pi-persona runs it and reports `git: git version …` or
+  `git: UNUSABLE (…)` with git's own first error line, so a git that cannot run for the Pi process
+  (for example x86_64 Node under Rosetta on an Apple Silicon Mac) is visible before a worktree leg.
+
+### Fixed
+
+- Worktree isolation no longer reports only "requires a Git repository" when git itself fails: the
+  message now carries git's first error line or exit code, as the Git status check already did.
+
 ## [1.19.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.19.0) - 2026-11-18
 
 ### Added

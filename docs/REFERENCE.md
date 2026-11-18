@@ -1022,6 +1022,12 @@ status flips to `⇄ offline` and a fresh ask on it fails fast instead of hangin
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 
+The next line probes `git --version` exactly as worktree isolation, `compete` and change reports
+run git: `git: git version …`, or `git: UNUSABLE (<git's first error line>)` when git fails for the
+Pi process. On an Apple Silicon Mac, `xcrun: error: unable to load libxcrun … need 'x86_64'` means
+Node (and therefore Pi) runs as x86_64 under Rosetta while the Command Line Tools are arm64-only:
+install a native arm64 Node and reinstall Pi. `/persona-settings` diagnostics show the latest probe.
+
 **CLI flags** — `--persona <name>` starts with that installed persona and errors if it is missing;
 `--exocom` joins this workspace's Exocom plane; `--exocom=Ab0T` joins another workspace's scope
 from a different cwd. Pi owns `--model <provider/id>`, `--thinking

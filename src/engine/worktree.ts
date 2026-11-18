@@ -55,6 +55,21 @@ export const defaultGitExec: GitExec = (args) =>
 		});
 	});
 
+/** Why a git call failed, for an operator: the first line of its stderr (bounded), else its exit
+ *  code; callers add their own `git` prefix. A broken git (for example an x86_64 process reaching arm64-only macOS Command Line Tools)
+ *  exits non-zero just like a non-repository, so the message must carry git's own words. */
+export function gitFailureCause(result: GitResult): string {
+	const line = result.stderr.split(/\r?\n/).map((part) => part.trim()).find(Boolean);
+	return line ? (line.length > 240 ? `${line.slice(0, 239)}…` : line) : `exited ${result.code}`;
+}
+
+/** The `/doctor` line for a `git --version` probe run the same way pi-persona runs git for real. */
+export function gitDoctorLine(result: GitResult): string {
+	return result.code === 0
+		? `git: ${result.stdout.trim() || "available"}`
+		: `git: UNUSABLE (${gitFailureCause(result)}) — worktree isolation, compete and change reports need a working git`;
+}
+
 /** The preflight gate for an isolated coding leg. Isolation is a safety boundary: a missing
  * repository or a dirty checkout is not permission to run against the real cwd. */
 export async function worktreePreflight(root: string, exec: GitExec = defaultGitExec): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -62,14 +77,14 @@ export async function worktreePreflight(root: string, exec: GitExec = defaultGit
 	if (repo.code !== 0 || repo.stdout.trim().toLowerCase() === "false") {
 		return {
 			ok: false,
-			error: `worktree isolation requires a Git repository at ${root}; use a Git checkout or remove isolation: "worktree"`,
+			error: `worktree isolation requires a Git repository at ${root}; use a Git checkout or remove isolation: "worktree"${repo.code !== 0 ? ` (git: ${gitFailureCause(repo)})` : ""}`,
 		};
 	}
 	const status = await exec(["-C", root, "status", "--porcelain=v1", "--untracked-files=all"]);
 	if (status.code !== 0) {
 		return {
 			ok: false,
-			error: `worktree isolation could not inspect Git status at ${root}; commit/stash the checkout or remove isolation: "worktree" (${status.stderr.trim() || `git exited ${status.code}`})`,
+			error: `worktree isolation could not inspect Git status at ${root}; commit/stash the checkout or remove isolation: "worktree" (git: ${gitFailureCause(status)})`,
 		};
 	}
 	if (status.stdout.trim().length > 0) {

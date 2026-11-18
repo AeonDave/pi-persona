@@ -9,13 +9,13 @@ import { withWorktree } from "../../../src/engine/worktree.ts";
 const PINNED_COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
 /** A fake git that records calls and returns scripted results. */
-function fakeGit(results: Record<string, { code: number; stdout?: string }> = {}): { exec: GitExec; calls: string[][] } {
+function fakeGit(results: Record<string, { code: number; stdout?: string; stderr?: string }> = {}): { exec: GitExec; calls: string[][] } {
 	const calls: string[][] = [];
 	const exec: GitExec = async (args) => {
 		calls.push(args);
 		const key = args.join(" ");
 		const hit = Object.entries(results).find(([k]) => key.includes(k))?.[1];
-		if (hit) return { code: hit.code, stdout: hit.stdout ?? "", stderr: "" };
+		if (hit) return { code: hit.code, stdout: hit.stdout ?? "", stderr: hit.stderr ?? "" };
 		if (args.includes("--verify") && args.includes("HEAD^{commit}")) {
 			return { code: 0, stdout: PINNED_COMMIT, stderr: "" };
 		}
@@ -71,6 +71,21 @@ test("withWorktree rejects a non-Git cwd before creating or running an isolated 
 		/git repository|isolation/i,
 	);
 	assert.equal(calls.some((c) => c.includes("worktree") && c.includes("add")), false, "non-repo must not spawn git worktree add");
+});
+
+test("worktree preflight names git's own failure instead of blaming the checkout", async () => {
+	// macOS: an x86_64 (Rosetta) process reaching the /usr/bin/git shim of arm64-only Command Line Tools.
+	const xcrun = "xcrun: error: unable to load libxcrun (dlopen(/Library/Developer/CommandLineTools/usr/lib/libxcrun.dylib, 0x0005): tried: '…' (fat file, but missing compatible architecture (have 'arm64,arm64e', need 'x86_64'))).";
+	const { exec } = fakeGit({ "rev-parse": { code: 1, stderr: `${xcrun}\nsecond line\n` } });
+	const result = await worktree.worktreePreflight("/repo", exec);
+	assert.equal(result.ok, false);
+	assert.match(result.ok ? "" : result.error, /git: xcrun: error: unable to load libxcrun/, "the operator sees why git failed");
+	assert.doesNotMatch(result.ok ? "" : result.error, /second line/, "only the first line of git's error");
+	assert.ok((result.ok ? "" : result.error).length < 500, "a long git error stays bounded");
+
+	const spawnFailure = fakeGit({ "rev-parse": { code: -1 } });
+	const missing = await worktree.worktreePreflight("/repo", spawnFailure.exec);
+	assert.match(missing.ok ? "" : missing.error, /\(git: exited -1\)/, "without stderr the exit code is the cause");
 });
 
 test("captureWorktreeArtifact exports tracked and untracked edits as a unified diff", async () => {
@@ -192,4 +207,12 @@ test("withWorktree returns the body's result even when the remove step's GitExec
 		calls.some((c) => c.includes("worktree") && c.includes("prune")),
 		"a failed (rejected) remove is treated as non-zero, so the stale registration is still pruned",
 	);
+});
+
+test("the doctor git line reports the version, or why git is unusable and what needs it", () => {
+	assert.equal(worktree.gitDoctorLine({ code: 0, stdout: "git version 2.52.0\n", stderr: "" }), "git: git version 2.52.0");
+	const broken = worktree.gitDoctorLine({ code: 1, stdout: "", stderr: "xcrun: error: unable to load libxcrun (need 'x86_64')\n" });
+	assert.match(broken, /^git: UNUSABLE \(xcrun: error: unable to load libxcrun/, "one git prefix, then git's own words");
+	assert.match(broken, /worktree isolation, compete and change reports/);
+	assert.match(worktree.gitDoctorLine({ code: -1, stdout: "", stderr: "" }), /^git: UNUSABLE \(exited -1\)/);
 });

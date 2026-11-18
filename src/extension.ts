@@ -124,6 +124,7 @@ import { registerFlowTool } from "./tools/flow.ts";
 import { registerModelsTool } from "./tools/models.ts";
 import { type AsyncRun, AsyncRunTracker, boundCompletionSurface, buildCheckIn, buildPeekDigest, buildRetentionOverflowNote, IdleCoalescingNotifier, PeekWatcher, renderCompletion, runDisplayName, STALL_FLAG_MS } from "./engine/async.ts";
 import { emptyUsage, type ToolEvent } from "./engine/stream.ts";
+import { defaultGitExec, gitDoctorLine } from "./engine/worktree.ts";
 import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
@@ -2344,6 +2345,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return toastCause(`pi-persona: persona "${who}" has an invalid orchestration — ${err instanceof Error ? err.message : String(err)}`, 300);
 	}
 
+	/** The latest `git --version` probe, refreshed by every /doctor. The settings page's synchronous
+	 *  diagnostics reuse it rather than spawning git themselves. */
+	let gitProbeLine: string | undefined;
+
 	function doctorReport(): string {
 		const lines: string[] = [];
 		lines.push(`pi-persona — active: ${controller.activePersona?.label ?? "none"}`);
@@ -2351,6 +2356,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		lines.push(`engine backend: ${config.engine === "child" ? "child-process" : "in-process"}`);
 		const piVersion = installedPiVersion();
 		lines.push(`pi: ${piVersion ?? "unknown"} (requires ≥ ${MIN_PI_VERSION})${piVersion && !satisfiesFloor(piVersion, MIN_PI_VERSION) ? " — BELOW FLOOR" : ""}`);
+		if (gitProbeLine) lines.push(gitProbeLine);
 		const spineRole = (selector: string, source: string | undefined): string => {
 			if (!selector) return "off";
 			return source ? `${selector} -> ${source}` : `${selector} -> degraded`;
@@ -2911,6 +2917,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		description: "Explain pi-persona resolution (personas/agents/teams/shadowed)",
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
+			// Probe git the way worktree isolation and change reports run it: a git that exits
+			// non-zero for this process (e.g. Rosetta x86_64 on arm64-only Command Line Tools) shows here.
+			gitProbeLine = gitDoctorLine(await defaultGitExec(["--version"]));
 			ctx.ui.notify(doctorReport(), "info");
 		},
 	});
