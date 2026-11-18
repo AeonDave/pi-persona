@@ -49,7 +49,10 @@ test("real Pi in-process worker reopens its conversation without replaying old e
 test("real child Pi reopens its saved conversation and emits only the new turn", { timeout: 30_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "persona-worker-child-sdk-"));
 	try {
-		const file = join(cwd, "worker.jsonl");
+		// Pi migrates loose session JSONL files out of its agent directory at CLI startup.
+		// Keep the transcript in its own directory, as the production conversation store does.
+		const file = join(cwd, "worker-sessions", "worker.jsonl");
+		await mkdir(dirname(file), { recursive: true });
 		const receipt = join(cwd, "receipt.jsonl");
 		const cli = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
 		const provider = fileURLToPath(new URL("../fixtures/selected-skills-provider.mjs", import.meta.url));
@@ -75,7 +78,8 @@ test("real child Pi reopens its saved conversation and emits only the new turn",
 test("real child rejects changed selected skill before the resumed provider request", { timeout: 30_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "persona-worker-skills-"));
 	try {
-		const file = join(cwd, "worker.jsonl");
+		const file = join(cwd, "worker-sessions", "worker.jsonl");
+		await mkdir(dirname(file), { recursive: true });
 		const receipt = join(cwd, "receipt.jsonl");
 		const skillDir = join(cwd, "skills", "audit");
 		const skill = join(skillDir, "SKILL.md");
