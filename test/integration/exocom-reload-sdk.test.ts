@@ -35,6 +35,11 @@ test("an accepted peer message queued during a turn survives same-session reload
 	const gate = new Promise<void>((resolve) => { release = resolve; });
 	let started!: () => void;
 	const busy = new Promise<void>((resolve) => { started = resolve; });
+	let holdRestoredSettlement = false;
+	let releaseSettlement!: () => void;
+	const settlementGate = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+	let settlementReached!: () => void;
+	const settling = new Promise<void>((resolve) => { settlementReached = resolve; });
 	let firstId = "";
 	let queuedId = "";
 	const senderId = `reload-sender-${process.pid}`;
@@ -45,13 +50,21 @@ test("an accepted peer message queued during a turn survives same-session reload
 		() => fauxAssistantMessage("first reply sent"),
 		async () => { started(); await gate; return fauxAssistantMessage("busy turn finished"); },
 		() => fauxAssistantMessage(fauxToolCall("exocom_send", { target: senderTarget, message: "reply after reload", in_reply_to: queuedId }, { id: "restored-reply" }), { stopReason: "toolUse" }),
-		() => fauxAssistantMessage("received"),
+		() => { holdRestoredSettlement = true; return fauxAssistantMessage("received"); },
 	]);
 	const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
 	runtime.registerNativeProvider(faux.provider);
 	await runtime.setRuntimeApiKey("exocom-reload-offline", "synthetic-key-never-transmitted");
 	const settings = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
-	const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings, extensionFactories: [piPersona], noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true });
+	const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings, extensionFactories: [piPersona, (pi) => {
+		// A companion may still be finishing its settlement work after the inner agent is idle.
+		pi.on("agent_before_settle", async () => {
+			if (!holdRestoredSettlement) return;
+			holdRestoredSettlement = false;
+			settlementReached();
+			await settlementGate;
+		});
+	}], noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true });
 	await loader.reload();
 	const { session } = await createAgentSession({ cwd, agentDir, model: faux.models[0]!, modelRuntime: runtime, settingsManager: settings, resourceLoader: loader, sessionManager: SessionManager.inMemory(cwd) });
 	const received: string[] = [];
@@ -72,7 +85,7 @@ test("an accepted peer message queued during a turn survives same-session reload
 		firstId = (await sender.send(receiver.target, "start reply chain")).msg_id;
 		let deadline = Date.now() + 5000;
 		while (replies.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 		assert.equal(replies[0]?.in_reply_to, firstId, JSON.stringify({ received, diagnostics }));
 		assert.equal(replies[0]?.hops, 1);
 		received.length = 0;
@@ -88,6 +101,12 @@ test("an accepted peer message queued during a turn survives same-session reload
 		while (received.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
 		while (replies.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
 		await session.agent.waitForIdle();
+		await settling;
+		assert.equal(session.isStreaming, true, "the inner agent can be idle while the SDK session is still settling");
+		const settled = session.waitForIdle();
+		releaseSettlement();
+		await settled;
+		assert.equal(session.isStreaming, false, "reload waits for the complete session, including companion settlement");
 		assert.equal(received.length, 1, "one restored peer delivery reaches the session");
 		assert.match(received[0]!, /EXOCOM_RELOAD_PROBE/);
 		assert.equal(replies[1]?.in_reply_to, queuedId);
@@ -97,6 +116,7 @@ test("an accepted peer message queued during a turn survives same-session reload
 		assert.equal(received.length, 1, "a second reload does not replay the delivered message");
 	} finally {
 		release();
+		releaseSettlement();
 		await sender.stop();
 		await session.abort();
 		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
