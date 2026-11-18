@@ -3,6 +3,7 @@
  * LIVE_MODEL=provider/id node --import tsx scripts/exocom-collaboration-smoke.mjs
  * Uses only a disposable workspace/profile. Credentials/models are copied there;
  * the operator profile is never mutated. No child agents or write claims are used.
+ * Set LIVE_PROVIDER_EXTENSION to an absolute extension entry for extension-provided models.
  */
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -29,6 +30,9 @@ for (const file of ["auth.json", "models.json"]) {
 for (const key of Object.keys(process.env)) if (key.startsWith("PI_PERSONA_")) delete process.env[key];
 Object.assign(process.env, {
 	PI_AGENT_DIR: agentDir, PI_CODING_AGENT_DIR: agentDir, PI_PERSONA_EXOCOM: "1",
+	PI_CLAUDE_NATIVE_STATE_DIR: join(agentDir, "claude-native"), PI_CLAUDE_NATIVE_LIVE_DISCOVERY: "0",
+	PI_CLAUDE_NATIVE_FINGERPRINT: join(agentDir, "claude-native", "fingerprint.json"),
+	PI_CLAUDE_NATIVE_MODELS_CACHE: join(agentDir, "claude-native", "models.json"),
 	PI_PERSONA_SEED: "off", PI_PERSONA_PERSIST: "off", PI_PERSONA_NUDGE: "off", PI_PERSONA_BROKER: "off",
 });
 const fixture = "alpha=19\nbeta=23\n";
@@ -100,14 +104,13 @@ try {
 		const notifications = [];
 		const settingsManager = host.SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
 		const loader = new host.DefaultResourceLoader({ cwd: workspace, agentDir, settingsManager,
-			extensionFactories: [persona], noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true });
+			extensionFactories: [persona], additionalExtensionPaths: process.env.LIVE_PROVIDER_EXTENSION ? [resolve(process.env.LIVE_PROVIDER_EXTENSION)] : [],
+			noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true });
 		await loader.reload();
 		const runtime = await host.ModelRuntime.create({ authPath: join(agentDir, "auth.json"),
 			modelsPath: join(agentDir, "models.json"), modelsStorePath: join(agentDir, `${label}-models.json`),
 			allowModelNetwork: false });
-		const model = runtime.getModel(provider, modelId);
-		assert.ok(model, `${modelRef} is unavailable in the isolated configured host`);
-		const { session } = await host.createAgentSession({ cwd: workspace, agentDir, modelRuntime: runtime, model,
+		const { session } = await host.createAgentSession({ cwd: workspace, agentDir, modelRuntime: runtime,
 			thinkingLevel: thinking, resourceLoader: loader, settingsManager, sessionManager: host.SessionManager.inMemory(workspace) });
 		const record = { label, session, notifications, calls: [], ends: 0, wakes: [] };
 		sessions.push(record);
@@ -132,6 +135,10 @@ try {
 			checkWaiters();
 		});
 		await session.bindExtensions({ uiContext: ui(notifications), mode: "rpc" });
+		const model = runtime.getModel(provider, modelId);
+		assert.ok(model, `${modelRef} is unavailable in the isolated configured host`);
+		await session.setModel(model);
+		session.setThinkingLevel(thinking);
 		session.setActiveToolsByName(tools);
 		assert.equal(session.model.provider, provider);
 		assert.equal(session.model.id, modelId);

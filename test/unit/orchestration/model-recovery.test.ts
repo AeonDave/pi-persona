@@ -78,6 +78,17 @@ const sdkFor = (engine: StrategyEngine, deps: Partial<Parameters<typeof makeSDK>
 // ---------------------------------------------------------------------------------------------
 // The recovery itself
 
+test("retained worktree prevents SDK model retry without changing the original failure", async () => {
+	for (const failureKind of ["provider", "unknown-model"] as const) {
+		const worktreeRecovery = { path: "/retained", baseCommit: "abc", reason: "export failed", availability: "retained" as const };
+		const { engine, attempts } = harness((a) => ({ ...broken(a.agent, "x/gone", failureKind), worktreeRecovery }));
+		const result = await sdkFor(engine, { sessionModel: "anthropic/sonnet-5" }).agent({ agent: "core", task: "t", model: "x/gone" });
+		assert.equal(attempts.length, 1, failureKind);
+		assert.equal(result.failureKind, failureKind);
+		assert.deepEqual(result.worktreeRecovery, worktreeRecovery);
+	}
+});
+
 test("a provider failure is retried ONCE on the session model, even behind a provider-qualified pin", async () => {
 	// The pin is an explicit provider/billing choice — but it may simply be UNAVAILABLE (unreachable
 	// ref, dead auth, retired route). The user's own running model is the one thing proven reachable,

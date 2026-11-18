@@ -6,8 +6,16 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.18.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.18.1) - 2026-11-18
+
 ### Added
 
+- `/exocom status` and `/exocom help` clarify status and usage, and inactive status identifies
+  activation, persona permission and startup failures when known.
+- Completed delegates can continue their saved worker conversation by latest run ID. Intercom
+  lists conversation availability and explicitly forgets a conversation and its retained worktree.
+- After Pi compacts the supervisor context, the next request receives a bounded, current snapshot
+  of pending runs and asks without a separate wake or history entry.
 - Delegate, council and strategy workers can receive selected skill instructions directly in Pi's
   native skills section; missing or model-disabled selections fail before provider use.
 - `show_image` displays bounded local PNG/JPEG/GIF/WebP previews with Pi terminal graphics when
@@ -16,6 +24,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Changed
 
+- The README presents the main workflows and features first, linking technical contracts and
+  limits to the canonical documentation.
+- F9 and Mind's F10 share one responsive window frame. F9 respects allocated height and narrow
+  widths, repaints after height-only resize, supports page navigation and uses native steering
+  input for paste, Unicode and cursor editing.
 - One `persona-background` status replaces the bare-number `persona-agents` status: `kind=count`
   pairs in the order `agents monitors timers scripts`, zero counts omitted, cleared when nothing is
   in the background, so a companion frame can show that monitors, timers and scripts will report
@@ -64,6 +77,28 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   theirs, and what the session publishes to the registry is unchanged.
 
 ### Fixed
+
+- Rapid persona switches now apply in order with their remembered choice and Exocom state.
+  Queued selections use the current definitions after reload, and shutdown invalidates pending
+  selections and late controller commits.
+- Provider fallback retains usage from every executed attempt while preserving the final
+  attempt's outcome and context snapshot. A failing notification cannot interrupt recovery.
+- Child-process progress consumers cannot crash stream handling or leave a completed worker
+  pending; final result delivery and temporary prompt cleanup remain independent of observers.
+- Startup authentication completing during shutdown no longer restarts Persona telemetry after
+  its teardown, including while another extension is still cleaning up.
+- Accepted Exocom postcards pending at `/reload` survive a bounded, one-use handoff to the same
+  session and scope, preserving reply routing and hop limits. Startup and teardown gate admission
+  and delivery; duplicates remain acknowledged when the inbox is full or their pending receipt
+  outlives the seen-ID cache. Ineligible handoffs warn instead of promising crash recovery.
+- `/exocom` rejects unsupported arguments instead of silently displaying status, and retains
+  startup failure diagnostics. The live collaboration smoke can load an explicit provider extension
+  before resolving its model in an isolated profile.
+- Preserve an isolated worktree when its bounded diff export fails or execution throws before
+  export, with its path and starting commit available for recovery. Keep worker diagnostics and
+  usage, stop automatic retries over retained work, and carry recovery notes through `compete`
+  even when another candidate wins. Successful exports retain their normal cleanup, except for a
+  resumable delegate's worktree, which stays available for its next turn.
 
 - `code_outline` now reports JavaScript function-expression bindings and class arrow fields, callable C/C++ declarators (excluding function-pointer data), C++ destructors and fully qualified out-of-line methods, Rust trait methods, and members under C# file-scoped namespaces. Separate declaration and definition nodes remain separate syntax rows.
 - Folded delegate failures and pending asks keep their `N failed` / `N waiting` alerts visible

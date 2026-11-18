@@ -1,8 +1,8 @@
 /**
  * Git worktree isolation — run a sub-agent in a throwaway `git worktree` so its file
  * edits / test runs never touch the main working tree (spec §6 `isolation: worktree`).
- * The worktree is detached at HEAD, used, then force-removed (the agent's experiments are
- * discarded — isolation, not persistence; the agent returns its findings as its result).
+ * The worktree is detached at HEAD and removed after an export; a failed export or a thrown
+ * worker retains it for recovery.
  *
  * Pure over an injected async `GitExec` (so the lifecycle is unit-tested without a real repo);
  * the default exec shells out to `git` via `child_process.execFile` — asynchronous, so the
@@ -12,9 +12,10 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { formatWorktreeRecovery, type WorktreeRecovery } from "../core/worktree-recovery.ts";
 
 export interface GitResult {
 	code: number;
@@ -35,6 +36,11 @@ export const MAX_WORKTREE_ARTIFACT_CHARS = 1_000_000;
  *  size check below, not the OS pipe, is what rejects an oversized diff. */
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 
+/** Exit 1 is valid for `git diff --no-index`; process failures must never look like it. */
+export function gitFailureCode(error: { code?: unknown; signal?: unknown; killed?: unknown }): number {
+	return !error.signal && !error.killed && typeof error.code === "number" ? error.code : -1;
+}
+
 /** Default git runner — `git <args>`, never throwing (returns the exit code). */
 export const defaultGitExec: GitExec = (args) =>
 	new Promise((resolveResult) => {
@@ -43,8 +49,8 @@ export const defaultGitExec: GitExec = (args) =>
 				resolveResult({ code: 0, stdout, stderr });
 				return;
 			}
-			const e = err as NodeJS.ErrnoException & { code?: number | string };
-			const code = typeof e.code === "number" ? e.code : 1;
+			const e = err as NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
+			const code = gitFailureCode(e);
 			resolveResult({ code, stdout: stdout ?? "", stderr: stderr || e.message });
 		});
 	});
@@ -110,9 +116,25 @@ export async function captureWorktreeArtifact(root: string, baseCommit: string, 
 	return { ok: true, diff: parts.join("\n") };
 }
 
-/** Create a detached worktree off `root`'s HEAD, pin its starting commit, run
- * `body(worktreeDir, baseCommit)`, then force-remove it. */
-export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: string, baseCommit: string) => Promise<T>): Promise<T> {
+/** The caller decides whether its exported result makes cleanup safe. */
+export type WorktreeOutcome<T> = { value: T; cleanup: "remove" | "retain" };
+
+/** Observe the path without following a replacement symlink. */
+export async function describeWorktreeRecovery(path: string, baseCommit: string, reason: string): Promise<WorktreeRecovery> {
+	const availability = await lstat(path).then((entry) => entry.isDirectory() ? "retained" as const : "unavailable" as const, () => "unavailable" as const);
+	return { path, baseCommit, reason, availability };
+}
+
+export class WorktreeRetainedError extends Error {
+	readonly recovery: WorktreeRecovery;
+	constructor(recovery: WorktreeRecovery, cause: unknown) {
+		super(formatWorktreeRecovery(recovery), { cause });
+		this.recovery = recovery;
+	}
+}
+
+/** Create a detached worktree, pin its baseline and preserve it if its body throws. */
+export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: string, baseCommit: string) => Promise<WorktreeOutcome<T>>): Promise<T> {
 	const preflight = await worktreePreflight(root, exec);
 	if (!preflight.ok) throw new Error(preflight.error);
 	const dir = await mkdtemp(join(tmpdir(), "pi-persona-wt-"));
@@ -123,6 +145,7 @@ export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: s
 		});
 		throw new Error(`could not create git worktree: ${add.stderr.trim() || `git exited ${add.code}`}`);
 	}
+	let retain = false;
 	try {
 		const initial = await exec(["-C", dir, "rev-parse", "--verify", "HEAD^{commit}"]);
 		const baseCommit = initial.stdout.trim();
@@ -130,24 +153,35 @@ export async function withWorktree<T>(root: string, exec: GitExec, body: (dir: s
 			const reason = initial.stderr.trim() || (initial.code !== 0 ? `git exited ${initial.code}` : "Git returned an empty commit id");
 			throw new Error(`could not resolve the initial worktree commit: ${reason}`);
 		}
-		return await body(dir, baseCommit);
+		let outcome: WorktreeOutcome<T>;
+		try {
+			outcome = await body(dir, baseCommit);
+		} catch (error) {
+			retain = true;
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new WorktreeRetainedError(await describeWorktreeRecovery(dir, baseCommit, reason), error);
+		}
+		retain = outcome.cleanup === "retain";
+		return outcome.value;
 	} finally {
-		// Remove the worktree registration, then the dir (force: it may carry the agent's edits).
-		// Never throw: cleanup must not replace the body's result (or its error) — `defaultGitExec`
-		// never rejects, but an injected `GitExec` could, and a rejection here must not either.
-		const rejected = (): GitResult => ({ code: 1, stdout: "", stderr: "git exec rejected" });
-		const remove = await exec(["-C", root, "worktree", "remove", "--force", dir]).catch(rejected);
-		await rm(dir, { recursive: true, force: true }).catch(() => {
-			/* the worktree remove usually handles it; ignore races */
-		});
-		// A failed remove (on Windows a grandchild tool process can still hold a file inside the
-		// worktree) leaves the .git/worktrees entry registered while the dir is gone — prune it,
-		// or stale ghosts accumulate across delegations until a manual `git worktree prune`.
-		// Never throw: cleanup must not replace the body's result (or its error).
-		if (remove.code !== 0) {
-			await exec(["-C", root, "worktree", "prune"]).catch(rejected);
-			if (process.env.PI_PERSONA_DEBUG) {
-				process.stderr.write(`[pi-persona] git worktree remove failed for ${dir} (pruned): ${remove.stderr.trim() || `git exited ${remove.code}`}\n`);
+		if (!retain) {
+			// Remove the worktree registration, then the dir (force: it may carry the agent's edits).
+			// Never throw: cleanup must not replace the body's result (or its error) — `defaultGitExec`
+			// never rejects, but an injected `GitExec` could, and a rejection here must not either.
+			const rejected = (): GitResult => ({ code: 1, stdout: "", stderr: "git exec rejected" });
+			const remove = await exec(["-C", root, "worktree", "remove", "--force", dir]).catch(rejected);
+			await rm(dir, { recursive: true, force: true }).catch(() => {
+				/* the worktree remove usually handles it; ignore races */
+			});
+			// A failed remove (on Windows a grandchild tool process can still hold a file inside the
+			// worktree) leaves the .git/worktrees entry registered while the dir is gone — prune it,
+			// or stale ghosts accumulate across delegations until a manual `git worktree prune`.
+			// Never throw: cleanup must not replace the body's result (or its error).
+			if (remove.code !== 0) {
+				await exec(["-C", root, "worktree", "prune"]).catch(rejected);
+				if (process.env.PI_PERSONA_DEBUG) {
+					process.stderr.write(`[pi-persona] git worktree remove failed for ${dir} (pruned): ${remove.stderr.trim() || `git exited ${remove.code}`}\n`);
+				}
 			}
 		}
 	}

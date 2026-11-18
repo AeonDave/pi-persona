@@ -17,6 +17,7 @@ import { MAX_DISPLAY_LABEL_CHARS, sanitizeDisplayLabel, sanitizeStatusLabel } fr
 import { compactTokens } from "../core/format.ts";
 import { isThinkingLevel } from "../core/types.ts";
 import { formatDuration } from "../core/time.ts";
+import { formatWorktreeLocation } from "../core/worktree-recovery.ts";
 
 /** "possibly stuck" — the soft stall signal shared by the operator card, the peek digest and the UI
  *  badge. It is deliberately patient: a long scan, a big generation, or a blocking command shows no
@@ -712,6 +713,12 @@ export function buildCompletionReport(runs: AsyncRun[], fence: (text: string) =>
 			}
 		}
 	}
+	// Failed/stopped reports use the error and progress snapshot, not result.output. Keep the
+	// runtime-owned recovery location separately so a clipped error cannot hide the worktree.
+	const retained = [...failed, ...stopped].flatMap((r) => r.result?.worktreeRecovery
+		? [`${r.id}: ${formatWorktreeLocation(r.result.worktreeRecovery)}`]
+		: []);
+	if (retained.length > 0) blocks.push(`\nIsolated worktree recovery:\n${fence(retained.join("\n"))}`);
 	const report = blocks.join("\n");
 	if (!bounded) return report;
 	// The cap cuts whole legs from the middle of a wide fan-out. Name every run in the tail, which the

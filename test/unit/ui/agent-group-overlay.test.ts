@@ -169,12 +169,9 @@ test("group inspection refusal sanitizes and bounds metadata in its notice", (t)
 });
 
 test("worker detail fits a narrow terminal with waiting, model, effort and cumulative usage metadata", (t) => {
-	const rowsProperty = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-	Object.defineProperty(process.stdout, "rows", { value: 24, configurable: true });
-	t.after(() => { if (rowsProperty) Object.defineProperty(process.stdout, "rows", rowsProperty); else Reflect.deleteProperty(process.stdout, "rows"); });
 	const tree = new AgentTree(() => 0);
 	tree.add({ id: "a", label: "Security reviewer " + "long alias ".repeat(8), model: "provider/" + "long-model-name-".repeat(8), thinking: "xhigh", detail: "read repository ".repeat(8), usage: { ...emptyUsage(), input: 1234, output: 567 }, output: "retained output\n".repeat(60) });
-	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { isWaitingForSupervisor: () => true });
+	const overlay = new AgentOverlay(tree, { terminal: { rows: 24 }, requestRender() {} } as unknown as TUI, THEME, () => {}, { isWaitingForSupervisor: () => true });
 	t.after(() => overlay.dispose());
 	overlay.handleInput("\n");
 	const lines = overlay.render(45);
@@ -182,4 +179,26 @@ test("worker detail fits a narrow terminal with waiting, model, effort and cumul
 	assert.match(lines.join("\n"), /cumulative usage/);
 	assert.ok(lines.length <= 24, `bounded detail height: ${lines.length}`);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 45));
+});
+
+test("group page navigation uses visible card capacity and preserves selection through height changes", (t) => {
+	const tree = new AgentTree(() => 0);
+	tree.add({ id: "group", label: "Review", kind: "delegate" });
+	for (let i = 0; i < 40; i++) tree.add({ id: `leg-${i}`, label: `Worker ${i}`, parentId: "group", kind: "subagent", status: "done", output: "retained result" });
+	const terminal = { rows: 40 };
+	const overlay = new AgentOverlay(tree, { terminal, requestRender() {} } as unknown as TUI, THEME, () => {});
+	t.after(() => overlay.dispose());
+	overlay.handleInput("k");
+	overlay.handleInput("\n");
+	const count = overlay.render(80).filter((line) => /Worker \d+/.test(line)).length;
+	overlay.handleInput("\x1b[6~");
+	assert.match(overlay.render(80).join("\n"), new RegExp(`▸.*Worker ${count}\\D`));
+	for (const rows of [24, 8, 4, 1]) {
+		terminal.rows = rows;
+		const frame = overlay.render(80);
+		assert.ok(frame.length <= Math.max(1, Math.min(Math.floor(rows * 0.9), rows - 2)));
+		assert.match(frame.join("\n"), new RegExp(`▸.*Worker ${count}\\D`), "the selected leg remains visible rather than metadata alone");
+	}
+	overlay.handleInput("\x1b[5~");
+	assert.match(overlay.render(80).join("\n"), new RegExp(`▸.*Worker ${count - 1}\\D`), "a tiny viewport pages one visible leg at a time");
 });

@@ -37,6 +37,7 @@ import type { BackgroundRuns } from "./background-run.ts";
 import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "../engine/stream.ts";
 import { progressPatch } from "../ui/agent-tree.ts";
 import type { RunLimits } from "../core/capabilities.ts";
+import type { ConversationTurn, WorkerConversations } from "../extension/conversations.ts";
 
 interface DelegateLaunchSnapshot {
 	id: string;
@@ -220,6 +221,7 @@ function singleLaunchReceipt(row: DelegateLaunchRow, hints?: Pick<KeybindingHint
 }
 
 export interface DelegateToolDeps {
+	conversations?: WorkerConversations;
 	get lastCtx(): ExtensionContext | undefined;
 	set lastCtx(value: ExtensionContext | undefined);
 	controller: PersonaController;
@@ -315,6 +317,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
 	});
 	const DelegateParams = Type.Object({
+		resume: Type.Optional(Type.String({ description: "Exact latest run id of a completed worker to continue with its saved conversation. Supply only resume, task and optionally brief; configuration stays pinned. Use intercom conversations to discover available workers." })),
 		agent: Type.Optional(Type.String({ description: "Agent to delegate to (single mode)" })),
 		task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
 		brief: Type.Optional(Type.Union([DelegationBriefSchema, JsonString], {
@@ -463,7 +466,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// stays parked until the run settles, so the leg may not block on a supervisor reply it cannot give.
 	// `fanOut` is set for a leg of a `tasks` call: its batch id, the per-call concurrency gate, and the
 	// header row it hangs under (interactive fan-outs of 2+ legs only).
-	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, inline: boolean, fanOut?: { batch: string; slots: Semaphore | undefined; groupId: string | undefined }): string {
+	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, inline: boolean, fanOut?: { batch: string; slots: Semaphore | undefined; groupId: string | undefined }, continuation?: ConversationTurn, brief?: DelegateCall["brief"], ctx = d.lastCtx): string {
+		let turn = continuation;
 		const model = shortModel(runSpec.model);
 		// The writer classification travels WITH the run (d.tracker metadata), not in a side Set keyed by
 		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
@@ -475,11 +479,14 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const ac = new AbortController();
 			d.stopRegistry.set(nodeId, () => ac.abort());
 			const execute = () =>
-				asyncSlots.with(() => {
+				asyncSlots.with(async () => {
+					if (ac.signal.aborted) throw new DOMException("Agent aborted", "AbortError");
 					d.tracker.markAdmitted(runId);
-					return d.buildEngine(
+					if (!turn && ctx) turn = d.conversations?.start(ctx, runSpec, brief);
+					const engine = d.buildEngine(
 						undefined,
 						(snap) => {
+							if (ac.signal.aborted || d.tracker.peek(runId)?.settled) return;
 							onProgress(snap);
 							if (snap.toolEvent) d.publishAgentTool(nodeId, snap.toolEvent);
 							const now = Date.now();
@@ -491,13 +498,20 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						// STOP via `ac.signal` (hard abort) and STEER via the run-id key (soft redirect) —
 						// both work for the supervisor (intercom `stop`/`steer`) and the f9 overlay (`x`/`s`),
 						// for ANY persona (these are supervisor→child controls, not child tools).
-					).run(runSpec, undefined, ac.signal, (steer) => {
+					);
+					const actualSpec = turn ? turn.prepare(runSpec) : runSpec;
+					const result = await engine.run(actualSpec, undefined, ac.signal, (steer) => {
+						if (ac.signal.aborted || d.tracker.peek(runId)?.settled) return;
 						d.steerRegistry.set(nodeId, steer);
 						// live now — clear the "queued" marker and re-stamp the clock from run time, not
 						// the queue-time seed, so the elapsed reading and stall badge are both honest.
 						const now = Date.now();
 						d.agentTree.update(nodeId, { detail: "", startedAt: now, lastAdvanceAt: now });
 					});
+					// A misbehaving or slow engine may resolve successfully after shutdown requested
+					// cancellation. Never save its turn into a subsequent activation of the same session.
+					const settled = ac.signal.aborted ? { ...result, ok: false, failureKind: "abort" as const, sessionSaved: false } : result;
+					return turn ? turn.settle(runId, runSpec, settled) : settled;
 				}, ac.signal);
 			// A per-call semaphore composes with the process-wide ceiling. Acquire it first so a
 			// queued member of a serial batch never occupies a global slot while waiting for its
@@ -512,7 +526,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 						ledger.record(keyInputOf({ ...runSpec, task }), r.ok);
 					}
 					return r;
-				});
+				}).finally(() => turn?.release());
 		});
 		const nodeId = `async:${id}`;
 		// "queued" until the semaphore grants a slot and the engine reports it steerable. Every
@@ -567,6 +581,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		description: [
 			"Delegate bounded independent work to supervised sub-agents by default; you own the objective, decisions and result review. Keep quick, trivial or tightly coupled work local when a hand-off would add more overhead than value.",
 			"Pass agent and task for one worker, or a tasks array for parallel workers. Required fields follow the active persona's delegation policy (the per-turn delegation brief shows the exact call shape); an incomplete call is rejected before any worker starts, and the error names what is missing.",
+			"Continue a completed worker with { resume: '<latest run id>', task: '<follow-up>' }; intercom conversations lists resumable workers. This opens its saved conversation as a new tracked run, preserving its configuration and provider. It does not restart a live or stopped task. Configuration changes require a fresh worker.",
 			"When disjoint writes are required, give every parallel writer a non-empty disjoint writeSet. Shells (bash/powershell), script/monitor, MCP and unknown tools count as writers even for read-only task prose. Readers need a runtime read-only tools grant and mcp: false; otherwise serialize with concurrency: 1. Top-level tools/writeSet are single-mode fields, never inherited by tasks[].",
 			"Interactive sessions ALWAYS run it in the BACKGROUND: you get run ids at once and stay free, and each result wakes you as a completion follow-up (a `tasks` call wakes you ONCE, when its last leg settles). Work independently meanwhile; when only children remain, end your turn. NEVER sleep, poll, or arm a `timer` to wait for a child. Headless sessions (`pi -p`) block for the turn and return results inline.",
 			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
@@ -586,6 +601,17 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			const coerced = coerceDelegateParams(rawParams);
 			if (!coerced.ok) return { content: [{ type: "text", text: coerced.error }], details: failureDetails({}), isError: true };
 			let params = coerced.params;
+			let continuation: ConversationTurn | undefined;
+			let transferred = false;
+			try {
+			if (params.resume !== undefined) {
+				const resumed = d.conversations?.resume(ctx, params as unknown as Record<string, unknown>);
+				if (!resumed?.ok) return { content: [{ type: "text", text: resumed?.error ?? "Worker conversation storage is unavailable." }], details: failureDetails({}), isError: true };
+				params = resumed.value.params;
+				continuation = resumed.value.turn;
+			}
+			const executionGate = d.controller.gate("delegate", params);
+			if (executionGate) return { content: [{ type: "text", text: executionGate.reason }], details: failureDetails({}), isError: true };
 			const policy = d.controller.activePersona?.delegation;
 			const defaultOutputContract = policy?.outputContract;
 			if (defaultOutputContract) {
@@ -731,7 +757,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					const spec = specOf(t, nameOffset + i);
 					const thinking = d.launchThinking(spec);
 					const label = nameFor(t, nameOffset + i);
-					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut);
+					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut, undefined, t.brief, ctx);
 					const model = shortModel(spec.model);
 					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), request: snapshotLaunchRequest(spec) };
 				});
@@ -759,7 +785,8 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				const runSpec = specOf(single, nameIndex);
 				const thinking = d.launchThinking(runSpec);
 				const label = nameFor(single, nameIndex);
-				const id = launchAsyncRun(agent, task, runSpec, label, inline);
+				const id = launchAsyncRun(agent, task, runSpec, label, inline, undefined, continuation, params.brief, ctx);
+				transferred = true;
 				if (inline) return settleInline([id], signal, onUpdate);
 				const model = shortModel(runSpec.model);
 				return {
@@ -778,12 +805,17 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				details: failureDetails({}),
 				isError: true,
 			};
+			} finally { if (!transferred) continuation?.release(); }
 		},
 
 		renderCall(args, theme) {
 			const title = theme.fg("toolTitle", theme.bold("delegate "));
 			const coerced = coerceDelegateParams(args);
 			const view = coerced.ok ? coerced.params : undefined;
+			if (typeof args.resume === "string" && args.resume.trim()) {
+				const label = `resume ${sanitizeLabel(args.resume)}`;
+				return new Text(`${title}${theme.fg("accent", theme.bold(compactVisibleLine(label, MAX_COLLAPSED_CARD_COLUMNS - visibleWidth("delegate "))))}`, 0, 0);
+			}
 			if (view?.tasks && view.tasks.length > 0) {
 				// Names live in the tree / final card — keep the call line itself minimal. A UNIFORM
 				// declared effort rides along (every leg declares the same level; mixed or undeclared

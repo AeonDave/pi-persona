@@ -24,7 +24,8 @@ Intercom uses distinct addresses; the display name in a card is not a routing ad
 | Archived `result` | `ref: "result:<UUID>"` from the retained report receipt |
 
 A worker may support steering without having a bus handle. A settled worker cannot be steered;
-read its result and delegate a new task if more work is needed. A failed `send` distinguishes an
+read its result. A successfully saved delegate may be continued with `delegate { resume: <latestRunId>, task }`
+when its continuation remains available; otherwise delegate a new task. A failed `send` distinguishes an
 unknown handle from an inbox full of pending questions; neither means the message was delivered.
 
 `intercom results` lists terminal reports. `intercom result { ref, offset, limit }` reads a bounded
@@ -44,6 +45,15 @@ its code as described in [the user guide](EXPERIENCE.md#work-with-another-pi-thr
 Use `exocom_list` to find stable qualified targets and self-reported profiles. A profile's capabilities
 and availability are suggestions for choosing a colleague, not verified skills, reservations or tool
 permissions. Missing availability is **unknown**. Profiles disappear when the Exocom plane stops.
+
+For a first exchange, start two Pi sessions in the same workspace with `pi --exocom`. Enter in Pi A:
+`Name yourself Ember for this session and list your Exocom peers.` Then enter in Pi B:
+`Name yourself Flint, list your Exocom peers, and send Ember: Hello from Pi B.` The agent uses the
+qualified target from `exocom_list`; the recipient gets the postcard automatically and can reply.
+For a decision that gates work, enter in Pi B: `Ask Ember through Exocom, using work key review,
+whether the plan has a risk I missed.` The recipient must answer or decline that ask. A postcard
+does not create that obligation. `/exocom` and `/exocom status` inspect the connection and ledger;
+`/exocom help` shows command usage. Ask the agent to send or ask; these are model tools.
 
 1. Describe an independent slice with `exocom_task { action: "create", work_key, description,
    write_set }`. An empty write set means read-only work. Creation is an invitation to collaborate,
@@ -91,6 +101,13 @@ using it; a peer's `done` means that peer finished its task, not that checks pas
 default to 10 entries (maximum 20); detailed pages default to 5 and allow at most 5. Evidence-title pages are bounded.
 Tool cards collapse long content and expand using Pi's normal keybinding; this never changes the
 stored evidence or the text supplied to the model.
+
+During Pi `/reload`, accepted postcards and replies still waiting for delivery can be handed off
+in a bounded snapshot in the native session file, which contains their text. Restoration is one-time
+and requires the same session, branch, Exocom scope and agent directory within five minutes; reply
+routing and hop context are preserved. An ineligible or expired handoff is invalidated and reported.
+This handoff does not guarantee recovery after a crash or process restart. Asks, answers and offers
+continue to use their existing ledger and lifecycle rules.
 
 Loss of a task owner's registry lease or explicit release marks unfinished work **stale**. It never
 silently reopens the task. Inspect the work and create a newly scoped task if reassignment is needed.

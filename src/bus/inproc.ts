@@ -283,6 +283,13 @@ export class InProcessBus {
 		return (this.inboxes.get(name)?.length ?? 0) > 0;
 	}
 
+	/** Live blocking ask identifiers for one recipient, including already-drained inbox messages. */
+	pendingAskIdsTo(name: string): readonly string[] {
+		const ids: string[] = [];
+		for (const [id, pending] of this.pendingAsks) if (pending.envelope.to === name) ids.push(id);
+		return ids;
+	}
+
 	/** Whether `handle` currently has a live ask (`decision`/`interview`) awaiting a reply.
 	 *  The one question an idle/startup watchdog needs to tell real silence from a leg
 	 *  legitimately blocked on the supervisor: re-arm while this is true, kill once it goes

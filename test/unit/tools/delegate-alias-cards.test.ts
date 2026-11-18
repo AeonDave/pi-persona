@@ -40,6 +40,7 @@ function register(overrides: Record<string, unknown> = {}): { tool: any; deps: a
 		publishPersonaCost: () => {},
 		...overrides,
 	};
+	deps.controller = { gate: () => undefined, ...deps.controller };
 	// A headless call joins its runs through the shared launcher, wired exactly as the extension wires it.
 	deps.runs ??= createBackgroundRuns({ tracker: deps.tracker, agentTree: deps.agentTree, stopRegistry: deps.stopRegistry, slots: new Semaphore(4), completionNotifier: deps.completionNotifier, startPeek: deps.startPeek, childUsage: { account: () => {}, accountMany: () => emptyUsage() } as any, publishPersonaCost: deps.publishPersonaCost });
 	registerDelegateTool({ registerTool: (definition: unknown) => { tool = definition; } } as unknown as ExtensionAPI, deps);
@@ -72,6 +73,16 @@ function render(tool: any, result: any, expanded = false, width = 240, context?:
 function renderCall(tool: any, args: unknown, width = 240, context?: any): string {
 	return tool.renderCall(args, plainTheme, context).render(width).join("\n");
 }
+
+test("continuation call names the historical run id without showing its task", () => {
+	const h = register();
+	const rendered = renderCall(h.tool, { resume: "run-1", task: "PRIVATE FOLLOW-UP" }, 120);
+	assert.match(rendered, /delegate resume run-1/);
+	assert.doesNotMatch(rendered, /PRIVATE FOLLOW-UP/);
+	const unsafe = renderCall(h.tool, { resume: "run-1\nINJECTED".repeat(30), task: "private" }, 36);
+	assert.ok(unsafe.split("\n").every((line) => visibleWidth(line.trimEnd()) <= 36));
+	assert.doesNotMatch(unsafe, /\nINJECTED|private/);
+});
 
 test("single delegate call gives the alias a title line and keeps agent plus provider-qualified model in dim metadata", async () => {
 	const h = register();

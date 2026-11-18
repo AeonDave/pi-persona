@@ -21,7 +21,7 @@ function harness() {
 	const gates = new Map<string, { resolve(): void; progress(): void }>();
 	const deps: any = {
 		lastCtx: undefined,
-		controller: { activePersona: undefined },
+		controller: { activePersona: undefined, gate: () => undefined },
 		agents: [{ name: "scout" }],
 		contractNames: () => [],
 		buildEngine: (_signal: unknown, onProgress: (snap: unknown) => void) => ({

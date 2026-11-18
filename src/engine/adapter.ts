@@ -7,6 +7,8 @@
 
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { validateWorkerSession } from "./worker-session.ts";
+import { SESSION_CONTRACT_ENV, SESSION_CONTRACT_ERROR_MARKER } from "./session-contract.ts";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
@@ -133,17 +135,22 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			/** Called once with a steer handle when the broker is on (in-process parity). */
 			onSteerable?: (steer: SteerFn) => void,
 		): Promise<AgentResult> {
+			const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
 			const cfg = deps.resolveAgent(spec.agent);
-			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
+			if (!cfg) return beforeStart(unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []));
+			if (spec.session) {
+				try { await validateWorkerSession(spec.session, deps.cwd ?? process.cwd()); }
+				catch (error) { return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "agent", error: `[${spec.agent}] Worker session: ${error instanceof Error ? error.message : String(error)}`, sessionSaved: false, sessionQuiescent: true }; }
+			}
 			let thinkingRequested: ThinkingLevel | undefined;
 			try {
 				thinkingRequested = resolveLegThinking(spec, cfg, deps.childThinking);
 			} catch (error) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` };
+				return beforeStart({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` });
 			}
 			const tools = spec.tools ?? cfg.tools;
 			const invalidTools = toolModifierFailure(spec.agent, tools);
-			if (invalidTools) return invalidTools;
+			if (invalidTools) return beforeStart(invalidTools);
 
 			// ── reference handoff preflight (contract 3/4) — BEFORE any broker work or spawn ──
 			// Admission uses the SAME shared rule as the in-process engine; storage is verified
@@ -156,13 +163,13 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					specTools: spec.tools, cfgTools: cfg.tools, excludeTools: cfg.excludeTools,
 					canUseBus: deps.canUseBus ?? true,
 				});
-				if (!grant.ok) return referenceHandoffFailure(spec.agent, grant.error);
+				if (!grant.ok) return beforeStart(referenceHandoffFailure(spec.agent, grant.error));
 				const archive = deps.resultArchive?.();
-				if (archive === undefined) return referenceHandoffFailure(spec.agent, "terminal result archive unavailable for reference handoff");
+				if (archive === undefined) return beforeStart(referenceHandoffFailure(spec.agent, "terminal result archive unavailable for reference handoff"));
 				const scoped = makeScopedResultReader(archive, spec.resultRefs);
 				const { missing } = scoped.preflight();
-				if (missing.length > 0) return referenceHandoffFailure(spec.agent, `archived results unavailable: ${missing.join(", ")}`);
-				if (deps.broker === undefined) return referenceHandoffFailure(spec.agent, "cross-process broker reader unavailable for reference handoff");
+				if (missing.length > 0) return beforeStart(referenceHandoffFailure(spec.agent, `archived results unavailable: ${missing.join(", ")}`));
+				if (deps.broker === undefined) return beforeStart(referenceHandoffFailure(spec.agent, "cross-process broker reader unavailable for reference handoff"));
 				resultReader = scoped;
 				admittedTools = grant.tools;
 			}
@@ -173,12 +180,14 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// without its requested guard would silently turn a constrained call into prose.
 			const requestedContract = spec.outputContract?.trim();
 			const contractDef = requestedContract ? pinnedDef(requestedContract) : undefined;
-			if (requestedContract && !contractDef) return unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []);
+			if (requestedContract && !contractDef) return beforeStart(unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []));
 			let encodedSkills: string | undefined;
 			try { if (spec.skills && spec.skills.length > 0) encodedSkills = encodeSelectedSkills(spec.skills); }
-			catch (error) { return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` }; }
+			catch (error) { return beforeStart({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` }); }
 			const task = contractDef ? `${spec.task}\n\n${contractInstructions(contractDef)}` : spec.task;
 			const childSpec: ChildRunSpec = { task };
+			if (spec.session) childSpec.session = spec.session;
+			if (spec.session) childSpec.sessionExtensionPath = fileURLToPath(new URL("./session-contract.ts", import.meta.url));
 			if (encodedSkills) childSpec.extensionPath = fileURLToPath(new URL("./skills-extension.ts", import.meta.url));
 			const model = spec.model ?? deps.modelFor?.(spec.agent, spec.role) ?? cfg.model;
 			if (model) childSpec.model = model;
@@ -198,6 +207,8 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const childEnv = { ...childOptions.env };
 			delete childEnv.PI_PERSONA_CODE_OUTLINE;
 			delete childEnv[SELECTED_SKILLS_ENV];
+			delete childEnv[SESSION_CONTRACT_ENV];
+			if (spec.session) childEnv[SESSION_CONTRACT_ENV] = spec.session.resume ? "resume" : "fresh";
 			if (encodedSkills) childEnv[SELECTED_SKILLS_ENV] = encodedSkills;
 			childOptions.env = childEnv;
 			const outlineExcluded = cfg.excludeTools?.some((pattern) => pattern === "code_outline" || (pattern.endsWith("*") && "code_outline".startsWith(pattern.slice(0, -1))));
@@ -244,7 +255,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 						try {
 							preparedReader = await broker.prepareResultReader(handle, resultReader, signal);
 						} catch (error) {
-							return referenceHandoffFailure(spec.agent, `broker result reader preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+							return beforeStart(referenceHandoffFailure(spec.agent, `broker result reader preparation failed: ${error instanceof Error ? error.message : String(error)}`));
 						}
 						childOptions.env = {
 							...childOptions.env,
@@ -308,7 +319,10 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const selectedFailure = encodedSkills && !child.ok
 				? child.stderr.split(/\r?\n/).find((line) => line.startsWith(SELECTED_SKILLS_ERROR_MARKER))?.slice(SELECTED_SKILLS_ERROR_MARKER.length)
 				: undefined;
-			if (selectedFailure && !child.timedOut && !child.aborted) result.error = `${tag} ${selectedFailure}`;
+			const sessionContractFailure = spec.session && !child.ok
+				? child.stderr.split(/\r?\n/).find((line) => line.startsWith(SESSION_CONTRACT_ERROR_MARKER))?.slice(SESSION_CONTRACT_ERROR_MARKER.length)
+				: undefined;
+			if ((selectedFailure || sessionContractFailure) && !child.timedOut && !child.aborted) result.error = `${tag} ${selectedFailure ?? sessionContractFailure}`;
 			else if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
 			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
 			const hostModuleHint = !child.ok ? piHostModuleHint(`${child.errorMessage ?? ""}\n${child.stderr}`) : undefined;
@@ -337,7 +351,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 					? "timeout"
 					: child.aborted
 						? "abort"
-						: selectedFailure
+						: selectedFailure || sessionContractFailure
 							? "contract"
 						: hostModuleHint
 							? "agent"
@@ -360,6 +374,14 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 				}
 			}
 
+			if (spec.session) {
+				result.sessionSaved = false;
+				result.sessionQuiescent = child.quiescent;
+				if (result.ok && child.quiescent) {
+					try { await validateWorkerSession({ ...spec.session, resume: true }, deps.cwd ?? process.cwd()); result.sessionSaved = true; }
+					catch { /* The result remains valid, but the transcript is not resumable. */ }
+				}
+			}
 			return result;
 		},
 	};

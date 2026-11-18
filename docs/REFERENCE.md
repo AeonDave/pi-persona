@@ -45,7 +45,7 @@ hard-fail.
 | persona `mode:` | choose `solo`, `parallel`, `pipeline`, `strategy:<name>`, or `flow:<name>` |
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
 | persona `delegation:` | require briefs, set an output contract, schedule disjoint writes, and order fresh verification |
-| `isolation: worktree` | run in a clean throwaway Git worktree and return an exported diff; non-Git, dirty, or oversized cases fail closed |
+| `isolation: worktree` | run in a clean temporary Git worktree and return an exported diff; invalid/dirty repositories fail before launch; failed export retains the worktree for recovery |
 | agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute, escaping `../`, and Windows drive-relative paths such as `C:foo` are invalid. Declarative, not a sandbox |
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
@@ -221,6 +221,7 @@ a live pending ask on the exact child handle, never inferred from its last activ
 |---|---|---|
 | **Observe and control** | any persona | `peek` inspects async sub-agents; `steer` sends a soft correction; `stop` requests cancellation, and `stop { to: "all" }` cancels every running run, `council` and `flow` included (runs already stopping are skipped, never force-cleared in bulk; a slash or mandated run is stopped at shutdown, not by this). The `f9` overlay provides the same controls (`s`, `x`, `X`). Cancelling a worker does not undo existing changes; an unknown id on `result`, `steer` or `stop` returns a miss text listing the known runs |
 | **Retrieve** | any persona | `result { to }` returns one retained run payload (`offset`/`limit` page a bounded view without collecting it; `collect: true` acknowledges whole-body collection of a live run); `result { ref, offset, limit }` reads a page of a retained terminal result after reload; `results` lists retained terminal results with immutable refs; `message { messageId }` returns one retained bus message. History is bounded to 256 messages and 256,000 body characters, terminal results to 128 entries / 8 MiB per session, and retrieval never starts a worker |
+| **Worker conversations** | any persona; continuation still requires delegate permission | `conversations` lists saved workers on this branch and their availability; `forget { to }` explicitly deletes the latest worker conversation and any retained worktree, including unapplied changes. Archived reports remain |
 | **Message bus** | bus allowed; in-process children also require `coaching: true` | broker-connected children and coached in-process children get `contact_supervisor`, subject to explicit empty tool grants and exclusions; progress appears in results and `intercom inbox`, while a blocking `decision` wakes the supervisor for `intercom reply` |
 | **Sibling peer comm** | strategy opt-in | `debate` and `pair` members always get one-way `contact_peer`; `map` and `synthesize` add it with `params: { peers: true }` |
 
@@ -262,6 +263,45 @@ model/provider failure once on the current main model, including unavailable sav
 They never substitute a peer's model or search arbitrary providers. Each recovery is visible and both
 attempts consume usage/child budget; stop, timeout, contract and infrastructure failures do not retry.
 
+### Continuing a worker conversation
+
+After a delegate completes successfully and its conversation is saved, the result gives a run ID
+for a follow-up. List saved workers with `intercom { action: "conversations" }`, then call:
+
+```text
+delegate { resume: "run-1", task: "Check the remaining edge case" }
+```
+
+Use the latest run ID for that conversation; the follow-up receives a new run ID. The only other
+accepted field is an optional `brief`. A continuation keeps the worker's alias, agent, exact
+provider/model and other configuration, and the current delegate permissions, brief requirements,
+concurrency limits and interactive/headless behavior are checked again. Configuration or skill/tool
+contract changes, an unavailable transcript, a different owning session/branch, and failed or
+cancelled turns prevent continuation; start a new worker when those checks fail.
+
+Saved worker transcripts are native Pi session files alongside the owning supervisor session. They
+can contain prompts, tool calls and tool results. Availability is limited to seven days since the
+last saved turn. Storage admission and settlement use limits of 8 MiB per transcript, 64 MiB total
+and 64 worker lineages per session owner; a transcript can exceed a byte limit while a worker is
+running, in which case it cannot be saved for continuation. A fresh, unsaved transcript is removed
+once its writer is known to be stopped. Expiry does not delete saved files, and Persona does not
+automatically evict them at quota. If a
+new conversation cannot be stored, its delegation still runs but cannot be continued from that
+conversation. Sessionless supervisors likewise run new delegates without saved continuation.
+
+To explicitly discard a conversation, use `intercom { action: "forget", to: "run-1" }` with its
+latest run ID. This deletes the worker transcript and its retained isolated worktree, **including
+unapplied changes**. Saved terminal reports in `intercom results` remain. A successful resumable
+worktree delegate keeps the same isolated checkout and pinned base for its next turn; Persona checks
+its ownership and registration before reopening it and refuses a missing or foreign worktree.
+Other strategy worktrees keep their normal cleanup behavior.
+
+Pi's native manual and automatic compaction remain in control of compaction itself. After one
+finishes, Persona supplies a bounded snapshot of pending run statuses, available result references
+and pending ask IDs to the next request. The snapshot is request-local, contains no task or report
+bodies, and creates no card or wake. The separately host-qualification-blocked idle-compaction
+scheduler remains unavailable.
+
 Any leg that does NOT run in `isolation: worktree` shares the real checkout, so its result may
 include a Git status snapshot delta: one `- <path> (<M|A|D|R|?>)` line per observed status change
 (capped at 40, `+N more` beyond that). The report explicitly is **not proof that this leg wrote the
@@ -273,6 +313,26 @@ This is a before/after comparison of path/status codes, not file contents or a p
 edits to an already-dirty path with the same status can be missed; an empty report does not prove
 no writes. The block is omitted when no delta is observed or capture is unavailable. Worktree-isolated
 legs instead return their real unified diff. `changeReport` controls this advisory snapshot only.
+
+If an isolated worker's final state cannot be exported, its result names a retained worktree and
+the pinned starting commit. The same recovery note is returned for all affected `compete`
+candidates, including those that did not win. A worker-provided patch may still be returned with
+an explicit warning that it was not verified against the worktree. A retained worktree prevents
+automatic provider/main-model retry; the supervisor decides how to recover the partial work.
+If the worker already removed or replaced the directory, the result reports it as unavailable;
+it does not promise that the missing files can be recovered.
+
+Inspect the reported directory and recover the files or diff you need before removing it. When
+Git metadata is intact, compare tracked changes with `git -C "<retained-path>" diff --binary
+<base-commit> --` and inspect untracked files separately with `git status`. After recovery,
+`git -C "<original-repository>" worktree remove --force "<retained-path>"` removes the temporary
+checkout. Persona does not merge it or clean up retained work automatically. Ignored outputs
+remain outside the exported artifact contract.
+
+A repeated `intercom stop` can force-settle an unresponsive run before its export finishes; that
+explicit forced settlement discards later results. If no recovery notice arrives, use
+`git worktree list` in the original repository to locate any retained checkout. This does not
+resume the worker or change its stopped status.
 
 The cross-process broker is on by default for child-engine, worktree, and MCP legs. It provides the
 same supervisor communication surface over a session-scoped POSIX socket or Windows named pipe.
@@ -318,7 +378,10 @@ actually inspect and cannot claim repository-relative paths in another workspace
 
 `exocom_status` (a tool, taking no arguments) and `/exocom` (a command, which additionally lists
 live peers) both render the same ownership view: your claims, peers' claims, asks waiting on you,
-and your own open asks. A claim's `write_set` is advisory, not enforced: a supervisor's own
+and your own open asks. `/exocom status` is equivalent to `/exocom`; `/exocom help` shows usage.
+An inactive plane reports whether it was requested, blocked by persona permissions, or failed to
+start when a cause is available. The command does not send messages; use the model-facing tools.
+A claim's `write_set` is advisory, not enforced: a supervisor's own
 `write`/`edit` call whose path overlaps a PEER's open claim is blocked once with a reason to
 coordinate (`exocom_ask`) or claim the path itself; calling the same tool again on the same path is
 then allowed through (one warning per claim + normalized path, not a standing lock).
@@ -763,6 +826,9 @@ stop, `s` steer, and Esc close. `X` (list view) stops every running leaf agent t
 timers, monitors, scripts and Exocom peers are skipped): the first press states the count (`press X again to
 stop N running agents`), any other key or a changed set re-asks. It is offered only for two or more;
 queued or later stages may still start.
+PageUp/PageDown move by the visible list, group or output page. Navigation follows Pi's configured
+keybindings. Steering uses native single-line input with paste, Unicode and cursor editing; Escape
+cancels composition and F9 closes the panel from every view.
 Timers, Monitors, Scripts and Exocom have separate presentation groups. Space/Left/Right folds a
 selected resource group or delegate batch; group headings also accept
 clicks in Pi alternate-screen mode. The widget and F9 share fold state, and folded agent groups

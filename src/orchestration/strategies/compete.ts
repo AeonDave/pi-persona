@@ -16,6 +16,7 @@
  */
 
 import { ballotLabel, shuffleOrder } from "../judge.ts";
+import { formatWorktreeRecovery, WORKTREE_CAPTURE_WARNING } from "../../core/worktree-recovery.ts";
 import { parseAuxActor } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
 import { rosterSpec } from "../roster.ts";
@@ -95,9 +96,17 @@ export const compete: Strategy = {
 				}, { reserveChildren: 1 }), // leave the mandatory arbiter slot
 			),
 		);
+		const recoveries = candidates.flatMap((candidate) => candidate.worktreeRecovery
+			? [{ agent: candidate.agent, ...candidate.worktreeRecovery }]
+			: []);
+		const recoveryText = recoveries.map(({ agent, ...recovery }) => `[${agent}] ${formatWorktreeRecovery(recovery)}`).join("\n");
+		const recoveryFields = recoveries.length ? { worktreeRecoveries: recoveries } : {};
 		const valid: Array<{ result: AgentResult; diff: string; summary: string }> = [];
 		for (const c of candidates) {
-			const extracted = c.ok ? extractDiff(c.output) : undefined;
+			// Remove only the exact runtime-generated recovery notice, never arbitrary worker text.
+			const notice = c.worktreeRecovery ? formatWorktreeRecovery(c.worktreeRecovery) : undefined;
+			const output = notice ? c.output.replace(`${notice}\n\n`, "") : c.output;
+			const extracted = c.ok ? extractDiff(output) : undefined;
 			if (extracted) valid.push({ result: c, diff: extracted.diff, summary: extracted.summary });
 		}
 		if (valid.length === 0) {
@@ -105,8 +114,8 @@ export const compete: Strategy = {
 			const cause = summarizeFailedResults(candidates, "no competitor delivered a valid tail diff");
 			return {
 				agent: "compete",
-				output: `(no competitor delivered a diff: ${reasons})`,
-				structured: { entered: team.length, valid: 0 },
+				output: [recoveryText, `(no competitor delivered a diff: ${reasons})`].filter(Boolean).join("\n\n"),
+				structured: { entered: team.length, valid: 0, ...recoveryFields },
 				usage: sumUsage(candidates.map((c) => c.usage)),
 				ok: false,
 				error: cause.error,
@@ -126,8 +135,8 @@ export const compete: Strategy = {
 			);
 			return {
 				agent: "compete",
-				output: [`compete cancelled before the arbiter ran — the ${valid.length} valid entries follow, unjudged.`, ...entries].join("\n\n"),
-				structured: { entered: team.length, valid: valid.length, cancelled: true },
+				output: [recoveryText, `compete cancelled before the arbiter ran — the ${valid.length} valid entries follow, unjudged.`, ...entries].filter(Boolean).join("\n\n"),
+				structured: { entered: team.length, valid: valid.length, cancelled: true, ...recoveryFields },
 				usage: sumUsage(candidates.map((c) => c.usage)),
 				ok: false,
 				error: "the run was aborted",
@@ -162,8 +171,8 @@ export const compete: Strategy = {
 			);
 			const result: AgentResult = {
 				agent: "compete",
-				output: [`compete: the judge could not resolve a pick (${why}) — the ${valid.length} valid entries follow, unjudged.`, ...entries].join("\n\n"),
-				structured: { pick: label, entered: team.length, valid: valid.length },
+				output: [recoveryText, `compete: the judge could not resolve a pick (${why}) — the ${valid.length} valid entries follow, unjudged.`, ...entries].filter(Boolean).join("\n\n"),
+				structured: { pick: label, entered: team.length, valid: valid.length, ...recoveryFields },
 				usage,
 				ok: false,
 			};
@@ -174,8 +183,10 @@ export const compete: Strategy = {
 
 		const reasoning = (typeof verdict.structured?.output === "string" && verdict.structured.output) || verdict.output;
 		const out = [
+			...(recoveryText ? [recoveryText, ""] : []),
 			`COMPETE winner: ${winner.result.agent} (${valid.length} valid of ${team.length} entered) — chosen by ${arbiterName}: ${reasoning}`,
 			"",
+			...(winner.result.worktreeRecovery ? [WORKTREE_CAPTURE_WARNING, ""] : []),
 			"Apply the winning diff from the repo root (save it, then `git apply`):",
 			"```diff",
 			winner.diff,
@@ -184,7 +195,7 @@ export const compete: Strategy = {
 		return {
 			agent: "compete",
 			output: out,
-			structured: { winner: winner.result.agent, pick: label, entered: team.length, valid: valid.length },
+			structured: { winner: winner.result.agent, pick: label, entered: team.length, valid: valid.length, ...recoveryFields },
 			usage,
 			ok: true,
 		};

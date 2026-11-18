@@ -2,6 +2,7 @@
  * Exocom plane + work ledger + wait + tools. Owns session-scoped plane state.
  */
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -62,6 +63,9 @@ import { collaborationWriteIntent, deliverCollaborationOffer } from "./collabora
 import type { SessionIdentity } from "../extension/identity.ts";
 import { WriteWarnings } from "./write-guard.ts";
 import { ExocomPeerPresenceStore, projectExocomPeerPresence, type ExocomPeerPresence } from "./presence.ts";
+import { createReloadSnapshot, EXOCOM_RELOAD_ENTRY, findReloadSnapshot, unconsumedReloadIds, type ReloadSnapshot } from "./reload.ts";
+
+interface ExocomNotice extends PresentedNotice { receipt?: { sender: string; id: string } }
 
 export interface ExocomHost {
 	readonly pi: ExtensionAPI;
@@ -82,7 +86,7 @@ export interface ExocomInstall {
 	refreshIdentity(): void;
 	reconcile(ctx: ExtensionContext): Promise<void>;
 	queue(op: () => Promise<void>): Promise<void>;
-	stop(): Promise<void>;
+	stop(reloadCtx?: ExtensionContext): Promise<void>;
 	onPersonaChanged(ctx: ExtensionContext): Promise<void>;
 	syncActiveTools(): void;
 	telemetrySessionId(ctx: ExtensionContext): string;
@@ -108,9 +112,11 @@ export interface ExocomInstall {
 	peerLabelFor(sessionId: string): string | undefined;
 	/** Warn-once memory for writes landing inside a peer's open claim (Task 7). Cleared on stop(). */
 	readonly writeWarnings: WriteWarnings;
-	get notifier(): IdleCoalescingNotifier<PresentedNotice> | undefined;
+	readonly startupError: string | undefined;
+	get notifier(): IdleCoalescingNotifier<ExocomNotice> | undefined;
 	get waitNotifier(): IdleCoalescingNotifier<PresentedNotice> | undefined;
 	kickWait(): void;
+	prepareReload(ctx: ExtensionContext, reload: boolean): void;
 }
 
 export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall {
@@ -133,7 +139,11 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomWaitNotifier: IdleCoalescingNotifier<PresentedNotice> | undefined;
 	let exocomBudget: SenderBudget | undefined;
 	let exocomSeen: SeenMessages | undefined;
-	let exocomNotifier: IdleCoalescingNotifier<PresentedNotice> | undefined;
+	let exocomNotifier: IdleCoalescingNotifier<ExocomNotice> | undefined;
+	let startupError: string | undefined;
+	let reloadSnapshot: ReloadSnapshot | undefined;
+	let exocomStarted = false;
+	const exocomAcceptsDelivery = (): boolean => exocomStarted && !host.disposed;
 	/** Latched while the inbox is at EXOCOM_INBOX_MAX, so a peer hammering a full inbox produces one
 	 *  operator warning rather than one per refused message. */
 	let exocomInboxFull = false;
@@ -151,6 +161,34 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			|| pi.getFlag("exocom") === true
 			|| host.exocomArgs.joinCode !== undefined
 			|| host.exocomArgs.error !== undefined;
+	}
+
+	function reloadWarning(ctx: ExtensionContext): void {
+		try { ctx.ui.notify("exocom: pending peer messages could not be restored after reload.", "warning"); } catch { /* teardown remains best effort */ }
+	}
+
+	/** Consume stale entries on every start; only this reload and branch may restore a snapshot. */
+	function prepareReload(ctx: ExtensionContext, reload: boolean): void {
+		reloadSnapshot = undefined;
+		try {
+			const sessionId = ctx.sessionManager.getSessionId();
+			const entries = ctx.sessionManager.getEntries();
+			const outstanding = unconsumedReloadIds(entries, sessionId);
+			if (outstanding.length === 0) return;
+			try {
+				if (reload && exocomRequested() && canParticipateInExocom(host.controller.capabilities)) {
+					const agentDir = resolve(host.userAgentDir());
+					const scope = exocomScope ?? selectExocomScope(agentDir, ctx.cwd, host.exocomArgs.joinCode);
+					reloadSnapshot = findReloadSnapshot(ctx.sessionManager.getBranch(), entries, sessionId, scope.scopeWorkspaceId, agentDir, Date.now());
+				}
+			} finally {
+				for (const id of outstanding) pi.appendEntry(EXOCOM_RELOAD_ENTRY, { kind: "consumed", id, sessionId });
+			}
+			if (reload && !reloadSnapshot) reloadWarning(ctx);
+		} catch {
+			reloadSnapshot = undefined;
+			if (reload) reloadWarning(ctx);
+		}
 	}
 
 	function peerWorkspace(peer: DisplayPeer): { label: string; code: string; same: boolean } | undefined {
@@ -415,6 +453,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	async function startExocom(ctx: ExtensionContext): Promise<void> {
 		if (!exocomRequested()) return;
 		if (!canParticipateInExocom(host.controller.capabilities)) return;
+		startupError = undefined;
 		try {
 			if (host.exocomArgs.error) throw new Error(host.exocomArgs.error);
 			const sessionId = ctx.sessionManager.getSessionId();
@@ -433,7 +472,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
 			exocomLedgerFile = ledgerPath(agentDir, hash);
 			exocomWaitNotifier = new IdleCoalescingNotifier<PresentedNotice>({
-				isIdle: () => host.canDeliverNotifications(),
+				isIdle: () => exocomAcceptsDelivery() && host.canDeliverNotifications(),
 				deliver: (message, items) => deliverNotice(message, items, "pi-persona"),
 				render: (items) => items.map((item) => item.text).join("\n\n"),
 				setTimer: (fn, ms) => { const h = setTimeout(fn, ms); h.unref?.(); return h; },
@@ -443,8 +482,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// discipline completionNotifier/intercomNotifier/timerNotifier apply above, but through
 			// pi.sendMessage (a distinct, labellable custom message) rather than pi.sendUserMessage
 			// (mirrors the bridge's own `sendFollowUp` for inbound cross-process text).
-			exocomNotifier = new IdleCoalescingNotifier<PresentedNotice>({
-				isIdle: () => host.canDeliverNotifications(),
+			exocomNotifier = new IdleCoalescingNotifier<ExocomNotice>({
+				isIdle: () => exocomAcceptsDelivery() && host.canDeliverNotifications(),
 				deliver: deliverNotice,
 				// A burst of independent peers must not turn one idle wake into an unbounded model
 				// payload. Each item is already attributed and peer-fenced by buildInboundDelivery;
@@ -633,8 +672,18 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					inbox: exocomNotifier?.peekPending().length ?? 0,
 				}),
 				onInbound: (msg, fromEntry) => {
-					const queued = exocomNotifier?.peekPending().length ?? 0;
+					if (!exocomAcceptsDelivery()) return { accepted: false, reason: "receiver starting or stopping" };
+					const pending = exocomNotifier?.peekPending() ?? [];
+					const queued = pending.length;
+					if (pending.some((item) => item.receipt?.sender === msg.from_session && item.receipt.id === msg.msg_id)) {
+						exocomSeen?.seenBefore(msg.from_session, msg.msg_id);
+						return { accepted: true, duplicate: true };
+					}
 					if (queued >= EXOCOM_INBOX_MAX) {
+						// An accepted id stays accepted even when a later arrival filled the queue.
+						// A genuinely new id must remain retryable after the queue drains.
+						if (exocomSeen?.seenBefore(msg.from_session, msg.msg_id)) return { accepted: true, duplicate: true };
+						exocomSeen?.forget(msg.from_session, msg.msg_id);
 						if (!exocomInboxFull) {
 							exocomInboxFull = true;
 							try {
@@ -682,7 +731,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						...(msg.in_reply_to ? { replyTo: msg.in_reply_to } : {}),
 					});
 					if ("deliver" in decision) {
-						exocomNotifier?.notify({ text: decision.deliver, message: { ...decision.message, from: peerName } });
+						exocomNotifier?.notify({ text: decision.deliver, message: { ...decision.message, from: peerName }, receipt: { sender: msg.from_session, id: msg.msg_id } });
 						// Never inject peer text into a live model turn. A compact human-only toast makes
 						// receipt visible while a long tool loop keeps the follow-up idle-gated.
 						if (host.lastCtx?.isIdle() !== true) {
@@ -702,6 +751,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					return disposition;
 				},
 				onSemantic: (frame, fromEntry) => {
+					if (!exocomAcceptsDelivery()) return { accepted: false, reason: "receiver starting or stopping" };
 					if (!exocomLedgerFile) return { accepted: false, reason: "ledger unavailable" };
 					if (frame.kind === "claim" && fromEntry.workspace_id !== undefined && fromEntry.workspace_id !== scope.scopeWorkspaceId) {
 						return { accepted: false, reason: "external-workspace peers cannot claim paths in the selected scope's workspace ledger" };
@@ -755,6 +805,14 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				},
 				onPoolChange: () => renderExocomWidget(),
 			});
+			// Seed before binding: fresh arrivals must follow the restored FIFO backlog.
+			if (reloadSnapshot) {
+				for (const item of reloadSnapshot.items) {
+					if (!exocomPlane.restoreInboundContext(item.context)) throw new Error("invalid restored peer reply context");
+					exocomSeen.seenBefore(item.receipt.sender, item.receipt.id);
+					exocomNotifier.notify({ text: item.text, ...(item.message ? { message: item.message } : {}), receipt: item.receipt });
+				}
+			}
 			await exocomPlane.start();
 			refreshIdentity = () => exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
 			renderExocomWidget();
@@ -824,7 +882,13 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				targetForSession: (id) => exocomPlane?.listPeers().find((peer) => peer.session_id === id)?.target,
 			});
 			registerExocomProfileTool(pi, () => exocomPlane);
+			exocomStarted = true;
+			exocomNotifier.kick();
+			reloadSnapshot = undefined;
 		} catch (err) {
+			startupError = err instanceof Error ? err.message : String(err);
+			if (reloadSnapshot) reloadWarning(ctx);
+			reloadSnapshot = undefined;
 			// `plane.start()` may have bound its server before a later registry write failed.
 			// Teardown while the reference is still owned; this also cancels notifier/timers.
 			await stopExocom();
@@ -916,7 +980,8 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// session_shutdown already fires on Ctrl+C/SIGHUP/SIGTERM (not just a normal exit), so wiring
 	// teardown only here — like the broker teardown above — covers every exit path without a
 	// redundant raw process.on(SIGINT/SIGTERM) handler.
-	async function stopExocom(): Promise<void> {
+	async function stopExocom(reloadCtx?: ExtensionContext): Promise<void> {
+		exocomStarted = false;
 		if (exocomHeartbeat) {
 			clearInterval(exocomHeartbeat);
 			exocomHeartbeat = undefined;
@@ -926,8 +991,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			clearInterval(exocomResetTimer);
 			exocomResetTimer = undefined;
 		}
-		exocomNotifier?.cancel();
-		exocomNotifier = undefined;
+		if (!reloadCtx) exocomNotifier?.cancel();
 		exocomWaitNotifier?.cancel();
 		exocomWaitNotifier = undefined;
 		for (const waiter of exocomWaiters) clearTimeout(waiter.handle);
@@ -957,29 +1021,49 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				/* Teardown stays best-effort; registry lease reconciliation handles a crash-equivalent. */
 			}
 		}
-		exocomLedgerFile = "";
-		exocomSessionId = "";
-		writeWarnings.clear();
-		exocomInboxFull = false; // a later plane reports its own first full inbox, not this one's tail
-		exocomToastNotifier?.cancel();
-		exocomToastNotifier = undefined;
-		exocomBudget = undefined;
-		exocomSeen = undefined;
 		if (exocomPlane) {
 			const plane = exocomPlane;
-			exocomPlane = undefined;
 			peerPresence.publish([]);
 			try {
 				publishTelemetryPeers([]);
 			} catch {
 				/* the dying instance's last roster must not linger as live presence */
 			}
+			let stopped = false;
 			try {
 				await plane.stop();
+				stopped = true;
 			} catch {
 				/* never block shutdown on a teardown error */
 			}
+			if (reloadCtx) {
+				const queued = exocomNotifier?.peekPending().filter((item) => item.receipt !== undefined) ?? [];
+				if (queued.length > 0) {
+					try {
+						const items = queued.map((item) => {
+							const receipt = item.receipt!;
+							const context = plane.getInboundContext(receipt.sender, receipt.id);
+							if (!context) throw new Error("missing authenticated reply context");
+							return { ...item, receipt, context };
+						});
+						const snapshot = stopped && exocomScope && createReloadSnapshot(randomUUID(), exocomSessionId, exocomScope.scopeWorkspaceId, resolve(host.userAgentDir()), Date.now(), items);
+						if (!snapshot) throw new Error("invalid reload snapshot");
+						pi.appendEntry(EXOCOM_RELOAD_ENTRY, snapshot);
+					} catch { reloadWarning(reloadCtx); }
+				}
+			}
+			exocomPlane = undefined;
 		}
+		exocomNotifier?.cancel();
+		exocomNotifier = undefined;
+		exocomLedgerFile = "";
+		exocomSessionId = "";
+		writeWarnings.clear();
+		exocomInboxFull = false;
+		exocomToastNotifier?.cancel();
+		exocomToastNotifier = undefined;
+		exocomBudget = undefined;
+		exocomSeen = undefined;
 		try {
 			host.lastCtx?.ui.setWidget("persona-exocom", undefined, { placement: "aboveEditor" });
 		} catch {
@@ -1007,6 +1091,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		peerSnapshot: () => peerPresence.snapshot(),
 		onPeersChanged: (listener) => peerPresence.onChange(listener),
 		get name() { return host.identity.name; },
+		get startupError() { return startupError; },
 		get namedByModel() { return host.identity.chosen; },
 		get scope() { return exocomScope; },
 		renderWidget: renderExocomWidget,
@@ -1020,5 +1105,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		get notifier() { return exocomNotifier; },
 		get waitNotifier() { return exocomWaitNotifier; },
 		kickWait() { exocomWaitNotifier?.kick(); },
+		prepareReload,
 	};
 }

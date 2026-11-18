@@ -165,6 +165,24 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   text, `intercom result { to: runId }` retrieves a settled run. Both explicit and automatic inbox
   drains retain bounded history (256 messages / 256,000 body characters). Ask settlement clears
   unread and buffered prompts; broker errors/cancellation remain correlated to the original request.
+- **Worker continuation**: a successful saved delegate can be continued with
+  `delegate { resume: <latestRunId>, task, brief? }`; `intercom conversations` lists the current
+  branch's availability and `intercom forget { to: <latestRunId> }` explicitly deletes its saved
+  transcript and retained worktree, including unapplied changes, while leaving archived reports.
+  The worker keeps its alias, exact provider/model and original configuration; current permissions,
+  briefs, limits, async rules and configuration/skill/tool fingerprints are rechecked before use.
+  Failed or cancelled turns cannot be resumed. Persistence is parent-session/branch scoped: native
+  worker JSONL admission/settlement limits are 8 MiB per file, 64 MiB total, 64 lineages and seven
+  days of availability. A running writer can cross a byte limit before settlement; do not claim a
+  rejected transcript was saved for continuation.
+  There is no automatic eviction; at quota, new delegations still run without continuation storage.
+  One lease protects each transcript until the engine proves the writer quiescent. A successful
+  worktree delegate retains the exact verified worktree and pinned base for follow-up; strategies
+  keep their existing cleanup. Never substitute a missing worktree with the supervisor's cwd.
+- Native Pi compaction arms a request-local supervisor snapshot of bounded run status/receipt
+  metadata and pending ask IDs (`core/supervisor-continuity.ts`, `extension/supervisor-continuity.ts`).
+  It adds no history entry, card or wake, and stays until the first successful response on that branch.
+  This does not enable the separately host-qualification-blocked idle-compaction scheduler.
 - **Sub-agent output is untrusted** — wrap it with `fenceUntrusted` (in `extension.ts`) before it
   reaches the supervisor as a follow-up or tool result (prompt-injection defense).
 - **Delegation nudges** (`core/nudge.ts`, on by default): a `tool_result` hook watches the supervisor's
@@ -214,7 +232,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   (uncorrelated errors; an anonymised ballot cannot survive members who talked) — do not "fix"
   this. `compete` runs its competitors with `isolation: worktree` (REQUIRES a clean git repo; missing
   repo/dirty checkout/worktree failure fails closed and never falls back to the real tree) and returns
-  the winning diff for the SUPERVISOR to apply.
+  the winning diff for the SUPERVISOR to apply. Worktrees are removed after successful final-state
+  export. Failed export or an exception after worker execution begins retains the worktree, with
+  its recovery path and pinned starting commit in the result. Keep recovery metadata out of blind
+  ballots and preserve it in `compete` results even when another candidate wins. Recovery never
+  applies changes automatically; ignored outputs and net-zero commit history are not artifacts.
 - **Exocom** (`src/exocom/*`, `src/tools/exocom*.ts`; opt-in `PI_PERSONA_EXOCOM=1` / `--exocom`;
   see [the collaboration guide](docs/COLLABORATION.md)): a flat external plane between independent,
   top-level Pi sessions, separate from one supervisor's internal workers. Bare `--exocom` selects the
@@ -244,6 +266,10 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   read-only filesystem tools remain available: profile `get` is allowed, but `set` and `clear` are not.
   Naming remains metadata and does not answer the ask. Joining requires `canUseBus` plus at least one
   callable ask closer (`exocom_answer` or `exocom_decline`) and is rechecked on persona changes.
+  Accepted postcards pending at `/reload` use a bounded, one-use native session entry
+  (`exocom/reload.ts`), bound to the same session, branch, scope and agent directory for five minutes.
+  Keep authenticated reply routes, hop counts and pending-message deduplication across that handoff.
+  Admission and delivery stop before teardown starts; restart/crash recovery is not promised.
   Design: [architecture](docs/ARCHITECTURE.md#exocom--the-external-plane) and
   [collaboration guide](docs/COLLABORATION.md).
 
@@ -282,6 +308,12 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   and never re-inject a chosen identity. Progress `tokens` is cumulative input/output usage, not live
   context occupancy; the model-facing digest and expanded cards say so explicitly, while compact rows
   use the agent widget's `tok` unit.
+
+- F9 and companion F10 share `ui/inspector-frame.ts` through
+  `pi-persona:inspector-frame:v1`: one geometry/painter contract, theme `border` role, 90% host
+  width and bounded height with margins. Keep content budgets and page movement tied to actual
+  visible rows, including height-only resize; do not reintroduce independent frame implementations.
+  Steering uses native Pi Input with focus limited to composition; directed-target guards still apply.
 
 - Session clock and event wakes: `timer now` refreshes the run-start clock snapshot; timer alarms
   require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs

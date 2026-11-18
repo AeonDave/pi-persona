@@ -71,6 +71,25 @@ test("completion report keeps FAILED and STOPPED status/error while bounding par
 	assert.match(report, /intercom \{ action:"result", to:"run-stopped" \}/);
 });
 
+test("failed and stopped completions retain worktree recovery despite long errors", () => {
+	for (const status of ["failed", "stopped"] as const) {
+		const recovery = { path: "C:/retained/worker", baseCommit: "0123456789abcdef", reason: "export failed", availability: "retained" as const };
+		const item = run({ status, error: "long error ".repeat(100), result: { ok: false, output: "", worktreeRecovery: recovery } as NonNullable<AsyncRun["result"]> });
+		for (const bounded of [true, false]) {
+			const report = buildCompletionReport([item], fenceUntrusted, { bounded });
+			assert.match(report, /C:\/retained\/worker/);
+			assert.match(report, /0123456789abcdef/);
+		}
+	}
+});
+
+test("completion reports unavailable worktree paths honestly", () => {
+	const item = run({ status: "failed", result: { ok: false, output: "", worktreeRecovery: { path: "C:/missing", baseCommit: "abc", reason: "gone", availability: "unavailable" } } as NonNullable<AsyncRun["result"]> });
+	const report = buildCompletionReport([item], (text) => text);
+	assert.match(report, /unavailable/i);
+	assert.doesNotMatch(report, /retained isolated worktrees/i);
+});
+
 test("the final completion cap never cuts through a fenced untrusted line", () => {
 	const runs = Array.from({ length: 31 }, (_, index) =>
 		run({

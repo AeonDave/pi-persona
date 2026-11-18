@@ -103,10 +103,17 @@ test("concurrent in-process workers keep selected skill bodies isolated", { time
 	const fixture = await makeFixture();
 	t.after(async () => rm(fixture.root, { recursive: true, force: true }));
 	const captured: CapturedRequest[][] = [[], []];
-	fixture.faux.setResponses([
-		(context) => { captured[0]!.push(requestText(context)); return fauxAssistantMessage("alpha done"); },
-		(context) => { captured[1]!.push(requestText(context)); return fauxAssistantMessage("beta done"); },
-	]);
+	const captureWorker = (context: TranscriptContext) => {
+		// SDK setup and skill I/O can reverse provider arrival order. Identify the request by
+		// its assigned task, independently of the skill section whose isolation we assert.
+		const userRequest = JSON.stringify(context.messages.filter((message) => message.role === "user"));
+		const alpha = userRequest.includes("Do alpha work.");
+		const beta = userRequest.includes("Do beta work.");
+		assert.notEqual(alpha, beta, "each request identifies exactly one assigned worker task");
+		captured[alpha ? 0 : 1]!.push(requestText(context));
+		return fauxAssistantMessage(`${alpha ? "alpha" : "beta"} done`);
+	};
+	fixture.faux.setResponses([captureWorker, captureWorker]);
 	const engine = makeInProcessEngine({
 		cwd: fixture.cwd,
 		agentDir: fixture.agentDir,
@@ -114,8 +121,8 @@ test("concurrent in-process workers keep selected skill bodies isolated", { time
 		resolveAgent: (name) => ({ name, model: fixture.model, tools: ["read"], systemPrompt: "Return the supplied answer.", source: "<selected-skills-test>" }),
 	});
 	const results = await Promise.all([
-		engine.run({ agent: "alpha-worker", task: "Do alpha work.", skills: ["alpha"] }),
 		engine.run({ agent: "beta-worker", task: "Do beta work.", skills: ["beta"] }),
+		engine.run({ agent: "alpha-worker", task: "Do alpha work.", skills: ["alpha"] }),
 	]);
 	for (const result of results) assert.equal(result.ok, true, result.error);
 	assert.equal(captured[0]!.length, 1);

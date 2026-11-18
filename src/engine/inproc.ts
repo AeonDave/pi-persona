@@ -48,6 +48,10 @@ import { combineSignals } from "./signals.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
 import { mergeSessionToolAllowlist } from "./session-tools.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
+import { validateWorkerSession, type WorkerSession } from "./worker-session.ts";
+import { installSessionContract } from "./session-contract.ts";
+
+class SessionContractError extends Error {}
 
 /** The minimal slice of Pi's AgentSession the engine drives — also the test seam. */
 export interface InProcSession {
@@ -56,6 +60,8 @@ export interface InProcSession {
 	subscribe(listener: (event: unknown) => void): () => void;
 	prompt(input: string): Promise<void>;
 	agent: { abort(): void; waitForIdle(): Promise<void>; steer(message: unknown): void };
+	/** Await extension-owned shutdown work before declaring a transcript resumable. */
+	shutdown?(): Promise<void>;
 	dispose(): void;
 }
 
@@ -81,6 +87,7 @@ export interface CreateSessionOptions {
 	skills?: readonly string[];
 	/** Extra tools injected into the child session (e.g. `contact_supervisor`). */
 	customTools?: ToolDefinition[];
+	session?: WorkerSession;
 }
 
 export type CreateInProcSession = (opts: CreateSessionOptions) => Promise<InProcSession>;
@@ -198,11 +205,12 @@ export function withOrchestrationToolsExcluded(extra: readonly string[] | undefi
  *  the orchestration tools excluded as a second line of defense. */
 const createPiSession: CreateInProcSession = async (opts) => {
 	if (opts.signal?.aborted) throw new DOMException("Session initialization aborted", "AbortError");
-	const manager = SessionManager.inMemory(opts.cwd);
+	const manager = opts.session ? SessionManager.open(opts.session.file, undefined, opts.cwd) : SessionManager.inMemory(opts.cwd);
 	const settingsManager = SettingsManager.create(opts.cwd, opts.agentDir);
 	const memoryPersona = opts.memoryPersona;
 	const factories: ExtensionFactory[] = [];
 	let selectedSkills: ReturnType<typeof installSelectedSkills> | undefined;
+	let sessionContract: ReturnType<typeof installSessionContract> | undefined;
 	if (memoryPersona !== undefined) factories.push((pi) => installFrozenMemoryOwner(pi, manager, memoryPersona));
 	if (opts.skills?.length) {
 		const names = [...opts.skills];
@@ -210,6 +218,7 @@ const createPiSession: CreateInProcSession = async (opts) => {
 			selectedSkills = installSelectedSkills(pi, names, opts.signal ? { signal: opts.signal } : {});
 		});
 	}
+	if (opts.session) factories.push((pi) => { sessionContract = installSessionContract(pi, opts.session!.resume); });
 	const loader = new DefaultResourceLoader({
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
@@ -272,11 +281,17 @@ const createPiSession: CreateInProcSession = async (opts) => {
 			await session.prompt(input);
 			const failure = selectedSkills?.getFailure();
 			if (failure !== undefined) throw new SelectedSkillsError(failure);
+			const contractFailure = sessionContract?.getFailure();
+			if (contractFailure !== undefined) throw new SessionContractError(contractFailure);
 		},
 		agent: {
 			abort: () => session.agent.abort(),
 			waitForIdle: () => session.agent.waitForIdle(),
 			steer: (message) => session.agent.steer(message as Parameters<typeof session.agent.steer>[0]),
+		},
+		shutdown: async () => {
+			await session.abort();
+			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		},
 		dispose: () => session.dispose(),
 	};
@@ -352,24 +367,25 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 	return {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
+			const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
 			const cfg = deps.resolveAgent(spec.agent);
-			if (!cfg) return unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []);
+			if (!cfg) return beforeStart(unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []));
 			let thinkingRequested: ThinkingLevel | undefined;
 			try {
 				thinkingRequested = resolveLegThinking(spec, cfg, deps.childThinking);
 				if (spec.skills !== undefined) encodeSelectedSkills(spec.skills);
 			} catch (error) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` };
+				return beforeStart({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "contract", error: `[${spec.agent}] ${error instanceof Error ? error.message : String(error)}` });
 			}
 			const thinkingMetadata = thinkingRequested !== undefined ? { thinkingRequested } : {};
 			const tools = spec.tools ?? cfg.tools;
 			const invalidTools = toolModifierFailure(spec.agent, tools);
-			if (invalidTools) return invalidTools;
+			if (invalidTools) return beforeStart(invalidTools);
 			// A requested contract is a runtime guard, not merely prompt decoration. Resolve it
 			// before model/session construction so a missing name can never run unconstrained.
 			const requestedContract = spec.outputContract?.trim();
 			const requestedDef = requestedContract ? pinnedDef(requestedContract) : undefined;
-			if (requestedContract && !requestedDef) return unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []);
+			if (requestedContract && !requestedDef) return beforeStart(unknownContractFailure(spec.agent, requestedContract, deps.listContracts?.() ?? []));
 
 			const picked = spec.model ? undefined : deps.modelFor?.(spec.agent, spec.role);
 			const ref = spec.model ?? picked ?? cfg.model ?? deps.defaultModel;
@@ -382,7 +398,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				const frag = (ref ?? "").split("/").pop()?.toLowerCase() ?? "";
 				const near = frag ? all.filter((r) => r.toLowerCase().includes(frag)) : [];
 				const hint = (near.length > 0 ? near : all).slice(0, 5);
-				return {
+				return beforeStart({
 					agent: spec.agent,
 					output: "",
 					usage: emptyUsage(),
@@ -390,7 +406,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					error: `[${spec.agent} · ${ref ?? "(no model)"}] model not found in registry (from ${src})${hint.length > 0 ? ` — try e.g.: ${hint.join(", ")}` : ""}`,
 					failureKind: "unknown-model",
 					...thinkingMetadata,
-				};
+				});
 			}
 			// The canonical provider/id this run resolved to — surfaced on every result (for the
 			// UI/cost) and, on a provider failure, used as the seed of the fallback chain.
@@ -411,12 +427,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					specTools: spec.tools, cfgTools: cfg.tools, excludeTools: cfg.excludeTools,
 					canUseBus: deps.canUseBus ?? true,
 				});
-				if (!grant.ok) return referenceHandoffFailure(spec.agent, grant.error);
+				if (!grant.ok) return beforeStart(referenceHandoffFailure(spec.agent, grant.error));
 				const archive = deps.resultArchive?.();
-				if (archive === undefined) return referenceHandoffFailure(spec.agent, "terminal result archive unavailable for reference handoff");
+				if (archive === undefined) return beforeStart(referenceHandoffFailure(spec.agent, "terminal result archive unavailable for reference handoff"));
 				const scoped = makeScopedResultReader(archive, spec.resultRefs);
 				const { missing } = scoped.preflight();
-				if (missing.length > 0) return referenceHandoffFailure(spec.agent, `archived results unavailable: ${missing.join(", ")}`);
+				if (missing.length > 0) return beforeStart(referenceHandoffFailure(spec.agent, `archived results unavailable: ${missing.join(", ")}`));
 				resultReadTool = makeReadResultTool(scoped);
 				admittedTools = grant.tools;
 				legCleanups.push(() => scoped.revoke());
@@ -434,11 +450,15 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 			const state = createStreamState();
 			const signal = combineSignals(deps.signal, callSignal);
+			if (spec.session) {
+				try { await validateWorkerSession(spec.session, deps.cwd); }
+				catch (error) { return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "agent", error: `[${spec.agent}] Worker session: ${error instanceof Error ? error.message : String(error)}`, sessionSaved: false, sessionQuiescent: true }; }
+			}
 
 			// Already cancelled (e.g. a queued async run stopped before its slot came up):
 			// don't build a session or burn a model call — settle as aborted right away.
 			if (signal?.aborted) {
-				return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted`, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), ...thinkingMetadata, failureKind: "abort" };
+				return beforeStart({ agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: `${tag} agent aborted`, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), ...thinkingMetadata, failureKind: "abort" });
 			}
 
 			const modelRuntime = sharedModelRuntime(deps.modelRegistry);
@@ -449,6 +469,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				agentDir: deps.agentDir ?? deps.cwd,
 			};
 			if (admittedTools !== undefined) sessionOpts.tools = admittedTools;
+			if (spec.session) sessionOpts.session = spec.session;
 			if (memoryPersona !== undefined) sessionOpts.memoryPersona = memoryPersona;
 			if (excludeTools && excludeTools.length > 0) sessionOpts.excludeTools = excludeTools;
 			if (thinkingRequested !== undefined) sessionOpts.thinkingLevel = thinkingRequested;
@@ -654,7 +675,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (cancellationRequested) {
 				if (signal) signal.removeEventListener("abort", onAbort);
 				releaseHandle();
-				return {
+				return beforeStart({
 					agent: spec.agent,
 					output: "",
 					usage: emptyUsage(),
@@ -663,7 +684,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
 					failureKind: "abort",
 					...thinkingMetadata,
-				};
+				});
 			}
 
 			const safeDispose = (late: InProcSession): void => {
@@ -859,6 +880,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let thrownError: string | undefined;
 			let selectedSkillsFailed = false;
 			let thinkingEffective: ThinkingLevel | undefined;
+			let shutdownComplete = false;
 			try {
 				armIdle(); // start the idle clock (reset on every session event)
 				armHard(); // start the lifetime ceiling (never reset)
@@ -872,8 +894,19 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				else await Promise.race([runToIdle(), abortGate]);
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
-				selectedSkillsFailed = e instanceof SelectedSkillsError;
+				selectedSkillsFailed = e instanceof SelectedSkillsError || e instanceof SessionContractError;
 			} finally {
+				// A completed provider failure still needs the full shutdown handshake before a
+				// fresh transcript can be safely discarded for a fallback attempt.
+				if (spec.session && !aborted && !timedOut && !hardTimedOut && !startupTimedOut && session.shutdown) {
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					try {
+						shutdownComplete = await Promise.race([
+							session.shutdown().then(() => true, () => false),
+							new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), 5000); }),
+						]);
+					} finally { if (timer) clearTimeout(timer); }
+				}
 				disarmIdle();
 				disarmHard();
 				disarmStartup();
@@ -959,6 +992,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					// naming "not valid JSON" over an empty output hides the real failure.
 					if (v.error && result.error === undefined) result.error = v.error;
 					if (result.failureKind === undefined) result.failureKind = "contract";
+				}
+			}
+			if (spec.session) {
+				result.sessionSaved = false;
+				result.sessionQuiescent = shutdownComplete;
+				if (result.ok && shutdownComplete) {
+					try { await validateWorkerSession({ ...spec.session, resume: true }, deps.cwd); result.sessionSaved = true; }
+					catch { /* The result remains valid, but the transcript is not resumable. */ }
 				}
 			}
 			return result;

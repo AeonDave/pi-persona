@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "../core/types.ts";
 import type { ChildUsage } from "../engine/stream.ts";
+import type { ConversationWorktree, WorktreeRecovery } from "../core/worktree-recovery.ts";
 import type { ResultReceipt } from "../results/retrieval.ts";
 
 export type { ChildUsage };
@@ -32,11 +33,19 @@ export interface ModelRecovery {
 /** The result of running one agent through the engine, as strategies see it. */
 export interface AgentResult {
 	agent: string;
+	/** The requested worker transcript was saved and is safe to reopen. */
+	sessionSaved?: boolean;
+	/** True only when a session-backed attempt can no longer write its transcript. */
+	sessionQuiescent?: boolean;
+	/** Exact isolated checkout retained for this saved worker conversation. */
+	sessionWorktree?: ConversationWorktree;
 	output: string;
 	/** Validated structured fields (when the agent ran against a contract). */
 	structured?: Record<string, unknown>;
 	/** Terminal archive observation; memory-only is not a durable receipt. */
 	resultReceipt?: ResultReceipt;
+	/** Runtime-owned location of isolated work retained after artifact export failure. */
+	worktreeRecovery?: Readonly<WorktreeRecovery>;
 	usage: ChildUsage;
 	ok: boolean;
 	error?: string;

@@ -12,17 +12,21 @@ import * as path from "node:path";
 
 import type { ThinkingLevel } from "../core/types.ts";
 import { applyEvent, type ChildUsage, createStreamState, feedLines, type ProgressSnapshot, snapshot } from "./stream.ts";
+import type { WorkerSession } from "./worker-session.ts";
 
 export interface ChildRunSpec {
 	task: string;
 	/** Private session-local extension entry, when selected skill preload is requested. */
 	extensionPath?: string;
+	/** Private contract guard loaded after the selected-skills extension. */
+	sessionExtensionPath?: string;
 	model?: string;
 	thinking?: ThinkingLevel;
 	tools?: string[];
 	excludeTools?: string[];
 	systemPrompt?: string;
 	cwd?: string;
+	session?: WorkerSession;
 }
 
 export interface ChildRunResult {
@@ -35,6 +39,8 @@ export interface ChildRunResult {
 	aborted: boolean;
 	/** True when the idle watchdog OR the hard wall-clock cap fired. Disjoint from `aborted`. */
 	timedOut: boolean;
+	/** Process closed, or spawn failed before it had a pid. False after forced early settlement. */
+	quiescent: boolean;
 	model?: string;
 	thinkingEffective?: ThinkingLevel;
 	stopReason?: string;
@@ -169,8 +175,11 @@ export async function runChildAgent(
 	const maxStderrBytes = opts.maxStderrBytes ?? 256 * 1024;
 	const maxLineBytes = 1024 * 1024; // a single unterminated >1 MiB line is stream noise — loud failure, never a silent drop
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	const args: string[] = ["--mode", "json", "-p"];
+	if (spec.session) args.push("--session", spec.session.file);
+	else args.push("--no-session");
 	if (spec.extensionPath) args.push("--extension", spec.extensionPath);
+	if (spec.sessionExtensionPath) args.push("--extension", spec.sessionExtensionPath);
 	if (spec.model) args.push("--model", spec.model);
 	if (spec.thinking !== undefined) args.push("--thinking", spec.thinking);
 	if (spec.tools !== undefined) {
@@ -202,6 +211,7 @@ export async function runChildAgent(
 	let spawnError: Error | undefined;
 	let oversizedLine = false; // a >maxLineBytes unterminated line — loud failure, never a silent drop
 	let diedWithoutStatus = false; // 'close' with null code AND null signal — never a clean exit
+	let quiescent = false;
 
 	try {
 		const exitCode = await new Promise<number>((resolveP) => {
@@ -221,6 +231,7 @@ export async function runChildAgent(
 			delete inherited.PI_PERSONA_RESULT_READER_TOKEN;
 			delete inherited.PI_PERSONA_CODE_OUTLINE;
 			delete inherited.PI_PERSONA_SELECTED_SKILLS;
+			delete inherited.PI_PERSONA_SESSION_CONTRACT;
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
@@ -251,6 +262,10 @@ export async function runChildAgent(
 			// Calls whose start crossed the progress seam but whose end has not. The tool NAME is kept
 			// beside the id because a synthetic close in finish() has to carry it.
 			const openToolCalls = new Map<string, string>();
+			const emitProgress = (progress: ProgressSnapshot): void => {
+				try { opts.onProgress?.(progress); }
+				catch { /* observation must not interrupt stream parsing, watchdogs or settlement */ }
+			};
 
 			const onLine = (line: string) => {
 				if (!line.trim()) return;
@@ -262,7 +277,7 @@ export async function runChildAgent(
 					if (toolEvent) {
 						if (toolEvent.phase === "start") openToolCalls.set(toolEvent.callId, toolEvent.name);
 						else openToolCalls.delete(toolEvent.callId);
-						opts.onProgress?.(snapshot(state, toolEvent));
+						emitProgress(snapshot(state, toolEvent));
 					}
 				} catch {
 					/* ignore non-JSON noise */
@@ -350,9 +365,9 @@ export async function runChildAgent(
 				// exactly once, mirroring what applyEvent would have produced. Without it the consumer
 				// shows that tool "running" forever and its telemetry record is pinned by the replay
 				// seed. A child that ended normally has nothing open, so nothing is double-closed.
-				for (const [callId, name] of openToolCalls) opts.onProgress?.(snapshot(state, { phase: "end", callId, name, failed: true }));
+				for (const [callId, name] of openToolCalls) emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
 				openToolCalls.clear();
-				opts.onProgress?.(snapshot(state));
+				emitProgress(snapshot(state));
 				resolveP(code);
 			};
 
@@ -437,7 +452,7 @@ export async function runChildAgent(
 				buffer = rest;
 				for (const l of lines) onLine(l);
 				noteProgress(); // first real progress cancels the startup deadline
-				opts.onProgress?.(snapshot(state));
+				emitProgress(snapshot(state));
 				armTimeout(); // output → reset the idle clock
 			});
 			// A stream 'error' (e.g. EPIPE on a dying child) on an emitter with no
@@ -462,6 +477,7 @@ export async function runChildAgent(
 
 			proc.on("close", (code, sig) => {
 				exited = true;
+				quiescent = true;
 				// POSIX signal death closes with code=null. Mapping that to 0 would report a
 				// child killed by something OUTSIDE this engine (OOM killer, `kill -9`, shutdown)
 				// as a clean success carrying its truncated mid-run output — none of the
@@ -475,6 +491,7 @@ export async function runChildAgent(
 			// folded into a bare exit code — capture it so it surfaces in errorMessage.
 			proc.on("error", (err: Error) => {
 				spawnError = err;
+				if (proc.pid === undefined) quiescent = true;
 				finish(1);
 			});
 
@@ -504,6 +521,7 @@ export async function runChildAgent(
 			exitCode,
 			stderr,
 			aborted,
+			quiescent,
 			// A hard-cap OR startup-deadline kill is a timeout-class death (never a provider reroute) —
 			// surface it via the same flag the idle timeout uses; the errorMessage below says WHICH fired.
 			timedOut: timedOut || hardTimedOut || startupTimedOut,

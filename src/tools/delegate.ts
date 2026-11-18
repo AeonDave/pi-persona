@@ -44,6 +44,8 @@ export interface DelegateTask {
 }
 
 export interface DelegateParams {
+	/** Continue a completed worker's saved conversation with a new task. */
+	resume?: string;
 	agent?: string;
 	task?: string;
 	brief?: Partial<DelegationBrief>;

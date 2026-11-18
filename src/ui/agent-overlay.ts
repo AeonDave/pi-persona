@@ -15,11 +15,14 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	getKeybindings,
+	setKeybindings,
+	Input,
 	matchesKey,
-	Spacer,
 	Text,
 	truncateToWidth,
 	type TUI,
+	type Focusable,
+	type KeybindingsManager,
 	type TuiMouseEvent,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -27,6 +30,7 @@ import {
 
 import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
+import { inspectorFrame } from "./inspector-frame.ts";
 import { cumulativeUsageLine, groupLegBrief, groupLegMetadata, groupLegStatus, isAgentGroup, projectAgentGroup } from "./agent-group.ts";
 import { visibleWindow } from "./model-picker.ts";
 import { compactInlineText, OPEN_SEQUENCE_TAIL, sanitizeTerminalText } from "./presentation.ts";
@@ -34,18 +38,6 @@ import { foldedRows, isFoldableRow, projectPeers, projectResourceGroups, type Pe
 
 function safeInline(value: string, maxChars = 96): string {
 	return compactInlineText(value, { maxChars });
-}
-
-/** Rows the terminal has (fallback for exotic hosts). */
-function termRows(): number {
-	return process.stdout.rows && process.stdout.rows > 0 ? process.stdout.rows : 24;
-}
-
-/** Is this keystroke a single printable character (a steer-input keystroke)? */
-function isPrintable(key: string): boolean {
-	if (key.length !== 1) return false;
-	const c = key.charCodeAt(0);
-	return c >= 0x20 && c !== 0x7f;
 }
 
 /** Pure inputs for one list row: everything {@link composeAgentRow} needs and nothing it can
@@ -118,9 +110,12 @@ export interface AgentOverlayActions {
 	onGroupToggle?: () => void;
 	peerSnapshot?: () => readonly PeerPresence[];
 	onPeersChanged?: (listener: () => void) => () => void;
+	keybindings?: KeybindingsManager;
+	/** Same row allocation used by the host's overlay options. */
+	viewportHeight?: () => number;
 }
 
-export class AgentOverlay extends Container {
+export class AgentOverlay extends Container implements Focusable {
 	private tree: AgentTree;
 	private tui: TUI;
 	private theme: Theme;
@@ -137,6 +132,7 @@ export class AgentOverlay extends Container {
 	private listScroll = 0; // list rows scrolled off the top (keeps the selection visible)
 	private mouseListIds: string[] = [];
 	private mouseListStart = 3;
+	private mouseInputRow = -1;
 	private detailId: string | undefined;
 	private groupId: string | undefined;
 	private groupSelectedId: string | undefined;
@@ -145,8 +141,15 @@ export class AgentOverlay extends Container {
 	private readonly collapsedGroups: Set<string>;
 	private detailScroll = 0; // output lines scrolled up from the bottom (0 = latest)
 	private steering = false; // typing a steer message into the drilled-in agent
-	private steerBuffer = "";
+	private steerInput = new Input({ prompt: "" });
+	private _focused = false;
+	private readonly keybindings: KeybindingsManager;
+	readonly capturesViewportInput = true;
 	private lastWidth = 100;
+	private lastHeight = 0;
+	private listCapacity = 1;
+	private groupCapacity = 1;
+	private detailCapacity = 1;
 	/** State changed since the last host paint. Rebuilding here (instead of in the tree listener)
 	 *  lets Pi-TUI's own 16ms frame coalescer absorb a burst of streamed progress snapshots. */
 	private dirty = false;
@@ -161,6 +164,8 @@ export class AgentOverlay extends Container {
 		this.theme = theme;
 		this.done = done;
 		this.actions = actions;
+		this.keybindings = actions.keybindings ?? getKeybindings();
+		this.resetSteerInput();
 		this.collapsedGroups = actions.collapsedGroups ?? new Set();
 		this.now = actions.now ?? Date.now;
 		this.clock = new LiveClock({ intervalMs: 1_000, isLive: () => tree.hasRunning(), onTick: () => this.refresh() });
@@ -170,14 +175,24 @@ export class AgentOverlay extends Container {
 			// while the lazy rebuild waits for the host's paint.
 			if (this.steering && this.detailId && !(this.actions.canSteer?.(this.detailId) ?? false)) {
 				this.steering = false;
-				this.steerBuffer = "";
+				this.resetSteerInput();
 			}
 			this.scheduleRefresh();
 			this.clock.start(); // new work may have appeared while the clock was stopped
 		});
 		this.unsubscribePeers = actions.onPeersChanged?.(() => this.scheduleRefresh()) ?? (() => {});
+		this.lastHeight = this.viewportRows();
 		this.rebuild();
 		this.clock.start();
+	}
+
+	get focused(): boolean { return this._focused; }
+	set focused(value: boolean) { this._focused = value; this.syncFocus(); }
+
+	private syncFocus(): void { this.steerInput.focused = this._focused && this.steering; }
+
+	private viewportRows(): number {
+		return Math.max(1, Math.floor(this.actions.viewportHeight?.() ?? inspectorFrame.viewportRows(this.tui.terminal?.rows ?? 24)));
 	}
 
 	private refresh(): void {
@@ -197,39 +212,74 @@ export class AgentOverlay extends Container {
 	/** Frame the panel in a box so it stands out from the chat background. */
 	override render(width: number): string[] {
 		this.frameRequested = false;
-		if (this.lastWidth !== width) this.dirty = true;
+		const height = this.viewportRows();
+		if (this.lastWidth !== width || this.lastHeight !== height) this.dirty = true;
 		this.lastWidth = width;
+		this.lastHeight = height;
 		if (this.dirty) {
 			this.rebuild();
 			this.dirty = false;
 		}
-		const inner = this.inner();
-		const t = this.theme;
-		// Frame lines use the host dialogs' `border` token, so a theme tunes them apart from highlights.
-		const b = (s: string): string => t.fg("border", s);
-		const framed = super.render(inner).map((line) => {
-			const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));
-			return `${b("│")} ${line}${pad} ${b("│")}`;
-		});
-		return [b(`┌${"─".repeat(inner + 2)}┐`), ...framed, b(`└${"─".repeat(inner + 2)}┘`)];
+		return inspectorFrame.render(super.render(this.inner()), inspectorFrame.layout(width, height), (text) => this.theme.fg("border", text));
+	}
+
+	override invalidate(): void {
+		this.dirty = true;
+		this.steerInput.invalidate();
+		super.invalidate();
 	}
 
 	private inner(): number {
-		// Use the whole width the host gives us (the overlay itself is sized ~90% of the
-		// terminal) — a hard 100-column cap made wide terminals waste most of the screen.
-		return Math.max(24, this.lastWidth - 4);
+		return inspectorFrame.layout(this.lastWidth, this.lastHeight).contentWidth;
 	}
 
-	/** Detail-output rows that fit: terminal height minus the overlay chrome. */
-	private detailViewport(reservedRows: number): number {
-		// Borders and both scroll markers occupy four rows independently of the
-		// measured header/footer. New metadata must reduce output space, not overflow.
-		return Math.max(1, termRows() - reservedRows - 4);
+	private contentRows(): number { return inspectorFrame.layout(this.lastWidth, this.lastHeight).contentRows; }
+
+	private addLine(text: string): void {
+		const fit = truncateToWidth(text, this.inner(), "…");
+		// The SDK adds reset sequences when truncating even uncoloured text.
+		this.addChild(new Text(text.includes("\x1b") ? fit : sanitizeTerminalText(fit), 0, 0));
 	}
 
-	/** List rows that fit: terminal height minus the overlay chrome. */
-	private listViewport(): number {
-		return Math.max(6, termRows() - 10);
+	private keyLabel(action: "tui.select.confirm" | "tui.select.cancel" | "tui.input.submit" | "tui.select.pageUp" | "tui.select.pageDown"): string {
+		const keys = this.keybindings.getKeys(action);
+		if (action !== "tui.select.cancel" && keys.includes("enter")) return "⏎";
+		if (action === "tui.select.cancel" && keys.includes("escape")) return "esc";
+		return keys.map((key) => key.replace(/pageUp/i, "PgUp").replace(/pageDown/i, "PgDn")).join("/") || "unbound";
+	}
+
+	private hintRows(full: string, compact: string, primary: string): string[] {
+		const limit = Math.max(1, Math.min(3, this.contentRows() - 2));
+		for (const text of [full, compact]) {
+			const rows = wrapTextWithAnsi(text, this.inner());
+			if (rows.length <= limit) return rows;
+		}
+		return [primary];
+	}
+
+	private resetSteerInput(): void {
+		this.steerInput = new Input({ prompt: "" });
+		this.steerInput.onSubmit = () => this.submitSteer();
+		this.steerInput.onEscape = () => {
+			this.steering = false;
+			this.resetSteerInput();
+			this.refresh();
+		};
+		this.syncFocus();
+	}
+
+	private steerPrefix(): string { return this.inner() >= 12 ? "steer ▸ " : this.inner() >= 4 ? "› " : ""; }
+
+	private navigationKeys(): string {
+		const up = this.keybindings.getKeys("tui.select.up");
+		const down = this.keybindings.getKeys("tui.select.down");
+		return up.includes("up") && down.includes("down") ? "↑↓" : `${up.join("/") || "unbound"}/${down.join("/") || "unbound"}`;
+	}
+
+	private pageDelta(data: string, capacity: number): number | undefined {
+		if (this.keybindings.matches(data, "tui.select.pageUp") || this.keybindings.matches(data, "tui.altScreen.pageUp")) return -Math.max(1, capacity);
+		if (this.keybindings.matches(data, "tui.select.pageDown") || this.keybindings.matches(data, "tui.altScreen.pageDown")) return Math.max(1, capacity);
+		return undefined;
 	}
 
 	private waitingNodeIds(nodes: readonly AgentNode[] = this.tree.snapshot()): Set<string> {
@@ -290,9 +340,11 @@ export class AgentOverlay extends Container {
 
 	private rebuild(): void {
 		this.clear();
+		this.mouseInputRow = -1;
 		if (this.detailId) this.renderDetail();
 		else if (this.groupId) this.renderGroup();
 		else this.renderList();
+		this.syncFocus();
 		this.dirty = false;
 	}
 
@@ -301,43 +353,41 @@ export class AgentOverlay extends Container {
 		const nodes = this.viewNodes();
 		const rows = this.selectableRows(nodes);
 		const selected = this.selectedLeaf(rows)?.node;
+		const available = this.contentRows();
 		this.mouseListIds = [];
-		this.addChild(new Text(t.fg("accent", t.bold("Agents")), 1, 0));
-		this.addChild(new Spacer(1));
-		if (rows.length === 0) {
-			this.addChild(new Text(t.fg("dim", "(no agents running)"), 1, 0));
-		} else {
-			// Scroll window over the rows (a big fan-out must not overflow the screen);
-			// the window follows the selection, ▲/▼ markers show what's off-screen.
-			const waitingIds = this.waitingNodeIds(nodes);
-			const vp = this.listViewport();
-			const selIdx = Math.max(0, rows.findIndex((r) => r.node.id === selected?.id));
-			this.listScroll = visibleWindow(selIdx, vp, rows.length, this.listScroll);
-			const end = Math.min(rows.length, this.listScroll + vp);
-			this.mouseListStart = 3 + (this.listScroll > 0 ? 1 : 0);
-			this.mouseListIds = rows.slice(this.listScroll, end).map((row) => row.node.id);
-			if (this.listScroll > 0) this.addChild(new Text(t.fg("dim", `▲ ${this.listScroll} above`), 1, 0));
-			for (const row of rows.slice(this.listScroll, end)) {
-				const composed = composeAgentRow({
-					node: isFoldableRow(row.node, nodes) ? { ...row.node, label: `${this.collapsedGroups.has(row.node.id) ? "▸" : "▾"} ${row.node.label}` } : row.node,
-					depth: row.depth,
-					selected: row.node.id === selected?.id,
-					inner: this.inner(),
-					now: this.now(),
-					stallMs: this.actions.stallMs ?? 0,
-					waitingForSupervisor: waitingIds.has(row.node.id),
-					theme: t,
-				});
-				this.addChild(new Text(composed, 1, 0));
-			}
-			if (end < rows.length) this.addChild(new Text(t.fg("dim", `▼ ${rows.length - end} below`), 1, 0));
-		}
-		this.addChild(new Spacer(1));
 		const stoppable = selected !== undefined && this.canStopNode(selected, nodes);
 		const steerable = selected !== undefined && this.canSteerNode(selected, nodes);
 		const foldHint = selected && isFoldableRow(selected, nodes) ? "   space fold" : "";
-		this.addChild(new Text(t.fg("dim", `↑↓ navigate   ⏎ open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   esc/F9 close`), 1, 0));
-		this.renderNotice();
+		const closeHint = `${this.keyLabel("tui.select.cancel")}/F9 close`;
+		const hint = `${this.navigationKeys()} navigate   ${this.keyLabel("tui.select.confirm")} open${foldHint}${this.hintLine("list", stoppable, steerable, this.stoppableIds(nodes).length)}   ${closeHint}`;
+		const header = available >= 7 ? [t.fg("accent", t.bold("Agents")), ""] : available >= 4 ? [t.fg("accent", t.bold("Agents"))] : [];
+		const footer = available >= 3 ? this.hintRows(hint, `${this.navigationKeys()} select · ${this.keyLabel("tui.select.confirm")} open · ${closeHint}`, closeHint).map((line) => t.fg("dim", line)) : [];
+		if (this.notice && available - header.length - footer.length >= 2) footer.push(t.fg("dim", safeInline(this.notice, 240)));
+		const spaced = available - header.length - footer.length >= 5;
+		if (spaced) footer.unshift("");
+		let capacity = Math.max(1, available - header.length - footer.length);
+		const showMarkers = rows.length > capacity && capacity >= 3;
+		if (showMarkers) capacity -= 2;
+		this.listCapacity = capacity;
+		for (const line of header) this.addLine(line);
+		if (!rows.length) this.addLine(t.fg("dim", "(no agents running)"));
+		else {
+			const waitingIds = this.waitingNodeIds(nodes);
+			const selIdx = Math.max(0, rows.findIndex((r) => r.node.id === selected?.id));
+			this.listScroll = visibleWindow(selIdx, capacity, rows.length, this.listScroll);
+			const end = Math.min(rows.length, this.listScroll + capacity);
+			const above = showMarkers && this.listScroll > 0;
+			this.mouseListStart = (inspectorFrame.layout(this.lastWidth, this.lastHeight).framed ? 1 : 0) + header.length + Number(above);
+			this.mouseListIds = rows.slice(this.listScroll, end).map((row) => row.node.id);
+			if (above) this.addLine(t.fg("dim", `▲ ${this.listScroll} above`));
+			for (const row of rows.slice(this.listScroll, end)) this.addLine(this.inner() < 16 ? `${row.node.id === selected?.id ? "▸ " : ""}${safeInline(row.node.label)}` : composeAgentRow({
+				node: isFoldableRow(row.node, nodes) ? { ...row.node, label: `${this.collapsedGroups.has(row.node.id) ? "▸" : "▾"} ${row.node.label}` } : row.node,
+				depth: row.depth, selected: row.node.id === selected?.id, inner: this.inner(), now: this.now(),
+				stallMs: this.actions.stallMs ?? 0, waitingForSupervisor: waitingIds.has(row.node.id), theme: t,
+			}));
+			if (showMarkers && end < rows.length) this.addLine(t.fg("dim", `▼ ${rows.length - end} below`));
+		}
+		for (const line of footer) this.addLine(line);
 	}
 
 	/** A group has its own stable cursor; returning from a worker keeps that same aim. */
@@ -353,48 +403,47 @@ export class AgentOverlay extends Container {
 		const nodes = this.viewNodes();
 		const waitingIds = this.waitingNodeIds(nodes);
 		const group = this.groupId ? projectAgentGroup(nodes, this.groupId, waitingIds) : undefined;
-		if (!group) {
-			this.groupId = undefined;
-			this.renderList();
-			return;
-		}
+		if (!group) { this.groupId = undefined; this.renderList(); return; }
 		const t = this.theme;
-		const line = (text: string, accent = false): void => {
-			this.addChild(new Text(t.fg(accent ? "accent" : "dim", sanitizeTerminalText(truncateToWidth(safeInline(text, 600), this.inner(), "…"))), 0, 0));
-		};
-		line(`Group overview · ${group.root.label}`, true);
-		line(group.summary);
-		this.addChild(new Spacer(1));
+		const available = this.contentRows();
 		const selected = this.selectedGroupLeg(group.legs);
-		const navigationHint = "↑↓ select · ⏎ output · esc back · F9 close";
+		const navigationHint = `${this.navigationKeys()} select · ${this.keyLabel("tui.select.confirm")} output · ${this.keyLabel("tui.select.cancel")} back · F9 close`;
 		const controlHint = [selected !== undefined && this.canStopNode(selected, nodes) ? "x stop leg" : "", selected !== undefined && this.canSteerNode(selected, nodes) ? "s steer leg" : ""].filter(Boolean).join(" · ");
 		const fullHint = [navigationHint, controlHint].filter(Boolean).join(" · ");
-		const footerLines = visibleWidth(fullHint) <= this.inner() ? [fullHint] : [navigationHint, controlHint].filter(Boolean);
-		// Four rows per card; reserve real footer height and both overflow markers
-		// only when cards do overflow. Long metadata never silently adds wrapped rows.
-		const available = termRows() - 6 - footerLines.length - (this.notice ? 1 : 0);
-		const capacity = Math.max(1, Math.floor(available / 4));
-		const viewport = group.legs.length <= capacity ? capacity : Math.max(1, Math.floor((available - 2) / 4));
-		const selectedIndex = Math.max(0, group.legs.findIndex((leg) => leg.id === selected?.id));
-		this.groupScroll = visibleWindow(selectedIndex, viewport, group.legs.length, this.groupScroll);
-		const end = Math.min(group.legs.length, this.groupScroll + viewport);
-		if (this.groupScroll > 0) line(`▲ ${this.groupScroll} legs above`);
-		for (const leg of group.legs.slice(this.groupScroll, end)) {
+		const header = available >= 8 ? [`Group overview · ${group.root.label}`, group.summary, ""] : available >= 4 ? [`Group overview · ${group.root.label}`] : [];
+		const footer = available >= 3 ? this.hintRows(fullHint, navigationHint, `${this.keyLabel("tui.select.cancel")} back · F9 close`) : [];
+		if (this.notice && available - header.length - footer.length >= 2) footer.push(safeInline(this.notice, 240));
+		const expanded = available - header.length - footer.length >= 7;
+		if (expanded) footer.unshift("");
+		const cards = group.legs.map((leg) => {
 			const clock = runningAnnotation(leg, this.now(), this.actions.stallMs ?? 0, waitingIds.has(leg.id));
 			const prefix = `${leg.id === selected?.id ? "▸" : " "} ${nodeGlyph(leg)} `;
 			const suffix = ` · ${waitingIds.has(leg.id) ? "waiting for supervisor" : `${groupLegStatus(leg)}${clock ? ` · ${clock}` : ""}`}`;
 			const label = truncateToWidth(safeInline(leg.label), Math.max(0, this.inner() - visibleWidth(prefix + suffix)), "…");
-			line(prefix + label + suffix, leg.id === selected?.id);
-			if (!isNonAgentNode(leg)) line(`  ${groupLegMetadata(leg, this.inner() - 2)}`);
-			line(`  ${groupLegBrief(leg)}`);
-			const usage = cumulativeUsageLine(leg);
-			if (usage) line(`  ${usage}`);
-		}
-		if (end < group.legs.length) line(`▼ ${group.legs.length - end} legs below`);
-		if (group.legs.length === 0) line("(no worker legs yet)");
-		this.addChild(new Spacer(1));
-		for (const hint of footerLines) line(hint);
-		this.renderNotice();
+			const card = [prefix + (expanded ? label + suffix : safeInline(leg.label))];
+			if (expanded) {
+				if (!isNonAgentNode(leg)) card.push(`  ${groupLegMetadata(leg, this.inner() - 2)}`);
+				card.push(`  ${groupLegBrief(leg)}`);
+				const usage = cumulativeUsageLine(leg);
+				if (usage) card.push(`  ${usage}`);
+			}
+			return card;
+		});
+		const cardRows = Math.max(1, ...cards.map((card) => card.length));
+		let bodyRows = Math.max(1, available - header.length - footer.length);
+		const overflow = cards.length * cardRows > bodyRows;
+		const showMarkers = overflow && bodyRows >= cardRows + 2;
+		if (showMarkers) bodyRows -= 2;
+		this.groupCapacity = Math.max(1, Math.floor(bodyRows / cardRows));
+		const selectedIndex = Math.max(0, group.legs.findIndex((leg) => leg.id === selected?.id));
+		this.groupScroll = visibleWindow(selectedIndex, this.groupCapacity, group.legs.length, this.groupScroll);
+		const end = Math.min(group.legs.length, this.groupScroll + this.groupCapacity);
+		for (const [i, text] of header.entries()) this.addLine(t.fg(i === 0 ? "accent" : "dim", sanitizeTerminalText(safeInline(text, 600))));
+		if (showMarkers && this.groupScroll > 0) this.addLine(t.fg("dim", `▲ ${this.groupScroll} legs above`));
+		for (let i = this.groupScroll; i < end; i++) for (const text of cards[i] ?? []) this.addLine(t.fg(group.legs[i]?.id === selected?.id ? "accent" : "dim", sanitizeTerminalText(text)));
+		if (showMarkers && end < group.legs.length) this.addLine(t.fg("dim", `▼ ${group.legs.length - end} legs below`));
+		if (!group.legs.length) this.addLine(t.fg("dim", "(no worker legs yet)"));
+		for (const text of footer) this.addLine(t.fg("dim", text));
 	}
 
 	/**
@@ -458,65 +507,74 @@ export class AgentOverlay extends Container {
 		const node = nodes.find((n) => n.id === this.detailId);
 		if (!node) {
 			this.detailId = undefined;
-			// The compose belonged to *that* agent — drop it, or the next drill-in would
-			// re-open it pre-filled and send it to a different sub-agent. Re-rendering the
-			// list also loses the anchor (the selection *is* the drilled-in agent), so an
-			// `x` still in flight for it is refused instead of landing on the list beneath.
 			this.steering = false;
-			this.steerBuffer = "";
-			if (this.groupId) this.renderGroup();
-			else this.renderList();
+			this.resetSteerInput();
+			this.syncFocus();
+			if (this.groupId) this.renderGroup(); else this.renderList();
 			return;
 		}
 		const live = node.status === "running";
-		// A wake source is armed, not a live agent: it has no steer handle, so the agent-only "● live"
-		// badge and the steer-unavailable hint below would both be wrong for it.
 		const wake = isWakeSource(node);
 		const localActivity = node.kind === "activity";
-		const metadata = (text: string): void => { this.addChild(new Text(truncateToWidth(text, Math.max(1, this.inner() - 2), "…"), 1, 0)); };
-		metadata(`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", node.kind === "peer" ? "  ● peer" : localActivity ? "  ● local work" : node.kind === "script" ? "  ● running" : wake ? "  ● armed" : "  ● live") : ""}`);
-		if (this.waitingNodeIds(nodes).has(node.id)) metadata(t.fg("dim", "waiting for supervisor"));
+		const header = [`${nodeGlyph(node)} ${t.fg("accent", t.bold(safeInline(node.label) || "agent"))}${live ? t.fg("success", node.kind === "peer" ? "  ● peer" : localActivity ? "  ● local work" : node.kind === "script" ? "  ● running" : wake ? "  ● armed" : "  ● live") : ""}`];
+		if (this.waitingNodeIds(nodes).has(node.id)) header.push(t.fg("dim", "waiting for supervisor"));
 		const usageLine = cumulativeUsageLine(node);
-		if (node.detail && usageLine !== `cumulative usage: ${node.detail}`) metadata(t.fg("dim", safeInline(node.detail)));
-		if (!isNonAgentNode(node)) metadata(t.fg("dim", `model: ${safeInline(node.model ?? "pending / unknown", 160)}`));
-		if (usageLine) metadata(t.fg("dim", usageLine));
-		// The drill-in has room for FULL effort names (the rows stay compact): an observed level
-		// appears only once a terminal result actually reported one.
+		if (node.detail && usageLine !== `cumulative usage: ${node.detail}`) header.push(t.fg("dim", safeInline(node.detail)));
+		if (!isNonAgentNode(node)) header.push(t.fg("dim", `model: ${safeInline(node.model ?? "pending / unknown", 160)}`));
+		if (usageLine) header.push(t.fg("dim", usageLine));
 		const effortLine = thinkingDetailLine(node.thinking, node.thinkingEffective);
-		if (effortLine) metadata(t.fg("dim", effortLine));
-		this.addChild(new Spacer(1));
-		const w = this.inner() - 1;
-		const footer = new Container();
+		if (effortLine) header.push(t.fg("dim", effortLine));
 		const steerable = this.canSteerNode(node, nodes);
 		const stoppable = this.canStopNode(node, nodes);
-		if (this.steering && !steerable) this.steering = false;
-		footer.addChild(new Spacer(1));
+		if (this.steering && !steerable) { this.steering = false; this.resetSteerInput(); }
+		this.syncFocus();
+		const footer: string[] = [];
 		if (this.steering) {
-			const composed = `${t.fg("accent", "steer ▸ ")}${this.steerBuffer}${t.fg("dim", "▌")}`;
-			for (const line of wrapTextWithAnsi(composed, w)) footer.addChild(new Text(line, 1, 0));
-			footer.addChild(new Text(t.fg("dim", "⏎ send   ·   esc cancel   ·   F9 close"), 1, 0));
+			const prefix = this.steerPrefix();
+			footer.push(prefix + (this.steerInput.render(this.inner() - visibleWidth(prefix))[0] ?? ""));
+			footer.push(...this.hintRows(`${this.keyLabel("tui.input.submit")} send · ${this.keyLabel("tui.select.cancel")} cancel · F9 close`, `${this.keyLabel("tui.input.submit")} send · F9 close`, "F9 close").map((line) => t.fg("dim", line)));
 		} else {
-			footer.addChild(new Text(t.fg("dim", `esc back   ·   ↑↓ scroll   ·   F9 close${this.hintLine("detail", stoppable, steerable)}`), 1, 0));
-			this.renderNotice(footer);
-			if (live && !steerable && !isNonAgentNode(node)) footer.addChild(new Text(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"), 1, 0));
+			footer.push(...this.hintRows(`${this.keyLabel("tui.select.cancel")} back   ·   ${this.navigationKeys()} scroll   ·   F9 close${this.hintLine("detail", stoppable, steerable)} · ${this.keyLabel("tui.select.pageUp")}/${this.keyLabel("tui.select.pageDown")} page`, `${this.keyLabel("tui.select.cancel")} back · ${this.navigationKeys()} scroll · F9 close`, `${this.keyLabel("tui.select.cancel")} back · F9 close`).map((line) => t.fg("dim", line)));
+			if (this.notice) footer.push(t.fg("dim", safeInline(this.notice, 240)));
+			if (live && !steerable && !isNonAgentNode(node)) footer.push(t.fg("dim", "(steer unavailable: no live handle yet, or this engine/broker does not expose one)"));
 		}
-
-		const raw = node.output?.trim()
-			? node.output
-			: live
-				? "(working… the report appears here when the agent writes text — see its current tool above)"
-				: "(no output)";
-		const all = this.displayRows(raw, w);
-		const viewport = this.detailViewport(super.render(this.inner()).length + footer.render(this.inner()).length);
-		const maxScroll = Math.max(0, all.length - viewport);
-		if (this.detailScroll > maxScroll) this.detailScroll = maxScroll;
+		const available = this.contentRows();
+		// Compact chrome before sacrificing the report. Even a one-row host keeps
+		// the latest output (or active composer) rather than a metadata-only slice.
+		if (available < header.length + footer.length + 3) header.splice(available >= 4 ? 1 : 0);
+		if (available < header.length + footer.length + 1) footer.splice(this.steering ? 1 : available >= 3 ? 1 : 0);
+		if (this.steering && available === 1) header.splice(0);
+		const spaced = available >= header.length + footer.length + 5;
+		if (spaced) { header.push(""); footer.unshift(""); }
+		const raw = node.output?.trim() ? node.output : live ? "(working… the report appears here when the agent writes text — see its current tool above)" : "(no output)";
+		const all = this.displayRows(raw, this.inner());
+		let capacity = Math.max(this.steering ? 0 : 1, available - header.length - footer.length);
+		const showMarkers = all.length > capacity && capacity >= 3;
+		if (showMarkers) capacity -= 2;
+		this.detailCapacity = Math.max(1, capacity);
+		const maxScroll = Math.max(0, all.length - capacity);
+		this.detailScroll = Math.min(this.detailScroll, maxScroll);
 		const end = all.length - this.detailScroll;
-		const start = Math.max(0, end - viewport);
-		if (start > 0) this.addChild(new Text(t.fg("dim", `▲ ${start} earlier`), 1, 0));
-		for (const line of all.slice(start, end)) this.addChild(new Text(t.fg("toolOutput", line), 1, 0));
-		if (this.detailScroll > 0) this.addChild(new Text(t.fg("dim", `▼ ${this.detailScroll} newer`), 1, 0));
+		const start = Math.max(0, end - capacity);
+		for (const text of header) this.addLine(text);
+		if (showMarkers && start > 0) this.addLine(t.fg("dim", `▲ ${start} earlier`));
+		for (const text of all.slice(start, end)) this.addLine(t.fg("toolOutput", text));
+		if (showMarkers && this.detailScroll > 0) this.addLine(t.fg("dim", `▼ ${this.detailScroll} newer`));
+		this.mouseInputRow = this.steering ? (inspectorFrame.layout(this.lastWidth, this.lastHeight).framed ? 1 : 0) + super.render(this.inner()).length + Number(spaced) : -1;
+		for (const text of footer) this.addLine(text);
+	}
 
-		this.addChild(footer);
+	private submitSteer(): void {
+		const text = sanitizeTerminalText(this.steerInput.getValue()).trim();
+		this.steering = false;
+		this.resetSteerInput();
+		this.syncFocus();
+		if (text) {
+			const nodes = this.tree.snapshot();
+			const node = nodes.find((candidate) => candidate.id === this.detailId);
+			if (!node || !this.canSteerNode(node, nodes) || !this.actions.onSteer?.(node.id, text)) this.notice = "steer unavailable for this worker";
+		}
+		this.refresh();
 	}
 
 	handleInput(keyData: string): void {
@@ -530,40 +588,38 @@ export class AgentOverlay extends Container {
 		this.notice = undefined; // any key clears a previous refusal notice
 		const armed = this.stopAllArmed;
 		this.stopAllArmed = undefined; // only an immediately repeated X confirms
-		const kb = getKeybindings();
+		const kb = this.keybindings;
 		if (this.detailId) {
 			// Steer mode: type a message into the running agent. Capture all printable keys
 			// (so j/k/x type normally); ⏎ sends, esc cancels.
 			if (this.steering) {
-				if (kb.matches(keyData, "tui.select.cancel")) {
-					this.steering = false;
-					this.steerBuffer = "";
-					this.refresh();
-				} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n" || keyData === "\r") {
-					const text = this.steerBuffer.trim();
-					this.steering = false;
-					this.steerBuffer = "";
-					if (text) {
-						const nodes = this.tree.snapshot();
-						const node = nodes.find((candidate) => candidate.id === this.detailId);
-						if (!node || !this.canSteerNode(node, nodes) || !this.actions.onSteer?.(node.id, text)) this.notice = "steer unavailable for this worker";
-					}
-					this.refresh();
-				} else if (keyData === "\x7f" || keyData === "\b") {
-					this.steerBuffer = this.steerBuffer.slice(0, -1);
-					this.refresh();
-				} else if (isPrintable(keyData)) {
-					this.steerBuffer += keyData;
-					this.refresh();
-				} else if (hadNotice) this.refresh();
+				// Input owns paste buffering and submit/cancel interpretation. In particular,
+				// an Enter/Escape chunk inside a paste must remain text, not an action.
+				const global = getKeybindings();
+				try {
+					if (global !== kb) setKeybindings(kb);
+					this.steerInput.handleInput(keyData);
+					const value = this.steerInput.getValue();
+					const clean = sanitizeTerminalText(value);
+					if (value !== clean) this.steerInput.setValue(clean);
+				} finally {
+					if (global !== kb) setKeybindings(global);
+				}
+				this.refresh();
 				return;
 			}
 			const detailNode = this.tree.snapshot().find((node) => node.id === this.detailId);
+			const page = this.pageDelta(keyData, this.detailCapacity);
 			if (keyData === "s" && detailNode && this.canSteerNode(detailNode, this.tree.snapshot())) {
 				this.steering = true;
-				this.steerBuffer = "";
+				this.resetSteerInput();
+				this.syncFocus();
 				this.refresh();
 			} else if (keyData === "x") this.tryStop(this.detailId);
+			else if (page !== undefined) {
+				this.detailScroll = Math.max(0, this.detailScroll - page);
+				this.refresh();
+			}
 			else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 				this.detailScroll += 1;
 				this.refresh();
@@ -582,7 +638,11 @@ export class AgentOverlay extends Container {
 		}
 		const nodes = this.viewNodes();
 		const leaves = this.selectableRows(nodes);
-		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
+		const page = this.pageDelta(keyData, this.listCapacity);
+		if (page !== undefined) {
+			this.moveSelection(leaves, page);
+			this.refresh();
+		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 			this.moveSelection(leaves, -1);
 			this.refresh();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
@@ -618,7 +678,8 @@ export class AgentOverlay extends Container {
 				this.detailId = leaf.node.id;
 				this.detailScroll = 0;
 				this.steering = true;
-				this.steerBuffer = "";
+				this.resetSteerInput();
+				this.syncFocus();
 				this.refresh();
 			}
 		} else if (keyData === "x") {
@@ -632,6 +693,18 @@ export class AgentOverlay extends Container {
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (this.steering && event.y === this.mouseInputRow) {
+			const layout = inspectorFrame.layout(this.lastWidth, this.lastHeight);
+			const prefixWidth = visibleWidth(this.steerPrefix());
+			const inputX = event.x - (layout.framed ? 1 + layout.gutter : 0) - prefixWidth;
+			if (inputX >= 0 && inputX < layout.contentWidth - prefixWidth) {
+				const result = this.steerInput.handleMouse({ ...event, x: inputX, y: 0, width: layout.contentWidth - prefixWidth, height: 1 });
+				if (result?.handled || result?.focus) {
+					this.refresh();
+					return { ...result, handled: true, focusTarget: this, target: { component: this, originX: event.screenX - event.x, originY: event.screenY - event.y, width: event.width, height: event.height } };
+				}
+			}
+		}
 		if (!this.detailId && !this.groupId && event.type === "click" && event.button === "left") {
 			const id = this.mouseListIds[event.y - this.mouseListStart];
 			const nodes = this.viewNodes();
@@ -656,13 +729,14 @@ export class AgentOverlay extends Container {
 			this.refresh();
 			return;
 		}
-		const kb = getKeybindings();
+		const kb = this.keybindings;
 		const selected = this.selectedGroupLeg(group.legs);
+		const page = this.pageDelta(keyData, this.groupCapacity);
 		if (kb.matches(keyData, "tui.select.cancel")) {
 			this.groupId = undefined;
 			this.refresh();
-		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k" || kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			const delta = kb.matches(keyData, "tui.select.up") || keyData === "k" ? -1 : 1;
+		} else if (page !== undefined || kb.matches(keyData, "tui.select.up") || keyData === "k" || kb.matches(keyData, "tui.select.down") || keyData === "j") {
+			const delta = page ?? (kb.matches(keyData, "tui.select.up") || keyData === "k" ? -1 : 1);
 			const index = group.legs.findIndex((node) => node.id === selected?.id);
 			this.groupSelectedId = group.legs[Math.max(0, Math.min(group.legs.length - 1, index + delta))]?.id;
 			this.groupAimLost = false;
@@ -683,7 +757,8 @@ export class AgentOverlay extends Container {
 				this.detailId = selected.id;
 				this.detailScroll = 0;
 				this.steering = true;
-				this.steerBuffer = "";
+				this.resetSteerInput();
+				this.syncFocus();
 				this.refresh();
 			}
 		} else if (hadNotice) this.refresh();
@@ -716,11 +791,6 @@ export class AgentOverlay extends Container {
 	private hintLine(kind: "list" | "detail", stoppable: boolean, steerable: boolean, stopAll = 0): string {
 		const sep = kind === "list" ? "   " : "   ·   ";
 		return `${stoppable ? `${sep}x stop` : ""}${stopAll >= 2 ? `${sep}X stop all (${stopAll})` : ""}${steerable ? `${sep}s steer` : ""}`;
-	}
-
-	/** The one-line refusal notice, shown identically under the list and the detail view. */
-	private renderNotice(target: Container = this): void {
-		if (this.notice) target.addChild(new Text(this.theme.fg("dim", sanitizeTerminalText(truncateToWidth(safeInline(this.notice, 240), Math.max(1, this.inner() - 2), "…"))), 1, 0));
 	}
 
 	/** Stop (abort) one agent by id. A refusal — the node is gone, not stoppable, or the caller

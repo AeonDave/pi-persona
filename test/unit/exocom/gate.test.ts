@@ -13,11 +13,11 @@ test("inbound constrained turn permits identity metadata, settlement, and read t
 });
 
 test("pending asks allow only explicit read actions of collaboration tools", () => {
-	for (const [name, action] of [["exocom_task", "list"], ["exocom_publish", "read"], ["exocom_profile", "get"]]) {
+	for (const [name, action] of [["exocom_task", "list"], ["exocom_publish", "read"], ["exocom_profile", "get"], ["intercom", "conversations"]]) {
 		assert.equal(constrainedTurnAllows(name!, { action }), true);
 		assert.equal(constrainedTurnAllows(name!), false);
 	}
-	for (const [name, action] of [["exocom_task", "take"], ["exocom_task", "create"], ["exocom_publish", "publish"], ["exocom_profile", "set"], ["exocom_profile", "clear"]]) {
+	for (const [name, action] of [["exocom_task", "take"], ["exocom_task", "create"], ["exocom_publish", "publish"], ["exocom_profile", "set"], ["exocom_profile", "clear"], ["intercom", "forget"]]) {
 		assert.equal(constrainedTurnAllows(name!, { action }), false);
 	}
 });

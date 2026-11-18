@@ -298,12 +298,15 @@ test("runChildAgent hard-caps an actively-emitting child the idle window would n
 });
 
 test("the timeout is idle-based — a child that keeps emitting is NOT killed (total runtime > the window)", async () => {
-	// Window vs fixture: [drip] emits at 0ms then every 150ms until ~600ms — each gap
-	// (150ms) sits well under the 500ms window while the total run exceeds it. The
-	// slack absorbs node.exe boot latency under parallel-suite load (flaked at 100ms).
-	const r = await runChildAgent({ task: "busy [drip]" }, undefined, { resolveInvocation: resolveFake, timeoutMs: 500 });
+	// Process boot is part of the first idle window. Give it room under suite load:
+	// [idle-drip] emits immediately after boot, then every 600ms for at least 2400ms.
+	// Each gap remains below 2000ms while the observed total must exceed that window.
+	const idleWindow = 2_000;
+	const started = performance.now();
+	const r = await runChildAgent({ task: "busy [idle-drip]" }, undefined, { resolveInvocation: resolveFake, timeoutMs: idleWindow });
 	assert.equal(r.timedOut, false, "output (re)arms the idle clock, so an active child survives");
 	assert.equal(r.ok, true);
+	assert.ok(performance.now() - started > idleWindow, "the active child survives longer than one idle window");
 });
 
 test("runChildAgent delivers a HUGE task intact over stdin (beyond any argv length cap)", async () => {

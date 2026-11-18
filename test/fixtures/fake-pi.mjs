@@ -45,11 +45,11 @@ function run(task) {
 			},
 		});
 		setTimeout(() => process.kill(process.pid, "SIGKILL"), 50);
-	} else if (task.includes("[drip]")) {
-		// Emit an event IMMEDIATELY (so node's boot latency can't eat the caller's idle
-		// window under parallel-suite load), then every 150ms a few times (total > a short
-		// idle window, each gap < it), then finish — exercises the idle-timeout reset (an
-		// active child must NOT be killed).
+	} else if (task.includes("[drip]") || task.includes("[idle-drip]")) {
+		// Emit immediately after boot, then four events. The longer idle-drip keeps gaps
+		// below its caller's idle window but total activity above it, with boot-time slack.
+		// Ordinary drip retains its short cadence for startup-deadline and hard-cap tests.
+		const intervalMs = task.includes("[idle-drip]") ? 600 : 150;
 		emit({ type: "turn_start" });
 		let n = 0;
 		const iv = setInterval(() => {
@@ -69,7 +69,7 @@ function run(task) {
 				});
 				process.exit(0);
 			}
-		}, 150);
+		}, intervalMs);
 	} else if (task.includes("[spew-stderr]")) {
 		process.stderr.write("E".repeat(500000)); // flood stderr to exercise the retention cap
 		emit({

@@ -15,7 +15,9 @@ import type { PersonaController, PersonaHost } from "../persona/controller.ts";
 import { type EngineAdapterBroker, type EngineAdapterDeps, makeEngine } from "../engine/adapter.ts";
 import { captureStatus, diffStatus, findGitRoot, renderChangeReport } from "../engine/change-report.ts";
 import { withModelFallback } from "../engine/fallback.ts";
-import { captureWorktreeArtifact, defaultGitExec, type GitExec, withWorktree, worktreePreflight } from "../engine/worktree.ts";
+import { captureWorktreeArtifact, defaultGitExec, describeWorktreeRecovery, type GitExec, withWorktree, worktreePreflight, WorktreeRetainedError } from "../engine/worktree.ts";
+import { verifyConversationWorktree } from "../engine/conversation-worktree.ts";
+import { formatWorktreeRecovery, WORKTREE_CAPTURE_WARNING } from "../core/worktree-recovery.ts";
 import { type InProcessDeps, makeInProcessEngine } from "../engine/inproc.ts";
 import { emptyUsage, type ProgressSnapshot } from "../engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
@@ -256,36 +258,86 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			};
 			return wrapFallback({
 				async run(spec, perProgress, perSignal, perSteer) {
+					const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
 					const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
+					if (spec.session?.resume && spec.session.worktree && iso !== "worktree") {
+						return { ...isolatedWorktreeFailure(spec, "A retained worktree conversation must resume with worktree isolation"), sessionSaved: false, sessionQuiescent: true };
+					}
 					if (iso === "worktree") {
 						if (!root) {
-							return isolatedWorktreeFailure(spec, "worktree isolation requires a real Git cwd; remove isolation: \"worktree\" or run inside a Git checkout");
+							return beforeStart(isolatedWorktreeFailure(spec, "worktree isolation requires a real Git cwd; remove isolation: \"worktree\" or run inside a Git checkout"));
 						}
-						const preflight = await worktreePreflight(root, defaultGitExec);
-						if (!preflight.ok) return isolatedWorktreeFailure(spec, preflight.error);
-						try {
-							return await withWorktree(root, defaultGitExec, async (dir, baseCommit) => {
+						const resumed = spec.session?.resume === true;
+						const previousWorktree = spec.session?.worktree;
+						if (resumed) {
+							if (!previousWorktree) return { ...isolatedWorktreeFailure(spec, "The retained worktree is missing; cannot continue an isolated worker"), sessionSaved: false, sessionQuiescent: true };
+							const verified = await verifyConversationWorktree(previousWorktree, root);
+							if (!verified.ok) return { ...isolatedWorktreeFailure(spec, verified.error), sessionSaved: false, sessionQuiescent: true };
+						} else {
+							const preflight = await worktreePreflight(root, defaultGitExec);
+							if (!preflight.ok) return beforeStart(isolatedWorktreeFailure(spec, preflight.error));
+						}
+						const runWorktree = async (dir: string, baseCommit: string) => {
 								const result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
-								const artifact = await captureWorktreeArtifact(dir, baseCommit, defaultGitExec);
+								if (spec.session && result.sessionQuiescent !== true) {
+									const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, "The isolated worker may still be writing; retained without capturing an artifact");
+									const notice = formatWorktreeRecovery(worktreeRecovery);
+									return { cleanup: "retain" as const, value: { ...result, ...(result.ok ? { ok: false, failureKind: "agent" as const, error: notice } : {}), sessionSaved: false, worktreeRecovery, output: `${notice}\n\n${result.output}`.trimEnd() } };
+								}
+								const artifact = await captureWorktreeArtifact(dir, baseCommit, defaultGitExec).catch((error: unknown) => ({
+									ok: false as const,
+									error: error instanceof Error ? error.message : String(error),
+								}));
 								const hasOutputArtifact = hasUnifiedDiff(result.output);
-								if (!result.ok) {
-									return artifact.ok && artifact.diff.trim().length > 0
-										? appendWorktreeArtifact(result, artifact.diff)
-										: result;
-								}
 								if (!artifact.ok) {
-									if (hasOutputArtifact) return prependWorktreeCaptureWarning(result);
-									return isolatedWorktreeFailure(spec, `${artifact.error}; the isolated leg returned success without an exportable diff/artifact`);
+									if (spec.session) result.sessionSaved = false;
+									const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, `Worktree artifact capture failed: ${artifact.error}`);
+									const notice = formatWorktreeRecovery(worktreeRecovery);
+									const output = `${notice}\n\n${result.output}`.trimEnd();
+									if (!result.ok) {
+										return { cleanup: "retain" as const, value: { ...result, output, worktreeRecovery, error: `${result.error ?? "isolated worker failed"}; ${notice}` } };
+									}
+									if (hasOutputArtifact) {
+										return { cleanup: "retain" as const, value: prependWorktreeCaptureWarning({ ...result, output, worktreeRecovery }) };
+									}
+									return { cleanup: "retain" as const, value: { ...result, output, worktreeRecovery, ok: false, failureKind: "contract" as const, error: `${notice} The isolated leg returned success without an exportable diff/artifact.` } };
 								}
-								if (artifact.diff.trim().length > 0) return appendWorktreeArtifact(result, artifact.diff);
-								if (hasOutputArtifact) return result;
-								return isolatedWorktreeFailure(
-									spec,
-									"isolated leg returned success but produced no unified diff or artifact; its worktree was discarded — return a complete diff or remove isolation: \"worktree\"",
-								);
-							});
+								if (!result.ok) {
+									if (resumed) {
+										const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, "Isolated worker did not complete; retained for recovery");
+										const notice = formatWorktreeRecovery(worktreeRecovery);
+										const reported = artifact.diff.trim() ? appendWorktreeArtifact(result, artifact.diff) : result;
+										return { cleanup: "retain" as const, value: { ...reported, ...(reported.ok ? { ok: false, failureKind: "agent" as const, error: notice } : {}), sessionSaved: false, worktreeRecovery, output: `${notice}\n\n${reported.output}`.trimEnd() } };
+									}
+									return { cleanup: "remove" as const, value: artifact.diff.trim().length > 0 ? appendWorktreeArtifact(result, artifact.diff) : result };
+								}
+								if (resumed && (!result.sessionSaved || !result.sessionQuiescent || (!artifact.diff.trim() && !hasOutputArtifact))) {
+									const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, "The continued worker could not be safely retained as a conversation");
+									const notice = formatWorktreeRecovery(worktreeRecovery);
+									const reported = artifact.diff.trim() ? appendWorktreeArtifact(result, artifact.diff) : result;
+									return { cleanup: "retain" as const, value: { ...reported, ok: false, failureKind: "contract" as const, sessionSaved: false, worktreeRecovery, output: `${notice}\n\n${reported.output}`.trimEnd(), error: notice } };
+								}
+								const retainForConversation = Boolean(spec.session && result.sessionSaved && result.sessionQuiescent);
+								const sessionWorktree = retainForConversation ? { path: dir, baseCommit, root } : undefined;
+								const cleanup = retainForConversation ? "retain" as const : "remove" as const;
+								if (artifact.diff.trim().length > 0) return { cleanup, value: { ...appendWorktreeArtifact(result, artifact.diff), ...(sessionWorktree ? { sessionWorktree } : {}) } };
+								if (hasOutputArtifact) return { cleanup, value: { ...result, ...(sessionWorktree ? { sessionWorktree } : {}) } };
+								return { cleanup: "remove" as const, value: {
+									...result, ...(spec.session ? { sessionSaved: false } : {}), ok: false, failureKind: "contract" as const,
+									error: "isolated leg returned success but produced no unified diff or artifact; its worktree was discarded — return a complete diff or remove isolation: \"worktree\"",
+								} };
+						};
+						try {
+							if (resumed && previousWorktree) return (await runWorktree(previousWorktree.path, previousWorktree.baseCommit)).value;
+							return await withWorktree(root, defaultGitExec, runWorktree);
 						} catch (err) {
-							return isolatedWorktreeFailure(spec, err instanceof Error ? err.message : String(err));
+							if (resumed && previousWorktree) {
+								const recovery = await describeWorktreeRecovery(previousWorktree.path, previousWorktree.baseCommit, err instanceof Error ? err.message : String(err));
+								const notice = formatWorktreeRecovery(recovery);
+								return { ...isolatedWorktreeFailure(spec, notice), output: notice, worktreeRecovery: recovery, sessionSaved: false, sessionQuiescent: false };
+							}
+							const failure = isolatedWorktreeFailure(spec, err instanceof Error ? err.message : String(err));
+							return err instanceof WorktreeRetainedError ? { ...failure, output: err.message, worktreeRecovery: err.recovery } : failure;
 						}
 					}
 					// MCP-capable leg: the DEFAULT in-process engine never fires `session_start`, so
@@ -318,8 +370,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 	}
 
 	function prependWorktreeCaptureWarning(result: AgentResult): AgentResult {
-		const warning = "⚠ Worktree artifact capture failed; the following patch is worker-provided and was not verified against the worktree state.";
-		return { ...result, output: result.output.trim() ? `${warning}\n\n${result.output}` : warning };
+		return { ...result, output: result.output.trim() ? `${WORKTREE_CAPTURE_WARNING}\n\n${result.output}` : WORKTREE_CAPTURE_WARNING };
 	}
 
 	/** Append a block to a leg's output, never leading with blank lines when there was nothing to

@@ -7,9 +7,11 @@
 [![CI](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/AeonDave/pi-persona/actions/workflows/test.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/AeonDave/pi-persona/badge)](https://scorecard.dev/viewer/?uri=github.com/AeonDave/pi-persona) [![npm version](https://img.shields.io/npm/v/@aeondave/pi-persona?logo=npm)](https://www.npmjs.com/package/@aeondave/pi-persona) [![License](https://img.shields.io/github/license/AeonDave/pi-persona)](LICENSE)
 
 **Give Pi a supervised team.**
-`pi-persona` adds async workers, live steering, cross-session collaboration and switchable
-personas to Pi. Describe an outcome; a supervisor can delegate bounded work, gather results and
-check the outcome while you inspect, redirect or stop workers.
+Delegate focused work. Steer it live. Keep the whole team in view.
+
+`pi-persona` adds async workers, switchable personas and collaboration between independent Pi
+sessions. Describe an outcome; the supervisor can split the work, gather results and check them.
+You can inspect, redirect or stop workers throughout.
 
 [Install](#install) · [Team workflow](#work-with-your-team) · [Explore source code](#explore-source-code) · [Cross-session collaboration](#collaborate-with-another-pi) · [Personas](#choose-a-persona) · [Documentation](#documentation)
 
@@ -31,14 +33,13 @@ Inside Pi, install the bundled starting points and select a supervisor:
 /persona dev
 ```
 
-Bundled personas are not installed automatically. Seed adds missing files without replacing your
-customizations; see [Make it yours](#make-it-yours) before using restore.
+Seed installs the bundled starting points without replacing your customizations.
 
 | Option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.18.0` |
-| Pin the Git tag | `pi install git:github.com/AeonDave/pi-persona@v1.18.0` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.18.1` |
+| Pin the Git tag | `pi install git:github.com/AeonDave/pi-persona@v1.18.1` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
 
 Restart Pi after updating. Update pinned installs explicitly. When switching from Git to npm, remove
@@ -47,17 +48,17 @@ to avoid loading the extension twice.
 
 ## What it does
 
-- **Coordinate work:** delegate independent investigations or edits; use councils and flows for
-  alternative perspectives, review loops or staged work. Results return to the same supervisor.
-- **Stay in control:** see live activity, steer a worker, retrieve retained results and stop runs.
-- **Specialize each worker:** assign the skills, role, model and thinking effort for its task. Load
-  [selected skill instructions](docs/REFERENCE.md) directly, without sending the full skill catalog;
-  tool permissions remain separate.
-- **Collaborate beyond one team:** Exocom connects independent Pi sessions to exchange findings and
-  voluntarily coordinate work.
-- **Watch for events:** timers, monitors and background scripts bring results back when ready.
-- **Explore code:** use Pi's native search tools and bounded, multilingual source outlines.
-- **Show an image:** display a local image in the terminal; use Pi's native graphics when available or a bounded text preview.
+| Capability | What you get |
+|---|---|
+| **A team for the task** | Parallel workers, councils for independent perspectives, and flows for staged work and approval gates. |
+| **Focused specialists** | Choose each worker's role, skills, model and effort. Selected skill instructions load before its first model request. |
+| **Live supervision** | F9 brings workers, timers, monitors and scripts into one view. Inspect output, steer work and stop runs. |
+| **Continuity** | Continue saved worker conversations; restore a compact view of pending work, asks and result references after Pi compacts context. |
+| **Pi-to-Pi collaboration** | Exocom lets independent sessions exchange findings, offer tasks and coordinate ownership. |
+| **Useful local tools** | Multilingual code outlines, native search, background scripts, event monitors and terminal image previews. |
+
+Tool permissions remain separate from prompts and skill selection. See the
+[tool and configuration reference](docs/REFERENCE.md) for the exact contracts.
 
 ## Work with your team
 
@@ -68,51 +69,48 @@ After seeding, start directly with `pi --persona dev` and describe the work in p
 
 ![Example workflow: the supervisor delegates code-path, test and API-contract investigations, then integrates and verifies their findings.](assets/workflow.png)
 
-This is one possible workflow, not a fixed pipeline: independent questions can run in parallel,
-while dependent steps run in order. For parallel edits, give writers disjoint repository-relative
-`writeSet` paths. Ownership coordinates scheduling; it does **not** sandbox filesystem access.
-Persona prose is not a security boundary: actual tool grants, runtime permissions and underlying
-system permissions govern access. See [multi-agent quick start](docs/REFERENCE.md#multi-agent-quick-start).
+Independent questions can run in parallel; dependent steps run in order. Parallel writers declare
+disjoint `writeSet` paths. Optional Git worktrees require a clean checkout, isolate edits and return a
+diff for review.
+Write sets coordinate ownership; they do **not** sandbox filesystem access.
+[Multi-agent quick start →](docs/REFERENCE.md#multi-agent-quick-start)
 
-In interactive sessions, delegate, council and flow runs start in the background. The supervisor can
-continue independent work; once it is waiting, it should end its turn rather than poll or sleep.
-Results arrive automatically when it is free. Headless `pi -p` waits and returns results inline.
-Intercom can send guidance or retrieve a retained result (`intercom result { to: runId }`). A steering
-receipt confirms a message was queued, not that the worker followed it; child-engine steering is a
-follow-up rather than mid-turn injection. [Follow the work](docs/EXPERIENCE.md#follow-the-work-without-constant-polling).
+Interactive runs work in the background and return results automatically when the supervisor is
+free. It can do other work, then end its turn while waiting. Headless `pi -p` returns results inline.
+[Follow the work →](docs/EXPERIENCE.md#follow-the-work-without-constant-polling)
+
+Need a follow-up from the same specialist? When its conversation was saved successfully:
+
+```text
+delegate { resume: "run-1", task: "Check the remaining edge case" }
+```
+
+Use `intercom { action: "conversations" }` to find the latest available run ID. Saved transcripts
+can contain full prompts and tool results; see [continuation and storage](docs/REFERENCE.md#continuing-a-worker-conversation)
+for availability, limits and cleanup.
 
 | Control | Action |
 |---|---|
 | **F8** | Cycle installed personas |
-| **F9** or `/agents` | Open the live panel; F9 closes it again |
-| **Enter** / **s** / **x** / **X** | Inspect / steer / stop the selected controllable item / stop agents (confirm with a second press) |
-| **Space** / **Left** / **Right** | Toggle / collapse / expand a group in F9 |
+| **F9** or `/agents` | Inspect and control live work; F9 closes the panel |
+| Click a card / **Ctrl+O** | Expand prompts, messages and diagnostics using Pi's configured expand binding |
 | `/peek` | Show a compact progress summary |
 | `/flow` | List flows; `/flow <name> <task>` runs one, with approval at configured gates |
-| `/persona list` / `/persona off` | List personas / turn off the active persona |
 | `/persona-settings` / `/doctor` | Open settings / check configuration and capabilities |
 
-F8 selects a persona immediately; its prompt applies at the next run, not inside an ongoing tool loop.
-F9 groups workers, timers, monitors and scripts and shows Exocom peers read-only. Select a worker
-for output, model, effort and cumulative usage. In alternate-screen mode, click group headings above
-the editor to fold them; the fold state is shared with F9. Click a card or use Pi's configured expand
-key (`Ctrl+O` by default) to see the full launch prompt, steering message or diagnostics. Ordinary
-progress stays in the live view; stall and resume cards are operator-only. Periodic status cards are
-optional and off by default.
+F9 shows each worker's output, model, effort and cumulative usage, plus a read-only Exocom peer
+section. Fold groups in the panel or click their headings above the editor in alternate-screen mode.
+Ordinary progress stays in the live view; stall and resume cards draw attention when needed.
+F9 and Mind's F10 share the same responsive window frame.
 
 Ask “remind me in ten minutes,” “let me know when this build finishes,” or “run the tests in the
-background.” Timers schedule reminders, monitors watch events or process exits, and scripts run
-commands or inline shell code with retained logs. Keep Pi open: running timers and monitors are not
-restored after restart. See [timers, monitors and scripts](docs/MONITORS.md) for examples and limits.
-
-Pi's native `grep`, `find` and `ls` are available to default supervisors and workers; Windows also
-gets native PowerShell. Pi's own grants and exclusions remain authoritative, and Pi may download
-missing `rg`/`fd` helpers on first use.
+background.” Timers, monitors and scripts share that view, with retained process logs. Keep Pi
+open: these running resources are session-scoped. [Examples and controls →](docs/MONITORS.md)
 
 ## Explore source code
 
-Use `code_outline` to find declarations and their line ranges in one source file, then read only the
-relevant excerpt. For example, given:
+Find files and text with Pi's native `grep`, `find` and `ls`; Windows also gets native PowerShell.
+Use **`code_outline`** to find declarations and line ranges before reading a source file. Given:
 
 ```ts
 export class Cart {
@@ -135,20 +133,17 @@ code_outline({ path: "src/cart.ts", query: "total" })
 read({ path: "src/cart.ts", offset: 2, limit: 1 })
 ```
 
-The lazy local WASM parser supports JavaScript/TypeScript, Python, Go, Rust, C-family and C# source.
-This is a bounded syntax outline, not a project index or compiler: names are not resolved, C-family
-uses the C++ grammar, and C# support covers source rather than .NET binaries. Unsupported files,
-syntax errors and resource-limit overruns fail explicitly. See the
-[outline reference](docs/REFERENCE.md#multilanguage-code-outline) for limits and supported syntax.
+Supports **JavaScript/TypeScript, Python, Go, Rust, C-family and C# source**, using one local,
+on-demand WASM parser. No server or persistent index. Unsupported files and syntax errors fail
+explicitly. See [supported syntax and limits](docs/REFERENCE.md#multilanguage-code-outline), including
+the C-family grammar boundary, and [native search setup](docs/REFERENCE.md#native-ossearch-tools).
 
 ## Display an image
 
 Use `show_image({ path: "assets/diagram.png" })` to show a local PNG, JPEG, GIF or WebP to the
-user. Pi's Kitty or iTerm2 graphics are used when available; otherwise the preview uses ANSI color
-cells or plain ASCII, without installing external image programs. It shows the first frame only and is bounded to 8 MiB and 16 million source
-pixels. The pixels stay out of the model result; use Pi's `read` tool when the model needs to inspect
-an image. See the [image reference](docs/REFERENCE.md#terminal-image-preview) for display modes and
-limits.
+user. Pi's Kitty or iTerm2 graphics are used when available; otherwise it shows ANSI color cells or
+plain ASCII, without external image programs. Use Pi's `read` tool for model image analysis.
+[Formats, display modes and limits →](docs/REFERENCE.md#terminal-image-preview)
 
 ## Collaborate with another Pi
 
@@ -159,17 +154,19 @@ Pi sessions. In two terminals in the same workspace, start each with:
 pi --exocom --persona dev
 ```
 
-Use `/exocom` to inspect the connection and workspace code. Peers can exchange messages, create
-voluntary tasks and share bounded evidence excerpts; creating a task does not start work for a peer.
-To join from another workspace, replace the example with the exact case-sensitive code shown:
+Use `/exocom status` to inspect the connection and workspace code, or `/exocom help` for usage. Then try:
 
-```bash
-pi --exocom=Ab0T --persona researcher
+```text
+Pi A: Name yourself Ember for this session and list your Exocom peers.
+Pi B: Name yourself Flint, list your Exocom peers, and send Ember: Hello from Pi B.
 ```
 
-Sessions must share a machine and Pi agent directory. A foreign-workspace peer can advise, exchange
-results and take read-only tasks, but cannot claim or take tasks declaring write paths in the joined
-workspace. See the [collaboration guide](docs/COLLABORATION.md) for asks, offers and task workflows.
+Pi A receives the message automatically. Peers can also ask questions, offer voluntary tasks and
+share evidence; creating a task does not start another session's work.
+
+To join from another workspace, use the exact code shown, for example `pi --exocom=Ab0T`.
+Sessions must share a machine and Pi agent directory; foreign-workspace participation has narrower
+write-coordination permissions. [First exchange, task workflows and delivery guarantees →](docs/COLLABORATION.md)
 
 ## Choose a persona
 
@@ -178,19 +175,12 @@ Personas shape the supervisor's approach and orchestration defaults. Start with 
 
 ![F8 cycles between installed supervisor personas.](assets/demo1.gif)
 
-`reverser` discovers installed skills, integrated appskills and tools, follows their workflows, and
-orients on the artifact before delegating bounded questions. `multiagent` coordinates research,
-code, documentation and troubleshooting without requiring a fixed fan-out. Both select models
-and supported thinking effort for each task within the current provider, respecting explicit user
-choices. With an aggregator, their prompt guidance favors a few useful workers on the supervisor's
-exact model instead of a catalog sweep. Availability and effective effort depend on the host; this
-is guidance, not a runtime provider lock. `dev` also follows task-fit selection.
+F8 cycles installed personas; `/persona <name>` selects one and `/persona off` turns it off. A new
+persona's prompt applies on the next run. Browse the bundled [personas](personas) and
+[worker agents](agents), or use the [practical guide](docs/EXPERIENCE.md) to choose a workflow.
 
-Browse the bundled [personas](personas) and [worker agents](agents), or use the
-[practical guide](docs/EXPERIENCE.md) to choose a workflow. Councils can use strategies such as
-`judge`, `magi` or `debate` independently of the active persona. In councils and flows, a provider
-failure or unavailable model can recover once on the supervisor's model; ordinary delegate provider
-pins remain strict. See [strategies](docs/STRATEGIES.md) and the [reference](docs/REFERENCE.md).
+Councils can use `judge`, `magi`, `debate` and other strategies independently of the active persona.
+[Strategies and flows →](docs/STRATEGIES.md)
 
 ## Make it yours
 
@@ -202,10 +192,9 @@ bundled defaults**, including customized files at those destinations. Additional
 settings, credentials, sessions and project-local overrides are not reset. Compare your edits before
 restoring.
 
-`/persona-settings` manages Persona preferences and model assignments, separately from Pi's
-`/settings`. Scalar changes apply after restarting Pi or Pi's native `/reload`, not `/new`;
-`/persona reload` refreshes resources only. Model changes apply to future runs. Idle compaction
-remains unavailable pending host qualification; see [configuration and settings](docs/REFERENCE.md#configuration-and-data).
+`/persona-settings` manages Persona preferences and model assignments. Scalar changes apply after
+restarting Pi or Pi's native `/reload`; model changes apply to future runs.
+[Configuration, settings and companion integration →](docs/REFERENCE.md#configuration-and-data)
 
 ## Optional memory companion
 
@@ -214,15 +203,20 @@ project/persona memory, session notes, an F10 inspector, consolidation and evide
 Install it with
 `pi install npm:@aeondave/pi-persona-mind`, then restart Pi or use `/reload`. Its
 [README](https://github.com/AeonDave/pi-persona-mind#readme) covers scope, review limits and undo.
-Loaded compatible Mind and Flow companions can contribute settings to Persona's panel; Skill Optimizer
-keeps its own configuration. See [companion settings](docs/REFERENCE.md#configuration-and-data).
 
 ## Documentation
 
-- [Everyday use](docs/EXPERIENCE.md) · [Cross-session collaboration](docs/COLLABORATION.md)
-- [Customization and tool reference](docs/REFERENCE.md) · [Strategies and flows](docs/STRATEGIES.md)
-- [Timers, monitors and scripts](docs/MONITORS.md) · [Architecture](docs/ARCHITECTURE.md)
-- [Shared prompts](docs/SPINE.md) · [Telemetry](docs/TELEMETRY.md) · [Changelog](CHANGELOG.md)
+| You want to… | Read |
+|---|---|
+| Choose a workflow and supervise it | [Everyday use](docs/EXPERIENCE.md) |
+| Connect independent Pi sessions | [Collaboration](docs/COLLABORATION.md) |
+| Configure tools, permissions and storage | [Reference](docs/REFERENCE.md) |
+| Build councils, review loops and staged work | [Strategies and flows](docs/STRATEGIES.md) |
+| Schedule reminders and run background jobs | [Timers, monitors and scripts](docs/MONITORS.md) |
+| Understand implementation contracts | [Architecture](docs/ARCHITECTURE.md) · [Shared prompts](docs/SPINE.md) · [Telemetry](docs/TELEMETRY.md) |
+
+The README follows the current checkout. See the [changelog](CHANGELOG.md) for release availability
+and the [documentation index](docs/README.md) for review records.
 
 ## Develop
 

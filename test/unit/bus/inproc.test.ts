@@ -11,6 +11,36 @@ import assert from "node:assert/strict";
 
 import { InProcessBus, MAX_RETAINED_MESSAGE_CHARS, MAX_RETAINED_MESSAGES } from "../../../src/bus/inproc.ts";
 
+test("live ask ids survive inbox drains and disappear on every settlement path", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.register("other");
+	bus.register("child");
+	const reply = bus.ask("child", "supervisor", "private reply body");
+	const id = bus.take("supervisor")[0]!.id;
+	assert.deepEqual(bus.pendingAskIdsTo("supervisor"), [id]);
+	assert.deepEqual(bus.pendingAskIdsTo("other"), []);
+	assert.equal(bus.reply(id, "answer"), true);
+	await reply;
+	assert.deepEqual(bus.pendingAskIdsTo("supervisor"), []);
+	const abort = new AbortController();
+	const cancelled = bus.ask("child", "supervisor", "private cancel body", { signal: abort.signal });
+	bus.take("supervisor");
+	assert.equal(bus.pendingAskIdsTo("supervisor").length, 1);
+	abort.abort();
+	await assert.rejects(cancelled);
+	assert.deepEqual(bus.pendingAskIdsTo("supervisor"), []);
+	const disconnected = bus.ask("child", "supervisor", "private disconnect body");
+	bus.take("supervisor");
+	bus.unregister("child");
+	await assert.rejects(disconnected);
+	assert.deepEqual(bus.pendingAskIdsTo("supervisor"), []);
+	const expired = bus.ask("another", "supervisor", "private timeout body", { timeoutMs: 20 });
+	bus.take("supervisor");
+	await assert.rejects(expired);
+	assert.deepEqual(bus.pendingAskIdsTo("supervisor"), []);
+});
+
 test("sender label is snapshotted and survives registration refresh and sender teardown", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

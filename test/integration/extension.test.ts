@@ -440,6 +440,79 @@ function cleanGitRepo(): string {
 	return cwd;
 }
 
+test("registered delegate continues its saved worker and intercom exposes the new turn", async () => {
+	const cwd = tempDir("persona-delegate-resume-wiring-");
+	const manager = SessionManager.create(cwd, cwd);
+	manager.appendMessage({ role: "user", content: "start", timestamp: Date.now() });
+	const m = makeMockPi(manager);
+	const calls: AgentRunSpec[] = [];
+	const engine: StrategyEngine = { async run(spec) {
+		calls.push(spec);
+		assert.ok(spec.session);
+		if (spec.session.resume) fs.appendFileSync(spec.session.file, "resumed\n");
+		else fs.writeFileSync(spec.session.file, "first\n");
+		return { agent: spec.agent, output: spec.session.resume ? "second report" : "first report", usage: emptyUsage(), ok: true, modelUsed: "native/model", sessionSaved: true, sessionQuiescent: true };
+	} };
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const base = makeCtx(cwd).ctx;
+	const model = { provider: "native", id: "model" };
+	const ctx = { ...base, sessionManager: manager, model, modelRegistry: { ...registryDefaults, getAll: () => [model], getAvailable: () => [model] } };
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		const intercom = m.tool("intercom") as { execute: AnyFn };
+		const first = await delegate.execute("first", { agent: "scout", name: "atlas", task: "inspect" }, undefined, undefined, ctx);
+		assert.equal(first.isError, false);
+		assert.match(first.content[0].text, /first report/);
+		const id = first.details.settledRuns[0].id as string;
+		assert.match((await intercom.execute("list", { action: "conversations" }, undefined, undefined, ctx)).content[0].text, new RegExp(`${id}.*atlas.*ready`));
+		const next = await delegate.execute("second", { resume: id, task: "review follow-up" }, undefined, undefined, ctx);
+		assert.equal(next.isError, false, next.content[0].text);
+		assert.match(next.content[0].text, /second report/);
+		assert.equal(calls.length, 2);
+		assert.equal(calls[1]!.session?.resume, true);
+		assert.equal(calls[1]!.session?.file, calls[0]!.session?.file);
+		assert.equal(calls[1]!.model, "native/model");
+		assert.equal(calls[1]!.name, "atlas");
+		assert.match(calls[1]!.task, /review follow-up/);
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("failed engine construction releases a resumed worker without losing its saved turn", async () => {
+	const cwd = tempDir("persona-resume-construction-failure-");
+	const manager = SessionManager.create(cwd, cwd);
+	manager.appendMessage({ role: "user", content: "start", timestamp: Date.now() });
+	const m = makeMockPi(manager);
+	let constructions = 0;
+	const engine: StrategyEngine = { async run(spec) {
+		assert.ok(spec.session);
+		fs.writeFileSync(spec.session.file, "saved\n");
+		return { agent: spec.agent, output: "report", usage: emptyUsage(), ok: true, modelUsed: "native/model", sessionSaved: true, sessionQuiescent: true };
+	} };
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => { if (++constructions > 1) throw new Error("factory failed before worker starts"); return engine; }, makeEngine: () => engine } });
+	const base = makeCtx(cwd).ctx;
+	const model = { provider: "native", id: "model" };
+	const ctx = { ...base, sessionManager: manager, model, modelRegistry: { ...registryDefaults, getAll: () => [model], getAvailable: () => [model] } };
+	try {
+		await m.fire("session_start", undefined, ctx);
+		const delegate = m.tool("delegate") as { execute: AnyFn };
+		const intercom = m.tool("intercom") as { execute: AnyFn };
+		const first = await delegate.execute("first", { agent: "scout", task: "inspect" }, undefined, undefined, ctx);
+		assert.equal(first.isError, false);
+		const id = first.details.settledRuns[0].id as string;
+		const failed = await delegate.execute("resume", { resume: id, task: "follow-up" }, undefined, undefined, ctx);
+		assert.equal(failed.isError, true);
+		const entries = await intercom.execute("list", { action: "conversations" }, undefined, undefined, ctx);
+		assert.match(entries.content[0].text, new RegExp(`${id}.*ready to continue`));
+	} finally {
+		await m.fire("session_shutdown", {}, ctx);
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 function projectCwdWithLockedPersona(): string {
 	const cwd = tempDir("pi-persona-ext-");
 	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
@@ -2625,8 +2698,103 @@ test("a worker-provided worktree patch stays visible with an explicit warning wh
 	assert.match(text, /not verified against the worktree state/i);
 	const warningIndex = text.toLowerCase().indexOf("worktree artifact capture failed");
 	assert.ok(warningIndex >= 0 && warningIndex < text.indexOf("diff --git a/base.txt"), "the host warning precedes the unverified patch in the compact head");
-	assert.equal(fs.existsSync(childCwd), false, "the disposable worktree is still removed after capture failure");
+	assert.equal(fs.existsSync(childCwd), true, "capture failure retains the isolated work for recovery");
+	assert.ok(text.includes(childCwd), "the worker result identifies the recovery path");
+	assert.match(text, /base(?:line| commit)/i);
 	assert.equal(fs.readFileSync(path.join(cwd, "base.txt"), "utf8"), "base\n", "invalidating the disposable metadata leaves the user's checkout untouched");
+	fs.rmSync(childCwd, { recursive: true, force: true });
+	gitAt(cwd, "worktree", "prune");
+});
+
+test("a failed isolated worker retains oversized unexportable work and reports its original failure", async () => {
+	const cwd = cleanGitRepo();
+	let childCwd = "";
+	const factories: EngineFactories = {
+		makeInProcessEngine: () => ({ run: async (spec) => ({ agent: spec.agent, output: "base", usage: emptyUsage(), ok: true }) }),
+		makeEngine: (deps) => {
+			childCwd = deps.cwd ?? "";
+			return { run: async (spec) => {
+				fs.writeFileSync(path.join(childCwd, "large.txt"), "x".repeat(1_000_100));
+				return { agent: spec.agent, output: "partial worker output", usage: emptyUsage(), ok: false, error: "worker cancelled", failureKind: "abort" };
+			} };
+		},
+	};
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi, { engineFactories: factories });
+		const { ctx } = makeCtx(cwd);
+		await m.fire("session_start", undefined, ctx);
+		const response = await (m.tool("delegate") as { execute: AnyFn }).execute(
+			"worktree-failed-oversize", { tasks: [{ agent: "scout", task: "implement", isolation: "worktree" }] }, undefined, undefined, ctx,
+		);
+		const text = legText(response);
+		assert.equal(response.isError, true);
+		assert.match(text, /worker cancelled/);
+		assert.match(text, /too large|limit/i);
+		assert.ok(text.includes(childCwd));
+		assert.equal(fs.statSync(path.join(childCwd, "large.txt")).size, 1_000_100);
+	} finally {
+		if (childCwd && fs.existsSync(childCwd)) {
+			gitAt(cwd, "worktree", "remove", "--force", childCwd);
+		}
+	}
+});
+
+test("an isolated worker that removes its worktree reports it unavailable rather than retained", async () => {
+	const cwd = cleanGitRepo();
+	let childCwd = "";
+	const factories: EngineFactories = {
+		makeInProcessEngine: () => ({ run: async (spec) => ({ agent: spec.agent, output: "base", usage: emptyUsage(), ok: true }) }),
+		makeEngine: (deps) => {
+			childCwd = deps.cwd ?? "";
+			return { run: async (spec) => {
+				fs.rmSync(childCwd, { recursive: true, force: true });
+				return { agent: spec.agent, output: "partial", usage: emptyUsage(), ok: false, error: "worker failed", failureKind: "agent" };
+			} };
+		},
+	};
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi, { engineFactories: factories });
+		const { ctx } = makeCtx(cwd);
+		await m.fire("session_start", undefined, ctx);
+		const response = await (m.tool("delegate") as { execute: AnyFn }).execute(
+			"worktree-missing", { tasks: [{ agent: "scout", task: "implement", isolation: "worktree" }] }, undefined, undefined, ctx,
+		);
+		const text = legText(response);
+		assert.equal(response.isError, true);
+		assert.match(text, /unavailable/i);
+		assert.doesNotMatch(text, /worktree retained/i);
+		assert.ok(text.includes(childCwd));
+	} finally {
+		gitAt(cwd, "worktree", "prune");
+	}
+});
+
+test("a cancelled isolated worker still exports recoverable changes and removes its worktree", async () => {
+	const cwd = cleanGitRepo();
+	let childCwd = "";
+	const factories: EngineFactories = {
+		makeInProcessEngine: () => ({ run: async (spec) => ({ agent: spec.agent, output: "base", usage: emptyUsage(), ok: true }) }),
+		makeEngine: (deps) => {
+			childCwd = deps.cwd ?? "";
+			return { run: async (spec) => {
+				fs.writeFileSync(path.join(childCwd, "partial.txt"), "recoverable partial work\n");
+				return { agent: spec.agent, output: "partial", usage: emptyUsage(), ok: false, error: "worker cancelled", failureKind: "abort" };
+			} };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: factories });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const response = await (m.tool("delegate") as { execute: AnyFn }).execute(
+		"worktree-cancel-export", { tasks: [{ agent: "scout", task: "implement", isolation: "worktree" }] }, undefined, undefined, ctx,
+	);
+	assert.equal(response.isError, true);
+	const full = await (m.tool("intercom") as { execute: AnyFn }).execute("worktree-cancel-result", { action: "result", to: "run-1" }, undefined, undefined, ctx);
+	assert.match(legText(full), /recoverable partial work/);
+	assert.equal(fs.existsSync(childCwd), false);
 });
 
 test("an isolated leg cannot fake an artifact with two summary marker lines", async () => {
@@ -2650,6 +2818,8 @@ test("an isolated leg cannot fake an artifact with two summary marker lines", as
 	);
 	assert.equal(response.isError, true);
 	assert.match(legText(response), /no diff|artifact|isolated/i);
+	const full = await (m.tool("intercom") as { execute: AnyFn }).execute("worktree-empty-result", { action: "result", to: "run-1" }, undefined, undefined, ctx);
+	assert.match(legText(full), /No repository changes were made/);
 });
 
 test("opt-in: a fresh install loads NO personas until /persona restore installs them", async () => {
@@ -4149,7 +4319,7 @@ test("native delegate fan-out archives three large reports across real session r
 				if (page.details.nextOffset === undefined) break;
 				offset = page.details.nextOffset;
 			}
-			assert.equal(body, reports[i]);
+			assert.equal(body, `${reports[i]}\n\n[pi-persona] The worker completed, but its conversation could not be retained for continuation.`);
 		}
 		assert.equal(engineCalls, 3, "reload retrieval cannot respawn or spend model calls");
 		assert.equal(reloaded.sentMessages().length, messagesBefore, "read-only retrieval cannot wake the supervisor");
@@ -5086,6 +5256,103 @@ test("persistence: /persona writes the selection and a fresh session restores it
 		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
 		else process.env.PI_AGENT_DIR = previousAgentDir;
 		process.env.PI_PERSONA_PERSIST = "off";
+	}
+});
+
+test("persona transitions serialize F8, off and startup, and shutdown revokes queued choices", async () => {
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	const previousPersist = process.env.PI_PERSONA_PERSIST;
+	const previousDefault = process.env.PI_PERSONA_DEFAULT;
+	try {
+		for (const scenario of ["cycle", "same-turn", "off", "startup", "shutdown", "reload", "removed"] as const) {
+			const agentDir = tempDir("persona-transition-agent-");
+			const cwd = tempDir("persona-transition-workspace-");
+			const definitions = path.join(cwd, ".pi", "agents");
+			fs.mkdirSync(definitions, { recursive: true });
+			for (const [name, model, thinking, tool] of [["alpha", "x", "low", "read"], ["beta", "y", "high", "write"]]) {
+				fs.writeFileSync(path.join(definitions, `${name}.md`), `---\nname: ${name}\npersona: true\nmodel: prov/${model}\nthinking: ${thinking}\ntools:\n  allow: [${tool}]\n---\n${name} transition prompt.\n`);
+			}
+			process.env.PI_AGENT_DIR = agentDir;
+			process.env.PI_PERSONA_PERSIST = "on";
+			if (scenario === "startup") process.env.PI_PERSONA_DEFAULT = "alpha";
+			else delete process.env.PI_PERSONA_DEFAULT;
+			const m = makeMockPi();
+			const { ctx: base, notes } = makeCtx(cwd);
+			let model = { provider: "base", id: "baseline" };
+			let thinking: ReturnType<ExtensionAPI["getThinkingLevel"]> = "medium";
+			const models = [model, { provider: "prov", id: "x" }, { provider: "prov", id: "y" }, { provider: "prov", id: "z" }];
+			const calls: string[] = [];
+			let releaseModel!: () => void;
+			const blockedModel = new Promise<void>((resolve) => { releaseModel = resolve; });
+			m.pi.setModel = async (next) => {
+				calls.push(next.id);
+				if (next.id === "x") await blockedModel;
+				model = next;
+				return true;
+			};
+			m.pi.getThinkingLevel = () => thinking;
+			m.pi.setThinkingLevel = (next) => { thinking = next; };
+			const ctx = { ...base, get model() { return model; }, modelRegistry: { ...registryDefaults, getAll: () => models, getAvailable: () => models } };
+			piPersona(m.pi);
+			let first: Promise<unknown> | undefined;
+			let second: Promise<unknown> | undefined;
+			let reloading: Promise<unknown> | undefined;
+			try {
+				const starting = Promise.resolve(m.fire("session_start", {}, ctx));
+				if (scenario === "startup") first = starting;
+				else {
+					await starting;
+					first = Promise.resolve(m.fireShortcut(ctx));
+					if (scenario === "same-turn") second = Promise.resolve(m.fireShortcut(ctx));
+				}
+				await waitUntil(() => calls.includes("x"), "first persona model selection to suspend");
+				if (scenario === "reload" || scenario === "removed") {
+					if (scenario === "removed") fs.unlinkSync(path.join(definitions, "beta.md"));
+					else fs.writeFileSync(path.join(definitions, "beta.md"), "---\nname: beta\nlabel: Updated beta\npersona: true\nmodel: prov/z\nthinking: xhigh\ntools:\n  allow: [write]\n---\nReloaded beta transition prompt.\n");
+					reloading = Promise.resolve(m.cmd("persona", "reload", ctx));
+					second = Promise.resolve(m.cmd("persona", "beta", ctx));
+				} else second ??= Promise.resolve(scenario === "off" ? m.cmd("persona", "off", ctx) : m.fireShortcut(ctx));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				assert.deepEqual(calls, ["x"], `${scenario}: the next selection waits for the entire previous transition`);
+				if (scenario === "shutdown") await m.fire("session_shutdown", {}, ctx);
+				releaseModel();
+				await Promise.all([first, reloading, second]);
+				const file = path.join(agentDir, "persona", "settings.json");
+				const remembered = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")).lastPersona : null;
+				if (scenario === "shutdown") {
+					assert.deepEqual(calls, ["x"], "shutdown prevents the queued model call");
+					assert.equal(remembered, null, "a late old choice must not be persisted");
+					assert.equal(thinking, "medium", "shutdown prevents the suspended transition's remaining host mutations");
+				} else if (scenario === "off") {
+					assert.equal(model.id, "baseline");
+					assert.equal(thinking, "medium");
+					assert.equal(remembered, null);
+					assert.ok(m.activeToolNames().includes("write"));
+				} else if (scenario === "removed") {
+					assert.equal(model.id, "x");
+					assert.equal(thinking, "low");
+					assert.equal(remembered, "alpha", "a missing queued selection cannot clear the current persona");
+					assert.match(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt, /alpha transition prompt/);
+					assert.ok(notes.some((note) => /beta.*not found/.test(note)), "removal is an explicit selection error");
+				} else {
+					assert.equal(model.id, scenario === "reload" ? "z" : "y");
+					assert.equal(thinking, scenario === "reload" ? "xhigh" : "high");
+					assert.equal(remembered, "beta");
+					assert.match(m.fire("before_agent_start", { systemPrompt: "BASE" }, ctx).systemPrompt, /beta transition prompt/);
+					assert.ok(m.activeToolNames().includes("write"));
+					assert.ok(!m.activeToolNames().includes("read"));
+					if (scenario === "reload") assert.ok(notes.some((note) => note === "persona: Updated beta active"));
+				}
+			} finally {
+				releaseModel();
+				await Promise.allSettled([first, reloading, second]);
+				await m.fire("session_shutdown", {}, ctx);
+			}
+		}
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR; else process.env.PI_AGENT_DIR = previousAgentDir;
+		if (previousPersist === undefined) delete process.env.PI_PERSONA_PERSIST; else process.env.PI_PERSONA_PERSIST = previousPersist;
+		if (previousDefault === undefined) delete process.env.PI_PERSONA_DEFAULT; else process.env.PI_PERSONA_DEFAULT = previousDefault;
 	}
 });
 
@@ -6472,7 +6739,7 @@ test("x on a wake row cancels it through the same stop path as an agent", async 
 	m.pi.setActiveTools(["read", "bash", "monitor", "timer"]);
 	piPersona(m.pi);
 	const { ctx: widgetCtx, widgets } = wakeWidgetCtx(tempDir("pi-persona-wake-stop-"));
-	const TUI_STUB = { requestRender: () => {} };
+	const TUI_STUB = { terminal: { rows: 24, columns: 80 }, requestRender: () => {} };
 	const THEME = { fg: (_role: string, s: string) => s, bold: (s: string) => s };
 	const ctx = {
 		...widgetCtx,
@@ -7880,7 +8147,7 @@ for (const command of ["orchestrate", "flow"] as const) {
 			// the checkpoint's "plan · fanout" phase, whose label contains the same strategy.
 			const target = command === "flow" ? /▸.*flow command-pick/ : /▸.*⏳ fanout\b/;
 			await m.cmd("agents", "", { ...ctx, mode: "tui", ui: { ...ctx.ui, custom: async (factory: AnyFn) => {
-				const overlay = factory({ requestRender() {} }, { fg: (_role: string, text: string) => text, bold: (text: string) => text }, new KeybindingsManager(TUI_KEYBINDINGS), () => {}) as { render(width: number): string[]; handleInput(input: string): void; dispose(): void };
+				const overlay = factory({ terminal: { rows: 24, columns: 160 }, requestRender() {} }, { fg: (_role: string, text: string) => text, bold: (text: string) => text }, new KeybindingsManager(TUI_KEYBINDINGS), () => {}) as { render(width: number): string[]; handleInput(input: string): void; dispose(): void };
 				try {
 					let found = false;
 					for (let index = 0; index < 12; index++) {
@@ -8170,6 +8437,42 @@ function makeExocomCtx(cwd: string, sessionId: string, width = 200) {
 	return { ctx: exocomCtx, notes, widgets };
 }
 
+test("exocom help works before activation and unknown actions cannot send or report status", async () => {
+	const previous = process.env.PI_PERSONA_EXOCOM;
+	delete process.env.PI_PERSONA_EXOCOM;
+	const cwd = exocomWorkspace();
+	const inactive = makeMockPi();
+	const { ctx: inactiveCtx, notes: inactiveNotes } = makeExocomCtx(cwd, "exocom-help-inactive");
+	const a = makeMockPi();
+	const b = makeMockPi();
+	const { ctx: ctxA, notes } = makeExocomCtx(cwd, "exocom-invalid-a");
+	const { ctx: ctxB } = makeExocomCtx(cwd, "exocom-invalid-b");
+	try {
+		piPersona(inactive.pi);
+		await inactive.fire("session_start", undefined, inactiveCtx);
+		await inactive.cmd("exocom", "help", inactiveCtx);
+		assert.match(inactiveNotes.at(-1) ?? "", /Usage: \/exocom/);
+		assert.doesNotMatch(inactiveNotes.at(-1) ?? "", /not requested/i);
+		await inactive.fire("session_shutdown", undefined, inactiveCtx);
+
+		process.env.PI_PERSONA_EXOCOM = "1";
+		piPersona(a.pi); piPersona(b.pi);
+		await a.fire("session_start", undefined, ctxA);
+		await b.fire("session_start", undefined, ctxB);
+		const entriesBefore = a.entries().length;
+		await a.cmd("exocom", "send peer hello", ctxA);
+		assert.match(notes.at(-1) ?? "", /Usage: \/exocom/);
+		assert.equal(a.entries().length, entriesBefore, "invalid action must not append a status result");
+		assert.equal(b.sentMessages().length, 0, "invalid action must not send a message to the peer");
+	} finally {
+		await a.fire("session_shutdown", undefined, ctxA);
+		await b.fire("session_shutdown", undefined, ctxB);
+		if (previous === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = previous;
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("independent Exocom peers discover profiles, voluntarily take work, publish evidence and retain stale tasks", async () => {
 	const previous = process.env.PI_PERSONA_EXOCOM;
 	process.env.PI_PERSONA_EXOCOM = "1";
@@ -8451,6 +8754,8 @@ test("an unknown --exocom=<code> fails closed without joining the current worksp
 		piPersona(m.pi, { exocomArgv: ["node", "pi", "--exocom=Ab0T"] });
 		await m.fire("session_start", undefined, ctx);
 		assert.match(notes.join("\n"), /unknown Exocom join code "Ab0T"/);
+		await m.cmd("exocom", "status", ctx);
+		assert.match(notes.at(-1) ?? "", /failed to start:.*unknown Exocom join code "Ab0T"/);
 		assert.equal(readAll(agentDir, workspaceHash(cwd)).length, 0);
 		assert.ok(!m.activeToolNames().includes("exocom_list"));
 	} finally {
@@ -8460,6 +8765,28 @@ test("an unknown --exocom=<code> fails closed without joining the current worksp
 		process.env.PI_AGENT_DIR = prevAgentDir;
 		fs.rmSync(cwd, { recursive: true, force: true });
 		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("exocom status retains the actual plane startup failure after cleanup", async () => {
+	const previous = process.env.PI_PERSONA_EXOCOM;
+	process.env.PI_PERSONA_EXOCOM = "1";
+	const cwd = exocomWorkspace();
+	const m = makeMockPi();
+	const { ctx, notes } = makeExocomCtx(cwd, "exocom-start-failure");
+	const start = mock.method(ExocomPlane.prototype, "start", async () => { throw new Error("fixture socket bind failed"); });
+	try {
+		piPersona(m.pi);
+		await m.fire("session_start", undefined, ctx);
+		await m.cmd("exocom", "status", ctx);
+		assert.match(notes.at(-1) ?? "", /failed to start: fixture socket bind failed/);
+		assert.ok(!m.activeToolNames().includes("exocom_list"));
+	} finally {
+		start.mock.restore();
+		await m.fire("session_shutdown", undefined, ctx);
+		if (previous === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = previous;
+		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -8798,7 +9125,7 @@ test("a persona that cannot answer or decline leaves Exocom instead of advertisi
 		"---\nname: nameless\nlabel: Nameless\npersona: true\ntools:\n  deny: [exocom_name]\n---\nCan collaborate but may not rename itself.",
 	);
 	const m = makeMockPi();
-	const { ctx } = makeExocomCtx(cwd, "answerless-session");
+	const { ctx, notes } = makeExocomCtx(cwd, "answerless-session");
 	const entry = entryFileFor(cwd, "answerless-session");
 	try {
 		piPersona(m.pi);
@@ -8807,6 +9134,8 @@ test("a persona that cannot answer or decline leaves Exocom instead of advertisi
 
 		await m.cmd("persona", "answerless", ctx);
 		assert.equal(fs.existsSync(entry), false, "an answerless persona is not published as an ask target");
+		await m.cmd("exocom", "status", ctx);
+		assert.match(notes.at(-1) ?? "", /denies both exocom_answer and exocom_decline/);
 		for (const name of EXOCOM_TOOL_NAMES) {
 			assert.ok(!m.activeToolNames().includes(name), `${name} is inactive while protocol admission fails`);
 		}
@@ -10033,7 +10362,7 @@ test("a persona downgrade landing mid-start leaves no ghost plane advertising it
 		);
 		notes.length = 0;
 		await m.cmd("exocom", "", ctx);
-		assert.match(notes.join("\n"), /not active/);
+		assert.match(notes.join("\n"), /active persona denies the bus/);
 	} finally {
 		await m.fire("session_shutdown", undefined, ctx);
 		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;

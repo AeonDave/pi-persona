@@ -238,6 +238,14 @@ and control contracts; merging them into a universal task engine would hide thos
   `settings-store.ts` (canonical preferences, per-persona models and last-selected persona),
   `spine.ts` (the shared behavioral layer's SOURCE resolution — docs/SPINE.md; composition sits in
   `persona.ts` for supervisor turns and in the engines for delegated legs).
+  The controller orders persona transitions, including the extension's persistence and Exocom
+  reconciliation callback. Selection and cycling resolve at their turn in that queue. Shutdown
+  invalidates queued work and subsequent transition steps; a Pi model change already awaiting
+  authentication cannot be cancelled or rolled back. Capabilities change when the transition
+  starts, preserving immediate tool-call revocation; model/effort/tool application is ordered,
+  not an atomic host transaction.
+  Startup checks the disposed state after each asynchronous handoff before opening telemetry;
+  late authentication or Exocom reconciliation cannot acquire resources after Persona teardown.
 - **`src/tools/`** — `delegate.ts`, `intercom.ts`, `exocom.ts` (the `exocom_list`/`exocom_send`
   tools), `exocom-work.ts` (claim/ask/answer/decline/wait/release/progress). **`src/ui/`** — agent tree/overlay, model picker, `wake-rows.ts` (the monitor/timer → tree-row projection), `presentation.ts` (the shared
   card-compaction/sanitization helpers behind the projection rules below), `usage.ts`
@@ -326,11 +334,55 @@ and untracked ignored outputs are not exported. The original checkout's ignored 
 untouched; tasks that need local-only inputs must recreate or provide them explicitly. The
 worktree's initial commit is pinned before the worker starts. Export compares the final file state
 against that immutable commit, so worker commits, later unstaged changes and new files are included
-together. The diff is captured before the temporary tree is removed, then returned to the supervisor;
-commit history is not applied to the main checkout. If Git cannot capture the diff but the worker
-returned a unified patch, that patch is retained with a warning that it was worker-provided and not
-verified against the worktree state. Every git call is asynchronous so the extension host keeps
+together. A successful export allows the temporary tree to be removed, including after a failed or
+cancelled worker, except for a successfully saved delegate conversation whose tree is retained for
+continuation. A session-backed worker that may still be writing retains the tree without attempting
+concurrent export. Commit history is not applied to the main checkout. If export fails (including
+the 1,000,000-character artifact limit), or execution throws after the worker callback begins,
+the directory and its worktree registration are retained for manual recovery. The result identifies
+the path, pinned starting commit and cause; it preserves the worker's available output, usage,
+model and failure classification. Failures before worker execution still clean up the unused tree.
+The path is checked without following replacement symlinks; a directory already removed or
+replaced by the worker is reported as unavailable, never promised recoverable. Both outcomes
+prevent automatic provider/main-model retry over an unexported attempt.
+If Git cannot capture the diff but the worker returned a unified patch, that patch is retained with
+a warning that it was worker-provided and not verified against the worktree state; this does not
+authorize deleting the unexported work. `compete` reports recovery locations even for candidates
+that do not win, outside the blind ballot. There is no automatic merge, retry or recovery cleanup.
+Ignored outputs and net-zero commit history remain outside the final-state artifact contract.
+Every git call is asynchronous so the extension host keeps
 rendering, ticking timers, and serving broker sockets while a large checkout runs.
+
+### Continuing a delegate worker
+
+Only a successfully settled, saved `delegate` worker can be continued. `delegate { resume:
+<latestRunId>, task, brief? }` starts a new tracked turn from the worker's native Pi conversation;
+it is not a restart of a running or failed task. The new run retains the assigned alias, agent,
+provider-qualified model, effort and other worker configuration. Current delegate gates, brief
+requirements, launch pool, limits and interactive/headless delivery rules still apply. Overrides
+require a fresh worker. Admission rechecks the owning session and branch, workspace, persona and
+configuration; both engines also compare the effective prompt, selected skills and tool contract
+before provider use. A missing, changed, busy, expired or failed transcript fails closed.
+
+`conversations/store.ts` owns a separate native JSONL transcript beneath the persistent supervisor
+session's directory and records branch-scoped lineage metadata in the parent session. The exact
+latest run ID selects the next turn; old IDs cannot fork an already-continued worker. One lease
+serializes access until the writer is known quiescent, including after cancellation or a forced UI
+settlement. Stored content can include worker prompts, tool calls and results; it is not the terminal
+result archive. Availability lasts seven days from the last saved turn; admission and settlement
+limits are 8 MiB per transcript, 64 MiB total and 64 lineages per owner. A running writer may cross
+a byte limit before settlement, whereupon that transcript is not saved as a continuation. A fresh,
+uncommitted transcript is removed once its writer is quiescent; saved conversations are not evicted
+automatically on expiry or quota. If a new conversation cannot be admitted, the ordinary delegation still runs without saved
+continuation. `intercom conversations` shows this branch's availability; explicit `intercom forget
+{ to: <latestRunId> }` removes the transcript and any retained worktree, including unapplied changes,
+without deleting archived terminal reports.
+
+For a resumable isolated delegate, the engine retains the same registered worktree and its pinned
+base after a successful export. A later turn validates repository ownership and registration before
+running in that exact directory; a missing or foreign worktree never falls back to the main checkout.
+A failed continuation retains the tree for recovery and cannot itself be resumed. Council, flow and
+strategy worktrees retain their existing export and cleanup policy.
 
 Transient retries inside one agent session belong to the host **Pi runtime**'s `retry.*` settings, not
 a persona contract — pi-persona neither parses retry notation nor schedules its own backoff. Both
@@ -344,6 +396,13 @@ family. A provider-qualified `spec.model` is an explicit pin and stays strict by
 prevents an explicitly selected OpenAI or native Claude leg from silently moving to an unrelated paid
 provider. (`"verification"` is a further terminal value that never appears on an `AgentResult` — see
 `map`'s `verify` param in [`docs/STRATEGIES.md`](./STRATEGIES.md).)
+An existing worker conversation never switches providers. A fresh worker may use the normal fallback
+policy only after its failed writer is quiescent and its private transcript has been safely discarded.
+Fallback accumulates billable input/output, cache usage, cost and turns across every executed
+attempt through the shared `sumUsage` reducer. The final attempt alone supplies the outcome,
+model/session metadata and live `contextTokens` snapshot. Fallback notifications and child-engine
+progress callbacks are observational: a throwing consumer cannot interrupt recovery, process
+cleanup or result settlement.
 
 Strategy/council/flow runs use a different, explicitly authorized recovery policy: the selected model
 is tried first without arbitrary provider reroutes, then `makeSDK` may retry a `provider` or
@@ -413,7 +472,14 @@ Scalar preferences are activation-scoped: saving marks differences pending until
 Pi's native `/reload`, not `/new`; the panel never reloads automatically. `/persona reload` only refreshes resources.
 The Models section selects the assignment owner independently of the viewed council/orchestration
 profile, supports exact-key resets and keeps inline pins immutable. It patches the same file and updates
-the resolver cache for future runs, never changing an already-running worker. Native compaction is untouched.
+the resolver cache for future runs, never changing an already-running worker.
+
+Native manual and automatic compaction remain Pi-owned. After `session_compact`, Persona prepares
+a bounded request-local snapshot of queued/running and pending uncollected runs, their available
+session-backed result refs, and pending ask IDs. It is scoped to the compaction entry's session and
+branch and remains eligible until the first successful assistant response. The snapshot has no task
+or report bodies, creates no persistent history entry or operator card, and does not wake the model;
+its timestamp makes clear that the observed status can change.
 
 Idle compaction is retained behind a hard host-qualification gate. Pi 1.4.0 has a reproduced
 controller-cleanup race between overlapping manual compactions; a public hook veto cannot prevent
@@ -425,8 +491,8 @@ The preserved policy is off by default, interactive-TUI only, 15 minutes idle an
 context occupancy strictly above 40%. Unknown occupancy, workers, queued wakes, unanswered asks,
 pending input and nonblank drafts block admission. Startup, reload and branch selection do not arm
 an episode. Real activity may arm a new one; an attempt consumes its episode even on cancellation,
-failure or an above-threshold result. Pi owns preparation and summary generation; Persona adds no
-summary prompt, continuity checkpoint or Mind memory write. See the
+failure or an above-threshold result. Pi owns preparation and summary generation; the blocked idle
+scheduler adds no summary prompt or Mind memory write. See the
 [qualification plan](https://github.com/AeonDave/pi-persona/blob/main/docs/plans/2026-10-20-compaction-evaluation-proposal.md)
 for the failing host check and the checks required before removing the gate.
 
@@ -865,6 +931,16 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   rows excepted) plus any run root with a stop handle (council/flow/mandated runs), and `x` on such a
   root stops the whole run.
   `intercom stop` / `stop { to: "all" }` also cover tracker runs, `council` and `flow` included;
+- F9 and Mind's F10 share the stateless `ui/inspector-frame.ts` geometry and painter. The local
+  synchronous `pi-persona:inspector-frame:v1` query returns `{ version: 1, provider: "pi-persona",
+  frame }`; the frame exposes `viewportRows`, `layout` and `render`. Both host overlays use 90%
+  width, the same bounded row allocation and one-row margins; the painter uses the theme's
+  `border` token and identical gutters. Content owners reserve their actual header/footer rows,
+  keep selection visible and page by the rendered content capacity. Height-only resize invalidates
+  F9's layout. Native Input owns steering editing and receives focus only while composing.
+  This replaces two drifting frame implementations; it introduces no shared selection, runtime
+  controls or storage policy, and no new package dependency. Mind resolves the service when opening;
+  an unavailable service prevents only the inspector from opening, with a reload diagnostic.
 - the F9 overlay's *directed* keys (`x` stop, `s` steer) act only on the agent the ▸ marker still
   shows; if that agent settles and is pruned mid-keystroke, the selection re-anchors visibly and the
   keypress is spent re-aiming instead of aborting an agent the user never chose. ↑↓, ⏎, and the scroll
@@ -960,6 +1036,11 @@ underlying result or changing a strategy's contract.
 
 ## exocom — the external plane
 
+The `/exocom` command is a read-only status surface. Its inactive-state explanation derives from
+the activation request, argument validation, effective bus and ask-closer permissions, and the
+last startup error. `src/exocom/availability.ts` owns that projection; it does not start or authorize
+the plane. Unknown command arguments receive usage instead of silently displaying status.
+
 `src/exocom/` is a separate plane from everything above: every plane in "the comm plane in practice"
 is **internal** to one supervisor's own run — hierarchical, keyed by that session id, talking to
 children *it* spawned. **exocom is flat and external**: independent, top-level Pi instances sharing
@@ -971,6 +1052,13 @@ Exocom supplies fenced one-way postcards and presence; chat `message` never muta
 state. `src/exocom/ledger.ts` stores claims, questions, answers and progress; `src/exocom/collaboration.ts`
 adds voluntary tasks, optional offers and explicit evidence excerpts. Tool adapters live in
 `src/tools/exocom.ts`, `src/tools/exocom-collaboration.ts`, and `src/tools/exocom-profile.ts`.
+
+On Pi reload shutdown, `src/exocom/reload.ts` bounds a snapshot of accepted, undelivered postcards
+and replies in a native session entry, including their fenced text and authenticated reply context.
+It restores the snapshot once on the same session, branch, scope and agent directory within five
+minutes; an ineligible or expired handoff is invalidated and reported. Reply routing and hop context
+survive the handoff. This is not crash or process-restart recovery; ledger-backed asks, answers and
+offers retain their own lifecycle.
 `exocom_ask` resolves its target through the live registry to a raw session id, never a display name.
 Attribution is resolved by `from_session`, never the envelope's self-reported `from_name`.
 
@@ -1090,10 +1178,13 @@ another same-user process, and not a delegate/council or task/run replacement.
   `exocom_profile` contains up to eight self-described capability labels (48 characters each) and
   optional `available`, `busy` or `away` status. Missing status is unknown. Profiles exist only for
   their live Exocom session and never prove skills, permission or availability.
-- **Inbound delivery is bounded without loss.** Each message is injected under the same byte cap
+- **Active-session delivery is bounded.** Each message is injected under the same byte cap
   whether plain text or an artifact descriptor. Bursts stay FIFO-queued; each rate-limited wake drains
   as many whole messages as fit, leaving the rest queued. A presentation cap on the collapsed card
-  never discards the rest of the queue.
+  never discards the rest of the queue. A full inbox refuses new messages while still acknowledging
+  accepted duplicates. Pending receipts remain deduplicated even after the normal seen-ID TTL.
+  Startup and teardown reject arrivals until a live receiver can own them. Ordinary shutdown drops
+  undelivered postcards; the bounded reload handoff above is the explicit exception.
 
 exocom never touches the delegate/council/broker path. One instance can be **both** a supervisor
 (delegating its own children) **and** an exocom peer at once — the planes are independent and

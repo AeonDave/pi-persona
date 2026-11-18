@@ -431,6 +431,20 @@ test("sdk strips a strategy-supplied resultRefs grant — strategies cannot enla
 	assert.deepEqual(seen, [undefined], "the strategy's own refs never reach the engine");
 });
 
+test("sdk strips a strategy-supplied private worker session, including on recovery", async () => {
+	const seen: Array<Parameters<StrategyEngine["run"]>[0]> = [];
+	const sdk = makeSDK({
+		engine: { run: async (spec) => {
+			seen.push(spec);
+			return seen.length === 1 ? { ...ok(spec.agent), ok: false, failureKind: "provider", modelUsed: "old/model" } : ok(spec.agent);
+		} },
+		roster: { team: () => [] }, limits: LIMITS, sessionModel: "new/model",
+	});
+	await sdk.agent({ agent: "a", task: "t", session: { file: "/arbitrary/session.jsonl", resume: true } });
+	assert.equal(seen.length, 2);
+	assert.ok(seen.every((spec) => !("session" in spec)), "neither attempt may open a strategy-provided session");
+});
+
 test("withResultRefs pins a trusted grant at the engine seam (flow reference mode wiring)", async () => {
 	const seen: Array<readonly string[] | undefined> = [];
 	const engine: StrategyEngine = {

@@ -101,7 +101,7 @@ test("worktree export applies worker commits, uncommitted edits and new binary f
 			await gitOk(exec, "-C", dir, "commit", "--quiet", "-m", "worker change A");
 			await writeFile(join(dir, "uncommitted.txt"), expected.get("uncommitted.txt")!);
 			await writeFile(join(dir, "new.bin"), expected.get("new.bin")!);
-			return captureWorktreeArtifact(dir, baseCommit, exec);
+			return { cleanup: "remove" as const, value: await captureWorktreeArtifact(dir, baseCommit, exec) };
 		});
 
 		assert.equal(artifact.ok, true, artifact.ok ? "" : artifact.error);
@@ -135,7 +135,7 @@ test("worktree export includes commit-only changes", async () => {
 			await writeFile(join(dir, "committed.txt"), expected);
 			await gitOk(exec, "-C", dir, "add", "--", "committed.txt");
 			await gitOk(exec, "-C", dir, "commit", "--quiet", "-m", "only committed change");
-			return captureWorktreeArtifact(dir, baseCommit, exec);
+			return { cleanup: "remove" as const, value: await captureWorktreeArtifact(dir, baseCommit, exec) };
 		});
 		assert.equal(artifact.ok, true, artifact.ok ? "" : artifact.error);
 		if (!artifact.ok) return;
@@ -163,6 +163,7 @@ test("withWorktree removes the real worktree when resolving its baseline fails",
 		await assert.rejects(
 			() => withWorktree(repo, failBaseline, async () => {
 				bodyRan = true;
+				return { cleanup: "remove" as const, value: undefined };
 			}),
 			/baseline|commit|resolve/i,
 		);
@@ -172,6 +173,24 @@ test("withWorktree removes the real worktree when resolving its baseline fails",
 		const listed = await gitOk(exec, "-C", repo, "worktree", "list", "--porcelain");
 		assert.deepEqual(listed.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => realpathSync.native(line.slice("worktree ".length))), [realpathSync.native(repo)], "the worktree registration is removed");
 	} finally {
+		await rm(tempRoot, { recursive: true, force: true });
+	}
+});
+
+test("a thrown worker retains its real worktree, contents, registration, and pinned baseline", async () => {
+	const { tempRoot, repo, exec } = await makeRepoFixture();
+	let worktreeDir = "";
+	try {
+		const baseline = (await gitOk(exec, "-C", repo, "rev-parse", "HEAD")).trim();
+		await assert.rejects(() => withWorktree(repo, exec, async (dir) => {
+			worktreeDir = dir;
+			await writeFile(join(dir, "unfinished.txt"), "recover me\n");
+			throw new Error("worker crashed");
+		}), (error: Error) => error.message.includes("worker crashed") && error.message.includes(worktreeDir) && error.message.includes(baseline));
+		assert.equal(await readFile(join(worktreeDir, "unfinished.txt"), "utf8"), "recover me\n");
+		assert.match(await gitOk(exec, "-C", repo, "worktree", "list", "--porcelain"), /pi-persona-wt-/);
+	} finally {
+		if (worktreeDir && existsSync(worktreeDir)) await gitOk(exec, "-C", repo, "worktree", "remove", "--force", worktreeDir);
 		await rm(tempRoot, { recursive: true, force: true });
 	}
 });

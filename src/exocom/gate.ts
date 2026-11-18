@@ -7,5 +7,6 @@ export function constrainedTurnAllows(toolName: string, input?: unknown): boolea
 	const action = (input as { action?: unknown }).action;
 	return (toolName === "exocom_task" && (action === "list" || action === "get"))
 		|| (toolName === "exocom_publish" && action === "read")
-		|| (toolName === "exocom_profile" && action === "get");
+		|| (toolName === "exocom_profile" && action === "get")
+		|| (toolName === "intercom" && action === "conversations");
 }

@@ -6,6 +6,7 @@
  */
 
 import type { ThinkingLevel } from "../core/types.ts";
+import type { ConversationWorktree } from "../core/worktree-recovery.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
@@ -19,6 +20,8 @@ import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 
 export interface AgentRunSpec {
 	agent: string;
+	/** INTERNAL runtime-owned worker transcript; never an argument supplied by a strategy or model. */
+	session?: { file: string; resume: boolean; worktree?: ConversationWorktree };
 	/** Supervisor-assigned display identity for this run. This is metadata only; handles and
 	 * routing continue to use the configured agent name and the engine-minted child handle. */
 	name?: string;
@@ -263,10 +266,9 @@ function abortedLeg(agent: string): AgentResult {
 	return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
 }
 
-/** Copy of a spec with its `resultRefs` removed — the SDK's one strip point, so a strategy's
- *  own value never reaches an engine (only `withResultRefs`-style trusted wiring sets it). */
-function stripResultRefs(spec: AgentRunSpec): AgentRunSpec {
-	const { resultRefs: _untrusted, ...rest } = spec;
+/** Strip runtime-owned grants before a strategy's request reaches the engine. */
+function stripRuntimeGrants(spec: AgentRunSpec): AgentRunSpec {
+	const { resultRefs: _untrusted, session: _session, ...rest } = spec;
 	return rest;
 }
 
@@ -302,7 +304,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 			// Reference-handoff grants are trusted wiring, never strategy input: drop any
 			// strategy-supplied `resultRefs` here (the flow path re-pins them at the engine
 			// seam via `withResultRefs`, which runs BELOW this layer).
-			const spec = requested.resultRefs === undefined ? requested : stripResultRefs(requested);
+			const spec = requested.resultRefs === undefined && requested.session === undefined ? requested : stripRuntimeGrants(requested);
 			const key = uiKeyFor(spec);
 			let currentAttempt = agentAttemptIdentity(spec);
 			const finish = (result: AgentResult): AgentResult => {
@@ -400,7 +402,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					// afforded is skipped with a stated reason and the ORIGINAL cause is returned, because
 					// throwing would turn a leg that merely lost its model into a run-fatal breach.
 					const main = currentMain();
-					const plan = isInfrastructureFailure(first)
+					const plan = isInfrastructureFailure(first) || first.worktreeRecovery
 						? null
 						: planModelRecovery(first, { ...(main ? { sessionModel: main } : {}), ...(spec.model ? { requested: spec.model } : {}) });
 					if (!plan) return first;

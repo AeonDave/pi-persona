@@ -28,8 +28,10 @@ import { emptyUsage } from "../engine/stream.ts";
 import { toolUsageField, type ChildUsageLedger } from "../ui/usage.ts";
 import type { TerminalResultArchive } from "../results/archive.ts";
 import { pageLiveResult, projectResultPage, resultReceiptHint } from "../results/retrieval.ts";
+import type { WorkerConversations } from "../extension/conversations.ts";
 
 export interface IntercomToolDeps {
+	conversations?: WorkerConversations;
 	get lastCtx(): ExtensionContext | undefined;
 	set lastCtx(value: ExtensionContext | undefined);
 	tracker: AsyncRunTracker;
@@ -141,6 +143,8 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				Type.Literal("peek"),
 				Type.Literal("result"),
 				Type.Literal("results"),
+				Type.Literal("conversations"),
+				Type.Literal("forget"),
 				Type.Literal("steer"),
 				Type.Literal("stop"),
 				Type.Literal("list"),
@@ -171,6 +175,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			"Steer, stop and inspect your background sub-agents; a finished run or batch wakes you with a completion follow-up.",
 			"Never `peek` healthy children; use it only for status you need. `result { to: runId }` pages a live settled payload by run id (8000 units default, 16000 maximum).",
 			"`results { cursor?, limit? }` lists saved terminal summaries across this session's branches (20 default, 50 maximum); pass nextCursor for the next page.",
+			"`conversations` lists this branch's saved worker conversations and whether they can continue. Use delegate { resume: '<latest run id>', task: '<follow-up>' }. `forget { to: '<latest run id>' }` explicitly discards a saved worker conversation and its retained isolated worktree, including unapplied changes; archived reports remain. Never forget work you still need.",
 			"`result { ref: 'result:<UUID>', offset?, limit? }` reads a saved report, including after reload, without collecting, billing, restarting a worker or waking the model. Memory-only references last only for this activation. Run ids route only the current runtime; never guess a historical run by id.",
 			"Use nextOffset for more UTF-16 pages. Page ranges are zero-based, half-open [start,end) UTF-16 units. Only a whole live body returned in one read, or explicit live collect:true, suppresses a pending completion. Archive ref reads reject collect.",
 			"`steer` sends a soft course-correction to one (by run id); in-process async runs can receive it mid-run,",
@@ -182,6 +187,16 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		parameters: IntercomToolParams,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			d.lastCtx = ctx;
+			if (params.action === "conversations") {
+				const rows = d.conversations?.entries(ctx) ?? [];
+				const text = rows.length ? rows.map((r) => `${r.id} · ${sanitizeDisplayLabel(r.label)} · ${r.available ? "ready to continue" : `unavailable: ${sanitizeDisplayLabel(r.reason ?? "unknown", "unknown", 180)}`}`).join("\n") : "No saved worker conversations on this branch.";
+				return { content: [{ type: "text", text }], details: { action: "conversations", count: rows.length }, isError: false };
+			}
+			if (params.action === "forget") {
+				const forgotten = params.to && d.conversations ? await d.conversations.forget(ctx, params.to) : undefined;
+				const text = forgotten?.ok ? "Worker conversation and retained isolated workspace discarded. Archived reports remain." : forgotten?.error ?? "intercom forget requires the latest saved worker run id in to.";
+				return { content: [{ type: "text", text }], details: { action: "forget", ok: forgotten?.ok === true }, isError: forgotten?.ok !== true };
+			}
 			// `to` comes from model-authored tool arguments. Use the exact value for routing, but never
 			// interpolate it into trusted prose without reducing it to compact identifier metadata.
 			const displayTarget = params.to === undefined ? undefined : sanitizeDisplayLabel(params.to, "run");
@@ -360,6 +375,7 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 				? state?.target?.id === args.to ? state.target.label : action === "send" ? displayBusTarget(args.to) : displayRunTarget(args.to)
 				: undefined;
 			if (action === "peek") target = runTarget ?? "all";
+			else if (action === "forget") target = typeof args.to === "string" ? sanitizeDisplayLabel(args.to, "run") : "?";
 			else if (action === "result" && typeof args.ref === "string") target = compactInlineText(args.ref, { maxChars: 80 }) || "?";
 			else if (["result", "steer", "stop"].includes(action)) target = runTarget ?? "?";
 			else if (action === "send") target = runTarget ?? "?";

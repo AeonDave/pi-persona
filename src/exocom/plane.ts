@@ -34,7 +34,7 @@ import { frameSigningPayload, isExocomFrame, isSemanticFrame, nextHops, parseExo
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
 import { normalizeExocomProfile, type ExocomProfile } from "./profile.ts";
-import { isAlive, normalizePeerName, prune, readAll, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
+import { isAlive, normalizePeerName, normalizeRegistryEntry, prune, readAll, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
 
 export interface ExocomIdentity {
 	session_id: string; name: string; persona: string; purpose: string; color: string;
@@ -354,11 +354,23 @@ function safeArtifactDirectory(path: string): Stats | undefined {
 	}
 }
 
-interface InboundContext {
+export interface InboundContext {
 	msg_id: string;
 	hops: number;
 	entry: RegistryEntry;
 	replyTarget: string;
+}
+
+/** Validate the receiver-owned reply context before admitting it from a reload entry. */
+export function validReloadInboundContext(value: unknown): value is InboundContext {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<InboundContext>;
+	const entry = normalizeRegistryEntry(candidate.entry);
+	if (!entry?.public_key || typeof candidate.msg_id !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(candidate.msg_id)
+		|| typeof candidate.hops !== "number" || !Number.isInteger(candidate.hops) || candidate.hops < 0 || candidate.hops > EXOCOM.MAX_HOPS
+		|| candidate.replyTarget !== qualifiedTarget(entry)) return false;
+	try { createPublicKey({ key: Buffer.from(entry.public_key, "base64"), format: "der", type: "spki" }); return true; }
+	catch { return false; }
 }
 
 /** Display-time-only name disambiguation. The registry FILE is keyed by session_id (registry.ts),
@@ -659,6 +671,24 @@ export class ExocomPlane {
 	private hasCachedReply(msgId: string): boolean {
 		for (const context of this.inboundContext.values()) if (context.msg_id === msgId) return true;
 		return false;
+	}
+
+	/** Capture only the authenticated context belonging to a queued postcard. */
+	getInboundContext(sender: string, msgId: string): InboundContext | undefined {
+		const context = this.inboundContext.get(inboundHopKey(sender, msgId));
+		return context ? { ...context, entry: { ...context.entry } } : undefined;
+	}
+
+	/** Restore a receiver-owned reload snapshot, validating its route and public key again. */
+	restoreInboundContext(value: InboundContext): boolean {
+		if (!validReloadInboundContext(value)) return false;
+		const entry = normalizeRegistryEntry(value.entry)!;
+		this.inboundContext.set(inboundHopKey(entry.session_id, value.msg_id), { ...value, entry });
+		if (this.inboundContext.size > MAX_TRACKED_HOPS) {
+			const oldest = this.inboundContext.keys().next().value;
+			if (oldest !== undefined) this.inboundContext.delete(oldest);
+		}
+		return true;
 	}
 
 	/** Stable, routable token for an authenticated inbound sender. Human display

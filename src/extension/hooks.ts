@@ -83,7 +83,7 @@ export interface HookHost {
 	/** Refuses an unchanged repeat of an intercom peek/result; absent when the nudge kill switch is off. */
 	pollGuard: PollGuard | undefined;
 	/** The async-run tracker: what is still running, and the run-id counter a restore continues. */
-	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom">;
+	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom" | "forceSettle">;
 	appendNudgeEntry(content: string): void;
 	completionNotifier: IdleCoalescingNotifier<AsyncRun>;
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
@@ -193,6 +193,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 
 	// ── lifecycle ─────────────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
+		h.disposed = false;
 		const memoryOwnerReady = h.memoryOwner.start(ctx.sessionManager);
 		h.companionActivities.start(ctx);
 		clearInFlight();
@@ -255,8 +256,12 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			}
 			h.personaHost.setStatus(h.controller.activePersona?.label);
 		}
+		if (h.disposed) return;
+		exocom.prepareReload(ctx, _event?.reason === "reload");
 		await exocom.reconcile(ctx); // after persona activation, so plane + active tools share one gate
+		if (h.disposed) return;
 		await h.telemetry?.stop("session-replaced");
+		if (h.disposed) return;
 		h.telemetry = undefined;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (sessionId) {
@@ -316,7 +321,6 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.peekWatcher.reset(); // …nor a stale "already surfaced this leg as stuck" set into the next session
 		h.completionNotifier.cancel(); // …nor the coalesced-delivery flush timers
 		h.intercomNotifier.cancel();
-		exocom.notifier?.cancel(); // …nor a late exocom follow-up (M1) — cancelled BEFORE exocom.stop tears down the plane below
 		exocom.waitNotifier?.cancel();
 		h.timerScheduler.cancelAll(); // …nor any armed alarms (never wake the next session)
 		h.timerNotifier.cancel();
@@ -331,6 +335,9 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				/* ignore */
 			}
 		}
+		// Closing this activation must settle its tracker entries before another activation can
+		// accept notifications. A late engine result is then discarded by the tracker itself.
+		for (const run of h.tracker.running()) h.tracker.forceSettle(run.id, "session ended");
 		h.stopRegistry.clear();
 		h.stopRequested.clear();
 		h.steerRegistry.clear();
@@ -340,7 +347,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// pending would otherwise see `exocom.plane` unset, no-op, and let that start bind a socket
 		// and register an entry for a session that no longer exists. Idempotent either way — off
 		// (or never started) ⇒ a no-op.
-		await exocom.queue(() => exocom.stop());
+		await exocom.queue(() => exocom.stop(event?.reason === "reload" ? ctx : undefined));
 		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
 		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
 		// `SupervisorBroker.close()` is itself best-effort (never blocks shutdown on a teardown error).

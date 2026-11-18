@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ConversationStore } from "../../../src/conversations/store.ts";
 
 import { withModelFallback } from "../../../src/engine/fallback.ts";
 import type { ModelLite } from "../../../src/core/models.ts";
@@ -22,7 +26,7 @@ function stubEngine(results: Array<Partial<AgentResult>>): { engine: StrategyEng
 			calls.push(spec.model ?? "(default)");
 			const scripted = results[Math.min(i, results.length - 1)] ?? {};
 			i += 1;
-			const r: AgentResult = { agent: spec.agent, output: scripted.output ?? "", usage: emptyUsage(), ok: scripted.ok ?? true };
+			const r: AgentResult = { agent: spec.agent, output: scripted.output ?? "", usage: scripted.usage ?? emptyUsage(), ok: scripted.ok ?? true };
 			const mu = scripted.modelUsed ?? spec.model; // default: report the model actually attempted
 			if (mu) r.modelUsed = mu;
 			if (scripted.failureKind) r.failureKind = scripted.failureKind;
@@ -37,6 +41,16 @@ function stubEngine(results: Array<Partial<AgentResult>>): { engine: StrategyEng
 // so each reroute reports the model it really ran on.
 const provider = (): Partial<AgentResult> => ({ ok: false, failureKind: "provider" as FailureKind, error: "boom" });
 
+test("provider fallback preserves retained work and does not rerun a pinned opt-in leg", async () => {
+	const worktreeRecovery = { path: "/retained", baseCommit: "abc", reason: "export failed", availability: "retained" as const };
+	let calls = 0;
+	const engine: StrategyEngine = { async run() { calls++; return { agent: "x", output: "partial", usage: emptyUsage(), ok: false, failureKind: "provider", modelUsed: "anthropic/m", worktreeRecovery }; } };
+	const result = await withModelFallback(engine, { models: MODELS, allowCrossProviderFallback: true }).run({ agent: "x", task: "t", model: "anthropic/m" });
+	assert.equal(calls, 1);
+	assert.equal(result.failureKind, "provider");
+	assert.deepEqual(result.worktreeRecovery, worktreeRecovery);
+});
+
 test("a provider failure reroutes to the same id under another provider and succeeds", async () => {
 	const { engine, calls } = stubEngine([provider(), { ok: true, modelUsed: "amazon-bedrock/m", output: "done" }]);
 	const wrapped = withModelFallback(engine, { models: MODELS, preferProvider: "anthropic", allowCrossProviderFallback: true });
@@ -45,6 +59,23 @@ test("a provider failure reroutes to the same id under another provider and succ
 	assert.equal(r.modelUsed, "amazon-bedrock/m");
 	assert.equal(calls.length, 2, "one reroute");
 	assert.equal(calls[1], "amazon-bedrock/m", "retried on the alternate provider");
+});
+
+test("provider fallback accounts for every attempted route and preserves the final result metadata", async () => {
+	for (const succeeds of [true, false]) {
+		const attempts: AgentResult[] = [
+			{ agent: "x", output: "first partial", ok: false, failureKind: "provider", modelUsed: "anthropic/m", usage: { input: 10, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.125, contextTokens: 100, turns: 1 } },
+			{ agent: "x", output: "second partial", ok: false, failureKind: "provider", modelUsed: "amazon-bedrock/m", usage: { input: 20, output: 4, cacheRead: 6, cacheWrite: 8, cost: 0.25, contextTokens: 200, turns: 2 } },
+			{ agent: "x", output: "final answer", ok: succeeds, ...(!succeeds ? { failureKind: "provider" as const, error: "final provider failed" } : {}), modelUsed: "copilot/m", thinkingRequested: "high", thinkingEffective: "medium", structured: { answer: "final" }, sessionSaved: succeeds, sessionQuiescent: true, usage: { input: 30, output: 6, cacheRead: 9, cacheWrite: 12, cost: 0.5, contextTokens: 300, turns: 3 } },
+		];
+		const originals = structuredClone(attempts);
+		let calls = 0;
+		const engine: StrategyEngine = { async run() { return attempts[calls++]!; } };
+		const result = await withModelFallback(engine, { models: MODELS, allowCrossProviderFallback: true }).run({ agent: "x", task: "t", model: "anthropic/m" });
+		assert.equal(calls, 3);
+		assert.deepEqual(result, { ...attempts[2], usage: { input: 60, output: 12, cacheRead: 18, cacheWrite: 24, cost: 0.875, contextTokens: 300, turns: 6 } });
+		assert.deepEqual(attempts, originals, "accounting must not mutate engine-owned attempt results");
+	}
 });
 
 test("a NON-provider failure (agent/contract/abort/timeout) is never retried", async () => {
@@ -93,6 +124,22 @@ test("onFallback is notified for each reroute (transparency breadcrumb)", async 
 	]);
 });
 
+test("a throwing fallback notification cannot discard billed attempts or prevent recovery", async () => {
+	const { engine, calls } = stubEngine([
+		{ ...provider(), usage: { ...emptyUsage(), input: 10, output: 2, cost: 0.125, turns: 1 } },
+		{ ok: true, output: "recovered", usage: { ...emptyUsage(), input: 20, output: 4, cost: 0.25, contextTokens: 200, turns: 1 } },
+	]);
+	const result = await withModelFallback(engine, {
+		models: MODELS, allowCrossProviderFallback: true,
+		onFallback: () => { throw new Error("toast failed"); },
+	}).run({ agent: "x", task: "t", model: "anthropic/m" });
+	assert.deepEqual(calls, ["anthropic/m", "amazon-bedrock/m"]);
+	assert.equal(result.ok, true);
+	assert.equal(result.output, "recovered");
+	assert.equal(result.modelUsed, "amazon-bedrock/m");
+	assert.deepEqual(result.usage, { input: 30, output: 6, cacheRead: 0, cacheWrite: 0, cost: 0.375, contextTokens: 200, turns: 2 });
+});
+
 test("provider fallback does not route a paid OpenAI model through OpenCode", async () => {
 	const models: ModelLite[] = [
 		{ provider: "openai-codex", id: "gpt-5.6-luna" },
@@ -116,4 +163,34 @@ test("a provider-qualified model can opt into cross-provider recovery", async ()
 	const r = await wrapped.run({ agent: "x", task: "t", model: "openai-codex/gpt-5.6-luna" });
 	assert.equal(r.ok, true);
 	assert.deepEqual(calls, ["openai-codex/gpt-5.6-luna", "openai/gpt-5.6-luna"]);
+});
+
+test("fresh quiescent worker can retry after deleting only its failed transcript; resumed workers stay pinned", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "persona-fallback-session-"));
+	try {
+		const store = new ConversationStore({ sessionId: "test", sessionFile: join(dir, "parent"), entries: () => [], append: () => {} });
+		const created = store.create(); assert.ok(created.ok);
+		const file = created.value.file;
+		let calls = 0;
+		const engine: StrategyEngine = { async run(spec) {
+			calls++;
+			if (calls === 1) { writeFileSync(file, "failed attempt"); return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, failureKind: "provider", modelUsed: "anthropic/m", sessionQuiescent: true }; }
+			assert.equal(existsSync(file), false, "retry must not reuse the failed transcript");
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true, modelUsed: spec.model! };
+		} };
+		const wrapped = withModelFallback(engine, { models: MODELS, allowCrossProviderFallback: true });
+		const result = await wrapped.run({ agent: "x", task: "t", model: "anthropic/m", session: { file, resume: false } });
+		assert.equal(result.modelUsed, "amazon-bedrock/m"); assert.equal(calls, 2);
+		calls = 0;
+		await wrapped.run({ agent: "x", task: "t", model: "anthropic/m", session: { file, resume: true } });
+		assert.equal(calls, 1);
+		created.value.release();
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("fresh worker with an uncertain writer does not retry", async () => {
+	let calls = 0;
+	const engine: StrategyEngine = { async run() { calls++; return { agent: "x", output: "", usage: emptyUsage(), ok: false, failureKind: "provider", modelUsed: "anthropic/m", sessionQuiescent: false }; } };
+	await withModelFallback(engine, { models: MODELS, allowCrossProviderFallback: true }).run({ agent: "x", task: "t", model: "anthropic/m", session: { file: "C:/invalid", resume: false } });
+	assert.equal(calls, 1);
 });

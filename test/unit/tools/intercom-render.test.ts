@@ -85,6 +85,14 @@ const bigBody = `${"x".repeat(300_000)}MUST-NOT-LEAK-COLLAPSED`;
 const pageBody = Array.from({ length: 300 }, (_, i) => `line ${i}: ${"payload-".repeat(4)}`).join("\n");
 const wideBody = ("y".repeat(50) + "\n").repeat(400);
 
+test("forget call displays its exact historical run id even when a live id was reused", () => {
+	const run = { id: "run-1", agent: "operator", label: "Unrelated-live-agent", status: "running" };
+	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [run] });
+	const rendered = call(tool, { action: "forget", to: "run-1" });
+	assert.match(rendered, /forget.*run-1/);
+	assert.doesNotMatch(rendered, /Unrelated-live-agent/);
+});
+
 test("intercom target cards show the assigned name without the model", async () => {
 	const run = { id: "run-1", agent: "operator", label: "Moss-native-tool-exposure", model: "model-secret", status: "running", task: "inspect", progress: { output: "", turns: 0, tokens: 0 } };
 	const { tool } = toolWith(archiveHarness().archive, { peek: () => run, list: () => [run], running: () => [run] });

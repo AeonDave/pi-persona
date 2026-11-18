@@ -22,6 +22,7 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 	const hooks = new Map<string, AnyFn>();
 	const tools = new Map<string, { execute: AnyFn }>();
 	let activeTools = ["read", "delegate", "intercom"];
+	const notifications: string[] = [];
 	const pi = {
 		events: createEventBus(),
 		on: (name: string, handler: AnyFn) => { hooks.set(name, handler); },
@@ -29,7 +30,7 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 		registerMessageRenderer: () => {}, registerEntryRenderer: () => {},
 		registerCommand: () => {}, registerShortcut: () => {}, registerFlag: () => {}, getFlag: () => false,
 		appendEntry: (type: string, data: unknown) => { manager.appendCustomEntry(type, data); },
-		sendMessage: () => {},
+		sendMessage: (message: { content?: unknown }) => { if (typeof message.content === "string") notifications.push(message.content); },
 		getActiveTools: () => activeTools,
 		setActiveTools: (value: string[]) => { activeTools = value; },
 		getAllTools: () => [...new Set(["read", "grep", "find", "ls", ...activeTools, ...tools.keys()])].map((name) => ({
@@ -42,7 +43,11 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 		getThinkingLevel: () => "high", setThinkingLevel: () => {}, setModel: async () => true,
 	};
 	let calls = 0;
-	const engine: StrategyEngine = { run: async (spec) => ({ agent: spec.agent, output: `durable report ${++calls}`, ok: true, usage: emptyUsage() }) };
+	let finishOld: (() => void) | undefined;
+	const engine: StrategyEngine = { run: async (spec) => {
+		if (spec.task === "old delayed work") await new Promise<void>((resolve) => { finishOld = resolve; });
+		return { agent: spec.agent, output: spec.task === "old delayed work" ? "stale old output" : `durable report ${++calls}`, ok: true, usage: emptyUsage() };
+	} };
 	// Exactly one factory invocation: both activations therefore use its original AsyncRunTracker.
 	piPersona(pi as unknown as ExtensionAPI, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
 	const context = () => ({
@@ -58,6 +63,13 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 		for (let cycle = 0; cycle < 2; cycle++) {
 			if (cycle > 0) { manager = SessionManager.create(cwd, join(agentDir, "sessions")); ctx = context(); }
 			await hooks.get("session_start")!({ type: "session_start", reason: cycle ? "new" : "startup" }, ctx);
+			if (cycle === 1) {
+				notifications.length = 0;
+				assert.ok(finishOld, "old worker reached the engine before shutdown");
+				finishOld();
+				await new Promise<void>((resolve) => setTimeout(resolve, 250));
+				assert.ok(notifications.every((message) => !message.includes("stale old output")), "late old completion must not notify the new session");
+			}
 			const receipt = await tools.get("delegate")!.execute(`delegate-${cycle}`, { agent: "reader", task: `read fixture ${cycle}` }, undefined, undefined, ctx);
 			assert.equal(receipt.isError, false, receipt.content?.[0]?.text);
 			assert.equal(entries().length, 1, `activation ${cycle} archives the same tracker's new delegate exactly once`);
@@ -71,6 +83,10 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 			assert.equal(page.isError, false);
 			assert.match(page.content[0].text, new RegExp(`durable report ${cycle + 1}`));
 			assert.equal(calls, cycle + 1, "retrieval never reruns the delegate");
+			if (cycle === 0) {
+				await tools.get("delegate")!.execute("old-background", { agent: "reader", task: "old delayed work" }, undefined, undefined, { ...ctx, hasUI: true });
+				await new Promise<void>((resolve) => setImmediate(resolve));
+			}
 			await hooks.get("session_shutdown")!({ type: "session_shutdown", reason: "new" }, ctx);
 		}
 	} finally { await hooks.get("session_shutdown")!({ type: "session_shutdown", reason: "quit" }, ctx); }

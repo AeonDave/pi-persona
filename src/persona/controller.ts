@@ -47,6 +47,8 @@ export class PersonaController {
 	private readonly host: PersonaHost;
 	private readonly delegateDefaultAllow: boolean;
 	private caps: EffectiveCapabilities | undefined;
+	private transitions: Promise<unknown> = Promise.resolve();
+	private generation = 0;
 
 	constructor(host: PersonaHost, delegateDefaultAllow = true) {
 		this.host = host;
@@ -58,21 +60,45 @@ export class PersonaController {
 	}
 
 	async activate(persona: Persona): Promise<void> {
-		this.active = persona;
-		this.caps = this.resolveCaps(persona);
-		this.host.setStatus(sanitizeStatusLabel(persona.label, persona.name));
-		await this.applyModel(persona);
-		this.applyThinking(persona);
-		this.applyTools(persona);
+		await this.transition(() => persona);
 	}
 
 	async deactivate(): Promise<void> {
-		this.active = undefined;
-		this.caps = undefined;
-		this.host.setStatus(undefined);
-		this.restoreTools();
-		await this.restoreModel();
-		this.restoreThinking();
+		await this.transition(() => undefined);
+	}
+
+	/** Resolve a choice at its turn, then keep host changes and their session commit together.
+	 * Startup, explicit selection and cycling share this line; a failed commit never wedges it. */
+	transition(select: () => Persona | undefined, complete?: (persona: Persona | undefined) => void | Promise<void>): Promise<boolean> {
+		const generation = this.generation;
+		const current = (): boolean => generation === this.generation;
+		const next = this.transitions.then(async () => {
+			if (!current()) return false;
+			const persona = select();
+			this.active = persona;
+			this.caps = persona ? this.resolveCaps(persona) : undefined;
+			this.host.setStatus(persona ? sanitizeStatusLabel(persona.label, persona.name) : undefined);
+			if (persona) {
+				await this.applyModel(persona);
+				if (!current()) return false;
+				this.applyThinking(persona);
+				this.applyTools(persona);
+			} else {
+				this.restoreTools();
+				await this.restoreModel();
+				if (!current()) return false;
+				this.restoreThinking();
+			}
+			await complete?.(persona);
+			return current();
+		});
+		this.transitions = next.catch(() => {});
+		return next;
+	}
+
+	/** A host model call already underway cannot be cancelled; revoke all remaining work and commits. */
+	cancelTransitions(): void {
+		this.generation++;
 	}
 
 	/** For the `before_agent_start` hook: the persona-composed prompt, or undefined.

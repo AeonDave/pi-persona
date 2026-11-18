@@ -12,7 +12,9 @@
  * (workers can stay cheap via roster/member `model` pins in teams.yaml).
  *
  * Usage:
- *   node --import tsx scripts/drive.ts [--persona magi] [--engine inproc] [--model claude-pro-max-native/claude-haiku-4-5] [--thinking xhigh] [--tools read,grep,find,ls,delegate] "your prompt"
+ *   node --import tsx scripts/drive.ts [--persona magi] [--engine inproc] [--model claude-pro-max-native/claude-haiku-4-5] [--thinking xhigh] [--tools read,grep,find,ls,delegate] [--session absolute-path] "your prompt"
+ * Pass the same session path on a later invocation to continue the supervisor session; without
+ * it the driver uses --no-session and no worker conversations can be retained for continuation.
  */
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -28,6 +30,7 @@ interface DriveOptions {
 	model?: string;
 	thinking?: string;
 	tools?: string;
+	session?: string;
 	prompt: string;
 }
 
@@ -51,6 +54,9 @@ function parseArgs(argv: string[]): DriveOptions {
 		} else if (a === "--tools") {
 			const v = argv[++i];
 			if (v !== undefined) out.tools = v;
+		} else if (a === "--session") {
+			const v = argv[++i];
+			if (v !== undefined) out.session = v;
 		} else rest.push(a);
 	}
 	out.prompt = rest.join(" ");
@@ -86,7 +92,7 @@ function resultText(result: unknown): string {
 
 const opts = parseArgs(process.argv.slice(2));
 if (!opts.prompt) {
-	console.error('usage: drive.ts [--persona x] [--engine inproc] [--model provider/id] [--thinking level] [--tools names] "prompt"');
+	console.error('usage: drive.ts [--persona x] [--engine inproc] [--model provider/id] [--thinking level] [--tools names] [--session absolute-path] "prompt"');
 	process.exit(2);
 }
 
@@ -100,7 +106,7 @@ if (opts.engine) env.PI_PERSONA_ENGINE = opts.engine;
 // rebuilding a `shell: true` cmdline truncated multi-line prompts on Windows (cmd.exe
 // treats an embedded newline as a command separator) — a harness-only bug that faked
 // "your message was cut off" from the model. stdin has no such limit or length cap.
-const args = ["--mode", "json", "-p", "--no-session"];
+const args = ["--mode", "json", "-p", ...(opts.session ? ["--session", opts.session] : ["--no-session"])];
 if (opts.model) args.push("--model", opts.model);
 if (opts.thinking) args.push("--thinking", opts.thinking);
 if (opts.tools) args.push("--tools", opts.tools);

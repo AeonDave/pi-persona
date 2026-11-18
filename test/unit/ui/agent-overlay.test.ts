@@ -2,13 +2,144 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, KeybindingsManager, TUI_KEYBINDINGS, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 
 import { AgentOverlay, type AgentOverlayActions, composeAgentRow } from "../../../src/ui/agent-overlay.ts";
 import { type AddNodeInput, type AgentNode, AgentTree } from "../../../src/ui/agent-tree.ts";
 
 const THEME = { fg: (_role: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
 const TUI_STUB = { requestRender: () => {} } as unknown as TUI;
+
+test("F9 bounds every view to its host allocation and rebuilds on a height-only resize", (t) => {
+	const tree = new AgentTree();
+	for (let i = 0; i < 40; i++) tree.add({ id: `a${i}`, label: `Worker ${i}`, status: "done", output: Array.from({ length: 100 }, (_, n) => `report line ${n}`).join("\n") });
+	const terminal = { rows: 40 };
+	const overlay = new AgentOverlay(tree, { terminal, requestRender() {} } as unknown as TUI, THEME, () => {});
+	t.after(() => overlay.dispose());
+	for (const rows of [40, 24, 8, 4, 2, 1]) {
+		terminal.rows = rows;
+		const allocation = Math.max(1, Math.min(Math.floor(rows * 0.9), rows - 2));
+		const list = overlay.render(60);
+		assert.ok(list.length <= allocation, `list ${list.length} exceeds host allocation ${allocation}`);
+		assert.match(list.join("\n"), /Worker 0/, "selection survives even when title/chrome must collapse");
+	}
+	terminal.rows = 24;
+	overlay.handleInput("\n");
+	for (const rows of [24, 8, 4, 2, 1]) {
+		terminal.rows = rows;
+		const detail = overlay.render(60);
+		assert.ok(detail.length <= Math.max(1, Math.min(Math.floor(rows * 0.9), rows - 2)));
+		assert.match(detail.join("\n"), /report line 99/, "latest report remains readable after shrinking");
+		if (rows >= 8) assert.match(detail.join("\n"), /back.*F9 close/, "footer is never clipped by host");
+	}
+	for (const width of [20, 6, 4, 1]) {
+		assert.ok(overlay.render(width).every((line) => visibleWidth(line) <= width));
+	}
+});
+
+test("steering uses native input for paste, grapheme editing, focus and long-line scrolling", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "Worker" });
+	const sent: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canSteer: () => true, onSteer: (_id, text) => { sent.push(text); return true; } });
+	t.after(() => overlay.dispose());
+	// Host focus must reach the active input so its hardware cursor supports IME.
+	(overlay as AgentOverlay & { focused: boolean }).focused = true;
+	overlay.handleInput("s");
+	overlay.handleInput("\x1b[200~hello 👩‍💻\x1b[201~");
+	overlay.handleInput("\x7f"); // remove the whole emoji grapheme
+	overlay.handleInput("界");
+	assert.match(overlay.render(60).join("\n"), new RegExp(CURSOR_MARKER));
+	overlay.handleInput("\r");
+	assert.deepEqual(sent, ["hello 界"]);
+	assert.ok(!overlay.render(60).join("\n").includes(CURSOR_MARKER), "read-only detail never owns the input cursor");
+	overlay.handleInput("s");
+	overlay.handleInput(`\x1b[200~${"long ".repeat(100)}tail\x1b[201~`);
+	const long = overlay.render(40);
+	assert.match(long.join("\n"), /tail/, "native input scrolls horizontally to the editing cursor");
+	assert.ok(long.length <= 21);
+	assert.ok(long.every((line) => visibleWidth(line) <= 40));
+	const tiny = overlay.render(10).join("\n");
+	assert.ok(tiny.includes(CURSOR_MARKER), "native cursor survives when its ordinary prompt cannot fit");
+	assert.match(tiny, /l/, "the end of the actual draft remains visible in a tiny input");
+});
+
+test("page keys and navigation use the injected host bindings and rendered list capacity", (t) => {
+	const tree = new AgentTree();
+	for (let i = 0; i < 80; i++) tree.add({ id: `a${i}`, label: `Worker ${i}`, status: "done" });
+	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "ctrl+n", "tui.select.pageDown": "ctrl+f", "tui.select.pageUp": "ctrl+b" });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { keybindings });
+	t.after(() => overlay.dispose());
+	const before = overlay.render(80);
+	const visibleCount = before.filter((line) => /Worker \d+/.test(line)).length;
+	overlay.handleInput("\x0e"); // ctrl+n
+	assert.match(overlay.render(80).join("\n"), /▸.*Worker 1\D/);
+	overlay.handleInput("\x06"); // ctrl+f
+	assert.match(overlay.render(80).join("\n"), new RegExp(`▸.*Worker ${visibleCount + 1}\\D`));
+	overlay.handleInput("\x02"); // ctrl+b
+	assert.match(overlay.render(80).join("\n"), /▸.*Worker 1\D/);
+});
+
+test("native steering keeps split-paste Enter/Escape as text and strips pasted terminal controls", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "Worker" });
+	const sent: string[] = [];
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canSteer: () => true, onSteer: (_id, text) => { sent.push(text); return true; } });
+	t.after(() => overlay.dispose());
+	overlay.handleInput("s");
+	for (const chunk of ["\x1b[200~first", "\r", "\x1b", "]0;hidden\x07 last", "\x1b[20", "1~"]) overlay.handleInput(chunk);
+	assert.deepEqual(sent, [], "a pasted Enter never submits the draft");
+	const frame = overlay.render(80).join("\n");
+	assert.match(frame, /steer ▸ first last/);
+	assert.doesNotMatch(frame, /\x1b\]|\x1b\[|hidden/, "pasted OSC/CSI are absent; native cursor markers remain intentional");
+	overlay.handleInput("\r");
+	assert.deepEqual(sent, ["first last"]);
+	overlay.handleInput("s");
+	overlay.handleInput("\x1b[200~safe\x1b]0;hidden\x07\x1b[201~\r");
+	assert.deepEqual(sent, ["first last", "safe"], "a submit coalesced after paste also sanitizes before delivery");
+});
+
+test("each steering draft discards native input history and an abandoned partial paste", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "Alpha" });
+	tree.add({ id: "b", label: "Bravo" });
+	const sent: string[] = [];
+	let alphaLive = true;
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canSteer: (id) => id !== "a" || alphaLive, onSteer: (id, text) => { sent.push(`${id}:${text}`); return true; } });
+	t.after(() => overlay.dispose());
+	overlay.handleInput("s");
+	overlay.handleInput("\x1b[200~old Alpha draft\x1b[201~");
+	overlay.handleInput("\x1b");
+	overlay.handleInput("s");
+	overlay.handleInput("\x1f"); // ctrl+_ native undo must not restore the cancelled draft
+	assert.doesNotMatch(overlay.render(80).join("\n"), /old Alpha draft/);
+	overlay.handleInput("\x1b[200~unfinished Alpha paste");
+	alphaLive = false;
+	tree.remove("a");
+	overlay.render(80);
+	overlay.handleInput("\n"); // inspect Bravo, re-taking aim after Alpha vanished
+	overlay.handleInput("s");
+	overlay.handleInput("new Bravo draft");
+	overlay.handleInput("\r");
+	assert.deepEqual(sent, ["b:new Bravo draft"], "the new target has neither the old paste state nor its text");
+});
+
+test("detail page keys move by the actual report viewport and stop at its edges", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "Worker", status: "done", output: Array.from({ length: 100 }, (_, n) => `report line ${n}`).join("\n") });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {});
+	t.after(() => overlay.dispose());
+	overlay.handleInput("\n");
+	const reportCount = overlay.render(80).filter((line) => /report line \d+/.test(line)).length;
+	overlay.handleInput("\x1b[5~");
+	let view = overlay.render(80).join("\n");
+	assert.match(view, new RegExp(`report line ${99 - reportCount}\\D`));
+	assert.doesNotMatch(view, /report line 99\D/);
+	for (let i = 0; i < 100; i++) overlay.handleInput("\x1b[6~");
+	view = overlay.render(80).join("\n");
+	assert.match(view, /report line 99\D/);
+	assert.doesNotMatch(view, /lines newer/);
+});
 
 function openOverlay(tree: AgentTree): AgentOverlay {
 	return new AgentOverlay(tree, TUI_STUB, THEME, () => {}, { canSteer: () => true });

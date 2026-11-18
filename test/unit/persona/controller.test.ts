@@ -177,3 +177,57 @@ test("composePrompt threads the spine into the persona composition (and no perso
 	await c.activate(p("name: q\npersona: true\nspine: false"));
 	assert.equal(c.composePrompt("BASE", "SPINE"), "BASE\n\nBody text", "the persona's own opt-out still wins");
 });
+
+test("overlapping persona selections finish in request order with one coherent host state", async () => {
+	const host = new MockHost();
+	host.models["prov/y"] = { provider: "prov", id: "y" };
+	let releaseFirst!: () => void;
+	const firstModel = new Promise<void>((resolve) => { releaseFirst = resolve; });
+	host.setModel = async (model) => {
+		host.setModelCalls.push(model);
+		if (model.id === "x") await firstModel;
+		host.model = model;
+	};
+	const c = new PersonaController(host);
+	const first = c.activate(p("name: alpha\npersona: true\nmodel: prov/x\nthinking: low\ntools:\n  allow: [read]"));
+	const second = c.activate(p("name: beta\npersona: true\nmodel: prov/y\nthinking: high\ntools:\n  allow: [write]"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	releaseFirst();
+	await Promise.all([first, second]);
+	assert.equal(c.activePersona?.name, "beta");
+	assert.equal(host.model?.id, "y", "the older authentication result must not overwrite the later choice");
+	assert.equal(host.thinking, "high");
+	assert.deepEqual(host.active, ["write", "delegate"]);
+	await c.deactivate();
+	assert.deepEqual(host.model, { provider: "base", id: "b" });
+	assert.equal(host.thinking, "medium");
+	assert.deepEqual(host.active, host.tools);
+});
+
+test("persona selection waits for the preceding session commit and recovers after its rejection", async () => {
+	const host = new MockHost();
+	const c = new PersonaController(host);
+	const alpha = p("name: alpha\npersona: true\nthinking: low");
+	const beta = p("name: beta\npersona: true\nthinking: high");
+	let releaseCommit!: () => void;
+	const commit = new Promise<void>((resolve) => { releaseCommit = resolve; });
+	const events: string[] = [];
+	const first = c.transition(() => alpha, async (persona) => {
+		events.push(`commit ${persona?.name}`);
+		await commit;
+		throw new Error("session commit failed");
+	});
+	const rejected = assert.rejects(first, /session commit failed/);
+	const second = c.transition(() => {
+		events.push(`select after ${c.activePersona?.name}`);
+		return beta;
+	}, (persona) => { events.push(`commit ${persona?.name}`); });
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(c.activePersona?.name, "alpha");
+	assert.deepEqual(events, ["commit alpha"], "selection and its commit are one ordered transition");
+	releaseCommit();
+	await rejected;
+	assert.equal(await second, true);
+	assert.deepEqual(events, ["commit alpha", "select after alpha", "commit beta"]);
+	assert.equal(host.thinking, "high");
+});

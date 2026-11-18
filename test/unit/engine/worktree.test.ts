@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
 
 import * as worktree from "../../../src/engine/worktree.ts";
 import type { GitExec } from "../../../src/engine/worktree.ts";
@@ -46,6 +47,7 @@ test("withWorktree removes a created worktree if its starting commit cannot be r
 	await assert.rejects(
 		() => withWorktree("/repo", exec, async () => {
 			bodyRan = true;
+			return { cleanup: "remove" as const, value: undefined };
 		}),
 		/baseline|commit|resolve/i,
 	);
@@ -56,7 +58,7 @@ test("withWorktree removes a created worktree if its starting commit cannot be r
 test("withWorktree rejects a dirty repository before creating or running an isolated leg", async () => {
 	const { exec, calls } = fakeGit({ status: { code: 0, stdout: " M src/live.ts\n?? notes.txt\n" } });
 	await assert.rejects(
-		() => withWorktree("/repo", exec, async () => "must not run"),
+		() => withWorktree("/repo", exec, async () => ({ cleanup: "remove" as const, value: "must not run" })),
 		/commit|stash|remove isolation/i,
 	);
 	assert.equal(calls.some((c) => c.includes("worktree") && c.includes("add")), false, "dirty worktree must not spawn git worktree add");
@@ -65,7 +67,7 @@ test("withWorktree rejects a dirty repository before creating or running an isol
 test("withWorktree rejects a non-Git cwd before creating or running an isolated leg", async () => {
 	const { exec, calls } = fakeGit({ "rev-parse": { code: 128 } });
 	await assert.rejects(
-		() => withWorktree("/not-a-repo", exec, async () => "must not run"),
+		() => withWorktree("/not-a-repo", exec, async () => ({ cleanup: "remove" as const, value: "must not run" })),
 		/git repository|isolation/i,
 	);
 	assert.equal(calls.some((c) => c.includes("worktree") && c.includes("add")), false, "non-repo must not spawn git worktree add");
@@ -102,7 +104,7 @@ test("withWorktree adds a detached worktree, runs the body with its path, then r
 	const out = await withWorktree("/repo", exec, async (dir, initialCommit) => {
 		ranIn = dir;
 		baseCommit = initialCommit;
-		return "result";
+		return { cleanup: "remove" as const, value: "result" };
 	});
 	assert.equal(out, "result");
 	assert.equal(ranIn.length > 0, true, "the body got a worktree path");
@@ -115,22 +117,41 @@ test("withWorktree adds a detached worktree, runs the body with its path, then r
 	assert.ok(remove?.includes("--force"), "force-removed");
 });
 
-test("withWorktree removes the worktree even when the body throws", async () => {
+test("withWorktree retains the worktree and reports its baseline when the body throws", async () => {
 	const { exec, calls } = fakeGit();
-	await assert.rejects(() =>
-		withWorktree("/repo", exec, async () => {
-			throw new Error("body failed");
-		}),
-	);
-	assert.ok(
-		calls.some((c) => c.includes("worktree") && c.includes("remove")),
-		"cleanup ran despite the throw",
-	);
+	let dir = "";
+	try {
+		await assert.rejects(() =>
+			withWorktree("/repo", exec, async (path) => {
+				dir = path;
+				throw new Error("body failed");
+			}),
+			(error: Error) => error.message.includes("body failed") && error.message.includes(dir) && error.message.includes(PINNED_COMMIT),
+		);
+		assert.ok(dir);
+		assert.equal(calls.some((c) => c.includes("worktree") && c.includes("remove")), false);
+	} finally {
+		if (dir) await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("git execution failures never masquerade as the no-index diff exit code", () => {
+	assert.equal(worktree.gitFailureCode({ code: 1 }), 1);
+	assert.equal(worktree.gitFailureCode({ code: "ETIMEDOUT" }), -1);
+	assert.equal(worktree.gitFailureCode({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }), -1);
+	assert.equal(worktree.gitFailureCode({ code: 1, signal: "SIGTERM" }), -1);
+	assert.equal(worktree.gitFailureCode({ code: 1, killed: true }), -1);
+});
+
+test("capture rejects an interrupted no-index diff", async () => {
+	const { exec } = fakeGit({ "no-index": { code: -1 }, "ls-files": { code: 0, stdout: "new.txt\0" } });
+	const artifact = await worktree.captureWorktreeArtifact("/wt", PINNED_COMMIT, exec);
+	assert.equal(artifact.ok, false);
 });
 
 test("withWorktree throws a clear error if the worktree cannot be created", async () => {
 	const { exec } = fakeGit({ "worktree add": { code: 128 } });
-	await assert.rejects(() => withWorktree("/repo", exec, async () => "x"), /worktree/i);
+	await assert.rejects(() => withWorktree("/repo", exec, async () => ({ cleanup: "remove" as const, value: "x" })), /worktree/i);
 });
 
 test("withWorktree prunes the registration when `git worktree remove` fails", async () => {
@@ -138,7 +159,7 @@ test("withWorktree prunes the registration when `git worktree remove` fails", as
 	// runs, so `remove` exits non-zero. The dir is deleted anyway — without a prune the repo keeps
 	// a stale .git/worktrees entry, and they accumulate across delegations.
 	const { exec, calls } = fakeGit({ "worktree remove": { code: 1 } });
-	const out = await withWorktree("/repo", exec, async () => "result");
+	const out = await withWorktree("/repo", exec, async () => ({ cleanup: "remove" as const, value: "result" }));
 	assert.equal(out, "result", "a cleanup failure never fails the body's result");
 	assert.ok(
 		calls.some((c) => c.includes("worktree") && c.includes("prune")),
@@ -148,7 +169,7 @@ test("withWorktree prunes the registration when `git worktree remove` fails", as
 
 test("withWorktree does not prune when the worktree was removed cleanly", async () => {
 	const { exec, calls } = fakeGit();
-	await withWorktree("/repo", exec, async () => "x");
+	await withWorktree("/repo", exec, async () => ({ cleanup: "remove" as const, value: "x" }));
 	assert.equal(calls.some((c) => c.includes("prune")), false, "no pruning of other live worktrees on the happy path");
 });
 
@@ -165,7 +186,7 @@ test("withWorktree returns the body's result even when the remove step's GitExec
 		}
 		return { code: 0, stdout: "", stderr: "" };
 	};
-	const out = await withWorktree("/repo", exec, async () => "result");
+	const out = await withWorktree("/repo", exec, async () => ({ cleanup: "remove" as const, value: "result" }));
 	assert.equal(out, "result", "a rejecting remove must not replace (or throw over) the body's result");
 	assert.ok(
 		calls.some((c) => c.includes("worktree") && c.includes("prune")),

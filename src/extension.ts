@@ -23,7 +23,7 @@ import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
 import { resolveConfig } from "./core/config.ts";
 import { resolvePersonaConfig } from "./core/settings.ts";
-import { type ContractDef, installedContractNames } from "./core/contract.ts";
+import { type ContractDef, DEFAULT_CONTRACT, installedContractNames } from "./core/contract.ts";
 import { type DataRootMigrationResult, migrateLegacyDataRoot } from "./core/data-root.ts";
 import {
 	inspectLegacySeededSpines,
@@ -37,7 +37,10 @@ import {
 	type SpineLegacySelection,
 } from "./core/seed.ts";
 import { type BriefFlow, buildDelegationBrief } from "./core/brief.ts";
+import { installSupervisorContinuity } from "./extension/supervisor-continuity.ts";
+import { WorkerConversations, conversationFingerprint } from "./extension/conversations.ts";
 import { canCallTool, canDelegateTo, canFanOut, type RunLimits } from "./core/capabilities.ts";
+import { parseExocomCommand, resolveExocomUnavailable } from "./exocom/availability.ts";
 import { isAllowed } from "./core/permissions.ts";
 import { fenceUntrusted } from "./core/fence.ts";
 import { sanitizeDisplayLabel } from "./core/display-label.ts";
@@ -56,6 +59,7 @@ import { makeShowImageTool } from "./tools/show-image.ts";
 import { installIdleCompaction } from "./extension/idle-compaction.ts";
 import { installActivityIngress, installCompanionPresence } from "./extension/companion.ts";
 import { installCardFrameProvider } from "./extension/card-frame.ts";
+import { installInspectorFrameProvider } from "./extension/inspector-frame.ts";
 import { buildCommunicationCardDetails } from "./ui/communication-card.ts";
 import { createCompletionInboxDelivery, deliverPendingNotes, formatPendingNotes } from "./extension/completion-delivery.ts";
 import { buildRunLabelDetails, buildSettlementDetails } from "./ui/run-labels.ts";
@@ -165,6 +169,7 @@ import { shortModel } from "./tools/delegate.ts";
 import { formatIntercomDelivery, formatIntercomSender } from "./tools/intercom.ts";
 import { renderTimerFire, TimerScheduler, type TimerEntry } from "./core/timer.ts";
 import { AgentOverlay } from "./ui/agent-overlay.ts";
+import { inspectorFrame } from "./ui/inspector-frame.ts";
 import { type AddNodeInput, type AgentNode, type AgentNodePatch, type AgentTreeChange, AgentTree, type AgentNodeStatus, backgroundCounts, deriveWaitingNodeIds, formatBackgroundStatus, isQueuedMarker, isNonAgentNode, PERSONA_BACKGROUND_STATUS_KEY, progressPatch } from "./ui/agent-tree.ts";
 import { WakeRows, type WakeRowChange } from "./ui/wake-rows.ts";
 import { LiveClock } from "./ui/live-clock.ts";
@@ -322,6 +327,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const role = bridgeMode || delegatedLeg ? "leg" : resolveConfig(process.env).disabled ? "disabled" : "supervisor";
 	installCompanionPresence(pi, role);
 	installCardFrameProvider(pi);
+	installInspectorFrameProvider(pi);
 	if (role === "leg") {
 		const inherited = inheritedMemoryPersona(process.env[MEMORY_PERSONA_ENV]);
 		if (inherited !== undefined) {
@@ -928,9 +934,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			ctx.ui.notify("agents: the navigable overlay needs the interactive TUI", "warning");
 			return;
 		}
+		let terminalRows = (): number => 24;
 		await ctx.ui.custom<void>(
-			(tui, theme, _kb, done) =>
-				new AgentOverlay(agentTree, tui, theme, () => done(undefined), {
+			(tui, theme, keybindings, done) => {
+				terminalRows = () => tui.terminal.rows;
+				return new AgentOverlay(agentTree, tui, theme, () => done(undefined), {
+					keybindings,
+					viewportHeight: () => inspectorFrame.viewportRows(terminalRows()),
 					collapsedGroups: collapsedResourceGroups,
 					onGroupToggle: renderAgentWidget,
 					peerSnapshot: () => exocom.peerSnapshot(),
@@ -941,9 +951,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					canStop: (id) => stopRegistry.has(id),
 					stallMs: STALL_FLAG_MS,
 					isWaitingForSupervisor: (id) => steerRegistry.get(id)?.isWaitingForSupervisor?.() === true,
-				}),
+				});
+			},
 			// Near-fullscreen: watching sub-agents work is a reading surface, not a popup.
-			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%" } },
+			{ overlay: true, overlayOptions: () => ({ width: "90%", maxHeight: inspectorFrame.viewportRows(terminalRows()), margin: 1 }) },
 		);
 	}
 	let personas: Persona[] = [];
@@ -1524,6 +1535,15 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		exocomArgs,
 		userAgentDir,
 	});
+	/** One persona gesture includes selection, host axes, remembered choice and bus reconciliation.
+	 * Resolve cycling/reloaded definitions only when this gesture reaches the controller's line. */
+	function transitionPersona(ctx: ExtensionContext, select: () => Persona | undefined, remember: boolean): Promise<boolean> {
+		if (disposed) return Promise.resolve(false);
+		return controller.transition(select, async (persona) => {
+			if (remember) persist(persona?.name);
+			await exocom.onPersonaChanged(ctx);
+		});
+	}
 
 	const innerBuildEngine = createBuildEngine(() => ({
 		agents,
@@ -2399,6 +2419,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		set disposed(value) {
 			disposed = value;
 			if (value) {
+				controller.cancelTransitions();
 				cancelAgentWidgetRender();
 				widgetClock.stop();
 				wakeRows.clearMonitors();
@@ -2497,6 +2518,27 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		},
 	});
 	installHooks(pi, hookHost, exocom);
+	installSupervisorContinuity(pi, () => ({
+		runs: [...tracker.running(), ...completionNotifier.peekPending()].filter((run, index, all) =>
+			run.delivery !== "companion" && !run.collected && all.findIndex((other) => other.id === run.id) === index,
+		).map((run) => ({
+			id: run.id, label: run.label ?? run.agent, status: run.status === "running" && run.queued ? "queued" as const : run.status,
+			...(run.resultReceipt?.storage === "session-entry" ? { resultRef: run.resultReceipt.ref } : {}),
+		})),
+		asks: bus.pendingAskIdsTo(SUPERVISOR).map((id) => ({ id })),
+	}));
+	const conversations = new WorkerConversations(pi, {
+		persona: () => controller.activePersona?.name ?? null,
+		currentContext: () => disposed ? undefined : lastCtx,
+		gate: (spec) => controller.gate("delegate", spec)?.reason,
+		fingerprint: (spec) => conversationFingerprint({
+			agent: agents.find((agent) => agent.name === spec.agent),
+			persona: controller.activePersona,
+			capabilities: controller.capabilities,
+			workerSpineText,
+			contract: spec.outputContract ? contractDefs[spec.outputContract] ?? (spec.outputContract === "default" ? DEFAULT_CONTRACT : null) : null,
+		}),
+	});
 
 	// ONE launch pool for every background run: a delegate leg, a `council` and a `flow` each take a slot
 	// (maxConcurrency). The strategy SDK's own per-run semaphore gates the legs INSIDE a council or flow.
@@ -2522,6 +2564,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	});
 
 	registerDelegateTool(pi, {
+		conversations,
 		get lastCtx() { return lastCtx; },
 		set lastCtx(value) { lastCtx = value; },
 		controller,
@@ -2553,17 +2596,11 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				if (ctx.hasUI) ctx.ui.notify(NO_PERSONAS_HINT, "info");
 				return;
 			}
-			const current = controller.activePersona;
-			const idx = current ? personas.findIndex((p) => p.name === current.name) : -1;
-			const next = idx + 1;
-			if (next >= personas.length) {
-				await controller.deactivate();
-				persist(undefined);
-			} else {
-				await controller.activate(personas[next]!);
-				persist(personas[next]!.name);
-			}
-			await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
+			await transitionPersona(ctx, () => {
+				const current = controller.activePersona;
+				const idx = current ? personas.findIndex((p) => p.name === current.name) : -1;
+				return personas[idx + 1]; // past the final persona means off
+			}, true);
 		},
 	};
 	type KeyId = Parameters<ExtensionAPI["registerShortcut"]>[0];
@@ -2580,6 +2617,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	registerIntercomTool(pi, {
+		conversations,
 		archive: (ctx) => results.activate(ctx),
 		get lastCtx() { return lastCtx; },
 		set lastCtx(value) { lastCtx = value; },
@@ -2768,30 +2806,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				return;
 			}
 			if (arg === "off") {
-				await controller.deactivate();
-				persist(undefined);
-				await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
-				ctx.ui.notify("persona: cleared (default supervisor)", "info");
+				if (await transitionPersona(ctx, () => undefined, true)) ctx.ui.notify("persona: cleared (default supervisor)", "info");
 				return;
 			}
 			if (arg === "reload") {
-				const activeName = controller.activePersona?.name;
-				const migration = refreshSeedMigration();
-				reload(ctx.cwd);
-				// Resolve-once-per-session is what keeps two turns of one conversation under the
-				// same rules; an explicit reload is the user asking for exactly this file to be
-				// re-read, so the spine comes along with the personas.
-				inspectEnabledLegacySpines();
-				reportSpineWarning(ctx);
-				reportSeedMigration(ctx, migration);
-				reportDefinitionCollisions(ctx);
-				if (activeName) {
-					const fresh = personas.find((p) => p.name === activeName);
-					if (fresh) await controller.activate(fresh);
-					else await controller.deactivate();
-				}
-				await exocom.onPersonaChanged(ctx);
-				ctx.ui.notify(`persona: reloaded ${personas.length} personas, ${agents.length} agents`, "info");
+				const changed = await transitionPersona(ctx, () => {
+					const activeName = controller.activePersona?.name;
+					const migration = refreshSeedMigration();
+					reload(ctx.cwd);
+					// Explicit reload refreshes the spine and definitions together for the next turn.
+					inspectEnabledLegacySpines();
+					reportSpineWarning(ctx);
+					reportSeedMigration(ctx, migration);
+					reportDefinitionCollisions(ctx);
+					return personas.find((p) => p.name === activeName);
+				}, false);
+				if (changed) ctx.ui.notify(`persona: reloaded ${personas.length} personas, ${agents.length} agents`, "info");
 				return;
 			}
 			// seed = copy any MISSING bundled defaults into the user dir (pull new ones);
@@ -2799,24 +2829,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// user directory: additional custom personas/agents/resources must remain untouched.
 			if (arg === "seed" || arg === "restore") {
 				const force = arg === "restore";
-				const r = runSeed(force);
-				reportSeedSourceCollisions(ctx, r);
-				const migration = refreshSeedMigration();
-				// These commands can create, migrate, preserve, or overwrite either prompt file. Refresh
-				// both cached roles now so the very next supervisor turn and delegated leg agree without
-				// requiring a second `/persona reload` or a process restart.
-				refreshSpineAfterSeed();
-				reportSpineWarning(ctx);
-				reportSeedMigration(ctx, migration);
-				reload(ctx.cwd);
-				reportDefinitionCollisions(ctx);
-				// Re-apply the active persona so a restored definition takes effect immediately.
-				const active = controller.activePersona?.name;
-				const fresh = active ? personas.find((p) => p.name === active) : undefined;
-				if (fresh) await controller.activate(fresh);
-				await exocom.onPersonaChanged(ctx); // a restored persona file may have changed canUseBus — re-gate; clear the by-hand run
-				const kept = r.skipped.length > 0 ? `, kept ${r.skipped.length} existing` : "";
-				ctx.ui.notify(`persona: ${force ? "restored" : "seeded"} ${r.copied.length} default(s) to ${userAgentDir()}${kept}.`, "info");
+				let result: SeedResult | undefined;
+				const changed = await transitionPersona(ctx, () => {
+					result = runSeed(force);
+					reportSeedSourceCollisions(ctx, result);
+					const migration = refreshSeedMigration();
+					// Refresh both cached roles with the definitions before reapplying the active persona.
+					refreshSpineAfterSeed();
+					reportSpineWarning(ctx);
+					reportSeedMigration(ctx, migration);
+					reload(ctx.cwd);
+					reportDefinitionCollisions(ctx);
+					return personas.find((p) => p.name === controller.activePersona?.name);
+				}, false);
+				if (changed && result) {
+					const kept = result.skipped.length > 0 ? `, kept ${result.skipped.length} existing` : "";
+					ctx.ui.notify(`persona: ${force ? "restored" : "seeded"} ${result.copied.length} default(s) to ${userAgentDir()}${kept}.`, "info");
+				}
 				return;
 			}
 			if (arg === "" || arg === "list") {
@@ -2833,15 +2862,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				);
 				return;
 			}
-			const persona = personas.find((p) => p.name === arg || p.label === arg);
-			if (!persona) {
-				ctx.ui.notify(`persona: "${arg}" not found. Try /persona list`, "error");
-				return;
+			let selected: Persona | undefined;
+			try {
+				const changed = await transitionPersona(ctx, () => {
+					selected = personas.find((p) => p.name === arg || p.label === arg);
+					if (!selected) throw new Error(`"${arg}" not found. Try /persona list`);
+					return selected;
+				}, true);
+				if (changed && selected) ctx.ui.notify(`persona: ${selected.label} active`, "info");
+			} catch (error) {
+				ctx.ui.notify(`persona: ${toastCause(error instanceof Error ? error.message : String(error))}`, "error");
 			}
-			await controller.activate(persona);
-			persist(persona.name);
-			await exocom.onPersonaChanged(ctx); // the persona just changed — re-gate the bus, clear the by-hand run
-			ctx.ui.notify(`persona: ${persona.label} active`, "info");
 		},
 	});
 
@@ -2856,12 +2887,22 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 
 	// ── /exocom (T9): the external peer-to-peer plane's live pool ─────────────────
 	pi.registerCommand("exocom", {
-		description: "Show the active Exocom scope, workspace code, and peers: /exocom",
-		handler: async (_args, ctx) => {
+		description: "Show Exocom status and workspace code: /exocom [status|help]",
+		handler: async (args, ctx) => {
 			lastCtx = ctx;
+			const command = parseExocomCommand(args);
+			if (command !== "status") {
+				ctx.ui.notify("Usage: /exocom [status|help]. This command shows connection status; ask your agent to use exocom_list, exocom_send or exocom_ask to collaborate.", command === "help" ? "info" : "warning");
+				return;
+			}
 			if (!exocom.plane) {
 				ctx.ui.notify(
-					"exocom: not active — use --exocom for this workspace or --exocom=Ab0T to join another workspace, with a persona that allows the bus (canUseBus).",
+					resolveExocomUnavailable({
+						requested: config.exocom || pi.getFlag("exocom") === true || exocomArgs.joinCode !== undefined || exocomArgs.error !== undefined,
+						activationError: exocomArgs.error,
+						capabilities: controller.capabilities,
+						startupError: exocom.startupError ? toastCause(exocom.startupError) : undefined,
+					}),
 					"warning",
 				);
 				return;
