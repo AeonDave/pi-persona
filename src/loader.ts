@@ -31,15 +31,22 @@ export interface LoadResult {
 	warnings: string[];
 }
 
-/** List `*.md` files in a directory (name without extension + full path). */
-export function listMarkdown(dir: string): Array<{ name: string; path: string }> {
-	let entries: string[];
+/** Read a definitions directory. A directory that does not exist (`ENOENT`/`ENOTDIR`) is an
+ *  ordinary absent layer and stays silent; any other failure (e.g. `EACCES`) is recorded in
+ *  `warnings` so its definitions are never dropped without a trace. */
+function readDirOrWarn(dir: string, warnings: string[]): string[] {
 	try {
-		entries = fs.readdirSync(dir);
-	} catch {
+		return fs.readdirSync(dir);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+		if (code !== "ENOENT" && code !== "ENOTDIR") warnings.push(`${dir}: unreadable (${code}) — its definitions were not loaded`);
 		return [];
 	}
-	return entries
+}
+
+/** List `*.md` files in a directory (name without extension + full path). */
+export function listMarkdown(dir: string, warnings: string[]): Array<{ name: string; path: string }> {
+	return readDirOrWarn(dir, warnings)
 		.filter((f) => f.toLowerCase().endsWith(".md"))
 		.map((f) => ({ name: f.slice(0, -3), path: path.join(dir, f) }));
 }
@@ -75,7 +82,7 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 	for (const d of dirs) {
 		const personaFiles: DiscoveredFile[] = [];
 		const agentFiles: DiscoveredFile[] = [];
-		for (const f of listMarkdown(d.path)) {
+		for (const f of listMarkdown(d.path, warnings)) {
 			const text = readSafe(f.path);
 			if (text === undefined) {
 				warnings.push(`${f.path}: unreadable — skipped`);
@@ -145,13 +152,7 @@ export function loadContracts(dirs: ScopedDir[]): ContractsLoad {
 	const merged: Record<string, ContractDef> = {};
 	const warnings: string[] = [];
 	for (const d of dirs) {
-		let entries: string[];
-		try {
-			entries = fs.readdirSync(d.path);
-		} catch {
-			continue;
-		}
-		for (const f of entries.filter((e) => e.toLowerCase().endsWith(".contract.json"))) {
+		for (const f of readDirOrWarn(d.path, warnings).filter((e) => e.toLowerCase().endsWith(".contract.json"))) {
 			const full = path.join(d.path, f);
 			const text = readSafe(full);
 			if (text === undefined) {
@@ -173,54 +174,71 @@ export function loadContracts(dirs: ScopedDir[]): ContractsLoad {
 	return { contracts: merged, warnings };
 }
 
+export interface PresetsLoad {
+	presets: Record<string, Partial<CouncilSpec>>;
+	warnings: string[];
+}
+
 /** Discover `*.preset.json` files (council presets) across dirs into a name→partial-spec map
- *  (later dirs win). A preset file is `{ strategy?, roster?, params? }`; bad files are skipped. */
-export function loadPresets(dirs: ScopedDir[]): Record<string, Partial<CouncilSpec>> {
-	const merged: Record<string, Partial<CouncilSpec>> = {};
+ *  (later dirs win). A preset file is `{ strategy?, roster?, params? }`; an unreadable,
+ *  malformed or non-object file is warned about, never silently skipped. */
+export function loadPresets(dirs: ScopedDir[]): PresetsLoad {
+	const presets: Record<string, Partial<CouncilSpec>> = {};
+	const warnings: string[] = [];
 	for (const d of dirs) {
-		let entries: string[];
-		try {
-			entries = fs.readdirSync(d.path);
-		} catch {
-			continue;
-		}
-		for (const f of entries.filter((e) => e.toLowerCase().endsWith(".preset.json"))) {
-			const text = readSafe(path.join(d.path, f));
-			if (text === undefined) continue;
+		for (const f of readDirOrWarn(d.path, warnings).filter((e) => e.toLowerCase().endsWith(".preset.json"))) {
+			const full = path.join(d.path, f);
+			const text = readSafe(full);
+			if (text === undefined) {
+				warnings.push(`${full}: unreadable — skipped`);
+				continue;
+			}
 			let raw: unknown;
 			try {
 				raw = JSON.parse(text);
-			} catch {
+			} catch (error) {
+				warnings.push(`${full}: invalid JSON (${error instanceof Error ? error.message : String(error)}) — skipped`);
 				continue;
 			}
-			if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+			if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+				warnings.push(`${full}: not a JSON object — skipped`);
+				continue;
+			}
 			const o = raw as Record<string, unknown>;
 			const spec: Partial<CouncilSpec> = {};
 			if (typeof o.strategy === "string" && o.strategy.trim()) spec.strategy = o.strategy.trim();
 			if (typeof o.roster === "string" && o.roster.trim()) spec.roster = o.roster.trim();
 			if (o.params && typeof o.params === "object" && !Array.isArray(o.params)) spec.params = o.params as Record<string, unknown>;
-			const name = f.slice(0, -".preset.json".length);
-			merged[name] = spec;
+			presets[f.slice(0, -".preset.json".length)] = spec;
 		}
 	}
-	return merged;
+	return { presets, warnings };
 }
 
-/** Merge `teams.yaml` files (later files win). */
-export function loadTeams(files: string[]): Record<string, RosterMember[]> {
-	const merged: Record<string, RosterMember[]> = {};
+export interface TeamsLoad {
+	teams: Record<string, RosterMember[]>;
+	warnings: string[];
+}
+
+/** Merge `teams.yaml` files (later files win). Never throws: a file that fails to parse is
+ *  warned about and skipped, so teams merged from earlier files survive. A missing file is silent; an unreadable one is warned about. */
+export function loadTeams(files: string[]): TeamsLoad {
+	const teams: Record<string, RosterMember[]> = {};
+	const warnings: string[] = [];
 	for (const file of files) {
 		let content: string;
 		try {
 			content = fs.readFileSync(file, "utf-8");
-		} catch {
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+			if (code !== "ENOENT" && code !== "ENOTDIR") warnings.push(`${file}: unreadable (${code}) — skipped`);
 			continue;
 		}
 		try {
-			Object.assign(merged, parseTeams(content));
+			Object.assign(teams, parseTeams(content));
 		} catch (error) {
-			throw new Error(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+			warnings.push(`${file}: ${error instanceof Error ? error.message : String(error)} — skipped`);
 		}
 	}
-	return merged;
+	return { teams, warnings };
 }

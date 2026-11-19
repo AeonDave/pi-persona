@@ -1054,15 +1054,23 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	function reload(cwd: string): void {
 		const result = loadDefinitions(defDirs(cwd));
 		// Expand each persona's council `preset` into concrete strategy/roster/params.
-		const presets = loadPresets(presetDirs(cwd));
+		const presetsLoad = loadPresets(presetDirs(cwd));
+		const presets = presetsLoad.presets;
+		// `expandCouncilPreset` drops an unknown preset silently; say so here.
+		const presetWarnings = result.personas.flatMap((p) =>
+			p.council?.preset && !Object.hasOwn(presets, p.council.preset)
+				? [`${p.source}: council preset "${p.council.preset}" is not installed — council defaults not applied`]
+				: [],
+		);
 		personas = result.personas.map((p) => (p.council?.preset ? { ...p, council: expandCouncilPreset(p.council, presets) } : p));
 		agents = result.agents;
 		shadowed = result.shadowed.map((f) => ({ name: f.name, scope: f.scope, path: f.path }));
 		definitionCollisions = result.collisions;
-		teams = loadTeams(teamFiles(cwd));
+		const teamsLoad = loadTeams(teamFiles(cwd));
+		teams = teamsLoad.teams;
 		const contractsLoad = loadContracts(contractDirs(cwd));
 		contractDefs = contractsLoad.contracts;
-		definitionWarnings = [...result.warnings, ...contractsLoad.warnings];
+		definitionWarnings = [...result.warnings, ...contractsLoad.warnings, ...presetsLoad.warnings, ...teamsLoad.warnings, ...presetWarnings];
 	}
 
 	// Empty by design on a fresh install (see above): point at the install gesture from every

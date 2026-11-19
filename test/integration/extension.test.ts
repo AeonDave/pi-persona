@@ -2978,6 +2978,60 @@ test("/doctor exposes custom persona-agent name collisions and neither definitio
 	}
 });
 
+test("a malformed project teams.yaml does not abort session_start: builtin teams stay and /doctor names the file", async () => {
+	const fresh = tempDir("pi-persona-bad-teams-user-");
+	const cwd = tempDir("pi-persona-bad-teams-project-");
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	const teamsFile = path.join(cwd, ".pi", "teams.yaml");
+	fs.mkdirSync(path.dirname(teamsFile), { recursive: true });
+	fs.writeFileSync(teamsFile, "broken:\n  - { agent: a, thinking: bogus }\n");
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx: base, notes } = makeCtx(cwd);
+		const ctx = { ...base, hasUI: true };
+		await m.fire("session_start", undefined, ctx);
+		assert.ok(notes.some((n) => n.includes("definition problem(s)") && n.includes("teams.yaml")), "startup toast reports the broken file");
+		notes.length = 0;
+		await m.cmd("doctor", "", ctx);
+		const report = notes.join("\n");
+		assert.ok(report.includes(teamsFile), "doctor names the broken teams file");
+		assert.match(report, /definition warnings/);
+		assert.match(report, /teams \(\d+\): .*review/, "builtin teams survive the broken project file");
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+	}
+});
+
+test("a persona naming an uninstalled council preset is reported with its source path", async () => {
+	const fresh = tempDir("pi-persona-bad-preset-user-");
+	const cwd = tempDir("pi-persona-bad-preset-project-");
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = fresh;
+	const personaFile = path.join(fresh, "persona", "agents", "ghosty.md");
+	fs.mkdirSync(path.dirname(personaFile), { recursive: true });
+	fs.writeFileSync(personaFile, "---\nname: ghosty\npersona: true\ncouncil:\n  preset: no-such-preset\n---\nSupervisor\n");
+	fs.mkdirSync(path.join(cwd, ".pi", "presets"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "presets", "bad.preset.json"), "[1]");
+	try {
+		const m = makeMockPi();
+		piPersona(m.pi);
+		const { ctx: base, notes } = makeCtx(cwd);
+		const ctx = { ...base, hasUI: true };
+		await m.fire("session_start", undefined, ctx);
+		notes.length = 0;
+		await m.cmd("doctor", "", ctx);
+		const report = notes.join("\n");
+		assert.ok(report.includes(`${personaFile}: council preset "no-such-preset" is not installed — council defaults not applied`), report);
+		assert.ok(report.includes("bad.preset.json: not a JSON object — skipped"), report);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+	}
+});
+
 test("the session-start collision toast names a fair prefix and counts the rest", async () => {
 	const fresh = tempDir("pi-persona-collision-cap-user-");
 	const cwd = tempDir("pi-persona-collision-cap-project-");

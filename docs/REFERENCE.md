@@ -597,6 +597,11 @@ files are seed sources. A fresh install has no installed personas until `/person
 | Contract | `contracts/*.contract.json` | structured output fields requested by name and pinned per run |
 | Preset | `presets/*.preset.json` | reusable council strategy, roster, and parameter bundle |
 
+A definition that cannot be loaded is never dropped silently. An unreadable definitions folder or file,
+a malformed `teams.yaml`, preset or contract, and a persona `council.preset` naming no installed preset
+are each reported in the startup notice and `/doctor`; the rest of the layers still load, so a broken
+project `teams.yaml` leaves the builtin and user teams in place.
+
 ### Unified pi-persona settings
 
 `/persona-settings` opens pi-persona's own settings editor in the TUI or RPC UI. It is a separate

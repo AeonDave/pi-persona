@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { tempDir } from "../setup/temp-dir.ts";
 import { seedDefaults } from "../../src/core/seed.ts";
-import { loadContracts, loadDefinitions, loadTeams } from "../../src/loader.ts";
+import { listMarkdown, loadContracts, loadDefinitions, loadPresets, loadTeams } from "../../src/loader.ts";
 
 function tmp(files: Record<string, string>): string {
 	const dir = tempDir("pi-persona-test-");
@@ -135,9 +135,61 @@ test("loadDefinitions diagnoses malformed agent thinking and never falls back to
 
 test("loadTeams merges teams.yaml files (later wins)", () => {
 	const dir = tmp({ "teams.yaml": "review: [a, b]\nmagi: [m, b, c]" });
-	const teams = loadTeams([path.join(dir, "teams.yaml")]);
+	const { teams, warnings } = loadTeams([path.join(dir, "teams.yaml")]);
 	assert.deepEqual(teams.review, ["a", "b"]);
 	assert.deepEqual(teams.magi, ["m", "b", "c"]);
+	assert.deepEqual(warnings, []);
+});
+
+test("loadTeams skips a broken later file with a warning and keeps earlier teams; a missing file is silent", () => {
+	const good = tmp({ "teams.yaml": "review: [a, b]" });
+	const bad = tmp({ "teams.yaml": "broken:\n  - { agent: a, thinking: bogus }\n" });
+	const badPath = path.join(bad, "teams.yaml");
+	const { teams, warnings } = loadTeams([path.join(good, "teams.yaml"), path.join(good, "absent.yaml"), badPath]);
+	assert.deepEqual(teams.review, ["a", "b"]);
+	assert.equal(warnings.length, 1);
+	assert.ok(warnings[0]?.startsWith(`${badPath}: `) && warnings[0].endsWith(" — skipped"), warnings[0]);
+});
+
+test("loadTeams warns about a teams file that exists but cannot be read", () => {
+	const dir = tempDir("pi-persona-teams-dir-");
+	const unreadable = path.join(dir, "teams.yaml");
+	fs.mkdirSync(unreadable); // a directory in the file's place: EISDIR on every platform
+	const { teams, warnings } = loadTeams([unreadable]);
+	assert.deepEqual(teams, {});
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0] ?? "", /teams\.yaml: unreadable \(EISDIR\) — skipped$/);
+});
+
+test("loadPresets warns about unreadable-JSON and non-object files and still loads valid ones", () => {
+	const dir = tmp({
+		"ok.preset.json": JSON.stringify({ strategy: "magi", roster: "magi" }),
+		"bad.preset.json": "{ not json",
+		"arr.preset.json": "[1]",
+	});
+	const { presets, warnings } = loadPresets([{ path: dir, scope: "user" }, { path: path.join(dir, "nope"), scope: "project" }]);
+	assert.deepEqual(Object.keys(presets), ["ok"]);
+	assert.equal(presets.ok?.strategy, "magi");
+	assert.equal(warnings.length, 2);
+	assert.ok(warnings.some((w) => w.startsWith(path.join(dir, "bad.preset.json")) && /invalid JSON.* — skipped$/.test(w)), warnings.join("\n"));
+	assert.ok(warnings.some((w) => w === `${path.join(dir, "arr.preset.json")}: not a JSON object — skipped`), warnings.join("\n"));
+});
+
+test("listMarkdown/loadDefinitions stay silent for an absent directory but warn on any other readdir failure", () => {
+	const dir = tmp({ "a.md": "---\nname: a\n---\nw" });
+	const quiet: string[] = [];
+	assert.deepEqual(listMarkdown(path.join(dir, "missing"), quiet), []);
+	assert.deepEqual(listMarkdown(path.join(dir, "a.md"), quiet), [], "a file where a directory is expected is ENOTDIR");
+	assert.deepEqual(quiet, []);
+	// A NUL byte makes readdir fail with ERR_INVALID_ARG_VALUE on every platform — neither ENOENT nor ENOTDIR.
+	const odd = `${dir}${path.sep}bad\0dir`;
+	const loud: string[] = [];
+	assert.deepEqual(listMarkdown(odd, loud), []);
+	assert.equal(loud.length, 1);
+	assert.match(loud[0] ?? "", /unreadable \(ERR_INVALID_ARG_VALUE\) — its definitions were not loaded$/);
+	const result = loadDefinitions([{ path: odd, scope: "project" }, { path: dir, scope: "user" }]);
+	assert.equal(result.warnings.length, 1);
+	assert.deepEqual(result.agents.map((x) => x.name), ["a"]);
 });
 
 test("loadContracts discovers *.contract.json across dirs (later wins, malformed skipped)", () => {

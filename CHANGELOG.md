@@ -14,6 +14,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- Definition loading no longer drops files silently or aborts: a malformed preset, an unreadable
+  definitions folder or `teams.yaml`, and a persona `council.preset` naming no installed preset are
+  reported in the startup notice and `/doctor`. A malformed `teams.yaml` used to throw out of session
+  start, skipping session-identity restore and persona activation; it is now skipped with a warning and
+  the other team layers still load.
 - Worktree isolation no longer reports only "requires a Git repository" when git itself fails: the
   message now carries git's first error line or exit code, as the Git status check already did.
 
