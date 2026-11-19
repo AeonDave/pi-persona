@@ -5,7 +5,7 @@ import type { AgentConfig } from "../agents/agent.ts";
 import { Type, type Static } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { THINKING_LEVELS, isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
-import { validateParallelWriteSets } from "../core/ownership.ts";
+import { findLiveWriteConflicts, validateParallelWriteSets, writeSetPathError } from "../core/ownership.ts";
 import { canCallTool } from "../core/capabilities.ts";
 import { VERIFICATION_MAX_COMMAND_CHARS, VERIFICATION_MAX_TIMEOUT_MS } from "../core/worktree-verification.ts";
 import { END_TURN_NOTE } from "../core/brief.ts";
@@ -476,7 +476,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		// The writer classification travels WITH the run (d.tracker metadata), not in a side Set keyed by
 		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
 		// registration after launch() returns would re-insert an already-dead run and leak it.
-		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), queued: true, ...(fanOut ? { batch: fanOut.batch } : {}) }, (onProgress, runId) => {
+		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), ...(runSpec.writeSet ? { writeSet: runSpec.writeSet } : {}), queued: true, ...(fanOut ? { batch: fanOut.batch } : {}) }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
 			// A real, HARD stop for the async run (a steer is only a soft request the child may
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
@@ -585,7 +585,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			"Delegate bounded independent work to supervised sub-agents by default; you own the objective, decisions and result review. Keep quick, trivial or tightly coupled work local when a hand-off would add more overhead than value.",
 			"Pass agent and task for one worker, or a tasks array for parallel workers. Required fields follow the active persona's delegation policy (the per-turn delegation brief shows the exact call shape); an incomplete call is rejected before any worker starts, and the error names what is missing.",
 			"Continue a completed worker with { resume: '<latest run id>', task: '<follow-up>' }; intercom conversations lists resumable workers. This opens its saved conversation as a new tracked run, preserving its configuration and provider. It does not restart a live or stopped task. Configuration changes require a fresh worker.",
-			"When disjoint writes are required, give every parallel writer a non-empty disjoint writeSet. Shells (bash/powershell), script/monitor, MCP and unknown tools count as writers even for read-only task prose. Readers need a runtime read-only tools grant and mcp: false; otherwise serialize with concurrency: 1. Top-level tools/writeSet are single-mode fields, never inherited by tasks[].",
+			"When disjoint writes are required, give every parallel writer a non-empty disjoint writeSet, including a writer started while earlier writers still run. Shells (bash/powershell), script/monitor, MCP and unknown tools count as writers even for read-only task prose. Readers need a runtime read-only tools grant and mcp: false; otherwise serialize with concurrency: 1. Top-level tools/writeSet are single-mode fields, never inherited by tasks[].",
 			"Interactive sessions ALWAYS run it in the BACKGROUND: you get run ids at once and stay free, and each result wakes you as a completion follow-up (a `tasks` call wakes you ONCE, when its last leg settles). Work independently meanwhile; when only children remain, end your turn. NEVER sleep, poll, or arm a `timer` to wait for a child. Headless sessions (`pi -p`) block for the turn and return results inline.",
 			"Steering received during an active tool may be acted on after that tool returns; do not assume arbitrary tool work is interrupted immediately.",
 			"No fitting agent? Shape one on the fly: `operator` + `role` (extra system prompt) + `skills`.",
@@ -725,6 +725,48 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 								: "End your turn; the writer's completion follow-up wakes you, then start the verifier against the resulting state.");
 						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 					}
+				}
+			}
+			// Disjoint ownership has the same cross-call hole: a writer started in a later call runs
+			// BESIDE the writers still live, so it is a parallel writer even when its own call has one leg.
+			// Checked once for the whole call, before any leg launches, so a batch never meets its own legs.
+			if (policy?.requireDisjointWrites) {
+				const legs = params.tasks && params.tasks.length > 0
+					? params.tasks.slice(0, d.RUN_LIMITS.maxChildren).map((task, index) => ({ owner: task, label: `tasks[${index}] ("${task.agent}")`, mayWrite: assessments[index]!.mayWrite }))
+					: params.agent ? [{ owner: params, label: `"${params.agent}"`, mayWrite: mayMutateWorkspace({ ...params, agent: params.agent }) }] : [];
+				const newWriters = legs.filter((leg) => leg.mayWrite);
+				// An absolute or escaping path names no repository-relative ownership and would look disjoint
+				// from every relative one, so it is refused here even when nothing else is running.
+				for (const leg of newWriters) {
+					const invalid = leg.owner.writeSet?.find((path) => path.trim() && writeSetPathError(path));
+					if (invalid) {
+						const message = `delegate: ${leg.label} writeSet path "${invalid}" is ${writeSetPathError(invalid)}.`;
+						return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
+					}
+				}
+				const live = d.tracker.writers().map((run) => ({ id: run.id, agent: sanitizeLabel(run.agent), ...(run.writeSet ? { writeSet: run.writeSet } : {}) }));
+				const conflicts = findLiveWriteConflicts(newWriters.map((leg) => leg.owner), live);
+				if (conflicts.length > 0) {
+					// A new writer without ownership collides with every live writer; otherwise name only the runs involved.
+					const involved = conflicts.some((conflict) => conflict.kind === "unowned-new")
+						? live
+						: [...new Set(conflicts.flatMap((conflict) => (conflict.kind === "unowned-new" ? [] : [conflict.run])))];
+					const visible = involved.slice(0, 8);
+					const running = `${visible.map((run) => `${run.id} (${run.agent})`).join(", ")}${involved.length > visible.length ? `, … +${involved.length - visible.length} more` : ""}`;
+					const reasons = conflicts.map((conflict) =>
+						conflict.kind === "unowned-live"
+							? `${conflict.run.id} (${conflict.run.agent}) has no declared writeSet, so no other writer can run beside it until it settles.`
+							: conflict.kind === "unowned-new"
+								? `${newWriters[conflict.index]!.label}: add writeSet: ["<files or directories only this leg edits>"], disjoint from the running writers.`
+								: `${newWriters[conflict.index]!.label} writeSet path "${conflict.newPath}" overlaps ${conflict.run.id} (${conflict.run.agent}) path "${conflict.livePath}".`);
+					const message =
+						`delegate: this persona requires disjoint ownership for parallel writers, and ${running} ${involved.length === 1 ? "is" : "are"} still running and may write the workspace.\n` +
+						`${reasons.join("\n")}\n` +
+						(inline
+							? "Or wait: each running writer's own call returns its result; start this writer in a later call against the resulting state."
+							: "Or wait: end your turn; a writer's completion follow-up wakes you, then start this one against the resulting state.") +
+						' Readers (tools: ["read","grep","find","ls","code_outline"], mcp: false) are never blocked.';
+					return { content: [{ type: "text", text: message }], details: failureDetails({}), isError: true };
 				}
 			}
 			const modelErr = resolveDelegateModels(params, ctx);

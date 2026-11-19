@@ -14,6 +14,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- `requireDisjointWrites` now holds across calls. Interactive `delegate` runs in the background, so a
+  writer requested in a later call ran beside the writers still live without any ownership check. It
+  must now declare a valid `writeSet` disjoint from theirs, and it cannot start beside a running writer
+  that declared none (a tracked `council`/`flow` run counts as one). Absolute or escaping `writeSet`
+  paths are refused for every writer under the policy. Readers are never blocked.
 - Definition loading no longer drops files silently or aborts: a malformed preset, an unreadable
   definitions folder or `teams.yaml`, and a persona `council.preset` naming no installed preset are
   reported in the startup notice and `/doctor`. A malformed `teams.yaml` used to throw out of session

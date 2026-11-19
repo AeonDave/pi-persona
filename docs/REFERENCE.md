@@ -874,7 +874,10 @@ recovery cannot help: use `/login` or change `/model`, then reselect with `/pers
 The runtime rejects incomplete briefs before a model call, supplies a missing contract, rejects
 overlapping or missing ownership for parallel writers, and refuses a declared verifier that would
 start before or beside a material writer in the same call or while a mutating background run is in
-flight. Only `read`, `grep`, `find`, `ls`, and the source-read-only `code_outline` count as read-only; shell-capable, MCP-enabled, and
+flight. Ownership holds across calls too: a `delegate` writer requested while earlier writers still run
+must declare a valid `writeSet` disjoint from theirs, and none starts beside a running writer that declared
+none (a tracked `council`/`flow` run counts as such a writer). The rejection names the conflicting run
+ids; readers are never blocked. Only `read`, `grep`, `find`, `ls`, and the source-read-only `code_outline` count as read-only; shell-capable, MCP-enabled, and
 unknown toolsets fail closed as writers. `writeSet` is a scheduling contract, not an OS sandbox.
 Ownership checks cover the tasks admitted by `maxChildren`; a dropped task cannot create a false
 parallel-write conflict. A verifier omitted by that limit still rejects the batch, rather than silently

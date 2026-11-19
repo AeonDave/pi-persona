@@ -65,6 +65,38 @@ export function findWriteSetOverlaps(tasks: readonly WriteSetOwner[]): WriteSetO
 	return overlaps;
 }
 
+/** A background run still classified as a potential workspace writer. */
+export interface LiveWriter extends WriteSetOwner {
+	id: string;
+}
+
+export type LiveWriteConflict =
+	| { kind: "unowned-live"; run: LiveWriter }
+	| { kind: "unowned-new"; index: number }
+	| { kind: "overlap"; index: number; run: LiveWriter; newPath: string; livePath: string };
+
+const owns = (owner: WriteSetOwner): boolean => owner.writeSet?.some((path) => path.trim()) === true;
+
+/** Why new writers cannot start beside writers that are still running. A writer without a usable
+ *  writeSet may touch anything, so it conflicts with every writer on the other side; owned writers
+ *  conflict on equal or ancestor/descendant paths. New-vs-new pairs belong to the in-batch check. */
+export function findLiveWriteConflicts(newWriters: readonly WriteSetOwner[], live: readonly LiveWriter[]): LiveWriteConflict[] {
+	if (newWriters.length === 0 || live.length === 0) return [];
+	const conflicts: LiveWriteConflict[] = [];
+	for (const run of live) if (!owns(run)) conflicts.push({ kind: "unowned-live", run });
+	newWriters.forEach((writer, index) => {
+		if (!owns(writer)) conflicts.push({ kind: "unowned-new", index });
+	});
+	newWriters.forEach((writer, index) => {
+		if (!owns(writer)) return;
+		for (const run of live) {
+			const overlap = findWriteSetOverlaps([writer, run])[0];
+			if (overlap) conflicts.push({ kind: "overlap", index, run, newPath: overlap.firstPath, livePath: overlap.secondPath });
+		}
+	});
+	return conflicts;
+}
+
 /** Undefined when the path is a repository-relative ownership name; otherwise a reason. */
 export function writeSetPathError(path: string): string | undefined {
 	if (typeof path !== "string" || !path.trim()) return "empty writeSet path";

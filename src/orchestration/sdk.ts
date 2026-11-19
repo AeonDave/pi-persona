@@ -58,7 +58,8 @@ export interface AgentRunSpec {
 	 *  strategies (e.g. `debate`). In-process engine only — the child engine ignores it;
 	 *  gated at bind time by the persona's `canUseBus` capability. */
 	peers?: boolean;
-	/** Declared ownership (from delegate `writeSet`), used only to annotate the files-changed report. */
+	/** Declared ownership (from delegate `writeSet`): annotates the files-changed report and, for a
+	 *  persona requiring disjoint writes, is checked against the writers still running. Never a sandbox. */
 	writeSet?: string[];
 	/** INTERNAL (flow reference handoff): the archived `result:<UUID>` refs granted to THIS leg
 	 *  — exactly its phase's DIRECT upstream needs, nothing more. Not a public delegate

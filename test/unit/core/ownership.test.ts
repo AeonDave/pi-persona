@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { findWriteSetOverlaps, normalizeWritePath, pathsOverlap, validateParallelWriteSets, writeSetPathError } from "../../../src/core/ownership.ts";
+import { findLiveWriteConflicts, findWriteSetOverlaps, normalizeWritePath, pathsOverlap, validateParallelWriteSets, writeSetPathError } from "../../../src/core/ownership.ts";
 
 test("findWriteSetOverlaps rejects equal and ancestor/descendant paths with Windows normalization", () => {
 	const tasks = [
@@ -83,4 +83,24 @@ test("validateParallelWriteSets allows distinct siblings and ignores an owner wi
 		]),
 		undefined,
 	);
+});
+
+test("findLiveWriteConflicts: a new writer beside a live one needs both owned and disjoint", () => {
+	const live = [{ id: "run-1", agent: "operator", writeSet: ["src/a"] }];
+	assert.deepEqual(findLiveWriteConflicts([{ agent: "operator", writeSet: ["src/b.ts"] }], live), [], "disjoint owners may run side by side");
+	assert.deepEqual(findLiveWriteConflicts([], live), [], "no new writer, nothing to check");
+	assert.deepEqual(findLiveWriteConflicts([{ agent: "operator" }], []), [], "no live writer, nothing to check");
+
+	assert.deepEqual(findLiveWriteConflicts([{ agent: "operator", writeSet: ["src/a/deep.ts"] }], live), [
+		{ kind: "overlap", index: 0, run: live[0], newPath: "src/a/deep.ts", livePath: "src/a" },
+	], "a descendant of a live writer's path collides");
+	assert.deepEqual(findLiveWriteConflicts([{ agent: "fixer" }, { agent: "docs", writeSet: [" "] }], live), [
+		{ kind: "unowned-new", index: 0 },
+		{ kind: "unowned-new", index: 1 },
+	], "a new writer without a usable writeSet could touch anything");
+
+	const unowned = { id: "run-2", agent: "worker" };
+	assert.deepEqual(findLiveWriteConflicts([{ agent: "operator", writeSet: ["docs"] }], [unowned, ...live]), [
+		{ kind: "unowned-live", run: unowned },
+	], "a live writer without a writeSet blocks every other writer until it settles");
 });

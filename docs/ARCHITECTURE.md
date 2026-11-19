@@ -44,6 +44,10 @@ concurrency on the single launch path (interactive background or headless inline
 after every material writer in that batch; otherwise the call fails before a child starts. The rule
 also holds ACROSS calls: a verifier launched while a material-writer background run is still live is
 rejected, naming the mutating run ids, so a later call cannot slip past the in-batch ordering.
+Disjoint ownership follows the same rule: a `delegate` writer requested while earlier writers still run
+is a parallel writer, so its `writeSet` must be valid and disjoint from theirs (each run carries its
+declared set in the tracker), and it cannot start beside a running writer without one, including a tracked
+council/flow run. The check runs once per call before any leg launches, so a batch never meets its own legs.
 
 ### The effort ladder (make the simple case simple; complexity is opt-in)
 

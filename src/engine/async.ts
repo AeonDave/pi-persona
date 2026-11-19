@@ -69,6 +69,10 @@ export interface AsyncRun {
 	 *  run INSIDE {@link AsyncRunTracker.launch}, before the caller holds the id, so a registration
 	 *  performed after launch() returns would re-insert an already-dead run and leak it. */
 	mutates?: boolean;
+	/** The declared ownership of a mutating run (its effective `writeSet`), so a persona that requires
+	 *  disjoint writes can check a later call's writers against the runs still live. Same carrier rule
+	 *  as {@link mutates}. */
+	writeSet?: string[];
 	/** The id of the one `tasks` call this leg was launched by. Its members are delivered together, once the
 	 *  last of them settles (see {@link AsyncRunTracker.batchSettled}); a single-leg launch has none. */
 	batch?: string;
@@ -143,7 +147,7 @@ export class AsyncRunTracker {
 		if (Number.isSafeInteger(issued) && issued > this.seq) this.seq = issued;
 	}
 
-	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; queued?: boolean; batch?: AsyncRun["batch"]; delivery?: AsyncRun["delivery"] }, run: RunThunk): string {
+	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; writeSet?: readonly string[]; queued?: boolean; batch?: AsyncRun["batch"]; delivery?: AsyncRun["delivery"] }, run: RunThunk): string {
 		this.seq += 1;
 		const id = `run-${this.seq.toString(36)}`;
 		const startedAt = this.now(); // one clock read, so the launch and stall stamps cannot disagree
@@ -157,6 +161,8 @@ export class AsyncRunTracker {
 			...(meta.queued ? { queued: true } : { lastAdvanceAt: startedAt }),
 		};
 		if (meta.mutates) entry.mutates = true;
+		const owned = meta.mutates ? meta.writeSet?.map((path) => path.trim()).filter(Boolean) : undefined;
+		if (owned?.length) entry.writeSet = owned;
 		if (meta.batch) entry.batch = meta.batch;
 		if (meta.delivery) entry.delivery = meta.delivery;
 		// Labels/models are rendered as trusted status metadata on several compact surfaces. Normalize
