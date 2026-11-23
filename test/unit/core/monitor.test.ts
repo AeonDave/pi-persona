@@ -166,6 +166,29 @@ test("exit mode suppresses output until exit and includes bounded diagnostics", 
 	assert.match(h.events[0]?.text ?? "", /warning/);
 });
 
+test("a lingering exit reports the held output once; an ordinary exit text is unchanged", () => {
+	const note = "a background process still holds its output; output after exit is not captured";
+	for (const mode of ["exit", "output"] as const) {
+		// An unterminated line never becomes an output event, so output mode reaches its exit event too.
+		const lingering = harness();
+		lingering.manager.arm(spec({ mode }));
+		lingering.processes[0]?.handlers.onStdout("buffered");
+		lingering.processes[0]?.handlers.onExit(0, undefined, true);
+		const plain = harness();
+		plain.manager.arm(spec({ mode }));
+		plain.processes[0]?.handlers.onStdout("buffered");
+		plain.processes[0]?.handlers.onExit(0);
+		assert.equal(lingering.events.length, 1);
+		assert.equal(lingering.events[0]?.kind, "exit");
+		assert.equal(lingering.events[0]?.terminal, true);
+		assert.match(lingering.events[0]?.text ?? "", /exit code 0/);
+		assert.match(lingering.events[0]?.text ?? "", /buffered/);
+		assert.equal(lingering.events[0]?.text, `${plain.events[0]?.text}
+${note}`);
+		assert.equal(plain.events[0]?.text.includes("background process"), false);
+	}
+});
+
 test("output mode bounds an unterminated giant line before it is completed", () => {
 	const h = harness();
 	const result = h.manager.arm(spec());

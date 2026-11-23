@@ -10,6 +10,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { killProcessTree } from "../engine/child.ts";
 import {
+	MONITOR_EXIT_DRAIN_MS,
 	type MonitorProcess,
 	type MonitorProcessHandlers,
 	type MonitorSpec,
@@ -20,18 +21,37 @@ interface ProcessState {
 	ended: boolean;
 }
 
-/** Start one explicit executable with literal argv; no shell interpolation is performed. */
+/** Start one explicit executable with literal argv; no shell interpolation is performed.
+ *
+ * The job is the launched program: it settles when that program exits, after reading already-buffered
+ * output for at most MONITOR_EXIT_DRAIN_MS. A descendant that inherited stdout/stderr and outlives the
+ * launcher is not stopped here (Windows cannot reach it once the launcher pid is gone); the pipes are
+ * destroyed so it cannot keep this process's event loop alive. */
 export function startMonitorProcess(spec: MonitorSpec, handlers: MonitorProcessHandlers): MonitorProcess {
 	const state: ProcessState = {
 		stopped: false,
 		ended: false,
 	};
 	let child: ChildProcess | undefined;
+	let drainTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const active = (): boolean => !state.stopped && !state.ended;
+	const releasePipes = (): void => {
+		clearTimeout(drainTimer);
+		for (const stream of [child?.stdout, child?.stderr, child?.stdin]) {
+			try {
+				stream?.destroy();
+			} catch {
+				/* a stream that cannot be destroyed has nothing left to release */
+			}
+		}
+	};
 	const stopOwned = (): void => {
 		if (state.stopped || state.ended) return;
 		state.stopped = true;
+		// A descendant that outlives the launcher keeps the pipes open, and finish() no longer runs
+		// to release them once the adapter is stopped.
+		releasePipes();
 		const pid = child?.pid;
 		if (pid === undefined) return;
 		try {
@@ -53,7 +73,7 @@ export function startMonitorProcess(spec: MonitorSpec, handlers: MonitorProcessH
 	const decoderOut = new StringDecoder("utf8");
 	const decoderErr = new StringDecoder("utf8");
 
-	const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
+	const finish = (code: number | null, signal: NodeJS.Signals | null, lingering: boolean): void => {
 		if (!active()) return;
 		const trailingOut = decoderOut.end();
 		const trailingErr = decoderErr.end();
@@ -66,8 +86,9 @@ export function startMonitorProcess(spec: MonitorSpec, handlers: MonitorProcessH
 		}
 		if (!active()) return;
 		state.ended = true;
+		releasePipes();
 		try {
-			handlers.onExit(code, signal ?? undefined);
+			handlers.onExit(code, signal ?? undefined, lingering);
 		} catch {
 			/* the process is already closed; keep the adapter terminal */
 		}
@@ -114,7 +135,13 @@ export function startMonitorProcess(spec: MonitorSpec, handlers: MonitorProcessH
 			stopOwned();
 		}
 	});
-	child.on("close", (code, signal) => finish(code, signal));
+	// Pipes that close with the process settle on "close"; a descendant that still holds them is cut off
+	// one bounded window after the exit, which is never re-armed by that descendant's output.
+	child.on("exit", (code, signal) => {
+		if (!active()) return;
+		drainTimer = setTimeout(() => finish(code, signal, true), MONITOR_EXIT_DRAIN_MS);
+	});
+	child.on("close", (code, signal) => finish(code, signal, false));
 
 	return {
 		stop: stopOwned,

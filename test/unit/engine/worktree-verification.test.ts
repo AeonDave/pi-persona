@@ -70,3 +70,25 @@ test("a signalled shell is not proof that the verification writer is quiescent",
 	assert.equal(result.report.status, "failed");
 	assert.equal(result.quiescent, false);
 });
+
+test("a command that exits while a background process holds its output is an error, retained and not exported", async () => {
+	for (const code of [0, 1]) {
+		const result = await runWorktreeVerification({ command: "test" }, "/exact/worktree", {
+			resolveShell: () => ({ shell: "shell", args: [] }),
+			start: (_spec, h) => { h.onStdout("done\n"); h.onExit(code, undefined, true); return { stop() {} }; },
+		});
+		assert.equal(result.report.status, "error");
+		assert.equal(result.report.exitCode, code);
+		assert.equal(result.quiescent, false);
+		assert.match(result.report.reason ?? "", /background process still holds.*retained/i);
+	}
+});
+
+test("a clean exit without lingering output stays passed and quiescent", async () => {
+	const result = await runWorktreeVerification({ command: "test" }, "/exact/worktree", {
+		resolveShell: () => ({ shell: "shell", args: [] }),
+		start: (_spec, h) => { h.onExit(0, undefined, false); return { stop() {} }; },
+	});
+	assert.equal(result.report.status, "passed");
+	assert.equal(result.quiescent, true);
+});

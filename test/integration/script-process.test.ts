@@ -70,3 +70,23 @@ test("spawn errors and deadlines settle script history with one failure completi
 		} finally { h.session.cancelAll(); }
 	}
 });
+
+test("a script whose command leaves a background process holding its output settles at the command exit", async () => {
+	const h = harness();
+	let descendant: number | undefined;
+	try {
+		const source = "const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true, windowsHide: true }); child.unref(); console.log('pid:' + child.pid);";
+		const result = h.session.arm({ command: process.execPath, args: ["-e", source], cwd: process.cwd(), label: "background", mode: "exit", timeoutMs: 30_000 });
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+		const event = await Promise.race([h.terminal, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("script did not settle at its exit")), 15_000).unref())]);
+		const record = h.archive.result(result.entry.id);
+		descendant = Number(/pid:(\d+)/.exec(record?.stdout ?? "")?.[1]);
+		assert.equal(event.kind, "exit");
+		assert.equal(record?.outcome, "exit");
+		assert.match(record?.text ?? "", /a background process still holds its output; output after exit is not captured/);
+	} finally {
+		if (descendant) try { process.kill(descendant, "SIGKILL"); } catch { /* already gone */ }
+		h.session.cancelAll();
+	}
+});

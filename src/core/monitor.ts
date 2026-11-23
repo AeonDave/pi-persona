@@ -54,7 +54,9 @@ export type MonitorRemovalReason = { kind: "cancelled" } | { kind: "error"; text
 export interface MonitorProcessHandlers {
 	onStdout: (chunk: string) => void;
 	onStderr: (chunk: string) => void;
-	onExit: (code: number | null, signal?: string) => void;
+	/** `lingering`: a surviving descendant still held stdout/stderr when the drain bound elapsed, so the
+	 *  adapter stopped reading. The survivor is not part of the job and is not stopped. */
+	onExit: (code: number | null, signal?: string, lingering?: boolean) => void;
 	onError: (error: Error) => void;
 }
 
@@ -100,6 +102,10 @@ export const MONITOR_MAX_ARGS = 64;
 export const MONITOR_MAX_ARG_CHARS = 8_192;
 export const MONITOR_MAX_ARGV_CHARS = 24_000;
 export const MONITOR_MAX_LABEL_CHARS = 120;
+/** Bound, measured once from process exit, for already-buffered stdout/stderr to be read. It is never
+ *  re-armed, so a chatty descendant that inherited the pipes cannot postpone settlement. */
+export const MONITOR_EXIT_DRAIN_MS = 250;
+const MONITOR_LINGERING_NOTE = "a background process still holds its output; output after exit is not captured";
 export const MONITOR_TRUNCATION_MARKER = "…[truncated]";
 
 /** Run passive UI/archive observation without letting it change monitor lifecycle behavior. */
@@ -212,7 +218,7 @@ export class MonitorManager {
 		const handlers: MonitorProcessHandlers = {
 			onStdout: (chunk) => this.receiveStdout(id, chunk),
 			onStderr: (chunk) => this.receiveStderr(id, chunk),
-			onExit: (code, signal) => this.receiveExit(id, code, signal),
+			onExit: (code, signal, lingering) => this.receiveExit(id, code, signal, lingering),
 			onError: (error) => this.receiveError(id, error),
 		};
 
@@ -370,7 +376,7 @@ export class MonitorManager {
 		observeMonitor(() => this.deps.onOutput?.({ id, stream, text }));
 	}
 
-	private receiveExit(id: string, code: number | null, signal?: string): void {
+	private receiveExit(id: string, code: number | null, signal?: string, lingering?: boolean): void {
 		const active = this.monitors.get(id);
 		if (!active || active.terminal) return;
 		this.finish(active, {
@@ -378,7 +384,7 @@ export class MonitorManager {
 			label: active.entry.label,
 			kind: "exit",
 			atEpochMs: this.deps.now(),
-			text: this.exitText(active, code, signal),
+			text: this.exitText(active, code, signal, lingering),
 			terminal: true,
 		});
 	}
@@ -420,12 +426,13 @@ export class MonitorManager {
 		else this.deps.onEvent(event);
 	}
 
-	private exitText(active: ActiveMonitor, code: number | null, signal?: string): string {
+	private exitText(active: ActiveMonitor, code: number | null, signal?: string, lingering?: boolean): string {
 		const status = code === null
 			? `process exited by ${signal ?? "unknown signal"}`
 			: `process exited with exit code ${code}${signal ? ` (signal ${signal})` : ""}`;
 		const diagnostics = this.diagnostics(active);
-		return diagnostics ? `${status}\n${diagnostics}` : status;
+		const text = diagnostics ? `${status}\n${diagnostics}` : status;
+		return lingering ? `${text}\n${MONITOR_LINGERING_NOTE}` : text;
 	}
 
 	private diagnostics(active: ActiveMonitor): string {

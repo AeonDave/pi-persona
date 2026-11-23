@@ -112,7 +112,10 @@ export async function runWorktreeVerification(spec: WorktreeVerificationSpec, cw
 				cwd, label: "Worktree verification", mode: "exit",
 			}, {
 				onStdout: append, onStderr: append,
-				onExit: (code, signal) => finish(code === 0 && !signal ? "passed" : "failed", !signal && code !== null, signal ? `Verification terminated by ${signal}` : undefined, code ?? undefined),
+				// A survivor may still write into the checkout, so a lingering exit cannot prove the worktree quiescent.
+				onExit: (code, signal, lingering) => lingering
+					? finish("error", false, "A background process still holds the command's output; the worktree is retained without export", code ?? undefined)
+					: finish(code === 0 && !signal ? "passed" : "failed", !signal && code !== null, signal ? `Verification terminated by ${signal}` : undefined, code ?? undefined),
 				onError: (error) => finish("error", false, error.message),
 			});
 			if (stopRequested) try { process.stop(); } catch { /* retained */ }
