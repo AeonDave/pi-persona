@@ -7,8 +7,9 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Agent working artifacts (task reports, review diffs, progress)
+# Agent working artifacts (task reports, review diffs, progress, command-output history)
 .superpowers/
+rtk/
 
 # Superpowers specs/plans — local design scratch, not part of the repo
 docs/superpowers/
