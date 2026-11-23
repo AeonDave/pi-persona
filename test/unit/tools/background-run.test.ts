@@ -263,3 +263,14 @@ test("a run tells its work whether the launching turn has ended: interactive is 
 	await tick();
 	assert.deepEqual(seen, [true, false]);
 });
+
+test("a council or flow a run limit cut short settles 'failed', never 'stopped' (stopped is a user or gate stop)", async () => {
+	const h = harness();
+	const p = parked();
+	const id = h.runs.launch({ kind: "council", label: "council magi", task: "ship it?", inline: false }, p.work);
+	await tick();
+	p.release(ok("partial ruling", { ok: false, error: "not run: the run's maxChildren limit (64) is spent", failureKind: "limit" }));
+	await tick();
+	await tick();
+	assert.equal(h.tracker.list().find((run) => run.id === id)?.status, "failed");
+});

@@ -416,8 +416,14 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 			if (!terminalOutput.trim()) return cancellationText;
 			return outputAlreadySignalsCancellation ? terminalOutput : `${terminalOutput}\n\n${cancellationText}`;
 		}
-		if (terminalOutput.trim()) return terminalOutput;
-		return failure ? failureText : terminalOutput;
+		if (!failure) return terminalOutput;
+		// A failed phase's partial output is work already paid for: keep it beside the failure, as a
+		// rejected checkpoint keeps its gated output. Parallel roots drain one shared budget, so several
+		// can fail at once; each keeps its own. A failed terminal is already in `terminalOutput`.
+		const partials = rootFailures
+			.filter((entry) => !terminals.includes(entry.phase))
+			.map((entry) => entry.result.output);
+		return [...partials, terminalOutput, failureText].filter((part) => part.trim()).join("\n\n");
 	};
 	return {
 		ok,

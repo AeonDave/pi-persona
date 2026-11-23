@@ -151,6 +151,7 @@ import { readArchivedBody, resultReceiptHint, type ResultReceipt } from "./resul
 type SavedFlowOutcome = FlowOutcome & { resultReceipt?: ResultReceipt };
 import { type ModelHandle, PersonaController, type PersonaHost } from "./persona/controller.ts";
 import { resolveStrategyName, resolveOrchestrationMembers, runPersonaStrategy } from "./persona/orchestrate.ts";
+import { createRunBudget } from "./orchestration/run-budget.ts";
 import {
 	collectModelParticipants,
 	collectModelParticipantOccurrences,
@@ -2159,6 +2160,9 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 				if (spec.phases[0]?.id) failed.failedPhase = spec.phases[0].id;
 				return finish(failed);
 			}
+			// The run limits bound the whole invocation: every phase draws on one child count, one token
+			// total and one maxConcurrency gate. A resume is a new invocation with a fresh budget.
+			const budget = createRunBudget(RUN_LIMITS);
 			const outcome = await runFlow(spec, baseTask, {
 				hash,
 				resume,
@@ -2200,7 +2204,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					const r = await runPersonaStrategy(orch, task, {
 						engine: phaseEngine,
 						teams,
-						limits: RUN_LIMITS,
+						budget,
 						...sessionModelDep(ctx),
 						signal, // cooperative per-round abort inside the phase's strategy, not just the engine
 						...strategyTreeDeps(pid, models, tracked),
@@ -2428,7 +2432,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		if (caps) {
 			lines.push(`effective-capabilities: tools=${caps.tools.size}, delegate-targets=${caps.delegateTargets.size}, canFanOut=${canFanOut(caps)}`);
 		}
-		lines.push(`run limits: children≤${RUN_LIMITS.maxChildren}, concurrency≤${RUN_LIMITS.maxConcurrency}, timeout=${RUN_LIMITS.timeoutMs}ms`);
+		lines.push(`run limits (per council/orchestration run; a flow counts as one run): children≤${RUN_LIMITS.maxChildren}, concurrency≤${RUN_LIMITS.maxConcurrency}, token budget=${RUN_LIMITS.budgetTokens > 0 ? RUN_LIMITS.budgetTokens : "none"} (admission on completed usage), idle timeout=${RUN_LIMITS.timeoutMs}ms per leg`);
 		lines.push("strategies:");
 		for (const name of strategyNames()) {
 			const schema = knownParams(name);

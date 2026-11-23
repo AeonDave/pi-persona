@@ -13,9 +13,10 @@ import type { RunLimits } from "../core/capabilities.ts";
 import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { planModelRecovery } from "./model-retry.ts";
-import { mapWithConcurrency, Semaphore } from "./parallel.ts";
+import { mapWithConcurrency } from "./parallel.ts";
 import { aggregateResults, sumUsage } from "./reducers.ts";
 import { roleHint, type RosterMember } from "./roster.ts";
+import { createRunBudget, type RunBudget, type RunLimitStop } from "./run-budget.ts";
 import { agentAttemptIdentity, type AgentAttemptIdentity } from "./agent-attempt.ts";
 import type { AgentResult, ModelRecovery } from "./types.ts";
 import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
@@ -152,7 +153,11 @@ export interface StrategySDK {
 	 *  default for a run — members get their roster/persona model. */
 	readonly sessionModel: string | undefined;
 	log(message: string): void;
+	/** The run's declared ceilings. */
 	limits: RunLimits;
+	/** Live headroom of the run's shared budget (other phases of a flow included); `tokens` is
+	 *  `Infinity` without a token budget. Plan optional work from this, never from `limits`. */
+	readonly remaining: { children: number; tokens: number };
 }
 
 export interface StrategyInput {
@@ -196,10 +201,9 @@ export interface Strategy {
 
 export type AgentStatus = "running" | "done" | "failed";
 
-export interface SDKDeps {
+interface SDKBase {
 	engine: StrategyEngine;
 	roster: Roster;
-	limits: RunLimits;
 	signal?: AbortSignal;
 	/** See `StrategySDK.sessionModel`. */
 	sessionModel?: string;
@@ -230,6 +234,10 @@ export interface SDKDeps {
 	 *  Denied BEFORE the child-slot is consumed and without calling the engine. Absent ⇒ no gate. */
 	canSpawn?: (agent: string) => boolean;
 }
+
+/** An SDK draws on the run's shared `budget`, or on a fresh one built from `limits` when it is the
+ *  whole run (one strategy call). A flow passes one budget to every phase. */
+export type SDKDeps = SDKBase & ({ limits: RunLimits } | { budget: RunBudget });
 
 /**
  * An `ok:false` SYNTHESISED from an engine rejection rather than reported by the engine itself.
@@ -273,6 +281,11 @@ function abortedLeg(agent: string): AgentResult {
 	return { agent, output: "", usage: emptyUsage(), ok: false, error: "agent aborted", failureKind: "abort" };
 }
 
+/** A leg the run's budget did not admit: never started, no child spent, nothing cancelled. */
+function refusedLeg(agent: string, stop: RunLimitStop): AgentResult {
+	return { agent, output: "", usage: emptyUsage(), ok: false, error: `not run: ${stop.error}`, failureKind: "limit" };
+}
+
 /** Strip runtime-owned grants before a strategy's request reaches the engine. */
 function stripRuntimeGrants(spec: AgentRunSpec): AgentRunSpec {
 	const { resultRefs: _untrusted, session: _session, ...rest } = spec;
@@ -282,37 +295,16 @@ function stripRuntimeGrants(spec: AgentRunSpec): AgentRunSpec {
 export function makeSDK(deps: SDKDeps): StrategySDK {
 	// Run-scoped enforcement of the declared limits — applied here so NO strategy can
 	// exceed them, however it calls agent() (I2: safety from runtime limits, not isolation).
-	let childrenSpawned = 0;
-	let tokensSpent = 0;
-	// One gate per SDK/run. This covers direct Promise.all callers as well as sdk.parallel's
-	// batch gate; a strategy cannot bypass maxConcurrency by choosing a different topology.
-	const maxConcurrency = Math.max(1, Number.isFinite(deps.limits.maxConcurrency) ? Math.floor(deps.limits.maxConcurrency) : 1);
-	const agentSlots = new Semaphore(maxConcurrency);
-	// Optional recovery must not spend slots already needed by queued logical legs or thunks.
-	const pendingAgents = new Set<symbol>();
-	const pendingThunks = new Set<symbol>();
+	// Its slot gate covers direct Promise.all callers as well as sdk.parallel's batch gate, so a
+	// strategy cannot bypass maxConcurrency by choosing a different topology.
+	const budget = "budget" in deps ? deps.budget : createRunBudget(deps.limits);
+	const { limits, slots, queued: pendingWork } = budget;
+	const maxConcurrency = Math.max(1, Number.isFinite(limits.maxConcurrency) ? Math.floor(limits.maxConcurrency) : 1);
 	// Run-unique UI keys: the base is the agent name, or `agent · HINT` when the member
 	// carries a role — so an ensemble of one agent under several roles shows as distinct
 	// nodes. A `#N` suffix guards the degenerate case of an identical base twice. This
 	// mirrors `rosterNodeKeys`, so the seeded "queued" nodes line up with the live ones.
 	const uiSeen = new Map<string, number>();
-	// A run-fatal limit breach rejects the strategy, but legs already in flight cannot be reached
-	// through that rejection: they would keep running and billing with no consumer. Every leg runs
-	// under `runSignal`, so the breach cancels them. `sdk.signal` stays the caller's signal — the one
-	// strategies read as "the user stopped" — so this internal cancellation is never reported as one.
-	let fatalBreach: Error | undefined;
-	const fatalAbort = new AbortController();
-	const runSignal = deps.signal ? AbortSignal.any([deps.signal, fatalAbort.signal]) : fatalAbort.signal;
-	const raiseFatal = (breach: Error): Error => {
-		fatalBreach ??= breach;
-		fatalAbort.abort(breach);
-		return breach;
-	};
-	/** Name the breach on a leg it cancelled, so its row and archive do not read as a user stop. */
-	const explainCancel = (result: AgentResult): AgentResult =>
-		fatalBreach && !deps.signal?.aborted && !result.ok && result.failureKind === "abort"
-			? { ...result, error: `cancelled: ${fatalBreach.message} in a sibling leg` }
-			: result;
 	/** The MAIN model, read LIVE (`getSessionModel` wins) so a `/model` pick made while the run is
 	 *  in flight is what recovery lands on; the snapshot is used only without a live getter. */
 	const currentMain = (): string | undefined => deps.getSessionModel ? deps.getSessionModel() : deps.sessionModel;
@@ -346,19 +338,19 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				});
 			}
 			const pending = Symbol();
-			pendingAgents.add(pending);
+			pendingWork.add(pending);
 			let started = false;
 			const run = async (): Promise<AgentResult> => {
-				pendingAgents.delete(pending);
-				// These checks intentionally happen AFTER waiting for a slot. A queued leg must see
-				// the current child/token totals, not the stale snapshot from when it was enqueued.
-				if (childrenSpawned >= deps.limits.maxChildren) {
-					throw raiseFatal(new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`));
+				pendingWork.delete(pending);
+				// Admission intentionally happens AFTER waiting for a slot: a queued leg must see the
+				// current child/token totals, not the stale snapshot from when it was enqueued. A refusal
+				// is this leg's own result — the strategy decides whether the run is still complete.
+				const stop = budget.admit();
+				if (stop) {
+					const refused = refusedLeg(spec.agent, stop);
+					deps.onAgentStatus?.(spec.agent, "failed", refused, key, currentAttempt);
+					return refused;
 				}
-				if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
-					throw raiseFatal(new Error(`run exceeded token budget (${deps.limits.budgetTokens})`));
-				}
-				childrenSpawned += 1;
 				started = true;
 				// One logical node and abort controller across attempts: a local stop remains sticky
 				// across the recovery seam. The SAME UI key repairs the node in place.
@@ -371,9 +363,12 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					const ac = current ?? new AbortController();
 					current = ac;
 					const onRootAbort = () => ac.abort();
-					detachRoot.push(() => runSignal.removeEventListener("abort", onRootAbort));
-					if (runSignal.aborted) ac.abort();
-					else runSignal.addEventListener("abort", onRootAbort, { once: true });
+					const root = deps.signal;
+					if (root) {
+						detachRoot.push(() => root.removeEventListener("abort", onRootAbort));
+						if (root.aborted) ac.abort();
+						else root.addEventListener("abort", onRootAbort, { once: true });
+					}
 					if (!announcedStart) {
 						announcedStart = true;
 						deps.onAgentStart?.(aSpec.agent, () => current?.abort(), key, identity);
@@ -382,7 +377,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					// A slot grant is not an engine start. Root or local cancellation in a lifecycle
 					// callback must prevent the engine invocation, not merely hand it an aborted signal.
 					if (ac.signal.aborted) {
-						return explainCancel(abortedLeg(aSpec.agent));
+						return abortedLeg(aSpec.agent);
 					}
 					const onProgress = deps.onAgentProgress;
 					// The try covers the ENGINE CALL AND NOTHING ELSE. Widened over the bookkeeping below it,
@@ -400,15 +395,13 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 						);
 					} catch (err) {
 						// PER-LEG failure — contained, never rethrown: one blown engine call must not discard
-						// the fan-out's completed (already billed) sibling results. The RUN-FATAL breaches
-						// above (maxChildren, token budget) are thrown BEFORE this try, so they still stop
-						// the run instead of degrading into a "failed member" the strategy fans out past.
-						// Such a failure is `infrastructure`: the HARNESS broke, which is no evidence about
-						// the model, so it never reaches the recovery below.
-						return explainCancel(legFailure(aSpec.agent, err, ac.signal.aborted || runSignal.aborted));
+						// the fan-out's completed (already billed) sibling results. Such a failure is
+						// `infrastructure`: the HARNESS broke, which is no evidence about the model, so it
+						// never reaches the recovery below.
+						return legFailure(aSpec.agent, err, ac.signal.aborted || deps.signal?.aborted === true);
 					}
-					tokensSpent += result.usage.input + result.usage.output;
-					return explainCancel(result);
+					budget.charge(result.usage);
+					return result;
 				};
 				try {
 					const first = await attempt(spec);
@@ -420,8 +413,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					// else qualifies: a stop, a timeout, a contract violation, an agent error, or a harness
 					// rejection reproduces on any model, and a retried abort would be a stop that does not
 					// stop. Everything here is BOUNDED and non-fatal: an optional recovery that cannot be
-					// afforded is skipped with a stated reason and the ORIGINAL cause is returned, because
-					// throwing would turn a leg that merely lost its model into a run-fatal breach.
+					// afforded is skipped with a stated reason and the ORIGINAL cause is returned.
 					const main = currentMain();
 					const plan = isInfrastructureFailure(first) || first.worktreeRecovery
 						? null
@@ -429,20 +421,15 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					if (!plan) return first;
 					// A stop never resurrects: neither the ROOT signal nor the per-leg stop the UI handed
 					// out. `current` is the controller this attempt ran under.
-					if (runSignal.aborted || current?.signal.aborted) return first;
+					if (deps.signal?.aborted || current?.signal.aborted) return first;
 					const skip = (why: string): AgentResult => {
 						deps.log?.(`${spec.agent} stays failed — ${why}`);
 						return first;
 					};
 					const requestedReserve = typeof options?.reserveChildren === "function" ? options.reserveChildren() : options?.reserveChildren;
 					const reserve = requestedReserve !== undefined && Number.isFinite(requestedReserve) ? Math.max(0, Math.floor(requestedReserve)) : 0;
-					const queued = pendingAgents.size + pendingThunks.size;
-					if (childrenSpawned + reserve + queued >= deps.limits.maxChildren) {
-						return skip(`no child budget left to recover it (maxChildren ${deps.limits.maxChildren}, ${reserve + queued} reserved for remaining work)`);
-					}
-					if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
-						return skip(`token budget exhausted (${deps.limits.budgetTokens})`);
-					}
+					const unaffordable = budget.recoverySkip(reserve);
+					if (unaffordable) return skip(unaffordable);
 					const recovery: ModelRecovery = { ...(plan.from ? { from: plan.from } : {}), to: plan.to };
 					deps.log?.(`${spec.agent} failed on ${plan.from ?? "its model"} — retrying once on the session model ${plan.to}`);
 					try {
@@ -452,15 +439,17 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					}
 					// The notification can cancel this logical leg too. Do not replace that intent with
 					// a fresh controller or spend another child slot after it has been stopped.
-					if (runSignal.aborted || current?.signal.aborted) {
-						const stopped = explainCancel({ ...abortedLeg(spec.agent), usage: first.usage });
+					if (deps.signal?.aborted || current?.signal.aborted) {
+						const stopped: AgentResult = { ...abortedLeg(spec.agent), usage: first.usage };
 						deps.onAgentStatus?.(spec.agent, "failed", stopped, key, currentAttempt);
 						return stopped;
 					}
 					// The retry is a REAL attempt: admitted and charged like any other child, but inside
 					// the slot this call already holds — never a recursive agent() (that would deadlock on
-					// maxConcurrency 1), and never raising the ceiling.
-					childrenSpawned += 1;
+					// maxConcurrency 1), and never raising the ceiling. `recoverySkip` checked the same
+					// totals synchronously, so this admission is not refused in practice.
+					const retryStop = budget.admit();
+					if (retryStop) return skip(retryStop.error);
 					const second = await attempt({ ...spec, model: plan.to });
 					// Both attempts are billed once. The LAST attempt supplies model/cause metadata:
 					// a main timeout or abort must not be relabelled as the initial provider failure.
@@ -478,35 +467,33 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				}
 			};
 			try {
-				return finish(await agentSlots.with(run, runSignal));
+				return finish(await slots.with(run, deps.signal));
 			} catch (error) {
 				// A queued leg has no engine result to report. Settle it as an abort when the
 				// run signal removed its waiter; all other errors retain their terminal semantics.
 				if (!started && deps.signal?.aborted) {
 					return finish(abortedLeg(spec.agent));
 				}
-				// Removed from the queue by a breach: it would have hit that same limit once admitted.
-				if (!started && fatalBreach) throw fatalBreach;
 				throw error;
 			} finally {
-				pendingAgents.delete(pending);
+				pendingWork.delete(pending);
 			}
 		},
 		parallel: (thunks, opts) => {
-			// `agent()` already contains ENGINE failures per leg, so a rejection reaching here is
-			// run-fatal by construction — a limit breach, a host callback that threw, or a thunk that
-			// threw on its own. All three are the run's bug, not a member's; let them stop the run.
+			// `agent()` already settles engine failures and limit refusals per leg, so a rejection
+			// reaching here is run-fatal by construction — a host callback that threw, or a thunk that
+			// threw on its own. Both are the run's bug, not a member's; let them stop the run.
 			// The generic `T` is why containment can't live in `mapWithConcurrency`: only the caller
 			// knows what a failed member of its own value type looks like. Clamp arbitrary thunk
 			// batches too, so the public parallel surface has the same ceiling as agent().
 			const requested = opts?.concurrency ?? maxConcurrency;
 			const queued = thunks.map((thunk) => ({ thunk, token: Symbol() }));
-			for (const { token } of queued) pendingThunks.add(token);
+			for (const { token } of queued) pendingWork.add(token);
 			return mapWithConcurrency(queued, Math.min(requested, maxConcurrency), ({ thunk, token }) => {
-				pendingThunks.delete(token);
+				pendingWork.delete(token);
 				return thunk();
 			}).finally(() => {
-				for (const { token } of queued) pendingThunks.delete(token);
+				for (const { token } of queued) pendingWork.delete(token);
 			});
 		},
 		reduce: { aggregate: aggregateResults, vote: voteReduce, judge: prepareJudge },
@@ -516,6 +503,9 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 			return currentMain();
 		},
 		log: deps.log ?? (() => {}),
-		limits: deps.limits,
+		limits,
+		get remaining() {
+			return budget.remaining;
+		},
 	};
 }

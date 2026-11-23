@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { AgentResult } from "../../../src/orchestration/types.ts";
-import { aggregateResults, itemLedger, sumUsage } from "../../../src/orchestration/reducers.ts";
+import { aggregateResults, itemLedger, summarizeFailedResults, sumUsage } from "../../../src/orchestration/reducers.ts";
 
 const usage = (input: number) => ({
 	input,
@@ -102,4 +102,15 @@ test("aggregateResults without labels is byte-identical: agent headers and no me
 	const agg = aggregateResults([ok("a", "A out")]);
 	assert.equal(agg.output, "### [a] ok\n\nA out");
 	assert.equal("member" in ((agg.structured?.results as Array<Record<string, unknown>>)[0] ?? {}), false);
+});
+
+test("summarizeFailedResults reports a limit refusal as the run-level cause; a user abort still wins", () => {
+	const u = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+	const okLeg: AgentResult = { agent: "a", output: "x", usage: u, ok: true };
+	const failed: AgentResult = { agent: "b", output: "", usage: u, ok: false, error: "gave up", failureKind: "agent" };
+	const refused: AgentResult = { agent: "c", output: "", usage: u, ok: false, error: "not run: the run's maxChildren limit (2) is spent", failureKind: "limit" };
+	const aborted: AgentResult = { agent: "d", output: "", usage: u, ok: false, error: "agent aborted", failureKind: "abort" };
+	assert.deepEqual(summarizeFailedResults([okLeg, failed, refused], "fallback"), { error: refused.error, failureKind: "limit" });
+	assert.equal(summarizeFailedResults([refused, aborted], "fallback").failureKind, "abort");
+	assert.equal(aggregateResults([okLeg, failed, refused]).failureKind, "limit", "an aggregate names the run's stop");
 });

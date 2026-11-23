@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { isInfrastructureFailure, makeSDK, type StrategyEngine, withResultRefs } from "../../../src/orchestration/sdk.ts";
+import { createRunBudget } from "../../../src/orchestration/run-budget.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { parseAuxActor } from "../../../src/orchestration/params.ts";
 import { parseMembersBlock } from "../../../src/persona/persona.ts";
@@ -51,8 +52,8 @@ test("SDK lifecycle carries frozen exact attempt identity through same-hint legs
 	assert.equal(seen.find((e) => e.phase === "result")!.identity, running[1]!.identity, "terminal capture names the last attempt");
 });
 
-// The per-leg vs. run-fatal boundary: an engine rejection is THIS leg's failure (the fan-out keeps
-// its siblings' completed work), while a run-scoped limit breach still stops the whole run.
+// Every leg failure is per-leg: an engine rejection and a run-limit refusal are THAT leg's result,
+// so the fan-out keeps its siblings' completed work. Only a user/lifecycle abort cancels legs.
 
 test("SDK forwards thinking from inline/persona members and auxiliary actors through model recovery unchanged", async () => {
 	const seen: Array<{ model?: string; thinking?: string }> = [];
@@ -184,7 +185,7 @@ test("engine-rejection containment does not depend on the status callback surviv
 	await assert.rejects(() => sdk.agent({ agent: "a", task: "t" }), /tree renderer blew up/);
 });
 
-test("a maxChildren breach still rejects the fan-out instead of degrading into a failed member", async () => {
+test("a maxChildren refusal is that leg's 'limit' result: the engine is never called for it and siblings keep their work", async () => {
 	let runs = 0;
 	const engine: StrategyEngine = {
 		run: async (spec) => {
@@ -192,12 +193,21 @@ test("a maxChildren breach still rejects the fan-out instead of degrading into a
 			return ok(spec.agent);
 		},
 	};
-	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: { ...LIMITS, maxChildren: 2 } });
-	await assert.rejects(
-		() => sdk.parallel(["a", "b", "c"].map((a) => () => sdk.agent({ agent: a, task: "t" }))),
-		/maxChildren/,
-	);
-	assert.equal(runs, 2, "the breach stops the run — it must not keep spawning");
+	const settled: Array<{ agent: string; status: string; result?: AgentResult }> = [];
+	const captured: AgentResult[] = [];
+	const sdk = makeSDK({
+		engine, roster: { team: () => [] }, limits: { ...LIMITS, maxChildren: 2 },
+		onAgentStatus: (agent, status, result) => settled.push({ agent, status, ...(result ? { result } : {}) }),
+		onAgentResult: (result) => captured.push(result),
+	});
+	const results = await sdk.parallel(["a", "b", "c"].map((a) => () => sdk.agent({ agent: a, task: "t" })));
+	assert.equal(runs, 2, "the refused leg never reaches the engine");
+	assert.deepEqual(results.map((r) => r.ok), [true, true, false]);
+	assert.equal(results[2]?.failureKind, "limit");
+	assert.match(results[2]?.error ?? "", /^not run: .*maxChildren limit \(2\)/);
+	assert.deepEqual(settled.filter((e) => e.agent === "c").map((e) => e.status), ["failed"], "the seeded row settles without a fake start");
+	assert.equal(settled.find((e) => e.agent === "c")?.result?.failureKind, "limit");
+	assert.equal(captured.find((r) => r.agent === "c")?.failureKind, "limit", "the refusal is captured like any final leg");
 });
 
 test("canSpawn denies a member before the engine runs and does not consume a child slot", async () => {
@@ -222,16 +232,21 @@ test("canSpawn denies a member before the engine runs and does not consume a chi
 	assert.equal(runs, 1, "the denied attempt did not consume maxChildren");
 });
 
-test("a token-budget breach still rejects the fan-out instead of degrading into a failed member", async () => {
+test("a token-budget refusal resolves as a 'limit' result per refused leg, never a rejection", async () => {
+	let runs = 0;
 	const engine: StrategyEngine = {
-		run: async (spec) => ({ agent: spec.agent, output: "o", usage: { ...usage(), input: 200 }, ok: true }),
+		run: async (spec) => {
+			runs++;
+			return { agent: spec.agent, output: "o", usage: { ...usage(), input: 200 }, ok: true };
+		},
 	};
 	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: { ...LIMITS, budgetTokens: 150 } });
 	await sdk.agent({ agent: "a", task: "t" });
-	await assert.rejects(
-		() => sdk.parallel(["b", "c"].map((a) => () => sdk.agent({ agent: a, task: "t" }))),
-		/budget/,
-	);
+	const results = await sdk.parallel(["b", "c"].map((a) => () => sdk.agent({ agent: a, task: "t" })));
+	assert.equal(runs, 1);
+	assert.deepEqual(results.map((r) => r.failureKind), ["limit", "limit"]);
+	assert.match(results[0]?.error ?? "", /token budget \(150\)/);
+	assert.doesNotMatch(results[0]?.error ?? "", /maxChildren/, "a token stop is never named as a child limit");
 });
 
 /** An engine whose legs stay in flight until their signal aborts (or `release` is called),
@@ -259,45 +274,65 @@ function holdingEngine(opts: { tokens?: (agent: string) => number; immediate?: (
 	return { engine, signals, releases };
 }
 
-test("a run-fatal maxChildren breach cancels in-flight siblings and fails queued legs with the breach", { timeout: 1000 }, async () => {
+test("a maxChildren refusal cancels nothing: in-flight siblings finish and keep their results", { timeout: 1000 }, async () => {
 	const root = new AbortController();
-	const { engine, signals } = holdingEngine();
-	const settledStatus = new Map<string, AgentResult>();
+	const { engine, signals, releases } = holdingEngine();
 	const sdk = makeSDK({
 		engine,
 		roster: { team: () => [] },
 		limits: { ...LIMITS, maxChildren: 2, maxConcurrency: 3 },
 		signal: root.signal,
-		onAgentStatus: (agent, status, result) => {
-			if (status !== "running" && result) settledStatus.set(agent, result);
-		},
 	});
-	const outcomes = await Promise.allSettled(["a", "b", "c", "d"].map((agent) => sdk.agent({ agent, task: "t" })));
-
-	assert.equal(outcomes[2]!.status, "rejected");
-	assert.match(String((outcomes[2] as PromiseRejectedResult).reason), /maxChildren/);
-	assert.equal(outcomes[3]!.status, "rejected", "a leg still queued behind the breach must not start");
-	assert.match(String((outcomes[3] as PromiseRejectedResult).reason), /maxChildren/, "the queued leg reports the breach, not a bare abort");
-	assert.equal(signals.get("a")?.aborted, true, "in-flight sibling a must be cancelled");
-	assert.equal(signals.get("b")?.aborted, true, "in-flight sibling b must be cancelled");
-	assert.equal(signals.has("d"), false, "the queued leg never reached the engine");
-	assert.equal(root.signal.aborted, false, "the caller's signal is not aborted by an internal cancellation");
-	assert.equal(sdk.signal, root.signal, "strategies still see the caller's (user-stop) signal");
-	for (const agent of ["a", "b"]) {
-		const r = settledStatus.get(agent);
-		assert.equal(r?.failureKind, "abort", `${agent} settles as a cancellation`);
-		assert.match(r?.error ?? "", /maxChildren/, `${agent}'s row names the breach, so it does not read as a user stop`);
-	}
+	const run = Promise.all(["a", "b", "c", "d"].map((agent) => sdk.agent({ agent, task: "t" })));
+	while (!releases.has("a") || !releases.has("b")) await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(signals.get("a")?.aborted, false, "in-flight sibling a is not cancelled");
+	assert.equal(signals.get("b")?.aborted, false, "in-flight sibling b is not cancelled");
+	releases.get("a")!();
+	releases.get("b")!();
+	const results = await run;
+	assert.deepEqual(results.map((r) => r.ok), [true, true, false, false]);
+	assert.deepEqual(results.map((r) => r.output), ["out:a", "out:b", "", ""], "the paid siblings' work survives");
+	assert.deepEqual(results.slice(2).map((r) => r.failureKind), ["limit", "limit"]);
+	assert.equal(signals.has("c") || signals.has("d"), false, "refused legs never reached the engine");
+	assert.equal(root.signal.aborted, false, "the caller's signal is untouched");
+	assert.equal(sdk.signal, root.signal);
 });
 
-test("a run-fatal token-budget breach cancels the in-flight sibling", { timeout: 1000 }, async () => {
+test("a token-budget refusal leaves the sibling still running alone", { timeout: 1000 }, async () => {
 	const { engine, signals, releases } = holdingEngine({ tokens: (agent) => (agent === "a" ? 200 : 1) });
 	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: { ...LIMITS, maxConcurrency: 2, budgetTokens: 150 } });
 	const run = sdk.parallel(["a", "b", "c"].map((agent) => () => sdk.agent({ agent, task: "t" })));
 	while (!releases.has("a") || !releases.has("b")) await new Promise<void>((resolve) => setImmediate(resolve));
 	releases.get("a")!();
-	await assert.rejects(run, /budget/);
-	assert.equal(signals.get("b")?.aborted, true, "the sibling still running when the budget broke must be cancelled");
+	while (signals.size < 2) await new Promise<void>((resolve) => setImmediate(resolve));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(signals.get("b")?.aborted, false, "the budget stop does not cancel b");
+	releases.get("b")!();
+	const results = await run;
+	assert.deepEqual(results.map((r) => r.ok), [true, true, false]);
+	assert.equal(results[2]?.failureKind, "limit");
+});
+
+test("two SDKs sharing one budget share its children, tokens and concurrency slot", { timeout: 1000 }, async () => {
+	const budget = createRunBudget({ ...LIMITS, maxChildren: 2, maxConcurrency: 1 });
+	const { engine, releases } = holdingEngine();
+	const stopped: string[] = [];
+	const a = makeSDK({ engine, roster: { team: () => [] }, budget });
+	const b = makeSDK({ engine, roster: { team: () => [] }, budget, onAgentStatus: (agent, status) => { if (status === "failed") stopped.push(agent); } });
+	const first = a.agent({ agent: "a1", task: "t" });
+	while (!releases.has("a1")) await new Promise<void>((resolve) => setImmediate(resolve));
+	const second = b.agent({ agent: "b1", task: "t" });
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(releases.has("b1"), false, "B waits on the slot A holds");
+	assert.deepEqual(b.remaining, { children: 1, tokens: 1000 });
+	releases.get("a1")!();
+	while (!releases.has("b1")) await new Promise<void>((resolve) => setImmediate(resolve));
+	releases.get("b1")!();
+	assert.deepEqual((await Promise.all([first, second])).map((r) => r.ok), [true, true]);
+	const third = await b.agent({ agent: "b2", task: "t" });
+	assert.equal(third.failureKind, "limit", "A's child counts against B");
+	assert.deepEqual(stopped, ["b2"]);
+	assert.deepEqual(a.remaining, { children: 0, tokens: 998 }, "both SDKs read the one shared spend");
 });
 
 test("a per-leg failure (a returned ok:false) does not cancel its siblings", { timeout: 1000 }, async () => {
@@ -407,7 +442,7 @@ test("a queued agent rechecks the token budget after it acquires a slot", async 
 	const second = sdk.agent({ agent: "second", task: "t" });
 	releaseFirst();
 	await first;
-	await assert.rejects(second, /budget/);
+	assert.equal((await second).failureKind, "limit");
 	assert.equal(runs, 1, "the queued leg must not start after the first leg exhausts the budget");
 });
 

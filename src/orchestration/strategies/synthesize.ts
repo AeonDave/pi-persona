@@ -110,9 +110,14 @@ export const synthesize: Strategy = {
 		const structuredResult = final.structured?.result;
 		const headline = `${coverage ? `Incomplete coverage: ${usable.length}/${team.length} · ` : ""}${typeof structuredResult === "string" && structuredResult.trim() ? structuredResult : firstLine}`.slice(0, 120);
 
+		// A merge that did not complete must not discard the findings already paid for: hand them
+		// back unmerged, saying why.
+		const body = final.ok
+			? final.output
+			: `The synthesis did not complete (${final.error ?? final.failureKind ?? "the synthesizer failed"}); the gatherers' unmerged findings follow.\n\n${sections}`;
 		const result: AgentResult = {
 			agent: "synthesize",
-			output: coverageNote ? `${coverageNote}\n\n${final.output}` : final.output,
+			output: coverageNote ? `${coverageNote}\n\n${body}` : body,
 			structured: { ...(final.structured ?? {}), gatherers: usable.length, headline, ...(coverage ? { coverage } : {}) },
 			usage: sumUsage([...results, final].map((r) => r.usage)),
 			ok: final.ok,

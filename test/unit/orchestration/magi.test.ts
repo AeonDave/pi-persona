@@ -272,9 +272,9 @@ test("recovery survives the reflection round — the DEFAULT configuration, not 
 });
 
 test("recovery never starves the rounds themselves of child budget", async () => {
-	// Recovery is an enhancement. Exceeding `maxChildren` THROWS out of sdk.agent(), which would
-	// turn a poll that had a ruling into no ruling at all — so the SDK skips a retry it cannot
-	// afford, and the reflection round declines to start rather than overrunning the cap.
+	// Recovery is an enhancement. A leg past `maxChildren` comes back refused, so the SDK skips a
+	// retry it cannot afford, and the reflection round declines to start rather than buying a
+	// partial round of refused legs.
 	const { engine, attempts } = brokenModelEngine({ melchior: "x/one", balthasar: "y/two", casper: "z/three" });
 	const logs: string[] = [];
 	const sdk = makeSDK({
@@ -459,4 +459,52 @@ test("a magi dissent line names the agent, never a run-key suffix, for same-agen
 	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: lenses, limits: LIMITS }));
 	assert.match(r.output, /\[reviewer · B\] B wins/);
 	assert.doesNotMatch(r.output, /#\d/);
+});
+
+test("magi plans reflection from the run's shared remaining budget, not from its own round", async () => {
+	const { createRunBudget } = await import("../../../src/orchestration/run-budget.ts");
+	const budget = createRunBudget({ ...LIMITS, budgetTokens: 10 });
+	budget.charge({ input: 5, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 }); // a sibling phase spent 5
+	let calls = 0;
+	const engine: StrategyEngine = { run: async (spec) => {
+		calls++;
+		return { agent: spec.agent, output: "x", structured: { result: "yes", vote: "yes", confidence: 0.5 }, usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 }, ok: true };
+	} };
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, budget }));
+	assert.equal(calls, 3, "2 tokens left cannot fund a 3-core reflection");
+	assert.equal(r.ok, true);
+	assert.match(r.output, /reflection skipped \(token budget\)/);
+});
+
+test("a split magi panel with a refused core ends without a ruling, keeping the cast answers", async () => {
+	const r = await magi.run(
+		{ task: "decide", roster: "magi", params: {} },
+		makeSDK({ engine: votingEngine({ a: "yes", b: "no" }), roster: { team: () => ["a", "b", "c"] }, limits: { ...LIMITS, maxChildren: 2 } }),
+	);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.usedFallback, false, "no best-by-confidence ruling from a panel that never fully convened");
+	assert.match(r.output, /a says yes/);
+	assert.match(r.output, /b says no/);
+	assert.match(r.output, /not run: c/);
+});
+
+test("a lone magi core is not the panel's ruling when the others were refused", async () => {
+	const r = await magi.run(
+		{ task: "decide", roster: "magi", params: {} },
+		makeSDK({ engine: votingEngine({ a: "yes" }), roster: { team: () => ["a", "b", "c"] }, limits: { ...LIMITS, maxChildren: 1 } }),
+	);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.notEqual(r.structured?.status, "winner");
+	assert.match(r.output, /a says yes/);
+	assert.match(r.output, /not run: b, c/);
+});
+
+test("magi decides over the cores that ran when the child limit refuses one, and names it", async () => {
+	const engine: StrategyEngine = { run: async (spec) => ({ agent: spec.agent, output: "x", structured: { result: "yes", vote: "yes", confidence: 0.5 }, usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 }, ok: true }) };
+	const r = await magi.run({ task: "decide", roster: "magi", params: {} }, makeSDK({ engine, roster: { team: () => ["a", "b", "c"] }, limits: { ...LIMITS, maxChildren: 2 } }));
+	assert.equal(r.structured?.status, "winner");
+	assert.match(r.output, /not run: c/);
+	assert.match(r.output, /reflection skipped \(child budget\)/);
 });

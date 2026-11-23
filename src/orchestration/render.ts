@@ -47,6 +47,14 @@ export function readableRuling(r: AgentResult): string {
 	return r.output.trim();
 }
 
+/** The voters a run limit refused, named so a ruling never hides who did not vote; undefined when all ran. */
+export function notRunLine(candidates: readonly AgentResult[]): string | undefined {
+	const refused = candidates.filter((c) => !c.ok && c.failureKind === "limit");
+	if (refused.length === 0) return undefined;
+	const why = (refused[0]?.error ?? "").replace(/^not run: /, "");
+	return `not run: ${refused.map((c) => safeChrome(c.agent, 60)).join(", ")}${why ? ` — ${why}` : ""}`;
+}
+
 /** A bounded one-line headline for collapsed strategy/tool presentations. */
 export function rulingHeadline(r: AgentResult): string | undefined {
 	const headline = oneLine(readableRuling(r), 120);

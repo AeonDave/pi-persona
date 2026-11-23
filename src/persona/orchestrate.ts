@@ -12,6 +12,7 @@ import {
 	type StrategyEngine,
 	type StrategyInput,
 } from "../orchestration/sdk.ts";
+import type { RunBudget } from "../orchestration/run-budget.ts";
 import { getStrategy, strategyNames } from "../orchestration/strategy.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import type { OrchestrationGrammar } from "./persona.ts";
@@ -53,10 +54,9 @@ export function resolveOrchestrationMembers(
 	return members;
 }
 
-export interface RunStrategyDeps {
+interface RunStrategyBase {
 	engine: StrategyEngine;
 	teams: Record<string, RosterMember[]>;
-	limits: RunLimits;
 	signal?: AbortSignal;
 	/** The session's own model (`provider/id`) — a strategy's last-resort recovery model for a
 	 *  member whose own model broke with no healthy peer to borrow from. */
@@ -81,6 +81,9 @@ export interface RunStrategyDeps {
 	canSpawn?: (agent: string) => boolean;
 }
 
+/** `limits` makes this call its own run; `budget` draws on a run shared with other calls (a flow's phases). */
+export type RunStrategyDeps = RunStrategyBase & ({ limits: RunLimits } | { budget: RunBudget });
+
 /** Run the persona's strategy on a task, or return null if it has no runnable strategy. */
 export async function runPersonaStrategy(
 	orch: OrchestrationGrammar,
@@ -101,7 +104,8 @@ export async function runPersonaStrategy(
 	// "a roster of … is required" before any engine call); only inline members change here.
 	const adhocMembers = orch.members && orch.members.length > 0 ? orch.members : undefined;
 	const teams = adhocMembers ? { ...deps.teams, [ADHOC_MEMBERS_KEY]: adhocMembers } : deps.teams;
-	const sdkDeps: SDKDeps = { engine: deps.engine, roster: makeRoster(teams), limits: deps.limits };
+	const base = { engine: deps.engine, roster: makeRoster(teams) };
+	const sdkDeps: SDKDeps = "budget" in deps ? { ...base, budget: deps.budget } : { ...base, limits: deps.limits };
 	if (deps.signal) sdkDeps.signal = deps.signal;
 	if (deps.sessionModel) sdkDeps.sessionModel = deps.sessionModel;
 	if (deps.getSessionModel) sdkDeps.getSessionModel = deps.getSessionModel;

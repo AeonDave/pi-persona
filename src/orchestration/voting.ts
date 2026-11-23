@@ -22,7 +22,7 @@ export interface ReducerResult {
 export interface VoteOpts {
 	aggregate: "majority" | "unanimity";
 	keepBestFallback?: boolean;
-	/** Best-of-X: a plurality winner must reach at least this many votes, else no_consensus. */
+	/** Best-of-X: a winner (plurality or unanimous) must reach at least this many votes, else no_consensus. */
 	threshold?: number;
 }
 
@@ -108,7 +108,8 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 	};
 
 	if (opts.aggregate === "unanimity") {
-		if (counts.size === 1) {
+		// Agreement among the votes cast still needs `threshold` of them: one surviving vote is not a panel.
+		if (counts.size === 1 && (opts.threshold === undefined || valid.length >= opts.threshold)) {
 			return { status: "winner", winner: valid[0]!.result, dissent: [], invalid, tally, usedFallback: false };
 		}
 		return withFallback("no_consensus");

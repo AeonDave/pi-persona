@@ -20,7 +20,7 @@ export async function mapWithConcurrency<TIn, TOut>(
 	// the bin. LATENCY: the batch rejects with the FIRST error the moment it lands. A callback
 	// already in flight cannot be cancelled from here, so awaiting it would not stop the work — it
 	// would only delay the report, and the rejections that reach this path are the run-fatal ones
-	// (`sdk.parallel`: a limit breach, a throwing host callback) that an operator must see now
+	// (`sdk.parallel`: a throwing host callback or thunk) that an operator must see now
 	// rather than after the slowest healthy leg, which for a delegated agent is minutes. The worker
 	// swallows into `failure`, so an abandoned one can never surface as an unhandled rejection.
 	let failure: { error: unknown } | undefined;

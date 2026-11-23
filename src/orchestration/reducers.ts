@@ -14,9 +14,10 @@ export interface FailedResultCause {
 }
 
 /** Preserve the most actionable cause when a whole panel yields no usable result.
- * User cancellation wins even in a mixed panel. Otherwise a homogeneous technical
- * failure survives; mixed failures or successful-but-protocol-invalid outputs are
- * classified at the enclosing strategy's contract boundary. */
+ * User cancellation wins even in a mixed panel, then a run-limit refusal (the run-level
+ * cause: some members were never run). Otherwise a homogeneous technical failure survives;
+ * mixed failures or successful-but-protocol-invalid outputs are classified at the enclosing
+ * strategy's contract boundary. */
 export function summarizeFailedResults(
 	results: AgentResult[],
 	fallbackError: string,
@@ -24,6 +25,8 @@ export function summarizeFailedResults(
 ): FailedResultCause {
 	const aborted = results.find((result) => !result.ok && result.failureKind === "abort");
 	if (aborted) return { error: aborted.error ?? "the run was aborted", failureKind: "abort" };
+	const refused = results.find((result) => !result.ok && result.failureKind === "limit");
+	if (refused) return { error: refused.error ?? "not run: a run limit was reached", failureKind: "limit" };
 
 	const failed = results.filter((result) => !result.ok);
 	if (failed.length > 0 && failed.length === results.length) {

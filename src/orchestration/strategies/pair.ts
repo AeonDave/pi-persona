@@ -57,6 +57,7 @@ export const pair: Strategy = {
 		// produced one, and its failure only degrades the pair to a solo run.
 		const lines = [work.output];
 		if (review.ok && review.output.trim()) lines.push(`\n--- navigator review (${navigator.agent}) ---\n${review.output.trim()}`);
+		else if (!review.ok) lines.push(`\n--- navigator did not review (${navigator.agent}): ${review.error ?? review.failureKind ?? "failed"} ---`);
 		const result: AgentResult = {
 			agent: "pair",
 			output: lines.join("\n"),

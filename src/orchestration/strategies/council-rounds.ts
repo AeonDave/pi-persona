@@ -12,7 +12,7 @@
 import { fenceUntrusted } from "../../core/fence.ts";
 import { clampBestOf, positiveInteger } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
-import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
+import { dissentLine, notRunLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
@@ -24,20 +24,27 @@ function render(
 	bestOf: number,
 	usages: AgentResult["usage"][],
 	candidates: AgentResult[],
+	/** Set when a run limit refused voters this round: the council stops convening here. */
+	priorDebate?: string,
 ): AgentResult {
+	const notRun = notRunLine(candidates);
 	const lines: string[] = [];
 	lines.push(
 		`COUNCIL ruling after ${round} round(s), best-of-${bestOf}: ${decision.status}${
 			decision.usedFallback ? " — fell back to best-by-confidence" : ""
-		}`,
+		}${notRun ? " — stopped at a run limit" : ""}`,
 	);
 	lines.push(`tally: ${Object.entries(decision.tally).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}`);
 	const nInvalid = decision.invalid?.length ?? 0;
 	if (nInvalid > 0) lines.push(`(${nInvalid} invalid excluded)`);
+	if (notRun) lines.push(notRun);
 	if (decision.winner) lines.push(`\n--- ruling ---\n${readableRuling(decision.winner)}`);
 	if (decision.dissent && decision.dissent.length > 0) {
 		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 	}
+	const cast = decision.winner ? [] : candidates.filter((c) => c.ok);
+	if (cast.length > 0) lines.push(`\n--- votes cast (no ruling) ---\n${cast.map(dissentLine).join("\n\n")}`);
+	if (priorDebate) lines.push(`\n--- round ${round - 1} debate ---\n${fenceUntrusted(priorDebate)}`);
 	const headline = decision.winner ? rulingHeadline(decision.winner) : undefined;
 	const result: AgentResult = {
 		agent: "council",
@@ -95,6 +102,9 @@ export const councilRounds: Strategy = {
 		const usages: AgentResult["usage"][] = [];
 		let debate = "";
 		let last: ReducerResult | undefined;
+		// The previous round's voters and the debate that fed it: what a fully refused round reports.
+		let previous: AgentResult[] = [];
+		let previousDebate = "";
 
 		for (let round = 1; round <= maxRounds; round++) {
 			if (sdk.signal?.aborted) return cancelled(round - 1, usages);
@@ -119,9 +129,24 @@ export const councilRounds: Strategy = {
 			// keeps convening the whole roster for every remaining round, then reports a
 			// normal-looking "no ruling". The loop guard above is a round too late for it.
 			if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) return cancelled(round - 1, usages);
+			// A voter the run's budget refused will be refused again next round: stop convening here.
+			// The quorum decides over the votes cast, with no best-by-confidence fallback — a fallback
+			// "ruling" from a panel that never fully convened is not one the council reached.
+			if (candidates.some((c) => c.failureKind === "limit")) {
+				// A round in which every voter was refused never convened: the last round that did is
+				// the one reported (its decision already had no fallback, as it was not the final round).
+				const decide = () => sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: false });
+				if (candidates.every((c) => c.failureKind === "limit")) {
+					return render(last ?? decide(), round - 1, bestOf, usages, [...previous, ...candidates], previousDebate || undefined);
+				}
+				last = decide();
+				return render(last, round, bestOf, usages, candidates, debate || undefined);
+			}
 			const lastRound = round === maxRounds;
 			last = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: lastRound });
 			if (last.status === "winner" || lastRound) return render(last, round, bestOf, usages, candidates);
+			previous = candidates;
+			previousDebate = debate;
 			debate = candidates
 				.filter((c) => c.ok)
 				.map((c) => `[${c.agent}] ${c.output}`)

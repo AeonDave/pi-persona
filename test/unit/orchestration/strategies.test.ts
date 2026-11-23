@@ -14,6 +14,7 @@ import { pair } from "../../../src/orchestration/strategies/pair.ts";
 import { pipeline } from "../../../src/orchestration/strategies/pipeline.ts";
 import { synthesize } from "../../../src/orchestration/strategies/synthesize.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
+import { createRunBudget } from "../../../src/orchestration/run-budget.ts";
 
 const LIMITS = { maxChildren: 8, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
@@ -101,7 +102,9 @@ test("the SDK enforces maxChildren regardless of strategy code", async () => {
 	});
 	await sdk.agent({ agent: "a", task: "t" });
 	await sdk.agent({ agent: "b", task: "t" });
-	await assert.rejects(() => sdk.agent({ agent: "c", task: "t" }), /maxChildren/);
+	const refused = await sdk.agent({ agent: "c", task: "t" });
+	assert.equal(refused.failureKind, "limit");
+	assert.match(refused.error ?? "", /maxChildren/);
 });
 
 test("the SDK enforces the token budget across a run", async () => {
@@ -113,7 +116,9 @@ test("the SDK enforces the token budget across a run", async () => {
 		limits: { ...LIMITS, budgetTokens: 150 },
 	});
 	await sdk.agent({ agent: "a", task: "t" }); // spends 200 > 150
-	await assert.rejects(() => sdk.agent({ agent: "b", task: "t" }), /budget/);
+	const refused = await sdk.agent({ agent: "b", task: "t" });
+	assert.equal(refused.failureKind, "limit");
+	assert.match(refused.error ?? "", /token budget/);
 });
 
 test("the SDK exposes a per-agent abort via onAgentStart (a running engine sees the aborted signal)", async () => {
@@ -2343,4 +2348,171 @@ test("map asks its splitter for {item, writeSet} objects exactly when ownership 
 		assert.match(prompts[ownership] ?? "", /"writeSet"/, `${ownership}: the splitter is asked to declare each item's write set`);
 		assert.doesNotMatch(prompts[ownership] ?? "", /array of short strings/, `${ownership}: one shape, not two competing ones`);
 	}
+});
+
+// ── Run-limit refusals: a refused leg is that leg's `limit` result; the strategy keeps what it paid for ──
+
+/** A counting stub engine over a fixed per-agent answer, run under `maxChildren`. */
+function limitedRun(maxChildren: number, answer: (spec: AgentRunSpec) => Partial<AgentResult>, roster: Record<string, string[]>) {
+	const calls: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			calls.push(spec.agent);
+			return { agent: spec.agent, output: `out:${spec.agent}`, usage: usage(), ok: true, ...answer(spec) };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: (name) => roster[name] ?? [] }, limits: { ...LIMITS, maxChildren, maxConcurrency: 1 } });
+	return { calls, sdk };
+}
+const vote = (v: string) => ({ structured: { result: `answer ${v}`, vote: v, confidence: 0.5 } });
+
+test("limit: fanout keeps the members that ran and names the refused one", async () => {
+	const { calls, sdk } = limitedRun(2, () => ({}), { t: ["a", "b", "c"] });
+	const r = await fanout.run({ task: "q", roster: "t", params: {} }, sdk);
+	assert.equal(calls.length, 2);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.match(r.output, /out:a[\s\S]*out:b/);
+	assert.match(r.output, /\[c\] failed \(limit\)/);
+});
+
+test("limit: pipeline keeps the last stage that ran and names the refused step", async () => {
+	const { calls, sdk } = limitedRun(2, () => ({}), { t: ["s1", "s2", "s3"] });
+	const r = await pipeline.run({ task: "q", roster: "t", params: {} }, sdk);
+	assert.deepEqual(calls, ["s1", "s2"]);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.match(r.output, /out:s2[\s\S]*failed step \(s3\): not run: .*maxChildren/);
+});
+
+test("limit: critic-loop keeps the reviewed draft and its critique and stops asking", async () => {
+	const { calls, sdk } = limitedRun(2, (spec) => (spec.agent === "critic" ? { output: "too vague", structured: { stance: "reject" } } : { output: "draft one" }), { t: ["gen", "critic"] });
+	const r = await criticLoop.run({ task: "q", roster: "t", params: { rounds: 3 } }, sdk);
+	assert.deepEqual(calls, ["gen", "critic"], "no further critic or revision is requested");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.rounds, 1);
+	assert.match(r.output, /draft one[\s\S]*UNRESOLVED CRITIQUE[\s\S]*too vague/);
+});
+
+test("limit: pair keeps the driver's work and discloses that the navigator did not review", async () => {
+	const { calls, sdk } = limitedRun(1, () => ({}), { t: ["driver", "navigator"] });
+	const r = await pair.run({ task: "q", roster: "t", params: {} }, sdk);
+	assert.deepEqual(calls, ["driver"]);
+	assert.equal(r.ok, true, "the navigator is optional: a disclosed downgrade");
+	assert.equal(r.structured?.navigatorOk, false);
+	assert.match(r.output, /out:driver/);
+	assert.match(r.output, /navigator did not review \(navigator\): not run: .*maxChildren/);
+});
+
+test("limit: judge with a refused arbiter returns the panel answers and no pick", async () => {
+	const { calls, sdk } = limitedRun(2, () => ({}), { t: ["a", "b"] });
+	const r = await judge.run({ task: "q", roster: "t", params: { judge: "arbiter" } }, sdk);
+	assert.deepEqual(calls.sort(), ["a", "b"]);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.winner, undefined);
+	assert.match(r.output, /out:a/);
+	assert.match(r.output, /out:b/);
+});
+
+test("limit: compete with a refused arbiter hands back every valid diff, unjudged", async () => {
+	const diff = (who: string) => ({ output: `approach ${who}\n\n\`\`\`diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+${who}\n\`\`\`` });
+	const { calls, sdk } = limitedRun(2, (spec) => diff(spec.agent), { t: ["one", "two"] });
+	const r = await compete.run({ task: "q", roster: "t", params: { judge: "arbiter" } }, sdk);
+	assert.deepEqual(calls.sort(), ["one", "two"]);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.winner, undefined);
+	assert.match(r.output, /\+one[\s\S]*\+two/);
+});
+
+test("limit: debate decides by its own quorum over the voters that ran and names the one that did not", async () => {
+	const { calls, sdk } = limitedRun(2, () => vote("x"), { t: ["a", "b", "c"] });
+	const r = await debate.run({ task: "q", roster: "t", params: {} }, sdk);
+	assert.equal(calls.length, 2);
+	assert.equal(r.structured?.status, "winner", "two of three agreeing meets the default majority");
+	assert.match(r.output, /not run: c/);
+});
+
+test("limit: a split debate panel with a refused voter ends without a ruling, keeping the cast answers", async () => {
+	const { calls, sdk } = limitedRun(2, (spec) => vote(spec.agent === "a" ? "x" : "y"), { t: ["a", "b", "c"] });
+	const r = await debate.run({ task: "q", roster: "t", params: {} }, sdk);
+	assert.equal(calls.length, 2);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.usedFallback, false, "no best-by-confidence ruling from a panel that never fully convened");
+	assert.match(r.output, /answer x/);
+	assert.match(r.output, /answer y/);
+	assert.match(r.output, /not run: c/);
+});
+
+test("limit: council-rounds refused on its FINAL round reports no fallback ruling, keeping the cast answers", async () => {
+	const { calls, sdk } = limitedRun(2, (spec) => vote(spec.agent === "a" ? "x" : "y"), { t: ["a", "b", "c"] });
+	const r = await councilRounds.run({ task: "q", roster: "t", params: { rounds: 1 } }, sdk);
+	assert.equal(calls.length, 2);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.rounds, 1);
+	assert.equal(r.structured?.usedFallback, false, "the final round's fallback does not apply to a panel that never convened");
+	assert.match(r.output, /answer x/);
+	assert.match(r.output, /answer y/);
+	assert.match(r.output, /not run: c/);
+});
+
+test("limit: a council round in which every voter was refused is not reported as a convened round", async () => {
+	let n = 0;
+	const { calls, sdk } = limitedRun(3, () => vote(["x", "y", "z"][n++] ?? "q"), { t: ["a", "b", "c"] });
+	const r = await councilRounds.run({ task: "q", roster: "t", params: { rounds: 3 } }, sdk);
+	assert.equal(calls.length, 3, "only round 1 ran");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.rounds, 1, "the refused round 2 never convened");
+	assert.deepEqual(r.structured?.tally, { x: 1, y: 1, z: 1 }, "round 1's tally is the one reported");
+	assert.match(r.output, /COUNCIL ruling after 1 round\(s\)/);
+	assert.doesNotMatch(r.output, /invalid excluded/);
+	assert.match(r.output, /not run: a, b, c/);
+	assert.match(r.output, /answer x[\s\S]*answer y[\s\S]*answer z/);
+});
+
+test("limit: council-rounds stops convening at a refused voter, with no fallback ruling and the earlier debate kept", async () => {
+	let n = 0;
+	const { calls, sdk } = limitedRun(4, () => vote(["x", "y", "z", "x"][n++] ?? "q"), { t: ["a", "b", "c"] });
+	const r = await councilRounds.run({ task: "q", roster: "t", params: { rounds: 3 } }, sdk);
+	assert.equal(calls.length, 4, "round 3 is never requested");
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.equal(r.structured?.rounds, 2);
+	assert.equal(r.structured?.usedFallback, false, "no fallback ruling from a panel that never convened");
+	assert.match(r.output, /not run: b, c/);
+	assert.match(r.output, /round 1 debate[\s\S]*\[b\] out:b/);
+});
+
+test("limit: synthesize with a refused merge returns the gatherers' findings and says the synthesis did not run", async () => {
+	const { calls, sdk } = limitedRun(2, (spec) => ({ output: `finding of ${spec.agent}` }), { t: ["a", "b"] });
+	const r = await synthesize.run({ task: "q", roster: "t", params: {} }, sdk);
+	assert.deepEqual(calls.sort(), ["a", "b"]);
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "limit");
+	assert.match(r.output, /synthesis did not complete \(not run: .*maxChildren/i);
+	assert.match(r.output, /finding of a[\s\S]*finding of b/);
+});
+
+test("limit: map caps workers at the run's remaining children, so the excess is reported dropped instead of refused", async () => {
+	const budget = createRunBudget({ ...LIMITS, maxChildren: 10, maxConcurrency: 1 });
+	for (let i = 0; i < 7; i++) budget.admit(); // another phase of the same flow already spent 7
+	const calls: string[] = [];
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			calls.push(spec.agent);
+			return spec.agent === "splitter"
+				? { agent: "splitter", output: '["a","b","c","d","e"]', usage: usage(), ok: true }
+				: { agent: spec.agent, output: "done", usage: usage(), ok: true };
+		},
+	};
+	const sdk = makeSDK({ engine, roster: { team: () => ["splitter", "worker"] }, budget });
+	const r = await map.run({ task: "q", roster: "m", params: {} }, sdk);
+	assert.deepEqual(calls, ["splitter", "worker", "worker"]);
+	assert.equal(r.ok, true, "no worker was refused");
+	assert.match(r.output, /3 sub-item\(s\) beyond the worker cap \(2\) were not run/);
 });

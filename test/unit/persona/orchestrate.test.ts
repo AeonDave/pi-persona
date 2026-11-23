@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { StrategyEngine } from "../../../src/orchestration/sdk.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 import { resolveStrategyName, runPersonaStrategy } from "../../../src/persona/orchestrate.ts";
+import { createRunBudget } from "../../../src/orchestration/run-budget.ts";
 
 const LIMITS = { maxChildren: 8, maxConcurrency: 4, timeoutMs: 1000, budgetTokens: 1000 };
 const usage = () => ({ input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
@@ -75,4 +76,39 @@ test("runPersonaStrategy canSpawn denies a roster member without calling the eng
 	assert.ok(r);
 	assert.equal(runs, 1, "the denied member never reaches the engine");
 	assert.match(r.output, /may not spawn "ghost"/);
+});
+
+test("runPersonaStrategy keeps the paid members of a run its child limit cut short, labelled as a limit stop", async () => {
+	let runs = 0;
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => {
+			runs++;
+			return { agent: s.agent, output: `answer:${s.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const r = await runPersonaStrategy({ mode: "parallel", roster: "pair" }, "t", {
+		engine, teams: { pair: ["first", "second"] }, limits: { ...LIMITS, maxChildren: 1, maxConcurrency: 1 },
+	});
+	assert.equal(runs, 1);
+	assert.equal(r?.ok, false);
+	assert.equal(r?.failureKind, "limit");
+	assert.match(r?.output ?? "", /answer:first/, "the member already paid for survives");
+	assert.match(r?.output ?? "", /\[second\] failed \(limit\)/);
+});
+
+test("two runPersonaStrategy calls sharing one budget share its child count", async () => {
+	let runs = 0;
+	const engine: StrategyEngine = {
+		run: async (s): Promise<AgentResult> => {
+			runs++;
+			return { agent: s.agent, output: `answer:${s.agent}`, usage: usage(), ok: true };
+		},
+	};
+	const budget = createRunBudget({ ...LIMITS, maxChildren: 2 });
+	const deps = { engine, teams: { pair: ["first", "second"] }, budget };
+	const first = await runPersonaStrategy({ mode: "parallel", roster: "pair" }, "t", deps);
+	const second = await runPersonaStrategy({ mode: "parallel", roster: "pair" }, "t", deps);
+	assert.equal(first?.ok, true);
+	assert.equal(runs, 2, "the second phase spawns nothing once the shared cap is spent");
+	assert.equal(second?.failureKind, "limit");
 });

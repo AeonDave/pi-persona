@@ -164,3 +164,11 @@ test("a vote naming an Object.prototype member tallies like any other key", () =
 	const unanimous = voteReduce([c("m1", "toString"), c("m2", "toString")], { aggregate: "unanimity" });
 	assert.equal(unanimous.status, "winner");
 });
+
+test("unanimity still needs `threshold` votes: one surviving vote is not a unanimous panel", () => {
+	const refused: AgentResult = { agent: "c", output: "", usage: usage(), ok: false, failureKind: "limit", error: "not run" };
+	const lone = voteReduce([c("a", "X"), { ...refused, agent: "b" }, refused], { aggregate: "unanimity", threshold: 2 });
+	assert.equal(lone.status, "no_consensus");
+	assert.equal(lone.winner, undefined);
+	assert.equal(voteReduce([c("a", "X"), c("b", "X"), refused], { aggregate: "unanimity", threshold: 2 }).status, "winner");
+});

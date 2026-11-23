@@ -274,7 +274,7 @@ export const map: Strategy = {
 	roster: "[splitter, worker]",
 	team: "swarm",
 	params: {
-		maxItems: { type: "number", doc: "default AND ceiling: the run's maxChildren, less the splitter's own slot" },
+		maxItems: { type: "number", doc: "default AND ceiling: the children the run has left, less the splitter's own slot" },
 		peers: { type: "boolean", default: false, doc: "workers share load-bearing cross-item discoveries live" },
 		ownership: {
 			type: "string",
@@ -300,13 +300,13 @@ export const map: Strategy = {
 		const ownershipParam = input.params.ownership;
 		const ownership = ownershipParam === "declare" || ownershipParam === "enforce" ? ownershipParam : "off";
 		const reviewer = verifierSpec(team, input.params.verify);
-		// The splitter spends one child slot before any worker runs, so the worker cap is one
-		// BELOW maxChildren — at the cap the last worker would trip the run's pre-spawn guard
-		// and take the whole (mostly finished) fan-out down with it. When `verify` is set, the
-		// verifier wave asks for ONE MORE child per completed item on top of that, so the cap is
-		// halved instead — splitter + workers + verifiers must all fit under the same ceiling.
-		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
-		const cap = reviewer ? Math.max(1, Math.floor((sdk.limits.maxChildren - 1) / 2)) : workerSlots;
+		// Caps come from the children the run has LEFT (a flow's earlier phases spend them too). The
+		// splitter takes one before any worker runs, so the worker cap is one below that — past it a
+		// worker would only come back refused. When `verify` is set, the verifier wave asks for ONE
+		// MORE child per completed item, so the cap is halved: splitter + workers + verifiers fit.
+		const childrenLeft = sdk.remaining.children;
+		const workerSlots = Math.max(1, childrenLeft - 1);
+		const cap = reviewer ? Math.max(1, Math.floor((childrenLeft - 1) / 2)) : workerSlots;
 		const maxItems = Math.min(positiveInteger(input.params.maxItems, cap), cap);
 
 		// A splitter retry is optional too; reserve the entire possible worker/verifier wave before
@@ -327,9 +327,9 @@ export const map: Strategy = {
 
 		const results = await runWorkers(sdk, worker, input.task, items, peers, reviewer ? items.length : 0);
 		const agg = sdk.reduce.aggregate(results, items.map((it, i) => `item ${i + 1}: ${compactInlineText(it.item, { maxChars: 60 })}`));
-		// Say what was left out. The clamp is right — a worker per item past the cap would trip the
-		// pre-spawn guard and lose the whole fan-out — but an aggregate that silently covers part of
-		// the splitter's list reads as a complete answer over an incomplete input set.
+		// Say what was left out. The clamp is right — a worker per item past the cap would only be
+		// refused by the run's budget — but an aggregate that silently covers part of the
+		// splitter's list reads as a complete answer over an incomplete input set.
 		const droppedNote =
 			dropped > 0
 				? `\n\n[pi-persona] ${dropped} sub-item(s) beyond the worker cap (${maxItems}) were not run — this covers ${items.length} of ${allItems.length} sub-items.`

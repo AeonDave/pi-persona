@@ -774,3 +774,57 @@ test("flowDisposition: a checkpoint the operator declined is a stop, never a fai
 	assert.equal(flowDisposition({ ok: false }), "failed");
 	assert.equal(flowDisposition({ ok: false, stoppedAtGate: undefined }), "failed");
 });
+
+test("runFlow keeps a failed phase's partial output beside the failure text; dependents block and the phase is journaled failed", async () => {
+	const r = parseFlow(flow([{ id: "a", strategy: "fanout" }, { id: "b", strategy: "fanout", needs: ["a"] }]));
+	assert.ok(r.ok);
+	if (!r.ok) return;
+	const journal: Array<{ phase: string; ok: boolean }> = [];
+	let ranB = false;
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		journal: (line) => journal.push({ phase: line.phase, ok: line.ok }),
+		runPhase: async ({ phase }) => {
+			if (phase.id === "b") ranB = true;
+			return { agent: phase.id, output: "partial A", usage: usage(), ok: false, error: "not run: the run's maxChildren limit (2) is spent", failureKind: "limit" as const };
+		},
+	});
+	assert.equal(ranB, false, "the dependent never runs");
+	assert.equal(outcome.ok, false);
+	assert.equal(outcome.failureKind, "limit");
+	assert.equal(outcome.results.b?.error, "blocked: an upstream phase failed");
+	assert.match(outcome.output, /partial A/, "the paid partial reaches the flow report");
+	assert.match(outcome.output, /Flow failed at phase "a": not run: the run's maxChildren limit \(2\) is spent/);
+	assert.deepEqual(journal.find((line) => line.phase === "a"), { phase: "a", ok: false }, "a resume re-runs it");
+});
+
+test("runFlow keeps the partial output of every failed root phase, in phase order, once each", async () => {
+	const r = parseFlow(flow([
+		{ id: "left", strategy: "fanout" },
+		{ id: "right", strategy: "fanout" },
+		{ id: "merge", strategy: "fanout", needs: ["left", "right"] },
+	]));
+	assert.ok(r.ok);
+	if (!r.ok) return;
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async ({ phase }) => ({ agent: phase.id, output: `PAID ${phase.id}`, usage: usage(), ok: false, error: "not run: limit", failureKind: "limit" as const }),
+	});
+	assert.equal(outcome.ok, false);
+	assert.equal(outcome.output.split("PAID left").length, 2, "left's partial appears once");
+	assert.equal(outcome.output.split("PAID right").length, 2, "right's partial appears once");
+	assert.ok(outcome.output.indexOf("PAID left") < outcome.output.indexOf("PAID right"), "phase order");
+	assert.doesNotMatch(outcome.output, /PAID merge/, "the blocked dependent never ran");
+});
+
+test("runFlow states the failure beside a failed terminal phase's own partial output, once", async () => {
+	const r = parseFlow(flow([{ id: "only", strategy: "fanout" }]));
+	assert.ok(r.ok);
+	if (!r.ok) return;
+	const outcome = await runFlow(r.flow, "t", {
+		hash: "h",
+		runPhase: async () => ({ agent: "only", output: "half a report", usage: usage(), ok: false, error: "the synthesizer failed", failureKind: "agent" as const }),
+	});
+	assert.equal(outcome.output.split("half a report").length, 2, "the terminal's output is not duplicated");
+	assert.match(outcome.output, /Flow failed at phase "only": the synthesizer failed/);
+});

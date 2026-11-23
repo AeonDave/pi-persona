@@ -11416,3 +11416,34 @@ test("a worker settling before the first progress tick delivers unread notes in 
 		if (previous === undefined) delete process.env.PI_PERSONA_PEEK_MS; else process.env.PI_PERSONA_PEEK_MS = previous;
 	}
 });
+
+test("a flow's parallel phases share ONE run budget: never more than maxConcurrency legs at once", async () => {
+	const { RUN_LIMITS } = await import("../../src/extension.ts");
+	const cwd = tempDir("pi-persona-flowbudget-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "flows", "wide.flow.json"),
+		JSON.stringify({ name: "wide", phases: [{ id: "left", strategy: "fanout", roster: "magi" }, { id: "right", strategy: "fanout", roster: "magi" }] }),
+	);
+	let inFlight = 0;
+	let peak = 0;
+	let calls = 0;
+	const engine: StrategyEngine = {
+		run: async (spec) => {
+			calls++;
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			await new Promise<void>((resolve) => setTimeout(resolve, 20));
+			inFlight--;
+			return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
+		},
+	};
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const flow = m.tool("flow") as { execute: AnyFn };
+	await flow.execute("flow-wide", { name: "wide", task: "review" }, undefined, undefined, ctx);
+	await waitUntil(() => calls === 6 && inFlight === 0, "both phases' legs settle");
+	assert.ok(peak <= RUN_LIMITS.maxConcurrency, `two phases of 3 legs ran ${peak} at once against maxConcurrency ${RUN_LIMITS.maxConcurrency}`);
+});

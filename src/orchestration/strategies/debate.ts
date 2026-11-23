@@ -11,7 +11,7 @@
 
 import { clampBestOf } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
-import { dissentLine, readableRuling, rulingHeadline } from "../render.ts";
+import { dissentLine, notRunLine, readableRuling, rulingHeadline } from "../render.ts";
 import { rosterSpec } from "../roster.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
@@ -43,10 +43,14 @@ function render(
 	lines.push(`tally: ${Object.entries(decision.tally).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}`);
 	const nInvalid = decision.invalid?.length ?? 0;
 	if (nInvalid > 0) lines.push(`(${nInvalid} invalid excluded)`);
+	const notRun = notRunLine(candidates);
+	if (notRun) lines.push(notRun);
 	if (decision.winner) lines.push(`\n--- ruling ---\n${readableRuling(decision.winner)}`);
 	if (decision.dissent && decision.dissent.length > 0) {
 		lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 	}
+	const cast = decision.winner ? [] : candidates.filter((c) => c.ok);
+	if (cast.length > 0) lines.push(`\n--- votes cast (no ruling) ---\n${cast.map(dissentLine).join("\n\n")}`);
 	const headline = decision.winner ? rulingHeadline(decision.winner) : undefined;
 	const result: AgentResult = {
 		agent: "debate",
@@ -122,7 +126,10 @@ export const debate: Strategy = {
 		if (sdk.signal?.aborted || candidates.every((c) => c.failureKind === "abort")) {
 			return cancelled(candidates.map((c) => c.usage));
 		}
-		const decision = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: true });
+		// A fallback "ruling" from a panel a run limit kept from convening is not one the debate
+		// reached: the quorum decides over the votes cast, as council-rounds does.
+		const refused = candidates.some((c) => c.failureKind === "limit");
+		const decision = sdk.reduce.vote(candidates, { aggregate, threshold: bestOf, keepBestFallback: !refused });
 		return render(decision, team.length, bestOf, candidates.map((c) => c.usage), candidates);
 	},
 };

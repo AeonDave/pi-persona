@@ -54,15 +54,15 @@ test("mapWithConcurrency surfaces the first error at once, without waiting on a 
 		() =>
 			mapWithConcurrency([0, 1, 2, 3, 4, 5], 2, async (_item, i) => {
 				started.push(i);
-				if (i === 0) throw new Error("run exceeded token budget");
+				if (i === 0) throw new Error("a host callback threw");
 				await new Promise((res) => setTimeout(res, 400));
 				slowFinished = true;
 				return i;
 			}),
-		/token budget/,
+		/host callback threw/,
 	);
 	const elapsed = Date.now() - t0;
-	// A run-fatal breach must reach the operator now — not after the slowest healthy leg, which
+	// A run-fatal failure must reach the operator now — not after the slowest healthy leg, which
 	// for a delegated agent is minutes.
 	assert.ok(elapsed < 300, `the batch rejected after ${elapsed}ms — it waited on the in-flight sibling`);
 	assert.equal(slowFinished, false, "the sibling was still in flight when the error surfaced");

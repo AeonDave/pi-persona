@@ -16,8 +16,9 @@
  */
 
 import { fenceUntrusted } from "../../core/fence.ts";
+import { clampBestOf } from "../params.ts";
 import { sumUsage, summarizeFailedResults } from "../reducers.ts";
-import { dissentLine, readableRuling as readable } from "../render.ts";
+import { dissentLine, notRunLine, readableRuling as readable } from "../render.ts";
 import type { Strategy } from "../sdk.ts";
 import type { AgentResult } from "../types.ts";
 import { rosterSpec } from "../roster.ts";
@@ -93,19 +94,16 @@ export const magi: Strategy = {
 		}
 
 		const okCount = opening.filter((c) => c.ok).length;
-		const tokensBeforeReflection = round1.reduce((total, result) => total + result.usage.input + result.usage.output, 0);
-		// A reflection is meaningful only when every core can participate. Under an active token
-		// budget, reserve the observable minimum of one token per leg instead of starting a partial
-		// round (or letting every parallel leg race past an already exhausted SDK counter). The same
-		// goes for children: a rescue already spent a child per recovered core, and exceeding
-		// `maxChildren` THROWS out of sdk.agent() — turning a poll that has a ruling into no ruling.
-		const childrenUsed = round1.length + round1.filter((c) => c.modelRecovery).length;
+		// A reflection is meaningful only when every core can participate, so it needs at least one
+		// token and one child per core left in the run's SHARED budget (a flow's other phases spend
+		// it too). Starting a partial round would only buy refused legs.
+		const left = sdk.remaining;
 		const wantsReflection = reflect && okCount >= 2;
 		const skip = !wantsReflection ? undefined
-			: sdk.limits.budgetTokens > 0 && tokensBeforeReflection + team.length > sdk.limits.budgetTokens
-				? { why: "token budget", detail: `cannot fund the full panel (${sdk.limits.budgetTokens})` }
-			: childrenUsed + team.length > sdk.limits.maxChildren
-				? { why: "child budget", detail: `cannot fund the full panel (maxChildren ${sdk.limits.maxChildren}, ${childrenUsed} used)` }
+			: left.tokens < team.length
+				? { why: "token budget", detail: `cannot fund the full panel (${left.tokens} of ${sdk.limits.budgetTokens} tokens left)` }
+			: left.children < team.length
+				? { why: "child budget", detail: `cannot fund the full panel (maxChildren ${sdk.limits.maxChildren}, ${left.children} left)` }
 			: undefined;
 		const didReflect = wantsReflection && !skip;
 		if (skip) sdk.log(`magi: reflection skipped — ${skip.why} ${skip.detail}`);
@@ -141,7 +139,7 @@ export const magi: Strategy = {
 				return cancelled([...round1, ...reflected].map((c) => c.usage));
 			}
 		}
-		// A reflection leg that FAILED (timeout, provider, contract...) is a missing second opinion, not a
+		// A reflection leg that FAILED (timeout, provider, contract, a run limit) is a missing second opinion, not a
 		// missing voter: the core keeps the valid vote it already cast, so a 3-core poll stays a 3-core
 		// poll. A STOPPED leg is never substituted. The substituted vote is not billed again (`allRuns`).
 		const ballots = didReflect
@@ -153,7 +151,15 @@ export const magi: Strategy = {
 		const kept = didReflect ? ballots.filter((b, i) => b !== reflected[i]).length : 0;
 		// "Reflected" means at least one core cast a second-round vote; a round that failed everywhere changed nothing.
 		const reflectedAny = didReflect && kept < ballots.length;
-		const decision = sdk.reduce.vote(ballots, { aggregate, keepBestFallback: true });
+		// A core a run limit refused is a missing ballot. Then the poll decides over the votes cast
+		// with no best-by-confidence fallback, and a plurality must still be a majority of the FULL
+		// roster: otherwise a lone surviving core would be reported as the panel's ruling.
+		const refused = ballots.some((b) => b.failureKind === "limit");
+		const decision = sdk.reduce.vote(ballots, {
+			aggregate,
+			keepBestFallback: !refused,
+			...(refused ? { threshold: clampBestOf(undefined, team.length).bestOf } : {}),
+		});
 
 		// Lead with the ruling (the answer); the decision/tally plumbing is a compact footer,
 		// not the headline. The collapsed council card shows `headline`; the supervisor still
@@ -163,6 +169,8 @@ export const magi: Strategy = {
 		if (decision.dissent && decision.dissent.length > 0) {
 			lines.push(`\n--- dissent (minority report) ---\n${decision.dissent.map(dissentLine).join("\n\n")}`);
 		}
+		const cast = decision.winner ? [] : ballots.filter((b) => b.ok);
+		if (cast.length > 0) lines.push(`\n--- votes cast (no ruling) ---\n${cast.map(dissentLine).join("\n\n")}`);
 		const tally = Object.entries(decision.tally).map(([k, v]) => `${k}=${v}`).join(", ") || "—";
 		const invalid = decision.invalid && decision.invalid.length > 0 ? ` · ${decision.invalid.length} invalid excluded` : "";
 		// State the recovery in the RULING, not only through sdk.log — which no production caller
@@ -173,8 +181,10 @@ export const magi: Strategy = {
 			: "";
 		const keptLine = kept > 0 ? ` · ${kept} core${kept === 1 ? "" : "s"} kept their round-1 vote (reflection failed)` : "";
 		const skipLine = skip ? ` · reflection skipped (${skip.why})` : "";
+		const notRun = notRunLine(ballots);
+		const notRunPart = notRun ? ` · ${notRun}` : "";
 		lines.push(
-			`\n— magi: ${decision.status}${reflectedAny ? " (after 1 reflection round)" : ""}${decision.usedFallback ? " · fell back to best-by-confidence" : ""} · tally ${tally}${invalid}${rescuedLine}${keptLine}${skipLine}`,
+			`\n— magi: ${decision.status}${reflectedAny ? " (after 1 reflection round)" : ""}${decision.usedFallback ? " · fell back to best-by-confidence" : ""} · tally ${tally}${invalid}${notRunPart}${rescuedLine}${keptLine}${skipLine}`,
 		);
 
 		const winnerResult = decision.winner?.structured?.result;
