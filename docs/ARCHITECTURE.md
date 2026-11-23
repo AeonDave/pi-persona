@@ -82,9 +82,13 @@ These are the guardrails a contributor must not violate. They are enforced in co
 - **I2 — Strategies are trusted project code, NOT a security sandbox.** Gated by Pi project-trust; the
   SDK is a constrained API *by convention*. Safety comes from **runtime limits, not isolation**:
   `RUN_LIMITS` (`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` idle window) are enforced
-  by the SDK on every `agent()` call and by the engine per child. Concurrency is shared across all
-  calls in one SDK instance; token admission uses completed usage and is rechecked after queueing, so
-  active legs can overshoot it. Nesting depth is not one of these numeric knobs — it is structural,
+  by the SDK on every `agent()` call and by the engine per child. They bound ONE tool run (one
+  council, `/orchestrate` or mandated run, or one whole flow invocation across its phases): concurrency,
+  the child count and the token total are shared by every SDK of that run (`orchestration/run-budget.ts`).
+  Token admission uses completed usage and is rechecked after queueing, so active legs can overshoot it.
+  A limit never throws and never cancels: a leg it cannot admit resolves as its own `ok: false` result
+  with `failureKind: "limit"` (the engine is not called, no child is used), legs already running finish
+  and are kept, and each strategy decides what that means for its result. Nesting depth is not one of these numeric knobs — it is structural,
   capped at 1: full pi-persona activation short-circuits under `PI_PERSONA_DISABLE=1` (the
   **fork-bomb guard**), so no supervisor orchestration tools (`delegate`/`council`/`flow`) are
   registered. A broker-enabled child instead loads the minimal bridge, which registers only
@@ -261,7 +265,8 @@ and control contracts; merging them into a universal task engine would hide thos
 - **`src/loader.ts`** — the discovery loader (`loadDefinitions`/`loadContracts`/`loadPresets`/
   `loadTeams`), the concrete read-side of the discovery precedence table.
 - **`src/bridge.ts`** — the child-mode-only wiring, loaded instead of the full extension when
-  `PI_PERSONA_BUS` is set (a broker child).
+  `PI_PERSONA_BUS` is set (a broker child); it also reads the one-shot registration token from
+  `PI_PERSONA_BUS_TOKEN` and does nothing without a well-formed one.
 - **`src/extension.ts`** — the single `ExtensionFactory` (default export `piPersona`): still the
   only file `package.json` `pi.extensions` names. Tools/commands stay registered here; Pi lifecycle,
   prompt composition, the pending-ask tool gate, and engine construction were extracted to
@@ -295,10 +300,13 @@ backstop.
 In-process deadlines and caller cancellation are armed **before session construction**; the bus
 consult that re-arms idle/startup only matters after construction, since no ask can be pending before
 a session exists. Cancellation settles the run and releases its bus handle; a session returned late is
-disposed and a late factory rejection is consumed. Pi's resource loader does not expose forcible
-cancellation — the recursive-extension guard stays held until that factory settles, so a loader that
-never returns needs a Pi restart (and `PI_PERSONA_ENGINE=child` for process-level termination). Run
-settlement does not promise that arbitrary in-process code has physically stopped.
+retired (the bounded `session_shutdown` handshake, then dispose) and a late factory rejection is
+consumed. Pi's resource loader does not expose forcible cancellation — the recursive-extension guard
+stays held until that factory settles or until the owning activation's shutdown deadline, which
+restores the environment, so a reload always brings the next activation up as the supervisor. A
+loader that never returns keeps running in the background (use `PI_PERSONA_ENGINE=child` for
+process-level termination). Run settlement does not promise that arbitrary in-process code has
+physically stopped.
 
 - **InProcessEngine** (default) — a `createAgentSession` per sub-agent: cheaper, shares the host's
   auth/model registry, and **steerable** (inject a live user message into a running sub-agent).
@@ -362,13 +370,15 @@ the existing monitor process adapter and Pi shell configuration, with no separat
 archive. It pins the registered worktree directory identity before worker execution, checks it
 again before/after the command, and rechecks supervisor and effective worker `bash` grants before
 starting. Worker default tools are captured before its edits. No command runs on a failed or
-non-quiescent worker. Foreground shell exit is the observed boundary; detached background work
-is outside the supported verification contract.
+non-quiescent worker. The command's own exit is the observed boundary: output already buffered is read
+for at most 250 ms, then the pipes are released. A command that exits while a background process still
+holds its output is an error (not quiescent, exit code kept): the worktree is retained without export.
 
 `AgentResult.verification` and terminal-result metadata carry the runtime observation independently
 of worker prose and body truncation. Command output is bounded untrusted data. A failed check is
 terminal, never a provider-retry trigger: clean nonzero completion permits export but retains the
-worktree; an uncertain process or directory state retains it without export. Saved successful
+worktree; an uncertain process or directory state, or a command that leaves a background process
+holding its output, retains it without export. Saved successful
 continuations inherit the original verification command. See the [reference](REFERENCE.md#verifying-isolated-changes)
 for bounds and host tool-policy integration.
 
@@ -394,8 +404,16 @@ settlement. Stored content can include worker prompts, tool calls and results; i
 result archive. Availability lasts seven days from the last saved turn; admission and settlement
 limits are 8 MiB per transcript, 64 MiB total and 64 lineages per owner. A running writer may cross
 a byte limit before settlement, whereupon that transcript is not saved as a continuation. A fresh,
-uncommitted transcript is removed once its writer is quiescent; saved conversations are not evicted
-automatically on expiry or quota. If a new conversation cannot be admitted, the ordinary delegation still runs without saved
+uncommitted transcript is removed once its writer is quiescent (a stopped or timed-out in-process
+worker runs the same bounded shutdown handshake first, one cancelled while its session is still being
+created waits for that factory within the same bound, and a settlement after a reload still frees it).
+Saved unexpired conversations are never evicted on quota. Each admission first reclaims, under the
+admission lock and from at most 256 directory entries, the transcripts that can never be resumed: those
+with no recorded run (stopped, timed-out, failed or aborted attempts, and crash leftovers whose lease
+owner is dead; a live, same-process or unknown owner is skipped) and expired lineages without a
+retained worktree. An unindexed transcript is deleted only when the session file on disk, read under
+that key's lock, does not mention its key, so another process on the same session cannot lose a
+conversation it just saved. Unreadable session history or an unreadable session file deletes nothing. If a new conversation cannot be admitted, the ordinary delegation still runs without saved
 continuation. `intercom conversations` shows this branch's availability; explicit `intercom forget
 { to: <latestRunId> }` removes the transcript and any retained worktree, including unapplied changes,
 without deleting archived terminal reports.
@@ -788,11 +806,26 @@ schema, provenance, freshness and application checks; valid JSON alone does not 
   [STRATEGIES.md](STRATEGIES.md#bias-guard-invariants-do-not-fix-these)).
 - **Cross-process broker** (on by default; `PI_PERSONA_BROKER=off` restores pre-broker spawn;
   `bus/broker/`) — gives child-process runs, every `isolation: worktree` leg, and every `mcp: true` leg
-  the same comm plane and **steer** the in-process ones have. It is a session-scoped (POSIX socket /
-  Windows named pipe under the session id), supervisor-hosted relay into the local `InProcessBus`: a
+  the same comm plane and **steer** the in-process ones have. It is a session-scoped (POSIX socket in a
+  private 0700 directory under the OS temp directory, `<tmp>/pi-broker-<hash of home>/<hash of session>.sock`,
+  chmod 0600 after bind; Windows named pipe under the session id), supervisor-hosted relay into the local `InProcessBus`: a
   connected child is indistinguishable from an in-process one, so the supervisor side (intercom, idle
   notifier, f9, peek) is unchanged by construction. Off ⇒ the host never starts and the child spawns
-  byte-identical to pre-broker pi-persona. Ask failures echo the originating `msgId` so the client
+  byte-identical to pre-broker pi-persona (neither `PI_PERSONA_BUS` nor `PI_PERSONA_BUS_TOKEN` in its
+  environment). Registration requires a per-child one-shot token: the supervisor mints 32 random bytes
+  when it registers the handle and passes them in the spawn env as `PI_PERSONA_BUS_TOKEN`; the host
+  compares it in constant time and consumes it on the first successful registration, so a departed child
+  cannot re-register. Every credential failure gets the same `authentication failed` reply and the
+  socket is closed. The host, not the child, decides label, run group and peer opt-in (the register
+  frame carries only handle and token, plus the reader token of a result-reader leg), and enforces
+  scope: a child reaches the supervisor, or sends one-way `progress` to an opted-in peer of its own run;
+  anything else is refused as an unknown recipient. Message bodies are capped at 8,000 characters,
+  ids must be UUIDs and client-to-host frames are capped at 64 KiB. The bridge deletes the token
+  (and the reader token) from the child's environment once read, so the worker's tool subprocesses never
+  inherit it; it stops another local process from claiming a handle, not a hostile worker. A socket
+  directory that is not a real, user-owned directory, or a socket path over 103 bytes (a long `TMPDIR`),
+  fails the start like a bind error instead of binding a truncated path. An invalid `send` or `cancel`
+  from a registered child is answered with its `msgId`. Ask failures echo the originating `msgId` so the client
   rejects the right request immediately, and a client cancellation propagates only to that connection's
   own host ask. A one-way send gets a UUID-correlated host receipt; `delivered: true` means admitted
   to the bus, not read or acted on by the peer. Each child is limited to 64 pending receipts with a
@@ -877,7 +910,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   Its expansion appends each finished run's retained log. The archived
   `pi-persona-monitor-log`/`pi-persona-script-log` entry draws nothing while that wake is queued
   (`wakePending`, queued before the archive observer runs) or on the current branch
-  (`programWakeIds`, terminal event lines parsed with the same anchored parser); otherwise it is the
+  (`programWakeIds`, terminal event lines parsed with the same anchored parser, computed once per
+  session id and leaf id by a one-slot memo created per extension activation, not once per rendered
+  card); otherwise it is the
   fallback card in the same `<kind> <verb> · <label>` grammar, state and quoted preview. A single
   program event's state comes from its runtime-owned kind and, for an exit, the manager's own first
   status line. Assigned names retain their capitalization. Neutral
@@ -1151,7 +1186,10 @@ another same-user process, and not a delegate/council or task/run replacement.
   self-registers one JSON entry under `<agentDir>/persona/exocom/<workspace-hash>/agents/<session-key>.json`
   (a hash of the session id, so a read drops any entry whose filename doesn't match its own
   `session_id`), heartbeating it; discovery is just reading that directory. Dead-pid and
-  stale-heartbeat entries are pruned on read — no host election, no failover. Cleanup is
+  stale-heartbeat entries are pruned on read — no host election, no failover. A failed send evicts a
+  peer's entry only when its pid is dead: the entry is its owner's ledger lease, and its absence makes
+  the next ledger commit forfeit that owner's claims and tasks, so an ack timeout, a signed nack or an
+  unreachable live peer leaves it in place. Cleanup is
   ownership-aware (`session_id` + endpoint + signing key) and atomically claims an entry before
   deletion, so a failed/replaced session cannot erase a live replacement's slot.
 - **Workspace identity is the Pi's actual cwd.** The chosen scope controls registry, endpoint, ledger,
@@ -1166,6 +1204,9 @@ another same-user process, and not a delegate/council or task/run replacement.
   expiring invitation to consider an open task, targeted to one peer or the pool; it creates no ask,
   no answer obligation and no work authorization. Its default lifetime is one hour, capped at 24 hours.
   Signed immediate-wake frames are signals; the ledger remains authoritative when delivery is deferred.
+  Only ask, answer and targeted-offer frames are sent over the wire (`ExocomWakeFrame`); claims, tasks,
+  progress, releases and publications are ledger-only facts, and a valid non-wake frame arriving from a
+  peer is dropped without a nack (the sender sees an ack timeout).
 - **Task generations and atomic pickup.** `exocom_task create` records a voluntary objective and
   declared write set; creation neither launches work nor claims paths. The task's immutable
   `task_id` is its creation frame's `msg_id`; later take/progress/finish, offer and publish actions
@@ -1179,7 +1220,7 @@ another same-user process, and not a delegate/council or task/run replacement.
   These excerpts do not grant access to a peer's terminal-result archive.
 - **Cross-workspace writes are advisory-only in v1.** A repository-relative claim path has meaning
   only in the workspace that owns the selected scope, so a member whose home workspace differs from
-  the scope cannot `exocom_claim` or create/pick up a write-set task (the tool and signed-frame
+  the scope cannot `exocom_claim` or create/pick up a write-set task (the tool and the ledger
   transaction both enforce the scope). It can still read shared tasks/evidence, take read-only tasks,
   send postcards, ask, answer/decline, and release its own asks. Multi-repository write coordination
   would need a versioned resource namespace; paths from unrelated repositories are never compared as
@@ -1299,7 +1340,7 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
   before a same-batch `delegate` is an accepted false negative). A `delegate` fan-out (`tasks`) is
   held and delivered as ONE completion follow-up when its last member settles, with every failed leg
   named and clipped on its own line; single legs and separate calls are unchanged. Held reports are
-  dropped at session shutdown or reload, like the running legs, and the `PI_PERSONA_ASYNC_RETAIN`
+  dropped at session shutdown or reload (the running legs end first, see the shutdown rule below), and the `PI_PERSONA_ASYNC_RETAIN`
   default (64, the `tasks` cap) covers one whole call so early finishers stay fetchable. In headless `pi -p` the
   `timer`/`monitor` arm text says the process exits when the turn settles, so such a wake lands only
   if it fires before then.
@@ -1310,14 +1351,23 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
   one; stop it by key. Ownership of the limits: a run holds ONE slot of the delegate `maxConcurrency` launch
   pool for its whole life (`queued` until granted; a flow keeps it while parked at a checkpoint); the strategy
   SDK's per-run semaphore gates the legs INSIDE it, so members never compete with delegate legs for pool
-  slots (a flow builds one SDK per phase, so those limits apply per phase); token budgets, the child limit, the delegation ledger and the fork-bomb guard stay in the SDK and
+  slots (one flow invocation shares ONE run budget across all its phases); token budgets, the child limit, the delegation ledger and the fork-bomb guard stay in the SDK and
   engine. A flow parked at a checkpoint is blocked on the OPERATOR: the run carries `awaiting`, peek reads
   `waiting for operator at checkpoint <id>`, the stall watchdog skips it and nothing wakes the model; a
   rejected checkpoint settles the run `stopped` and the plan reaches the model as its partial output. A
   persona's `council:` defaults resolve unchanged when the call omits strategy, roster and params. The
   mandated `orchestration:` path stays PRE-turn and inline (its result is the supervisor's first answer),
   as do the `/orchestrate` and `/flow` slash commands; those runs register their own abort under their root
-  row, so shutdown ends the whole run. Operator-run results also reach the supervisor's next turn as a
+  row, so shutdown ends the whole run. **Shutdown stops everything.** Every `session_shutdown` (reload,
+  new, resume, quit) cancels timers, monitors and scripts, aborts every run, then waits up to ONE shared
+  12-second deadline (`SHUTDOWN_DRAIN_MS`, above the child engine's 5 s kill grace plus 5 s last-resort
+  kill and the in-process 5 s handshake) for every engine run to settle, the untracked `/orchestrate`,
+  `/flow` and mandated roots included, and for the in-process leg guard to drain; a run that stops by
+  itself in that window keeps its own stopped result, worktree recovery metadata and archived receipt.
+  At the deadline this activation's guard holds are released by force; only then are stragglers force-settled as `session
+  ended` and the broker closed, so a dying child keeps its pipe until it exits. Nothing is waited for
+  when nothing is in flight. A reload therefore always brings the next activation, and the companions
+  loaded with it, up as the supervisor. Operator-run results also reach the supervisor's next turn as a
   passive, fenced, 12k-bounded message.
   Progress tokens are labelled **cumulative input/output** (in the model-facing digest and expanded
   cards; compact rows use the agent widget's `tok`), not context occupancy; cache-read/write
@@ -1502,14 +1552,15 @@ must pass. The broker's transport is the only OS-specific code, confined to `bus
   silently lost. A throwing ENGINE call becomes that leg's own `ok: false` result (`legFailure`,
   flagged `infrastructure: true` so failure-punishing consumers can tell it from a model-side
   failure), so one blown leg can't discard the fan-out's completed — already billed — siblings.
-  A rejection that reaches `sdk.parallel` is run-fatal by construction (a limit breach, a throwing
-  host callback): the batch stops pulling new items and rethrows the FIRST error immediately.
+  A rejection that reaches `sdk.parallel` is run-fatal by construction (a throwing host
+  callback or thunk; a run limit is not one — it is the refused leg's own result): the batch stops pulling new items and rethrows the FIRST error immediately.
   `runPersonaStrategy` returns `null` only for "nothing to run" (a persona naming no mode) — that
   is not a failure.
 - Model/thinking baseline is snapshot-once and restored on omit; tools are restored from the **full**
   registry, never the active subset ("never strip Pi power").
 - The completion/mutation guard keeps child-claimed success ≠ runtime-verified; the `maxChildren` cap
-  rejects an oversized fan-out **visibly** (an error before spawn), never by silently trimming it.
+  refuses an oversized fan-out **visibly** (each leg past it is a failed `limit` result and `map` reports
+  the items it did not run), never by silently trimming it.
 - Sub-agent output is UNTRUSTED — fenced (`fenceUntrusted`) before it reaches the supervisor as a
   follow-up or tool result (prompt-injection defense).
 - The broker host is `unref`'d (never keeps Pi alive) with a permanent error sink; never unlink a live

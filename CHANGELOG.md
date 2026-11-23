@@ -17,6 +17,21 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - The cross-process broker no longer accepts a `reply` frame. No worker ever needed one, and any process
   connected to the session's pipe could use it to answer another worker's pending question as the
   supervisor.
+- A worker can register with the cross-process broker only with a one-shot token the supervisor generates
+  for it and passes in its environment (`PI_PERSONA_BUS_TOKEN`). Before, any local process that knew a
+  worker's handle could connect to the session's pipe or socket and claim it. The host, not the worker,
+  now decides the worker's label, run group and peer opt-in, so a worker can no longer present itself as
+  another one. It also enforces who a worker may reach (the supervisor, or one-way progress to an opted-in
+  peer of its own run), the 8,000-character message limit and a 64 KiB limit on a worker's frames.
+  Every failed registration gets the same `authentication failed` answer. The worker removes the
+  token from its environment once read, so the commands it runs never see it. The token stops another
+  local process from claiming a handle; it does not protect against a hostile worker.
+- On Linux and macOS the broker socket now lives in a private (0700) directory under the system temp
+  directory, `pi-broker-<hash>/`, instead of the persona directory under your home, and is closed to other users. A
+  directory that is a symlink, a file or owned by someone else, or a socket path longer than 103 bytes (a
+  long `TMPDIR`), fails the broker start like a bind error:
+  workers launch without a bus, and `/doctor` shows `broker: failed`. Leftover `broker-*.sock` files from
+  earlier versions are not removed. The Windows pipe name is unchanged.
 
 ### Changed
 
@@ -25,6 +40,28 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   A package that an in-process worker's loader installs no longer writes git or npm output to the
   supervisor's terminal or waits on a credential prompt. Idle compaction stays unavailable: the host
   lifecycle check still fails on 1.6.0.
+- Run limits (`maxChildren`, the token budget and `maxConcurrency`) now bound one tool run: one `council`,
+  `/orchestrate` or mandated run, or one whole `flow` invocation. The phases of a flow share one child
+  count, one token total and one concurrency limit; before, each phase had its own, so a wide flow could
+  run far more at once than `maxConcurrency` and spend far more than the budget. A resumed flow starts a
+  fresh budget. `/doctor` says what the limits bound. A flow that used to run in full may now stop with
+  some legs reported as not run.
+- A limit now stops only what has not started. A leg that cannot be admitted comes back as that leg's own
+  failed result (`not run: the run's maxChildren limit (64) is spent` or `… token budget … is spent`, failure
+  kind `limit`) and is never retried; legs already running finish and are kept. Each strategy returns the
+  work already paid for: `fanout` lists the refused legs beside the finished ones, `pipeline` stops at the
+  refused step with the previous output, `critic-loop` returns the last reviewed draft, `judge` and
+  `compete` return the panel answers or diffs unjudged when the arbiter is refused, `synthesize` returns
+  the gatherers' findings when the merge fails, `pair` says the navigator did not review, `map` plans its
+  items from the children the run has left and reports the rest as not run, and `magi`, `debate` and
+  `council-rounds` name a refused voter and never fall back to best-by-confidence over a panel a limit
+  cut short: the votes cast must still reach the quorum (`council-rounds` also stops convening at that
+  round). A flow keeps every failed phase's partial output in its report beside the failure.
+- A unanimous ruling needs the `bestOf` quorum too: with `aggregate: "unanimity"`, one surviving vote on
+  a panel whose other members failed is no longer reported as a unanimous winner.
+- Exocom sends only ask, answer and targeted-offer frames over the wire. Claims, tasks, progress,
+  releases and publications travel through the shared ledger, as before. A non-wake frame from a peer is
+  dropped without a rejection, so its sender sees an ack timeout.
 
 ### Added
 
@@ -38,8 +75,40 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   unavailable selected skill) now settles as a classified failure instead of throwing. A provider
   failure at that point is eligible for provider fallback, and the completion card and the repeated-
   failure guard see it. A progress consumer that throws can no longer fail a finished worker.
-- A `council` or `flow` phase that exceeds `maxChildren` or the token budget now cancels the legs still
-  running in that run or phase instead of leaving them to run and bill with nothing waiting for them.
+- A `council`, `/orchestrate`, mandated or `flow` run that reaches `maxChildren` or the token budget no
+  longer fails the whole run and cancels its other legs, which discarded work already paid for. Legs
+  already running finish and are kept; only legs that have not started are refused. The token budget is a
+  threshold on usage already completed, not a spending cap: legs running when it is crossed still consume
+  tokens.
+- Reload, `/new`, resume and quit now stop everything before the session ends. They cancel timers,
+  monitors and scripts, abort every run, and wait up to 12 seconds, once for everything, for workers to
+  settle with their own result (stopped status, worktree recovery notice, archived result) before
+  settling any that remain as "session ended" and closing the broker. A reload during a worker's session
+  start used to leave the worker's environment markers set, so pi-persona and its companions came up
+  inert, without personas or tools, in the next session; the markers are now released at the deadline at
+  the latest. A worker session that finishes starting after its run was cancelled is now shut down and
+  disposed, and a worker stopped while its session is still starting no longer holds a continuation slot
+  until Pi exits. A reload can take up to 12 seconds when a worker does not stop.
+- Worker transcripts that can never be resumed no longer fill the continuation quota. A new worker's
+  admission first removes transcripts of stopped, timed-out, failed or aborted workers, leftovers of a
+  crashed session, and expired conversations that retain no worktree. Saved unexpired conversations are
+  still never removed to make room, and a transcript the session file still mentions is never touched. Stopped and timed-out in-process workers now run the bounded (up to
+  5 seconds) shutdown that proves them quiescent, so their transcript is released at once, and a worker
+  that settles after a reload frees its transcript too.
+- A `monitor` exit job, `script`, output monitor or worktree `verification` command whose program exits
+  while a background process still holds its output is reported when the program exits, with the line
+  "a background process still holds its output; output after exit is not captured", instead of as a
+  timeout at the deadline. Buffered output is read for up to 250 ms and the background process is left
+  running. A verification in that state is an error and keeps the worktree without exporting it. The
+  redirect workaround is no longer needed to see the exit.
+- A failed Exocom send no longer removes the target's registry entry unless its process is gone. A
+  transient connection error used to make the other sessions treat a live peer as having left and drop
+  its claims and tasks. The entry of a peer that is alive but unreachable now stays until its process exits
+  or its heartbeat goes stale (about two minutes), and sends to it fail as unreachable meanwhile.
+- Program-event log cards no longer rescan the branch once per rendered card.
+- The first creation of `persona/settings.json` works on filesystems without hard links (some network and
+  removable volumes). It checks that the file is absent under the settings lock and renames atomically; a
+  file that appeared first is still reported, and any other error still fails without overwriting.
 - `PI_PERSONA_PEEK_MS`, `PI_PERSONA_CHECKIN_MS`, `PI_PERSONA_AGENT_MAX_MS` and
   `PI_PERSONA_AGENT_STARTUP_MS` accept only integers from 0 to 2147483647, as `/persona-settings` does.
   A value above that range or below 1 used to reach the timer as about 1 ms, cancelling every worker at

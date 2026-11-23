@@ -23,11 +23,11 @@ a strategy is backend-agnostic and unit-testable against a stub engine.
 | `sdk.reduce.vote(candidates, opts)` | Tally the candidates' OWN votes → a `ReducerResult` (`voting.ts`). |
 | `sdk.reduce.judge(candidates, order?)` | Anonymise + reorder N candidates into a ballot for an impartial judge; `pick(label)` maps the verdict back. |
 | `sdk.roster.team(name)` | The members of a named team (bare names or inline `{ agent, role, model, skills }` specs). |
-| `sdk.signal` · `sdk.limits` · `sdk.log` | Cooperative abort · admission/runtime limits · a progress line. |
+| `sdk.signal` · `sdk.limits` · `sdk.remaining` · `sdk.log` | Cooperative abort · the declared ceilings · the live headroom of the run's shared budget (`{ children, tokens }`; tokens is `Infinity` without a budget — plan optional work from this, not from `limits`) · a progress line. |
 | series & loops | Plain `await` / `for` — a strategy is TypeScript, so `pipeline` and `critic-loop` are just native control flow. |
 
 Run limits (`RUN_LIMITS`) are enforced inside `makeSDK` regardless of how a strategy calls `agent()`:
-`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window). Model recovery attempts
+`maxChildren`, `maxConcurrency`, `budgetTokens`, `timeoutMs` (idle window, per leg). Model recovery attempts
 consume child slots and usage too; they are not free legs hidden outside these limits. Nesting depth is not a
 numeric knob on this list — it is structurally 1: a spawned child's whole pi-persona extension
 disables itself under `PI_PERSONA_DISABLE=1`, so it has no `delegate`/`council`/`orchestrate`/`flow`
@@ -45,24 +45,48 @@ Optional main-model recovery leaves admission room for queued logical legs and p
 `judge`, `compete`, and `synthesize` protect their final arbiter/merge this way. `map` reserves the
 worker/verifier waves at splitting and the remaining verifier wave during workers; `pipeline`,
 `critic-loop`, and `council-rounds` reserve their remaining required steps/rounds. Recovery must not
-turn a usable partial panel into a run-fatal child-budget overflow.
+spend the slots a usable partial panel still needs.
 
 Who owns which limit: a `council` or `flow` TOOL run takes ONE slot of the delegate launch pool
 (`maxConcurrency`, see [ARCHITECTURE.md](ARCHITECTURE.md#supervision--the-waiting-model)) for its whole life, and
 the SDK's semaphore below gates only the legs INSIDE it, so a strategy's members never contend with delegate
 legs for pool slots. Interactive sessions launch the run in the background (a receipt, then ONE completion
-follow-up); headless sessions join it inline. A strategy needs nothing to opt in. A flow builds one SDK
-per phase, so `maxChildren`, `maxConcurrency` and `budgetTokens` apply to each phase, not to the flow as a
-whole; phases whose `needs` are met run together.
+follow-up); headless sessions join it inline. A strategy needs nothing to opt in. The limits bound ONE tool
+run: one council, `/orchestrate` or mandated run, or one whole flow invocation. A flow builds one SDK per
+phase, but every phase draws on the same run budget (`createRunBudget`, `run-budget.ts`), so `maxChildren`,
+`maxConcurrency` and `budgetTokens` are shared by all phases, and phases whose `needs` are met run together
+inside that one ceiling. A journal resume is a new invocation with a fresh budget (resumed phases cost
+nothing). `timeoutMs` stays a per-leg idle window.
 
-Every `agent()` call in one SDK instance shares a concurrency semaphore, including direct
+Every `agent()` call of one run shares the budget's concurrency semaphore, including direct
 `Promise.all` calls and overlapping `parallel()` batches. A requested batch concurrency may lower
 the ceiling, never raise it. Cancellation removes queued legs before they reach an engine.
 `budgetTokens` is an admission guard based on completed legs' input/output usage: queued work
 rechecks it when a slot opens, but already-running legs may exceed it. It is not a hard streaming
-token or billing cap. A breach of it or of `maxChildren` is detected when the next leg asks for a slot;
-it fails that run (in a flow, that phase) and cancels its legs still in flight, whose rows read
-`cancelled: run exceeded … in a sibling leg`.
+token or billing cap. A limit never throws and never cancels. When the next leg asks for a slot past
+`maxChildren` or the token budget, that leg alone resolves as a failed result with `failureKind: "limit"`
+and `not run: the run's maxChildren limit (N) is spent` or `… token budget (N) is spent (S tokens used)`; the
+engine is not called, no child is used, its row settles as failed, and it is never retried. Legs already
+running finish and their results are kept. Only a user or session abort cancels legs.
+
+Each strategy decides what a refused leg means and returns what it already paid for:
+
+| Strategy | A refused leg |
+|---|---|
+| `fanout` | A `failed (limit)` section beside the finished ones; the aggregate is `ok: false`. |
+| `pipeline` | The chain stops at the refused step and returns the last output plus a `failed step` note, `ok: false`. |
+| `map` | Items are capped at the run's remaining children (less the splitter) and the rest are reported as not run; the aggregate keeps every finished item. |
+| `critic-loop` | A refused critic or revision returns the last reviewed draft, `ok: false`; a refused generator leaves no draft. |
+| `magi` | A refused voter is a missing ballot, named in a `not run: …` line. With any refusal there is no best-by-confidence fallback and a ruling needs a majority of the full roster, so a split or lone partial panel ends `ok:false`/`limit` with the cast answers listed. The reflection round is skipped, and named, unless the run has at least one token and one child per core left. |
+| `council-rounds` | Stops convening at the first round with a refused voter and decides it over the votes cast, with no best-by-confidence fallback; names the voters that did not run and keeps the previous round's debate. A round in which every voter was refused did not convene: the report shows the previous round's tally and round count. |
+| `debate` | Like `council-rounds`: the `bestOf` quorum decides over the votes cast, with no best-by-confidence fallback; a split partial panel ends `ok:false`/`limit` with the cast answers listed. |
+| `judge` | Refused panelists drop out; a refused arbiter returns the panel answers unjudged, `ok: false`, no pick. |
+| `compete` | Refused competitors drop out; a refused arbiter returns every valid diff unjudged, `ok: false`, no winner. |
+| `synthesize` | A refused gatherer is a missing gatherer (coverage note); if the merge fails for any reason, the gatherers' unmerged findings are returned after "The synthesis did not complete (…)", `ok: false`. |
+| `pair` | A refused driver fails the pair; a refused navigator adds "navigator did not review" and the driver's result stands. |
+
+A flow keeps every failed phase's partial output, in phase order, in its terminal report beside `Flow failed at phase "<id>": …`.
+Dependents stay blocked, the flow stays `ok: false` and the phase is journaled failed, so a resume re-runs it.
 
 ## Roster-role ensembles
 
@@ -102,10 +126,10 @@ request. Tasks and result grants are excluded from this display identity.
 |---|---|---|---|
 | `fanout` | Every roster agent on the same task in parallel, then `aggregate`. Sections are labelled by lens (`reviewer · SECURITY`); `structured.results[i].member` carries the label when it differs from the agent name. | — | roster-role |
 | `pipeline` | Roster in SEQUENCE, each builds on the prior output; answer = last step. | — | roster-role |
-| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`; sections are labelled `item N: <text>`. | `maxItems` (default AND ceiling: maxChildren − 1 without verification, halved and rounded down with `verify`, minimum 1; the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
+| `map` | A splitter breaks the task into a runtime list; a worker runs once per item in parallel, then `aggregate`; sections are labelled `item N: <text>`. | `maxItems` (default AND ceiling: the children the run has left − 1 without verification, halved and rounded down with `verify`, minimum 1; the splitter takes a slot; a larger value is clamped and the drop is noted in the output), `peers` (false), `ownership` ("off" — "off"/"declare"/"enforce": ignore, record, or gate on the splitter's per-item `writeSet`; always exposed as `structured.items`, a per-item status ledger), `verify` ("" — agent that re-checks each COMPLETED item read-only; one extra child per completed item, empty = off) | roster-role, opt-in peers |
 | `critic-loop` | Generator proposes, critic attacks; `reject`/`revise` triggers another draft, and only explicit `approve` succeeds. Exhaustion fails closed with the last reviewed draft + unresolved critique (never an unreviewed tail revision). | `generator` (roster[0]), `critic` (roster[1]), `rounds` (positive integer, 3) | roster-role, `outputContract` |
 | `magi` | Parallel INDEPENDENT votes from distinct-persona cores → majority/unanimity, tally + minority report; one anonymised reflection round by default. A core whose reflection leg fails (other than a stop) keeps its round-1 vote; the footer says so, and a reflection skipped for budget is named (`token budget`/`child budget`). | `aggregate` ("majority"), `reflect` (true) | vote reducer |
-| `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round. | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
+| `council-rounds` | Multi-round `magi`, best-of-X: the whole roster re-deliberates carrying the debate forward until a supermajority, else best-by-confidence on the last round (a round with a refused voter ends the convening with no fallback). | `rounds` (3), `bestOf` (majority), `aggregate` ("majority") | vote reducer |
 | `debate` | 2+ members work the same task in parallel and exchange positions LIVE via `contact_peer`, then a majority vote settles it. | `bestOf` (majority), `aggregate` ("majority") | **peers always**, vote reducer |
 | `judge` | A panel answers in parallel; one impartial arbiter picks on an anonymised, shuffled ballot. Only a successful arbiter result can select a winner; partial structured output from a failed/aborted arbiter fails closed. | `judge` (required), `contract` (none) | judge reducer |
 | `synthesize` | Parallel gatherers → one synthesiser merges the findings, labelled by lens like `fanout`, into a single coherent answer (the "reduce" `fanout` lacks). Partial panels explicitly name missing gatherers in the merge input, returned output and coverage metadata. | `synthesizer` (roster[0]), `peers` (false) | roster-role, opt-in peers |
@@ -118,8 +142,8 @@ request. Tasks and result grants are excluded from this display identity.
 single read-only review pass per completed unit of work, not swarm autonomy for its own sake. It
 runs one extra child per COMPLETED item (a failed item has nothing to re-check), through the same
 `sdk.parallel` wave as the workers, so `maxChildren`/`maxConcurrency`/`budgetTokens` still bound it
-— `map` automatically reduces the item ceiling to leave one verifier slot per item. With the default
-`maxChildren: 64`, that allows 31 items (1 splitter + 31 workers + 31 verifiers); a lower `maxItems`
+— `map` automatically reduces the item ceiling (from the run's remaining children) to leave one verifier slot per item. With the default
+`maxChildren: 64` and a fresh run, that allows 31 items (1 splitter + 31 workers + 31 verifiers); a lower `maxItems`
 can leave more room for optional model recovery. It pays for a batch where a wrong answer is
 expensive and hard to eyeball after the fact (security-sensitive edits, long-tail correctness);
 it costs more than it is worth for a low-risk sweep a supervisor can spot-check itself.

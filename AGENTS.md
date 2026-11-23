@@ -79,29 +79,43 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Every delegate leg, and every
   tracked `council`/`flow` run (one slot for the whole run), headless included, shares one
   `maxConcurrency` launch pool (`Semaphore` in `orchestration/parallel.ts`), so a fan-out can't open more
-  concurrent sessions than that; the strategy SDK's own semaphore gates the legs INSIDE a run (a flow
-  builds one SDK per phase, so the SDK limits apply per phase, not per flow).
+  concurrent sessions than that; the run's own budget (`orchestration/run-budget.ts`) gates the legs
+  INSIDE a run. It bounds one tool run: one council / `/orchestrate` / mandated run, or one whole flow
+  invocation across its phases, which share its child count, token total and concurrency (a resume starts
+  fresh; `timeoutMs` stays per leg).
   Any event re-arms the idle window (a chatty tool is never killed), but stall credit follows one rule,
   `madeHeadway` (`engine/async.ts`): raw tool-output chunks earn none, so a leg whose tool streams forever
   raises only the operator-only stall card (nothing is killed, the model is not woken). The idle-timeout
   failure text names the `timeoutMs` remedy.
-  Each strategy SDK also gates every `agent()` call through one semaphore, including direct
+  Each strategy SDK also gates every `agent()` call through that budget's semaphore, including direct
   `Promise.all` calls; `parallel` overrides cannot raise its concurrency ceiling. Token budgets
   gate admission using completed usage, so already-running legs can overshoot the threshold.
+  A limit never throws and never cancels: a leg it cannot admit is that leg's own result
+  (`failureKind: "limit"`, engine not called, no child used), running legs finish and are kept, and
+  each strategy returns what it already paid for (a flow keeps every failed phase's partial output; a voting strategy never falls back to
+  best-by-confidence over a panel a limit cut short).
   In-process cancellation and deadlines cover session construction; coaching exemptions apply
-  after it finishes. A cancelled factory's late session is disposed, but its ref-counted guard
-  stays held until the factory settles because Pi's loader itself cannot be forcibly cancelled.
+  after it finishes. A cancelled factory's late session is retired (bounded `session_shutdown`
+  handshake, then dispose). Its guard hold stays until the factory settles, because Pi's loader
+  cannot be cancelled, but session shutdown force-releases its own activation's holds at its deadline.
 - **Cross-process broker** (`src/bus/broker/{paths,framing,messages,host,client}.ts`, on by default,
-  spec B1-B7; `PI_PERSONA_BROKER=off` restores pre-broker spawn): session-scoped (POSIX socket /
-  Windows named pipe under the session id), supervisor-hosted, lazily started on the FIRST actual
+  spec B1-B7; `PI_PERSONA_BROKER=off` restores pre-broker spawn): session-scoped (POSIX socket in a
+  private 0700 directory under the OS temp dir / Windows named pipe under the session id),
+  supervisor-hosted, lazily started on the FIRST actual
   child-engine build (a `PI_PERSONA_ENGINE=child` run, any `isolation: worktree` leg, or an
   `mcp: true` leg — those ALWAYS use the child engine). It is a RELAY into the local `InProcessBus`:
   a connected child is indistinguishable from an in-process one, so the supervisor side (intercom,
   idle notifier, f9, peek) is unchanged BY CONSTRUCTION. It gives child-process runs
   `contact_supervisor`/`contact_peer` AND **steer** (closing the child-engine steer gap —
   `intercom steer`/f9 `s` work on both engines; a child's steer is follow-up-queued, not mid-turn
-  injection). Off ⇒ `deps.broker` is never built, the host never starts, and the child spawns
-  byte-identical to pre-broker pi-persona — see
+  injection). Registration needs the supervisor-minted one-shot token in the spawn env
+  (`PI_PERSONA_BUS_TOKEN`); the host, not the child, decides label, peer group and peer opt-in and
+  enforces recipient scope, message size (8,000 chars) and client frame size (64 KiB). The bridge removes
+  the token from the child's environment once read, so its tool subprocesses never inherit it; it stops
+  another local process claiming a handle, not a hostile worker. A POSIX socket path over 103 bytes fails
+  the start closed.
+  Off ⇒ `deps.broker` is never built, the host never starts, and the child spawns
+  byte-identical to pre-broker pi-persona (no `PI_PERSONA_BUS`/`PI_PERSONA_BUS_TOKEN`) — see
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-comm-plane-in-practice).
 - **Provider fallback**: `buildEngine` wraps the engine in `withModelFallback` (`engine/fallback.ts`).
   A provider-qualified `spec.model` is an explicit provider/billing pin and is strict by default:
@@ -124,6 +138,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   engines also export `PI_PERSONA_LEG=1` for a delegated leg — a **dedicated** marker (unlike the
   user-settable `PI_PERSONA_DISABLE`) so a companion extension can tell a real leg from a disabled
   supervisor; set it in lockstep with the disable guard (in-process guard + child `spawn` env).
+  Session shutdown force-releases its own activation's holds at its deadline (`settleLegGuard`) and
+  restores the environment once no hold of any activation remains; a dropped hold's late release is a
+  no-op. Extensions a forced loader loads afterwards see no leg markers and never bind to a session.
 - Native OS/search tools are Pi-owned: `src/extension/native-tools.ts` activates existing host
   `grep`/`find`/`ls` and Windows `powershell` defaults without replacing implementations. Pi's
   allowlists/exclusions and explicit `defaultTools` remain authoritative; in-process legs add native
@@ -154,8 +171,11 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   mandated `orchestration:` path stays pre-turn and inline, and `/orchestrate`, `/flow` and that path
   register their own abort under their root row (`visibleRoot`). A rejected `gate: true` returns
   `stoppedAtGate` (`ok` stays false, so mandatory flows still fail closed; a tracker run settles
-  `stopped`). Stop-all, checkpoint waits, operator-result hand-off, run ids, restore honesty, flow journal
-  identity (`flowRunHash`) and retention are in
+  `stopped`). Every `session_shutdown` (reload included) stops everything: it cancels timers, monitors
+  and scripts, aborts every run, waits up to one 12 s deadline for workers to settle with their own
+  results, then force-settles stragglers and closes the broker. Stop-all, checkpoint waits,
+  operator-result hand-off, run ids, restore honesty, flow journal identity (`flowRunHash`) and
+  retention are in
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#supervision--the-waiting-model).
   Routine async status is opt-in (`checkInEveryMs=0` by default); ordinary progress stays in live rows/F9.
   Each newly detected stall and genuine progress resume after a reported stall is a durable,
@@ -173,7 +193,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   must permit it before launch and before execution. Snapshot the validated command/deadline;
   worker prose cannot supply runtime evidence. Preserve `AgentResult.verification` in terminal
   metadata independently of body truncation. Nonzero checks retain exported work; uncertain
-  termination/directory state retains without export. No automatic retry, background services or
+  termination/directory state retains without export; so does a command that exits while a background
+  process still holds its output (status `error`). No automatic retry, background services or
   extra archive. Successful continuation inherits the command. Command-specific host policy
   inspects the delegate field; this is not a separate native bash tool call.
 - **Worker continuation**: a successful saved delegate can be continued with
@@ -186,7 +207,13 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   worker JSONL admission/settlement limits are 8 MiB per file, 64 MiB total, 64 lineages and seven
   days of availability. A running writer can cross a byte limit before settlement; do not claim a
   rejected transcript was saved for continuation.
-  There is no automatic eviction; at quota, new delegations still run without continuation storage.
+  Saved unexpired conversations are never evicted; at quota, new delegations still run without
+  continuation storage. Admission first reclaims transcripts that can never be resumed (stopped,
+  timed-out, failed or aborted attempts, crash leftovers whose lease owner is dead) and expired
+  lineages without a retained worktree; an unindexed transcript goes only when the session file on
+  disk does not mention its key. Stopped or timed-out in-process workers run the bounded shutdown
+  handshake (one cancelled during session creation waits for its factory within the same bound), so
+  their lease releases once quiescence is proven.
   One lease protects each transcript until the engine proves the writer quiescent. A successful
   worktree delegate retains the exact verified worktree and pinned base for follow-up; strategies
   keep their existing cleanup. Never substitute a missing worktree with the supervisor's cwd.
@@ -254,7 +281,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   current workspace; exact `--exocom=Ab0T` joins that existing scope from another cwd through a
   persistent, case-sensitive four-character Base62 alias. The scope selects registry, transport,
   ledger and artifacts; each member still advertises its actual home workspace. The code is a
-  same-host/same-agent-dir join reference, not authentication.
+  same-host/same-agent-dir join reference, not authentication. A failed send evicts a peer's registry
+  entry (its ledger lease) only when its process is gone; only ask, answer and targeted-offer frames
+  cross the wire, every other semantic fact is ledger-only.
   `EXOCOM_TOOL_NAMES` contains 15 call-time-gated tools: `exocom_list`, `exocom_send`, `exocom_name`,
   `exocom_claim`, `exocom_ask`, `exocom_answer`, `exocom_decline`, `exocom_wait`, `exocom_release`,
   `exocom_progress`, `exocom_status`, `exocom_task`, `exocom_offer`, `exocom_publish`, and
@@ -343,7 +372,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   require an explicit timezone for absolute times. `monitor` runs bounded event-producing programs
   (`output`) or jobs (`exit`), with both `monitor` and `bash` permissions. Pure lifecycle is in
   `src/core/monitor.ts`, process/delivery adapters in `src/monitor/`; use the existing idle notifier
-  and process-tree cleanup. Session-scoped, no restoration on restart. See [`docs/MONITORS.md`](docs/MONITORS.md).
+  and process-tree cleanup. Session-scoped, no restoration on restart. A job, script or output monitor
+  settles at process exit plus a bounded output drain (`MONITOR_EXIT_DRAIN_MS`, 250 ms), never the pipe
+  close; a surviving background process is left running. See [`docs/MONITORS.md`](docs/MONITORS.md).
   Armed timers and active monitors also show as agent-tree rows (`monitor:<id>` / `timer:<id>`, never
   agents): `src/ui/wake-rows.ts` is the pure projection, fed by the core seams `TimerScheduler`
   `onArmed`/`onCancelled`, `MonitorManager` `onArmed`/`onRemoved` and `createMonitorSession`'s `observe`
@@ -389,7 +420,7 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   `.pi-persona-seeded`). Release prep: add the previous tag's digest
   to `LEGACY_SEEDED_DEFAULTS` for every changed persona/agent (the guard test in `seed.test.ts` prints the row).
   F8 and `/doctor` point to `/persona seed` when no personas are installed. Contracts/presets/teams keep a builtin layer (they aren't personas).
-- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic claim; run via `npm run smoke:exocom`). `demo/` records the README GIFs: the real Pi TUI in a pseudo-terminal with scripted model replies (`record.mjs` → `render.mjs`; scenarios in `demo/scenarios/`, recorder dependencies live outside the repository — see the `record.mjs` header); `demo/svg.mjs` renders `assets/workflow.svg` to `assets/workflow.png`. `test/` — unit + integration.
+- `scripts/` — `drive.ts` (headless `pi -p` log) + `drive-status.ts` (its pure exit-code/status projection), `control-test.mjs`, `flow-test.ts`, `live-suite.mjs` (every strategy/mode against a real model), `exocom-smoke.mjs` (real socket/pipe round-trip, chat + semantic ask; run via `npm run smoke:exocom`). `demo/` records the README GIFs: the real Pi TUI in a pseudo-terminal with scripted model replies (`record.mjs` → `render.mjs`; scenarios in `demo/scenarios/`, recorder dependencies live outside the repository — see the `record.mjs` header); `demo/svg.mjs` renders `assets/workflow.svg` to `assets/workflow.png`. `test/` — unit + integration.
 
 ## Adding a new X (data-driven — usually no core change)
 

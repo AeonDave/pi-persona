@@ -44,13 +44,17 @@ interpreter avoids platform-specific quoting.
 
 | Mode | When the model wakes | Typical source |
 |---|---|---|
-| `exit` | The launched program finishes and its output pipes close, with its exit code and bounded output tail | Build or local job |
+| `exit` | The launched program exits, with its exit code and bounded output tail | Build or local job |
 | `output` | A nonempty stdout line arrives | File watcher, filtered log tail, system-event subscription, service adapter |
 
-A job that leaves a background process holding its output (`server &` with no redirection) is not
-reported as finished until that process exits or the deadline passes, and is then reported as timed out.
-Redirect the background process (`server >server.log 2>&1 &`) so the launcher's exit is seen at once. The
-same holds for `script` and for a worktree `verification` command.
+A job, `script`, output monitor or worktree `verification` command settles when the launched program
+exits. Output already buffered is read for at most 250 ms (measured once from the exit, never extended
+by later output), then the pipes are released. A background process that still holds the output
+(`server &`) is left running, its later output is not captured, and the exit event gains the line
+`a background process still holds its output; output after exit is not captured`. It is no longer
+tracked, so `script stop` reports no active script for it. Redirect it (`server >server.log 2>&1 &`) only
+to keep its output or to avoid a write into the closed pipe. A `verification` command in that state is
+an error, not a pass or a failure: the worktree is retained without export.
 
 For example, start an existing build script and get its completion:
 

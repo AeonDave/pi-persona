@@ -304,6 +304,9 @@ This command is part of `delegate`, not a separate host `bash` tool invocation. 
 apply command-specific policy must inspect `verification.command` on the delegate call, just as
 they inspect inline source passed to other process tools. Foreground completion is not proof
 that a command did not create detached processes, and worktrees are not a filesystem sandbox.
+A command that exits while a background process still holds its output (after a 250 ms drain) is an
+`error`, not a pass or a failure: the worktree is retained without export, and the result reads
+`Worktree verification error (exit N): …`.
 
 ### Reading and messaging workers
 
@@ -355,19 +358,24 @@ Temporary views and saved work have different owners and deletion rules:
 | Data | Limit and cleanup |
 |---|---|
 | Live run state and F9 chats | The async tracker retains 64 settled runs by default (`PI_PERSONA_ASYNC_RETAIN`), evicting collected results first, then older completions. Running workers are not evicted. Each chat has the bounds above. F9 keeps at most eight reader caches; obsolete attempts and abandoned views are released, and closing F9 releases its reader caches. Native `/new`, `/resume` and `/reload` replace the extension runtime. |
-| Saved worker conversations | Admission/settlement limits are 8 MiB per transcript, 64 MiB and 64 lineages per owning session. Seven days limits continuation availability, **not file lifetime**. Expired files still count against quota. Use `intercom { action: "conversations" }`, then explicitly `forget` the latest run ID to remove its transcript and retained worktree. See [continuation](#continuing-a-worker-conversation). |
+| Saved worker conversations | Admission/settlement limits are 8 MiB per transcript, 64 MiB and 64 lineages per owning session. Seven days limits continuation availability, **not file lifetime**: an expired transcript is reclaimed at the next admission unless it retains a worktree, and counts against quota until then. Use `intercom { action: "conversations" }`, then explicitly `forget` the latest run ID to remove its transcript and retained worktree. See [continuation](#continuing-a-worker-conversation). |
 | Terminal reports | At most 128 entries / 8 MiB of cumulative result payload in the native session. Quota stops additional persistence; it does not rewrite or erase the session's historical entries. `forget` leaves these reports intact. |
 | Monitor and script logs | Each archive admits at most 64 terminal records / 2 MiB per session. Active processes stop on shutdown; historical entries remain in the owning session. See [log retention](MONITORS.md). |
 | Isolated worktrees | Ordinary temporary worktrees are removed after safe export. Continuation and recovery worktrees remain until explicitly discarded, so unapplied changes are not deleted by an age sweep. |
 | Telemetry | On activation, a maintenance pass removes eligible owned telemetry older than 30 days by default. Live or unverifiable writer leases protect their data. See [telemetry retention](TELEMETRY.md). |
 
 A fresh unsaved transcript is removed once its writer is known to have stopped. Failed admission
-also releases its temporary lease. Crash-orphan worker files have no global scavenger, and saved
-conversations are never silently evicted to make room for new ones. A storage limit can disable
+also releases its temporary lease. When a new worker asks for storage, the store first reclaims
+transcripts that can never be resumed: attempts with no recorded run (stopped, timed-out, failed or
+aborted workers, and crash leftovers whose lease owner process is gone) and expired lineages without a
+retained worktree. A lease held by a live process, including this one, is never touched, nor is
+anything when the session history or the session file cannot be read; a transcript with no recorded
+run is removed only if the session file on disk does not mention it; each admission looks at no more than 256 directory entries. Saved
+unexpired conversations are never evicted to make room for new ones. A storage limit can disable
 continuation for a new worker without preventing its task from running.
 Transcript quotas do not include retained worktree contents or native session history, and are
-per owner rather than a global disk quota across all sessions. Expired recorded conversations can
-still be removed with `forget`; crash-orphan files without a recorded run require manual inspection.
+per owner rather than a global disk quota across all sessions. A reclaimed expired conversation still
+lists as expired and can be forgotten; an expired one that retains a worktree stays until `forget`.
 
 Removing a native session removes its embedded reports/logs, but does not promise deletion of
 separate worker transcripts, retained worktrees, exports or backups. Review and discard saved
@@ -447,8 +455,8 @@ can contain prompts, tool calls and tool results. Availability is limited to sev
 last saved turn. Storage admission and settlement use limits of 8 MiB per transcript, 64 MiB total
 and 64 worker lineages per session owner; a transcript can exceed a byte limit while a worker is
 running, in which case it cannot be saved for continuation. A fresh, unsaved transcript is removed
-once its writer is known to be stopped. Expiry does not delete saved files, and Persona does not
-automatically evict them at quota. If a
+once its writer is known to be stopped. Saved unexpired conversations are never evicted at quota; an
+expired one is reclaimed at the next admission unless it retains a worktree. If a
 new conversation cannot be stored, its delegation still runs but cannot be continued from that
 conversation. Sessionless supervisors likewise run new delegates without saved continuation.
 
@@ -498,7 +506,10 @@ explicit forced settlement discards later results. If no recovery notice arrives
 resume the worker or change its stopped status.
 
 The cross-process broker is on by default for child-engine, worktree, and MCP legs. It provides the
-same supervisor communication surface over a session-scoped POSIX socket or Windows named pipe.
+same supervisor communication surface over a session-scoped Windows named pipe, or on POSIX a socket in
+a private 0700 directory under the OS temp directory (no longer under the agent directory). A child
+registers with a one-shot token the supervisor passes in `PI_PERSONA_BUS_TOKEN`; the host, not the child,
+decides its label and peer scope, and bounds message and frame sizes.
 `PI_PERSONA_BROKER=off` restores the pre-broker child spawn behavior. See the comm-plane contract in
 [`ARCHITECTURE.md`](./ARCHITECTURE.md#the-comm-plane-in-practice).
 
