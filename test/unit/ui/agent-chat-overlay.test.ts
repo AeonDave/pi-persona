@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Container, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Container, KeybindingsManager, TUI_KEYBINDINGS, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import type { WorkerChatSnapshot } from "../../../src/core/worker-chat.ts";
 import { AgentOverlay } from "../../../src/ui/agent-overlay.ts";
 import { AgentTree, progressPatch, type AgentNode } from "../../../src/ui/agent-tree.ts";
 
 const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 const tui = { terminal: { rows: 26 }, requestRender() {} } as unknown as TUI;
-const chat: WorkerChatSnapshot = { revision: 1, truncated: false, blocks: [
+const chat: WorkerChatSnapshot = { truncated: false, blocks: [
 	{ kind: "user", id: "u", text: "original task" },
 	{ kind: "tool", id: "t", name: "external", arguments: '{"query":"inspect"}', output: "recorded result", status: "done" },
 	{ kind: "assistant", id: "a", text: "final worker message" },
@@ -62,7 +62,7 @@ test("an open chat survives pruning without steering another worker; recent chat
 
 test("search focus swallows stop and steer characters and wheel scrolls the chat only", (t) => {
 	const tree = new AgentTree();
-	tree.add({ id: "a", label: "Alpha", chat: { revision: 2, truncated: false, blocks:
+	tree.add({ id: "a", label: "Alpha", chat: { truncated: false, blocks:
 		Array.from({ length: 40 }, (_, i) => ({ id: `m${i}`, kind: "assistant", text: `line ${i}` })) } });
 	let stopped = 0;
 	const overlay = new AgentOverlay(tree, tui, theme, () => {}, { canStop: () => true, onStop: () => { stopped++; return true; } });
@@ -118,7 +118,7 @@ test("a reused worker row starts a fresh reader after a retry", (t) => {
 	overlay.handleInput("/");
 	overlay.handleInput("old search");
 	tree.add({ id: "a", label: "Alpha retry", chat: undefined, output: "" });
-	tree.update("a", { chat: { revision: 1, truncated: false, blocks: [
+	tree.update("a", { chat: { truncated: false, blocks: [
 		{ kind: "assistant", id: "a", text: "new attempt output" },
 	] } });
 	const text = overlay.render(90).join("\n");
@@ -184,4 +184,19 @@ test("reader caches stay bounded and disposal releases rendered chat content", (
 	overlay.dispose();
 	assert.equal(readers.size, 0);
 	assert.deepEqual(Container.prototype.render.call(overlay, 90), [], "the disposed container releases its rendered text too");
+});
+
+test("the worker chat legend advertises the live back and scroll bindings", (t) => {
+	const tree = new AgentTree();
+	tree.add({ id: "a", label: "Alpha", kind: "subagent", chat });
+	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.cancel": "ctrl+q", "tui.select.down": "ctrl+n", "tui.select.pageDown": "ctrl+f", "tui.select.pageUp": "ctrl+b" });
+	const overlay = new AgentOverlay(tree, tui, theme, () => {}, { keybindings });
+	t.after(() => overlay.dispose());
+	overlay.render(120);
+	overlay.handleInput("\n");
+	const view = overlay.render(120).join("\n");
+	assert.match(view, /ctrl\+q back/);
+	assert.match(view, /up\/ctrl\+n/);
+	assert.match(view, /ctrl\+b\/ctrl\+f/);
+	assert.doesNotMatch(view, /esc back|↑↓/);
 });

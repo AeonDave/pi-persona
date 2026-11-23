@@ -76,7 +76,7 @@ export function composeAgentRow(input: AgentRowInput): string {
 
 	const prefixCols = 2 + visibleWidth(indent); // "▸ " or "  ", then the indent
 	const avail = Math.max(0, bodyMax - prefixCols - 2); // 2 = glyph + space
-	// The compact effort sigla rides the label (` · xh` / ` · xh→h`); its width comes out of the
+	// The full effort name rides the label (` · xhigh` / ` · xhigh→high`); its width comes out of the
 	// label budget so the appended field never becomes the part a tight row eats first. The final
 	// clamp below still guarantees the row fits either way.
 	const effort = effortTag(node.thinking, node.thinkingEffective);
@@ -680,7 +680,8 @@ export class AgentOverlay extends Container implements Focusable {
 		else {
 			const controls = this.hintLine(stoppable, steerable);
 			if (roomy) footer.push(this.rule());
-			footer.push(...this.hintRows(`esc back · ↑↓/Pg scroll · / search · e expand · i info · m raw/md${controls} · F9 close`, `esc back · ↑↓/Pg scroll · / search${controls} · F9 close`, "esc back · F9 close").map((line) => t.fg("dim", line)));
+			const back = this.keyLabel("tui.select.cancel"), scroll = `${this.navigationKeys()}/${this.keyLabel("tui.select.pageUp")}/${this.keyLabel("tui.select.pageDown")}`;
+			footer.push(...this.hintRows(`${back} back · ${scroll} scroll · / search · e expand · i info · m raw/md${controls} · F9 close`, `${back} back · ${scroll} scroll · / search${controls} · F9 close`, `${back} back · F9 close`).map((line) => t.fg("dim", line)));
 		}
 		if (this.notice) footer.push(t.fg("dim", safeInline(this.notice, 240)));
 		if (roomy) header.push(this.rule());

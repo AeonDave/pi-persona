@@ -12,6 +12,7 @@ test("worker chat projects user, thinking, assistant, tools and errors in event 
 	chat.observe({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "Inspect this file" }] } });
 	chat.observe({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "Inspect this file" }] } });
 	chat.observe({ type: "message_start", message: { role: "assistant", content: [] } });
+	// Child-engine JSON wire: Pi's json mode strips `message` from message_update, leaving deltas.
 	chat.observe({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Look at the callers" } });
 	chat.observe({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Reading now" } });
 	chat.observe({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "Look at the callers" }, { type: "text", text: "Reading now" }, { type: "toolCall", id: "read-1", name: "read", arguments: { path: "src/a.ts" } }] } });
@@ -40,13 +41,13 @@ test("worker chat keeps immutable snapshots and stable references for unchanged 
 	chat.observe({ type: "tool_execution_start", toolCallId: "a", toolName: "read", args: { path: "a" } });
 	const running = chat.snapshot();
 	chat.observe({ type: "tool_execution_update", toolCallId: "a", toolName: "read", partialResult: { content: [] } });
-	assert.equal(chat.snapshot(), running, "identical progress is not a new revision");
+	assert.equal(chat.snapshot(), running, "identical progress is not a new snapshot");
 	chat.observe({ type: "tool_execution_end", toolCallId: "a", toolName: "read", result: { content: [{ type: "text", text: "done" }] } });
 	const done = chat.snapshot();
 	assert.equal(done.blocks[0], first.blocks[0], "settled blocks keep renderer cache identity");
 	assert.notEqual(done.blocks[1], running.blocks[1]);
 	assert.equal(running.blocks[1]?.kind === "tool" && running.blocks[1].status, "running");
-	assert.ok(done.revision > running.revision);
+	assert.notEqual(done, running);
 	assert.ok(Object.isFrozen(done) && Object.isFrozen(done.blocks) && done.blocks.every(Object.isFrozen));
 });
 
@@ -96,6 +97,23 @@ test("worker chat truncation preserves surrogate pairs and argument projection r
 	for (let i = 0; i < 1000; i++) Object.defineProperty(argumentsObject, `key${i}`, { enumerable: true, get() { reads++; return i; } });
 	assert.equal(chatArguments(argumentsObject, 4000).truncated, true);
 	assert.equal(reads, 24);
+});
+
+test("settle closes every still-running tool block as not completed and keeps settled blocks", () => {
+	const chat = new WorkerChat();
+	chat.observe({ type: "tool_execution_end", toolCallId: "done-1", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
+	// The assistant message names a call, but the worker stopped before tool_execution_start.
+	chat.observe({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "never-ran", name: "bash", arguments: { command: "ls" } }] } });
+	const before = chat.snapshot();
+	const done = before.blocks[0];
+	assert.equal(before.blocks[1]?.kind === "tool" && before.blocks[1].status, "running");
+	chat.settle();
+	const after = chat.snapshot();
+	assert.equal(after.blocks[0], done, "a settled block keeps renderer cache identity");
+	assert.equal(after.blocks[1]?.kind === "tool" && after.blocks[1].status, "failed");
+	assert.equal(after.blocks[1]?.kind === "tool" && after.blocks[1].arguments, before.blocks[1]?.kind === "tool" && before.blocks[1].arguments);
+	chat.settle();
+	assert.equal(chat.snapshot(), after, "settling again is a no-op");
 });
 
 test("late partial updates cannot replace a settled tool result", () => {

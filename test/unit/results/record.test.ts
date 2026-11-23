@@ -46,6 +46,8 @@ test("malformed runtime verification reports are rejected rather than truncated 
 		{ ...report, output: "x".repeat(16001) }, { ...report, outputTruncated: "false" },
 		{ ...report, durationMs: NaN }, { ...report, durationMs: -1 }, { ...report, durationMs: 0.5 },
 		{ ...report, exitCode: 1.5 }, { ...report, reason: "x".repeat(1001) },
+		// "failed" admits any exit code, so these reach the safe-integer rule rather than passed-requires-0.
+		...[1.5, NaN, Infinity, 2 ** 53, "1"].map((exitCode) => ({ ...report, status: "failed", exitCode })),
 		Object.defineProperty({ ...report }, "output", { enumerable: true, get: () => assert.fail("report getter must never execute") }),
 		Object.assign(Object.create({ inherited: true }) as Record<string, unknown>, report),
 	];

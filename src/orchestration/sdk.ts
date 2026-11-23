@@ -296,6 +296,23 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 	// nodes. A `#N` suffix guards the degenerate case of an identical base twice. This
 	// mirrors `rosterNodeKeys`, so the seeded "queued" nodes line up with the live ones.
 	const uiSeen = new Map<string, number>();
+	// A run-fatal limit breach rejects the strategy, but legs already in flight cannot be reached
+	// through that rejection: they would keep running and billing with no consumer. Every leg runs
+	// under `runSignal`, so the breach cancels them. `sdk.signal` stays the caller's signal — the one
+	// strategies read as "the user stopped" — so this internal cancellation is never reported as one.
+	let fatalBreach: Error | undefined;
+	const fatalAbort = new AbortController();
+	const runSignal = deps.signal ? AbortSignal.any([deps.signal, fatalAbort.signal]) : fatalAbort.signal;
+	const raiseFatal = (breach: Error): Error => {
+		fatalBreach ??= breach;
+		fatalAbort.abort(breach);
+		return breach;
+	};
+	/** Name the breach on a leg it cancelled, so its row and archive do not read as a user stop. */
+	const explainCancel = (result: AgentResult): AgentResult =>
+		fatalBreach && !deps.signal?.aborted && !result.ok && result.failureKind === "abort"
+			? { ...result, error: `cancelled: ${fatalBreach.message} in a sibling leg` }
+			: result;
 	/** The MAIN model, read LIVE (`getSessionModel` wins) so a `/model` pick made while the run is
 	 *  in flight is what recovery lands on; the snapshot is used only without a live getter. */
 	const currentMain = (): string | undefined => deps.getSessionModel ? deps.getSessionModel() : deps.sessionModel;
@@ -336,10 +353,10 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				// These checks intentionally happen AFTER waiting for a slot. A queued leg must see
 				// the current child/token totals, not the stale snapshot from when it was enqueued.
 				if (childrenSpawned >= deps.limits.maxChildren) {
-					throw new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`);
+					throw raiseFatal(new Error(`run exceeded maxChildren (${deps.limits.maxChildren})`));
 				}
 				if (deps.limits.budgetTokens > 0 && tokensSpent >= deps.limits.budgetTokens) {
-					throw new Error(`run exceeded token budget (${deps.limits.budgetTokens})`);
+					throw raiseFatal(new Error(`run exceeded token budget (${deps.limits.budgetTokens})`));
 				}
 				childrenSpawned += 1;
 				started = true;
@@ -353,12 +370,10 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					currentAttempt = identity;
 					const ac = current ?? new AbortController();
 					current = ac;
-					if (deps.signal) {
-						const onRootAbort = () => ac.abort();
-						detachRoot.push(() => deps.signal?.removeEventListener("abort", onRootAbort));
-						if (deps.signal.aborted) ac.abort();
-						else deps.signal.addEventListener("abort", onRootAbort, { once: true });
-					}
+					const onRootAbort = () => ac.abort();
+					detachRoot.push(() => runSignal.removeEventListener("abort", onRootAbort));
+					if (runSignal.aborted) ac.abort();
+					else runSignal.addEventListener("abort", onRootAbort, { once: true });
 					if (!announcedStart) {
 						announcedStart = true;
 						deps.onAgentStart?.(aSpec.agent, () => current?.abort(), key, identity);
@@ -367,7 +382,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					// A slot grant is not an engine start. Root or local cancellation in a lifecycle
 					// callback must prevent the engine invocation, not merely hand it an aborted signal.
 					if (ac.signal.aborted) {
-						return abortedLeg(aSpec.agent);
+						return explainCancel(abortedLeg(aSpec.agent));
 					}
 					const onProgress = deps.onAgentProgress;
 					// The try covers the ENGINE CALL AND NOTHING ELSE. Widened over the bookkeeping below it,
@@ -390,11 +405,10 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 						// the run instead of degrading into a "failed member" the strategy fans out past.
 						// Such a failure is `infrastructure`: the HARNESS broke, which is no evidence about
 						// the model, so it never reaches the recovery below.
-						const failed = legFailure(aSpec.agent, err, ac.signal.aborted || (deps.signal?.aborted ?? false));
-						return failed;
+						return explainCancel(legFailure(aSpec.agent, err, ac.signal.aborted || runSignal.aborted));
 					}
 					tokensSpent += result.usage.input + result.usage.output;
-					return result;
+					return explainCancel(result);
 				};
 				try {
 					const first = await attempt(spec);
@@ -415,7 +429,7 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					if (!plan) return first;
 					// A stop never resurrects: neither the ROOT signal nor the per-leg stop the UI handed
 					// out. `current` is the controller this attempt ran under.
-					if (deps.signal?.aborted || current?.signal.aborted) return first;
+					if (runSignal.aborted || current?.signal.aborted) return first;
 					const skip = (why: string): AgentResult => {
 						deps.log?.(`${spec.agent} stays failed — ${why}`);
 						return first;
@@ -438,8 +452,8 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 					}
 					// The notification can cancel this logical leg too. Do not replace that intent with
 					// a fresh controller or spend another child slot after it has been stopped.
-					if (deps.signal?.aborted || current?.signal.aborted) {
-						const stopped = { ...abortedLeg(spec.agent), usage: first.usage };
+					if (runSignal.aborted || current?.signal.aborted) {
+						const stopped = explainCancel({ ...abortedLeg(spec.agent), usage: first.usage });
 						deps.onAgentStatus?.(spec.agent, "failed", stopped, key, currentAttempt);
 						return stopped;
 					}
@@ -464,13 +478,15 @@ export function makeSDK(deps: SDKDeps): StrategySDK {
 				}
 			};
 			try {
-				return finish(await agentSlots.with(run, deps.signal));
+				return finish(await agentSlots.with(run, runSignal));
 			} catch (error) {
 				// A queued leg has no engine result to report. Settle it as an abort when the
 				// run signal removed its waiter; all other errors retain their terminal semantics.
 				if (!started && deps.signal?.aborted) {
 					return finish(abortedLeg(spec.agent));
 				}
+				// Removed from the queue by a breach: it would have hit that same limit once admitted.
+				if (!started && fatalBreach) throw fatalBreach;
 				throw error;
 			} finally {
 				pendingAgents.delete(pending);

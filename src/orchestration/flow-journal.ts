@@ -7,6 +7,7 @@
  * and the filename derivation are pure (tested); the read/write helpers are thin `fs` glue.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 
 import { emptyUsage } from "../engine/stream.ts";
@@ -95,17 +96,49 @@ export function clearJournal(path: string, hash: string): void {
 			}
 		});
 		if (others.length === 0) fs.rmSync(path, { force: true });
-		else fs.writeFileSync(path, `${others.join("\n")}\n`);
+		else replaceFile(path, `${others.join("\n")}\n`);
 	} catch {
 		/* best effort — a journal that cannot be cleaned is only a stale resume candidate */
 	}
 }
 
-/** An appending writer — one JSONL line per completed phase. Best-effort. */
+/** Write a sibling temp file and rename it over `path`, so a crash mid-rewrite cannot leave
+ *  another run's progress truncated. */
+function replaceFile(path: string, content: string): void {
+	const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+	try {
+		fs.writeFileSync(tmp, content);
+		fs.renameSync(tmp, path);
+	} catch (error) {
+		fs.rmSync(tmp, { force: true });
+		throw error;
+	}
+}
+
+/** Does the file end inside a line — a fragment a crash left mid-append? */
+function endsMidLine(path: string): boolean {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(path, "r");
+		const { size } = fs.fstatSync(fd);
+		if (size === 0) return false;
+		const last = Buffer.alloc(1);
+		fs.readSync(fd, last, 0, 1, size - 1);
+		return last[0] !== 0x0a;
+	} catch {
+		return false; // absent: the append creates it
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+}
+
+/** An appending writer — one JSONL line per completed phase. Best-effort. An entry always
+ *  starts on its own line: appended to an unterminated fragment, it would fail to parse along
+ *  with it, and its completed phase would silently re-run on resume. */
 export function journalWriter(path: string): (entry: FlowJournalEntry) => void {
 	return (entry) => {
 		try {
-			fs.appendFileSync(path, `${JSON.stringify(entry)}\n`);
+			fs.appendFileSync(path, `${endsMidLine(path) ? "\n" : ""}${JSON.stringify(entry)}\n`);
 		} catch {
 			/* best effort — journaling must never break a run */
 		}

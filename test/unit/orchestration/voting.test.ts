@@ -154,3 +154,13 @@ test("hard failures (timeout/abort/provider/agent) are NEVER rescued as prose", 
 	assert.equal(r.winner, undefined);
 	assert.equal(r.invalid?.length, 2);
 });
+
+test("a vote naming an Object.prototype member tallies like any other key", () => {
+	const r = voteReduce([c("m1", "constructor"), c("m2", "constructor"), c("m3", "other")], { aggregate: "majority" });
+	assert.equal(r.status, "winner");
+	assert.equal(r.winner?.agent, "m1");
+	assert.deepEqual(r.tally, { constructor: 2, other: 1 });
+
+	const unanimous = voteReduce([c("m1", "toString"), c("m2", "toString")], { aggregate: "unanimity" });
+	assert.equal(unanimous.status, "winner");
+});

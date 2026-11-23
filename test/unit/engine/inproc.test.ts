@@ -28,9 +28,10 @@ import {
 } from "../../../src/engine/inproc.ts";
 import { mergeSessionToolAllowlist } from "../../../src/engine/session-tools.ts";
 import { SelectedSkillsError } from "../../../src/engine/skills.ts";
+import { withModelFallback } from "../../../src/engine/fallback.ts";
 import type { AgentProgress, AgentRunSpec } from "../../../src/orchestration/sdk.ts";
 import type { ThinkingLevel } from "../../../src/core/types.ts";
-import { specOf } from "../../../src/tools/delegate.ts";
+import { shouldRecordDelegationOutcome, specOf } from "../../../src/tools/delegate.ts";
 import { parseAgent } from "../../../src/agents/agent.ts";
 
 // A stub registry: one model, resolvable by provider/id or bare id.
@@ -1719,7 +1720,12 @@ test("a failed session construction does not strand the child's bus registration
 			throw new Error("resource loader exploded");
 		},
 	});
-	await assert.rejects(() => engine.run({ agent: "a", task: "t" }), /resource loader exploded/);
+	const r = await engine.run({ agent: "a", task: "t" });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "agent", "a construction failure is a classified result, never a throw");
+	assert.equal(shouldRecordDelegationOutcome(r), false, "a harness break is no strike against the delegation");
+	assert.equal(r.modelUsed, "stub/m");
+	assert.match(r.error ?? "", /\[a · stub\/m\] resource loader exploded/);
 	assert.deepEqual(bus.participants(), ["supervisor"], "no phantom peer survives the failed construction");
 });
 
@@ -1947,9 +1953,11 @@ test("failed session wiring disarms the startup and hard deadlines", async (t) =
 		startupTimeoutMs: 30, hardTimeoutMs: 40,
 		createSession: async () => session,
 	});
-	await assert.rejects(engine.run({ agent: "a", task: "t" }, undefined, undefined, () => {
+	const r = await engine.run({ agent: "a", task: "t" }, undefined, undefined, () => {
 		throw new Error("wiring failed");
-	}), /wiring failed/);
+	});
+	assert.equal(r.failureKind, "agent");
+	assert.match(r.error ?? "", /wiring failed/);
 	t.mock.timers.tick(100);
 	assert.equal(aborts, 0, "disposed sessions must not receive stale deadline callbacks");
 });
@@ -2069,7 +2077,9 @@ test("a failed session construction drops the child from the run's peer registry
 			return fakeSession([msgEnd("x")]);
 		},
 	});
-	await assert.rejects(() => engine.run({ agent: "a", task: "t", peers: true }));
+	const failed = await engine.run({ agent: "a", task: "t", peers: true });
+	assert.equal(failed.ok, false);
+	assert.match(failed.error ?? "", /boom/);
 	await engine.run({ agent: "a", task: "t", peers: true });
 	const r = await tools[0]!.execute("t", { action: "list" });
 	const listed = r.content.map((c) => c.text ?? "").join("");
@@ -2096,13 +2106,13 @@ test("a throw from the caller's onSteerable wiring releases the child handle and
 			},
 		}),
 	});
-	await assert.rejects(
-		() =>
-			engine.run({ agent: "a", task: "t" }, undefined, undefined, () => {
-				throw new Error("steer wiring boom");
-			}),
-		/steer wiring boom/,
-	);
+	const r = await engine.run({ agent: "a", task: "t" }, undefined, undefined, () => {
+		throw new Error("steer wiring boom");
+	});
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "agent", "caller wiring is never a provider fault");
+	assert.equal(shouldRecordDelegationOutcome(r), false, "a harness break is no strike against the delegation");
+	assert.match(r.error ?? "", /steer wiring boom/);
 	assert.deepEqual(bus.participants(), ["supervisor"], "the handle is released when the wiring throws");
 	assert.equal(disposed, true, "the live session is not retained after the failed wiring");
 });
@@ -2242,4 +2252,105 @@ test("inproc scoped read_result serves only its granted ref and is revoked when 
 	const after = await probeAfter!(REF_OK);
 	assert.equal(after.ok, false, "the reader is revoked once the leg settles");
 	assert.match(after.error ?? "", /revoked/);
+});
+
+test("inproc pre-start failures of a session-less leg report a quiescent writer (nothing was started)", async () => {
+	let built = false;
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".",
+		createSession: async () => { built = true; return fakeSession([msgEnd("x")]); },
+	});
+	const unknownAgent = await engine.run({ agent: "missing", task: "t" });
+	const unknownContract = await engine.run({ agent: "a", task: "t", outputContract: "nope" });
+	assert.equal(built, false);
+	for (const result of [unknownAgent, unknownContract]) {
+		assert.equal(result.ok, false);
+		assert.equal(result.sessionQuiescent, true);
+		assert.equal("sessionSaved" in result, false, "sessionSaved stays a session-only field");
+	}
+});
+
+test("a throwing progress sink cannot fail a finished in-process leg (stream ticks and delivery-bridge ticks)", async () => {
+	// Mirrors the child engine's contained emitProgress: observation is never allowed to
+	// reject the prompt or escape the delivery bridge's flush.
+	for (const sink of ["per-call", "construction"] as const) {
+		const bus = new InProcessBus();
+		bus.register("supervisor");
+		let calls = 0;
+		const throwing = (): void => { calls += 1; throw new Error("progress sink failed"); };
+		const engine = makeInProcessEngine({
+			resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", bus,
+			...(sink === "construction" ? { onProgress: throwing } : {}),
+			createSession: async () => {
+				const child = bus.participants().find((p) => p !== "supervisor");
+				bus.send("elsewhere#7", child ?? "?", "hello");
+				return fakeSession([update("work"), msgEnd("done")]);
+			},
+		});
+		const r = await engine.run({ agent: "a", task: "t", peers: true }, sink === "per-call" ? throwing : undefined);
+		assert.equal(r.ok, true, `${sink}: ${r.error ?? ""}`);
+		assert.equal(r.output, "done");
+		assert.ok(calls >= 3, `${sink}: the bridge tick and both stream ticks reached the sink`);
+		assert.deepEqual(bus.participants(), ["supervisor"]);
+	}
+});
+
+test("a provider-class session construction failure is classified and rerouted by the fallback decorator", async () => {
+	const registry = { find: (provider: string, id: string) => ({ provider, id }), getAll: () => [] } as unknown as ModelRegistry;
+	const built: string[] = [];
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: registry, cwd: ".",
+		createSession: async (opts) => {
+			const model = opts.model as { provider: string; id: string };
+			built.push(`${model.provider}/${model.id}`);
+			if (built.length === 1) throw new Error("401 unauthorized: invalid api key");
+			return fakeSession([msgEnd("rerouted")]);
+		},
+	});
+	const direct = await engine.run({ agent: "a", task: "t", model: "anthropic/m" });
+	assert.equal(direct.ok, false);
+	assert.equal(direct.failureKind, "provider");
+	assert.equal(shouldRecordDelegationOutcome(direct), true, "a provider rejection is a real outcome of the delegation");
+	assert.equal(direct.modelUsed, "anthropic/m");
+	assert.match(direct.error ?? "", /401 unauthorized/);
+	built.length = 0;
+	const wrapped = withModelFallback(engine, { models: [{ provider: "anthropic", id: "m" }, { provider: "amazon-bedrock", id: "m" }], allowCrossProviderFallback: true });
+	const r = await wrapped.run({ agent: "a", task: "t", model: "anthropic/m" });
+	assert.equal(r.ok, true, r.error);
+	assert.equal(r.output, "rerouted");
+	assert.deepEqual(built, ["anthropic/m", "amazon-bedrock/m"]);
+});
+
+test("a selected-skill failure raised during session construction is a contract result", async () => {
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".",
+		createSession: async () => { throw new SelectedSkillsError("Selected skill \"alpha\" is unavailable in this worker"); },
+	});
+	const r = await engine.run({ agent: "a", task: "t", skills: ["alpha"] });
+	assert.equal(r.ok, false);
+	assert.equal(r.failureKind, "contract");
+	assert.match(r.error ?? "", /alpha.*unavailable/);
+});
+
+test("inproc settles a tool call the worker named but never started when the run fails", async () => {
+	let terminalChat: AgentProgress["chat"];
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".",
+		createSession: async () => {
+			let listener: ((e: unknown) => void) | undefined;
+			return {
+				subscribe: (l) => { listener = l; return () => { listener = undefined; }; },
+				prompt: async () => {
+					listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "never-ran", name: "bash", arguments: { command: "ls" } }], stopReason: "toolUse" } });
+					throw new Error("worker crashed before executing the call");
+				},
+				agent: { abort() {}, async waitForIdle() {}, steer() {} },
+				dispose: () => {},
+			};
+		},
+	});
+	const r = await engine.run({ agent: "a", task: "t" }, (progress) => { terminalChat = progress.chat; });
+	assert.equal(r.ok, false);
+	const tool = terminalChat?.blocks.find((block) => block.kind === "tool");
+	assert.equal(tool?.kind === "tool" && tool.status, "failed", "the settled run's chat shows no tool running forever");
 });

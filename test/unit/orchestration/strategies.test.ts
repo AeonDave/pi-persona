@@ -904,6 +904,19 @@ test("map clamps an explicit params.maxItems to the worker slots left after the 
 	assert.equal(r.structured?.count, LIMITS.maxChildren - 1);
 });
 
+test("map normalises a junk params.maxItems like its sibling strategies instead of emptying a paid split", async () => {
+	for (const maxItems of [0, -3, Number.NaN]) {
+		const sdk = makeSDK({ engine: splitEngine(3), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+		const r = await map.run({ task: "t", roster: "m", params: { maxItems } }, sdk);
+		assert.equal(r.ok, true, `maxItems ${maxItems} falls back to the cap`);
+		assert.equal(r.structured?.count, 3, `maxItems ${maxItems} works every sub-item`);
+	}
+	const sdk = makeSDK({ engine: splitEngine(4), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
+	const r = await map.run({ task: "t", roster: "m", params: { maxItems: 2.7 } }, sdk);
+	assert.equal(r.structured?.count, 2, "a fractional cap floors");
+	assert.match(r.output, /beyond the worker cap \(2\)/, "the footer names the cap actually applied");
+});
+
 test("map says so when it drops sub-items — an aggregate over a truncated list is not a complete answer", async () => {
 	const sdk = makeSDK({ engine: splitEngine(LIMITS.maxChildren + 2), roster: { team: () => ["splitter", "worker"] }, limits: LIMITS });
 	const r = await map.run({ task: "t", roster: "m", params: { maxItems: LIMITS.maxChildren } }, sdk);

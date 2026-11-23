@@ -234,6 +234,86 @@ test("a token-budget breach still rejects the fan-out instead of degrading into 
 	);
 });
 
+/** An engine whose legs stay in flight until their signal aborts (or `release` is called),
+ *  recording each leg's signal so a test can see whether a sibling was cancelled. */
+function holdingEngine(opts: { tokens?: (agent: string) => number; immediate?: (agent: string) => AgentResult | undefined } = {}) {
+	const signals = new Map<string, AbortSignal>();
+	const releases = new Map<string, () => void>();
+	const engine: StrategyEngine = {
+		run: async (spec, _progress, signal) => {
+			const immediate = opts.immediate?.(spec.agent);
+			if (immediate) return immediate;
+			if (!signal) throw new Error("engine did not receive a per-leg signal");
+			signals.set(spec.agent, signal);
+			const aborted = await new Promise<boolean>((resolve) => {
+				if (signal.aborted) return resolve(true);
+				signal.addEventListener("abort", () => resolve(true), { once: true });
+				releases.set(spec.agent, () => resolve(false));
+			});
+			const spent = { ...usage(), input: opts.tokens?.(spec.agent) ?? 1 };
+			return aborted
+				? { agent: spec.agent, output: "", usage: spent, ok: false, error: "aborted", failureKind: "abort" }
+				: { agent: spec.agent, output: `out:${spec.agent}`, usage: spent, ok: true };
+		},
+	};
+	return { engine, signals, releases };
+}
+
+test("a run-fatal maxChildren breach cancels in-flight siblings and fails queued legs with the breach", { timeout: 1000 }, async () => {
+	const root = new AbortController();
+	const { engine, signals } = holdingEngine();
+	const settledStatus = new Map<string, AgentResult>();
+	const sdk = makeSDK({
+		engine,
+		roster: { team: () => [] },
+		limits: { ...LIMITS, maxChildren: 2, maxConcurrency: 3 },
+		signal: root.signal,
+		onAgentStatus: (agent, status, result) => {
+			if (status !== "running" && result) settledStatus.set(agent, result);
+		},
+	});
+	const outcomes = await Promise.allSettled(["a", "b", "c", "d"].map((agent) => sdk.agent({ agent, task: "t" })));
+
+	assert.equal(outcomes[2]!.status, "rejected");
+	assert.match(String((outcomes[2] as PromiseRejectedResult).reason), /maxChildren/);
+	assert.equal(outcomes[3]!.status, "rejected", "a leg still queued behind the breach must not start");
+	assert.match(String((outcomes[3] as PromiseRejectedResult).reason), /maxChildren/, "the queued leg reports the breach, not a bare abort");
+	assert.equal(signals.get("a")?.aborted, true, "in-flight sibling a must be cancelled");
+	assert.equal(signals.get("b")?.aborted, true, "in-flight sibling b must be cancelled");
+	assert.equal(signals.has("d"), false, "the queued leg never reached the engine");
+	assert.equal(root.signal.aborted, false, "the caller's signal is not aborted by an internal cancellation");
+	assert.equal(sdk.signal, root.signal, "strategies still see the caller's (user-stop) signal");
+	for (const agent of ["a", "b"]) {
+		const r = settledStatus.get(agent);
+		assert.equal(r?.failureKind, "abort", `${agent} settles as a cancellation`);
+		assert.match(r?.error ?? "", /maxChildren/, `${agent}'s row names the breach, so it does not read as a user stop`);
+	}
+});
+
+test("a run-fatal token-budget breach cancels the in-flight sibling", { timeout: 1000 }, async () => {
+	const { engine, signals, releases } = holdingEngine({ tokens: (agent) => (agent === "a" ? 200 : 1) });
+	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: { ...LIMITS, maxConcurrency: 2, budgetTokens: 150 } });
+	const run = sdk.parallel(["a", "b", "c"].map((agent) => () => sdk.agent({ agent, task: "t" })));
+	while (!releases.has("a") || !releases.has("b")) await new Promise<void>((resolve) => setImmediate(resolve));
+	releases.get("a")!();
+	await assert.rejects(run, /budget/);
+	assert.equal(signals.get("b")?.aborted, true, "the sibling still running when the budget broke must be cancelled");
+});
+
+test("a per-leg failure (a returned ok:false) does not cancel its siblings", { timeout: 1000 }, async () => {
+	const { engine, signals, releases } = holdingEngine({
+		immediate: (agent) => (agent === "bad" ? { agent, output: "", usage: usage(), ok: false, error: "gave up", failureKind: "agent" } : undefined),
+	});
+	const sdk = makeSDK({ engine, roster: { team: () => [] }, limits: LIMITS });
+	const run = sdk.parallel(["bad", "good"].map((agent) => () => sdk.agent({ agent, task: "t" })));
+	while (!releases.has("good")) await new Promise<void>((resolve) => setImmediate(resolve));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(signals.get("good")?.aborted, false, "a sibling's ordinary failure must not cancel the healthy leg");
+	releases.get("good")!();
+	const results = await run;
+	assert.deepEqual(results.map((r) => r.ok), [false, true]);
+});
+
 test("an engine rejection releases its SDK slot for the next queued leg", async () => {
 	let runs = 0;
 	const sdk = makeSDK({

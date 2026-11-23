@@ -26,6 +26,7 @@ async function fixture() {
 	let allowed = true;
 	let workerOk = true;
 	let quiescent = true;
+	let failureKind: "provider" | "timeout" = "provider";
 	let workerOutput = "All checks passed (worker claim).";
 	let afterWorker: (() => void | Promise<void>) | undefined;
 	const agents = [{ name: "a", model: "p/m", systemPrompt: "x", source: "test" }];
@@ -35,9 +36,9 @@ async function fixture() {
 		dirs.push(cwd);
 		await writeFile(join(cwd, "file.txt"), "worker edit\n");
 		await afterWorker?.();
-		return { agent: "a", ok: workerOk, output: workerOutput, usage: emptyUsage(), sessionQuiescent: quiescent, ...(spec.session ? { sessionSaved: workerOk } : {}), ...(workerOk ? {} : { failureKind: "provider" as const, modelUsed: "p/m", error: "worker failed" }) };
+		return { agent: "a", ok: workerOk, output: workerOutput, usage: emptyUsage(), sessionQuiescent: quiescent, ...(spec.session ? { sessionSaved: workerOk } : {}), ...(workerOk ? {} : { failureKind, modelUsed: "p/m", error: "worker failed" }) };
 	} }) }, makeBrokerDeps: () => undefined, userAgentDir: () => temp, childPiSettingsEnv: () => ({}), runLimits: { timeoutMs: 1000 } as never, bus: {} as never, supervisorHandle: "s", canVerify: () => allowed });
-	return { repo, temp, dirs, agents, engine: createBuildEngine(deps)(undefined, undefined, { providerFallback: false }), setAllowed: (v: boolean) => { allowed = v; }, setOutput: (value: string) => { workerOutput = value; }, setWorker: (ok: boolean, quiet = true) => { workerOk = ok; quiescent = quiet; }, afterWorker: (fn: () => void | Promise<void>) => { afterWorker = fn; }, cleanup: async () => {
+	return { repo, temp, dirs, agents, engine: createBuildEngine(deps)(undefined, undefined, { providerFallback: false }), setAllowed: (v: boolean) => { allowed = v; }, setOutput: (value: string) => { workerOutput = value; }, setWorker: (ok: boolean, quiet = true, kind: "provider" | "timeout" = "provider") => { workerOk = ok; quiescent = quiet; failureKind = kind; }, afterWorker: (fn: () => void | Promise<void>) => { afterWorker = fn; }, cleanup: async () => {
 		for (const dir of dirs) if (existsSync(dir)) await defaultGitExec(["-C", repo, "worktree", "remove", "--force", dir]);
 		await rm(temp, { recursive: true, force: true });
 	} };
@@ -133,13 +134,15 @@ test("continued worktree verification runs again in the retained checkout before
 test("a real verification deadline retains the worktree without attempting final export", { timeout: 30000 }, async () => {
 	const f = await fixture();
 	try {
-		const result = await f.engine.run({ agent: "a", task: "edit", isolation: "worktree", verification: { command: "node -e \"console.log(process.pid);setInterval(()=>{},1000)\"", timeoutMs: 500 } });
+		// The verifier records its own pid in the retained worktree (stdout of a force-killed process
+		// can be lost), and the deadline leaves node startup room on a loaded host.
+		const result = await f.engine.run({ agent: "a", task: "edit", isolation: "worktree", verification: { command: "node -e \"require('node:fs').writeFileSync('verifier.pid',String(process.pid));setInterval(()=>{},1000)\"", timeoutMs: 3000 } });
 		assert.equal(result.ok, false);
 		assert.equal(result.failureKind, "timeout");
 		assert.equal(result.verification?.status, "timeout");
 		assert.equal(result.worktreeRecovery?.path, f.dirs[0]);
 		assert.doesNotMatch(result.output, /ISOLATED WORKTREE ARTIFACT/);
-		const pid = Number(result.verification?.output.trim());
+		const pid = Number(await readFile(join(f.dirs[0]!, "verifier.pid"), "utf8"));
 		assert.ok(Number.isSafeInteger(pid) && pid > 0, "the actual test process started before the deadline");
 		let alive = true;
 		for (let attempt = 0; attempt < 50 && alive; attempt++) {
@@ -168,7 +171,9 @@ test("verification fails closed for missing isolation or shell permission, inclu
 	const f = await fixture();
 	const verification = { command: "node -e \"require('node:fs').writeFileSync('should-not-exist','x')\"" };
 	try {
-		assert.equal((await f.engine.run({ agent: "a", task: "edit", verification })).ok, false);
+		const unisolated = await f.engine.run({ agent: "a", task: "edit", verification });
+		assert.equal(unisolated.ok, false);
+		assert.match(unisolated.error ?? "", /verification requires worktree isolation/);
 		f.setAllowed(false);
 		assert.equal((await f.engine.run({ agent: "a", task: "edit", isolation: "worktree", verification })).ok, false);
 		assert.equal(f.dirs.length, 0);
@@ -192,12 +197,28 @@ test("failed and uncertain workers never start verification; uncertainty prevent
 		const failed = await f.engine.run({ agent: "a", task: "edit", isolation: "worktree", verification });
 		assert.equal(failed.verification?.status, "skipped");
 		assert.equal(failed.failureKind, "provider");
-		assert.doesNotMatch(failed.output, /\+x/);
+		assert.equal(failed.verification?.reason, "Worker did not complete successfully");
+		assert.equal(failed.worktreeRecovery, undefined, "a worker provider failure removes its worktree");
 		f.setWorker(true, false);
 		const uncertain = await f.engine.run({ agent: "a", task: "edit", isolation: "worktree", verification });
 		assert.equal(uncertain.verification?.status, "skipped");
 		assert.equal(uncertain.ok, false);
 		assert.doesNotMatch(uncertain.output, /ISOLATED WORKTREE ARTIFACT/);
 		assert.equal(existsSync(join(f.dirs[1]!, "should-not-exist")), false);
+	} finally { await f.cleanup(); }
+});
+
+test("a non-provider worker failure under requested verification retains the worktree with a truthful notice", { timeout: 30000 }, async () => {
+	const f = await fixture();
+	try {
+		f.setWorker(false, true, "timeout");
+		const result = await f.engine.run({ agent: "a", task: "edit", isolation: "worktree", verification: { command: "node -e \"require('node:fs').writeFileSync('should-not-exist','x')\"" } });
+		assert.equal(result.ok, false);
+		assert.equal(result.failureKind, "timeout");
+		assert.equal(result.verification?.status, "skipped");
+		assert.equal(result.worktreeRecovery?.path, f.dirs[0]);
+		assert.equal(result.worktreeRecovery?.reason, "Isolated worker did not complete; verification did not run; retained for recovery");
+		assert.doesNotMatch(result.output, /Worktree verification skipped; retained/);
+		assert.equal(existsSync(join(f.dirs[0]!, "should-not-exist")), false);
 	} finally { await f.cleanup(); }
 });

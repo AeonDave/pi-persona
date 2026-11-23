@@ -48,7 +48,13 @@ export function renderOutlineResult(
 	{ expanded }: ToolRenderResultOptions, theme: Theme, context: Parameters<NonNullable<ToolDefinition["renderResult"]>>[3],
 ) {
 	if ((context?.isError ?? result.isError ?? false) || !validDetails(result.details)) {
-		return renderLiteralToolResult(result, { expanded }, theme, context);
+		// renderShell "self" gives no host padding, and the literal renderer is shared with
+		// host-padded tools, so the pad is applied here rather than inside it.
+		const literal = renderLiteralToolResult(result, { expanded }, theme, context);
+		return { invalidate: () => literal.invalidate(), render(width: number) {
+			const pad = Math.min(Math.max(0, Math.floor(context?.outputPad ?? 0)), Math.max(0, Math.floor((width - 1) / 2)));
+			return literal.render(width - 2 * pad).map((line) => " ".repeat(pad) + line);
+		} };
 	}
 	const d = result.details;
 	const rows = d.symbols.map(s => `${JSON.stringify(s.name)} [${s.kind}]${s.container === undefined ? "" : ` in ${JSON.stringify(s.container)}`} L${s.startLine}-${s.endLine}`);

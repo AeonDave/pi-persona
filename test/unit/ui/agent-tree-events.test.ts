@@ -82,3 +82,13 @@ test("effort metadata rides the tree store: add carries it, a settle patch sets 
   assert.equal(changes[1]?.type, "updated", "a newly observed effort is a real change and must repaint");
   if (changes[1]?.type === "updated") assert.equal(changes[1].node.thinkingEffective, "high");
 });
+
+test("a throwing change listener neither starves later listeners nor escapes into the updater", () => {
+	const tree = new AgentTree();
+	const seen: string[] = [];
+	tree.onChange(() => { throw new Error("boom"); });
+	tree.onChange((change) => seen.push(change.type));
+	tree.add({ id: "a", label: "A" });
+	assert.doesNotThrow(() => tree.update("a", { status: "done" }));
+	assert.deepEqual(seen, ["added", "updated"]);
+});

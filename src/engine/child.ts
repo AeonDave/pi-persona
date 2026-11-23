@@ -370,6 +370,8 @@ export async function runChildAgent(
 					emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
 				}
 				openToolCalls.clear();
+				// The process is gone, so no further event can complete a call that never started.
+				state.chat.settle();
 				emitProgress(snapshot(state));
 				resolveP(code);
 			};

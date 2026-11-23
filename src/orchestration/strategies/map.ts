@@ -18,7 +18,7 @@ import { validateParallelWriteSets } from "../../core/ownership.ts";
 import type { ChildUsage } from "../../engine/stream.ts";
 import { compactInlineText } from "../../ui/presentation.ts";
 import { itemLedger, type ItemLedgerEntry, sumUsage } from "../reducers.ts";
-import { parseAuxActor } from "../params.ts";
+import { parseAuxActor, positiveInteger } from "../params.ts";
 import { rosterSpec, type RosterMember, type RosterSpec } from "../roster.ts";
 import type { Strategy, StrategySDK } from "../sdk.ts";
 import type { AgentResult, FailureKind } from "../types.ts";
@@ -307,13 +307,12 @@ export const map: Strategy = {
 		// halved instead — splitter + workers + verifiers must all fit under the same ceiling.
 		const workerSlots = Math.max(1, sdk.limits.maxChildren - 1);
 		const cap = reviewer ? Math.max(1, Math.floor((sdk.limits.maxChildren - 1) / 2)) : workerSlots;
-		const maxItems = Math.min(typeof input.params.maxItems === "number" ? input.params.maxItems : cap, cap);
+		const maxItems = Math.min(positiveInteger(input.params.maxItems, cap), cap);
 
 		// A splitter retry is optional too; reserve the entire possible worker/verifier wave before
 		// admitting it. The splitter has not produced its actual item count yet, so maxItems is the
 		// conservative upper bound; the cap above already guarantees the reserved waves fit.
-		const maxWorkerItems = Math.max(0, Math.floor(maxItems));
-		const splitReserve = maxWorkerItems * (reviewer ? 2 : 1);
+		const splitReserve = maxItems * (reviewer ? 2 : 1);
 		const split = await splitIntoItems(sdk, splitter, input.task, maxItems, splitReserve, ownership !== "off");
 		if (!split.ok) return split.result;
 		const { allItems, items, dropped, usage: splitUsage } = split;

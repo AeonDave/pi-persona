@@ -3,7 +3,8 @@ import { test } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { ActivityRows } from "../../../src/ui/activity-rows.ts";
-import { AgentTree, renderAgentTreeSummary } from "../../../src/ui/agent-tree.ts";
+import { AgentTree } from "../../../src/ui/agent-tree.ts";
+import { renderAgentTreeSummary } from "../../helpers/agent-tree-text.ts";
 import { AgentOverlay } from "../../../src/ui/agent-overlay.ts";
 import type { CompanionActivity } from "../../../src/core/companion.ts";
 

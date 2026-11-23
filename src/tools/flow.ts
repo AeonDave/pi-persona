@@ -44,6 +44,15 @@ function flowResult(name: string, outcome: FlowOutcome): AgentResult {
 	return { ...base, error: outcome.error ?? "flow failed", failureKind: outcome.cancelled ? "abort" : (outcome.failureKind ?? "agent") };
 }
 
+/** The runtime-owned cause of a failed flow, for the model: a sink that did succeed leaves a
+ *  successful-looking fenced body, so the failed phase must be said OUTSIDE it. The error is
+ *  child-derived text, so it is sanitized to one bounded line and quoted as data. */
+function flowFailureLine(outcome: FlowOutcome): string {
+	const phase = outcome.failedPhase ? ` at phase ${JSON.stringify(compactInlineText(outcome.failedPhase, { maxChars: 64 }))}` : "";
+	const kind = ` (${outcome.cancelled ? "abort" : (outcome.failureKind ?? "agent")})`;
+	return `Flow failed${phase}${kind}: ${JSON.stringify(compactInlineText(outcome.error ?? "flow failed", { maxChars: 200 }))}`;
+}
+
 export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 	// ── flow tool (run a *.flow.json DAG over strategies; the supervisor self-launches) ──
 	const FlowToolParams = Type.Object({
@@ -128,7 +137,7 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 				// An unapproved checkpoint is the operator's choice: the flow stopped, it did not fail.
 				const failed = flowDisposition(outcome) === "failed";
 				return {
-					content: [{ type: "text", text: `${fenceUntrusted(outcome.output || "(flow produced no output)")}${run?.resultReceipt ? `\n\n${resultReceiptHint(run.resultReceipt)}` : ""}` }],
+					content: [{ type: "text", text: `${fenceUntrusted(outcome.output || "(flow produced no output)")}${failed ? `\n\n${flowFailureLine(outcome)}` : ""}${run?.resultReceipt ? `\n\n${resultReceiptHint(run.resultReceipt)}` : ""}` }],
 					details: failed ? failureDetails(details) : details,
 					isError: failed,
 					...toolUsageField(usage),

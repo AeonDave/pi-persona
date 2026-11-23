@@ -306,6 +306,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 								if (verification && !workerAllowed()) return { cleanup: "remove" as const, value: beforeStart(isolatedWorktreeFailure(spec, "verification requires bash in the worker's effective host defaults")) };
 								const target = verification ? await captureVerificationTarget(dir) : undefined;
 								let result = await childEngineAt(dir).run({ ...spec, isolation: "none" }, perProgress, perSignal, perSteer);
+								const workerOk = result.ok;
 								// Only worker prose may supply a fallback patch; verification output is never an artifact.
 								const hasOutputArtifact = hasUnifiedDiff(result.output);
 								let verificationCanExport = true;
@@ -339,8 +340,13 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 									return { cleanup: "retain" as const, value: { ...result, output, worktreeRecovery, ok: false, failureKind: "contract" as const, error: `${notice} The isolated leg returned success without an exportable diff/artifact.` } };
 								}
 								if (!result.ok) {
-									if (resumed || (verification && result.verification?.status !== "skipped") || (verification && result.failureKind !== "provider")) {
-										const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, result.verification ? `Worktree verification ${result.verification.status}; retained for recovery` : "Isolated worker did not complete; retained for recovery");
+									// Verification runs only after a successful worker, so a ran-and-failed check is never a
+									// provider failure: every requested-verification failure except a worker's provider error retains.
+									if (resumed || (verification && result.failureKind !== "provider")) {
+										const reason = result.verification && workerOk
+											? `Worktree verification ${result.verification.status}; retained for recovery`
+											: `Isolated worker did not complete${result.verification ? "; verification did not run" : ""}; retained for recovery`;
+										const worktreeRecovery = await describeWorktreeRecovery(dir, baseCommit, reason);
 										const notice = formatWorktreeRecovery(worktreeRecovery);
 										const reported = artifact.diff.trim() ? appendWorktreeArtifact(result, artifact.diff) : result;
 										return { cleanup: "retain" as const, value: { ...reported, ...(reported.ok ? { ok: false, failureKind: "agent" as const, error: notice } : {}), sessionSaved: false, worktreeRecovery, output: `${notice}\n\n${reported.output}`.trimEnd() } };

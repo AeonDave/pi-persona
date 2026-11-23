@@ -444,6 +444,23 @@ test("message_update deltas (pi ≥0.83, no cumulative message) assemble the liv
 	assert.match(snapshot(s).output, /decisively/);
 });
 
+test("the operator chat projects child-engine JSON-wire deltas (message_update carries no message)", () => {
+	// Exact shape of Pi's json mode (`toJsonEvent` in pi-coding-agent dist/modes/json-event.js): the
+	// cumulative `message` is replaced by `usage`, so WorkerChat's delta branch is the only live path.
+	const s = createStreamState();
+	const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } };
+	applyEvent(s, { type: "message_start", message: { role: "assistant", content: [] } });
+	applyEvent(s, { type: "message_update", usage, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "check the callers" } });
+	applyEvent(s, { type: "message_update", usage, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Reading " } });
+	applyEvent(s, { type: "message_update", usage, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "now" } });
+	const live = snapshot(s).chat?.blocks ?? [];
+	assert.deepEqual(live.map((block) => [block.kind, "text" in block ? block.text : ""]), [["thinking", "check the callers"], ["assistant", "Reading now"]]);
+	applyEvent(s, { type: "message_update", usage, assistantMessageEvent: { type: "text_end", contentIndex: 1, content: "Reading now." } });
+	const ended = snapshot(s).chat?.blocks ?? [];
+	assert.equal(ended.length, 2, "an _end replaces its slot rather than appending");
+	assert.equal(ended[1]?.kind !== "tool" && ended[1]?.text, "Reading now.");
+});
+
 test("delta assembly keeps thinking and answer text in contentIndex order, and ignores toolcall args", () => {
 	const s = createStreamState();
 	applyEvent(s, { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "weighing the options" } });

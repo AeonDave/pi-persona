@@ -6,7 +6,8 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 import { formatUsage } from "../../../src/ui/usage.ts";
 
-import { AgentTree, type AgentNode, type AgentNodeStatus, backgroundCounts, deriveWaitingNodeIds, formatBackgroundStatus, PERSONA_BACKGROUND_STATUS_KEY, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, renderAgentTree, renderAgentTreeSummary, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, type AgentNode, type AgentNodeStatus, backgroundCounts, deriveWaitingNodeIds, formatBackgroundStatus, PERSONA_BACKGROUND_STATUS_KEY, effortTag, flattenTree, isQueuedMarker, isWakeSource, nodeGlyph, progressPatch, runningAnnotation, thinkingDetailLine } from "../../../src/ui/agent-tree.ts";
+import { renderAgentTree, renderAgentTreeSummary } from "../../helpers/agent-tree-text.ts";
 
 test("overflow worker counts exclude delegate and structural containers and separate waiting workers", () => {
 	const tree = new AgentTree();

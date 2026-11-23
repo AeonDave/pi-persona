@@ -286,12 +286,7 @@ function joinParts(parts: readonly RowSpan[]): RowSpan[] {
 	return parts.flatMap((part, index) => index === 0 ? [part] : [{ text: " · ", token: "dim" as const, ...(part.keep ? { keep: true } : {}) }, part]);
 }
 
-/** Render the tree as plain lines with ├─/└─ branches and status glyphs. Pure. */
-export function renderAgentTree(nodes: AgentNode[], opts: RenderOptions = {}): string[] {
-	return renderAgentTreeRows(nodes, opts).map(rowText);
-}
-
-/** {@link renderAgentTree} as styled spans: connectors dim, names text, effort and detail muted,
+/** Render the tree as styled spans with ├─/└─ branches: connectors dim, names text, effort and detail muted,
  *  glyphs and attention flags in their state tokens. `rowText` of each row is the plain line. Pure. */
 export function renderAgentTreeRows(nodes: AgentNode[], opts: RenderOptions = {}): StyledRow[] {
 	const lines: StyledRow[] = [];
@@ -604,10 +599,6 @@ function countOverflow(result: AgentSummaryRow[], treeRows: number): AgentSummar
 	return result.map((item) => item.kind === "overflow" ? overflowRow(hidden) : item);
 }
 
-export function renderAgentTreeSummary(nodes: AgentNode[], maxRows = 8, opts: RenderOptions = {}): string[] {
-	return projectAgentTreeSummary(nodes, maxRows, opts).map((row) => row.text);
-}
-
 export interface AddNodeInput {
 	id: string;
 	label: string;
@@ -780,7 +771,17 @@ export class AgentTree {
 	}
 
 	private emit(change: AgentTreeChange): void {
-		for (const fn of this.listeners) fn(change);
+		// Same policy as AsyncRunTracker: iterate a snapshot, and one listener's throw must neither
+		// skip the later ones nor propagate into the engine/strategy callback that updated the tree.
+		for (const fn of [...this.listeners]) {
+			try {
+				fn(change);
+			} catch (e) {
+				if (process.env.PI_PERSONA_DEBUG) {
+					process.stderr.write(`[pi-persona] agent tree listener threw on ${change.type}: ${e instanceof Error ? e.message : String(e)}\n`);
+				}
+			}
+		}
 	}
 }
 

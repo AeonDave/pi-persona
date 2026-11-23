@@ -59,8 +59,11 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 		else valid.push({ result: candidate, key });
 	}
 
-	const tally: Record<string, number> = {};
-	for (const v of valid) tally[v.key] = (tally[v.key] ?? 0) + 1;
+	// Count in a Map: vote keys are model-controlled, and a plain object would resolve
+	// `constructor`/`__proto__` to Object.prototype members instead of a count.
+	const counts = new Map<string, number>();
+	for (const v of valid) counts.set(v.key, (counts.get(v.key) ?? 0) + 1);
+	const tally: Record<string, number> = Object.fromEntries(counts);
 
 	if (valid.length === 0) {
 		// Nobody emitted a parseable vote. With keepBestFallback, don't strand the caller with an
@@ -105,15 +108,15 @@ export function voteReduce(candidates: AgentResult[], opts: VoteOpts): ReducerRe
 	};
 
 	if (opts.aggregate === "unanimity") {
-		if (Object.keys(tally).length === 1) {
+		if (counts.size === 1) {
 			return { status: "winner", winner: valid[0]!.result, dissent: [], invalid, tally, usedFallback: false };
 		}
 		return withFallback("no_consensus");
 	}
 
 	// majority
-	const max = Math.max(...Object.values(tally));
-	const top = Object.keys(tally).filter((k) => tally[k] === max);
+	const max = Math.max(...counts.values());
+	const top = [...counts.keys()].filter((k) => counts.get(k) === max);
 	if (top.length === 1) {
 		// Best-of-X: a clear plurality still needs `threshold` votes to win outright.
 		if (opts.threshold !== undefined && max < opts.threshold) return withFallback("no_consensus");

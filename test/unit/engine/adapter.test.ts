@@ -866,3 +866,16 @@ test("selected skill child failure is contract and keeps its diagnostic", async 
 	assert.equal(result.failureKind, "contract");
 	assert.match(result.error ?? "", /Selected skill alpha missing/);
 });
+
+test("child adapter pre-start failures of a session-less leg report a quiescent writer (nothing was started)", async () => {
+	let invoked = false;
+	const engine = makeEngine({ resolveAgent, contracts, childOptions: { resolveInvocation: (args) => { invoked = true; return resolveFake(args); } } });
+	const unknownAgent = await engine.run({ agent: "missing", task: "t" });
+	const unknownContract = await engine.run({ agent: "a", task: "t", outputContract: "nope" });
+	assert.equal(invoked, false);
+	for (const result of [unknownAgent, unknownContract]) {
+		assert.equal(result.ok, false);
+		assert.equal(result.sessionQuiescent, true, "worktree verification must not read a never-started leg as still writing");
+		assert.equal("sessionSaved" in result, false, "sessionSaved stays a session-only field");
+	}
+});

@@ -45,3 +45,17 @@ test("malformed history and native errors fall back to literal content", () => {
 	component.updateResult({ content: [{ type: "text", text: "parser failed" }], details, isError: true });
 	assert.match(plain(component.render(80)), /failed[\s\S]*parser failed/);
 });
+
+test("a failed outline body honours the output pad like the call row and the success card", () => {
+	const tool = makeCodeOutlineTool();
+	const component = new ToolExecutionComponent("code_outline", "pad", { path: "a.ts" }, { outputPad: 2 }, tool, { requestRender() {} } as unknown as TUI, process.cwd());
+	component.updateResult({ content: [{ type: "text", text: "parser failed" }], details, isError: true });
+	for (const expanded of [false, true]) {
+		component.setExpanded(expanded);
+		const rows = plain(component.render(80)).split("\n");
+		const body = rows.filter((row) => /parser failed|^\s*failed\s*$/.test(row));
+		assert.equal(body.length, 2, `heading and body rows (expanded=${expanded})`);
+		for (const row of body) assert.match(row, /^ {2}\S/, `padded by outputPad (expanded=${expanded})`);
+		for (const width of [1, 2, 5, 20]) assert.ok(component.render(width).every((line) => visibleWidth(line) <= width));
+	}
+});

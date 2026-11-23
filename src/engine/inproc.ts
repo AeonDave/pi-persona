@@ -34,7 +34,7 @@ import { installFrozenMemoryOwner } from "../extension/memory-owner.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import { type AgentRunSpec, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
+import { type AgentRunSpec, type InfrastructureFailure, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { makeReadResultTool } from "../tools/read-result.ts";
 import { makeCodeOutlineTool } from "../tools/code-outline.ts";
@@ -367,7 +367,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 	return {
 		async run(spec: AgentRunSpec, onProgress?, callSignal?, onSteerable?): Promise<AgentResult> {
-			const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
+			const beforeStart = (result: AgentResult): AgentResult => ({ ...result, sessionQuiescent: true, ...(spec.session ? { sessionSaved: false } : {}) });
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return beforeStart(unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []));
 			let thinkingRequested: ThinkingLevel | undefined;
@@ -449,6 +449,29 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (spec.tools !== undefined) overrides.push("tools");
 			const dyn = overrides.length > 0 ? ` +dyn(${overrides.join(",")})` : "";
 			const tag = `[${spec.agent} · ${ref ?? "(no model)"}${dyn}]`;
+			// A failure thrown before the prompt runs (session construction, or the caller's wiring)
+			// settles as a classified result like every later failure, so provider fallback, the async
+			// tracker and the delegation ledger all see it. Construction follows the post-run ladder's
+			// tail below; caller wiring is never a provider fault. What is neither a provider nor a
+			// contract failure is the harness breaking (a loader error, a full disk, the caller's own
+			// wiring): it stays marked `infrastructure`, as when it was a rejection, so it is no strike
+			// against the delegation and never triggers model recovery.
+			const failedBeforePrompt = (error: unknown, wiring: boolean): AgentResult => {
+				const message = error instanceof Error ? error.message : String(error);
+				const hostModuleHint = piHostModuleHint(message);
+				const contract = error instanceof SelectedSkillsError || error instanceof SessionContractError;
+				const harness = !contract && (wiring || hostModuleHint !== undefined || !looksLikeProviderError(message));
+				const failure: AgentResult = {
+					agent: spec.agent, output: "", usage: emptyUsage(), ok: false,
+					error: `${tag} ${message}${hostModuleHint ? ` — ${hostModuleHint}` : ""}`,
+					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
+					failureKind: contract ? "contract" : harness ? "agent" : "provider",
+					...thinkingMetadata,
+				};
+				if (!harness) return failure;
+				const marked: InfrastructureFailure = { ...failure, infrastructure: true };
+				return marked;
+			};
 
 			const state = createStreamState();
 			const signal = combineSignals(deps.signal, callSignal);
@@ -740,7 +763,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				disarmHard();
 				disarmStartup();
 				releaseHandle();
-				if (initializationOutcome && "error" in initializationOutcome && !cancellationRequested) throw initializationOutcome.error;
+				// The factory settled (rejected), so nothing is left writing: same shape as a pre-start failure.
+				if (initializationOutcome && "error" in initializationOutcome && !cancellationRequested) return beforeStart(failedBeforePrompt(initializationOutcome.error, false));
 				const initError = hardTimedOut
 					? `${tag} agent exceeded the ${hardMs}ms hard cap during session initialization`
 					: timedOut
@@ -774,10 +798,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// only the ids. Mirrors the child engine's `openToolCalls`.
 			const openToolCalls = new Map<string, string>();
 			// One progress tick, routed exactly as the subscription routes them: the per-call sink
-			// takes the AgentProgress shape (no `turns`), else the construction-time sink.
+			// takes the AgentProgress shape (no `turns`), else the construction-time sink. A throwing
+			// sink is contained (child engine parity): observation must never reject the prompt, escape
+			// the delivery bridge into a sender's call stack, or skip the run's cleanup.
 			const emitProgress = (snap: ProgressSnapshot): void => {
-				if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}), ...(snap.chat ? { chat: snap.chat } : {}) });
-				else if (deps.onProgress) deps.onProgress(snap);
+				try {
+					if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.activity ? { activity: snap.activity } : {}), ...(snap.toolEvent ? { toolEvent: snap.toolEvent } : {}), ...(snap.chat ? { chat: snap.chat } : {}) });
+					else if (deps.onProgress) deps.onProgress(snap);
+				} catch { /* the tick is lost; the run still progresses and settles */ }
 			};
 			let contractDef: ContractDef | undefined = requestedDef;
 			let task: string;
@@ -839,14 +867,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 								continue;
 							}
 							// Transparency tick: surface the delivery on the run's progress line (agent tree).
-							// Mirrors the main subscription's fallback (line ~332): per-call onProgress wins
-							// (AgentProgress — no `turns`), else the construction-time deps.onProgress
-							// (ProgressSnapshot — built from snapshot(state), `turns` included) — the async
-							// launch path (extension.ts) only has the latter.
-							const snap = snapshot(state);
-							const activity = `✉ from ${env.from}`;
-							if (onProgress) onProgress({ output: snap.output, tokens: snap.tokens, ...(snap.usage ? { usage: snap.usage } : {}), ...(snap.chat ? { chat: snap.chat } : {}), activity });
-							else if (deps.onProgress) deps.onProgress({ ...snap, activity });
+							emitProgress({ ...snapshot(state), activity: `✉ from ${env.from}` });
 						}
 					};
 					unsubBridge = b.onMessage((env) => {
@@ -872,7 +893,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				releaseHandle();
 				steerable = false;
 				session.dispose();
-				throw e;
+				// Disposed without the shutdown handshake: a saved transcript is not proven quiescent.
+				return { ...failedBeforePrompt(e, true), ...(spec.session ? { sessionSaved: false, sessionQuiescent: false } : {}) };
 			}
 
 			// Capture a thrown error (e.g. provider API 400 before any stream event fires,
@@ -934,18 +956,17 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			//    (_handleAgentEvent awaits the extension runner before it fans out), so a green run's last
 			//    end can land after waitForIdle() resolved — closing it `failed` would report a tool that
 			//    actually completed as failed. Leaving it open is the older, honest gap.
-			//  * it runs AFTER the teardown and each tick is guarded, because emitProgress calls consumer
-			//    code: inside the finally an onProgress throw skipped the handle release, the unsubscribes
-			//    and dispose(). Dropping the tick mirrors deliver()'s contract for a throwing steer().
+			//  * it runs AFTER the teardown: emitProgress contains a throwing sink, but the close ticks
+			//    still belong after the handle release, the unsubscribes and dispose().
 			if (!ok) {
 				for (const [callId, name] of openToolCalls) {
-					try {
-						state.chat.observe({ type: "tool_execution_end", toolCallId: callId, toolName: name, isError: true });
-						emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
-					} catch {
-						/* the consumer's sink threw; the tick is lost, the run still settles */
-					}
+					state.chat.observe({ type: "tool_execution_end", toolCallId: callId, toolName: name, isError: true });
+					emitProgress(snapshot(state, { phase: "end", callId, name, failed: true }));
 				}
+				// Calls the assistant named but never started are not in openToolCalls.
+				const chat = state.chat.snapshot();
+				state.chat.settle();
+				if (state.chat.snapshot() !== chat) emitProgress(snapshot(state));
 			}
 
 			const result: AgentResult = { agent: spec.agent, output: state.output, usage: state.usage, ok, ...(resolvedRef ? { modelUsed: resolvedRef } : {}), ...thinkingMetadata };

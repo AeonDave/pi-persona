@@ -135,7 +135,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			/** Called once with a steer handle when the broker is on (in-process parity). */
 			onSteerable?: (steer: SteerFn) => void,
 		): Promise<AgentResult> {
-			const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
+			const beforeStart = (result: AgentResult): AgentResult => ({ ...result, sessionQuiescent: true, ...(spec.session ? { sessionSaved: false } : {}) });
 			const cfg = deps.resolveAgent(spec.agent);
 			if (!cfg) return beforeStart(unknownAgentFailure(spec.agent, deps.listAgents?.() ?? []));
 			if (spec.session) {

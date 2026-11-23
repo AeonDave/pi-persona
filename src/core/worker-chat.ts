@@ -8,7 +8,6 @@ export type WorkerChatBlock =
 	| Readonly<{ kind: "status"; id: string; text: string; level: "info" | "error" }>;
 
 export interface WorkerChatSnapshot {
-	readonly revision: number;
 	readonly blocks: readonly WorkerChatBlock[];
 	readonly truncated: boolean;
 }
@@ -31,7 +30,7 @@ function same(a: WorkerChatBlock, b: WorkerChatBlock): boolean {
 }
 
 export class WorkerChat {
-	private view: WorkerChatSnapshot = Object.freeze({ revision: 0, blocks: Object.freeze([]), truncated: false });
+	private view: WorkerChatSnapshot = Object.freeze({ blocks: Object.freeze([]), truncated: false });
 	private sequence = 0;
 	private active: { role: "user" | "assistant"; id: string } | undefined;
 	private pendingTruncation = false;
@@ -77,6 +76,15 @@ export class WorkerChat {
 		const text = ending ? delta.content : delta.delta;
 		if (typeof text !== "string") return;
 		this.put({ kind, id, text: this.bounded(ending ? text : `${previous && "text" in previous ? previous.text : ""}${text}`) });
+	}
+
+	/** Close every tool block still running once the attempt has ended. An assistant message can
+	 *  name a call that never reached tool_execution_start, so the engines' own synthetic close
+	 *  (which covers only started calls) cannot reach it. */
+	settle(): void {
+		for (const block of this.view.blocks) {
+			if (block.kind === "tool" && block.status === "running") this.put({ ...block, status: "failed" });
+		}
 	}
 
 	private bounded(text: string, limit: number = WORKER_CHAT_LIMITS.textChars): string {
@@ -143,6 +151,6 @@ export class WorkerChat {
 			truncated = true;
 		}
 		this.pendingTruncation = false;
-		this.view = Object.freeze({ revision: this.view.revision + 1, blocks: Object.freeze(blocks), truncated });
+		this.view = Object.freeze({ blocks: Object.freeze(blocks), truncated });
 	}
 }

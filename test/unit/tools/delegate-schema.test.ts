@@ -62,9 +62,18 @@ test("verification survives native and encoded single/batch calls and is copied 
 
 test("malformed verification cannot be silently ignored before worker admission", () => {
 	const tool = registeredDelegate();
-	for (const verification of [{ command: "" }, { command: "npm test", cwd: "elsewhere" }, { command: "npm test", timeoutMs: 0 }, { command: "npm test", timeoutMs: 1.5 }]) {
-		for (const raw of [{ agent: "operator", task: "Fix", verification }, { tasks: [{ agent: "operator", task: "Fix", verification }] }]) {
-			assert.throws(() => validated(tool, raw));
+	for (const [verification, cause] of [
+		[{ command: "" }, /command must be non-empty/],
+		[{ command: "npm test", cwd: "elsewhere" }, /accepts only command and timeoutMs/],
+		[{ command: "npm test", timeoutMs: 0 }, /timeoutMs must be an integer/],
+		[{ command: "npm test", timeoutMs: 1.5 }, /timeoutMs must be an integer/],
+	] as const) {
+		for (const [raw, field] of [
+			[{ agent: "operator", task: "Fix", verification }, "verification"],
+			[{ tasks: [{ agent: "operator", task: "Fix", verification }] }, "tasks\\[0\\]\\.verification"],
+		] as const) {
+			// A clean, field-naming rejection — not any crash that happens to throw.
+			assert.throws(() => validated(tool, raw), { name: "Error", message: new RegExp(`^delegate: ${field}: verification ${cause.source}`) });
 			assert.equal(coerceDelegateParams(raw).ok, false);
 		}
 	}
@@ -95,10 +104,19 @@ test("preparation preserves the host's native optional-null and primitive coerci
 test("JSON-encoded malformed or non-object requests never become valid defaults", () => {
 	const tool = registeredDelegate();
 	assert.ok(tool.prepareArguments);
-	for (const raw of [null, [], "{}", { tasks: "[{" }, { tasks: ["not JSON"] }, { tasks: "[null]" },
-		{ agent: "scout", task: "Inspect", brief: "{" }, { tasks: JSON.stringify([{ agent: "scout", task: "Inspect", mcp: "false" }]) },
-		{ agent: "scout", task: "Inspect", brief: JSON.stringify({ ...brief, objective: 42 }) }]) {
-		assert.throws(() => validated(tool, raw));
+	for (const [raw, cause] of [
+		[null, /^delegate: arguments must be an object\./],
+		[[], /^delegate: arguments must be an object\./],
+		["{}", /^delegate: arguments must be an object\./],
+		[{ tasks: "[{" }, /^delegate: tasks looks like JSON but did not parse/],
+		[{ tasks: ["not JSON"] }, /^delegate: tasks\[0\] must be an object\./],
+		[{ tasks: "[null]" }, /^delegate: tasks\[0\] must be an object\./],
+		[{ agent: "scout", task: "Inspect", brief: "{" }, /^delegate: brief looks like JSON but did not parse/],
+		[{ tasks: JSON.stringify([{ agent: "scout", task: "Inspect", mcp: "false" }]) }, /^delegate: tasks\[0\]\.mcp must be a boolean\./],
+		[{ agent: "scout", task: "Inspect", brief: JSON.stringify({ ...brief, objective: 42 }) }, /^delegate: brief\.objective must be a string\./],
+	] as const) {
+		// A clean, field-naming rejection — not any crash that happens to throw.
+		assert.throws(() => validated(tool, raw), { name: "Error", message: cause }, JSON.stringify(raw));
 	}
 });
 

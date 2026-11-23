@@ -9,12 +9,12 @@ import { after, test } from "node:test";
 const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { tempDir } from "../../setup/temp-dir.ts";
 import { flowHash, flowRunHash, parseFlow, topoOrder, verifyFlowRefs } from "../../../src/orchestration/flow.ts";
-import { clearJournal, journalFileName, parseJournal } from "../../../src/orchestration/flow-journal.ts";
+import { clearJournal, journalFileName, journalWriter, parseJournal } from "../../../src/orchestration/flow-journal.ts";
 import { flowDisposition, runFlow } from "../../../src/orchestration/flow-run.ts";
 import type { AgentResult } from "../../../src/orchestration/types.ts";
 
@@ -701,6 +701,31 @@ ${line("A", "a2")}
 	clearJournal(path, "B");
 	assert.equal(existsSync(path), false, "nothing left, nothing kept");
 	clearJournal(path, "B"); // a missing file is not an error
+});
+
+test("journalWriter starts each entry on its own line after a crash left a fragment", () => {
+	const path = join(tempDir("flow-journal-fragment-"), "j.jsonl");
+	const line = (phase: string) => JSON.stringify({ phase, hash: "H", ok: true, output: phase });
+	// A crash mid-append left an unterminated fragment after the last complete entry.
+	writeFileSync(path, `${line("a")}\n{"phase":"b","hash":"H","ok":tr`);
+	journalWriter(path)({ phase: "c", hash: "H", ok: true, output: "c" });
+	assert.deepEqual(Object.keys(parseJournal(readFileSync(path, "utf8"), "H")), ["a", "c"], "the fragment must not swallow the next entry");
+	journalWriter(path)({ phase: "d", hash: "H", ok: true, output: "d" });
+	assert.equal(readFileSync(path, "utf8").split("\n").filter((l) => !l.trim()).length, 1, "a terminated file gets no blank separator lines");
+});
+
+test("clearJournal replaces the file instead of rewriting it in place", () => {
+	const dir = tempDir("flow-journal-atomic-");
+	const path = join(dir, "j.jsonl");
+	const line = (hash: string, phase: string) => JSON.stringify({ phase, hash, ok: true, output: phase });
+	const original = `${line("A", "a1")}\n${line("B", "b1")}\n`;
+	writeFileSync(path, original);
+	// A hard link observes the old file: an in-place rewrite truncates it too, a rename leaves it whole.
+	linkSync(path, join(dir, "witness"));
+	clearJournal(path, "A");
+	assert.equal(readFileSync(join(dir, "witness"), "utf8"), original, "the rewrite must go through a temp file + rename");
+	assert.deepEqual(Object.keys(parseJournal(readFileSync(path, "utf8"), "B")), ["b1"]);
+	assert.deepEqual(readdirSync(dir).sort(), ["j.jsonl", "witness"], "no temp file is left behind");
 });
 
 test("parseJournal folds JSONL into a resume map, honouring hash and re-running failures", () => {

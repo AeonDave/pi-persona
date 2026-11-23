@@ -11,7 +11,7 @@ import { WorkerChatView } from "../../../src/ui/worker-chat.ts";
 
 const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 const keys = new KeybindingsManager(TUI_KEYBINDINGS);
-const snapshot = (count: number, revision = count): WorkerChatSnapshot => ({ revision, truncated: false,
+const snapshot = (count: number): WorkerChatSnapshot => ({ truncated: false,
 	blocks: Array.from({ length: count }, (_, i) => ({ kind: "assistant", id: `m${i}`, text: `message ${i}` })) });
 
 test("chat viewport anchors the same block while earlier rows grow and new blocks arrive", () => {
@@ -50,7 +50,7 @@ test("worker chat follows live output until scrolling, supports page/home/end an
 
 test("chat searches collapsed arguments and errors, expands the match, and keeps controls as input", () => {
 	const view = new WorkerChatView(theme, keys);
-	view.update({ revision: 1, truncated: true, blocks: [
+	view.update({ truncated: true, blocks: [
 		{ kind: "user", id: "u", text: "review the file" },
 		{ kind: "tool", id: "t", name: "external_tool", arguments: '{"path":"needle.ts"}', output: "permission denied\nsecond line\nthird line\nfourth line", status: "failed" },
 	] });
@@ -78,7 +78,7 @@ test("chat wheel and click use local coordinates; unchanged blocks reuse rendere
 	const rendered = view.renderedBlockCount;
 	view.render(50, 7);
 	assert.equal(view.renderedBlockCount, rendered, "height-only resize and idle frames never rewrap blocks");
-	view.update({ ...initial, revision: 21, blocks: [...initial.blocks, { kind: "assistant", id: "new", text: "new final" }] });
+	view.update({ ...initial, blocks: [...initial.blocks, { kind: "assistant", id: "new", text: "new final" }] });
 	view.render(50, 7);
 	assert.equal(view.renderedBlockCount, rendered + 1);
 	assert.equal(view.handleMouse({ type: "wheel", wheelDelta: -6, y: 2, x: 2 } as TuiMouseEvent), true);
@@ -87,7 +87,7 @@ test("chat wheel and click use local coordinates; unchanged blocks reuse rendere
 
 test("chat never emits worker terminal control sequences or synthesizes a current-file diff", () => {
 	const view = new WorkerChatView(theme, keys);
-	view.update({ revision: 1, truncated: false, blocks: [
+	view.update({ truncated: false, blocks: [
 		{ kind: "tool", id: "t", name: "edit\x1b]0;hidden\x07", arguments: '{"path":"missing.ts"}', output: "- recorded old\n+ recorded new\x1b[2J", status: "done" },
 	] });
 	view.render(80, 12);
@@ -98,14 +98,14 @@ test("chat never emits worker terminal control sequences or synthesizes a curren
 	assert.doesNotMatch(text, /\x1b|hidden/);
 });
 
-test("search reveals a match deep inside a collapsed tool and refreshes across equal-revision snapshots", () => {
+test("search reveals a match deep inside a collapsed tool and refreshes when a block changes in place", () => {
 	const view = new WorkerChatView(theme, keys);
 	const tool = { kind: "tool" as const, id: "t", name: "read", arguments: "{}", output: `${"ordinary line\n".repeat(300)}deep needle here`, status: "done" as const };
-	view.update({ revision: 1, truncated: false, blocks: [tool] });
+	view.update({ truncated: false, blocks: [tool] });
 	view.render(60, 10);
 	view.handleInput("/"); view.handleInput("needle"); view.handleInput("\r");
 	assert.match(view.render(60, 10).join("\n"), /deep needle here/);
-	view.update({ revision: 1, truncated: false, blocks: [{ ...tool, output: "no matching text" }] });
+	view.update({ truncated: false, blocks: [{ ...tool, output: "no matching text" }] });
 	assert.match(view.render(60, 10).join("\n"), /0\/0/);
 });
 
@@ -122,7 +122,7 @@ test("search keeps its native focused input visible even in a one-row chat", () 
 
 test("search jumps to a phrase crossing wrapped rows rather than the beginning of its tool", () => {
 	const view = new WorkerChatView(theme, keys);
-	view.update({ revision: 1, truncated: false, blocks: [{ kind: "tool", id: "t", name: "read", arguments: "{}",
+	view.update({ truncated: false, blocks: [{ kind: "tool", id: "t", name: "read", arguments: "{}",
 		output: `${"ordinary\n".repeat(40)}needle phrase appears here`, status: "done" }] });
 	view.render(10, 8);
 	view.handleInput("/"); view.handleInput("needle phrase"); view.handleInput("\r");
@@ -142,7 +142,7 @@ test("opening, painting, searching and expanding recorded tool data performs no 
 	syncBuiltinESMExports();
 	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
 	const view = new WorkerChatView(theme, keys);
-	view.update({ revision: 1, truncated: false, blocks: [
+	view.update({ truncated: false, blocks: [
 		{ kind: "tool", id: "edit", name: "edit", arguments: '{"path":"not-on-disk.ts"}', output: "- recorded old\n+ recorded new", status: "done" },
 		{ kind: "tool", id: "external", name: "unknown_extension", arguments: "{}", output: "plain external result", status: "failed" },
 	] });
@@ -155,7 +155,7 @@ test("collapsed long tool and thinking lines keep their headers visible without 
 	for (const kind of ["tool", "thinking"] as const) {
 		const view = new WorkerChatView(theme, keys);
 		const output = `  recorded ${"界".repeat(8000)}\nTAIL`;
-		view.update({ revision: 1, truncated: false, blocks: [kind === "tool"
+		view.update({ truncated: false, blocks: [kind === "tool"
 			? { kind, id: "long", name: "bash", arguments: "{}", output, status: "failed" }
 			: { kind, id: "long", text: output }] });
 		for (const width of [80, 40, 20, 4, 1]) {

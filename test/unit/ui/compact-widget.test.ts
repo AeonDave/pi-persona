@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 
 import { compactWidget } from "../../../src/ui/compact-widget.ts";
-import { type AgentNode, renderAgentTreeSummary } from "../../../src/ui/agent-tree.ts";
+import { type AgentNode } from "../../../src/ui/agent-tree.ts";
+import { renderAgentTreeSummary } from "../../helpers/agent-tree-text.ts";
 import { boundDisplayRows } from "../../../src/ui/presentation.ts";
 
 function assertPhysicalBudget(rows: readonly string[], width: number, budget: number): void {

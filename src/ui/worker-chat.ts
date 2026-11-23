@@ -27,7 +27,7 @@ function matchingRow(lines: readonly string[], query: string): number {
 }
 
 export class WorkerChatView {
-	private snapshot: WorkerChatSnapshot = { revision: 0, blocks: [], truncated: false };
+	private snapshot: WorkerChatSnapshot = { blocks: [], truncated: false };
 	private readonly viewport = new ChatViewport();
 	private readonly cache = new Map<string, CachedBlock>();
 	private readonly expanded = new Set<string>();

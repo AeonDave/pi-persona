@@ -53,7 +53,7 @@ const languages = new Map<string, Promise<InstanceType<typeof TreeSitterLanguage
 
 async function loadRuntime(): Promise<TreeSitterApi> {
 	if (!runtimePromise) {
-		runtimePromise = (async () => {
+		const pending = (async () => {
 			const namespace = await import("@vscode/tree-sitter-wasm");
 			// The package is CommonJS: its public entry exposes the Web Tree-sitter API on
 			// the default object, while its declaration file describes named members.
@@ -63,6 +63,9 @@ async function loadRuntime(): Promise<TreeSitterApi> {
 			await runtime.Parser.init({ locateFile: (file) => join(wasmDirectory, file) });
 			return runtime;
 		})();
+		runtimePromise = pending;
+		// A transient failure (EMFILE, a locked .wasm) must not disable the tool until restart.
+		pending.catch(() => { if (runtimePromise === pending) runtimePromise = undefined; });
 	}
 	return runtimePromise;
 }
@@ -76,6 +79,8 @@ async function loadLanguage(grammar: string): Promise<InstanceType<typeof TreeSi
 			return await runtime.Language.load(join(dirname(packageEntry), `tree-sitter-${grammar}.wasm`));
 		})();
 		languages.set(grammar, language);
+		const pending = language;
+		pending.catch(() => { if (languages.get(grammar) === pending) languages.delete(grammar); });
 	}
 	return language;
 }

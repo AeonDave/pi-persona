@@ -4,7 +4,8 @@ import { createEventBus, SessionManager, type ExtensionContext } from "@earendil
 import piPersona from "../../../src/extension.ts";
 import { ACTIVITY_EVENT, COMPANION_EVENT, parseCompanionActivity, type CompanionPresence } from "../../../src/core/companion.ts";
 import { installActivityIngress } from "../../../src/extension/companion.ts";
-import { AgentTree, inFlightAgentCount, isNonAgentNode, renderAgentTreeSummary, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { AgentTree, inFlightAgentCount, isNonAgentNode, runningAnnotation } from "../../../src/ui/agent-tree.ts";
+import { renderAgentTreeSummary } from "../../helpers/agent-tree-text.ts";
 
 const activity = { version: 1, producerId: "pi-persona-mind", activityId: "operation-1", sessionId: "session-one", phase: "inspect", state: "running", target: "project" };
 

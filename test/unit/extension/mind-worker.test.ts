@@ -4,7 +4,8 @@ import { createEventBus, type ExtensionContext } from "@earendil-works/pi-coding
 import { installMindWorker, MIND_WORKER_EVENT, type MindWorkerResponse } from "../../../src/extension/mind-worker.ts";
 import { installMemoryOwner } from "../../../src/extension/memory-owner.ts";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
-import { AgentTree, renderAgentTree } from "../../../src/ui/agent-tree.ts";
+import { AgentTree } from "../../../src/ui/agent-tree.ts";
+import { renderAgentTree } from "../../helpers/agent-tree-text.ts";
 import { Semaphore } from "../../../src/orchestration/parallel.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 import type { AgentRunSpec, SteerFn } from "../../../src/orchestration/sdk.ts";

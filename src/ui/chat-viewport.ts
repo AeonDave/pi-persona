@@ -56,8 +56,12 @@ export class ChatViewport {
 	}
 
 	scrollBy(delta: number): void {
-		this.top = Math.max(0, Math.min(this.maxTop(), this.top + Math.trunc(delta)));
-		this.follow = this.top === this.maxTop() && delta > 0;
+		const step = Math.trunc(delta);
+		if (step === 0) return;
+		this.top = Math.max(0, Math.min(this.maxTop(), this.top + step));
+		// Following changes only when the view can actually leave (or return to) the tail.
+		if (step > 0) this.follow = this.top === this.maxTop();
+		else if (this.maxTop() > 0) this.follow = false;
 		this.captureAnchor();
 	}
 	start(): void { this.top = 0; this.follow = false; this.captureAnchor(); }
