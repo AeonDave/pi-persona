@@ -574,7 +574,7 @@ test("child adapter steer metadata mirrors broker pending-ask state for its regi
 	let registeredHandle = "";
 	const broker = {
 		endpoint: "fake-endpoint",
-		register: ({ handle }: { handle: string }) => { registeredHandle = handle; },
+		register: ({ handle }: { handle: string }) => { registeredHandle = handle; return "a".repeat(64); },
 		unregister: (handle: string) => { if (handle === registeredHandle) registeredHandle = ""; },
 		steerFrame: () => true,
 		prepareResultReader: async () => { throw new Error("no reader grant"); },
@@ -602,7 +602,7 @@ test("child adapter steer metadata mirrors broker pending-ask state for its regi
 });
 
 test("child adapter re-arms the idle watchdog while the broker reports a pending ask from this leg", { timeout: 3000 }, async () => {
-	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => true , prepareResultReader: async () => { throw new Error("no reader grant"); } };
+	const broker = { endpoint: "fake-endpoint", register: () => "a".repeat(64), unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => true , prepareResultReader: async () => { throw new Error("no reader grant"); } };
 	const ac = new AbortController();
 	setTimeout(() => ac.abort(), 400);
 	const engine = makeEngine({
@@ -618,7 +618,7 @@ test("child adapter re-arms the idle watchdog while the broker reports a pending
 });
 
 test("child adapter idle-kills once the broker reports no pending ask from this leg", { timeout: 3000 }, async () => {
-	const broker = { endpoint: "fake-endpoint", register: () => {}, unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => false , prepareResultReader: async () => { throw new Error("no reader grant"); } };
+	const broker = { endpoint: "fake-endpoint", register: () => "a".repeat(64), unregister: () => {}, steerFrame: () => true, hasPendingAskFrom: () => false , prepareResultReader: async () => { throw new Error("no reader grant"); } };
 	const engine = makeEngine({
 		resolveAgent,
 		contracts,
@@ -647,9 +647,10 @@ function referenceArchiveFixture() {
 	return archive;
 }
 
+const BUS_TOKEN = "c".repeat(64);
 const fullBroker = (log: string[], token = "a".repeat(64), revoked: { count: number } = { count: 0 }) => ({
 	endpoint: "pipe",
-	register: (info: { handle: string }) => { log.push(`register:${info.handle}`); },
+	register: (info: { handle: string }) => { log.push(`register:${info.handle}`); return BUS_TOKEN; },
 	unregister: (handle: string) => { log.push(`unregister:${handle}`); },
 	steerFrame: () => true,
 	hasPendingAskFrom: () => false,
@@ -660,7 +661,7 @@ const fullBroker = (log: string[], token = "a".repeat(64), revoked: { count: num
 });
 
 const envDump = (marker: string) => {
-	const script = `const NL=String.fromCharCode(10);const t=process.env.PI_PERSONA_RESULT_READER_TOKEN??'unset';process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'${marker} token='+t+' busTools='+(process.env.PI_PERSONA_BUS_TOOLS??'unset')}],stopReason:'stop'}})+NL);`;
+	const script = `const NL=String.fromCharCode(10);const t=process.env.PI_PERSONA_RESULT_READER_TOKEN??'unset';process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'${marker} token='+t+' busTools='+(process.env.PI_PERSONA_BUS_TOOLS??'unset')+' bus='+(process.env.PI_PERSONA_BUS??'unset')+' busToken='+(process.env.PI_PERSONA_BUS_TOKEN??'unset')}],stopReason:'stop'}})+NL);`;
 	return (args: string[]) => ({ command: process.execPath, args: ["-e", script, "--", ...args] });
 };
 
@@ -674,6 +675,24 @@ test("child broker admits granted communication tools into a nonempty plain allo
 		assert.match(result.output, /busTools=on/);
 		assert.equal(seen[seen.indexOf("--tools") + 1], peers ? "read,contact_supervisor,contact_peer" : "read,contact_supervisor");
 	}
+});
+
+test("a brokered child receives the supervisor-minted bus token beside its endpoint", async () => {
+	const engine = makeEngine({ resolveAgent, broker: fullBroker([]),
+		childOptions: { resolveInvocation: envDump("bus") } });
+	const result = await engine.run({ agent: "a", task: "t" });
+	assert.equal(result.ok, true);
+	assert.match(result.output, new RegExp(`bus=pipe busToken=${BUS_TOKEN}`));
+});
+
+test("without a broker the spawn gains no bus key, and a stale inherited bus token is scrubbed", async () => {
+	process.env.PI_PERSONA_BUS_TOKEN = "f".repeat(64);
+	try {
+		const engine = makeEngine({ resolveAgent, childOptions: { resolveInvocation: envDump("off") } });
+		const result = await engine.run({ agent: "a", task: "t" });
+		assert.equal(result.ok, true);
+		assert.match(result.output, /busTools=unset bus=unset busToken=unset/);
+	} finally { delete process.env.PI_PERSONA_BUS_TOKEN; }
 });
 
 test("child adapter retains the pinned provider only for an exact same-id observation", async () => {
@@ -780,8 +799,9 @@ test("child adapter releases prepared readers and registrations when pre-spawn w
 		const broker = fullBroker(log, "d".repeat(64), revoked);
 		const register = broker.register;
 		broker.register = (info) => {
-			register(info);
+			const busToken = register(info);
 			if (stage === "registration") throw new Error("registration failed after acquiring handle");
+			return busToken;
 		};
 		let invoked = false;
 		const engine = makeEngine({ resolveAgent, broker, resultArchive: referenceArchiveFixture,

@@ -5,14 +5,17 @@
  * an in-process one to the rest of pi-persona (intercom, idle notifier, f9, peek, …) —
  * the "same surface" promise `bus/inproc.ts`'s header makes, kept literally.
  *
- * Inbound (client → bus): `register` proxies `bus.register(handle)` (a client claiming
+ * Inbound (client → bus): `register` proxies `bus.register(handle)` only for a handle the
+ * supervisor `expect()`ed, against the one-shot token minted for that spawn (a client claiming
  * the reserved `supervisorHandle` is rejected — the in-process supervisor never dials in,
- * so a remote impersonating it would hijack the supervisor's own inbox); `send` becomes
- * `bus.send`, or — when `expectsReply` — `bus.ask` run ON BEHALF of the remote sender (the
+ * so a remote impersonating it would hijack the supervisor's own inbox). The child's label, run
+ * group and peer opt-in come from that `expect()` record, never the wire. `send` reaches the
+ * supervisor, or a same-run peer with one-way `progress` when this child opted into peers; it
+ * becomes `bus.send`, or — when `expectsReply` — `bus.ask` run ON BEHALF of the remote sender (the
  * bus mints its own ask id; the host correlates it back to the client's `msgId` via the
  * settled promise, so an eventual `bus.reply`/local answer produces a `replied` frame);
  * `cancel` aborts only the ask owned by that same socket; `list` answers a `peers` frame scoped to
- * the caller's own registered group (B7); `bye`/socket close proxies `bus.unregister`.
+ * the caller's own run (B7); `bye`/socket close proxies `bus.unregister`.
  * There is deliberately no client `reply` frame: asks flow child → supervisor only and the
  * supervisor answers locally, so a wire answer could only forge a reply to a sibling's ask.
  *
@@ -27,13 +30,13 @@
  * idempotent teardown.
  */
 
-import { existsSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import nodeNet from "node:net";
 import type net from "node:net";
 
-import { createFrameReader, encodeFrame } from "./framing.ts";
-import { type Frame, isFrame } from "./messages.ts";
+import { createFrameReader, encodeFrame, MAX_CLIENT_FRAME_BYTES } from "./framing.ts";
+import { type Frame, isFrame, isToken } from "./messages.ts";
 import type { InProcessBus } from "../inproc.ts";
 import { isReadReplyFor, readFailure, RESULT_READ_MAX_FRAME_BYTES, RESULT_READ_MAX_PENDING,
 	RESULT_READ_MAX_REQUESTS, RESULT_READ_TIMEOUT_MS, type PreparedResultReader, type ReadReply,
@@ -54,11 +57,22 @@ export interface BrokerHost {
 	 *  spawn-before-connect buffers the steer and still returns true, up to
 	 *  `MAX_PENDING_STEERS` (then false); the buffer flushes when the child registers. */
 	steer(handle: string, text: string): boolean;
-	/** Mark `handle` as a child that is about to connect (adapter pre-register). A steer
-	 *  to an expected-but-not-yet-connected handle is buffered rather than reported as lost. */
-	expect(handle: string): void;
+	/** Mark `handle` as a child that is about to connect (adapter pre-register): only an
+	 *  expected handle presenting `info.token` may register, once. A steer to an
+	 *  expected-but-not-yet-connected handle is buffered rather than reported as lost. */
+	expect(handle: string, info: ExpectedChild): void;
 	/** Drop expectation + any buffered steers (adapter unregister / spawn failure). */
 	forget(handle: string): void;
+}
+
+/** What the supervisor records for a child it is about to spawn: the 64-hex one-shot
+ *  registration token, and the identity the host vouches for (display label, run group,
+ *  peer opt-in). */
+export interface ExpectedChild {
+	token: string;
+	label?: string;
+	group?: string;
+	peers?: boolean;
 }
 
 type PeerEntry = { handle: string; label: string };
@@ -70,9 +84,11 @@ export interface StartBrokerHostDeps {
 	endpoint: string;
 	/** Injected transport (tests use a paired in-memory fake); defaults to real `node:net`. */
 	net?: typeof import("node:net");
-	/** Answers a `list` frame; default reads the host's own `peers:true` registrations. */
-	listPeersFor?: (group: string, self: string) => PeerEntry[];
 }
+
+/** The one reason every failed registration gets, so a probe learns nothing about which
+ *  handles exist or are connected. */
+const AUTH_FAILED = "authentication failed";
 
 const STALE_PROBE_TIMEOUT_MS = 1000;
 /** Per-handle cap on steers buffered while a spawned child has not registered yet. */
@@ -161,13 +177,19 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 	const bus = deps.bus;
 
 	const connections = new Map<string, { write: (frame: Frame) => void }>();
-	const peerRegistry = new Map<string, { handle: string; label: string; group: string }>();
 	const sockets = new Set<net.Socket>();
-	const expected = new Set<string>();
+	/** `token` is cleared once consumed by a successful registration. */
+	type Expected = { token: Buffer | undefined; label: string; group: string; peers: boolean };
+	const expected = new Map<string, Expected>();
 	const pendingSteer = new Map<string, string[]>();
 	type Grant = { token: Buffer; reader: ScopedReader; active: boolean; bound: boolean; stop?: () => void; revoke: () => void };
 	const grants = new Map<string, Grant>();
 	let closed = false;
+
+	function dropExpected(handle: string): void {
+		expected.get(handle)?.token?.fill(0);
+		expected.delete(handle);
+	}
 
 	function revokeReader(reader: ScopedReader): void {
 		try { reader.revoke(); } catch { /* cleanup cannot leak callback errors or strand siblings */ }
@@ -186,7 +208,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			signal?.removeEventListener("abort", grant.revoke);
 			if (grants.get(handle) === grant) {
 				grants.delete(handle);
-				expected.delete(handle);
+				dropExpected(handle);
 				pendingSteer.delete(handle);
 			}
 			token.fill(0);
@@ -194,7 +216,8 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			revokeReader(reader);
 		} };
 		grants.set(handle, grant);
-		expected.add(handle);
+		// Reserves the handle; the adapter's expect() then supplies its bus token and identity.
+		expected.set(handle, { token: undefined, label: handle, group: "", peers: false });
 		signal?.addEventListener("abort", grant.revoke, { once: true });
 		return { token: token.toString("hex"), revoke: grant.revoke, wasBound: () => grant.bound };
 	}
@@ -211,16 +234,18 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		if (!connections.delete(handle)) return;
 		// Handles are minted per spawn and a client never reconnects, so a departed child is
 		// gone for good: a later steer must report undelivered instead of buffering forever.
-		expected.delete(handle);
+		dropExpected(handle);
 		pendingSteer.delete(handle);
-		peerRegistry.delete(handle);
 		bus.unregister(handle);
 	}
 
-	function defaultPeersFor(group: string, self: string): PeerEntry[] {
-		return [...peerRegistry.values()]
-			.filter((p) => p.group === group && p.handle !== self)
-			.map((p) => ({ handle: p.handle, label: p.label }));
+	/** `self`'s own run's opted-in peers — empty unless `self` opted in too. */
+	function peersOf(self: string): PeerEntry[] {
+		const me = expected.get(self);
+		if (!me?.peers) return [];
+		return [...expected.entries()]
+			.filter(([handle, e]) => e.peers && e.group === me.group && handle !== self)
+			.map(([handle, e]) => ({ handle, label: e.label }));
 	}
 
 	/** Forward every queued envelope addressed to `handle` as a `deliver` frame — both
@@ -229,7 +254,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		const conn = connections.get(handle);
 		if (!conn) return;
 		for (const env of bus.takeWhere(handle, () => true)) {
-			const fromLabel = peerRegistry.get(env.from)?.label;
+			const fromLabel = expected.get(env.from)?.label;
 			conn.write({
 				t: "deliver",
 				from: env.from,
@@ -249,7 +274,6 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 	function handleConnection(socket: net.Socket): void {
 		sockets.add(socket);
 		let handle: string | undefined;
-		let group: string | undefined;
 		const pendingAsks = new Map<string, AbortController>();
 		let ended = false;
 		let boundGrant: Grant | undefined;
@@ -334,43 +358,43 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					return;
 				}
 				case "register": {
-					const reject = (reason: string): void => {
-						write({ t: "error", reason });
-						if (frame.readerToken !== undefined || grants.has(frame.handle)) socket.destroy();
-					};
-					if (frame.handle === deps.supervisorHandle) {
-						reject("reserved handle");
-						return;
-					}
-					// Registration is one-shot per socket and exclusive per handle: a
-					// second claim would overwrite the live entry, and this socket's close
-					// would then unregister a handle it no longer owns (or leak the one it
-					// silently abandoned).
+					// Registration is one-shot per socket: a second claim would overwrite the
+					// live entry, and this socket's close would then unregister a handle it no
+					// longer owns (or leak the one it silently abandoned).
 					if (handle) {
-						reject("already registered");
+						write({ t: "error", reason: "already registered" });
 						return;
 					}
-					if (connections.has(frame.handle)) {
-						reject("handle already connected");
+					const fail = (): void => {
+						write({ t: "error", reason: AUTH_FAILED });
+						socket.destroy();
+					};
+					// Exclusive per handle, and only with the token minted for this spawn. Both tokens are
+					// 32 bytes (isFrame here, isToken in expect()), so timingSafeEqual never sees a
+					// length mismatch.
+					const entry = expected.get(frame.handle);
+					if (frame.handle === deps.supervisorHandle || connections.has(frame.handle) || !entry?.token
+						|| !timingSafeEqual(entry.token, Buffer.from(frame.token, "hex"))) {
+						fail();
 						return;
 					}
 					const grant = grants.get(frame.handle);
-					// A supplied unknown/expired token never falls through to ordinary registration.
+					// A supplied unknown/expired reader token never falls through to ordinary registration.
 					if (grant || frame.readerToken !== undefined) {
 						if (!grant?.active || grant.bound || !frame.readerToken
 							|| !timingSafeEqual(grant.token, Buffer.from(frame.readerToken, "hex"))) {
-							reject("result reader authentication failed");
+							fail();
 							return;
 						}
 						grant.bound = true;
 						boundGrant = grant;
 						grant.stop = () => { if (!ended) { cleanup(); socket.destroy(); } };
 					}
+					entry.token.fill(0);
+					entry.token = undefined;
 					handle = frame.handle;
-					group = frame.group;
 					bus.register(handle);
 					connections.set(handle, conn);
-					if (frame.peers) peerRegistry.set(handle, { handle, label: frame.label ?? handle, group: frame.group ?? "" });
 					write({ t: "registered", handle, ...(frame.readerToken ? { readerToken: frame.readerToken } : {}) });
 					drain(handle);
 					flushPendingSteer(handle);
@@ -382,6 +406,16 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 						return;
 					}
 					const from = handle;
+					// The child-side tools enforce the same scope; the host is where it binds.
+					const inScope = frame.to === deps.supervisorHandle || (!frame.expectsReply && frame.kind === "progress"
+						&& peersOf(from).some((p) => p.handle === frame.to));
+					if (!inScope) {
+						// Worded exactly like an absent recipient: no signal about what exists outside scope.
+						write(frame.expectsReply
+							? { t: "error", reason: `unknown peer: ${frame.to}`, msgId: frame.msgId }
+							: { t: "sent", msgId: frame.msgId, delivered: false });
+						return;
+					}
 					if (frame.expectsReply) {
 						const ac = new AbortController();
 						pendingAsks.set(frame.msgId, ac);
@@ -420,10 +454,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					return;
 				}
 				case "list": {
-					const self = handle ?? "";
-					const g = group ?? "";
-					const peers = deps.listPeersFor ? deps.listPeersFor(g, self) : defaultPeersFor(g, self);
-					write({ t: "peers", reqId: frame.reqId, peers });
+					write({ t: "peers", reqId: frame.reqId, peers: handle ? peersOf(handle) : [] });
 					return;
 				}
 				case "bye": {
@@ -438,8 +469,12 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 
 		const handleFrame = (raw: unknown): void => {
 			if (!isFrame(raw)) {
-				write({ t: "error", reason: "invalid frame" });
-				if (boundGrant || (typeof raw === "object" && raw !== null
+				// A registered client's malformed send/cancel is answered with its msgId so the request
+				// settles at once instead of waiting out its timeout.
+				const msgId = handle && typeof raw === "object" && raw !== null && "msgId" in raw && typeof raw.msgId === "string"
+					&& "t" in raw && (raw.t === "send" || raw.t === "cancel") ? raw.msgId : undefined;
+				write({ t: "error", reason: "invalid frame", ...(msgId !== undefined ? { msgId } : {}) });
+				if (!handle || boundGrant || (typeof raw === "object" && raw !== null
 					&& ("readerToken" in raw || ("t" in raw && String(raw.t).startsWith("result_read"))))) socket.destroy();
 				return;
 			}
@@ -458,7 +493,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			// JSON parser diagnostics can contain the private registration token.
 			write({ t: "error", reason: "invalid frame" });
 			socket.destroy();
-		}));
+		}, MAX_CLIENT_FRAME_BYTES));
 		socket.on("error", () => socket.destroy());
 		socket.once("close", () => {
 			sockets.delete(socket);
@@ -467,6 +502,17 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 	}
 
 	const server = await bindServer(netImpl, deps.endpoint, handleConnection);
+	if (process.platform !== "win32") {
+		try {
+			chmodSync(deps.endpoint, 0o600);
+		} catch (e) {
+			// A fake transport has no socket file; a real one that cannot be tightened must not serve.
+			if (existsSync(deps.endpoint)) {
+				server.close();
+				throw e;
+			}
+		}
+	}
 
 	return {
 		endpoint: deps.endpoint,
@@ -485,12 +531,15 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			pendingSteer.set(handle, queued);
 			return true;
 		},
-		expect(handle: string): void {
-			expected.add(handle);
+		expect(handle: string, info: ExpectedChild): void {
+			if (!isToken(info.token)) throw new Error("broker host: expect() needs a 64-hex-character token");
+			expected.get(handle)?.token?.fill(0);
+			expected.set(handle, { token: Buffer.from(info.token, "hex"), label: info.label ?? handle,
+				group: info.group ?? "", peers: info.peers === true });
 		},
 		forget(handle: string): void {
 			grants.get(handle)?.revoke();
-			expected.delete(handle);
+			dropExpected(handle);
 			pendingSteer.delete(handle);
 		},
 		async close(): Promise<void> {
@@ -498,7 +547,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			closed = true;
 			for (const grant of grants.values()) grant.revoke();
 			unsubBus();
-			expected.clear();
+			for (const h of [...expected.keys()]) dropExpected(h);
 			pendingSteer.clear();
 			for (const h of [...connections.keys()]) unregisterConnection(h);
 			for (const s of [...sockets]) {

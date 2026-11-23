@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { isFrame } from "../../../../src/bus/broker/messages.ts";
+import { MAX_MESSAGE_CHARS } from "../../../../src/bus/inproc.ts";
 
 const reqId = "12345678-1234-1234-1234-123456789abc";
 const ref = `result:${reqId}`;
+const token = "c".repeat(64);
 
 test("reader frames are closed, UUID-correlated and strictly range checked", () => {
 	assert.equal(isFrame({ t: "result_read", reqId, ref }), true);
@@ -19,18 +21,24 @@ test("reader frames are closed, UUID-correlated and strictly range checked", () 
 });
 
 test("reader registration validates the private token and forbids client grants", () => {
-	for (const t of ["register", "registered"]) {
-		assert.equal(isFrame({ t, handle: "child", readerToken: "a".repeat(64) }), true);
+	for (const base of [{ t: "register", handle: "child", token }, { t: "registered", handle: "child" }]) {
+		assert.equal(isFrame({ ...base, readerToken: "a".repeat(64) }), true);
 		for (const readerToken of ["", "a".repeat(63), "G".repeat(64), 1]) {
-			assert.equal(isFrame({ t, handle: "child", readerToken }), false);
+			assert.equal(isFrame({ ...base, readerToken }), false);
 		}
-		assert.equal(isFrame({ t, handle: "child", readerToken: "a".repeat(64), grants: [ref] }), false);
+		assert.equal(isFrame({ ...base, readerToken: "a".repeat(64), grants: [ref] }), false);
 	}
 });
 
-test("isFrame accepts register", () => {
-	assert.equal(isFrame({ t: "register", handle: "a1" }), true);
-	assert.equal(isFrame({ t: "register", handle: "a1", label: "coder", group: "g1", peers: true }), true);
+test("register requires a 64-hex bus token and carries no client-asserted identity", () => {
+	assert.equal(isFrame({ t: "register", handle: "a1", token }), true);
+	assert.equal(isFrame({ t: "register", handle: "a1" }), false);
+	for (const bad of ["", "c".repeat(63), "c".repeat(65), "G".repeat(64), 1]) {
+		assert.equal(isFrame({ t: "register", handle: "a1", token: bad }), false, String(bad));
+	}
+	for (const extra of [{ label: "coder" }, { group: "g1" }, { peers: true }]) {
+		assert.equal(isFrame({ t: "register", handle: "a1", token, ...extra }), false, JSON.stringify(extra));
+	}
 });
 
 test("isFrame accepts registered", () => {
@@ -38,7 +46,22 @@ test("isFrame accepts registered", () => {
 });
 
 test("isFrame accepts send", () => {
-	assert.equal(isFrame({ t: "send", to: "a1", kind: "progress", text: "hi", msgId: "m1", expectsReply: false }), true);
+	assert.equal(isFrame({ t: "send", to: "a1", kind: "progress", text: "hi", msgId: reqId, expectsReply: false }), true);
+});
+
+test("send is bounded: UUID id, 1..256-char recipient, the shared message-size limit", () => {
+	const send = { t: "send", to: "a1", kind: "progress", text: "x".repeat(MAX_MESSAGE_CHARS), msgId: reqId, expectsReply: false };
+	assert.equal(MAX_MESSAGE_CHARS, 8_000);
+	assert.equal(isFrame(send), true, "exactly the limit is accepted");
+	for (const patch of [{ text: "x".repeat(MAX_MESSAGE_CHARS + 1) }, { msgId: "m1" }, { to: "" }, { to: "a".repeat(257) }]) {
+		assert.equal(isFrame({ ...send, ...patch }), false, JSON.stringify(patch).slice(0, 40));
+	}
+	assert.equal(isFrame({ ...send, to: "a".repeat(256) }), true);
+});
+
+test("client cancel and list ids are UUIDs", () => {
+	assert.equal(isFrame({ t: "cancel", msgId: "m1" }), false);
+	assert.equal(isFrame({ t: "list", reqId: "r1" }), false);
 });
 
 test("sent receipts match send message ids and carry only a boolean admission result", () => {
@@ -67,7 +90,7 @@ test("isFrame accepts steer", () => {
 });
 
 test("isFrame accepts list", () => {
-	assert.equal(isFrame({ t: "list", reqId: "r1" }), true);
+	assert.equal(isFrame({ t: "list", reqId }), true);
 });
 
 test("isFrame accepts peers", () => {
@@ -85,7 +108,7 @@ test("isFrame accepts error", () => {
 });
 
 test("isFrame accepts a per-connection ask cancellation", () => {
-	assert.equal(isFrame({ t: "cancel", msgId: "m1" }), true);
+	assert.equal(isFrame({ t: "cancel", msgId: reqId }), true);
 });
 
 test("isFrame rejects an unknown t", () => {

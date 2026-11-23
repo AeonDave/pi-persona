@@ -171,6 +171,7 @@ function makeSpyBroker(endpoint = "fake-broker-endpoint") {
 		register: (info: { handle: string; label?: string; group?: string; peers?: boolean }) => {
 			calls.push("register");
 			registered.push(info);
+			return "a".repeat(64);
 		},
 		unregister: (handle: string) => {
 			calls.push("unregister");
@@ -190,6 +191,7 @@ test("makeEngine (broker absent): child env carries NO PI_PERSONA_BUS/PI_PERSONA
 	const r = await engine().run({ agent: "scout", task: "check [env]" });
 	assert.equal(r.ok, true);
 	assert.match(r.output, /PI_PERSONA_BUS=unset/);
+	assert.match(r.output, /PI_PERSONA_BUS_TOKEN=unset/);
 	assert.match(r.output, /PI_PERSONA_HANDLE=unset/);
 	assert.match(r.output, /PI_PERSONA_PEERS=unset/);
 });

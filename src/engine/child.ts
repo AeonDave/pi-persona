@@ -218,12 +218,13 @@ export async function runChildAgent(
 			const inv = resolveInvocation(args);
 			// A stale broker wiring in the SUPERVISOR's own environment must not leak into a
 			// plain child: PI_PERSONA_BUS would boot the child's bridge against a dead (or
-			// foreign) endpoint, and a stale reader token would arm a read_result tool nobody
-			// granted. The adapter re-adds these deliberately via opts.env when a broker (and a
-			// result-reader grant) is actually live for THIS run.
+			// foreign) endpoint, a stale reader token would arm a read_result tool nobody granted,
+			// and a stale bus token was minted for another spawn. The adapter re-adds these deliberately via opts.env when a broker
+			// (and a result-reader grant) is actually live for THIS run.
 			const inherited = { ...process.env };
 			delete inherited.PI_PERSONA_BUS;
 			delete inherited.PI_PERSONA_HANDLE;
+			delete inherited.PI_PERSONA_BUS_TOKEN;
 			delete inherited.PI_PERSONA_PEERS;
 			delete inherited.PI_PERSONA_ALLOW_BLOCKING;
 			delete inherited.PI_PERSONA_BUS_TOOLS;

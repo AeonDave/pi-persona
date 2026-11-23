@@ -1,20 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { MAX_PENDING_STEERS, type BrokerHost } from "../../../src/bus/broker/host.ts";
+import { MAX_PENDING_STEERS, type BrokerHost, type ExpectedChild } from "../../../src/bus/broker/host.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { SupervisorBroker } from "../../../src/extension/broker-host.ts";
 import { readFailure, type ScopedReader } from "../../../src/bus/result-reader.ts";
 
 function fakeHost(endpoint: string) {
-	const expected: string[] = [];
+	const expected: Array<[string, ExpectedChild]> = [];
 	const steers: Array<[string, string]> = [];
 	const host: BrokerHost = {
 		endpoint,
 		close: async () => {},
 		connectedHandles: () => [],
 		steer: (h, t) => { steers.push([h, t]); return true; },
-		expect: (h) => { expected.push(h); },
+		expect: (h, info) => { expected.push([h, info]); },
 		forget: () => {},
 		prepareResultReader: async (_handle, reader) => ({ token: "a".repeat(64), revoke: () => reader.revoke(), wasBound: () => false }),
 	};
@@ -136,8 +139,8 @@ test("a successful start after a failure clears the error and hands the endpoint
 	assert.equal(broker.error, undefined);
 	const deps = broker.adapterDeps("/x");
 	assert.ok(deps);
-	deps.register({ handle: "child#1" });
-	assert.deepEqual(expected, ["child#1"]);
+	const token = deps.register({ handle: "child#1" });
+	assert.deepEqual(expected, [["child#1", { token }]]);
 	assert.match(broker.doctorLine(), /endpoint \/x/);
 });
 
@@ -184,7 +187,7 @@ test("a start that fails after steers were buffered says how many were dropped",
 	assert.match(warnings[0] ?? "", /2 queued steers? were dropped/);
 });
 
-test("close tears the host down and forgets the peers", async () => {
+test("close tears the host down and forgets what it expected", async () => {
 	let closed = 0;
 	const { host } = fakeHost("/x");
 	host.close = async () => { closed++; };
@@ -192,9 +195,61 @@ test("close tears the host down and forgets the peers", async () => {
 	const deps = broker.adapterDeps("/x");
 	deps?.register({ handle: "child#1", peers: true, label: "coder", group: "g" });
 	await settle();
-	assert.equal(broker.peers.size, 1);
 	await broker.close();
 	assert.equal(closed, 1);
-	assert.equal(broker.peers.size, 0);
 	assert.equal(broker.host, undefined);
+	const next = fakeHost("/x");
+	const reopened = make(async () => next.host);
+	reopened.broker.adapterDeps("/x");
+	await settle();
+	assert.deepEqual(next.expected, []);
+});
+
+test("register mints a distinct one-shot bus token per child and returns it", async () => {
+	const { broker } = make(async () => fakeHost("/x").host);
+	const deps = broker.adapterDeps("/x")!;
+	const a = deps.register({ handle: "a#1" });
+	const b = deps.register({ handle: "b#2" });
+	assert.match(a, /^[0-9a-f]{64}$/);
+	assert.match(b, /^[0-9a-f]{64}$/);
+	assert.notEqual(a, b);
+	await broker.close();
+});
+
+test("a registration made before the host is up is replayed with its token and roster record; a forgotten one is not", async () => {
+	let release!: (h: BrokerHost) => void;
+	const { host, expected } = fakeHost("/x");
+	const { broker } = make(() => new Promise<BrokerHost>((r) => { release = r; }));
+	const deps = broker.adapterDeps("/x")!;
+	const token = deps.register({ handle: "coder#1", label: "Coder", group: "run", peers: true });
+	deps.register({ handle: "gone#2" });
+	deps.unregister("gone#2");
+	release(host);
+	await settle();
+	assert.deepEqual(expected, [["coder#1", { token, label: "Coder", group: "run", peers: true }]]);
+	await broker.close();
+});
+
+test("an unsafe socket directory is a normal start failure: warned once, children spawn bus-less", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-broker-test-"));
+	try {
+		const blocker = join(dir, "not-a-dir");
+		writeFileSync(blocker, "");
+		let starts = 0;
+		const warnings: string[] = [];
+		const broker = new SupervisorBroker({ bus: new InProcessBus(), supervisorHandle: "supervisor",
+			startHost: async () => { starts++; return fakeHost("/x").host; }, warn: (m) => warnings.push(m) });
+		broker.adapterDeps(join(blocker, "x.sock"));
+		await settle();
+		if (process.platform === "win32") {
+			assert.equal(starts, 1, "named pipes have no socket directory to prepare");
+			assert.deepEqual(warnings, []);
+		} else {
+			assert.equal(starts, 0, "the host never starts in an unsafe directory");
+			assert.equal(warnings.length, 1);
+			assert.match(warnings[0] ?? "", /child-agent bus unavailable/);
+			assert.equal(broker.adapterDeps(join(blocker, "x.sock")), undefined);
+		}
+		await broker.close();
+	} finally { rmSync(dir, { recursive: true, force: true }); }
 });

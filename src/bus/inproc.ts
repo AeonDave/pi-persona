@@ -34,6 +34,8 @@ export interface Envelope {
 export const MAX_RETAINED_MESSAGES = 256;
 export const MAX_RETAINED_MESSAGE_CHARS = 256_000;
 export const MAX_INBOX_MESSAGES = 200;
+/** Largest message body a child may put on the bus: its tools bound it, the broker host enforces it. */
+export const MAX_MESSAGE_CHARS = 8_000;
 
 export interface InProcessBusOptions {
 	/** Override the unread-envelope bound for focused tests or a future host policy. */

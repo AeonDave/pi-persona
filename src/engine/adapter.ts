@@ -41,9 +41,10 @@ import { mergeSessionToolAllowlist } from "./session-tools.ts";
 export interface EngineAdapterBroker {
 	/** The session-scoped endpoint (`PI_PERSONA_BUS`) passed to the child's env. */
 	endpoint: string;
-	/** Pre-registers the about-to-be-spawned child's handle (+ peer-roster data when
-	 *  `peers` is set) with the host, before the child process is spawned. */
-	register(info: { handle: string; label?: string; group?: string; peers?: boolean }): void;
+	/** Pre-registers the about-to-be-spawned child's handle, display label and peer-roster data
+	 *  with the host, before the child process is spawned. Returns the child's one-shot
+	 *  registration token (`PI_PERSONA_BUS_TOKEN`); the host trusts this record, not the child. */
+	register(info: { handle: string; label?: string; group?: string; peers?: boolean }): string;
 	/** Unregisters the handle once the run has settled (success, failure, or abort). */
 	unregister(handle: string): void;
 	/** Pushes a `steer` frame to the connected (or not-yet-connected) child.
@@ -266,11 +267,12 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 							PI_PERSONA_RESULT_READER_TOKEN: preparedReader.token,
 						};
 					}
-					broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
+					const busToken = broker.register({ handle, label, group: peerGroup, ...(wantsPeers ? { peers: true } : {}) });
 					childOptions.env = {
 						...childOptions.env,
 						PI_PERSONA_BUS: broker.endpoint,
 						PI_PERSONA_HANDLE: handle,
+						PI_PERSONA_BUS_TOKEN: busToken,
 						PI_PERSONA_BUS_TOOLS: (deps.canUseBus ?? true) ? "on" : "off",
 						...(wantsPeers ? { PI_PERSONA_PEERS: "1" } : {}),
 						...(deps.allowBlocking ? { PI_PERSONA_ALLOW_BLOCKING: "1" } : {}),

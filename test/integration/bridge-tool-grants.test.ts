@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -43,12 +43,13 @@ test("real Pi SDK keeps granted bridge tools callable under plain allowlists and
 			const registered = new Promise<void>((resolve) => { markRegistered = resolve; });
 			let activateBridge!: () => void;
 			const bridgeActivation = new Promise<void>((resolve) => { activateBridge = resolve; });
-			host.expect(handle);
+			const token = randomBytes(32).toString("hex");
+			host.expect(handle, { token });
 			const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
 			const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager, noExtensions: true,
 				noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
 				extensionFactories: [(pi) => { if (scenario.outline) pi.registerTool(makeCodeOutlineTool()); pi.on("session_start", (_event, ctx) => installBridge(pi, ctx, { env: {
-					PI_PERSONA_BUS: endpoint, PI_PERSONA_HANDLE: handle, PI_PERSONA_PEERS: scenario.peers ? "1" : "0",
+					PI_PERSONA_BUS: endpoint, PI_PERSONA_HANDLE: handle, PI_PERSONA_BUS_TOKEN: token, PI_PERSONA_PEERS: scenario.peers ? "1" : "0",
 					PI_PERSONA_BUS_TOOLS: scenario.bus ? "on" : "off",
 					...(scenario.outline ? { PI_PERSONA_CODE_OUTLINE: "1" } : {}),
 				}, makeClient: (deps) => {

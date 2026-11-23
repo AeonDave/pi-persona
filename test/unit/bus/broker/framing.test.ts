@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fc from "fast-check";
 
-import { createFrameReader, encodeFrame } from "../../../../src/bus/broker/framing.ts";
+import { createFrameReader, encodeFrame, MAX_CLIENT_FRAME_BYTES } from "../../../../src/bus/broker/framing.ts";
 
 test("encode/decode round-trips an object across arbitrary chunk splits", () => {
 	const frames: unknown[] = [];
@@ -22,6 +22,23 @@ test("a length header over the 16 MiB cap is rejected via onError and poisons th
 	assert.match(err?.message ?? "", /too large/);
 	read(encodeFrame({ ok: 1 })); // poisoned → dropped
 	assert.equal(frames.length, 0);
+});
+
+test("a reader built with the client-frame cap poisons on a larger header without buffering the body", () => {
+	assert.equal(MAX_CLIENT_FRAME_BYTES, 64 * 1024);
+	let err: Error | undefined;
+	const frames: unknown[] = [];
+	const read = createFrameReader((o) => frames.push(o), (e) => (err = e), MAX_CLIENT_FRAME_BYTES);
+	const head = Buffer.alloc(4);
+	head.writeUInt32BE(MAX_CLIENT_FRAME_BYTES + 1, 0);
+	read(head);
+	assert.match(err?.message ?? "", /too large/, "rejected from the header alone");
+	read(encodeFrame({ ok: 1 }));
+	assert.equal(frames.length, 0);
+	const atCap = createFrameReader((o) => frames.push(o), () => assert.fail("a frame at the cap is accepted"), MAX_CLIENT_FRAME_BYTES);
+	const body = JSON.stringify("x".repeat(MAX_CLIENT_FRAME_BYTES - 2));
+	atCap(encodeFrame(JSON.parse(body)));
+	assert.equal(frames.length, 1);
 });
 
 test("malformed JSON payload triggers onError once, not a throw", () => {

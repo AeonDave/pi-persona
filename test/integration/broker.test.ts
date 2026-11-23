@@ -1,15 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
+import nodeNet from "node:net";
+import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 
 import { InProcessBus } from "../../src/bus/inproc.ts";
 import { makeBrokerClient } from "../../src/bus/broker/client.ts";
-import { startBrokerHost } from "../../src/bus/broker/host.ts";
+import { encodeFrame } from "../../src/bus/broker/framing.ts";
+import { type BrokerHost, startBrokerHost } from "../../src/bus/broker/host.ts";
 import { brokerEndpoint } from "../../src/bus/broker/paths.ts";
-import { listPeersForGroup, SupervisorBroker } from "../../src/extension/broker-host.ts";
+import { preparePrivateEndpointDir } from "../../src/bus/endpoint.ts";
+import { SupervisorBroker } from "../../src/extension/broker-host.ts";
 import { readFailure, type ReadReply, type ScopedReader } from "../../src/bus/result-reader.ts";
+
+/** The supervisor side of a spawn: record the child and mint its one-shot token. */
+function expectChild(host: BrokerHost, handle: string): string {
+	const token = randomBytes(32).toString("hex");
+	host.expect(handle, { token });
+	return token;
+}
 
 async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
 	const start = Date.now();
@@ -21,7 +32,7 @@ async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
 
 test("authenticated scoped result reads over REAL socket/pipe preserve maximum escaped pages and deny ungranted refs", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	preparePrivateEndpointDir(endpoint, "broker");
 	const bus = new InProcessBus();
 	const broker = new SupervisorBroker({ bus, supervisorHandle: "supervisor", warn: () => assert.fail("unexpected bind failure") });
 	broker.ensure(endpoint);
@@ -33,8 +44,9 @@ test("authenticated scoped result reads over REAL socket/pipe preserve maximum e
 		truncated: false, endOfStoredBody: true, status: "done", provenance: "result-output",
 	}), revoke: () => { revoked++; } };
 	const grant = await broker.prepareResultReader("reader", reader);
-	const client = makeBrokerClient({ endpoint, handle: "reader", readerToken: grant.token });
-	const impersonator = makeBrokerClient({ endpoint, handle: "reader" });
+	const token = broker.adapterDeps(endpoint)!.register({ handle: "reader" });
+	const client = makeBrokerClient({ endpoint, handle: "reader", token, readerToken: grant.token });
+	const impersonator = makeBrokerClient({ endpoint, handle: "reader", token: "f".repeat(64) });
 	try {
 		await assert.rejects(impersonator.register(), /authentication/);
 		assert.equal(grant.wasBound(), false);
@@ -55,14 +67,14 @@ test("authenticated scoped result reads over REAL socket/pipe preserve maximum e
 
 test("REAL reader cancellation reaches the callback; host close settles all pending reads", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	preparePrivateEndpointDir(endpoint, "broker");
 	const host = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
 	const signals: AbortSignal[] = [];
 	const resolvers: Array<(reply: ReadReply) => void> = [];
 	const grant = await host.prepareResultReader("reader", { read: (_request, signal) => {
 		signals.push(signal!); return new Promise((resolve) => { resolvers.push(resolve); });
 	}, revoke: () => {} });
-	const client = makeBrokerClient({ endpoint, handle: "reader", readerToken: grant.token });
+	const client = makeBrokerClient({ endpoint, handle: "reader", token: expectChild(host, "reader"), readerToken: grant.token });
 	try {
 		await client.register();
 		const ref = `result:${randomUUID()}`;
@@ -83,7 +95,7 @@ test("REAL reader cancellation reaches the callback; host close settles all pend
 
 test("REAL bind collision fails reader preparation before any child registration", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	preparePrivateEndpointDir(endpoint, "broker");
 	const host = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
 	const other = new SupervisorBroker({ bus: new InProcessBus(), supervisorHandle: "supervisor", warn: () => {} });
 	try {
@@ -100,14 +112,12 @@ test("REAL bind collision fails reader preparation before any child registration
 // exercised end to end). A per-run random session id keeps concurrent test runs collision-free.
 test("broker round-trip over a REAL socket/pipe: register, send, deliver, steer, close", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	// POSIX sockets are filesystem paths — the directory must exist before `listen()` (Windows
-	// named pipes are not filesystem-backed, so this is a no-op there in spirit; skipped outright).
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	preparePrivateEndpointDir(endpoint, "broker");
 
 	const bus = new InProcessBus();
 	bus.register("supervisor");
 	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint });
-	const client = makeBrokerClient({ endpoint, handle: "child#1" });
+	const client = makeBrokerClient({ endpoint, handle: "child#1", token: expectChild(host, "child#1") });
 	try {
 		await client.register();
 		assert.ok(bus.participants().includes("child#1"), "register proxies bus.register on the host's local bus");
@@ -138,11 +148,11 @@ test("broker round-trip over a REAL socket/pipe: register, send, deliver, steer,
 
 test("REAL one-way receipts distinguish bus admission from a full or missing inbox", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	preparePrivateEndpointDir(endpoint, "broker");
 	const bus = new InProcessBus({ maxInbox: 1 });
 	bus.register("supervisor");
 	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint });
-	const client = makeBrokerClient({ endpoint, handle: "child" });
+	const client = makeBrokerClient({ endpoint, handle: "child", token: expectChild(host, "child") });
 	const ac = new AbortController();
 	let ask: Promise<unknown> | undefined;
 	try {
@@ -163,12 +173,12 @@ test("REAL one-way receipts distinguish bus admission from a full or missing inb
 
 test("broker ask cancellation over a REAL socket/pipe settles the host-side ask", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
+	preparePrivateEndpointDir(endpoint, "broker");
 
 	const bus = new InProcessBus();
 	bus.register("supervisor");
 	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint });
-	const client = makeBrokerClient({ endpoint, handle: "child#cancel" });
+	const client = makeBrokerClient({ endpoint, handle: "child#cancel", token: expectChild(host, "child#cancel") });
 	try {
 		await client.register();
 		const ac = new AbortController();
@@ -184,83 +194,97 @@ test("broker ask cancellation over a REAL socket/pipe settles the host-side ask"
 	}
 });
 
-// ── contact_peer roster scoping (spec B7) — regression coverage for the extension.ts
-// `listPeersFor` closure, which must derive scope from `self`'s OWN recorded group (the
-// wire's `group` frame field is always unset per spec B6, so scoping by it directly —
-// either the host's own default, or a naive echo of the wire value — either always comes
-// back empty or leaks every concurrent run's peers into one flat list). ─────────────────
+// ── contact_peer roster scoping (spec B7): the roster is what the supervisor recorded at
+// spawn (`SupervisorBroker` → `host.expect`), scoped to the caller's own run; nothing the
+// child sends on the wire can widen it. ─────────────────────────────────────────────────
 
-test("listPeersForGroup: two peers in the same group see each other; a caller with no brokerPeers entry gets an empty roster", () => {
-	const brokerPeers = new Map<string, { label: string; group: string }>([
-		["scout#1", { label: "scout#1", group: "run-a" }],
-		["reviewer#2", { label: "reviewer#2 (SECURITY)", group: "run-a" }],
-	]);
-	assert.deepEqual(listPeersForGroup(brokerPeers, "scout#1"), [{ handle: "reviewer#2", label: "reviewer#2 (SECURITY)" }]);
-	assert.deepEqual(listPeersForGroup(brokerPeers, "reviewer#2"), [{ handle: "scout#1", label: "scout#1" }]);
-	// Not in `brokerPeers` at all (e.g. registered without `peers: true`) ⇒ empty, not a leak.
-	assert.deepEqual(listPeersForGroup(brokerPeers, "ghost#9"), []);
-});
-
-test("listPeersForGroup: a concurrent second group never leaks into the first group's roster", () => {
-	const brokerPeers = new Map<string, { label: string; group: string }>([
-		["scout#1", { label: "scout#1", group: "run-a" }],
-		["reviewer#2", { label: "reviewer#2", group: "run-a" }],
-		["scout#3", { label: "scout#3", group: "run-b" }],
-		["reviewer#4", { label: "reviewer#4", group: "run-b" }],
-	]);
-	assert.deepEqual(
-		listPeersForGroup(brokerPeers, "scout#1").map((p) => p.handle),
-		["reviewer#2"],
-	);
-	assert.deepEqual(
-		listPeersForGroup(brokerPeers, "scout#3").map((p) => p.handle),
-		["reviewer#4"],
-	);
-});
-
-// The real cross-process wiring: `brokerPeers` is populated BEFORE spawn (mirroring
-// `makeBrokerDeps`'s `register`, called pre-spawn in `adapter.ts`), then TWO real clients in
-// the SAME group `list()` each other over the REAL socket/pipe, while a THIRD client in a
-// concurrent second group never appears in either roster and sees none of theirs.
 test("broker `list` over a REAL socket/pipe: two peer-enabled clients in the same group see each other; a concurrent second group doesn't leak", async () => {
 	const endpoint = brokerEndpoint(randomUUID());
-	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true });
-
 	const bus = new InProcessBus();
 	bus.register("supervisor");
-	const brokerPeers = new Map<string, { label: string; group: string }>();
-	const host = await startBrokerHost({
-		bus,
-		supervisorHandle: "supervisor",
-		endpoint,
-		listPeersFor: (_group, self) => listPeersForGroup(brokerPeers, self),
-	});
-
-	// Same engine instance ("run-a"): scout#1 + reviewer#2, both opted into the roster.
-	brokerPeers.set("scout#1", { label: "scout#1", group: "run-a" });
-	brokerPeers.set("reviewer#2", { label: "reviewer#2 (SECURITY)", group: "run-a" });
-	// A concurrent, unrelated run ("run-b") sharing the ONE host — must never leak either way.
-	brokerPeers.set("scout#3", { label: "scout#3", group: "run-b" });
-
-	const clientA = makeBrokerClient({ endpoint, handle: "scout#1", group: "run-a", peers: true });
-	const clientB = makeBrokerClient({ endpoint, handle: "reviewer#2", group: "run-a", peers: true });
-	const clientC = makeBrokerClient({ endpoint, handle: "scout#3", group: "run-b", peers: true });
+	const broker = new SupervisorBroker({ bus, supervisorHandle: "supervisor", warn: () => assert.fail("unexpected bind failure") });
+	const deps = broker.adapterDeps(endpoint)!;
+	const tokenA = deps.register({ handle: "scout#1", label: "scout#1", group: "run-a", peers: true });
+	const tokenB = deps.register({ handle: "reviewer#2", label: "reviewer#2 (SECURITY)", group: "run-a", peers: true });
+	const tokenC = deps.register({ handle: "scout#3", label: "scout#3", group: "run-b", peers: true });
+	const clientA = makeBrokerClient({ endpoint, handle: "scout#1", token: tokenA });
+	const clientB = makeBrokerClient({ endpoint, handle: "reviewer#2", token: tokenB });
+	const clientC = makeBrokerClient({ endpoint, handle: "scout#3", token: tokenC });
 	try {
 		await Promise.all([clientA.register(), clientB.register(), clientC.register()]);
-
-		const rosterA = await clientA.list();
-		assert.deepEqual(rosterA, [{ handle: "reviewer#2", label: "reviewer#2 (SECURITY)" }], "scout#1 sees only its own-group peer");
-
-		const rosterB = await clientB.list();
-		assert.deepEqual(rosterB, [{ handle: "scout#1", label: "scout#1" }], "reviewer#2 sees only its own-group peer");
-
-		const rosterC = await clientC.list();
-		assert.deepEqual(rosterC, [], "the concurrent second group's sole member sees no cross-group leak");
+		assert.deepEqual(await clientA.list(), [{ handle: "reviewer#2", label: "reviewer#2 (SECURITY)" }], "scout#1 sees only its own-group peer");
+		assert.deepEqual(await clientB.list(), [{ handle: "scout#1", label: "scout#1" }], "reviewer#2 sees only its own-group peer");
+		assert.deepEqual(await clientC.list(), [], "the concurrent second group's sole member sees no cross-group leak");
+		assert.equal(await clientA.send("scout#3", "progress", "cross-run"), false, "the host refuses a cross-run send");
+		assert.equal(await clientA.send("reviewer#2", "progress", "same run"), true);
 	} finally {
 		clientA.close();
 		clientB.close();
 		clientC.close();
-		await waitFor(() => !bus.participants().includes("scout#1") && !bus.participants().includes("reviewer#2") && !bus.participants().includes("scout#3"));
-		await host.close();
+		await broker.close();
 	}
+});
+
+/** A raw wire client: the frames it receives and whether the host closed it. */
+function rawClient(endpoint: string) {
+	const socket = nodeNet.connect(endpoint);
+	const state = { closed: false, data: "" };
+	socket.on("data", (chunk) => { state.data += chunk.toString("utf8"); });
+	socket.on("error", () => {});
+	socket.on("close", () => { state.closed = true; });
+	const ready = new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+	return { socket, state, ready };
+}
+
+test("REAL registration needs the supervisor's token: a squatter is cut off and the real child still connects", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	preparePrivateEndpointDir(endpoint, "broker");
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const host = await startBrokerHost({ bus, supervisorHandle: "supervisor", endpoint });
+	const token = expectChild(host, "child#1");
+	const squatter = rawClient(endpoint);
+	const client = makeBrokerClient({ endpoint, handle: "child#1", token });
+	try {
+		await squatter.ready;
+		squatter.socket.write(encodeFrame({ t: "register", handle: "child#1", token: "f".repeat(64) }));
+		await waitFor(() => squatter.state.closed);
+		assert.match(squatter.state.data, /authentication failed/);
+		assert.equal(bus.participants().includes("child#1"), false);
+		await client.register();
+		assert.deepEqual(host.connectedHandles(), ["child#1"]);
+	} finally { squatter.socket.destroy(); client.close(); await host.close(); }
+});
+
+test("REAL client frames over 64 KiB close the connection even from a registered client", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	preparePrivateEndpointDir(endpoint, "broker");
+	const host = await startBrokerHost({ bus: new InProcessBus(), supervisorHandle: "supervisor", endpoint });
+	const token = expectChild(host, "child#1");
+	const raw = rawClient(endpoint);
+	try {
+		await raw.ready;
+		raw.socket.write(encodeFrame({ t: "register", handle: "child#1", token }));
+		await waitFor(() => raw.state.data.includes("registered"));
+		// Well-formed JSON of a known type; an invalid frame alone would leave a registered socket open,
+		// so only the frame-size cap can close it.
+		raw.socket.write(encodeFrame({ t: "send", to: "supervisor", kind: "progress", text: "x".repeat(70 * 1024), msgId: randomUUID(), expectsReply: false }));
+		await waitFor(() => raw.state.closed);
+	} finally { raw.socket.destroy(); await host.close(); }
+});
+
+test("the REAL endpoint lives in a private directory under the temp dir (POSIX) or a named pipe (Windows)", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	const broker = new SupervisorBroker({ bus: new InProcessBus(), supervisorHandle: "supervisor", warn: () => assert.fail("unexpected bind failure") });
+	try {
+		broker.ensure(endpoint);
+		await waitFor(() => broker.host !== undefined);
+		if (process.platform === "win32") {
+			assert.match(endpoint, /^\\\\\.\\pipe\\pi-persona-/);
+		} else {
+			assert.equal(dirname(dirname(endpoint)), tmpdir());
+			assert.equal(statSync(dirname(endpoint)).mode & 0o777, 0o700);
+			assert.equal(statSync(endpoint).mode & 0o777, 0o600);
+		}
+	} finally { await broker.close(); }
 });

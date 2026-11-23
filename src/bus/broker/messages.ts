@@ -7,10 +7,11 @@
  * Pure module: no Pi imports, unit-tested.
  */
 
-import type { MsgKind } from "../inproc.ts";
+import { MAX_MESSAGE_CHARS, type MsgKind } from "../inproc.ts";
 import { closedRecord, isReadReply, isReadRequest, type ReadReply, type ResultReadRequest } from "../result-reader.ts";
 
-export function isReaderToken(value: unknown): value is string {
+/** A 32-byte hex credential: the per-child bus token and the result-reader grant share the shape. */
+export function isToken(value: unknown): value is string {
 	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
@@ -19,7 +20,7 @@ function isRequestId(value: unknown): value is string {
 }
 
 export type Frame =
-	| { t: "register"; handle: string; label?: string; group?: string; peers?: boolean; readerToken?: string }
+	| { t: "register"; handle: string; token: string; readerToken?: string }
 	| { t: "registered"; handle: string; readerToken?: string }
 	| ({ t: "result_read"; reqId: string } & ResultReadRequest)
 	| { t: "result_read_reply"; reqId: string; result: ReadReply }
@@ -60,27 +61,25 @@ export function isFrame(value: unknown): value is Frame {
 		case "result_read_cancel":
 			return closedRecord(value, ["t", "reqId"]) && isRequestId(value.reqId);
 		case "register": {
-			if (!closedRecord(value, ["t", "handle", "label", "group", "peers", "readerToken"])) return false;
-			if ("readerToken" in value && !isReaderToken(value.readerToken)) return false;
-			if (typeof value.handle !== "string" || value.handle.length === 0 || value.handle.length > 256) return false;
-			if (value.label !== undefined && typeof value.label !== "string") return false;
-			if (value.group !== undefined && typeof value.group !== "string") return false;
-			return value.peers === undefined || typeof value.peers === "boolean";
+			// Identity (label, run group, peer opt-in) is what the supervisor recorded at spawn, never wire data.
+			if (!closedRecord(value, ["t", "handle", "token", "readerToken"]) || !isToken(value.token)) return false;
+			if ("readerToken" in value && !isToken(value.readerToken)) return false;
+			return typeof value.handle === "string" && value.handle.length > 0 && value.handle.length <= 256;
 		}
 		case "registered":
 			return closedRecord(value, ["t", "handle", "readerToken"]) && typeof value.handle === "string"
 				&& value.handle.length > 0 && value.handle.length <= 256
-				&& (!("readerToken" in value) || isReaderToken(value.readerToken));
+				&& (!("readerToken" in value) || isToken(value.readerToken));
 		case "send":
 			return (
-				typeof value.to === "string" &&
+				typeof value.to === "string" && value.to.length > 0 && value.to.length <= 256 &&
 				isMsgKind(value.kind) &&
-				typeof value.text === "string" &&
-				typeof value.msgId === "string" &&
+				typeof value.text === "string" && value.text.length <= MAX_MESSAGE_CHARS &&
+				isRequestId(value.msgId) &&
 				typeof value.expectsReply === "boolean"
 			);
 		case "cancel":
-			return typeof value.msgId === "string";
+			return isRequestId(value.msgId);
 		case "sent":
 			return closedRecord(value, ["t", "msgId", "delivered"]) && typeof value.msgId === "string" && typeof value.delivered === "boolean";
 		case "deliver": {
@@ -98,7 +97,7 @@ export function isFrame(value: unknown): value is Frame {
 		case "steer":
 			return typeof value.text === "string";
 		case "list":
-			return typeof value.reqId === "string";
+			return isRequestId(value.reqId);
 		case "peers":
 			return typeof value.reqId === "string" && Array.isArray(value.peers) && value.peers.every(isPeerEntry);
 		case "bye":

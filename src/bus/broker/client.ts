@@ -23,7 +23,7 @@ import nodeNet from "node:net";
 import type net from "node:net";
 
 import { createFrameReader, encodeFrame } from "./framing.ts";
-import { type Frame, isFrame, isReaderToken } from "./messages.ts";
+import { type Frame, isFrame, isToken } from "./messages.ts";
 import { isReadRequest, isReadReplyFor, readFailure, RESULT_READ_MAX_PENDING, RESULT_READ_TIMEOUT_MS,
 	type ReadReply, type ResultReadRequest } from "../result-reader.ts";
 import type { MsgKind } from "../inproc.ts";
@@ -60,9 +60,8 @@ export interface BrokerClient {
 export interface MakeBrokerClientDeps {
 	endpoint: string;
 	handle: string;
-	label?: string;
-	group?: string;
-	peers?: boolean;
+	/** Private, one-shot registration token the supervisor minted for this spawn. */
+	token: string;
 	/** Private, one-shot parent grant. Never log this or pass it to a model. */
 	readerToken?: string;
 	/** Injected transport (tests use a paired in-memory fake); defaults to real `node:net`. */
@@ -264,7 +263,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 	async function register(): Promise<void> {
 		if (registerStarted || closed) throw new Error("broker register is one-shot or closed");
 		registerStarted = true;
-		if (deps.readerToken !== undefined && !isReaderToken(deps.readerToken)) throw new Error("Result reader protocol failure.");
+		if (deps.readerToken !== undefined && !isToken(deps.readerToken)) throw new Error("Result reader protocol failure.");
 		// Ordinary comms retain initial-connect backoff. A result grant never reconnects/replays.
 		const s = await (deps.readerToken !== undefined ? connectOnce() : connectWithBackoff());
 		if (closed) {
@@ -315,10 +314,8 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 			write({
 				t: "register",
 				handle: deps.handle,
+				token: deps.token,
 				...(deps.readerToken !== undefined ? { readerToken: deps.readerToken } : {}),
-				...(deps.label !== undefined ? { label: deps.label } : {}),
-				...(deps.group !== undefined ? { group: deps.group } : {}),
-				...(deps.peers !== undefined ? { peers: deps.peers } : {}),
 			});
 		});
 	}

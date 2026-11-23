@@ -46,7 +46,7 @@ import { shouldRecordDelegationOutcome } from "../../src/tools/delegate.ts";
 import { MAX_BROADCAST_DETAIL_ITEMS } from "../../src/tools/exocom.ts";
 import { MAX_INTERCOM_MESSAGE_CHARS, MAX_INTERCOM_REF_CHARS } from "../../src/tools/intercom.ts";
 import { parseTelemetryEvent } from "../../src/telemetry/contract.ts";
-import { makeEngine as makeThinkingChildEngine, type EngineAdapterDeps } from "../../src/engine/adapter.ts";
+import { makeEngine as makeThinkingChildEngine, type EngineAdapterBroker, type EngineAdapterDeps } from "../../src/engine/adapter.ts";
 import { makeInProcessEngine as makeThinkingInProcEngine, type InProcessDeps } from "../../src/engine/inproc.ts";
 import { emptyUsage, type ProgressSnapshot } from "../../src/engine/stream.ts";
 import { createTerminalResultRecord } from "../../src/results/record.ts";
@@ -1309,6 +1309,23 @@ test("a streaming leg publishes one agent.updated per real change, not one per t
 	assert.ok(legUpdates.length <= 4, `a ${CHUNKS}-chunk stream must not publish one event per chunk (published ${legUpdates.length})`);
 });
 
+/** The harness's door into the extension's private bus. A child may register with the broker only
+ *  with the one-shot token the supervisor mints for it, so capture the broker seam the child
+ *  engine is built with and register a handle exactly as that engine does before a spawn. */
+function brokerDoor(): { options: { engineFactories: { makeEngine: typeof makeThinkingChildEngine; makeInProcessEngine: typeof makeThinkingInProcEngine } }; token(handle: string): string } {
+	let broker: EngineAdapterBroker | undefined;
+	return {
+		options: { engineFactories: {
+			makeEngine: (deps) => { broker = deps.broker; return makeThinkingChildEngine(deps); },
+			makeInProcessEngine: makeThinkingInProcEngine,
+		} },
+		token: (handle) => {
+			assert.ok(broker, "the child engine was built with the broker");
+			return broker.register({ handle });
+		},
+	};
+}
+
 test("an intercom reply is its own telemetry entity, addressed to the child that asked", async () => {
 	// A real `contact_supervisor` ask needs a real child; the broker host is this harness's one door
 	// into the extension's private bus (see the ask/inbox test below for the same setup).
@@ -1322,12 +1339,13 @@ test("an intercom reply is its own telemetry entity, addressed to the child that
 	const m = makeMockPi();
 	const { ctx: base } = makeCtx(cwd);
 	const ctx = { ...base, sessionManager: nativeSessionManager(sessionId) };
+	const door = brokerDoor();
 	try {
-		piPersona(m.pi);
+		piPersona(m.pi, door.options);
 		await m.fire("session_start", undefined, ctx);
 		const council = m.tool("council") as { execute: AnyFn };
 		await council.execute("ask-host", { question: "q", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, ctx);
-		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon" });
+		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon", token: door.token("orion-recon") });
 		await client.register();
 		const decision = client.ask("supervisor", "decision", "ship it or hold?");
 		await waitUntil(() => m.sentMessages().length > 0, "the blocking ask to wake the supervisor");
@@ -7304,15 +7322,16 @@ test("answering one child ask through the intercom TOOL retires it from the inbo
 	const m = makeMockPi();
 	const { ctx: base } = makeCtx(os.tmpdir());
 	const ctx = { ...base, sessionManager: nativeSessionManager(sessionId) };
+	const door = brokerDoor();
 	try {
-		piPersona(m.pi);
+		piPersona(m.pi, door.options);
 		await m.fire("session_start", undefined, ctx);
 		// An unknown strategy still builds the engine before it fails — which is what lazily starts
 		// the host (the flag alone never does; see the /doctor test above).
 		const council = m.tool("council") as { execute: AnyFn };
 		await council.execute("ask-host", { question: "q", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, ctx);
 
-		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon" });
+		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon", token: door.token("orion-recon") });
 		await client.register();
 		const decision = client.ask("supervisor", "decision", "ship it or hold?");
 		// Left unanswered on purpose (the control); it is abandoned when the client closes.
@@ -7361,13 +7380,14 @@ test("an ask answered while the supervisor is busy is dropped from the pending w
 	const { ctx: base } = makeCtx(os.tmpdir());
 	let idle = false; // busy: every wake stays buffered until we say otherwise
 	const ctx = { ...base, isIdle: () => idle, sessionManager: nativeSessionManager(sessionId) };
+	const door = brokerDoor();
 	try {
-		piPersona(m.pi);
+		piPersona(m.pi, door.options);
 		await m.fire("session_start", undefined, ctx);
 		const council = m.tool("council") as { execute: AnyFn };
 		await council.execute("ask-host", { question: "q", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, ctx);
 
-		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon" });
+		client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle: "orion-recon", token: door.token("orion-recon") });
 		await client.register();
 		const decision = client.ask("supervisor", "decision", "ship it or hold?");
 		client.ask("supervisor", "interview", "which service do I start with?").catch(() => {});
@@ -7415,12 +7435,13 @@ test("a disconnected child's buffered ask never wakes the supervisor after it go
 	const { ctx: base } = makeCtx(tempDir("pi-persona-retired-ask-"));
 	let idle = false;
 	const ctx = { ...base, isIdle: () => idle, sessionManager: nativeSessionManager(sessionId) };
+	const door = brokerDoor();
 	try {
-		piPersona(m.pi);
+		piPersona(m.pi, door.options);
 		await m.fire("session_start", undefined, ctx);
 		await (m.tool("council") as { execute: AnyFn }).execute("ask-host", { question: "q", strategy: "no-such-strategy-xyz", roster: "magi" }, undefined, undefined, ctx);
 		for (const handle of ["departing-worker", "waiting-worker"]) {
-			const client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle });
+			const client = makeBrokerClient({ endpoint: brokerEndpoint(sessionId), handle, token: door.token(handle) });
 			clients.push(client);
 			await client.register();
 		}

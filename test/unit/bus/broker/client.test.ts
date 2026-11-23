@@ -104,6 +104,8 @@ async function waitFor(pred: () => boolean, timeoutMs = 1000): Promise<void> {
 	}
 }
 
+const TOKEN = "d".repeat(64);
+
 /** Connect + register a client against a fresh fake host, replying `registered` as soon
  *  as the `register` frame arrives. */
 async function connectedClient(deps: Partial<Parameters<typeof makeBrokerClient>[0]> = {}): Promise<{
@@ -113,7 +115,7 @@ async function connectedClient(deps: Partial<Parameters<typeof makeBrokerClient>
 }> {
 	const { net, hostSide } = fakeNet();
 	const host = wireHost(hostSide);
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net, ...deps });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", token: TOKEN, net, ...deps });
 	const registerPromise = client.register();
 	await waitFor(() => host.frames.some((f) => f.t === "register"));
 	host.send({ t: "registered", handle: "child#1", ...(deps.readerToken ? { readerToken: deps.readerToken } : {}) });
@@ -196,7 +198,7 @@ test("mismatched or missing reader acknowledgement rejects instead of downgradin
 	for (const ack of [undefined, "b".repeat(64)]) {
 		const { net, hostSide } = fakeNet();
 		const host = wireHost(hostSide);
-		const client = makeBrokerClient({ endpoint: "/fake", handle: "child", readerToken, net });
+		const client = makeBrokerClient({ endpoint: "/fake", handle: "child", token: TOKEN, readerToken, net });
 		const registration = client.register();
 		await waitFor(() => host.frames.length === 1);
 		host.send({ t: "registered", handle: "child", ...(ack ? { readerToken: ack } : {}) });
@@ -222,7 +224,7 @@ test("malformed reply and wrong page correlation fail closed without raw payload
 test("reader handshake has a deadline and cannot reconnect/replay", async (t) => {
 	const { net, hostSide } = fakeNet();
 	const host = wireHost(hostSide);
-	const client = makeBrokerClient({ endpoint: "/fake", handle: "child", readerToken, net });
+	const client = makeBrokerClient({ endpoint: "/fake", handle: "child", token: TOKEN, readerToken, net });
 	try {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const pending = client.register();
@@ -236,14 +238,10 @@ test("reader handshake has a deadline and cannot reconnect/replay", async (t) =>
 });
 
 test("register connects and completes the register/registered handshake", async () => {
-	const { client, host } = await connectedClient({ label: "coder", group: "g1", peers: true });
+	const { client, host } = await connectedClient();
 	try {
 		const registerFrame = host.frames.find((f) => f.t === "register");
-		assert.ok(registerFrame && registerFrame.t === "register");
-		assert.equal(registerFrame.handle, "child#1");
-		assert.equal(registerFrame.label, "coder");
-		assert.equal(registerFrame.group, "g1");
-		assert.equal(registerFrame.peers, true);
+		assert.deepEqual(registerFrame, { t: "register", handle: "child#1", token: TOKEN }, "the bus token and nothing client-asserted");
 	} finally {
 		client.close();
 	}
@@ -252,7 +250,7 @@ test("register connects and completes the register/registered handshake", async 
 test("register rejects when the host answers with an error frame", async () => {
 	const { net, hostSide } = fakeNet();
 	const host = wireHost(hostSide);
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "supervisor", net });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "supervisor", token: TOKEN, net });
 	const registerPromise = client.register();
 	await waitFor(() => host.frames.some((f) => f.t === "register"));
 	host.send({ t: "error", reason: "reserved handle" });
@@ -265,7 +263,7 @@ test("register retries the connect with capped exponential backoff, then succeed
 	const { net, attempts } = flakyFakeNet(2, (hostSide, attemptNo) => {
 		hosts.push({ attemptNo, ...wireHost(hostSide) });
 	});
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", token: TOKEN, net });
 	try {
 		const registerPromise = client.register();
 		await waitFor(() => hosts.some((h) => h.frames.some((f) => f.t === "register")), 5000);
@@ -518,7 +516,7 @@ test("close sends a bye frame and disposes the socket", async () => {
 test("close during a pending register (connected, awaiting registered) rejects it instead of hanging", async () => {
 	const { net, hostSide } = fakeNet();
 	wireHost(hostSide); // don't reply — leave the handshake pending
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", token: TOKEN, net });
 	const registerPromise = client.register();
 	await new Promise((r) => setTimeout(r, 5)); // let the connect settle
 	client.close();
@@ -539,7 +537,7 @@ test("close during an in-flight initial connect rejects register() and destroys 
 			return clientSocket as unknown as import("node:net").Socket;
 		},
 	} as unknown as typeof import("node:net");
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", token: TOKEN, net });
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	try {
 		const outcomes: unknown[] = [];
@@ -562,7 +560,7 @@ test("close during an in-flight initial connect rejects register() and destroys 
 
 test("close interrupts an existing initial-connect backoff without waiting for the retry clock or redialing", async (t) => {
 	const { net, attempts } = flakyFakeNet(1, () => {});
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", token: TOKEN, net });
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	try {
 		const outcomes: unknown[] = [];
@@ -592,7 +590,7 @@ test("close interrupts an existing initial-connect backoff without waiting for t
 test("register rejects when the host drops the connection mid-handshake", { timeout: 5000 }, async () => {
 	const { net, hostSide } = fakeNet();
 	const host = wireHost(hostSide);
-	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", net });
+	const client = makeBrokerClient({ endpoint: "/fake/endpoint.sock", handle: "child#1", token: TOKEN, net });
 	const registerPromise = client.register();
 	await waitFor(() => host.frames.some((f) => f.t === "register"));
 	hostSide.destroy(); // host teardown/crash after accept, before `registered`

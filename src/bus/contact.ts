@@ -21,7 +21,7 @@ import { Text } from "@earendil-works/pi-tui";
 
 import { compactInlineText } from "../ui/presentation.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
-import type { MsgKind } from "./inproc.ts";
+import { MAX_MESSAGE_CHARS, type MsgKind } from "./inproc.ts";
 import type { ContactTransport } from "./contact-transport.ts";
 
 const ContactParams = Type.Object({
@@ -111,7 +111,7 @@ export function makeContactSupervisorTool(
 			allowBlocking
 				? "This async run waits for the supervisor's reply before continuing. If there is no reply, the request remains unresolved: continue only with independent work already authorized, otherwise return a blocked/partial result."
 				: "This synchronous run cannot block: decision/interview are posted one-way and return immediately; no answer is possible in this path, so the request remains unresolved. Continue only with independent work already authorized, otherwise return a blocked/partial result.",
-			`Messages longer than ${MAX_CONTACT_MESSAGE_CHARS} characters are shortened before delivery; use smaller messages to preserve full detail.`,
+			`Messages longer than ${MAX_MESSAGE_CHARS} characters are shortened before delivery; use smaller messages to preserve full detail.`,
 		].join(" "),
 		promptSnippet: "contact_supervisor — report progress or ask the supervisor a question",
 		parameters: ContactParams,
@@ -207,12 +207,9 @@ export function makeContactSupervisorTool(
 		},
 	});
 }
-/** Maximum body accepted by contact_supervisor's message action. Full reports should use the
- * delegated result channel rather than sending megabytes over the supervisor bus. */
-export const MAX_CONTACT_MESSAGE_CHARS = 8_000;
 
 /** Keep the sender-facing body bounded while preserving both ends and an omission count. */
-export function boundContactMessage(message: string, maxChars = MAX_CONTACT_MESSAGE_CHARS): string {
+export function boundContactMessage(message: string, maxChars = MAX_MESSAGE_CHARS): string {
 	if (message.length <= maxChars) return message;
 	const marker = `\n\n[… ${message.length - maxChars} characters omitted; send the remaining detail in smaller contact_supervisor messages …]\n\n`;
 	if (marker.length >= maxChars) return marker.slice(0, Math.max(0, maxChars));

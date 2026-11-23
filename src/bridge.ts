@@ -25,7 +25,7 @@ import type { MsgKind } from "./bus/inproc.ts";
 import type { ContactTransport } from "./bus/contact-transport.ts";
 import { makeContactPeerTool, type PeerInfo } from "./bus/peers.ts";
 import { attributeInbound } from "./core/fence.ts";
-import { isReaderToken } from "./bus/broker/messages.ts";
+import { isToken } from "./bus/broker/messages.ts";
 import { readFailure } from "./bus/result-reader.ts";
 import { makeReadResultTool } from "./tools/read-result.ts";
 
@@ -92,17 +92,23 @@ export function installBridge(pi: ExtensionAPI, ctx: ExtensionContext, deps: Ins
 	const env = deps.env ?? process.env;
 	const endpoint = env.PI_PERSONA_BUS;
 	const handle = env.PI_PERSONA_HANDLE;
+	const token = env.PI_PERSONA_BUS_TOKEN;
 	const readerToken = env.PI_PERSONA_RESULT_READER_TOKEN;
-	if (readerToken !== undefined && (!endpoint || !handle || !isReaderToken(readerToken))) {
+	// One-shot credentials: remove them so a tool subprocess of the worker (bash, a script) cannot
+	// inherit them and register first. Nothing below or elsewhere in the child reads them again.
+	delete env.PI_PERSONA_BUS_TOKEN;
+	delete env.PI_PERSONA_RESULT_READER_TOKEN;
+	if (readerToken !== undefined && (!endpoint || !handle || !isToken(token) || !isToken(readerToken))) {
 		throw new Error("Invalid result reader environment.");
 	}
-	if (!endpoint || !handle) return; // isBridgeMode() gates the real caller; malformed env degrades to a no-op
+	// isBridgeMode() gates the real caller; malformed env degrades to a no-op
+	if (!endpoint || !handle || !isToken(token)) return;
 	activateNativeTools(pi);
 
 	const canUseBus = env.PI_PERSONA_BUS_TOOLS !== "off";
+	// Decides only whether contact_peer is installed: the host scopes peers from its own record.
 	const wantsPeers = canUseBus && env.PI_PERSONA_PEERS === "1";
-	const clientDeps: MakeBrokerClientDeps = { endpoint, handle, ...(wantsPeers ? { peers: true } : {}),
-		...(readerToken !== undefined ? { readerToken } : {}) };
+	const clientDeps: MakeBrokerClientDeps = { endpoint, handle, token, ...(readerToken !== undefined ? { readerToken } : {}) };
 	const client = (deps.makeClient ?? makeBrokerClient)(clientDeps);
 
 	// Blocking asks are honoured only when the spawning run is async (`PI_PERSONA_ALLOW_BLOCKING`,

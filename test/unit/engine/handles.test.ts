@@ -30,7 +30,7 @@ test("the child engine and the inproc engine mint bus handles from ONE sequence 
 		childOptions: { resolveInvocation: resolveFake },
 		broker: {
 			endpoint: "pipe:test",
-			register: (info) => minted.push(info.handle),
+			register: (info) => { minted.push(info.handle); return "a".repeat(64); },
 			unregister: () => {},
 			steerFrame: () => true,
 			prepareResultReader: async () => { throw new Error("no reader grant"); },

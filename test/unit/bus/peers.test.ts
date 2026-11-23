@@ -4,8 +4,8 @@ import { stripVTControlCharacters } from "node:util";
 
 import { initTheme } from "@earendil-works/pi-coding-agent";
 
-import { InProcessBus } from "../../../src/bus/inproc.ts";
-import { makeContactPeerTool, MAX_PEER_MESSAGE_CHARS } from "../../../src/bus/peers.ts";
+import { InProcessBus, MAX_MESSAGE_CHARS } from "../../../src/bus/inproc.ts";
+import { makeContactPeerTool } from "../../../src/bus/peers.ts";
 
 // Like contact.test.ts: ctx is unused by the tool, the bus is the real (pure) InProcessBus.
 const CTX = undefined as never;
@@ -92,12 +92,12 @@ test("contact_peer rejects oversized messages before delivery and without burnin
 
 	const oversized = await tool.execute(
 		"t10",
-		{ action: "send", to: "b#2", message: "x".repeat(MAX_PEER_MESSAGE_CHARS + 1) },
+		{ action: "send", to: "b#2", message: "x".repeat(MAX_MESSAGE_CHARS + 1) },
 		undefined,
 		undefined,
 		CTX,
 	);
-	assert.match(text(oversized), new RegExp(`exceeds the ${MAX_PEER_MESSAGE_CHARS}-character limit`));
+	assert.match(text(oversized), new RegExp(`exceeds the ${MAX_MESSAGE_CHARS}-character limit`));
 	assert.equal(bus.pending("b#2").length, 0, "the oversized note never enters the bus");
 
 	const accepted = await tool.execute("t11", { action: "send", to: "b#2", message: "small" }, undefined, undefined, CTX);
