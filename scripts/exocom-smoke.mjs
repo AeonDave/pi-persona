@@ -132,20 +132,22 @@ async function main() {
 		check("correlated reply: A's onInbound fired", aInbound.length === 1);
 		check("correlated reply: in_reply_to matches the original msg_id", aInbound[0]?.in_reply_to === firstMsgId);
 
-		// ── 4. semantic frame (claim) ─────────────────────────────────────────
-		const claimFrame = {
-			kind: "claim",
+		// ── 4. semantic wake frame (ask) ─────────────────────────────────────
+		// Only ask/answer/targeted-offer cross the wire; claims and the rest are ledger-only.
+		const askFrame = {
+			kind: "ask",
+			ask_id: randomUUID(),
 			work_key: "smoke-wk",
 			from_session: sessionIdFor("smoke-a"),
 			from_name: "smoke-a",
-			write_set: ["README.md"],
-			slice: "smoke",
+			to_session: sessionIdFor("smoke-b"),
+			question: "smoke question?",
 			msg_id: randomUUID(),
 			ts: new Date().toISOString(),
 		};
-		const sentClaim = await a.sendSemantic("smoke-b", claimFrame);
+		const sentAsk = await a.sendSemantic("smoke-b", askFrame);
 		await delay(150);
-		check("semantic claim frame delivered", bSemantic.some((s) => s.frame.msg_id === sentClaim.msg_id));
+		check("semantic ask frame delivered", bSemantic.some((s) => s.frame.msg_id === sentAsk.msg_id));
 
 		// ── 5. budget cap (R2) ────────────────────────────────────────────────
 		// One message already spent from A's bucket in step 2 — fire enough more to cross

@@ -46,6 +46,9 @@ export interface ExocomOffer extends CollaborationFrame { kind: "offer"; task_id
 export interface ExocomPublish extends CollaborationFrame { kind: "publish"; task_id: string; title: string; excerpt: string; }
 export type ExocomCollaborationFrame = ExocomTaskCreate | ExocomTaskTake | ExocomTaskFinish | ExocomOffer | ExocomPublish;
 export type ExocomSemanticFrame = ExocomClaim | ExocomAsk | ExocomAnswer | ExocomProgress | ExocomRelease | ExocomCollaborationFrame;
+/** The only semantic kinds that cross the wire: signed immediate-wake signals for a fact already
+ *  durable in the ledger. Every other kind (claim, release, progress, task_*, publish) is ledger-only. */
+export type ExocomWakeFrame = ExocomAsk | ExocomAnswer | ExocomOffer;
 export type ExocomFrame = ExocomMessage | ExocomBye | ExocomAck | ExocomNack | ExocomSemanticFrame;
 
 const str = (v: unknown): v is string => typeof v === "string";

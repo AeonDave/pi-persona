@@ -766,9 +766,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				onSemantic: (frame, fromEntry) => {
 					if (!exocomAcceptsDelivery()) return { accepted: false, reason: "receiver starting or stopping" };
 					if (!exocomLedgerFile) return { accepted: false, reason: "ledger unavailable" };
-					if (frame.kind === "claim" && fromEntry.workspace_id !== undefined && fromEntry.workspace_id !== scope.scopeWorkspaceId) {
-						return { accepted: false, reason: "external-workspace peers cannot claim paths in the selected scope's workspace ledger" };
-					}
 					if (exocomSeen?.seenBefore(frame.from_session, frame.msg_id)) return { accepted: true, duplicate: true };
 					const bytes = Buffer.byteLength(JSON.stringify(frame), "utf8");
 					if (!exocomBudget?.allow(frame.from_session, bytes)) {
@@ -783,10 +780,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						return { accepted: false, reason: error instanceof Error ? error.message : "ledger unavailable" };
 					}
 					const label = exocomPlane?.humanDisplayLabelFor(fromEntry) ?? fromEntry.session_id;
-					if (fromEntry.workspace_id !== undefined && fromEntry.workspace_id !== scope.scopeWorkspaceId && collaborationWriteIntent(frame, state)) {
-						exocomSeen?.forget(frame.from_session, frame.msg_id);
-						return { accepted: false, reason: "external-workspace peers cannot take write tasks in the selected scope" };
-					}
 					if (frame.kind === "offer") {
 						const delivery = deliverCollaborationOffer(frame, state, sessionId, label, Date.now());
 						if (!delivery.accepted) { exocomSeen?.forget(frame.from_session, frame.msg_id); return delivery; }
@@ -803,16 +796,13 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						}
 						const block = pendingAskBlock([stored], () => label);
 						if (block) exocomNotifier?.notify({ text: block, message: { from: label, text: stored.question, id: stored.ask_id, kind: "ask" } });
-					} else if (frame.kind === "answer") {
+					} else {
 						const stored = answerFor(state, frame.ask_id, sessionId);
 						if (!stored || stored.msg_id !== frame.msg_id || stored.work_key !== frame.work_key) {
 							exocomSeen?.forget(frame.from_session, frame.msg_id);
 							return { accepted: false, reason: "answer is not durable for this requester" };
 						}
 						if (!fireWaiters(stored, label)) exocomNotifier?.notify(answerNotice(stored, label));
-					} else if (!state.seen.includes(frame.msg_id)) {
-						exocomSeen?.forget(frame.from_session, frame.msg_id);
-						return { accepted: false, reason: "semantic event is not durable in the shared ledger" };
 					}
 					return { accepted: true };
 				},

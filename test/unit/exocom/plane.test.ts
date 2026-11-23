@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -19,7 +20,7 @@ import { endpoint, exocomRoot, registryPath } from "../../../src/exocom/paths.ts
 import { ARTIFACT_MAX_BYTES, ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
 import { readAll, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
 import { deleteRegistryFile, registryEntryFixture } from "../../helpers/exocom-registry.ts";
-import { frameSigningPayload, type ExocomBye, type ExocomMessage } from "../../../src/exocom/envelope.ts";
+import { frameSigningPayload, type ExocomAsk, type ExocomBye, type ExocomClaim, type ExocomFrame, type ExocomMessage } from "../../../src/exocom/envelope.ts";
 import { buildInboundDelivery } from "../../../src/exocom/inbound.ts";
 import { SenderBudget, SeenMessages } from "../../../src/exocom/guards.ts";
 import { EXOCOM } from "../../../src/exocom/limits.ts";
@@ -106,7 +107,7 @@ async function injectMessage(targetEndpoint: string, frame: ExocomMessage): Prom
  *  tell an ACK from a NACK instead of inferring the verdict from an empty inbox. The receiver
  *  answers with a single frame and leaves the connection open, so this settles on the first chunk
  *  rather than waiting out the timeout on every verdict. */
-function injectForReply(targetEndpoint: string, frame: ExocomMessage): Promise<string> {
+function injectForReply(targetEndpoint: string, frame: ExocomFrame): Promise<string> {
 	return new Promise((resolve) => {
 		const socket = net.connect(targetEndpoint);
 		let out = "";
@@ -1237,30 +1238,151 @@ test("send() requires a correlated ACK and rejects invalid signature/session bin
 		));
 	});
 	await new Promise<void>((resolve) => rawServer.listen(rawEndpoint, resolve));
-	const advertise = () => writeEntry(dir, "h", registryEntryFixture({
+	writeEntry(dir, "h", registryEntryFixture({
 		session_id: rawSession, name: "raw-auth", pid: process.pid, endpoint: rawEndpoint,
 		heartbeat_at: new Date().toISOString(), public_key: "cHVi",
 	}));
-	advertise();
 	const sender = planeFor("auth-sender", () => {});
 	await sender.start();
 	try {
+		const survives = (): boolean => readAll(dir, "h").some((e) => e.session_id === rawSession);
 		await assert.rejects(() => sender.send("raw-auth", "one"), /unexpected reply frame/, "wrong ACK msg_id is not success");
+		assert.ok(survives(), "a live peer's entry is its ledger lease; a protocol failure must not remove it");
 		mode = "bad-signature";
-		advertise();
 		await assert.rejects(() => sender.send("raw-auth", "two"), /unauthenticated ack/, "invalid signature is rejected");
+		assert.ok(survives(), "an unauthenticated ack must not remove a live peer's entry");
 		mode = "bad-session";
-		advertise();
 		await assert.rejects(() => sender.send("raw-auth", "three"), /unauthenticated ack/, "ACK session must match the registry binding");
+		assert.ok(survives(), "a mismatched ack session must not remove a live peer's entry");
 	} finally {
 		await sender.stop();
 		await new Promise<void>((resolve) => rawServer.close(() => resolve()));
 	}
 });
 
-// An entry can be evicted while its instance is very much alive (a peer's transient send error,
-// or a >STALE_AFTER_MS stall making every peer prune it). The next heartbeat then RE-CREATES the
-// file, and writeEntry's preserve-from-disk step has nothing to preserve from — so the key must
+/** A registry entry for a live process (this one) whose endpoint is whatever the test serves there. */
+function livePeerEntry(name: string, endpointPath?: string): RegistryEntry {
+	const session_id = `sid-${name}-${process.pid}-${seq++}`;
+	const entry = registryEntryFixture({
+		session_id, name, pid: process.pid, endpoint: endpointPath ?? endpoint(dir, "h", session_id, process.platform),
+		heartbeat_at: new Date().toISOString(),
+	});
+	writeEntry(dir, "h", entry);
+	return entry;
+}
+
+const registered = (sessionId: string): boolean => readAll(dir, "h").some((e) => e.session_id === sessionId);
+
+// The registry entry is the owner's ledger lease: the next ledger commit by any session reads its
+// absence as "left" and forfeits that owner's claims and tasks. A failed attempt proves only that
+// the attempt failed, so a live owner keeps its entry and the caller sees the failure.
+test("a send that cannot connect leaves a live peer's registry entry in place", async () => {
+	const ghost = livePeerEntry("ghost-nolistener");
+	const sender = planeFor("ghost-sender", () => {});
+	await sender.start();
+	try {
+		await assert.rejects(() => sender.send("ghost-nolistener", "hi"), /unreachable/);
+		assert.ok(registered(ghost.session_id), "connect errors on both attempts do not evict a live pid");
+	} finally { await sender.stop(); }
+});
+
+test("a send whose connection is dropped leaves a live peer's registry entry in place", async () => {
+	const session = `sid-dropper-${process.pid}-${seq++}`;
+	const dropperEndpoint = endpoint(dir, "h", session, process.platform);
+	const server = net.createServer((socket) => socket.destroy());
+	await new Promise<void>((resolve) => server.listen(dropperEndpoint, resolve));
+	writeEntry(dir, "h", registryEntryFixture({
+		session_id: session, name: "dropper", pid: process.pid, endpoint: dropperEndpoint, heartbeat_at: new Date().toISOString(),
+	}));
+	const sender = planeFor("dropper-sender", () => {});
+	await sender.start();
+	try {
+		await assert.rejects(() => sender.send("dropper", "hi"), /unreachable/);
+		assert.ok(registered(session), "a non-restarting transport error does not evict a live pid");
+	} finally {
+		await sender.stop();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
+test("a semantic send that cannot connect leaves a live peer's registry entry in place", async () => {
+	const ghost = livePeerEntry("ghost-semantic");
+	const sender = planeFor("ghost-semantic-sender", () => {});
+	await sender.start();
+	try {
+		const target = sender.listPeers().find((p) => p.session_id === ghost.session_id)!.target;
+		const ask: ExocomAsk = {
+			kind: "ask", ask_id: "ask-1", work_key: "wk", from_session: "sid-ghost-semantic-sender", from_name: "sender",
+			to_session: ghost.session_id, question: "q?", msg_id: randomUUID(), ts: new Date().toISOString(),
+		};
+		await assert.rejects(() => sender.sendSemantic(target, ask), /unreachable/);
+		assert.ok(registered(ghost.session_id), "the semantic path shares the no-eviction rule");
+	} finally { await sender.stop(); }
+});
+
+test("a send to a peer whose process is gone still removes its entry", async () => {
+	const deadPid = spawnSync(process.execPath, ["-e", ""]).pid!;
+	const session = `sid-corpse-${process.pid}-${seq++}`;
+	const corpse = registryEntryFixture({
+		session_id: session, name: "corpse", pid: deadPid, endpoint: endpoint(dir, "h", session, process.platform),
+		heartbeat_at: new Date().toISOString(),
+	});
+	const sender = planeFor("corpse-sender", () => {});
+	await sender.start();
+	// Written after start(): start() prunes dead pids, so an earlier write would be gone before the send.
+	writeEntry(dir, "h", corpse);
+	// listPeers() prunes a dead pid before a send reaches it; a roster resolved a moment earlier is
+	// how a send meets a peer that died in between.
+	(sender as unknown as { listPeers: () => unknown[] }).listPeers = () => [{ ...corpse, displayName: "corpse", target: "corpse" }];
+	try {
+		assert.ok(registered(session), "the corpse is registered until the failed send evicts it");
+		await assert.rejects(() => sender.send("corpse", "hi"), /unreachable/);
+		assert.equal(registered(session), false, "a provably dead pid is evicted on the failed send");
+	} finally { await sender.stop(); }
+});
+
+// Only ask, answer and targeted offer cross the wire as wake signals; every other semantic fact
+// is a shared-ledger commit, so a receiver has no use for (and never invokes a hook on) one.
+test("a wire claim frame never reaches the semantic hook, while a wake frame still does", async () => {
+	const seen: string[] = [];
+	const receiverSession = `sid-wake-recv-${process.pid}-${seq++}`;
+	const receiver = new ExocomPlane({
+		agentDir: dir, hash: "h",
+		identity: {
+			session_id: receiverSession, name: "wake-receiver", persona: "", purpose: "", color: "#36F9F6", model: "m",
+			endpoint: endpoint(dir, "h", receiverSession, process.platform), cwd: "/",
+		},
+		getCard: () => ({ name: "wake-receiver", persona: "", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true }),
+		onSemantic: (frame) => { seen.push(frame.kind); return { accepted: true }; },
+	});
+	const sender = planeFor("wake-sender", () => {});
+	await receiver.start();
+	await sender.start();
+	try {
+		const receiverEntry = readAll(dir, "h").find((e) => e.session_id === receiverSession)!;
+		const senderEntry = readAll(dir, "h").find((e) => e.name === "wake-sender")!;
+		const privateKey = (sender as unknown as { privateKey: KeyObject }).privateKey;
+		const claim: ExocomClaim = {
+			kind: "claim", work_key: "wk", from_session: senderEntry.session_id, from_name: "wake-sender",
+			write_set: ["a.ts"], slice: "s", msg_id: randomUUID(), ts: new Date().toISOString(),
+		};
+		const signed = { ...claim, signature: cryptoSign(null, Buffer.from(frameSigningPayload(claim), "utf8"), privateKey).toString("base64") };
+		assert.equal(await injectForReply(receiverEntry.endpoint, signed), "", "a non-wake frame gets no verdict from the wire");
+		assert.deepEqual(seen, [], "the semantic hook is never invoked for a ledger-only kind");
+
+		const ask: ExocomAsk = {
+			kind: "ask", ask_id: "ask-w", work_key: "wk", from_session: senderEntry.session_id, from_name: "wake-sender",
+			to_session: receiverSession, question: "q?", msg_id: randomUUID(), ts: new Date().toISOString(),
+		};
+		await sender.sendSemantic(sender.listPeers().find((p) => p.session_id === receiverSession)!.target, ask);
+		assert.deepEqual(seen, ["ask"], "a wake kind is still delivered");
+	} finally { await sender.stop(); await receiver.stop(); }
+});
+
+// An entry can vanish while its instance is very much alive (a >STALE_AFTER_MS stall making every
+// peer prune it). The next heartbeat then RE-CREATES the file, and
+// writeEntry's preserve-from-disk step has nothing to preserve from — so the key must
 // come from the plane itself, or the instance stays unauthenticable for the rest of the session.
 test("heartbeat re-registration after entry loss keeps this instance authenticable", async () => {
 	const got: ExocomMessage[] = [];
@@ -1493,8 +1615,8 @@ test("an unreadable registry fails the sender lookup CLOSED instead of poisoning
 	await receiver.start();
 	await sender.start();
 	try {
-		// A signed NACK, not a destroyed socket — the latter reads as "unreachable" and would make
-		// the sender evict a peer that is merely having a bad moment with its filesystem.
+		// A signed NACK, not a destroyed socket — the latter reads as "unreachable" instead of the
+		// receiver's own verdict on a peer that is merely having a bad moment with its filesystem.
 		await assert.rejects(() => sender.send("pool-deaf", "hi"), /rejected message: authentication failed/);
 		assert.ok(readAll(dir, "h").some((e) => e.session_id === deaf), "the receiver's entry survived the failed send");
 	} finally { await sender.stop(); await receiver.stop(); }

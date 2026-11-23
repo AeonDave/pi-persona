@@ -2,10 +2,7 @@
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-
-function shortHash(value: string, length = 16): string {
-	return createHash("sha256").update(value).digest("hex").slice(0, length);
-}
+import { shortHash } from "../bus/endpoint.ts";
 
 export function workspaceHash(projectRoot: string): string {
 	const resolved = resolve(projectRoot);

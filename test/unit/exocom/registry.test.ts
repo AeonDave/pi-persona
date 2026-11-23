@@ -142,8 +142,8 @@ test("prune does not delete a replacement installed after its initial registry r
 });
 
 // The preserve-from-disk step below only covers the file-STILL-EXISTS case. An entry can be
-// evicted while its instance is very much alive (a peer's transient send error removes it,
-// or a >STALE_AFTER_MS stall lets every peer prune it), and the next heartbeat RE-CREATES the
+// evicted while its instance is very much alive (a >STALE_AFTER_MS stall lets every peer
+// prune it), and the next heartbeat RE-CREATES the
 // file from scratch — with nothing on disk to preserve from. The key exists nowhere but the
 // writing process, so writeEntry remembers the keys IT registered; otherwise a live instance
 // becomes permanently unverifiable (every frame it signs fails verifyFrameOrigin) for the rest of

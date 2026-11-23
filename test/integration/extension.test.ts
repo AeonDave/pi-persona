@@ -8768,7 +8768,6 @@ test("--exocom=<code> joins another workspace while advertising the Pi's real wo
 	const teamCode = allocateJoinCode(agentDir, teamHash);
 	const team = makeMockPi();
 	const corpus = makeMockPi();
-	let rogue: ExocomPlane | undefined;
 	const { ctx: teamCtx } = makeExocomCtx(teamCwd, "cross-team-session");
 	const { ctx: corpusCtx } = makeExocomCtx(corpusCwd, "cross-corpus-session");
 	try {
@@ -8842,43 +8841,7 @@ test("--exocom=<code> joins another workspace while advertising the Pi's real wo
 			ask_id: askId,
 		}, undefined, undefined, teamCtx);
 		assert.match(String(waited.content?.[0]?.text ?? ""), /already answered.*ok=true/i);
-
-		const rogueSession = "cross-rogue-session";
-		rogue = new ExocomPlane({
-			agentDir,
-			hash: teamHash,
-			identity: {
-				session_id: rogueSession,
-				name: "rogue",
-				persona: "external",
-				purpose: "",
-				color: "#36F9F6",
-				model: "m",
-				endpoint: endpointFor(agentDir, teamHash, rogueSession, process.platform),
-				cwd: corpusCwd,
-				workspace: { id: corpusHash, code: external!.workspace_code!, label: "external" },
-			},
-			getCard: () => ({ name: "rogue", persona: "external", model: "m", context_pct: 0, inbox: 0 }),
-			onInbound: () => ({ accepted: true }),
-		});
-		await rogue.start();
-		const teamTarget = rogue.listPeers().find((peer) => peer.session_id === "cross-team-session")?.target;
-		assert.ok(teamTarget);
-		await assert.rejects(
-			() => rogue!.sendSemantic(teamTarget, {
-				kind: "claim",
-				work_key: "forged-foreign-claim",
-				write_set: ["src"],
-				slice: "wrong workspace",
-				from_session: rogueSession,
-				from_name: "rogue",
-				msg_id: randomUUID(),
-				ts: new Date().toISOString(),
-			}),
-			/external-workspace peers cannot claim/i,
-		);
 	} finally {
-		await rogue?.stop();
 		await team.fire("session_shutdown", undefined, teamCtx);
 		await corpus.fire("session_shutdown", undefined, corpusCtx);
 		if (prevExocom === undefined) delete process.env.PI_PERSONA_EXOCOM;

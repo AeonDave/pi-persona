@@ -107,8 +107,8 @@ export function sessionKey(sessionId: string): string {
 
 /** Public keys THIS process has registered, keyed by session_id — the second half of the
  *  key-preservation guarantee. The preserve-from-disk step in `writeEntry` only covers the
- *  file-still-exists case; an entry can be removed while its instance is alive (a peer's transient
- *  send error calls `removeEntryIfMatches`, or a >STALE_AFTER_MS stall lets every peer prune it), and the
+ *  file-still-exists case; an entry can be removed while its instance is alive (a >STALE_AFTER_MS stall lets
+ *  every peer prune it), and the
  *  next heartbeat then RE-CREATES the file with nothing on disk to preserve from. A plane's
  *  ed25519 key exists nowhere but its own process, so a re-registration that dropped it would
  *  leave the live instance permanently unverifiable. Keyed per session_id, so one instance's key
