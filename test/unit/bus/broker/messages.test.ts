@@ -54,8 +54,8 @@ test("isFrame accepts deliver", () => {
 	assert.equal(isFrame({ t: "deliver", from: "a1", fromLabel: "coder", kind: "interview", text: "hi", msgId: "m1", expectsReply: true }), true);
 });
 
-test("isFrame accepts reply", () => {
-	assert.equal(isFrame({ t: "reply", askId: "m1", text: "ok" }), true);
+test("isFrame rejects reply: a child never answers a supervisor ask over the wire", () => {
+	assert.equal(isFrame({ t: "reply", askId: "m1", text: "ok" }), false);
 });
 
 test("isFrame accepts replied", () => {

@@ -10,7 +10,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { EngineAdapterBroker } from "../engine/adapter.ts";
-import { type BrokerHost, startBrokerHost } from "../bus/broker/host.ts";
+import { type BrokerHost, MAX_PENDING_STEERS, startBrokerHost } from "../bus/broker/host.ts";
 import type { InProcessBus } from "../bus/inproc.ts";
 import { RESULT_READ_TIMEOUT_MS, type PreparedResultReader, type ScopedReader } from "../bus/result-reader.ts";
 
@@ -183,6 +183,8 @@ export class SupervisorBroker {
 				if (this.hostRef) return this.hostRef.steer(handle, text);
 				if (this.state() === "failed" || !this.expected.has(handle) || !text.trim()) return false;
 				const queued = this.preHostSteers.get(handle) ?? [];
+				// The host applies the same cap when these are replayed, so refuse here what it would drop there.
+				if (queued.length >= MAX_PENDING_STEERS) return false;
 				queued.push(text);
 				this.preHostSteers.set(handle, queued);
 				return true;

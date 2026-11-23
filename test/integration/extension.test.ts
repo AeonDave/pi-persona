@@ -7133,6 +7133,48 @@ test("an aborted flow PHASE reaches its strategy's own cooperative check, not ju
 	assert.deepEqual(settledMembers, [], "no roster member was dispatched by the aborted phase");
 });
 
+test("a flow name is a bare token: path segments cannot load a *.flow.json outside the flow directories", async () => {
+	const cwd = tempDir("pi-persona-flow-escape-");
+	fs.mkdirSync(path.join(cwd, ".pi", "flows"), { recursive: true });
+	// `.pi/flows/../escape.flow.json` resolves here — outside every flow directory.
+	fs.writeFileSync(path.join(cwd, ".pi", "escape.flow.json"), JSON.stringify({ name: "escape", phases: [{ id: "x", strategy: "fanout", roster: "magi" }] }));
+	// A stem the loader refuses must not be advertised by the catalog either.
+	fs.writeFileSync(path.join(cwd, ".pi", "flows", "a..b.flow.json"), JSON.stringify({ name: "a..b", phases: [{ id: "x", strategy: "fanout", roster: "magi" }] }));
+	let ran = 0;
+	const engine: StrategyEngine = { run: async (spec) => { ran++; return { agent: spec.agent, output: "escaped", usage: emptyUsage(), ok: true }; } };
+	const m = makeMockPi();
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	const flow = m.tool("flow") as { execute: AnyFn };
+	for (const name of ["../escape", "..\\escape", "flows/../../escape"]) {
+		const result = await flow.execute(`escape-${name}`, { name, task: "probe" }, undefined, undefined, ctx);
+		assert.equal(result.isError, true, `${name}: refused`);
+		assert.match(String(result.content?.[0]?.text ?? ""), /^no flow named /, `${name}: reported like an unknown flow`);
+		assert.doesNotMatch(String(result.content?.[0]?.text ?? ""), /a..b/, "the installed-flows hint lists only loadable names");
+	}
+	assert.equal(ran, 0, "no leg of the out-of-tree flow ever ran");
+	await m.fire("session_shutdown", {}, ctx);
+});
+
+test("the tool_call gate refuses a council member granted tools the persona lacks, exactly as it refuses delegate", async () => {
+	const cwd = tempDir("pi-persona-council-escalation-");
+	fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "agents", "reader.md"), "---\nname: reader\npersona: true\ntools:\n  allow: [read, delegate, council]\n---\nRead only.\n");
+	const m = makeMockPi();
+	m.pi.setActiveTools(["read", "bash", "write", "delegate", "council"]);
+	piPersona(m.pi);
+	const { ctx } = makeCtx(cwd);
+	await m.fire("session_start", undefined, ctx);
+	await m.cmd("persona", "reader", ctx);
+	const council = m.fire("tool_call", { toolCallId: "c-1", toolName: "council", input: { question: "q", members: [{ agent: "scout", tools: ["bash", "write"] }] } }, ctx) as { block?: boolean; reason?: string } | undefined;
+	assert.equal(council?.block, true);
+	assert.match(council?.reason ?? "", /cannot grant a council member tools it lacks: bash, write/);
+	assert.equal((m.fire("tool_call", { toolCallId: "d-1", toolName: "delegate", input: { agent: "scout", task: "t", tools: ["bash", "write"] } }, ctx) as { block?: boolean } | undefined)?.block, true);
+	assert.equal(m.fire("tool_call", { toolCallId: "c-2", toolName: "council", input: { question: "q", members: ["scout"] } }, ctx), undefined, "a member that only names an agent is unaffected");
+	await m.fire("session_shutdown", {}, ctx);
+});
+
 // ── the intercom inbox is child-authored text: it must be fenced like every other path ───
 
 test("fenceIntercomOutcome fences the inbox (child-authored) and leaves the other actions alone", () => {

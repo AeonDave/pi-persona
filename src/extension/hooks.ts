@@ -123,8 +123,6 @@ export interface HookHost {
 	runStrategyVisible(ctx: ExtensionContext, orch: OrchestrationGrammar, task: string, label: string): Promise<{ output: string; ok: boolean; error?: string; failureKind?: FailureKind; resultReceipt?: ResultReceipt } | undefined>;
 	personaGrammarError(err: unknown): string;
 	intercomRecipient(input: Record<string, unknown>, askId: string | undefined): string;
-	idleDelivery: unknown;
-	drainBusBlock: () => string;
 	childUsage: { restore(entries: readonly unknown[]): void };
 	publishPersonaCost: () => void;
 }

@@ -2021,11 +2021,18 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		join(personaDataDir(), "flows"),
 		join(cwd, ".pi", "flows"),
 	];
+	// A flow name comes from the model, the operator or a persona file: only a bare file stem may select
+	// a flow, so `..`, separators or a drive prefix can never reach a *.flow.json outside these dirs.
+	// The catalog applies the same rule, so it never lists a name the loader refuses.
+	const isFlowName = (name: string): boolean => name !== "" && !/[\\/:\0]/.test(name) && !name.includes("..");
 	function listFlows(cwd: string): string[] {
 		const names = new Set<string>();
 		for (const dir of flowDirs(cwd)) {
 			try {
-				for (const f of readdirSync(dir)) if (f.endsWith(".flow.json")) names.add(f.replace(/\.flow\.json$/, ""));
+				for (const f of readdirSync(dir)) {
+					const name = f.endsWith(".flow.json") ? f.slice(0, -".flow.json".length) : "";
+					if (isFlowName(name)) names.add(name);
+				}
 			} catch {
 				/* dir absent */
 			}
@@ -2033,6 +2040,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		return [...names].sort();
 	}
 	function loadFlow(cwd: string, name: string): ReturnType<typeof parseFlow> | undefined {
+		if (!isFlowName(name)) return undefined;
 		// Later dirs win (project > user > builtin) — keep the last readable file's content.
 		let found: string | undefined;
 		for (const dir of flowDirs(cwd)) {
@@ -2517,8 +2525,6 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		runStrategyVisible,
 		personaGrammarError,
 		intercomRecipient,
-		idleDelivery,
-		drainBusBlock,
 		childUsage,
 		publishPersonaCost,
 	};

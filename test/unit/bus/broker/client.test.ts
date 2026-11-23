@@ -461,20 +461,6 @@ test("onSteer dispatches inbound steer frames", async () => {
 	}
 });
 
-test("reply writes a reply frame carrying the askId", async () => {
-	const { client, host } = await connectedClient();
-	try {
-		client.reply("m1", "go right");
-		await waitFor(() => host.frames.some((f) => f.t === "reply"));
-		const replyFrame = host.frames.find((f) => f.t === "reply");
-		assert.ok(replyFrame && replyFrame.t === "reply");
-		assert.equal(replyFrame.askId, "m1");
-		assert.equal(replyFrame.text, "go right");
-	} finally {
-		client.close();
-	}
-});
-
 test("list resolves with the peers frame's roster", async () => {
 	const { client, host } = await connectedClient();
 	try {

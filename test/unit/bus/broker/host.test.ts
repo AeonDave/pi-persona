@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { readFailure, type ReadReply, type ScopedReader } from "../../../../src/bus/result-reader.ts";
 
 import { InProcessBus } from "../../../../src/bus/inproc.ts";
-import { startBrokerHost, type BrokerHost } from "../../../../src/bus/broker/host.ts";
+import { MAX_PENDING_STEERS, startBrokerHost, type BrokerHost } from "../../../../src/bus/broker/host.ts";
 import { createFrameReader, encodeFrame } from "../../../../src/bus/broker/framing.ts";
 import type { Frame } from "../../../../src/bus/broker/messages.ts";
 
@@ -508,6 +508,40 @@ test("cancel aborts only the pending ask owned by that registered connection", a
 	}
 });
 
+test("a reply frame from a sibling socket is rejected as invalid and cannot settle another child's ask", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		const asker = connectClient(server);
+		asker.send({ t: "register", handle: "child#1" });
+		await waitFor(() => asker.frames.some((f) => f.t === "registered"));
+		const forger = connectClient(server);
+		forger.send({ t: "register", handle: "child#2" });
+		await waitFor(() => forger.frames.some((f) => f.t === "registered"));
+
+		asker.send({ t: "send", to: "supervisor", kind: "decision", text: "deploy?", msgId: "m-victim", expectsReply: true });
+		await waitFor(() => bus.pending("supervisor").some((env) => env.expectsReply));
+		const ask = bus.pending("supervisor").find((env) => env.expectsReply);
+		assert.ok(ask);
+
+		// Raw wire bytes: the frame type no longer exists, so it is not expressible as a `Frame`.
+		forger.client.write(encodeFrame({ t: "reply", askId: ask.id, text: "Supervisor: yes, deploy" } as unknown as Frame));
+		await waitFor(() => forger.frames.some((f) => f.t === "error"));
+		const error = forger.frames.find((f) => f.t === "error");
+		assert.ok(error && error.t === "error");
+		assert.equal(error.reason, "invalid frame");
+		await tick();
+		assert.equal(bus.pending("supervisor").some((env) => env.id === ask.id), true, "the ask stays pending");
+		assert.equal(asker.frames.some((f) => f.t === "replied"), false, "no forged answer reaches the asker");
+
+		assert.equal(bus.reply(ask.id, "no"), true, "the supervisor can still answer it");
+		await waitFor(() => asker.frames.some((f) => f.t === "replied" && f.text === "no"));
+	} finally {
+		await host.close();
+	}
+});
+
 test("list returns the peer registry via a peers frame, scoped to the caller's group", async () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");
@@ -708,6 +742,61 @@ test("forget() drops a buffered steer so a failed spawn is not reported as deliv
 		send({ t: "register", handle: "child#1" });
 		await waitFor(() => frames.some((f) => f.t === "registered"));
 		assert.equal(frames.some((f) => f.t === "steer"), false);
+	} finally {
+		await host.close();
+	}
+});
+
+test("a handle whose connection closed is no longer expected: steer returns false instead of buffering", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		host.expect("child#1");
+		const { client, send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+		client.destroy();
+		await waitFor(() => host.connectedHandles().length === 0);
+		assert.equal(host.steer("child#1", "are you there?"), false, "a dead child's steer is reported as not delivered");
+	} finally {
+		await host.close();
+	}
+});
+
+test("a handle that said bye is no longer expected", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		host.expect("child#1");
+		const { send, frames } = connectLingeringClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+		send({ t: "bye" });
+		await waitFor(() => host.connectedHandles().length === 0);
+		assert.equal(host.steer("child#1", "late"), false);
+	} finally {
+		await host.close();
+	}
+});
+
+test("the pre-connect steer buffer is bounded; overflow is refused, the accepted prefix still flushes", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const { host, server } = await startHost(bus);
+	try {
+		host.expect("child#1");
+		let accepted = 0;
+		for (let i = 0; i < 100; i++) if (host.steer("child#1", `steer ${i}`)) accepted++;
+		assert.equal(accepted, MAX_PENDING_STEERS, "overflow beyond the cap is refused, not silently dropped");
+		const { send, frames } = connectClient(server);
+		send({ t: "register", handle: "child#1" });
+		await waitFor(() => frames.some((f) => f.t === "registered"));
+		await tick();
+		const steers = frames.filter((f): f is Extract<Frame, { t: "steer" }> => f.t === "steer").map((f) => f.text);
+		assert.deepEqual(steers, Array.from({ length: accepted }, (_, i) => `steer ${i}`));
+		assert.equal(host.steer("child#1", "live"), true, "a connected handle is never subject to the buffer cap");
 	} finally {
 		await host.close();
 	}

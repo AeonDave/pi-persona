@@ -4,8 +4,7 @@
  * and exposes the same shape a local `contact_supervisor`/`contact_peer` binding needs —
  * `send` (one-way with a bounded host-admission receipt), `ask` (a blocking `send{expectsReply}` correlated to a
  * `replied{askId}`, 10-minute cap, mirrors `bus.ask`, and sends `cancel{msgId}` when
- * aborted), `reply` (answers a host-issued
- * blocking `deliver`), `list` (the engine-scoped peer roster, B7), and `onDeliver`/`onSteer`
+ * aborted), `list` (the engine-scoped peer roster, B7), and `onDeliver`/`onSteer`
  * for inbound frames. The bridge (`src/bridge.ts`) wires these onto Pi tools; this
  * module has no Pi imports.
  *
@@ -49,8 +48,6 @@ export interface BrokerClient {
 	/** Blocking request; resolves on a matching `replied`, rejects on `signal` abort or the
 	 *  10-minute cap (mirrors `bus.ask`'s default). */
 	ask(to: string, kind: MsgKind, text: string, signal?: AbortSignal): Promise<string>;
-	/** Answers a host-issued blocking `deliver` (the supervisor asked THIS child). */
-	reply(askId: string, text: string): void;
 	list(): Promise<Array<{ handle: string; label: string }>>;
 	onDeliver(cb: (evt: DeliverEvent) => void): void;
 	onSteer(cb: (text: string) => void): void;
@@ -182,7 +179,7 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 				return;
 			}
 			default:
-				return; // register/send/reply/list/bye are client→host-only; ignore if echoed
+				return; // register/send/list/bye are client→host-only; ignore if echoed
 		}
 	}
 
@@ -430,10 +427,6 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		});
 	}
 
-	function reply(askId: string, text: string): void {
-		write({ t: "reply", askId, text });
-	}
-
 	function list(): Promise<Array<{ handle: string; label: string }>> {
 		if (closed || disconnected) return Promise.reject(new Error(unavailableReason()));
 		const reqId = randomUUID();
@@ -492,5 +485,5 @@ export function makeBrokerClient(deps: MakeBrokerClientDeps): BrokerClient {
 		rejectAllPending("broker client closed");
 	}
 
-	return { register, read, send, ask, reply, list, onDeliver, onSteer, onClose, close };
+	return { register, read, send, ask, list, onDeliver, onSteer, onClose, close };
 }

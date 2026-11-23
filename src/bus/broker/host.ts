@@ -11,15 +11,15 @@
  * `bus.send`, or — when `expectsReply` — `bus.ask` run ON BEHALF of the remote sender (the
  * bus mints its own ask id; the host correlates it back to the client's `msgId` via the
  * settled promise, so an eventual `bus.reply`/local answer produces a `replied` frame);
- * `cancel` aborts only the ask owned by that same socket; `reply` answers a pending ask via
- * `bus.reply`; `list` answers a `peers` frame scoped to
+ * `cancel` aborts only the ask owned by that same socket; `list` answers a `peers` frame scoped to
  * the caller's own registered group (B7); `bye`/socket close proxies `bus.unregister`.
+ * There is deliberately no client `reply` frame: asks flow child → supervisor only and the
+ * supervisor answers locally, so a wire answer could only forge a reply to a sibling's ask.
  *
  * Outbound (bus → client): one `bus.onMessage` subscription drains (`bus.takeWhere`,
  * mirroring the in-process delivery bridge in `engine/inproc.ts`) any envelope addressed
  * to a connected remote handle — both kinds, since the host is that handle's ONLY
- * consumer — and forwards it as a `deliver` frame (a blocking ask included: the remote
- * side answers with a `reply` frame, resolved via the same `bus.reply` path above).
+ * consumer — and forwards it as a `deliver` frame.
  *
  * The supervisor is always the sole host (spec B1). Cross-process safety uses POSIX stale-socket reclaim
  * before `listen` (unlink only a socket that is provably not connectable), a permanent
@@ -49,9 +49,10 @@ export interface BrokerHost {
 	 *  live voice, NOT a bus envelope (it bypasses `bus.send`/the outbound drain entirely, so
 	 *  it can't be mistaken for a peer/child message on the wire). Returns false (a harmless
 	 *  no-op, mirrors `InProcessBus.reply`'s unknown-id return) when the handle is not
-	 *  currently connected AND was never `expect()`ed — e.g. a typo, or already forgotten.
-	 *  A handle `expect()`ed during spawn-before-connect buffers the steer and still returns
-	 *  true; the buffer flushes when the child registers. */
+	 *  currently connected AND is not `expect()`ed — e.g. a typo, already forgotten, or a
+	 *  child whose connection closed (it never reconnects). A handle `expect()`ed during
+	 *  spawn-before-connect buffers the steer and still returns true, up to
+	 *  `MAX_PENDING_STEERS` (then false); the buffer flushes when the child registers. */
 	steer(handle: string, text: string): boolean;
 	/** Mark `handle` as a child that is about to connect (adapter pre-register). A steer
 	 *  to an expected-but-not-yet-connected handle is buffered rather than reported as lost. */
@@ -74,6 +75,8 @@ export interface StartBrokerHostDeps {
 }
 
 const STALE_PROBE_TIMEOUT_MS = 1000;
+/** Per-handle cap on steers buffered while a spawned child has not registered yet. */
+export const MAX_PENDING_STEERS = 16;
 
 /** Probe a POSIX socket path: is something actually listening there? */
 function isConnectable(netImpl: typeof import("node:net"), endpoint: string): Promise<boolean> {
@@ -206,6 +209,10 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 
 	function unregisterConnection(handle: string): void {
 		if (!connections.delete(handle)) return;
+		// Handles are minted per spawn and a client never reconnects, so a departed child is
+		// gone for good: a later steer must report undelivered instead of buffering forever.
+		expected.delete(handle);
+		pendingSteer.delete(handle);
 		peerRegistry.delete(handle);
 		bus.unregister(handle);
 	}
@@ -412,10 +419,6 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					pendingAsks.get(frame.msgId)?.abort();
 					return;
 				}
-				case "reply": {
-					bus.reply(frame.askId, frame.text);
-					return;
-				}
 				case "list": {
 					const self = handle ?? "";
 					const g = group ?? "";
@@ -477,6 +480,7 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			}
 			if (!expected.has(handle) || !text.trim()) return false;
 			const queued = pendingSteer.get(handle) ?? [];
+			if (queued.length >= MAX_PENDING_STEERS) return false;
 			queued.push(text);
 			pendingSteer.set(handle, queued);
 			return true;

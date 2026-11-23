@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import type { BrokerHost } from "../../../src/bus/broker/host.ts";
+import { MAX_PENDING_STEERS, type BrokerHost } from "../../../src/bus/broker/host.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
 import { SupervisorBroker } from "../../../src/extension/broker-host.ts";
 import { readFailure, type ScopedReader } from "../../../src/bus/result-reader.ts";
@@ -154,6 +154,22 @@ test("steers queued before the host is up are flushed on start and refused once 
 	release(host);
 	await settle();
 	assert.deepEqual(steers, [["child#1", "go left"]]);
+});
+
+test("steers buffered before the host is up obey the host's cap instead of being accepted and then dropped", async () => {
+	let release!: (h: BrokerHost) => void;
+	const pending = new Promise<BrokerHost>((r) => { release = r; });
+	const { host, steers } = fakeHost("/x");
+	const { broker } = make(() => pending);
+	const deps = broker.adapterDeps("/x");
+	assert.ok(deps);
+	deps.register({ handle: "child#1" });
+	const accepted = Array.from({ length: MAX_PENDING_STEERS + 4 }, (_, i) => deps.steerFrame("child#1", `steer ${i}`));
+	assert.equal(accepted.filter(Boolean).length, MAX_PENDING_STEERS, "only what the host will deliver is reported as accepted");
+	assert.deepEqual(accepted.slice(MAX_PENDING_STEERS), [false, false, false, false]);
+	release(host);
+	await settle();
+	assert.equal(steers.length, MAX_PENDING_STEERS, "every accepted steer is replayed");
 });
 
 test("a start that fails after steers were buffered says how many were dropped", async () => {

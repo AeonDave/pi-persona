@@ -86,7 +86,6 @@ function makeFakeClient(opts: {
 			return true;
 		},
 		ask: async () => "supervisor answer",
-		reply: () => {},
 		list: opts.list ?? (async () => []),
 		onDeliver: (cb) => {
 			deliverCbs.push(cb);

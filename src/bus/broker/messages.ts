@@ -28,7 +28,6 @@ export type Frame =
 	| { t: "sent"; msgId: string; delivered: boolean }
 	| { t: "cancel"; msgId: string }
 	| { t: "deliver"; from: string; fromLabel?: string; kind: MsgKind; text: string; msgId: string; expectsReply: boolean }
-	| { t: "reply"; askId: string; text: string }
 	| { t: "replied"; askId: string; text: string }
 	| { t: "steer"; text: string }
 	| { t: "list"; reqId: string }
@@ -94,8 +93,6 @@ export function isFrame(value: unknown): value is Frame {
 				typeof value.expectsReply === "boolean"
 			);
 		}
-		case "reply":
-			return typeof value.askId === "string" && typeof value.text === "string";
 		case "replied":
 			return typeof value.askId === "string" && typeof value.text === "string";
 		case "steer":

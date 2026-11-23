@@ -62,6 +62,25 @@ test("gateToolCall blocks a delegate that grants a sub-agent tools beyond the pe
 	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout", tools: ["read"] }), undefined, "an allowed tool is fine");
 });
 
+test("gateToolCall blocks a council whose inline members or aux actors grant tools beyond the persona's (I4 escalation)", () => {
+	const caps = resolveCapabilities({
+		allToolNames: ["read", "write", "bash", "delegate", "council"],
+		knownAgents: KNOWN,
+		permissions: { tools: { allow: ["read", "delegate", "council"] } },
+	});
+	const member = gateToolCall(caps, "R", "council", { question: "q", members: ["scout", { agent: "scout", tools: ["bash", "write"] }] });
+	assert.equal(member?.block, true, "an inline member cannot carry tools the persona lacks");
+	assert.match(member?.reason ?? "", /Persona "R" cannot grant a council member tools it lacks: bash, write\./);
+	const aux = gateToolCall(caps, "R", "council", { question: "q", strategy: "judge", params: { judge: { agent: "scout", tools: ["bash"] } } });
+	assert.equal(aux?.block, true, "an inline aux actor param (judge/critic/synthesizer/…) is a leg too");
+	assert.match(aux?.reason ?? "", /cannot grant a council member tools it lacks: bash\./);
+	// The same request through delegate is refused too: one rule, both paths.
+	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout", tools: ["bash", "write"] })?.block, true);
+	// Members that only name an agent, or grant tools the persona holds, are unaffected.
+	assert.equal(gateToolCall(caps, "R", "council", { question: "q", members: ["scout", { agent: "ghost", role: "SECURITY" }] }), undefined);
+	assert.equal(gateToolCall(caps, "R", "council", { question: "q", members: [{ agent: "scout", tools: ["read"] }], params: { judge: "scout", rounds: 2 } }), undefined);
+});
+
 test("a tools-restricted persona still keeps delegate (delegation is preserved unless explicitly denied)", () => {
 	const caps = capsFor(p("name: r\npersona: true\ntools:\n  allow: [read]"));
 	assert.equal(gateToolCall(caps, "R", "delegate", { agent: "scout" }), undefined, "delegate survives a tools allowlist");

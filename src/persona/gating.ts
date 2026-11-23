@@ -40,6 +40,24 @@ export function extractDelegateTools(input: unknown): string[] {
 	return [...new Set(out)];
 }
 
+/** The tool grants a council call requests for its legs: inline `members[].tools`, and any
+ *  inline actor param carrying `tools` (`params.judge`, `params.critic`, … — every strategy
+ *  parses those as a roster member, so scanning all params cannot miss a newly added one). */
+export function extractCouncilTools(input: unknown): string[] {
+	const out: string[] = [];
+	const collect = (o: unknown): void => {
+		if (!o || typeof o !== "object" || Array.isArray(o)) return;
+		const tools = (o as Record<string, unknown>).tools;
+		if (Array.isArray(tools)) for (const t of tools) if (typeof t === "string") out.push(t);
+	};
+	if (input && typeof input === "object") {
+		const o = input as Record<string, unknown>;
+		if (Array.isArray(o.members)) for (const m of o.members) collect(m);
+		if (o.params && typeof o.params === "object") for (const v of Object.values(o.params)) collect(v);
+	}
+	return [...new Set(out)];
+}
+
 export interface GateResult {
 	block: true;
 	reason: string;
@@ -55,6 +73,13 @@ export function gateToolCall(
 ): GateResult | undefined {
 	if (!canCallTool(caps, toolName)) {
 		return { block: true, reason: `Persona "${personaLabel}" may not use tool: ${toolName}.` };
+	}
+	if (toolName === "council") {
+		// I4 for council: an inline member/actor is a sub-agent leg, so the same escalation rule applies.
+		const escalated = extractCouncilTools(input).filter((t) => !canCallTool(caps, t));
+		return escalated.length > 0
+			? { block: true, reason: `Persona "${personaLabel}" cannot grant a council member tools it lacks: ${escalated.join(", ")}.` }
+			: undefined;
 	}
 	if (toolName !== delegateTool) return undefined;
 
