@@ -16,6 +16,8 @@ import { findStoredRuns, highestIssuedRun, makeRunsEntry, restoreNotice, RUNS_EN
 import { buildSessionAnchor } from "../core/time.ts";
 import { readClockSnapshot } from "./clock.ts";
 import { type AsyncRun, type AsyncRunTracker, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
+import { settleLegGuard } from "../engine/inproc.ts";
+import { drainEngineRuns } from "./engine.ts";
 import { constrainedTurnAllows } from "../exocom/gate.ts";
 import type { LedgerClaim } from "../exocom/ledger.ts";
 import type { DisplayPeer } from "../exocom/plane.ts";
@@ -46,6 +48,10 @@ import type { ExocomInstall } from "../exocom/install.ts";
 import type { SessionIdentity } from "./identity.ts";
 import type { SessionResults } from "./results.ts";
 import { resultReceiptHint, type ResultReceipt } from "../results/retrieval.ts";
+
+/** How long session shutdown waits, in total, for its workers to stop: above the child engine's
+ *  kill grace (5000 ms) plus its last-resort kill (5000 ms), and the in-process shutdown handshake. */
+export const SHUTDOWN_DRAIN_MS = 12_000;
 
 type MandatoryOutcome = { label: string; output: string; ok: boolean; error?: string; failureKind?: FailureKind; resultReceipt?: ResultReceipt };
 
@@ -83,7 +89,7 @@ export interface HookHost {
 	/** Refuses an unchanged repeat of an intercom peek/result; absent when the nudge kill switch is off. */
 	pollGuard: PollGuard | undefined;
 	/** The async-run tracker: what is still running, and the run-id counter a restore continues. */
-	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom" | "forceSettle">;
+	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom" | "forceSettle" | "drain">;
 	appendNudgeEntry(content: string): void;
 	completionNotifier: IdleCoalescingNotifier<AsyncRun>;
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
@@ -97,6 +103,8 @@ export interface HookHost {
 	stopRequested: Set<string>;
 	steerRegistry: Map<string, unknown>;
 	broker: { close(): Promise<void> };
+	/** The total shutdown wait; {@link SHUTDOWN_DRAIN_MS} when absent (tests inject a short one). */
+	shutdownDrainMs?: number;
 	get spineText(): string;
 	delegationBrief(ctx: ExtensionContext): string | undefined;
 	get agents(): AgentConfig[];
@@ -312,7 +320,6 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.lastCtx = ctx;
 		recordLostWork(ctx); // before the notifiers/timers/runs below are torn down
 		h.disposed = true; // gate any late async-run onComplete from touching the next session's instance
-		h.results.dispose(); // revoke frozen owners before cancellation can settle old runs
 		h.deferredOrchestrations.length = 0;
 		h.pendingOrchestration = undefined;
 		h.stopPeek(); // h.reload-hygiene: never leak the idle-peek timer across sessions
@@ -324,8 +331,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		h.timerNotifier.cancel();
 		h.monitors.cancelAll();
 		h.scripts.cancelAll();
-		// This instance is being torn down (a h.reload/new/resume rebinds a fresh one); abort in-flight
-		// sub-h.agents and reset control state so nothing is left orphaned or rendered stale.
+		// This instance is being torn down (a reload/new/resume rebinds a fresh one); abort in-flight
+		// sub-agents and reset control state so nothing is left orphaned or rendered stale.
 		for (const abort of [...h.stopRegistry.values()]) {
 			try {
 				abort();
@@ -333,6 +340,16 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				/* ignore */
 			}
 		}
+		// A reload stops everything: the next activation, and the companions loaded with it, read the
+		// process environment at factory time. ONE deadline bounds every wait: tracked runs settling
+		// with their own result (stopped status, worktree recovery, archive receipt), every engine run
+		// including the untracked /orchestrate, /flow and mandated roots, and the in-process leg-guard
+		// holds this extension-factory instance's cancelled session factories may still keep, forced at
+		// the deadline.
+		const deadline = Date.now() + (h.shutdownDrainMs ?? SHUTDOWN_DRAIN_MS);
+		await Promise.all([h.tracker.drain(deadline), drainEngineRuns(h.controller, deadline)]);
+		await settleLegGuard(h.controller, deadline);
+		h.results.dispose(); // revoke frozen owners before forced settlement can archive a run
 		// Closing this activation must settle its tracker entries before another activation can
 		// accept notifications. A late engine result is then discarded by the tracker itself.
 		for (const run of h.tracker.running()) h.tracker.forceSettle(run.id, "session ended");
@@ -346,8 +363,8 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		// and register an entry for a session that no longer exists. Idempotent either way — off
 		// (or never started) ⇒ a no-op.
 		await exocom.queue(() => exocom.stop(event?.reason === "reload" ? ctx : undefined));
-		// Broker teardown (spec B1/B5): idempotent — a session that never built a broker-backed
-		// child engine (flag off, or on but unused) never started a host, so this is a no-op.
+		// Broker teardown (spec B1/B5), after the drain so a dying child keeps its pipe until it exits.
+		// Idempotent — a session that never built a broker-backed child engine never started a host.
 		// `SupervisorBroker.close()` is itself best-effort (never blocks shutdown on a teardown error).
 		await h.broker.close();
 		await h.telemetry?.stop(event?.reason);

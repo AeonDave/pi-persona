@@ -19,6 +19,7 @@ import { captureWorktreeArtifact, defaultGitExec, describeWorktreeRecovery, type
 import { verifyConversationWorktree } from "../engine/conversation-worktree.ts";
 import { formatWorktreeRecovery, WORKTREE_CAPTURE_WARNING } from "../core/worktree-recovery.ts";
 import { type InProcessDeps, makeInProcessEngine } from "../engine/inproc.ts";
+import { drainUntil } from "../engine/async.ts";
 import { emptyUsage, type ProgressSnapshot } from "../engine/stream.ts";
 import type { AgentRunSpec, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -80,6 +81,28 @@ export type BuildEngine = (
 		canUseBus?: false;
 	},
 ) => StrategyEngine;
+
+/** Every engine run an extension-factory instance has in flight, tracked or not (delegate, council,
+ *  flow, Mind worker, `/orchestrate`, `/flow`, mandated orchestration). Keyed by its PersonaController:
+ *  the one per-extension-factory-instance object both this builder and the shutdown hook already hold,
+ *  so concurrent factory instances in one process never wait on each other's runs. */
+const inFlightRuns = new WeakMap<PersonaController, Set<Promise<unknown>>>();
+
+/** Wait until every engine run built for `activation` has settled, or until the absolute `deadline`
+ *  (epoch ms). True when none is left; false at the deadline. */
+export function drainEngineRuns(activation: PersonaController, deadline: number): Promise<boolean> {
+	return drainUntil(inFlightRuns.get(activation) ?? new Set(), deadline);
+}
+
+function trackRun<T>(activation: PersonaController, run: Promise<T>): Promise<T> {
+	let runs = inFlightRuns.get(activation);
+	if (!runs) inFlightRuns.set(activation, runs = new Set());
+	const live = runs;
+	live.add(run);
+	const done = (): void => { live.delete(run); };
+	run.then(done, done);
+	return run;
+}
 
 export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 	return (signal, onProgress, engOpts) => {
@@ -169,7 +192,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 			let base: StrategyEngine;
 			if (config.engine === "inproc" && lastCtx) {
 				if (process.env.PI_PERSONA_DEBUG) process.stderr.write("[pi-persona] engine=inproc\n");
-				const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir(), memoryPersona: persona ?? null };
+				const ideps: InProcessDeps = { resolveAgent, contracts, modelFor, childThinking, modelRegistry: lastCtx.modelRegistry, cwd: lastCtx.cwd, agentDir: userAgentDir(), memoryPersona: persona ?? null, legGuardOwner: controller };
 				ideps.listAgents = () => agents.map((a) => a.name);
 				ideps.listContracts = contractNames;
 				if (legSpine) ideps.spine = legSpine; // legs get the worker variant (docs/SPINE.md)
@@ -262,7 +285,7 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 				const block = renderChangeReport(diffStatus(before, after), spec.writeSet);
 				return block ? appendBlock(result, block) : result;
 			};
-			return wrapFallback({
+			const engine = wrapFallback({
 				async run(spec, perProgress, perSignal, perSteer) {
 					const beforeStart = (result: AgentResult): AgentResult => spec.session ? { ...result, sessionSaved: false, sessionQuiescent: true } : result;
 					const iso = spec.isolation ?? resolveAgent(spec.agent)?.isolation;
@@ -394,6 +417,8 @@ export function createBuildEngine(d: () => BuildEngineDeps): BuildEngine {
 					return withChangeReport(() => base.run(spec, perProgress, perSignal, perSteer), spec);
 				},
 			});
+			// The outermost run, so a provider-fallback retry stays one in-flight unit.
+			return { run: (spec, progress, runSignal, steer) => trackRun(controller, engine.run(spec, progress, runSignal, steer)) };
 	};
 
 	function isolatedWorktreeFailure(spec: AgentRunSpec, error: string): AgentResult {

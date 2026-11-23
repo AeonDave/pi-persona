@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { participantKey } from "../../../src/persona/model-participants.ts";
 import { snapshotStrategyModels, strategyLegMetadata } from "../../../src/ui/strategy-leg.ts";
+import type { ThinkingLevel } from "../../../src/core/types.ts";
 import { emptyUsage } from "../../../src/engine/stream.ts";
 
 test("live metadata uses exact roles, inline occurrences and immutable model assignments", () => {
@@ -18,7 +19,7 @@ test("live metadata uses exact roles, inline occurrences and immutable model ass
 });
 
 test("a running leg shows the effort its engine will request: explicit > agent default > child default", () => {
-	const agents = [{ name: "reviewer", thinking: "low" as const }, { name: "scout" }];
+	const agents: Array<{ name: string; thinking?: ThinkingLevel }> = [{ name: "reviewer", thinking: "low" }, { name: "scout" }];
 	const selection = snapshotStrategyModels({ agents, childThinking: "medium" });
 	agents[0]!.thinking = "max" as never;
 	assert.equal(strategyLegMetadata({ agent: "reviewer", thinking: "xhigh" }, selection).thinking, "xhigh");

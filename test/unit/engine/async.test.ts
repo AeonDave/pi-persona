@@ -717,6 +717,38 @@ test("forceSettle stops a still-running ghost (fires onComplete once, leaves the
 	assert.equal(tracker.peek(id)?.status, "stopped", "the late natural result does not overwrite the forced stop");
 });
 
+test("drain waits for in-flight runs to settle naturally and keeps their own results", async () => {
+	const tracker = new AsyncRunTracker();
+	let release: () => void = () => {};
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	const worktreeRecovery = { path: "/tmp/wt", baseCommit: "abc123", reason: "aborted" };
+	const id = tracker.launch({ agent: "a", task: "t" }, async () => {
+		await gate;
+		return { agent: "a", output: "partial", usage: usage(), ok: false, error: "agent aborted", failureKind: "abort", worktreeRecovery } as AgentResult;
+	});
+	const drained = tracker.drain(Date.now() + 5_000);
+	setTimeout(release, 20);
+	assert.equal(await drained, true, "every in-flight run settled before the deadline");
+	assert.equal(tracker.peek(id)?.status, "stopped");
+	assert.equal(tracker.peek(id)?.error, "agent aborted", "the natural result, not a forced one");
+	assert.deepEqual(tracker.peek(id)?.result?.worktreeRecovery, worktreeRecovery, "recovery metadata survives");
+	assert.equal(tracker.forceSettle(id, "session ended"), false, "nothing is left for forceSettle");
+	assert.equal(await tracker.drain(Date.now()), true, "an idle tracker drains at once, even at its deadline");
+});
+
+test("drain gives up at its deadline and leaves the straggler for forceSettle", async () => {
+	const tracker = new AsyncRunTracker();
+	const id = tracker.launch({ agent: "a", task: "t" }, () => new Promise<AgentResult>(() => {}));
+	const started = Date.now();
+	assert.equal(await tracker.drain(started + 30), false);
+	assert.ok(Date.now() - started >= 25, "it waited until the deadline");
+	assert.equal(tracker.peek(id)?.status, "running", "drain never settles a run itself");
+	assert.equal(tracker.forceSettle(id, "session ended"), true);
+	assert.equal(tracker.peek(id)?.error, "session ended");
+});
+
 test("tracker classifies an engine abort result as stopped, not failed", async () => {
 	const tracker = new AsyncRunTracker();
 	const id = tracker.launch({ agent: "a", task: "t" }, async () => ({

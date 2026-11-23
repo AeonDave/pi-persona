@@ -8,7 +8,8 @@
  * Fork-bomb guard: the sub-session must NOT re-activate pi-persona (which would give
  * the child the `delegate`/`council` tools + turn interception → recursion). We set
  * `PI_PERSONA_DISABLE` for the duration of session creation (the same flag the child
- * path passes via env) and exclude the orchestration tools defensively.
+ * path passes via env) and exclude the orchestration tools defensively. Session shutdown
+ * bounds that window with `settleLegGuard`, so it never outlives its activation.
  *
  * The session factory is injectable (`deps.createSession`) — exactly like the child
  * engine's `resolveInvocation` — so the whole path is deterministically testable with
@@ -183,6 +184,10 @@ export interface InProcessDeps {
 	 *  `read_result` tool pages THIS archive, after a zero-usage preflight verified every
 	 *  granted ref is durably stored. Absent ⇒ such legs fail closed before the session factory. */
 	resultArchive?: () => ResultArchiveView | undefined;
+	/** The extension-factory instance (its PersonaController) this engine is built for: tags its
+	 *  leg-guard holds so that instance's shutdown (`settleLegGuard`) forces only its own. Absent ⇒ a
+	 *  private per-engine owner. */
+	legGuardOwner?: object;
 }
 
 // The sub-agent must never re-enter the supervisor's orchestration surface. This is the SECOND
@@ -266,15 +271,7 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
 	};
 	const { session } = await createAgentSession(sessionOptions);
-	if (opts.signal?.aborted) {
-		try {
-			session.dispose();
-		} catch {
-			// The initialization cancellation result still owns the lifecycle if disposal throws.
-		}
-		throw new DOMException("Session initialization aborted", "AbortError");
-	}
-	return {
+	const worker: InProcSession = {
 		get thinkingLevel() {
 			const level: unknown = session.thinkingLevel;
 			return isThinkingLevel(level) ? level : undefined;
@@ -298,6 +295,11 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		},
 		dispose: () => session.dispose(),
 	};
+	if (opts.signal?.aborted) {
+		await retireSession(worker);
+		throw new DOMException("Session initialization aborted", "AbortError");
+	}
+	return worker;
 };
 
 /** Resolve a model ref (`provider/id`, or a bare id) to a registry Model. */
@@ -320,24 +322,35 @@ function resolveModel(reg: ModelRegistry, ref: string | undefined): unknown {
 // PI_PERSONA_DISABLE alone is ambiguous — a user can set it as a kill switch — so a companion
 // extension (e.g. pi-persona-mind) cannot tell a real leg from a disabled supervisor by DISABLE
 // alone. LEG is set ONLY here (and in the child engine), never by a user, so it names a leg exactly.
-let disableDepth = 0;
+//
+// Each hold is tagged with the extension-factory instance that owns it. The guard is process-global
+// while shutdown is per instance, so `settleLegGuard` forces only its own instance's holds: another
+// live instance's loading factory keeps the markers. A dropped hold's late pop is a no-op instead of
+// restoring, or deleting, an environment that the next activation now owns.
+interface GuardHold { readonly owner: object }
+const guardHolds = new Set<GuardHold>();
 let savedDisable: string | undefined;
 let savedLeg: string | undefined;
 let savedCodeOutline: string | undefined;
-function pushDisableGuard(): void {
-	if (disableDepth === 0) {
+const guardWaiters = new Set<() => void>();
+function pushDisableGuard(owner: object): GuardHold {
+	if (guardHolds.size === 0) {
 		savedDisable = process.env.PI_PERSONA_DISABLE;
 		savedLeg = process.env.PI_PERSONA_LEG;
 		savedCodeOutline = process.env.PI_PERSONA_CODE_OUTLINE;
 	}
-	disableDepth += 1;
+	const hold: GuardHold = { owner };
+	guardHolds.add(hold);
 	process.env.PI_PERSONA_DISABLE = "1";
 	process.env.PI_PERSONA_LEG = "1";
 	delete process.env.PI_PERSONA_CODE_OUTLINE;
+	return hold;
 }
-function popDisableGuard(): void {
-	disableDepth -= 1;
-	if (disableDepth === 0) {
+function popDisableGuard(hold: GuardHold): void {
+	if (guardHolds.delete(hold)) guardHoldsChanged();
+}
+function guardHoldsChanged(): void {
+	if (guardHolds.size === 0) {
 		if (savedDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
 		else process.env.PI_PERSONA_DISABLE = savedDisable;
 		if (savedLeg === undefined) delete process.env.PI_PERSONA_LEG;
@@ -345,12 +358,75 @@ function popDisableGuard(): void {
 		if (savedCodeOutline === undefined) delete process.env.PI_PERSONA_CODE_OUTLINE;
 		else process.env.PI_PERSONA_CODE_OUTLINE = savedCodeOutline;
 	}
+	for (const check of [...guardWaiters]) check();
+}
+function ownsGuardHold(owner: object): boolean {
+	for (const hold of guardHolds) if (hold.owner === owner) return true;
+	return false;
+}
+
+/** Wait until no in-process session factory built for `owner` (the extension-factory instance)
+ *  holds the leg guard, or until the absolute `deadline` (epoch ms). At the deadline only `owner`'s
+ *  holds are dropped, and the saved environment is restored only when no hold of any owner remains.
+ *
+ *  The forced release leaves a gap: a factory forced while Pi's loader is still running can load its
+ *  remaining extensions without the leg markers. Its run was cancelled, so the factory throws before
+ *  a session exists; those extensions never bind to a session and receive no `session_shutdown`. */
+export function settleLegGuard(owner: object, deadline: number): Promise<void> {
+	if (!ownsGuardHold(owner)) return Promise.resolve();
+	return new Promise<void>((resolve) => {
+		const timer = setTimeout(() => {
+			for (const hold of [...guardHolds]) if (hold.owner === owner) guardHolds.delete(hold);
+			guardHoldsChanged();
+		}, Math.max(0, deadline - Date.now()));
+		const check = (): void => {
+			if (ownsGuardHold(owner)) return;
+			clearTimeout(timer);
+			guardWaiters.delete(check);
+			resolve();
+		};
+		guardWaiters.add(check);
+	});
+}
+
+/** Bound on the worker-session shutdown handshake that proves no late transcript write can follow. */
+export const SHUTDOWN_PROOF_MS = 5000;
+
+/** The bounded shutdown handshake (abort + `session_shutdown` to the session's own extensions).
+ *  True only when it completed within {@link SHUTDOWN_PROOF_MS}; never throws. */
+async function shutdownWithin(session: InProcSession): Promise<boolean> {
+	const shutdown = session.shutdown?.bind(session);
+	if (!shutdown) return false;
+	return (await settledWithinProof(Promise.resolve().then(shutdown).then(() => true, () => false))) ?? false;
+}
+
+/** `work`'s value, or undefined once {@link SHUTDOWN_PROOF_MS} passes first. */
+async function settledWithinProof<T>(work: Promise<T>): Promise<T | undefined> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([work, new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), SHUTDOWN_PROOF_MS); })]);
+	} finally { if (timer) clearTimeout(timer); }
+}
+
+/** Retire a session no run will ever use (its run was cancelled after Pi built it): its extensions
+ *  get the same bounded `session_shutdown` as a finished run, then it is disposed. A factory that
+ *  observes the cancellation before building a session never reaches this (see `settleLegGuard`).
+ *  True when the handshake completed in time; never throws: no consumer is left for a teardown error. */
+async function retireSession(session: InProcSession): Promise<boolean> {
+	const quiescent = await shutdownWithin(session);
+	try {
+		session.dispose();
+	} catch {
+		// Nothing left to report to; the cancellation result already owns the run's outcome.
+	}
+	return quiescent;
 }
 
 export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 	const memoryPersona = deps.memoryPersona;
 	const createSession = deps.createSession ?? createPiSession;
 	const supervisorHandle = deps.supervisorHandle ?? "supervisor";
+	const legGuardOwner = deps.legGuardOwner ?? {};
 	// Per-run contract pinning (I3), mirroring the child adapter.
 	const pinned = new Map<string, PinnedContract>();
 	const pinnedDef = (name: string): ContractDef | undefined => {
@@ -693,8 +769,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 
 			// The Pi resource loader currently has no cancellation API. `armIdle`/`armHard`/`armStartup`
 			// (below) already start before the factory is invoked and stay held until the factory
-			// promise itself settles, so a timed-out run may return to its semaphore caller while a
-			// late session is disposed and a late rejection is consumed by this handled promise.
+			// promise itself settles, so a timed-out run without a saved session may return to its
+			// semaphore caller while a late session is retired (shutdown handshake, then dispose) and a
+			// late rejection is consumed by this handled promise.
 			const onAbort = (): void => requestCancellation("abort");
 			if (signal) {
 				if (signal.aborted) requestCancellation("abort");
@@ -715,29 +792,19 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				});
 			}
 
-			const safeDispose = (late: InProcSession): void => {
-				try {
-					late.dispose();
-				} catch {
-					// A late session has no consumer left to report disposal errors to; never turn
-					// cleanup into an unhandled rejection or strand the global guard.
-				}
-			};
-			type InitializationOutcome = { session?: InProcSession; error?: unknown };
+			/** `retired`: a session built after cancellation, and whether its retire handshake completed. */
+			type InitializationOutcome = { session?: InProcSession; error?: unknown; retired?: boolean };
 			let initializationSettled = false;
 
-			pushDisableGuard();
+			const guardHold = pushDisableGuard(legGuardOwner);
 			armHard();
 			armIdle();
 			armStartup();
 			const initialization = Promise.resolve()
 				.then(() => createSession({ ...sessionOpts, signal: initController.signal }))
 				.then(
-					(created) => {
-						if (cancellationRequested) {
-							safeDispose(created);
-							return {};
-						}
+					async (created): Promise<InitializationOutcome> => {
+						if (cancellationRequested) return { retired: await retireSession(created) };
 						initializedSession = created;
 						return { session: created };
 					},
@@ -746,8 +813,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				.then((outcome) => {
 					initializationSettled = true;
 					// Do not pop this guard at the timeout boundary: the original factory may still
-					// be loading recursive extensions under PI_PERSONA_DISABLE=1.
-					popDisableGuard();
+					// be loading recursive extensions under PI_PERSONA_DISABLE=1. settleLegGuard
+					// bounds that wait at shutdown.
+					popDisableGuard(guardHold);
 					return outcome;
 				});
 
@@ -756,18 +824,23 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				abortGate.then(() => undefined as InitializationOutcome | undefined),
 			]);
 			if (cancellationRequested || !initializationOutcome || !initializationOutcome.session) {
-				if (cancellationRequested && initializedSession) {
-					const cancelledSession = initializedSession;
-					initializedSession = undefined;
-					safeDispose(cancelledSession);
-				}
+				const cancelledSession = cancellationRequested ? initializedSession : undefined;
+				initializedSession = undefined;
 				if (signal) signal.removeEventListener("abort", onAbort);
 				disarmIdle();
 				disarmHard();
 				disarmStartup();
 				releaseHandle();
+				const retired = cancelledSession ? await retireSession(cancelledSession) : undefined;
 				// The factory settled (rejected), so nothing is left writing: same shape as a pre-start failure.
 				if (initializationOutcome && "error" in initializationOutcome && !cancellationRequested) return beforeStart(failedBeforePrompt(initializationOutcome.error, false));
+				// A saved conversation's lease is released only on proven quiescence, so wait, bounded, for the
+				// factory to settle and a late session to be retired. Without a session, return at once.
+				let sessionQuiescent = false;
+				if (spec.session) {
+					const settled = initializationOutcome ?? await settledWithinProof(initialization);
+					sessionQuiescent = settled !== undefined && (retired ?? settled.retired ?? true);
+				}
 				const initError = hardTimedOut
 					? `${tag} agent exceeded the ${hardMs}ms hard cap during session initialization`
 					: timedOut
@@ -785,6 +858,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
 					failureKind: hardTimedOut || timedOut || startupTimedOut ? "timeout" : "abort",
 					...thinkingMetadata,
+					...(spec.session ? { sessionSaved: false, sessionQuiescent } : {}),
 				};
 			}
 			session = initializationOutcome.session;
@@ -895,9 +969,12 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				unsub?.();
 				releaseHandle();
 				steerable = false;
-				session.dispose();
-				// Disposed without the shutdown handshake: a saved transcript is not proven quiescent.
-				return { ...failedBeforePrompt(e, true), ...(spec.session ? { sessionSaved: false, sessionQuiescent: false } : {}) };
+				if (!spec.session) {
+					session.dispose();
+					return failedBeforePrompt(e, true);
+				}
+				// A saved transcript is proven quiescent only by the bounded shutdown handshake.
+				return { ...failedBeforePrompt(e, true), sessionSaved: false, sessionQuiescent: await retireSession(session) };
 			}
 
 			// Capture a thrown error (e.g. provider API 400 before any stream event fires,
@@ -923,17 +1000,10 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				thrownError = e instanceof Error ? e.message : String(e);
 				selectedSkillsFailed = e instanceof SelectedSkillsError || e instanceof SessionContractError;
 			} finally {
-				// A completed provider failure still needs the full shutdown handshake before a
-				// fresh transcript can be safely discarded for a fallback attempt.
-				if (spec.session && !aborted && !timedOut && !hardTimedOut && !startupTimedOut && session.shutdown) {
-					let timer: ReturnType<typeof setTimeout> | undefined;
-					try {
-						shutdownComplete = await Promise.race([
-							session.shutdown().then(() => true, () => false),
-							new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), 5000); }),
-						]);
-					} finally { if (timer) clearTimeout(timer); }
-				}
+				// Every exit path, cancellation included, needs the bounded shutdown handshake before an
+				// unsaved transcript can be discarded: only proven quiescence releases its storage. A
+				// watchdog firing during the wait is a no-op once cancellation was requested.
+				if (spec.session) shutdownComplete = await shutdownWithin(session);
 				disarmIdle();
 				disarmHard();
 				disarmStartup();

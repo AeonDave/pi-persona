@@ -12,6 +12,7 @@ export const CONVERSATION_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 export const CONVERSATION_MAX_LINEAGES = 64;
 export const CONVERSATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_METADATA_BYTES = 64 * 1024;
+const RECLAIM_SCAN_LIMIT = 256;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RUN = /^run-[a-z0-9-]{1,80}$/i;
 const HASH = /^[a-f0-9]{64}$/i;
@@ -60,12 +61,14 @@ export class ConversationStore {
 	private readonly deps: ConversationStoreDeps;
 	private readonly owner: string;
 	private readonly directory: string | undefined;
+	private readonly sessionFile: string | undefined;
 	constructor(deps: ConversationStoreDeps) {
 		this.deps = { ...deps };
 		const parent = deps.sessionFile && isAbsolute(deps.sessionFile) ? resolve(deps.sessionFile) : undefined;
 		const canonical = parent && existsSync(parent) ? realpathSync(parent) : parent;
 		this.owner = createHash("sha256").update(`${canonical ?? ""}\0${deps.sessionId}`).digest("hex");
 		this.directory = parent && deps.sessionId ? join(dirname(parent), "persona-workers", this.owner) : undefined;
+		this.sessionFile = parent;
 	}
 
 	create(): ConversationResult<ConversationLease> {
@@ -75,6 +78,7 @@ export class ConversationStore {
 			const guard = this.lock("admission");
 			if (!guard.ok) return guard;
 			try {
+				this.reclaim();
 				const quota = this.quota();
 				if (quota.count >= CONVERSATION_MAX_LINEAGES || quota.bytes >= CONVERSATION_MAX_TOTAL_BYTES) return fail("quota", "Conversation storage quota exhausted");
 				const key = randomUUID();
@@ -247,6 +251,42 @@ export class ConversationStore {
 			return hash.digest("hex");
 		} finally { closeSync(fd); }
 	}
+	/**
+	 * Removes transcripts that can never be resumed: unindexed attempts and expired lineages
+	 * without a retained worktree. Taking the key's lock is the liveness proof, so a live,
+	 * same-process, unknown or malformed owner is skipped. Unreadable history deletes nothing.
+	 * An unindexed key is also kept when the session file on disk mentions it: another Pi process
+	 * on the same session may have committed it after this instance's history was read.
+	 */
+	private reclaim(): void {
+		let latest: Map<string, ConversationRecord>, forgotten: Set<string>;
+		try {
+			const entries = this.deps.entries();
+			latest = new Map(this.records(entries).map((r) => [r.key, r]));
+			forgotten = this.forgotten(entries);
+		} catch { return; }
+		const seen = new Set<string>();
+		for (const name of readdirSync(this.directory!).slice(0, RECLAIM_SCAN_LIMIT)) {
+			const match = /^(.+)\.(?:jsonl|lock)$/.exec(name);
+			const key = match?.[1];
+			if (!key || !UUID.test(key) || seen.has(key)) continue;
+			seen.add(key);
+			const record = latest.get(key);
+			if (record && !(this.expired(record) && !record.worktree)) continue;
+			if (forgotten.has(key) || existsSync(join(this.directory!, `${key}.forgotten`))) continue;
+			const held = this.lock(key);
+			if (!held.ok) continue;
+			const file = join(this.directory!, `${key}.jsonl`);
+			try { if (existsSync(file) && regularPath(file) && lstatSync(file).isFile() && (record || !this.sessionFileMentions(key))) unlinkSync(file); }
+			catch { /* Retained for the next admission. */ }
+			finally { held.value(); }
+		}
+	}
+	/** Fails closed: a session file that cannot be read counts as mentioning the key. */
+	private sessionFileMentions(key: string): boolean {
+		try { return readFileSync(this.sessionFile!).includes(key); }
+		catch { return true; }
+	}
 	private quota(): { count: number; bytes: number } {
 		let count = 0, bytes = 0;
 		for (const name of readdirSync(this.directory!)) {
@@ -305,9 +345,10 @@ export class ConversationStore {
 				if (released) return;
 				try {
 					// Unsettled fresh attempts have no index entry through which forget could reach
-					// them. The caller releases only after the writer has stopped.
-					if (!previous && !committed && !this.records(this.deps.entries()).some((r) => r.key === key)
-						&& existsSync(file) && regularPath(file) && lstatSync(file).isFile()) unlinkSync(file);
+					// them. A fresh key is indexed only by this lease's own commit, so `committed` is
+					// authoritative; session history may belong to a stale context after a reload.
+					// The caller releases only after the writer has stopped.
+					if (!previous && !committed && existsSync(file) && regularPath(file) && lstatSync(file).isFile()) unlinkSync(file);
 				} catch { /* A path or ownership that cannot be verified is retained. */ }
 				finally { released = true; locked.value(); }
 			},

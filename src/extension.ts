@@ -311,6 +311,8 @@ export interface PiPersonaOptions {
 	seedMigration?: SeedMigrationOptions;
 	/** Activation-local argv seam for Pi's boolean `--exocom=<code>` compatibility parser. */
 	exocomArgv?: readonly string[];
+	/** Activation-local test seam for the total `session_shutdown` wait (default `SHUTDOWN_DRAIN_MS`). */
+	shutdownDrainMs?: number;
 }
 
 export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = {}): void {
@@ -2445,6 +2447,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	}
 
 	const hookHost: HookHost = {
+		...(options.shutdownDrainMs !== undefined ? { shutdownDrainMs: options.shutdownDrainMs } : {}),
 		companionActivities,
 		memoryOwner,
 		identity,

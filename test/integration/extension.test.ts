@@ -2080,7 +2080,7 @@ test("a mandated orchestration stays inline (its ruling is the first answer) and
 		},
 	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine }, shutdownDrainMs: 20 });
 	const { ctx: base } = makeCtx(cwd);
 	const ctx = { ...base, hasUI: true };
 	await m.fire("session_start", undefined, ctx);
@@ -7542,7 +7542,7 @@ for (const routineEnabled of [false, true]) test(`routine async check-ins are ${
 		},
 	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeEngine: (deps) => { advance = deps.childOptions?.onProgress; return engine; }, makeInProcessEngine: (deps) => { advance = deps.onProgress; return engine; } } });
+	piPersona(m.pi, { engineFactories: { makeEngine: (deps) => { advance = deps.childOptions?.onProgress; return engine; }, makeInProcessEngine: (deps) => { advance = deps.onProgress; return engine; } }, shutdownDrainMs: 20 });
 	const ctx = makeCtx(tempDir("pi-persona-checkin-entry-"), { hasUI: true }).ctx;
 	let sessionStarted = false;
 	try {
@@ -7625,7 +7625,7 @@ test("stall and recovery episodes replace coincident routine entries without mod
 		},
 	};
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeEngine: (deps) => { advance = deps.childOptions?.onProgress; return engine; }, makeInProcessEngine: (deps) => { advance = deps.onProgress; return engine; } } });
+	piPersona(m.pi, { engineFactories: { makeEngine: (deps) => { advance = deps.childOptions?.onProgress; return engine; }, makeInProcessEngine: (deps) => { advance = deps.onProgress; return engine; } }, shutdownDrainMs: 20 });
 	const base = makeCtx(tempDir("pi-persona-checkin-busy-")).ctx;
 	const ctx = { ...base, hasUI: true, isIdle: () => true, hasPendingMessages: () => false };
 	let sessionStarted = false;
@@ -7708,7 +7708,7 @@ test("the peek tick survives unavailable status sinks and still wakes for an unr
 		},
 	});
 	const m = makeMockPi();
-	piPersona(m.pi, { engineFactories: { makeEngine: () => engine(undefined), makeInProcessEngine: (deps) => engine(deps.bus) } });
+	piPersona(m.pi, { engineFactories: { makeEngine: () => engine(undefined), makeInProcessEngine: (deps) => engine(deps.bus) }, shutdownDrainMs: 20 });
 	const piApi = m.pi as unknown as { appendEntry: (customType: string, data: unknown) => void };
 	const appendEntry = piApi.appendEntry.bind(m.pi);
 	let statusAttempts = 0;

@@ -107,6 +107,20 @@ export function madeHeadway(prev: ProgressReading | undefined, next: ProgressRea
 		|| (next.toolEvent?.phase === "end" && next.toolEvent !== prev?.toolEvent);
 }
 
+/** Wait until the live set `inFlight` (each member removes itself when it settles) is empty, or until
+ *  the absolute `deadline` (epoch ms). True when empty; false at the deadline. A promise added while
+ *  waiting joins the next round. */
+export async function drainUntil(inFlight: ReadonlySet<Promise<unknown>>, deadline: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())); });
+	try {
+		while (inFlight.size > 0) {
+			if (!await Promise.race([Promise.allSettled([...inFlight]).then(() => true), expired])) return false;
+		}
+		return true;
+	} finally { clearTimeout(timer); }
+}
+
 /** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
 export type RunThunk = (onProgress: (snapshot: ProgressSnapshot) => void, runId: string) => Promise<AgentResult>;
 
@@ -124,6 +138,8 @@ export class AsyncRunTracker {
 	private readonly droppedIds = new Set<string>();
 	private readonly completeListeners: Array<(run: AsyncRun) => void> = [];
 	private readonly createListeners: Array<(run: AsyncRun) => void> = [];
+	/** Each launched thunk's natural settlement chain, until it settles: what {@link drain} awaits. */
+	private readonly inFlight = new Set<Promise<void>>();
 	private seq = 0;
 	private readonly maxRetained: number;
 	private readonly now: () => number;
@@ -181,7 +197,7 @@ export class AsyncRunTracker {
 		// path, so onComplete always fires — otherwise the entry would be stuck "running" forever and
 		// its stop/steer handle would leak.
 		try {
-			Promise.resolve(
+			const natural = Promise.resolve(
 				run((s) => {
 					// The injected clock stamps the advance, never an event's own timestamp.
 					if (!entry.queued && madeHeadway(entry.progress, s)) entry.lastAdvanceAt = this.now();
@@ -202,6 +218,10 @@ export class AsyncRunTracker {
 					entry.error = err instanceof Error ? err.message : String(err);
 				})
 				.finally(settle);
+			// Removed by its OWN settlement, never by forceSettle: drain waits for the real result.
+			this.inFlight.add(natural);
+			const done = (): void => { this.inFlight.delete(natural); };
+			natural.then(done, done);
 		} catch (err) {
 			entry.status = "failed";
 			entry.error = err instanceof Error ? err.message : String(err);
@@ -209,6 +229,13 @@ export class AsyncRunTracker {
 		}
 
 		return id;
+	}
+
+	/** Wait until every launched thunk has settled naturally, or until the absolute `deadline`
+	 *  (epoch ms). Resolves true when nothing is left in flight; false at the deadline, leaving the
+	 *  stragglers to {@link forceSettle}. A natural settlement inside the window keeps its own result. */
+	drain(deadline: number): Promise<boolean> {
+		return drainUntil(this.inFlight, deadline);
 	}
 
 	/** Fire the completion listeners for `entry` exactly once. Both the natural resolution of the run

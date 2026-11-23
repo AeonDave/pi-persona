@@ -24,6 +24,7 @@ import {
 	type InProcSession,
 	makeInProcessEngine,
 	ORCHESTRATION_TOOLS,
+	settleLegGuard,
 	withOrchestrationToolsExcluded,
 } from "../../../src/engine/inproc.ts";
 import { mergeSessionToolAllowlist } from "../../../src/engine/session-tools.ts";
@@ -1893,6 +1894,163 @@ test("a late initialization rejection is consumed after timeout and restores the
 		process.off("unhandledRejection", onUnhandled);
 		if (priorDisable === undefined) delete process.env.PI_PERSONA_DISABLE;
 		else process.env.PI_PERSONA_DISABLE = priorDisable;
+	}
+});
+
+const LEG_ENV = ["PI_PERSONA_DISABLE", "PI_PERSONA_LEG", "PI_PERSONA_CODE_OUTLINE"] as const;
+function legEnv(): Record<string, string | undefined> {
+	return Object.fromEntries(LEG_ENV.map((name) => [name, process.env[name]]));
+}
+function restoreLegEnv(saved: Record<string, string | undefined>): void {
+	for (const name of LEG_ENV) {
+		if (saved[name] === undefined) delete process.env[name];
+		else process.env[name] = saved[name];
+	}
+}
+/** A session factory held open by the test: `begun` resolves once it is invoked, `settle` finishes it. */
+function heldFactory(): { create: CreateInProcSession; begun: Promise<void>; settle(session: InProcSession): void } {
+	let begin!: () => void;
+	const begun = new Promise<void>((resolve) => { begin = resolve; });
+	let resolveInit!: (session: InProcSession) => void;
+	const init = new Promise<InProcSession>((resolve) => { resolveInit = resolve; });
+	return { create: async () => { begin(); return init; }, begun, settle: (session) => resolveInit(session) };
+}
+function retiredSession(calls: string[]): InProcSession {
+	return {
+		subscribe: () => () => {},
+		prompt: async () => {},
+		agent: { abort() {}, async waitForIdle() {}, steer() {} },
+		shutdown: async () => { calls.push("shutdown"); },
+		dispose: () => { calls.push("dispose"); },
+	};
+}
+
+test("settleLegGuard restores the leg markers at its deadline and a late factory then leaves them alone", async () => {
+	const prior = legEnv();
+	process.env.PI_PERSONA_DISABLE = "user-kill-switch";
+	delete process.env.PI_PERSONA_LEG;
+	process.env.PI_PERSONA_CODE_OUTLINE = "1";
+	const before = legEnv();
+	try {
+		const held = heldFactory();
+		const ac = new AbortController();
+		const owner = {};
+		const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: held.create, legGuardOwner: owner });
+		const pending = engine.run({ agent: "a", task: "t" }, undefined, ac.signal);
+		await held.begun;
+		ac.abort();
+		assert.equal((await pending).failureKind, "abort");
+		assert.equal(process.env.PI_PERSONA_LEG, "1", "the uncancellable loader still holds the guard");
+
+		const started = Date.now();
+		await settleLegGuard(owner, started + 30);
+		assert.ok(Date.now() - started >= 25, "it waited for the deadline before forcing");
+		assert.deepEqual(legEnv(), before, "the forced release restores the pre-run environment byte for byte");
+
+		const calls: string[] = [];
+		process.env.PI_PERSONA_LEG = "set-by-the-next-activation";
+		held.settle(retiredSession(calls));
+		await new Promise<void>((resolve) => setTimeout(resolve, 10));
+		assert.equal(process.env.PI_PERSONA_LEG, "set-by-the-next-activation", "the invalidated hold's late pop is a no-op");
+		assert.deepEqual(calls, ["shutdown", "dispose"], "the late session is retired through the shutdown handshake");
+	} finally {
+		restoreLegEnv(prior);
+	}
+});
+
+test("settleLegGuard resolves as soon as the factory settles and forces nothing", async () => {
+	const prior = legEnv();
+	delete process.env.PI_PERSONA_LEG;
+	try {
+		const held = heldFactory();
+		const owner = {};
+		const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: held.create, legGuardOwner: owner });
+		const pending = engine.run({ agent: "a", task: "t" });
+		await held.begun;
+		const settled = settleLegGuard(owner, Date.now() + 5_000);
+		const started = Date.now();
+		held.settle(fakeSession([msgEnd("ok")]));
+		await settled;
+		assert.ok(Date.now() - started < 1_000, "resolved early, not at the deadline");
+		assert.equal((await pending).ok, true, "the run itself was not disturbed");
+		assert.equal(process.env.PI_PERSONA_LEG, undefined, "the last pop restored the environment");
+		await settleLegGuard(owner, Date.now()); // idle: resolves immediately
+	} finally {
+		restoreLegEnv(prior);
+	}
+});
+
+test("after a forced release, overlapping late holds do not corrupt the next guard's counting", async () => {
+	const prior = legEnv();
+	delete process.env.PI_PERSONA_LEG;
+	try {
+		const first = heldFactory();
+		const second = heldFactory();
+		const ac = new AbortController();
+		const owner = {};
+		const engine = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: first.create, legGuardOwner: owner });
+		const engine2 = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: second.create, legGuardOwner: owner });
+		const runs = [engine.run({ agent: "a", task: "t" }, undefined, ac.signal), engine2.run({ agent: "a", task: "t" }, undefined, ac.signal)];
+		await Promise.all([first.begun, second.begun]);
+		ac.abort();
+		await Promise.all(runs);
+		await settleLegGuard(owner, Date.now() + 10);
+		assert.equal(process.env.PI_PERSONA_LEG, undefined, "forced release");
+
+		second.settle(fakeSession([])); // a stale pop between the release and the next push
+		await new Promise<void>((resolve) => setTimeout(resolve, 5));
+		const spy: Spy = {};
+		const third = heldFactory();
+		const engine3 = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: async (opts) => { const s = await third.create(opts); spy.legDuringCreate = process.env.PI_PERSONA_LEG; return s; } });
+		const live = engine3.run({ agent: "a", task: "t" });
+		await third.begun;
+		assert.equal(process.env.PI_PERSONA_LEG, "1", "a new hold sets the marker again");
+		first.settle(fakeSession([])); // the other stale pop lands while the new hold is live
+		await new Promise<void>((resolve) => setTimeout(resolve, 5));
+		assert.equal(process.env.PI_PERSONA_LEG, "1", "a stale pop never releases a live hold");
+		third.settle(fakeSession([msgEnd("ok")]));
+		assert.equal((await live).ok, true);
+		assert.equal(spy.legDuringCreate, "1");
+		assert.equal(process.env.PI_PERSONA_LEG, undefined, "depth 1 -> 0 restores on the new hold's own pop");
+	} finally {
+		restoreLegEnv(prior);
+	}
+});
+
+test("settleLegGuard forces only its own activation's holds; another activation's loading factory keeps the markers", async () => {
+	const prior = legEnv();
+	delete process.env.PI_PERSONA_DISABLE;
+	delete process.env.PI_PERSONA_LEG;
+	const before = legEnv();
+	try {
+		const doomed = heldFactory();
+		const live = heldFactory();
+		const ownerA = {};
+		const ownerB = {};
+		const ac = new AbortController();
+		const engineA = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: doomed.create, legGuardOwner: ownerA });
+		const engineB = makeInProcessEngine({ resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", createSession: live.create, legGuardOwner: ownerB });
+		const runA = engineA.run({ agent: "a", task: "t" }, undefined, ac.signal);
+		const runB = engineB.run({ agent: "a", task: "t" });
+		await Promise.all([doomed.begun, live.begun]);
+		ac.abort();
+		assert.equal((await runA).failureKind, "abort");
+
+		await settleLegGuard(ownerA, Date.now() + 10);
+		assert.equal(process.env.PI_PERSONA_DISABLE, "1", "B's factory is still loading under the fork-bomb guard");
+		assert.equal(process.env.PI_PERSONA_LEG, "1", "B's factory still carries the leg marker");
+		await settleLegGuard(ownerA, Date.now()); // A has nothing left: resolves at once despite B's hold
+
+		live.settle(fakeSession([msgEnd("ok")]));
+		assert.equal((await runB).ok, true);
+		assert.deepEqual(legEnv(), before, "B's own pop, the last hold, restores the environment");
+
+		process.env.PI_PERSONA_LEG = "set-by-the-next-activation";
+		doomed.settle(fakeSession([]));
+		await new Promise<void>((resolve) => setTimeout(resolve, 10));
+		assert.equal(process.env.PI_PERSONA_LEG, "set-by-the-next-activation", "A's dropped hold's late pop is a no-op");
+	} finally {
+		restoreLegEnv(prior);
 	}
 });
 

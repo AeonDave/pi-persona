@@ -49,7 +49,7 @@ test("same extension and tracker retain delegate receipts and Intercom history a
 		return { agent: spec.agent, output: spec.task === "old delayed work" ? "stale old output" : `durable report ${++calls}`, ok: true, usage: emptyUsage() };
 	} };
 	// Exactly one factory invocation: both activations therefore use its original AsyncRunTracker.
-	piPersona(pi as unknown as ExtensionAPI, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine } });
+	piPersona(pi as unknown as ExtensionAPI, { engineFactories: { makeEngine: () => engine, makeInProcessEngine: () => engine }, shutdownDrainMs: 20 });
 	const context = () => ({
 		cwd, hasUI: false, sessionManager: manager,
 		modelRegistry: { getAll: () => [], getAvailable: () => [], getRegisteredProviderIds: () => [],

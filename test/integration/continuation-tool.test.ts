@@ -22,7 +22,8 @@ function fixture() {
 	let fingerprint = "a".repeat(64);
 	let policyFails = false;
 	let denied = false;
-	const ctx = { cwd, sessionManager: { getSessionId: () => "owner", getSessionFile: () => file, getLeafId: () => null, getEntries: () => entries, getBranch: () => entries } } as unknown as ExtensionContext;
+	let stale = false;
+	const ctx = { cwd, sessionManager: { getSessionId: () => "owner", getSessionFile: () => file, getLeafId: () => null, getEntries: () => { if (stale) throw new Error("This extension ctx is stale"); return entries; }, getBranch: () => entries } } as unknown as ExtensionContext;
 	let current: ExtensionContext | undefined = ctx;
 	let appendFails = false;
 	const pi = { appendEntry: (customType: string, data: unknown) => { if (appendFails) throw new Error("append failed"); entries.push({ type: "custom", customType, data }); } } as unknown as ExtensionAPI;
@@ -42,7 +43,7 @@ function fixture() {
 		turn.release();
 		return { receipt, file: prepared.session.file };
 	}
-	return { cwd, ctx, runtime, spec, result, brief, start, setPersona: (s: string | null) => { persona = s; }, changeDefinition: () => { fingerprint = "b".repeat(64); }, deny: () => { denied = true; }, switchOwner: () => { current = undefined; }, failAppend: () => { appendFails = true; }, setPolicyFailure: (value: boolean) => { policyFails = value; }, close: () => rmSync(cwd, { recursive: true, force: true }) };
+	return { cwd, ctx, runtime, spec, result, brief, start, setPersona: (s: string | null) => { persona = s; }, changeDefinition: () => { fingerprint = "b".repeat(64); }, deny: () => { denied = true; }, switchOwner: () => { current = undefined; }, staleContext: () => { stale = true; }, failAppend: () => { appendFails = true; }, setPolicyFailure: (value: boolean) => { policyFails = value; }, close: () => rmSync(cwd, { recursive: true, force: true }) };
 }
 
 test("a policy exception before a fresh turn is built releases its unused storage reservation", () => {
@@ -151,6 +152,21 @@ test("an admitted worker remains unavailable until its session is quiescent", ()
 		resumed.value.turn.settle("run-2", spec, { ...h.result, ok: false, sessionSaved: false, sessionQuiescent: true, failureKind: "abort" });
 		resumed.value.turn.release();
 		assert.equal(h.runtime.list(h.ctx)[0]?.runId, "run-1");
+	} finally { h.close(); }
+});
+
+test("a stopped fresh worker settling after a reload frees its transcript and lease", () => {
+	const h = fixture();
+	try {
+		const turn = h.runtime.start(h.ctx, h.spec, h.brief);
+		assert.ok(turn);
+		const prepared = turn.prepare(h.spec);
+		assert.ok(prepared.session);
+		writeFileSync(prepared.session.file, "partial worker transcript\n");
+		h.staleContext();
+		turn.settle("run-1", prepared, { ...h.result, ok: false, sessionSaved: false, sessionQuiescent: true, failureKind: "abort" });
+		turn.release();
+		assert.deepEqual(readdirSync(join(h.cwd, "persona-workers"), { recursive: true }).filter((path) => /\.(?:jsonl|lock)$/.test(String(path))), []);
 	} finally { h.close(); }
 });
 

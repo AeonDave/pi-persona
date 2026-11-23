@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import type { PathLike } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CONVERSATION_MAX_FILE_BYTES, ConversationStore } from "../../../src/conversations/store.ts";
+import { CONVERSATION_ENTRY, CONVERSATION_MAX_FILE_BYTES, CONVERSATION_MAX_LINEAGES, CONVERSATION_RETENTION_MS, ConversationStore } from "../../../src/conversations/store.ts";
 
 test("conversation leases persist, reject concurrent and stale continuations, and honor branches", () => {
 	const dir = mkdtempSync(join(tmpdir(), "persona-conversation-"));
@@ -109,6 +113,148 @@ test("releasing an unindexed fresh attempt removes its transcript and frees its 
 			assert.equal(existsSync(created.value.file), false);
 		}
 	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+function storeFixture(prefix: string) {
+	const dir = mkdtempSync(join(tmpdir(), prefix));
+	// Reclaim confirms an unindexed key against the session file, which Pi has written by the first turn.
+	writeFileSync(join(dir, "parent"), "{\"type\":\"session\"}\n");
+	const entries: unknown[] = [];
+	let now = 1_000;
+	let corrupt = false;
+	const store = new ConversationStore({ sessionId: "owner", sessionFile: join(dir, "parent"), now: () => now,
+		entries: () => corrupt ? [...entries, { type: "custom", customType: CONVERSATION_ENTRY, data: { owner: (entries[0] as { data: { owner: string } }).data.owner } }] : entries,
+		append: (customType, data) => { entries.push({ type: "custom", customType, data }); } });
+	let runs = 0;
+	const commit = (worktree?: { path: string; root: string; baseCommit: string }) => {
+		const created = store.create();
+		assert.ok(created.ok, created.ok ? "" : created.error);
+		writeFileSync(created.value.file, "saved");
+		const runId = `run-${++runs}`;
+		assert.ok(created.value.commit({ rootRunId: runId, runId, cwd: dir, persona: null, fingerprint: "a".repeat(64),
+			spec: { agent: "scout", task: "inspect" }, model: "provider/model", ...(worktree ? { worktree } : {}) }).ok);
+		created.value.release();
+		return { file: created.value.file, runId };
+	};
+	const orphan = (owner: string | undefined) => {
+		const key = randomUUID();
+		const file = join(dir, "persona-workers", workerDirName(dir), `${key}.jsonl`);
+		writeFileSync(file, "orphaned transcript");
+		if (owner !== undefined) writeFileSync(file.replace(/\.jsonl$/, ".lock"), owner);
+		return file;
+	};
+	return { dir, store, commit, orphan, advance: (ms: number) => { now += ms; }, corrupt: (value: boolean) => { corrupt = value; }, close: () => rmSync(dir, { recursive: true, force: true }) };
+}
+function workerDirName(dir: string): string {
+	return readdirSync(join(dir, "persona-workers"))[0]!;
+}
+const DEAD = JSON.stringify({ pid: 2147483647, token: "dead" });
+
+test("releasing a fresh uncommitted lease does not read session history", () => {
+	const dir = mkdtempSync(join(tmpdir(), "persona-conversation-stale-ctx-"));
+	try {
+		let stale = false;
+		const store = new ConversationStore({ sessionId: "owner", sessionFile: join(dir, "parent"),
+			entries: () => { if (stale) throw new Error("This extension ctx is stale"); return []; }, append: () => {} });
+		const created = store.create();
+		assert.ok(created.ok);
+		writeFileSync(created.value.file, "aborted transcript");
+		stale = true;
+		created.value.release();
+		assert.equal(existsSync(created.value.file), false);
+		assert.equal(existsSync(created.value.file.replace(/\.jsonl$/, ".lock")), false);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("admission reclaims a dead-owner orphan at the lineage ceiling and never touches live, unknown or indexed files", () => {
+	const h = storeFixture("persona-conversation-reclaim-");
+	try {
+		const saved = h.commit();
+		const live = h.orphan(JSON.stringify({ pid: process.pid, token: "live" }));
+		const malformed = h.orphan("{not json");
+		const dead = h.orphan(DEAD);
+		const deadLockOnly = h.orphan(DEAD);
+		unlinkSync(deadLockOnly);
+		h.corrupt(true);
+		const blocked = h.store.create();
+		assert.ok(blocked.ok, "quota headroom: only reclaim's own guard decides whether the orphan survives");
+		blocked.value.release();
+		assert.equal(existsSync(dead), true, "corrupt history deletes nothing");
+		h.corrupt(false);
+		for (let i = 1; i < CONVERSATION_MAX_LINEAGES - 3; i++) h.commit();
+		const admitted = h.store.create();
+		assert.ok(admitted.ok, admitted.ok ? "" : admitted.error);
+		admitted.value.release();
+		assert.equal(existsSync(dead), false);
+		assert.equal(existsSync(dead.replace(/\.jsonl$/, ".lock")), false);
+		assert.equal(existsSync(deadLockOnly.replace(/\.jsonl$/, ".lock")), false);
+		for (const kept of [live, malformed, saved.file]) assert.equal(existsSync(kept), true, `${kept} must survive`);
+		assert.equal(existsSync(live.replace(/\.jsonl$/, ".lock")), true);
+		assert.ok(h.store.acquire(saved.runId).ok);
+	} finally { h.close(); }
+});
+
+test("reclaim keeps an unindexed transcript that the session file mentions or cannot confirm absent", () => {
+	const h = storeFixture("persona-conversation-stale-view-");
+	try {
+		h.commit();
+		const other = h.orphan(undefined);
+		const key = /([0-9a-f-]{36})\.jsonl$/.exec(other)![1]!;
+		const admit = () => { const r = h.store.create(); assert.ok(r.ok, r.ok ? "" : r.error); r.value.release(); };
+		writeFileSync(join(h.dir, "parent"), `{"type":"custom","data":{"key":"${key}"}}\n`);
+		admit();
+		assert.equal(existsSync(other), true, "another process committed it, so this stale view must not delete it");
+		unlinkSync(join(h.dir, "parent"));
+		admit();
+		assert.equal(existsSync(other), true, "an unreadable session file fails closed");
+		writeFileSync(join(h.dir, "parent"), "{\"type\":\"session\"}\n");
+		admit();
+		assert.equal(existsSync(other), false, "confirmed absent from the session file");
+	} finally { h.close(); }
+});
+
+test("reclaim continues past a transcript that cannot be unlinked, frees its lock and retries it next admission", () => {
+	const h = storeFixture("persona-conversation-unlink-fail-");
+	try {
+		h.commit();
+		const stuck = h.orphan(DEAD), removable = h.orphan(DEAD);
+		const realUnlink = fs.unlinkSync;
+		let failing = true;
+		fs.unlinkSync = ((path: PathLike) => {
+			if (failing && String(path) === stuck) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+			return realUnlink(path);
+		}) as typeof fs.unlinkSync;
+		syncBuiltinESMExports();
+		try {
+			const first = h.store.create();
+			assert.ok(first.ok, first.ok ? "" : first.error);
+			first.value.release();
+			assert.equal(existsSync(removable), false, "the sweep continues past the failure");
+			assert.equal(existsSync(stuck), true);
+			assert.equal(existsSync(stuck.replace(/\.jsonl$/, ".lock")), false, "the failed key's lock is released");
+			failing = false;
+			const second = h.store.create();
+			assert.ok(second.ok, second.ok ? "" : second.error);
+			second.value.release();
+			assert.equal(existsSync(stuck), false, "the next admission retries it");
+		} finally { fs.unlinkSync = realUnlink; syncBuiltinESMExports(); }
+	} finally { h.close(); }
+});
+
+test("admission reclaims an expired transcript without a worktree and keeps a worktree-bearing one", async () => {
+	const h = storeFixture("persona-conversation-expired-");
+	try {
+		const plain = h.commit();
+		const retained = h.commit({ path: join(h.dir, "worktree"), root: h.dir, baseCommit: "a".repeat(40) });
+		h.advance(CONVERSATION_RETENTION_MS + 1);
+		const admitted = h.store.create();
+		assert.ok(admitted.ok);
+		admitted.value.release();
+		assert.equal(existsSync(plain.file), false);
+		assert.equal(existsSync(retained.file), true);
+		assert.deepEqual(h.store.listAll().map((item) => item.reason), ["expired", "expired"]);
+		assert.equal((await h.store.forget(plain.runId)).ok, true);
+	} finally { h.close(); }
 });
 
 test("invalid metadata and oversized transcript cannot be advertised", () => {
