@@ -13,6 +13,7 @@ import { compactInlineText } from "../ui/presentation.ts";
 
 export const MIND_WORKER_EVENT = "pi-persona:mind-worker:v1";
 export const MIND_WORKER_MAX_MS = 180_000;
+const MIND_DEADLINE_ERROR = `Mind worker exceeded its ${MIND_WORKER_MAX_MS / 1000} s limit`;
 const MIND_JSON_CORRECTION = "FORMAT CORRECTION: Return exactly one valid JSON value matching the original request. No markdown or prose; do not invent facts.\n\n";
 const MIND_OUTPUT_MAX = 48_000;
 export type MindWorkerResult = {
@@ -90,6 +91,10 @@ export function installMindWorker(pi: Pick<ExtensionAPI, "events">, d: MindWorke
 			let resolveCompletion!: (result: MindWorkerResult) => void;
 			const completion = new Promise<MindWorkerResult>((resolve) => { resolveCompletion = resolve; });
 			let id = "";
+			// Set only when the deadline is what aborts the worker: a stop, owner change or shutdown that
+			// got there first stays an interruption, because the companion retries those and never a limit.
+			let deadlineHit = false;
+			const abortedResult = (usage: ChildUsage) => ({ agent: "mind", output: "", usage, ok: false as const, ...(deadlineHit ? { failureKind: "timeout" as const, error: MIND_DEADLINE_ERROR } : { failureKind: "abort" as const, error: "Mind worker cancelled" }) });
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const off = d.tracker.onComplete((run) => {
 				if (run.id !== id) return;
@@ -97,8 +102,12 @@ export function installMindWorker(pi: Pick<ExtensionAPI, "events">, d: MindWorke
 				if (timer !== undefined) clearTimeout(timer);
 				if (active === job) active = undefined;
 				const result = run.result;
-				const status = run.status === "done" ? "done" : run.status === "stopped" ? "stopped" : "failed";
-				const common = { output: result?.output ?? run.progress.output, ...(run.error || result?.error ? { error: run.error ?? result?.error ?? "Mind worker failed" } : {}), ...(run.resultReceipt?.ref ? { resultRef: run.resultReceipt.ref } : {}), ...(result?.modelUsed ? { model: result.modelUsed } : {}), ...(result?.thinkingEffective ? { thinking: result.thinkingEffective } : {}) };
+				// The companion gets the FIRST termination cause. A shutdown force-settle can land before the
+				// aborted engine returns, leaving the tracker row "stopped" (and unarchived) after the deadline
+				// fired; the row stays as the tracker made it, but the companion must not retry a timed-out review.
+				const limited = deadlineHit && run.status !== "done";
+				const status = limited ? "failed" : run.status === "done" ? "done" : run.status === "stopped" ? "stopped" : "failed";
+				const common = { output: result?.output ?? run.progress.output, ...(limited ? { error: MIND_DEADLINE_ERROR } : run.error || result?.error ? { error: run.error ?? result?.error ?? "Mind worker failed" } : {}), ...(run.resultReceipt?.ref ? { resultRef: run.resultReceipt.ref } : {}), ...(result?.modelUsed ? { model: result.modelUsed } : {}), ...(result?.thinkingEffective ? { thinking: result.thinkingEffective } : {}) };
 				resolveCompletion(status === "done" ? { status, ok: true, ...common } : { status, ok: false, ...common });
 			});
 			id = d.tracker.launch({ agent: "mind", label: "mind", task, model: modelRef, queued: true, delivery: "companion" }, (onProgress, runId) => Promise.resolve().then(async () => {
@@ -151,7 +160,7 @@ export function installMindWorker(pi: Pick<ExtensionAPI, "events">, d: MindWorke
 								let currentOwners = 0;
 								pi.events.emit(MEMORY_OWNER_EVENT, { version: 1, sessionId, respond: (response: CompanionMemoryOwner) => { currentOwners++; currentOwner = response; } });
 								if (!ac.signal.aborted && currentOwners === 1 && currentOwner?.ready && currentOwner.sessionId === sessionId && currentOwner.persona === request.persona) {
-									if (d.canLaunch() !== true || ac.signal.aborted) return { ...first, output: "", usage: cumulativeUsage, ok: false, failureKind: "abort" as const, error: "Mind worker cancelled" };
+									if (d.canLaunch() !== true || ac.signal.aborted) return { ...first, ...abortedResult(cumulativeUsage) };
 									d.steerRegistry.delete(nodeId);
 									const second = await runAttempt(MIND_JSON_CORRECTION + task, true);
 									const usage = { ...cumulativeUsage };
@@ -165,15 +174,15 @@ export function installMindWorker(pi: Pick<ExtensionAPI, "events">, d: MindWorke
 									}
 								}
 							}
-						if (ac.signal.aborted) return { ...result, output: "", usage: observedUsage ?? cumulativeUsage, ok: false, failureKind: "abort", error: "Mind worker cancelled" };
+						if (ac.signal.aborted) return { ...result, ...abortedResult(observedUsage ?? cumulativeUsage) };
 						return result;
 					}, ac.signal);
 				} catch (error) {
-					return { agent: "mind", output: "", usage: observedUsage ?? cumulativeUsage, ok: false, failureKind: ac.signal.aborted ? "abort" as const : "agent" as const, error: ac.signal.aborted ? "Mind worker cancelled" : error instanceof Error ? error.message : String(error) };
+					return ac.signal.aborted ? abortedResult(observedUsage ?? cumulativeUsage) : { agent: "mind", output: "", usage: observedUsage ?? cumulativeUsage, ok: false, failureKind: "agent" as const, error: error instanceof Error ? error.message : String(error) };
 				}
 			}));
 			d.stopRegistry.set(`async:${id}`, job.cancel);
-			timer = setTimeout(job.cancel, MIND_WORKER_MAX_MS); timer.unref?.();
+			timer = setTimeout(() => { if (!ac.signal.aborted) deadlineHit = true; job.cancel(); }, MIND_WORKER_MAX_MS); timer.unref?.();
 			d.tree.add({ id: `async:${id}`, label: compactInlineText(`mind · ${shortModel(modelRef)}`, { maxChars: 120 }), kind: "subagent", agent: "mind", model: modelRef, thinking, status: "running", detail: "queued" });
 			d.startPeek();
 			respond({ ok: true, runId: id, model: modelRef, thinking, completion, cancel: job.cancel });

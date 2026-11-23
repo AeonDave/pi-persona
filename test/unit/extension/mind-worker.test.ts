@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { createEventBus, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { installMindWorker, MIND_WORKER_EVENT, type MindWorkerResponse } from "../../../src/extension/mind-worker.ts";
+import { installMindWorker, MIND_WORKER_EVENT, MIND_WORKER_MAX_MS, type MindWorkerResponse } from "../../../src/extension/mind-worker.ts";
 import { installMemoryOwner } from "../../../src/extension/memory-owner.ts";
 import { AsyncRunTracker } from "../../../src/engine/async.ts";
 import { AgentTree } from "../../../src/ui/agent-tree.ts";
@@ -220,4 +220,77 @@ test("cancelling a Mind receipt before admission spends no model call", async ()
 	const h = harness(); const response = h.request(); assert.equal(response?.ok, true); if (!response?.ok) return;
 	response.cancel(); const result = await response.completion;
 	assert.equal(result.ok, false); assert.equal(result.status, "stopped"); assert.deepEqual(h.seen, []);
+});
+
+test("Mind deadline settles failed, names the limit, and the tracked row is failed with failureKind timeout", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const h = harness(); const response = h.request(); assert.equal(response?.ok, true); if (!response?.ok) return;
+		await h.waitAttempt(1);
+		mock.timers.tick(MIND_WORKER_MAX_MS);
+		assert.equal(h.signal()?.aborted, true);
+		const result = await response.completion;
+		assert.equal(result.ok, false); assert.equal(result.status, "failed");
+		assert.equal(result.error, "Mind worker exceeded its 180 s limit");
+		const run = h.tracker.peek(response.runId);
+		assert.equal(run?.status, "failed", "the tracked row and archive do not show a deadline as a user stop");
+		assert.equal(run?.error, "Mind worker exceeded its 180 s limit");
+		assert.equal(run?.result?.failureKind, "timeout");
+	} finally { mock.timers.reset(); }
+});
+
+test("Mind deadline while queued for a slot also settles failed", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const h = harness(); const response = h.request(); assert.equal(response?.ok, true); if (!response?.ok) return;
+		mock.timers.tick(MIND_WORKER_MAX_MS);
+		const result = await response.completion;
+		assert.equal(result.status, "failed"); assert.match(result.error ?? "", /180 s limit/);
+	} finally { mock.timers.reset(); }
+});
+
+test("a deadline that fired first stays failed when the tracker is force-settled before the engine's abort completes", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const h = harness(); const response = h.request(); assert.equal(response?.ok, true); if (!response?.ok) return;
+		await h.waitAttempt(1);
+		mock.timers.tick(MIND_WORKER_MAX_MS);
+		// The engine's abort continuation has not run yet, as with a slow provider teardown.
+		assert.equal(h.tracker.forceSettle(response.runId, "session ended"), true);
+		const result = await response.completion;
+		assert.equal(result.ok, false); assert.equal(result.status, "failed", "the companion retries a stop but never a limit");
+		assert.equal(result.error, "Mind worker exceeded its 180 s limit");
+		assert.equal(h.tracker.peek(response.runId)?.status, "stopped", "the tracker row keeps its forced settlement; it is not archived");
+	} finally { mock.timers.reset(); }
+});
+
+test("the deadline timer is cleared after a normal completion and after a forced settlement", async () => {
+	for (const how of ["completion", "forced"] as const) {
+		mock.timers.enable({ apis: ["setTimeout"] });
+		const armed = new Set<unknown>();
+		const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout;
+		globalThis.setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => { const handle = (realSet as (...a: unknown[]) => unknown)(fn, ms, ...rest); if (ms === MIND_WORKER_MAX_MS) armed.add(handle); return handle; }) as typeof setTimeout;
+		globalThis.clearTimeout = ((handle?: unknown) => { armed.delete(handle); return (realClear as (h: unknown) => void)(handle); }) as typeof clearTimeout;
+		try {
+			const h = harness(); const response = h.request(); assert.equal(response?.ok, true); if (!response?.ok) return;
+			await h.waitAttempt(1);
+			assert.equal(armed.size, 1, "the deadline is armed while the worker runs");
+			if (how === "completion") { h.release(1); await response.completion; } else { h.tracker.forceSettle(response.runId, "session ended"); await response.completion; }
+			assert.equal(armed.size, 0, `no deadline timer stays armed after ${how}`);
+			mock.timers.tick(MIND_WORKER_MAX_MS);
+			assert.equal(h.signal()?.aborted, false, "advancing past the deadline aborts nothing");
+			h.release(1);
+		} finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; mock.timers.reset(); }
+	}
+});
+
+test("a user stop before the deadline stays stopped and disarms the deadline", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const h = harness(); const response = h.request(); assert.equal(response?.ok, true); if (!response?.ok) return;
+		await h.waitAttempt(1); response.cancel();
+		mock.timers.tick(MIND_WORKER_MAX_MS);
+		const result = await response.completion;
+		assert.equal(result.status, "stopped"); assert.equal(h.tracker.peek(response.runId)?.status, "stopped");
+	} finally { mock.timers.reset(); }
 });

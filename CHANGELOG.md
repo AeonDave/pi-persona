@@ -71,6 +71,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- A Mind review worker that reaches its 180-second deadline is now reported to the companion as failed,
+  with the limit named, instead of as stopped. A stop looked like an interruption, so Mind retried the
+  same review again and again; a user stop, an owner change and a session shutdown are still stopped.
 - An in-process worker whose session cannot be created (rejected credentials, a loader error, an
   unavailable selected skill) now settles as a classified failure instead of throwing. A provider
   failure at that point is eligible for provider fallback, and the completion card and the repeated-

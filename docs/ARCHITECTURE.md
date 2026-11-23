@@ -737,7 +737,7 @@ explicit `null` owner when the parent had Persona off.
 `pi-persona:activity:v1` contributes operator-only local-work rows through a closed record:
 `{ version: 1, producerId: "pi-persona-mind", activityId, sessionId, phase, state, target }`.
 `phase` is `inspect|stage|apply`, `state` is `running|staged|done|failed`, and `target` is
-`project|persona|shared`; `staged` is valid only for `stage`. No memory text, paths, models, token
+`project|persona|shared|project-long`; `staged` is valid only for `stage`. No memory text, paths, models, token
 counts, or free-form output are accepted. Ingress matches the active native session and checks its
 manager's current id/file. The producer also captures its native owner and scope across awaits.
 The resulting `mind` row uses `kind: "activity"`: it has no agent count, steer/stop handle, wake,
@@ -755,7 +755,12 @@ memory permissions, the persona's raw delegate target rules for `mind`, and idle
 state. A strict target allowlist must include `mind`; explicit memory/delegate/target denies win.
 No installed agent is required. Accepted
 responses are synchronous `{ ok: true, runId, model, thinking, completion, cancel }`; rejection is
-`{ ok: false, reason }`. `completion` resolves with `{ ok, output, error?, resultRef?, model?, thinking? }`.
+`{ ok: false, reason }`. `completion` resolves with
+`{ status: "done" | "failed" | "stopped", ok, output, error?, resultRef?, model?, thinking? }`. `stopped`
+means the worker was interrupted (user stop, memory-owner change, session shutdown). The 180 s worker
+deadline is not an interruption: once it has fired the companion receives `failed` with the error
+`Mind worker exceeded its 180 s limit`, whatever settles the tracker row afterwards, so it does not retry
+a review that timed out.
 Output remains untrusted data for Mind's bounded proposal parser, never executable code.
 
 This is an ordinary tracked `mind` sub-agent in the tree and F9, sharing the launch pool, usage,
