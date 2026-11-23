@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 
-import { contractPath } from "./contract-data.ts";
+import { CONTRACT_LIMITS, clipContractText, contractPath } from "./contract-data.ts";
 import { type ContractDef, type FieldSpec, validateContractDefinition } from "./contract-schema.ts";
 import { validateContractValue, type ValidationResult } from "./contract-value.ts";
 
@@ -264,7 +264,7 @@ export interface ParseResult {
  *  Prose/fenced replies still try candidates until one parses and validates. */
 export function parseAndValidate(output: string, def: ContractDef): ParseResult {
 	const schema = validateContractDefinition(def);
-	if (!schema.ok) return { ok: false, error: `contract failed: ${schema.error}` };
+	if (!schema.ok) return { ok: false, error: clipContractText(`contract failed: ${schema.error}`, CONTRACT_LIMITS.failureChars) };
 	const wholeReply = output.trim();
 	let firstErrors: string[] | undefined;
 	for (const candidate of jsonCandidates(wholeReply)) {
@@ -280,7 +280,7 @@ export function parseAndValidate(output: string, def: ContractDef): ParseResult 
 		if (candidate === wholeReply) break;
 	}
 	const errors = firstErrors ?? ["output was not valid JSON"];
-	return { ok: false, error: `contract ${def.name} failed: ${errors.join("; ")}` };
+	return { ok: false, error: clipContractText(`contract ${def.name} failed: ${errors.join("; ")}`, CONTRACT_LIMITS.failureChars) };
 }
 
 /** Deterministic, key-order-independent serialisation for hashing. */

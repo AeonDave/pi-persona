@@ -430,3 +430,26 @@ test("the bundled elite persona exposes a sequential evidence-assurance council"
 		"retry policy belongs to Pi's runtime, not the Elite prompt",
 	);
 });
+
+test("persona name and label are sanitized at the parse edge; ordinary ones are untouched", () => {
+	const ESC = String.fromCharCode(27);
+	const parse = (name: string, label?: string) =>
+		parsePersona(["---", `name: ${name}`, ...(label === undefined ? [] : [`label: ${label}`]), "persona: true", "---", "body"].join("\n"), "/p/x.md");
+	assert.equal(parse("magi", '"🧠 MAGI"')?.label, "🧠 MAGI");
+	assert.equal(parse("dev")?.label, "dev", "label defaults to the name");
+	assert.equal(parse("dev", '"  padded  "')?.label, "padded", "label is trimmed");
+	const p = parse(`"${ESC}[31mevil"`, `"${ESC}]0;title\u0007Label\n2"`);
+	assert.ok(p && !p.name.includes(ESC) && !p.label.includes(ESC) && !/[\u0007\n]/.test(p.label), JSON.stringify(p));
+	assert.equal(parse(`"${ESC}[31m"`), null, "a name made only of control characters is no name");
+	assert.equal(parse("dev", `"${ESC}[0m"`)?.label, "dev", "an all-control label falls back to the name");
+});
+
+test("a present-but-unknown orchestration mode is an error; an absent mode stays solo", () => {
+	const withMode = (mode?: string) =>
+		parsePersona(`---\nname: m\npersona: true\norchestration:\n${mode === undefined ? "  roster: x" : `  mode: ${mode}`}\n---\nbody`, "/p/m.md");
+	assert.equal(withMode()?.orchestration?.mode, "solo");
+	assert.equal(withMode("flow")?.orchestration?.mode, "flow");
+	for (const bad of ["Flow", "pipline", "strategy2"]) {
+		assert.throws(() => withMode(bad), new RegExp(`mode: ${bad}".*not a known mode`));
+	}
+});

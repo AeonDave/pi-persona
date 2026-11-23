@@ -580,6 +580,46 @@ test("migration never overwrites a concurrent edit in the final replacement wind
 	assert.ok(result.warnings.some((warning) => warning.includes("changed during migration")));
 });
 
+function backupLockedMigration(beforeInstall?: (target: string) => void) {
+	const b = tempDir("pi-persona-migration-bundled-");
+	const u = userDir();
+	fs.mkdirSync(path.join(b, "personas"), { recursive: true });
+	fs.mkdirSync(path.join(u, "agents"), { recursive: true });
+	const old = "OLD DEFAULT\n";
+	const target = path.join(u, "agents", "dev.md");
+	fs.writeFileSync(path.join(b, "personas", "dev.md"), "CURRENT DEFAULT\n");
+	fs.writeFileSync(target, old);
+	const result = migratePristineSeededDefaults(b, u, {
+		legacyDefaults: { "personas/dev.md": { size: Buffer.byteLength(old), sha256: createHash("sha256").update(old).digest("hex") } },
+		...(beforeInstall ? { beforeInstall: () => beforeInstall(target) } : {}),
+		io: {
+			// A Windows EBUSY on the old backup: only the backup removal fails.
+			remove: (file) => {
+				if (file.endsWith(".bak")) throw Object.assign(new Error("EBUSY: resource busy"), { code: "EBUSY" });
+				fs.rmSync(file, { force: true });
+			},
+		},
+	});
+	return { result, target };
+}
+
+test("a locked backup after a successful install still records the migration and warns about the leftover", () => {
+	const { result, target } = backupLockedMigration();
+	assert.equal(read(target), "CURRENT DEFAULT\n", "the new default was installed");
+	assert.deepEqual(result.migrated, [target]);
+	assert.ok(result.warnings.some((w) => w.includes("backup remains") && w.includes(".bak")), result.warnings.join("\n"));
+	assert.ok(!result.warnings.some((w) => w.includes("replacement warning")), "the upgrade itself did not fail");
+});
+
+test("a locked backup after losing the install race keeps the user's edit, reports skipped, and warns about the leftover", () => {
+	const { result, target } = backupLockedMigration((t) => fs.writeFileSync(t, "USER EDIT WON THE RACE\n"));
+	assert.equal(read(target), "USER EDIT WON THE RACE\n");
+	assert.deepEqual(result.migrated, []);
+	assert.ok(result.skipped.includes(target));
+	assert.ok(result.warnings.some((w) => w.includes("changed during migration")), result.warnings.join("\n"));
+	assert.ok(result.warnings.some((w) => w.includes("backup remains") && w.includes(".bak")), result.warnings.join("\n"));
+});
+
 test("migration stages exclusively and installs with an atomic hard-link", () => {
 	const b = tempDir("pi-persona-migration-bundled-");
 	const u = userDir();

@@ -104,3 +104,15 @@ test("findLiveWriteConflicts: a new writer beside a live one needs both owned an
 		{ kind: "unowned-live", run: unowned },
 	], "a live writer without a writeSet blocks every other writer until it settles");
 });
+
+test("writeSetPathError rejects * and ? wildcards that the literal-segment overlap check cannot reason about", () => {
+	for (const path of ["src/*.ts", "src/**", "*", "src/a?.ts", "src\\*.ts"]) {
+		assert.match(writeSetPathError(path) ?? "", /wildcard/, path);
+	}
+	// Brackets and braces are legitimate file names (Next.js routes), not wildcards here.
+	for (const path of ["app/[id]/page.tsx", "src/{a}.ts"]) assert.equal(writeSetPathError(path), undefined, path);
+	assert.equal(
+		validateParallelWriteSets([{ agent: "a", writeSet: ["src/*.ts"] }, { agent: "b", writeSet: ["src/index.ts"] }]),
+		'delegate: task[0] ("a") writeSet path "src/*.ts" is a wildcard pattern; list exact files or directories.',
+	);
+});

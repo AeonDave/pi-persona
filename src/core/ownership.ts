@@ -108,6 +108,9 @@ export function writeSetPathError(path: string): string | undefined {
 	if (/^[A-Za-z]:/.test(raw) || posix.isAbsolute(slash) || win32.isAbsolute(raw) || normalized === ".." || normalized.startsWith("../")) {
 		return 'outside the repository-relative ownership namespace; use "." for the repository root';
 	}
+	// Overlap is literal segment comparison, so `src/*.ts` would look disjoint from `src/index.ts`.
+	// Only `*` and `?`: brackets and braces are legitimate file names (`app/[id]/page.tsx`).
+	if (/[*?]/.test(raw)) return "a wildcard pattern; list exact files or directories";
 	return undefined;
 }
 

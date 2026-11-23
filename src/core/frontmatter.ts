@@ -8,16 +8,21 @@
  * raw values into the typed shapes the rest of the system expects.
  */
 
+import { MAX_DISPLAY_LABEL_CHARS, sanitizeStatusLabel } from "./display-label.ts";
 import type { Permission } from "./permissions.ts";
 
 // --------------------------------------------------------------------------
 // Frontmatter split
 // --------------------------------------------------------------------------
 
+/** The closing fence is `---` then only spaces/tabs to end of line (`---junk` is content). The
+ *  immediate-close alternative comes first so an empty block ends at ITS fence, not at a later rule. */
+const FRONTMATTER = /^---[ \t]*\r?\n(?:---[ \t]*(?:\r?\n|$)|([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$))([\s\S]*)$/;
+
 /** Split `---\nfrontmatter\n---\nbody`. Missing frontmatter → all body. */
 export function splitFrontmatter(content: string): { frontmatter: string; body: string } {
 	const normalized = content.replace(/^﻿/, "");
-	const match = normalized.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?([\s\S]*)$/);
+	const match = normalized.match(FRONTMATTER);
 	if (!match) return { frontmatter: "", body: normalized.trim() };
 	return { frontmatter: match[1] ?? "", body: (match[2] ?? "").trim() };
 }
@@ -101,6 +106,14 @@ function parseValue(raw: string): string | string[] | boolean | number | Record<
 	return unquote(v);
 }
 
+/** A YAML block-scalar header (`|`, `>` + optional chomping/indent). The subset has no block scalars:
+ *  parsing one would promote its indented continuation lines to top-level keys. */
+const BLOCK_SCALAR = /^[|>][+\-\d]*$/;
+
+function rejectBlockScalar(key: string, value: string): void {
+	if (BLOCK_SCALAR.test(value)) throw new Error(`unsupported block scalar "${value}" for "${key}" — use a single-line value`);
+}
+
 interface Frame {
 	indent: number;
 	container: Record<string, unknown>;
@@ -135,6 +148,7 @@ export function parseYamlSubset(src: string): Record<string, unknown> {
 		if (isItem) {
 			// Block list item under the current `key:` frame.
 			const itemRaw = content === "-" ? "" : content.slice(2);
+			rejectBlockScalar("- item", itemRaw.trim());
 			if (!top.listArr) {
 				top.listArr = [];
 				if (top.parent && top.selfKey) top.parent[top.selfKey] = top.listArr;
@@ -154,6 +168,7 @@ export function parseYamlSubset(src: string): Record<string, unknown> {
 			top.container[key] = child;
 			stack.push({ indent, container: child, selfKey: key, parent: top.container });
 		} else {
+			rejectBlockScalar(key, rest);
 			top.container[key] = parseValue(rest);
 		}
 	}
@@ -191,6 +206,15 @@ export function asPermission(value: unknown): Permission | undefined {
 	if (allow !== undefined) perm.allow = allow;
 	if (deny !== undefined) perm.deny = deny;
 	return perm;
+}
+
+/** A definition-file name/label is project data that reaches notifications and `/doctor`: one folded,
+ *  bounded line with no terminal control sequences. Absent or reduced to nothing ⇒ `""`. */
+export function sanitizedLabel(value: unknown): string {
+	if (typeof value !== "string") return "";
+	// The sanitizer substitutes its fallback for a value that reduces to nothing: two fallbacks tell that apart.
+	const safe = sanitizeStatusLabel(value, "?", MAX_DISPLAY_LABEL_CHARS);
+	return safe === sanitizeStatusLabel(value, "!", MAX_DISPLAY_LABEL_CHARS) ? safe : "";
 }
 
 /** Coerce a value to a boolean (real booleans or the strings `"true"`/`"false"`). */

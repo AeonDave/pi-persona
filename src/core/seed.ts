@@ -756,6 +756,15 @@ export function migratePristineSeededDefaults(
 		const staged = `${target}.pi-persona-migrate-${suffix}.tmp`;
 		const backup = `${target}.pi-persona-migrate-${suffix}.bak`;
 		let stagedOwned = false;
+		// Best-effort: a locked old backup (EBUSY on Windows) must neither undo nor hide an install
+		// that already succeeded, so it is its own warning.
+		const removeBackup = (): void => {
+			try {
+				io.remove(backup);
+			} catch (error) {
+				warnings.push(`seed migration backup remains: ${backup}: ${errorText(error)}`);
+			}
+		};
 		try {
 			// Stage the trusted bundled bytes beside the target with exclusive creation. A stale
 			// temp from a crashed prior run is never followed, overwritten, or removed by us.
@@ -800,7 +809,7 @@ export function migratePristineSeededDefaults(
 				if ((error as NodeJS.ErrnoException).code === "EEXIST") {
 					// A concurrent custom edit won the path. Leave it untouched and discard only
 					// the old known-pristine backup.
-					io.remove(backup);
+					removeBackup();
 					warnings.push(`seed migration target changed during migration; preserved: ${target}`);
 					skipped.push(target);
 					continue;
@@ -808,8 +817,8 @@ export function migratePristineSeededDefaults(
 				if (!restoreBackupIfTargetMissing(target, backup, io)) warnings.push(`seed migration backup preserved: ${backup}`);
 				throw error;
 			}
-			io.remove(backup);
 			migrated.push(target);
+			removeBackup();
 		} catch (error) {
 			warnings.push(`seed migration replacement warning: ${target}: ${errorText(error)}`);
 		} finally {

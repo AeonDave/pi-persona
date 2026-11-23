@@ -89,7 +89,13 @@ export function loadDefinitions(dirs: ScopedDir[]): LoadResult {
 				continue;
 			}
 			content.set(f.path, text);
-			const persona = parsePersona(text, f.path);
+			let persona: Persona | null;
+			try {
+				persona = parsePersona(text, f.path);
+			} catch (error) {
+				warnings.push(`${f.path}: ${error instanceof Error ? error.message : String(error)} — skipped`);
+				continue;
+			}
 			parsedPersonas.set(f.path, persona);
 			if (!persona) {
 				// parseAgent fails on the same condition (missing frontmatter `name`),

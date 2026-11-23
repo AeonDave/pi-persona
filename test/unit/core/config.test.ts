@@ -40,6 +40,22 @@ test("routine check-ins are opt-in; invalid intervals preserve the quiet default
 	assert.equal(resolveConfig({ PI_PERSONA_CHECKIN_MS: "-5" }).checkInEveryMs, 0, "negative ⇒ default");
 });
 
+test("timer-backed intervals obey the settings registry bounds (integer, <= 2^31-1) or fall back to the default", () => {
+	// Node coerces a delay above 2^31-1 or below 1 to 1 ms: an out-of-range knob would spin or cancel instantly.
+	const cases = [
+		["PI_PERSONA_PEEK_MS", "peekEveryMs", 30_000],
+		["PI_PERSONA_CHECKIN_MS", "checkInEveryMs", 0],
+		["PI_PERSONA_AGENT_MAX_MS", "agentHardTimeoutMs", 0],
+		["PI_PERSONA_AGENT_STARTUP_MS", "agentStartupTimeoutMs", 300_000],
+	] as const;
+	for (const [name, key, def] of cases) {
+		assert.equal(resolveConfig({ [name]: "2147483647" })[key], 2_147_483_647, `${name} accepts the ceiling`);
+		for (const bad of ["2147483648", "3000000000", "1e10", "0.5", "1.5", "Infinity"]) {
+			assert.equal(resolveConfig({ [name]: bad })[key], def, `${name}=${bad} ⇒ default`);
+		}
+	}
+});
+
 test("idle compaction settings are opt-in and reject invalid environment values to their defaults", () => {
 	assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION: "on" }).idleCompaction, true);
 	assert.equal(resolveConfig({ PI_PERSONA_IDLE_COMPACTION: " YES " }).idleCompaction, true);

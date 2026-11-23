@@ -9,7 +9,7 @@
  */
 
 import { sanitizeStatusLabel } from "../core/display-label.ts";
-import { asBoolean, asPermission, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { asBoolean, asPermission, parseYamlSubset, sanitizedLabel, splitFrontmatter } from "../core/frontmatter.ts";
 import { parseLegThinking } from "../core/leg-thinking.ts";
 import type { ThinkingLevel } from "../core/types.ts";
 import { writeSetPathError } from "../core/ownership.ts";
@@ -58,7 +58,7 @@ export const MAX_PURPOSE_CHARS = 24;
 export function parseAgent(content: string, source: string): AgentConfig | null {
 	const { frontmatter, body } = splitFrontmatter(content);
 	const fm = parseYamlSubset(frontmatter);
-	const name = typeof fm.name === "string" ? fm.name.trim() : "";
+	const name = sanitizedLabel(fm.name);
 	if (!name) return null;
 
 	const agent: AgentConfig = {

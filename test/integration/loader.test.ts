@@ -216,3 +216,24 @@ test("loadDefinitions ignores unreadable dirs gracefully", () => {
 	assert.deepEqual(r.personas, []);
 	assert.deepEqual(r.agents, []);
 });
+
+test("a definition using an unsupported block scalar is skipped with a warning naming the file and reason", () => {
+	const dir = tmp({
+		"ok.md": "---\nname: ok\n---\nfine",
+		"bad.md": "---\nname: bad\ndescription: >\n  Use when: tools: x\n---\nbody",
+	});
+	const loaded = loadDefinitions([{ path: dir, scope: "user" }]);
+	assert.deepEqual(loaded.agents.map((a) => a.name), ["ok"]);
+	assert.equal(loaded.warnings.length, 1);
+	assert.match(loaded.warnings[0] ?? "", /bad\.md.*block scalar.*skipped/);
+});
+
+test("a persona with an unknown orchestration mode is skipped with a warning naming the file and the mode", () => {
+	const dir = tmp({
+		"typo.md": "---\nname: typo\npersona: true\norchestration:\n  mode: Flow\n  flow: x\n---\nbody",
+		"fine.md": "---\nname: fine\npersona: true\norchestration:\n  mode: flow\n  flow: x\n---\nbody",
+	});
+	const loaded = loadDefinitions([{ path: dir, scope: "user" }]);
+	assert.deepEqual(loaded.personas.map((p) => p.name), ["fine"]);
+	assert.match(loaded.warnings.join("\n"), /typo\.md.*"mode: Flow".*not a known mode.*skipped/);
+});

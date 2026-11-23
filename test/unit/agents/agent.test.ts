@@ -160,3 +160,13 @@ test("the bundled research worker declares .research/ as the area it alone write
 	const agent = parseAgent(readFileSync(source, "utf8"), source.pathname);
 	assert.deepEqual(agent?.writeSet, [".research/"]);
 });
+
+test("an agent name is sanitized at the parse edge; ordinary names are untouched", () => {
+	const ESC = String.fromCharCode(27);
+	const named = (raw: string) => parseAgent(["---", `name: ${raw}`, "---", "body"].join("\n"), "/a/x.md");
+	assert.equal(named("code-reviewer")?.name, "code-reviewer");
+	assert.equal(named("Écrivain 2")?.name, "Écrivain 2");
+	const escaped = named(`"${ESC}[31mred${ESC}]0;title\u0007"`)?.name;
+	assert.ok(escaped !== undefined && !escaped.includes(ESC) && !escaped.includes("\u0007"), `got ${JSON.stringify(escaped)}`);
+	assert.equal(named(`"${ESC}[31m"`), null, "a name made only of control characters is no name");
+});

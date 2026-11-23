@@ -555,8 +555,13 @@ export class TelemetryProducer {
 		const heartbeatMs = this.options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
 		if (heartbeatMs > 0) {
 			this.heartbeatTimer = setInterval(() => {
-				const dynamic = this.options.heartbeat?.() ?? {};
-				this.publish("instance.heartbeat", dynamic);
+				// The production callback reads ctx, which Pi makes throw once stale after a reload; an
+				// exception escaping a timer would be uncaught and end the process.
+				try {
+					this.publish("instance.heartbeat", this.options.heartbeat?.() ?? {});
+				} catch (error) {
+					this.options.onError?.(error);
+				}
 			}, heartbeatMs);
 			this.heartbeatTimer.unref?.();
 		}

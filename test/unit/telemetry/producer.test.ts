@@ -288,3 +288,34 @@ test("every write in the producer pins owner-only permissions", () => {
     assert.match(write.text, /mode: 0o600/, `producer.ts:${write.at} persists without owner-only permissions: ${write.text}`);
   }
 });
+
+test("a throwing heartbeat callback (stale ctx after reload) is reported via onError, not thrown from the timer", async () => {
+  const root = tempDir("pi-persona-telemetry-");
+  const errors: unknown[] = [];
+  const uncaught: unknown[] = [];
+  const onUncaught = (error: unknown) => uncaught.push(error);
+  process.on("uncaughtException", onUncaught);
+  let calls = 0;
+  const p = new TelemetryProducer({
+    agentDir: root,
+    cwd: "/work",
+    sessionId: "stale-ctx",
+    emit: () => {},
+    heartbeatMs: 10,
+    heartbeat: () => {
+      calls += 1;
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    },
+    onError: (error) => errors.push(error),
+  });
+  try {
+    p.start(instance);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(uncaught, [], "the timer callback must not throw");
+    assert.ok(calls >= 2, "the heartbeat keeps ticking after a failure");
+    assert.ok(errors.length >= 2 && errors.every((e) => /stale/.test(String(e))), "each failure is routed to onError");
+  } finally {
+    await p.stop();
+    process.off("uncaughtException", onUncaught);
+  }
+});

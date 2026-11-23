@@ -1,7 +1,7 @@
 /** Public, persistable pi-persona preferences and their resolved runtime config. */
 
 import { isThinkingLevel } from "./types.ts";
-import { resolveConfig, type PiPersonaConfig } from "./config.ts";
+import { MAX_TIMER_DELAY_MS, resolveConfig, type PiPersonaConfig } from "./config.ts";
 import { IDLE_COMPACTION_QUALIFICATION } from "./idle-compaction-qualification.ts";
 
 export type CompanionId = "mind" | "flow";
@@ -39,7 +39,6 @@ export interface PersonaSetting {
 
 const APPLY_WHEN = "next Pi restart or native extension reload";
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /** The one registry used by settings UI, validation, and environment precedence. */
 export const PERSONA_SETTINGS: readonly PersonaSetting[] = [

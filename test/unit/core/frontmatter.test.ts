@@ -134,3 +134,42 @@ test("asBoolean coerces real booleans and the strings 'true'/'false'", () => {
 	assert.equal(asBoolean(undefined), undefined);
 	assert.equal(asBoolean("nonsense"), undefined);
 });
+
+test("splitFrontmatter: an empty block closes at the first fence, so a later horizontal rule stays in the body", () => {
+	const { frontmatter, body } = splitFrontmatter("---\n---\nBody line\n\n---\nafter\n");
+	assert.equal(frontmatter, "");
+	assert.equal(body, "Body line\n\n---\nafter");
+	const crlf = splitFrontmatter("---\r\n---\r\nBody\r\n\r\n---\r\nafter\r\n");
+	assert.equal(crlf.frontmatter, "");
+	assert.equal(crlf.body, "Body\r\n\r\n---\r\nafter");
+});
+
+test("splitFrontmatter: the closing fence is --- followed only by spaces/tabs and end of line", () => {
+	const junk = splitFrontmatter("---\nname: a\n---junk\nmore: x\n---\nBody");
+	assert.equal(junk.frontmatter, "name: a\n---junk\nmore: x");
+	assert.equal(junk.body, "Body");
+	const padded = splitFrontmatter("---\nname: a\n--- \t\nBody");
+	assert.equal(padded.frontmatter, "name: a");
+	assert.equal(padded.body, "Body");
+	const noEol = splitFrontmatter("---\nname: a\n---");
+	assert.equal(noEol.frontmatter, "name: a");
+	assert.equal(noEol.body, "");
+	// An unterminated block (only a `---junk` line) is not frontmatter at all.
+	assert.equal(splitFrontmatter("---\nname: a\n---junk\nBody").frontmatter, "");
+});
+
+test("parseYamlSubset rejects a block-scalar indicator instead of promoting its continuation lines to keys", () => {
+	for (const indicator of ["|", ">", "|-", ">+", ">2", "|2-", "|+1"]) {
+		assert.throws(
+			() => parseYamlSubset(`description: ${indicator}\n  Use when: tools: x\nname: a`),
+			/block scalar/,
+			`${indicator} is unsupported syntax`,
+		);
+	}
+	assert.throws(() => parseYamlSubset("notes:\n  - >\n    folded"), /block scalar/);
+	// Ordinary values that merely contain or start near those characters stay valid.
+	assert.deepEqual(parseYamlSubset("a: x > y\nb: \"|\"\nc: '>'"), { a: "x > y", b: "|", c: ">" });
+	for (const plain of [">=5", ">1.5", ">AB", "|abc", "><", "> 5 items"]) {
+		assert.deepEqual(parseYamlSubset(`description: ${plain}`), { description: plain }, `${plain} is an ordinary value`);
+	}
+});

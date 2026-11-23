@@ -150,6 +150,9 @@ function splitDirs(value: string | undefined): string[] {
 		.filter((s) => s.length > 0);
 }
 
+/** Largest delay `setTimeout`/`setInterval` honours; Node coerces anything above it to 1 ms. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 function boundedInteger(value: string | undefined, min: number, max: number): number | undefined {
 	const normalized = value?.trim();
 	if (!normalized || !/^\d+$/.test(normalized)) return undefined;
@@ -200,31 +203,20 @@ export function resolveConfig(env: Env): PiPersonaConfig {
 		spineLegs: "",
 		changeReport: !isOff(env.PI_PERSONA_LEG_CHANGE_REPORT ?? "on"),
 	};
-	// A valid finite value >= 0 sets the interval (0 opts out); junk/negative keeps the default.
-	const peekRaw = env.PI_PERSONA_PEEK_MS?.trim();
-	if (peekRaw !== undefined && peekRaw !== "") {
-		const peek = Number(peekRaw);
-		if (Number.isFinite(peek) && peek >= 0) config.peekEveryMs = peek;
-	}
-	const checkInRaw = env.PI_PERSONA_CHECKIN_MS?.trim();
-	if (checkInRaw !== undefined && checkInRaw !== "") {
-		const checkIn = Number(checkInRaw);
-		if (Number.isFinite(checkIn) && checkIn >= 0) config.checkInEveryMs = checkIn;
-	}
+	// A valid integer in [0, MAX_TIMER_DELAY_MS] sets the interval (0 opts out); junk, negative,
+	// fractional or over-ceiling values keep the default (same bounds as the settings registry).
+	const peek = boundedInteger(env.PI_PERSONA_PEEK_MS, 0, MAX_TIMER_DELAY_MS);
+	if (peek !== undefined) config.peekEveryMs = peek;
+	const checkIn = boundedInteger(env.PI_PERSONA_CHECKIN_MS, 0, MAX_TIMER_DELAY_MS);
+	if (checkIn !== undefined) config.checkInEveryMs = checkIn;
 	const idleMinutes = boundedInteger(env.PI_PERSONA_IDLE_COMPACTION_MINUTES, 1, 1440);
 	if (idleMinutes !== undefined) config.idleCompactionMinutes = idleMinutes;
 	const idleThreshold = boundedInteger(env.PI_PERSONA_IDLE_COMPACTION_PERCENT, 1, 100);
 	if (idleThreshold !== undefined) config.idleCompactionThresholdPercent = idleThreshold;
-	const hardRaw = env.PI_PERSONA_AGENT_MAX_MS?.trim();
-	if (hardRaw !== undefined && hardRaw !== "") {
-		const hard = Number(hardRaw);
-		if (Number.isFinite(hard) && hard >= 0) config.agentHardTimeoutMs = hard;
-	}
-	const startupRaw = env.PI_PERSONA_AGENT_STARTUP_MS?.trim();
-	if (startupRaw !== undefined && startupRaw !== "") {
-		const startup = Number(startupRaw);
-		if (Number.isFinite(startup) && startup >= 0) config.agentStartupTimeoutMs = startup;
-	}
+	const hard = boundedInteger(env.PI_PERSONA_AGENT_MAX_MS, 0, MAX_TIMER_DELAY_MS);
+	if (hard !== undefined) config.agentHardTimeoutMs = hard;
+	const startup = boundedInteger(env.PI_PERSONA_AGENT_STARTUP_MS, 0, MAX_TIMER_DELAY_MS);
+	if (startup !== undefined) config.agentStartupTimeoutMs = startup;
 	// A finite value >= 1 sets the retention bound; 0 isn't meaningful here (unlike the interval
 	// knobs above, where 0 opts out) so it — like junk/negative — falls back to the default.
 	const asyncRetainRaw = env.PI_PERSONA_ASYNC_RETAIN?.trim();

@@ -9,11 +9,20 @@ export const CONTRACT_LIMITS = Object.freeze({
 	valueNodes: 10_000,
 	valueChars: 1_048_576,
 	errors: 32,
+	pathSegmentChars: 64,
+	failureChars: 2_000,
 });
 
+/** Clip model-controlled text so a diagnostic cannot grow with hostile input. */
+export function clipContractText(text: string, max: number): string {
+	return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
 export function contractPath(parent: string, key: string): string {
-	if (/^[A-Za-z_$][\w$]*$/.test(key)) return parent ? `${parent}.${key}` : key;
-	return `${parent}[${JSON.stringify(key)}]`;
+	const segment = clipContractText(key, CONTRACT_LIMITS.pathSegmentChars);
+	if (/^[A-Za-z_$][\w$]*$/.test(key)) return parent ? `${parent}.${segment}` : segment;
+	// A top-level name has no parent to subscript: quote it instead of `["name"]`.
+	return parent ? `${parent}[${JSON.stringify(segment)}]` : JSON.stringify(segment);
 }
 
 export function isContractObject(value: unknown): value is Record<string, unknown> {

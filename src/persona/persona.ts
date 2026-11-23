@@ -7,7 +7,8 @@
  * `orchestration:` block is the control surface; absent ⇒ L0 (opportunistic).
  */
 
-import { asBoolean, asPermission, asStringArray, parseYamlSubset, splitFrontmatter } from "../core/frontmatter.ts";
+import { sanitizeStatusLabel } from "../core/display-label.ts";
+import { asBoolean, asPermission, asStringArray, parseYamlSubset, sanitizedLabel, splitFrontmatter } from "../core/frontmatter.ts";
 import type { Permission } from "../core/permissions.ts";
 import { asSystemPromptMode, type SystemPromptMode } from "../core/types.ts";
 import { parseRuntimeRosterMember, type RosterMember } from "../orchestration/roster.ts";
@@ -107,10 +108,15 @@ export interface Persona {
 function parseOrchestration(raw: unknown): OrchestrationGrammar | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
 	const o = raw as Record<string, unknown>;
-	const mode: OrchestrationMode =
-		typeof o.mode === "string" && (ORCHESTRATION_MODES as readonly string[]).includes(o.mode)
-			? (o.mode as OrchestrationMode)
-			: "solo";
+	let mode: OrchestrationMode = "solo";
+	if (o.mode !== undefined) {
+		// A present-but-unknown mode (`Flow`, `pipline`) must not silently become solo: the mandated
+		// strategy/flow would never run. Throwing reaches the definition-load warnings (loader.ts).
+		if (typeof o.mode !== "string" || !(ORCHESTRATION_MODES as readonly string[]).includes(o.mode)) {
+			throw new Error(`orchestration "mode: ${sanitizeStatusLabel(String(o.mode), "", 40)}" is not a known mode (expected: ${ORCHESTRATION_MODES.join(", ")})`);
+		}
+		mode = o.mode as OrchestrationMode;
+	}
 	const grammar: OrchestrationGrammar = { mode };
 	if (typeof o.strategy === "string" && o.strategy.trim()) grammar.strategy = o.strategy.trim();
 	if (typeof o.flow === "string" && o.flow.trim()) grammar.flow = o.flow.trim();
@@ -128,10 +134,10 @@ function parseOrchestration(raw: unknown): OrchestrationGrammar | undefined {
 export function parsePersona(content: string, source: string): Persona | null {
 	const { frontmatter, body } = splitFrontmatter(content);
 	const fm = parseYamlSubset(frontmatter);
-	const name = typeof fm.name === "string" ? fm.name.trim() : "";
+	const name = sanitizedLabel(fm.name);
 	if (!name) return null;
 
-	const label = typeof fm.label === "string" && fm.label.trim() ? fm.label : name;
+	const label = sanitizedLabel(fm.label) || name;
 	const persona: Persona = {
 		name,
 		label,
