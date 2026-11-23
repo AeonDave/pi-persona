@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { programWakeIds, registerSessionCards, type RunFailureEntry } from "./ui/session-cards.ts";
+import { createProgramWakeIndex, registerSessionCards, type RunFailureEntry } from "./ui/session-cards.ts";
 
 import type { AgentConfig } from "./agents/agent.ts";
 import { installBridge, isBridgeMode } from "./bridge.ts";
@@ -360,13 +360,14 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	pi.on("session_start", () => activateNativeTools(pi));
 	const results = new SessionResults(pi);
 	const exocomArgs = parseExocomArgv(options.exocomArgv ?? process.argv);
+	const branchWakeIds = createProgramWakeIndex();
 	registerSessionCards(pi, {
 		detailHint: expandDetailHint,
 		getOutputPad: () => pi.getSettings().outputPad ?? 1,
 		processLog: (record) => renderProcessLog(record, true),
 		// One card per program event: its wake, queued or on this branch; otherwise its log entry.
 		programWake: (id) => monitors?.wakePending(id) === true || scripts?.wakePending(id) === true
-			|| programWakeIds(lastCtx?.sessionManager.getBranch() ?? []).has(id),
+			|| branchWakeIds(lastCtx?.sessionManager).has(id),
 		// Never hydrate an archive before its owning session is bound.
 		programLog: (id) => lastCtx ? (id.startsWith("script-") ? scriptArchive : monitorArchive).result(id) : undefined,
 	});

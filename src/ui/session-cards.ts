@@ -182,6 +182,30 @@ export function programWakeIds(entries: readonly unknown[]): Set<string> {
 	return ids;
 }
 
+export interface BranchSource {
+	getSessionId(): string;
+	getLeafId(): string | null;
+	getBranch(): readonly unknown[];
+}
+
+const NO_WAKE_IDS: ReadonlySet<string> = new Set();
+
+/** One-slot memo of `programWakeIds` keyed on (session id, leaf id): entries are append-only, and every
+ * append, compaction, branch switch, `/new` or fork changes one of the two. */
+export function createProgramWakeIndex(): (source: BranchSource | undefined) => ReadonlySet<string> {
+	let key: string | undefined;
+	let ids: ReadonlySet<string> = NO_WAKE_IDS;
+	return (source) => {
+		if (!source) return NO_WAKE_IDS;
+		const next = `${source.getSessionId()}\u0000${source.getLeafId() ?? ""}`;
+		if (next !== key) {
+			ids = programWakeIds(source.getBranch());
+			key = next; // assigned only after a successful scan, so a throw is never cached
+		}
+		return ids;
+	};
+}
+
 /** A custom message's text as its card renders it. */
 function messageText(content: unknown): string {
 	if (typeof content === "string") return content;

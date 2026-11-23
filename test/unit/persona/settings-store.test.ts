@@ -8,6 +8,7 @@ import {
 	linkSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	statSync,
 	symlinkSync,
 	unlinkSync,
@@ -549,4 +550,52 @@ test("oversized legacy sources are retained and not imported", () => {
 	assert.ok(result.warnings.some((warning) => warning.includes("exceeds")));
 	assert.equal(readFileSync(legacyConfigFile, "utf8"), original);
 	assert.equal(existsSync(`${legacyConfigFile}.migrated`), false);
+});
+
+test("first creation falls back to an absent-check rename where hard links are unsupported", () => {
+	for (const code of ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"]) {
+		const dir = tempDir("pi-persona-settings-");
+		const file = join(dir, "settings.json");
+		const link = () => { throw Object.assign(new Error("no links"), { code }); };
+		patchPersonaSettings(file, { preferences: { nudge: false } }, { link });
+		assert.equal(readPersonaSettings(file).preferences.nudge, false, code);
+		assert.equal(statSync(file).nlink, 1, code);
+		assert.deepEqual(readdirSync(dir), ["settings.json"], `${code}: no temp or lock left`);
+	}
+});
+
+test("the link-less fallback never replaces a file that appeared first", () => {
+	const dir = tempDir("pi-persona-settings-");
+	const file = join(dir, "settings.json");
+	const competing = JSON.stringify({ version: 1, preferences: { nudge: true }, personas: {}, lastPersona: null });
+	const link = () => { writeFileSync(file, competing, "utf8"); throw Object.assign(new Error("no links"), { code: "ENOTSUP" }); };
+	assert.throws(() => patchPersonaSettings(file, { preferences: { nudge: false } }, { link }), { code: "EEXIST" });
+	assert.equal(readFileSync(file, "utf8"), competing);
+	assert.deepEqual(readdirSync(dir), ["settings.json"]);
+});
+
+test("other link errors propagate without touching rename", () => {
+	for (const code of ["EACCES", "EEXIST"]) {
+		const dir = tempDir("pi-persona-settings-");
+		const file = join(dir, "settings.json");
+		let renames = 0;
+		assert.throws(() => patchPersonaSettings(file, { preferences: { nudge: false } }, {
+			link: () => { throw Object.assign(new Error("x"), { code }); },
+			rename: () => { renames++; },
+		}), { code });
+		assert.equal(renames, 0, code);
+		assert.deepEqual(readdirSync(dir), []);
+	}
+});
+
+test("the link-less fallback retries a transient rename failure", () => {
+	const file = join(tempDir("pi-persona-settings-"), "settings.json");
+	let failures = 1; let slept = 0;
+	patchPersonaSettings(file, { preferences: { nudge: false } }, {
+		link: () => { throw Object.assign(new Error("no links"), { code: "EPERM" }); },
+		rename: (from, to) => { if (failures-- > 0) throw Object.assign(new Error("busy"), { code: "EBUSY" }); renameSync(from, to); },
+		sleep: () => { slept++; },
+	});
+	assert.equal(slept, 1);
+	assert.equal(readPersonaSettings(file).preferences.nudge, false);
 });

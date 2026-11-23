@@ -44,6 +44,8 @@ export interface PersonaSettingsWriteIO {
 	sleep?: (ms: number) => void;
 	/** Exclusive lock-file open seam, useful for exercising transient platform errors. */
 	openExclusiveLock?: (file: string) => number;
+	/** Exclusive-create seam, useful for exercising filesystems without hard links. */
+	link?: (from: string, to: string) => void;
 	acquireLock?: (file: string, sleep: (ms: number) => void) => () => void;
 }
 
@@ -416,6 +418,19 @@ function removeLinkIfIdentity(file: string, snapshot: FileSnapshot): void {
 	}
 }
 
+/** Link failures that mean the filesystem has no hard links, not that the target exists. */
+const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"]);
+
+function existsNoFollow(file: string): boolean {
+	try {
+		lstatSync(file);
+		return true;
+	} catch (error) {
+		if (errorCode(error) === "ENOENT") return false;
+		throw error;
+	}
+}
+
 function atomicWrite(file: string, payload: string, io: PersonaSettingsWriteIO, expectMissing: boolean): void {
 	const contents = Buffer.from(payload, "utf8");
 	if (contents.byteLength > MAX_SETTINGS_BYTES) {
@@ -429,25 +444,33 @@ function atomicWrite(file: string, payload: string, io: PersonaSettingsWriteIO, 
 		fsyncSync(fd);
 		closeSync(fd);
 		fd = undefined;
-		if (expectMissing) {
-			// Exclusive same-volume link makes first creation atomic without replacing a racing file.
-			linkSync(temporary, file);
-			return;
-		}
 		const rename = io.rename ?? renameSync;
 		const sleep = io.sleep ?? sleepSync;
-		for (let attempt = 1; ; attempt++) {
-			try {
-				rename(temporary, file);
-				return;
-			} catch (error) {
-				const code = errorCode(error);
-				if (attempt < RENAME_ATTEMPTS && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
-					sleep(RENAME_BACKOFF_MS * attempt);
-					continue;
+		const replace = (): void => {
+			for (let attempt = 1; ; attempt++) {
+				try {
+					rename(temporary, file);
+					return;
+				} catch (error) {
+					const code = errorCode(error);
+					if (attempt < RENAME_ATTEMPTS && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
+						sleep(RENAME_BACKOFF_MS * attempt);
+						continue;
+					}
+					throw error;
 				}
-				throw error;
 			}
+		};
+		if (!expectMissing) return replace();
+		try {
+			// Exclusive same-volume link makes first creation atomic without replacing a racing file.
+			(io.link ?? linkSync)(temporary, file);
+		} catch (error) {
+			if (!NO_HARD_LINKS.has(errorCode(error) ?? "")) throw error;
+			// Every writer holds the settings lock and the caller read the target as absent, so an
+			// absent check plus atomic rename cannot clobber a first write or expose a partial file.
+			if (existsNoFollow(file)) throw Object.assign(new Error(`persona settings already exist: ${file}`), { code: "EEXIST" });
+			replace();
 		}
 	} finally {
 		if (fd !== undefined) {
