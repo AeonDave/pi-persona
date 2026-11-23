@@ -60,7 +60,8 @@ does not create that obligation. `/exocom` and `/exocom status` inspect the conn
 `/exocom help` shows command usage. Ask the agent to send or ask; these are model tools.
 
 1. Describe an independent slice with `exocom_task { action: "create", work_key, description,
-   write_set }`. An empty write set means read-only work. Creation is an invitation to collaborate,
+   write_set }`. An empty write set means read-only work. Paths are exact files or directories (`*` and
+   `?` are refused); on Windows and macOS two spellings that differ only in letter case are one path. Creation is an invitation to collaborate,
    not an assignment. Keep tasks within the users' authorized objective.
 2. Inspect tasks using `exocom_task { action: "list", offset, limit, detail }`. Every task carries a
    `task_id`, the immutable creation message ID, alongside its human-selected `work_key`. Before

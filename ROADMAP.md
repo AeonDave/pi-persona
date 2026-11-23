@@ -254,7 +254,7 @@ No code changes planned until the audit completes.
 - Patch (`x.y.z+1`): bugfixes, doc updates, no new features
 - Minor (`x.y+1.0`): new features, new integrations, backward-compatible
 - The project follows [Keep a Changelog](https://keepachangelog.com/) in `CHANGELOG.md`
-- Host policy: qualify the latest stable Pi together with plugin updates (currently 1.4.0); do not maintain historical-host compatibility branches.
+- Host policy: qualify the latest stable Pi together with plugin updates (currently 1.5.2); do not maintain historical-host compatibility branches.
 - Node.js floor: ≥ 22.19
 
 ## References

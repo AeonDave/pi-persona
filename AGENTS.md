@@ -79,7 +79,8 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   which would hit Windows' ~32 KiB command-line cap on flow-phase tasks. Every delegate leg, and every
   tracked `council`/`flow` run (one slot for the whole run), headless included, shares one
   `maxConcurrency` launch pool (`Semaphore` in `orchestration/parallel.ts`), so a fan-out can't open more
-  concurrent sessions than that; the strategy SDK's own semaphore gates the legs INSIDE a run.
+  concurrent sessions than that; the strategy SDK's own semaphore gates the legs INSIDE a run (a flow
+  builds one SDK per phase, so the SDK limits apply per phase, not per flow).
   Any event re-arms the idle window (a chatty tool is never killed), but stall credit follows one rule,
   `madeHeadway` (`engine/async.ts`): raw tool-output chunks earn none, so a leg whose tool streams forever
   raises only the operator-only stall card (nothing is killed, the model is not woken). The idle-timeout

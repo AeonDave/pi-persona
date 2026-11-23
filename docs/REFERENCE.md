@@ -46,7 +46,7 @@ hard-fail.
 | persona `coaching:` | give children `contact_supervisor` for progress and blocking decisions |
 | persona `delegation:` | require briefs, set an output contract, schedule disjoint writes, and order fresh verification |
 | `isolation: worktree` | run in a clean temporary Git worktree and return an exported diff; invalid/dirty repositories fail before launch; failed export retains the worktree for recovery |
-| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute, escaping `../`, and Windows drive-relative paths such as `C:foo` are invalid. Declarative, not a sandbox |
+| agent `writeSet:` | repository-relative paths the agent alone writes by design (`research` declares `[.research/]`); a write-capable `delegate` leg that gives no `writeSet` of its own inherits it, so a persona that requires disjoint writes sees a declared owner instead of an unknown writer. Read-only legs do not inherit it. A directory owns its subtree; absolute, escaping `../`, Windows drive-relative paths such as `C:foo`, and `*`/`?` wildcards are invalid. Declarative, not a sandbox |
 | `council: { preset }` | expand a reusable `presets/<name>.preset.json`; authored fields override the preset |
 | `contracts/*.json` | define a hot-editable structured return requested through `outputContract` and pinned per run |
 
@@ -237,22 +237,27 @@ No replacement sandbox or renderer is required for this integration.
 Naming one that
 isn't installed is rejected before any worker
 spawns, checked across every task in a parallel batch: `delegate: unknown output contract(s) "x" —
-nothing was spawned. Installed contracts: default, finding` (the list is capped at 16 names; a
+nothing was spawned. Installed contracts: default, finding, findings` (the list is capped at 16 names; a
 `, …` marker is appended only when more than 16 are installed).
 
 The `findings` contract returns a required `result` string and up to 50 `findings`, each with
-`file`, a positive integer `line`, `severity` (`low`, `medium`, `high`, `critical`) and `evidence`.
+a non-empty `file`, a positive integer `line`, `severity` (`low`, `medium`, `high`, `critical`) and
+`evidence` of at least 12 characters.
 An empty findings array is valid. Shape validation does not prove the factual claim or read the file.
 
 Custom `contracts/<name>.contract.json` files use the same schema recursively: scalar `string`,
 `number`, `integer`, `boolean` and `enum`; `object` with `fields`; `array` with `items` and optional
 `minItems`/`maxItems`. `required` applies within each containing object. Existing numeric bounds
-and `minLength` retain their meaning. Errors identify the exact path, such as `findings[0].line`.
+and `minLength` retain their meaning. Errors identify the exact path, such as `findings[0].line`; a top-level
+name that is not an identifier is quoted (`"risk-level"`). A definition with an unsupported property, such
+as an unknown top-level key or a bound that does not apply to its field type, is skipped with a load
+warning, and naming it is then refused as an unknown contract.
 Both engines instruct and validate against a deep-frozen schema pinned at run start.
 
 Definitions are bounded to 65,536 characters, depth 8, 256 field/item schemas and 128 enum values.
 Results are bounded to depth 16, 1,024 items per array, 10,000 nodes and 1,048,576 characters in
-strings and keys; diagnostics stop at 32 errors. Ordinary undeclared fields remain available;
+strings and keys; diagnostics stop at 32 errors, cut each key in a path at 64 characters and the
+failure message at 2,000, each followed by `...`. Ordinary undeclared fields remain available;
 non-JSON values, hostile keys, cycles and accessors are rejected. No second schema engine or
 dependency is involved.
 
@@ -288,7 +293,9 @@ so they do not repeat command output or bypass page limits. No extra log store i
 
 A nonzero exit fails the run and retains the worktree and safely exported changes for recovery.
 Timeout, cancellation or uncertain process/directory state retain the worktree without exporting
-an artifact. Failed workers skip the check. Verification failure never causes an automatic model
+an artifact. Failed workers skip the check. When verification was requested and the worker fails, the
+worktree is retained for recovery, except after a provider failure, where it is removed once any diff has
+been appended. Verification failure never causes an automatic model
 retry. A successful saved continuation keeps the same command and checks permissions again;
 changing it requires a new worker. Default timeout is 120 seconds; the explicit range is 1 ms to
 one hour. Shell source is limited to 8,192 characters.
@@ -584,7 +591,12 @@ bounded examples.
 Personas and agents are Markdown files with YAML frontmatter. Teams, flows, contracts, and presets
 are data files. Discovery precedence is builtin < user `~/.pi/agent/persona` < project `.pi/`.
 Personas and agents are loaded from the user and project agent folders; bundled persona and agent
-files are seed sources. A fresh install has no installed personas until `/persona seed`,
+files are seed sources. Frontmatter is a single-line YAML subset: a block scalar (`key: |` or `key: >`)
+is not supported, and a file that uses one is skipped with a warning naming it. An `orchestration.mode`
+that is not `solo`, `parallel`, `pipeline`, `strategy` or `flow` skips the persona the same way instead of
+running it as `solo`. At load, names and labels lose terminal control sequences, are folded to one
+line with compatibility characters normalized, and are cut at 80 characters.
+A fresh install has no installed personas until `/persona seed`,
 `/persona restore`, or opt-in first-run seeding installs them. With none installed, F8, `/doctor` and
 `/persona list` all point to `/persona seed`.
 
@@ -876,8 +888,10 @@ overlapping or missing ownership for parallel writers, and refuses a declared ve
 start before or beside a material writer in the same call or while a mutating background run is in
 flight. Ownership holds across calls too: a `delegate` writer requested while earlier writers still run
 must declare a valid `writeSet` disjoint from theirs, and none starts beside a running writer that declared
-none (a tracked `council`/`flow` run counts as such a writer). The rejection names the conflicting run
-ids; readers are never blocked. Only `read`, `grep`, `find`, `ls`, and the source-read-only `code_outline` count as read-only; shell-capable, MCP-enabled, and
+none (a tracked `council`/`flow` run counts as such a writer). The check runs when `delegate` launches a
+writer: launching a `council` or `flow` is not itself checked against live writers. `isolation: worktree`
+does not relax ownership: an isolated leg is still classed as a writer, since its exported changes target the same tree. The rejection names
+the conflicting run ids; readers are never blocked. Only `read`, `grep`, `find`, `ls`, and the source-read-only `code_outline` count as read-only; shell-capable, MCP-enabled, and
 unknown toolsets fail closed as writers. `writeSet` is a scheduling contract, not an OS sandbox.
 Ownership checks cover the tasks admitted by `maxChildren`; a dropped task cannot create a false
 parallel-write conflict. A verifier omitted by that limit still rejects the batch, rather than silently
@@ -1034,7 +1048,8 @@ The next line probes `git --version` exactly as worktree isolation, `compete` an
 run git: `git: git version …`, or `git: UNUSABLE (<git's first error line>)` when git fails for the
 Pi process. On an Apple Silicon Mac, `xcrun: error: unable to load libxcrun … need 'x86_64'` means
 Node (and therefore Pi) runs as x86_64 under Rosetta while the Command Line Tools are arm64-only:
-install a native arm64 Node and reinstall Pi. `/persona-settings` diagnostics show the latest probe.
+install a native arm64 Node and reinstall Pi. After a `/doctor` run, `/persona-settings` diagnostics
+repeat that probe; they never start git themselves.
 
 **CLI flags** — `--persona <name>` starts with that installed persona and errors if it is missing;
 `--exocom` joins this workspace's Exocom plane; `--exocom=Ab0T` joins another workspace's scope
@@ -1047,7 +1062,7 @@ from a different cwd. Pi owns `--model <provider/id>`, `--thinking
 | `PI_PERSONA_CHILD_THINKING` | inherited | reasoning effort for child-engine sub-agents |
 | `PI_PERSONA_SEED` | off | `on` auto-installs bundled personas on first run |
 | `PI_PERSONA_BROKER` | on | `off` disables the cross-process comm plane for child, worktree, and MCP legs |
-| `PI_PERSONA_PEEK_MS` | 30000 | fast async stall-card/message tick; `0` disables it |
+| `PI_PERSONA_PEEK_MS` | 30000 | fast async stall-card/message tick; `0` disables it. This and the three millisecond settings below accept integers from 0 to 2147483647, like `/persona-settings`; any other value falls back to the default |
 | `PI_PERSONA_CHECKIN_MS` | 0 | opt-in periodic operator status entries while async children run; positive milliseconds enable them. Live progress and stall/recovery entries remain independent; no model wake |
 | `PI_PERSONA_AGENT_MAX_MS` | off | opt-in per-agent hard wall-clock cap; unset leaves healthy work running |
 | `PI_PERSONA_AGENT_STARTUP_MS` | 300000 | startup deadline for a child that makes no progress; `0` disables it. Like the idle window, a leg waiting on a supervisor reply is not idle: the watchdog re-arms while its ask is pending, instead of killing on a blind ceiling |

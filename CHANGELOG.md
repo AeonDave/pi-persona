@@ -6,6 +6,18 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+### Security
+
+- A `council` call can no longer hand an inline member, or an inline actor such as `params.judge`, tools
+  the active persona is denied. The call-time rule that already refused this for `delegate` now covers
+  `council`; members that only name an agent are unchanged.
+- A flow name containing a path separator, `..`, `:` or NUL is reported as an unknown flow, so the `flow`
+  tool, `/flow` and a persona's `orchestration:` cannot load a `*.flow.json` from outside the bundled,
+  user and project flow folders.
+- The cross-process broker no longer accepts a `reply` frame. No worker ever needed one, and any process
+  connected to the session's pipe could use it to answer another worker's pending question as the
+  supervisor.
+
 ### Added
 
 - `/doctor` probes git the way pi-persona runs it and reports `git: git version …` or
@@ -14,6 +26,49 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ### Fixed
 
+- An in-process worker whose session cannot be created (rejected credentials, a loader error, an
+  unavailable selected skill) now settles as a classified failure instead of throwing. A provider
+  failure at that point is eligible for provider fallback, and the completion card and the repeated-
+  failure guard see it. A progress consumer that throws can no longer fail a finished worker.
+- A `council` or `flow` phase that exceeds `maxChildren` or the token budget now cancels the legs still
+  running in that run or phase instead of leaving them to run and bill with nothing waiting for them.
+- `PI_PERSONA_PEEK_MS`, `PI_PERSONA_CHECKIN_MS`, `PI_PERSONA_AGENT_MAX_MS` and
+  `PI_PERSONA_AGENT_STARTUP_MS` accept only integers from 0 to 2147483647, as `/persona-settings` does.
+  A value above that range or below 1 used to reach the timer as about 1 ms, cancelling every worker at
+  launch or polling continuously. Anything that is not a plain integer, including `1e4` and `30000.5`, now
+  falls back to the default.
+- Definition files: a YAML block scalar (`key: |`, `key: >`) is refused with a warning instead of turning
+  its continuation lines into top-level keys; an empty frontmatter block no longer swallows the body up to
+  the next horizontal rule, and only a line of exactly `---` closes a block; an unknown `orchestration.mode` skips the persona with a warning instead of
+  silently running it as `solo`; names and labels lose terminal control sequences, are folded to one line
+  and are cut at 80 characters.
+- `writeSet` and exocom `write_set` paths containing `*` or `?` are refused. They were compared as
+  literal names and so looked disjoint from the files they matched.
+- A majority vote for an option named `constructor` is no longer reported as a tie.
+- A flow journal left with a partial last line by a crash no longer swallows the next entry, which made a
+  completed phase run again; clearing a finished run's entries replaces the file atomically.
+- `map` treats `maxItems` of 0, a negative number or NaN as the default cap instead of failing after the
+  splitter has run.
+- A headless `flow` that fails names the failed phase, the failure kind and a shortened error after the
+  fenced output, even when another phase produced output.
+- `code_outline` retries after a transient failure to start the parser or load a grammar instead of
+  staying broken until Pi restarts; its failure text is indented like its call row.
+- Contract failure messages are cut at 2,000 characters and each key in a path at 64, so a reply with
+  an enormous key cannot produce an enormous error. A top-level field whose name is not an identifier is
+  shown as `"risk-level"` rather than `["risk-level"]`.
+- F9 worker chat: a tool the worker named but never started is closed when the run settles instead of
+  showing as running forever; pressing up while everything fits no longer stops the view following new
+  output; the legend shows the live key bindings.
+- A worktree leg that fails before its worker starts is no longer described as possibly still writing,
+  and a failed worker's recovery notice no longer says its verification was skipped.
+- Steering a child-process worker that has already disconnected reports the steer as not delivered
+  instead of accepting and dropping it. Steers sent before a worker connects are buffered up to 16.
+- Exocom: two sessions reclaiming the same lock left by a crashed one can no longer both hold it, because
+  only one reclaims at a time and it rechecks the lock first; on Windows and macOS two claims that differ only in letter case conflict; a spilled
+  message the receiver rejects no longer leaves its copy on disk.
+- Upgrading a seeded default counts as migrated even when its backup cannot be deleted, and the leftover
+  backup is reported on its own.
+- A throwing telemetry heartbeat no longer becomes an uncaught exception.
 - `requireDisjointWrites` now holds across calls. Interactive `delegate` runs in the background, so a
   writer requested in a later call ran beside the writers still live without any ownership check. It
   must now declare a valid `writeSet` disjoint from theirs, and it cannot start beside a running writer

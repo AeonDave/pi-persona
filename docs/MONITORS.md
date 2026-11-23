@@ -44,8 +44,13 @@ interpreter avoids platform-specific quoting.
 
 | Mode | When the model wakes | Typical source |
 |---|---|---|
-| `exit` | The launched program finishes, with its exit code and bounded output tail | Build or local job |
+| `exit` | The launched program finishes and its output pipes close, with its exit code and bounded output tail | Build or local job |
 | `output` | A nonempty stdout line arrives | File watcher, filtered log tail, system-event subscription, service adapter |
+
+A job that leaves a background process holding its output (`server &` with no redirection) is not
+reported as finished until that process exits or the deadline passes, and is then reported as timed out.
+Redirect the background process (`server >server.log 2>&1 &`) so the launcher's exit is seen at once. The
+same holds for `script` and for a worktree `verification` command.
 
 For example, start an existing build script and get its completion:
 

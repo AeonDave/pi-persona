@@ -1310,7 +1310,7 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
   one; stop it by key. Ownership of the limits: a run holds ONE slot of the delegate `maxConcurrency` launch
   pool for its whole life (`queued` until granted; a flow keeps it while parked at a checkpoint); the strategy
   SDK's per-run semaphore gates the legs INSIDE it, so members never compete with delegate legs for pool
-  slots; token budgets, the child limit, the delegation ledger and the fork-bomb guard stay in the SDK and
+  slots (a flow builds one SDK per phase, so those limits apply per phase); token budgets, the child limit, the delegation ledger and the fork-bomb guard stay in the SDK and
   engine. A flow parked at a checkpoint is blocked on the OPERATOR: the run carries `awaiting`, peek reads
   `waiting for operator at checkpoint <id>`, the stall watchdog skips it and nothing wakes the model; a
   rejected checkpoint settles the run `stopped` and the plan reaches the model as its partial output. A

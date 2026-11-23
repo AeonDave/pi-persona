@@ -51,14 +51,18 @@ Who owns which limit: a `council` or `flow` TOOL run takes ONE slot of the deleg
 (`maxConcurrency`, see [ARCHITECTURE.md](ARCHITECTURE.md#supervision--the-waiting-model)) for its whole life, and
 the SDK's semaphore below gates only the legs INSIDE it, so a strategy's members never contend with delegate
 legs for pool slots. Interactive sessions launch the run in the background (a receipt, then ONE completion
-follow-up); headless sessions join it inline. A strategy needs nothing to opt in.
+follow-up); headless sessions join it inline. A strategy needs nothing to opt in. A flow builds one SDK
+per phase, so `maxChildren`, `maxConcurrency` and `budgetTokens` apply to each phase, not to the flow as a
+whole; phases whose `needs` are met run together.
 
 Every `agent()` call in one SDK instance shares a concurrency semaphore, including direct
 `Promise.all` calls and overlapping `parallel()` batches. A requested batch concurrency may lower
 the ceiling, never raise it. Cancellation removes queued legs before they reach an engine.
 `budgetTokens` is an admission guard based on completed legs' input/output usage: queued work
 rechecks it when a slot opens, but already-running legs may exceed it. It is not a hard streaming
-token or billing cap.
+token or billing cap. A breach of it or of `maxChildren` is detected when the next leg asks for a slot;
+it fails that run (in a flow, that phase) and cancels its legs still in flight, whose rows read
+`cancelled: run exceeded … in a sibling leg`.
 
 ## Roster-role ensembles
 
