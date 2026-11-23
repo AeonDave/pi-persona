@@ -6,6 +6,8 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.20.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.20.0) - 2026-11-23
+
 ### Security
 
 - A `council` call can no longer hand an inline member, or an inline actor such as `params.judge`, tools
@@ -61,7 +63,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   a panel whose other members failed is no longer reported as a unanimous winner.
 - Exocom sends only ask, answer and targeted-offer frames over the wire. Claims, tasks, progress,
   releases and publications travel through the shared ledger, as before. A non-wake frame from a peer is
-  dropped without a rejection, so its sender sees an ack timeout.
+  dropped without a rejection, so its sender sees an ack timeout. On Linux and macOS Exocom's socket
+  directory is prepared the same way as the broker's: a socket path longer than 103 bytes (a long
+  `TMPDIR`) fails Exocom's start with `socket path too long` instead of binding a truncated path.
 
 ### Added
 
@@ -107,19 +111,19 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 - A failed Exocom send no longer removes the target's registry entry unless its process is gone. A
   transient connection error used to make the other sessions treat a live peer as having left and drop
   its claims and tasks. The entry of a peer that is alive but unreachable now stays until its process exits
-  or its heartbeat goes stale (about two minutes), and sends to it fail as unreachable meanwhile.
+  or its heartbeat goes stale (about two minutes), and sends to it fail as unreachable or as an ack timeout meanwhile.
 - Program-event log cards no longer rescan the branch once per rendered card.
 - The first creation of `persona/settings.json` works on filesystems without hard links (some network and
   removable volumes). It checks that the file is absent under the settings lock and renames atomically; a
   file that appeared first is still reported, and any other error still fails without overwriting.
 - `PI_PERSONA_PEEK_MS`, `PI_PERSONA_CHECKIN_MS`, `PI_PERSONA_AGENT_MAX_MS` and
   `PI_PERSONA_AGENT_STARTUP_MS` accept only integers from 0 to 2147483647, as `/persona-settings` does.
-  A value above that range or below 1 used to reach the timer as about 1 ms, cancelling every worker at
-  launch or polling continuously. Anything that is not a plain integer, including `1e4` and `30000.5`, now
-  falls back to the default.
+  A value above that range, or a fraction below 1, used to reach the timer as about 1 ms, cancelling every
+  worker at launch or polling continuously; 0 still turns the setting off. Anything that is not a plain
+  integer, including `1e4` and `30000.5` (both accepted before), now falls back to the default.
 - Definition files: a YAML block scalar (`key: |`, `key: >`) is refused with a warning instead of turning
   its continuation lines into top-level keys; an empty frontmatter block no longer swallows the body up to
-  the next horizontal rule, and only a line of exactly `---` closes a block; an unknown `orchestration.mode` skips the persona with a warning instead of
+  the next horizontal rule, and only a line of `---` (trailing spaces or tabs allowed) closes a block; an unknown `orchestration.mode` skips the persona with a warning instead of
   silently running it as `solo`; names and labels lose terminal control sequences, are folded to one line
   and are cut at 80 characters.
 - `writeSet` and exocom `write_set` paths containing `*` or `?` are refused. They were compared as
