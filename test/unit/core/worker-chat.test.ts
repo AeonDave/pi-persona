@@ -116,6 +116,23 @@ test("settle closes every still-running tool block as not completed and keeps se
 	assert.equal(chat.snapshot(), after, "settling again is a no-op");
 });
 
+test("a call the host aborts before it ran is closed by the host's own result, leaving settle nothing to do", () => {
+	// Pi 1.6.0 gives every named call of an interrupted batch a start, an error end and a result message.
+	const chat = new WorkerChat();
+	const aborted = { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+	chat.observe({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "skipped", name: "bash", arguments: { command: "ls" } }] } });
+	chat.observe({ type: "tool_execution_start", toolCallId: "skipped", toolName: "bash", args: { command: "ls" } });
+	chat.observe({ type: "tool_execution_end", toolCallId: "skipped", toolName: "bash", result: aborted, isError: true });
+	chat.observe({ type: "message_end", message: { role: "toolResult", toolCallId: "skipped", toolName: "bash", ...aborted } });
+	const closed = chat.snapshot();
+	const tools = closed.blocks.filter((block) => block.kind === "tool");
+	assert.equal(tools.length, 1, "the three reports of one call are one block");
+	assert.equal(tools[0]?.status, "failed");
+	assert.equal(tools[0]?.output, "Operation aborted");
+	chat.settle();
+	assert.equal(chat.snapshot(), closed);
+});
+
 test("late partial updates cannot replace a settled tool result", () => {
 	const chat = new WorkerChat();
 	chat.observe({ type: "tool_execution_end", toolCallId: "a", toolName: "read", result: { content: [{ type: "text", text: "final" }] } });

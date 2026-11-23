@@ -223,6 +223,9 @@ const createPiSession: CreateInProcSession = async (opts) => {
 		cwd: opts.cwd,
 		agentDir: opts.agentDir,
 		settingsManager,
+		// A worker never owns the terminal: a package the loader installs must not write git/npm output
+		// over the supervisor's TUI or stderr, nor wait on a credential prompt nobody can answer.
+		packageCommandOutput: "capture",
 		...(factories.length ? { extensionFactories: factories } : {}),
 		...(opts.systemPrompt ? { appendSystemPrompt: [opts.systemPrompt] } : {}),
 	});

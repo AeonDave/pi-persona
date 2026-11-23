@@ -157,7 +157,7 @@ These are the guardrails a contributor must not violate. They are enforced in co
 
 ## Module layout
 
-The supported host is the latest stable Pi (currently 1.5.2). Runtime code uses its public APIs
+The supported host is the latest stable Pi (currently 1.6.0). Runtime code uses its public APIs
 directly; obsolete host facades, ignored SDK options and compatibility-only aliases are removed
 with their callers. Genuine host failures remain explicit rather than fabricating session identity
 or model availability. One-way user-data migrations and retained-history readers are separate data
@@ -503,7 +503,7 @@ branch and remains eligible until the first successful assistant response. The s
 or report bodies, creates no persistent history entry or operator card, and does not wake the model;
 its timestamp makes clear that the observed status can change.
 
-Idle compaction is retained behind a hard host-qualification gate. Pi 1.4.0 has a reproduced
+Idle compaction is retained behind a hard host-qualification gate. Pi 1.4.0 through 1.6.0 have a reproduced
 controller-cleanup race between overlapping manual compactions; a public hook veto cannot prevent
 it. The entry point must return before constructing its scheduler or registering any lifecycle/input
 hooks, regardless of saved preferences or environment overrides. Context settings expose this block

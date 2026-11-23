@@ -60,8 +60,8 @@ does not add tool grants. With `skills` omitted or empty, Pi's ordinary skills c
 with the current model first. Recommendations stay within its provider, textual name root and
 numbered major generation, retaining the newest representative of each distinct variant. Remaining
 candidates are ordered `cost:low` → `medium` → `high` → `unknown`, then by numeric version within
-each band. For example, a `gpt-6-astra` supervisor sees available `gpt-6-luna` and `gpt-6.1-sol`
-neighbors before considering older models. The rule reads catalog IDs, without a model-name table;
+each band. For example, a supervisor on one generation sees the newest available model of each
+sibling variant in that generation before considering older models. The rule reads catalog IDs, without a model-name table;
 gateway vendor/region namespaces remain distinct from the model's family and generation.
 If the current name has no numeric version, only provider and textual root constrain the list.
 The list is not filled with older or unrelated models just to reach the cap; explicit searches and
@@ -1040,7 +1040,7 @@ build retries. A connected broker child's status shows `⇄ <handle>`; if that c
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 `/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
-(requires ≥ 1.5.2)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+(requires ≥ 1.6.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 

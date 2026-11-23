@@ -18,6 +18,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
   connected to the session's pipe could use it to answer another worker's pending question as the
   supervisor.
 
+### Changed
+
+- Requires Pi 1.6.0. Pi 1.6.0 made a component's `render()` output read-only and cached; pi-persona's
+  components never modify the arrays the host returns, so nothing changes on screen.
+  A package that an in-process worker's loader installs no longer writes git or npm output to the
+  supervisor's terminal or waits on a credential prompt. Idle compaction stays unavailable: the host
+  lifecycle check still fails on 1.6.0.
+
 ### Added
 
 - `/doctor` probes git the way pi-persona runs it and reports `git: git version …` or

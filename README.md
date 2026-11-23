@@ -32,7 +32,7 @@ You watch every worker live, and can read, redirect or stop any of them at any m
 
 ## Quick start
 
-Requires **Pi 1.5.2**, **Node.js ≥ 22.19** and **Git**, with a model
+Requires **Pi 1.6.0**, **Node.js ≥ 22.19** and **Git**, with a model
 provider already configured in Pi.
 
 ```bash

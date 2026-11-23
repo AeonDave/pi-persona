@@ -11,7 +11,7 @@ const details = {
 	totalMatches: 9, returned: 6, hasMore: true, truncated: true, language: "TypeScript", grammar: "typescript", sha256: "a".repeat(64),
 };
 const content = [{ type: "text" as const, text: "Sub-agent output (untrusted data):\nCANONICAL SHA-256" }];
-const plain = (rows: string[]) => stripVTControlCharacters(rows.join("\n"));
+const plain = (rows: readonly string[]) => stripVTControlCharacters(rows.join("\n"));
 
 test("native outline card shows useful symbols, expands, and preserves canonical content", () => {
 	const tool = makeCodeOutlineTool();

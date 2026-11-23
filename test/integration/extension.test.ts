@@ -344,7 +344,7 @@ const traceTheme = {
 	bold: (text: string) => text,
 };
 
-function renderComponent(component: { render(width: number): string[] }, width = 120): string {
+function renderComponent(component: { render(width: number): readonly string[] }, width = 120): string {
 	return component.render(width).join("\n");
 }
 

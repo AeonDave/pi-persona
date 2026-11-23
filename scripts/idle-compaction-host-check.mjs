@@ -2,7 +2,7 @@
  * Offline Pi host lifecycle check for https://github.com/badlogic/pi-mono/issues/7738.
  * Run with: node scripts/idle-compaction-host-check.mjs
  * Scope: synthetic-summary overlapping-cancellation lifecycle only; no real provider or network requests.
- * Expected on installed Pi 1.4.0: nonzero exit until both cancellations have paired lifecycle events and notifications.
+ * Expected through Pi 1.6.0: nonzero exit until both cancellations have paired lifecycle events and notifications.
  * Passing this check is one prerequisite only; it never enables the Persona feature gate.
  */
 import assert from "node:assert/strict";

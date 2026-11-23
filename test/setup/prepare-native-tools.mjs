@@ -8,7 +8,7 @@ import { join } from "node:path";
 assert.ok(process.env.GITHUB_PATH, "GITHUB_PATH must identify the file receiving the prepared tools' PATH entry");
 const agentDir = await mkdtemp(join(tmpdir(), "pi-persona-native-prerequisites-"));
 try {
-	// The helper is shipped with Pi 1.5.2 but is not re-exported by its public entry.
+	// The helper is shipped with Pi 1.6.0 but is not re-exported by its public entry.
 	const sdkEntry = import.meta.resolve("@earendil-works/pi-coding-agent");
 	const { ENV_AGENT_DIR, getBinDir } = await import(new URL("./config.js", sdkEntry));
 	process.env[ENV_AGENT_DIR] = agentDir;

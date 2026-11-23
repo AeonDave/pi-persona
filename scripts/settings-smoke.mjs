@@ -483,7 +483,7 @@ try {
 				return await selected;
 			}
 			if (tuiCustomCalls !== 2) throw new Error(`Unexpected custom component invocation ${tuiCustomCalls}`);
-			assert.equal(options?.overlay, false, "The model picker is intentionally inline, not an overlay");
+			assert.equal(options?.overlay, true, "The model picker opens in the shared overlay window");
 			for (const width of [40, 80, 120]) {
 				const lines = component.render(width);
 				assert.ok(lines.length > 0, `The model picker rendered no lines at width ${width}`);
