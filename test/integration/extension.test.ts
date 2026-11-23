@@ -61,7 +61,8 @@ import { EVIDENCE_GUIDANCE, shouldAppendEvidenceGuidance } from "../../src/core/
 import { EXOCOM_TOOL_NAMES } from "../../src/core/capabilities.ts";
 import { endpoint as endpointFor, ledgerPath, registryPath, workspaceHash } from "../../src/exocom/paths.ts";
 import { ExocomPlane } from "../../src/exocom/plane.ts";
-import { readAll, registryEntryFixture, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
+import { readAll, sessionKey, writeEntry } from "../../src/exocom/registry.ts";
+import { registryEntryFixture } from "../helpers/exocom-registry.ts";
 import { allocateJoinCode, resolveJoinCode } from "../../src/exocom/codes.ts";
 import { runIntercom } from "../../src/tools/intercom.ts";
 import { seedDefaults, type SpineLegacyIO } from "../../src/core/seed.ts";

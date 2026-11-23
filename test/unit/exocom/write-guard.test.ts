@@ -13,6 +13,20 @@ test("peerClaimFor finds the peer claim whose write_set contains or is contained
 	assert.equal(peerClaimFor("README.md", claims, "me"), undefined);
 });
 
+test("peerClaimFor follows the same-host filesystem's case rules for an injected platform", () => {
+	const claims: LedgerClaim[] = [
+		{ work_key: "wk", from_session: "peer", from_name: "vega", write_set: ["src/Foo.ts"], slice: "s", msg_id: "m1", ts: "2026-09-01T00:00:00Z" },
+	];
+	for (const platform of ["win32", "darwin"] as const) {
+		assert.equal(peerClaimFor("src/foo.ts", claims, "me", undefined, platform)?.msg_id, "m1", `${platform} folds case`);
+		assert.equal(peerClaimFor("/Users/Me/Repo/SRC/foo.ts", claims, "me", "/users/me/repo", platform)?.msg_id, "m1", `${platform} relativizes case-insensitively`);
+	}
+	assert.equal(peerClaimFor("src/foo.ts", claims, "me", undefined, "linux"), undefined, "linux stays case-sensitive");
+	const claim = claims[0]!;
+	assert.equal(writeWarningKey(claim, "src/Foo.ts", "darwin"), writeWarningKey(claim, "src/foo.ts", "darwin"), "one warning per same-host file");
+	assert.notEqual(writeWarningKey(claim, "src/Foo.ts", "linux"), writeWarningKey(claim, "src/foo.ts", "linux"));
+});
+
 test("WriteWarnings remembers a key once", () => {
 	const w = new WriteWarnings();
 	assert.equal(w.seen("k"), false);

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { tempDir } from "../../setup/temp-dir.ts";
 import { agentsDir, registryPath } from "../../../src/exocom/paths.ts";
-import { MAX_REGISTRY_FILE_BYTES, prune, readAll, registryEntryFixture, removeEntry, removeEntryIfMatches, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
+import { MAX_REGISTRY_FILE_BYTES, prune, readAll, removeEntryIfMatches, sessionKey, writeEntry } from "../../../src/exocom/registry.ts";
+import { deleteRegistryFile, registryEntryFixture } from "../../helpers/exocom-registry.ts";
 
 let dir: string;
 before(async () => { dir = await mkdtemp(join(tmpdir(), "exo-reg-")); });
@@ -29,7 +30,7 @@ test("a self-reported effort round-trips only as a valid Pi level", () => {
 	const bad = readAll(dir, H).find((e) => e.session_id === "effort-bad");
 	assert.ok(bad, "an invalid optional effort never rejects the entry");
 	assert.equal("thinking" in bad!, false, "an invalid effort is dropped, never normalized into another level");
-	removeEntry(dir, H, "effort-ok"); removeEntry(dir, H, "effort-bad");
+	deleteRegistryFile(dir, H, "effort-ok"); deleteRegistryFile(dir, H, "effort-bad");
 });
 
 test("workspace identity round-trips as a safe label plus stable id/code", () => {
@@ -98,14 +99,6 @@ test("writeEntry: same name, different session_id, persist as TWO separate files
 	assert.deepEqual(all.map((e) => e.session_id).sort(), ["twin-a", "twin-b"]);
 });
 
-test("removeEntry takes a session_id and deletes the right file", () => {
-	writeEntry(dir, H, entry({ session_id: "gone-sess", name: "gone" }));
-	writeEntry(dir, H, entry({ session_id: "stays-sess", name: "gone" })); // same name, different file
-	removeEntry(dir, H, "gone-sess");
-	const remaining = readAll(dir, H).filter((e) => e.name === "gone");
-	assert.deepEqual(remaining.map((e) => e.session_id), ["stays-sess"], "only the targeted session_id's file is removed");
-});
-
 test("removeEntryIfMatches preserves a replacement with the same session_id", () => {
 	const original = entry({ session_id: "owned-original", endpoint: "/old-endpoint", public_key: Buffer.from("old-key").toString("base64") });
 	const replacement = entry({ session_id: "owned-original", endpoint: "/new-endpoint", public_key: Buffer.from("new-key").toString("base64") });
@@ -149,7 +142,7 @@ test("prune does not delete a replacement installed after its initial registry r
 });
 
 // The preserve-from-disk step below only covers the file-STILL-EXISTS case. An entry can be
-// evicted while its instance is very much alive (a peer's transient send error calls removeEntry,
+// evicted while its instance is very much alive (a peer's transient send error removes it,
 // or a >STALE_AFTER_MS stall lets every peer prune it), and the next heartbeat RE-CREATES the
 // file from scratch — with nothing on disk to preserve from. The key exists nowhere but the
 // writing process, so writeEntry remembers the keys IT registered; otherwise a live instance
@@ -158,7 +151,7 @@ test("prune does not delete a replacement installed after its initial registry r
 test("a heartbeat that re-creates a DELETED entry still carries the key this process registered", () => {
 	const publicKey = Buffer.from("resurrect-ed25519-key").toString("base64");
 	writeEntry(dir, H, entry({ session_id: "evicted-session", name: "before", public_key: publicKey }));
-	removeEntry(dir, H, "evicted-session");
+	deleteRegistryFile(dir, H, "evicted-session");
 	writeEntry(dir, H, entry({ session_id: "evicted-session", name: "after" }));
 	const stored = readAll(dir, H).find((e) => e.session_id === "evicted-session");
 	assert.equal(stored?.name, "after", "the re-registration carries the fresh metadata");

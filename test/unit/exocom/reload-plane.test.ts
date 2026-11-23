@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ExocomPlane } from "../../../src/exocom/plane.ts";
 import { endpoint } from "../../../src/exocom/paths.ts";
-import { removeEntry } from "../../../src/exocom/registry.ts";
+import { deleteRegistryFile } from "../../helpers/exocom-registry.ts";
 import type { ExocomMessage } from "../../../src/exocom/envelope.ts";
 
 test("reload restores authenticated reply target and original hop count", async () => {
@@ -37,7 +37,7 @@ test("reload restores authenticated reply target and original hop count", async 
 		await b.start();
 		assert.equal(b.restoreInboundContext(saved), true);
 		await assert.rejects(() => b.send("wrong@000000000000000000000000", "misdirected", third.msg_id), /does not match the authenticated sender/);
-		removeEntry(dir, hash, "sender");
+		deleteRegistryFile(dir, hash, "sender");
 		await b.send(senderTarget, "four", third.msg_id);
 		assert.equal(inboxA.at(-1)?.hops, 3);
 		assert.equal(inboxA.at(-1)?.in_reply_to, third.msg_id);

@@ -32,11 +32,11 @@ export function inventedExocomNameHint(): string {
 }
 
 /** Local widget: mark this instance without using "you" as the identity. */
-export function exocomSelfWidgetLabel(namedByModel: boolean, name: string, persona = ""): string {
-	return `${exocomSelfStatusLabel(namedByModel, name, persona)} (you)`;
+export function exocomSelfWidgetLabel(name: string): string {
+	return `${exocomSelfStatusLabel(name)} (you)`;
 }
 
 /** Status / telemetry identity stays separate from the persona, including provisional labels. */
-export function exocomSelfStatusLabel(_namedByModel: boolean, name: string, _persona = ""): string {
+export function exocomSelfStatusLabel(name: string): string {
 	return name.trim() || "unnamed";
 }

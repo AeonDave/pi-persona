@@ -6,6 +6,7 @@
 import { posix, win32 } from "node:path";
 import { fencePeer } from "../core/fence.ts";
 import { normalizeWritePath, pathsOverlap } from "../core/ownership.ts";
+import { comparableClaimPath, foldsClaimPathCase } from "./claim-paths.ts";
 import { renderWriteSet, untrusted, UNTRUSTED_MAX } from "./untrusted.ts";
 import type { LedgerClaim } from "./ledger.ts";
 
@@ -30,22 +31,26 @@ function relativizeAbsolute(path: string, cwd: string): string {
 
 /** The first live claim (never the caller's own) whose write_set overlaps `path`. `cwd`
  *  relativizes an absolute `path` first (see {@link relativizeAbsolute}); omit it to compare
- *  `path` as-is, for callers that only ever see repo-relative paths. */
+ *  `path` as-is, for callers that only ever see repo-relative paths. `platform` selects the
+ *  same-host case rule (see `claim-paths.ts`). */
 export function peerClaimFor(
 	path: string,
 	claims: readonly LedgerClaim[],
 	self: string,
 	cwd?: string,
+	platform: NodeJS.Platform = process.platform,
 ): LedgerClaim | undefined {
-	const target = normalizeWritePath(cwd ? relativizeAbsolute(path, cwd) : path);
+	const fold = foldsClaimPathCase(platform);
+	const comparable = (value: string): string => comparableClaimPath(value, fold);
+	const target = normalizeWritePath(cwd ? relativizeAbsolute(comparable(path), comparable(cwd)) : comparable(path));
 	return claims.find((claim) =>
-		claim.from_session !== self && claim.write_set.some((ws) => pathsOverlap(target, normalizeWritePath(ws))),
+		claim.from_session !== self && claim.write_set.some((ws) => pathsOverlap(target, normalizeWritePath(comparable(ws)))),
 	);
 }
 
 /** One warning per (claim, normalized path) — the retry that follows a block is allowed through. */
-export function writeWarningKey(claim: LedgerClaim, path: string): string {
-	return `${claim.msg_id}|${normalizeWritePath(path).value}`;
+export function writeWarningKey(claim: LedgerClaim, path: string, platform: NodeJS.Platform = process.platform): string {
+	return `${claim.msg_id}|${normalizeWritePath(comparableClaimPath(path, foldsClaimPathCase(platform))).value}`;
 }
 
 /** Build the write-guard's tool-result reason. `claim.slice`, `claim.write_set`, and `label` are

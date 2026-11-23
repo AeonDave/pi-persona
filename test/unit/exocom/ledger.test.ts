@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -340,6 +340,54 @@ test("release can cancel an outbound ask even when that work key has no write cl
 	assert.equal(released.state.asks.length, 0);
 });
 
+test("claims that differ only in case conflict on case-insensitive same-host filesystems", () => {
+	const upper = claim({ write_set: ["src/Foo.ts"] });
+	const lower = claim({ from_session: "sess-b", from_name: "vega", write_set: ["src/foo.ts"], msg_id: "msg-claim-b" });
+	for (const platform of ["win32", "darwin"] as const) {
+		const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-case-"));
+		const ledger = join(dir, "ledger.jsonl");
+		try {
+			assert.equal(commitLedgerEvent(ledger, upper, { platform }).ok, true);
+			const conflict = commitLedgerEvent(ledger, lower, { platform });
+			assert.equal(conflict.ok, false, `${platform}: one file, two spellings`);
+			if (!conflict.ok) assert.match(conflict.error, /"src\/Foo\.ts" \/ "src\/foo\.ts"/, "the error keeps both original spellings");
+			assert.deepEqual(loadLedger(ledger).claims.map((entry) => entry.write_set), [["src/Foo.ts"]], "the stored path keeps its spelling");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-case-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		assert.equal(commitLedgerEvent(ledger, upper, { platform: "linux" }).ok, true);
+		assert.equal(commitLedgerEvent(ledger, lower, { platform: "linux" }).ok, true, "case-sensitive hosts keep distinct files distinct");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	const opened = applyLedgerEvent(emptyLedger(), upper, true);
+	assert.equal(opened.ok, true);
+	if (opened.ok) {
+		assert.equal(applyLedgerEvent(opened.state, lower, true).ok, false, "the pure reducer folds case when asked");
+		assert.equal(applyLedgerEvent(opened.state, lower, false).ok, true);
+	}
+});
+
+test("replay keeps an already-durable case-variant claim pair instead of rejecting the journal", () => {
+	const upper = claim({ write_set: ["src/Foo.ts"] });
+	const lower = claim({ from_session: "sess-b", from_name: "vega", write_set: ["src/foo.ts"], msg_id: "msg-claim-b" });
+	const journal = `${JSON.stringify(upper)}\n${JSON.stringify(lower)}\n`;
+	assert.equal(parseLedger(journal).claims.length, 2);
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-case-replay-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		writeFileSync(ledger, journal, "utf8");
+		const unrelated = commitLedgerEvent(ledger, claim({ from_session: "sess-c", write_set: ["docs/x.md"], msg_id: "msg-claim-c" }), { platform: "win32" });
+		assert.equal(unrelated.ok, true, "a historical pair does not block an unrelated claim");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("commit fails closed while another process owns the ledger lock", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-lock-"));
 	const ledger = join(dir, "ledger.jsonl");
@@ -631,6 +679,54 @@ test("commit reclaims a crashed owner's lock immediately without waiting the sta
 		assert.equal(committed.ok, true);
 		assert.equal(loadLedger(ledger).claims.length, 1);
 		assert.equal(existsSync(lock), false, "successful commit must release the sidecar");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a stale-lock reclaim never deletes a live lock that replaced the dead one after inspection", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-reclaim-race-"));
+	const ledger = join(dir, "ledger.jsonl");
+	const lock = `${ledger}.lock`;
+	// The parent test runner is alive and is not this process, so its lock is never stealable.
+	const liveLock = `${process.ppid} competitor-token\n`;
+	try {
+		writeFileSync(lock, `${unusedPid()}\n`, { flag: "wx" });
+		const committed = commitLedgerEvent(ledger, claim(), {
+			io: { afterLockInspect: () => {
+				// A competing reclaimer finished first: it removed the dead lock and now holds its own.
+				unlinkSync(lock);
+				writeFileSync(lock, liveLock, { flag: "wx" });
+			} },
+		});
+		assert.equal(committed.ok, false, "the commit must not proceed while the competitor holds the lock");
+		if (!committed.ok) assert.match(committed.error, /lock/i);
+		assert.equal(readFileSync(lock, "utf8"), liveLock, "the competitor's live lock is left in place");
+		assert.deepEqual(readdirSync(dir).sort(), ["ledger.jsonl.lock"], "no reclaim scratch file is left behind");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("one reclaimer at a time: a held gate defers the reclaim, and a dead gate is cleared by age", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-reclaim-gate-"));
+	const ledger = join(dir, "ledger.jsonl");
+	const lock = `${ledger}.lock`;
+	const gate = `${lock}.reclaim`;
+	try {
+		writeFileSync(lock, `${unusedPid()}
+`, { flag: "wx" });
+		writeFileSync(gate, "", { flag: "wx" });
+		const deferred = commitLedgerEvent(ledger, claim());
+		assert.equal(deferred.ok, false, "another reclaimer holds the gate, so this one must not unlink the lock");
+		assert.equal(existsSync(lock), true);
+		assert.equal(existsSync(gate), true, "a fresh gate belongs to a live reclaimer");
+
+		const old = new Date(Date.now() - LEDGER_LIMITS.staleLockMs - 1_000);
+		utimesSync(gate, old, old);
+		const recovered = commitLedgerEvent(ledger, claim());
+		assert.equal(recovered.ok, true, "a gate left by a dead reclaimer does not wedge the ledger");
+		assert.deepEqual(readdirSync(dir).sort(), ["ledger.jsonl"], "neither the lock nor the gate is left behind");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

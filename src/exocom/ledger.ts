@@ -9,6 +9,7 @@ import { dirname } from "node:path";
 import { attributePeer } from "../core/fence.ts";
 import { findWriteSetOverlaps, writeSetPathError } from "../core/ownership.ts";
 import { frameSigningPayload, isSemanticFrame, truncateForInject, type ExocomAsk, type ExocomClaim, type ExocomSemanticFrame } from "./envelope.ts";
+import { comparableClaimPath, foldsClaimPathCase } from "./claim-paths.ts";
 import { applyCollaborationEvent, collaborationStatus, emptyCollaboration, parseCollaboration, pruneCollaboration, releaseCollaboration, retainedCollaborationEvent, type CollaborationState } from "./collaboration.ts";
 
 export type LedgerEvent = ExocomSemanticFrame;
@@ -91,8 +92,9 @@ function answerOf(event: Extract<LedgerEvent, { kind: "answer" }>, ask: LedgerAs
 	};
 }
 
-/** Apply one signed-or-local semantic event. Fail-closed; idempotent on msg_id. */
-export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyResult {
+/** Apply one signed-or-local semantic event. Fail-closed; idempotent on msg_id.
+ *  `foldPathCase` compares claim paths case-insensitively (see `claim-paths.ts`). */
+export function applyLedgerEvent(state: LedgerState, event: LedgerEvent, foldPathCase = foldsClaimPathCase()): ApplyResult {
 	if (!isSemanticFrame(event)) {
 		const raw = event && typeof event === "object"
 			? event as Partial<Extract<LedgerEvent, { kind: "claim" }>>
@@ -120,7 +122,7 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 			if (event.kind === "task_take" && task?.created.write_set.length) {
 				if (claims.some((claim) => claim.work_key === event.work_key && claim.from_session === event.from_session)) return { ok: false, error: "task pickup conflicts with an existing owned claim on this work_key" };
 				const claimed = applyLedgerEvent(state, { kind: "claim", work_key: event.work_key, from_session: event.from_session, from_name: event.from_name,
-					write_set: [...task.created.write_set], slice: task.created.description.slice(0, 256), msg_id: event.msg_id, ts: event.ts });
+					write_set: [...task.created.write_set], slice: task.created.description.slice(0, 256), msg_id: event.msg_id, ts: event.ts }, foldPathCase);
 				if (!claimed.ok) return claimed;
 				claims = claimed.state.claims;
 			}
@@ -133,11 +135,14 @@ export function applyLedgerEvent(state: LedgerState, event: LedgerEvent): ApplyR
 				const err = writeSetPathError(path);
 				if (err) return { ok: false, error: `claim write_set path "${path}" is ${err}` };
 			}
-			const owners = [...state.claims.map((claim) => ({ agent: claim.from_session, writeSet: claim.write_set })), { agent: event.from_session, writeSet: event.write_set }];
-			const overlap = findWriteSetOverlaps(owners)[0];
+			const originals = [...state.claims.map((claim) => ({ agent: claim.from_session, writeSet: claim.write_set })), { agent: event.from_session, writeSet: event.write_set }];
+			const owners = originals.map((owner) => ({ ...owner, writeSet: owner.writeSet.map((path) => comparableClaimPath(path, foldPathCase)) }));
+			// Only the new claim is admitted here; a pair that replay already accepted must not wedge it.
+			const overlap = findWriteSetOverlaps(owners).find((candidate) => candidate.secondIndex === state.claims.length);
 			if (overlap) {
 				const other = state.claims[overlap.firstIndex];
-				return { ok: false, error: `claim overlaps open claim by "${other?.from_session ?? "?"}" on "${overlap.firstPath}" / "${overlap.secondPath}"` };
+				const original = (index: number, folded: string): string => originals[index]?.writeSet[owners[index]?.writeSet.indexOf(folded) ?? -1] ?? folded;
+				return { ok: false, error: `claim overlaps open claim by "${other?.from_session ?? "?"}" on "${original(overlap.firstIndex, overlap.firstPath)}" / "${original(overlap.secondIndex, overlap.secondPath)}"` };
 			}
 			return { ok: true, state: remember({ ...state, claims: [...state.claims, claimOf(event)] }, event.msg_id) };
 		}
@@ -231,7 +236,8 @@ function parseSnapshot(raw: unknown): LedgerState | undefined {
 			write_set: claim.write_set, slice: claim.slice, msg_id: claim.msg_id, ts: claim.ts,
 		};
 		if (!isSemanticFrame(frame) || frame.kind !== "claim") return undefined;
-		const applied = applyLedgerEvent(state, frame);
+		// Replay restores durable facts as written; case folding gates only new admissions.
+		const applied = applyLedgerEvent(state, frame, false);
 		if (!applied.ok) return undefined;
 		state = applied.state;
 	}
@@ -291,7 +297,7 @@ export function parseLedger(text: string): LedgerState {
 		if (raw && typeof raw === "object" && typeof (raw as { kind?: unknown }).kind === "string"
 			&& (raw as { kind: string }).kind.startsWith("ledger_snapshot_")) throw new Error("unsupported ledger snapshot version");
 		if (!isSemanticFrame(raw)) continue;
-		const result = applyLedgerEvent(state, raw);
+		const result = applyLedgerEvent(state, raw, false);
 		if (result.ok) state = result.state;
 	}
 	return state;
@@ -399,11 +405,49 @@ function pidAlive(pid: number): boolean {
 
 function lockOwnerPid(lock: string): number | undefined {
 	try {
-		const first = readFileSync(lock, "utf8").trim().split(/\s+/)[0];
+		const first = readFileSync(lock, "utf8").trim().split(/s+/)[0];
 		const pid = Number(first);
 		if (Number.isInteger(pid) && pid > 0) return pid;
-	} catch { /* unreadable lock is pid-unknown */ }
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+		/* unreadable lock is pid-unknown */
+	}
 	return undefined;
+}
+
+/** Whether the sidecar at `lock` was left by a crash. Throws ENOENT once it is gone. */
+function lockIsStale(lock: string): boolean {
+	const held = lstatSync(lock);
+	if (held.isSymbolicLink() || !held.isFile() || held.nlink > 1) throw unsafe(lock);
+	const pid = lockOwnerPid(lock);
+	if (pid !== undefined) return pid === process.pid || !pidAlive(pid);
+	return Date.now() - held.mtimeMs > LEDGER_LIMITS.staleLockMs;
+}
+
+/** Remove a crash-left lock. Two contenders that both judged it stale must not both unlink by path:
+ * the second would delete the lock the first has just taken. A `wx` gate admits one reclaimer at a
+ * time, and the staleness check is repeated inside it, where only this process can remove the lock
+ * (an acquirer needs it absent, and its owner is dead). Returns false while another reclaimer holds
+ * the gate. No live lock is ever moved or linked, so the holder's token-checked release is unaffected. */
+function reclaimStaleLock(lock: string): boolean {
+	const gate = `${lock}.reclaim`;
+	let fd: number;
+	try {
+		fd = openSync(gate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		// shortcut: a reclaimer that died inside its gate is cleared by age and by path, so two
+		// contenders clearing the same dead gate can overlap; closing that needs an OS-level lock.
+		try { if (Date.now() - lstatSync(gate).mtimeMs > LEDGER_LIMITS.staleLockMs) unlinkSync(gate); } catch { /* another contender cleared it */ }
+		return false;
+	}
+	try {
+		if (lockIsStale(lock)) unlinkSync(lock);
+		return true;
+	} finally {
+		closeSync(fd);
+		try { unlinkSync(gate); } catch { /* already cleared */ }
+	}
 }
 
 function sharingViolation(error: unknown): boolean {
@@ -424,7 +468,7 @@ function releaseLockFile(lock: string, payload: string, held: { dev: number; ino
 
 /** A short `wx` sidecar lock serializes transactions on POSIX and Windows.
  * Live owners are never stolen from mtime alone; a dead pid is reclaimed immediately; release is token-checked. */
-function acquireLedgerLock(path: string): () => void {
+function acquireLedgerLock(path: string, io?: LedgerFileIO): () => void {
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	const lock = `${path}.lock`;
 	for (let attempt = 1; attempt <= LEDGER_LIMITS.lockAttempts; attempt++) {
@@ -444,13 +488,10 @@ function acquireLedgerLock(path: string): () => void {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			let steal = false;
 			try {
-				const held = lstatSync(lock);
-				if (held.isSymbolicLink() || !held.isFile() || held.nlink > 1) throw unsafe(lock);
-				const pid = lockOwnerPid(lock);
-				if (pid !== undefined && pid !== process.pid && pidAlive(pid)) steal = false;
-				else if (pid !== undefined && (pid === process.pid || !pidAlive(pid))) steal = true;
-				else steal = Date.now() - held.mtimeMs > LEDGER_LIMITS.staleLockMs;
-				if (steal) unlinkSync(lock);
+				if (lockIsStale(lock)) {
+					io?.afterLockInspect?.();
+					steal = reclaimStaleLock(lock);
+				}
 			} catch (lockError) {
 				if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
 				throw lockError;
@@ -596,21 +637,14 @@ function replaceWithSnapshotLocked(path: string, state: LedgerState, io?: Ledger
 		try { unlinkSync(tmp); } catch { /* successful rename already consumed it */ }
 	}
 }
-/** Strict append for callers that already have a validated event but no state transition. */
-export function appendLedgerEvent(path: string, event: LedgerEvent): void {
-	if (!isSemanticFrame(event)) throw new Error("malformed ledger event");
-	const release = acquireLedgerLock(path);
-	try {
-		recoverIncompleteTrailingRecordLocked(path);
-		appendLocked(path, event);
-	} finally { release(); }
-}
 /** Atomic cross-process read/apply/append transaction. I/O failures become an explicit NACK. */
 export interface LedgerCommitOptions {
 	/** Applied under the same transaction lock before validating the new event. */
 	prune?: LedgerPruneOptions;
 	/** Authoritative write admission, evaluated against the locked task definition (not a preflight read). */
 	canClaim?: boolean;
+	/** Host whose filesystem case rules gate claim overlap; defaults to this process's platform. */
+	platform?: NodeJS.Platform;
 	/** Test/operations override; defaults to half the maximum journal size. */
 	compactAtBytes?: number;
 	/** Fault-injection seam for short-write and Windows replacement regression tests. */
@@ -620,6 +654,8 @@ export interface LedgerCommitOptions {
 export interface LedgerFileIO {
 	write?: LedgerWriter;
 	rename?: (from: string, to: string) => void;
+	/** Runs after a stale lock was inspected and judged reclaimable, immediately before reclaiming it. */
+	afterLockInspect?: () => void;
 }
 
 function pruningChanged(before: LedgerState, after: LedgerState): boolean {
@@ -631,14 +667,14 @@ function pruningChanged(before: LedgerState, after: LedgerState): boolean {
 export function commitLedgerEvent(path: string, event: LedgerEvent, options: LedgerCommitOptions = {}): ApplyResult {
 	let release: (() => void) | undefined;
 	try {
-		release = acquireLedgerLock(path);
+		release = acquireLedgerLock(path, options.io);
 		const sizeBeforeRecovery = recoverIncompleteTrailingRecordLocked(path);
 		const loaded = loadLedger(path);
 		const pruned = options.prune ? pruneLedger(loaded, options.prune) : loaded;
 		const writes = event.kind === "claim" || event.kind === "task_create" ? event.write_set.length > 0
 			: event.kind === "task_take" && (pruned.collaboration?.tasks.find((task) => task.created.work_key === event.work_key)?.created.write_set.length ?? 0) > 0;
 		if (options.canClaim === false && writes) return { ok: false, error: "this session cannot claim write paths in the selected scope" };
-		const result = applyLedgerEvent(pruned, event);
+		const result = applyLedgerEvent(pruned, event, foldsClaimPathCase(options.platform));
 		const compactAt = Number.isFinite(options.compactAtBytes) && options.compactAtBytes !== undefined
 			? Math.max(1, Math.floor(options.compactAtBytes)) : Math.floor(LEDGER_LIMITS.maxBytes / 2);
 		const eventBytes = Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8");

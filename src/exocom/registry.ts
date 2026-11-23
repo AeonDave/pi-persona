@@ -96,12 +96,6 @@ export function normalizeRegistryEntry(value: unknown): RegistryEntry | undefine
 	};
 }
 
-export function registryEntryFixture(over: Partial<RegistryEntry>): RegistryEntry {
-	return { session_id: "s", name: "n", persona: "", purpose: "", color: "#36F9F6", model: "m",
-		pid: 0, endpoint: "/e", cwd: "/", context_pct: 0, inbox: 0,
-		heartbeat_at: new Date(0).toISOString(), ...over };
-}
-
 /** Short, fs-safe registry key for a session_id (mirrors paths.ts's `workspaceHash`). Keying the
  *  registry FILE by this — rather than by the display `name` — makes two instances launched
  *  under the SAME persona name collision-proof BY CONSTRUCTION: distinct session_ids always land
@@ -114,7 +108,7 @@ export function sessionKey(sessionId: string): string {
 /** Public keys THIS process has registered, keyed by session_id — the second half of the
  *  key-preservation guarantee. The preserve-from-disk step in `writeEntry` only covers the
  *  file-still-exists case; an entry can be removed while its instance is alive (a peer's transient
- *  send error calls `removeEntry`, or a >STALE_AFTER_MS stall lets every peer prune it), and the
+ *  send error calls `removeEntryIfMatches`, or a >STALE_AFTER_MS stall lets every peer prune it), and the
  *  next heartbeat then RE-CREATES the file with nothing on disk to preserve from. A plane's
  *  ed25519 key exists nowhere but its own process, so a re-registration that dropped it would
  *  leave the live instance permanently unverifiable. Keyed per session_id, so one instance's key
@@ -252,10 +246,6 @@ export function prune(
 		removeEntryIfMatches(agentDir, hash, e);
 	}
 	return live;
-}
-
-export function removeEntry(agentDir: string, hash: string, sessionId: string): void {
-	try { unlinkSync(registryPath(agentDir, hash, sessionKey(sessionId))); } catch { /* best-effort */ }
 }
 
 function restoreClaim(agentPath: string, claimedPath: string): void {

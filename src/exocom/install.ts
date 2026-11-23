@@ -308,8 +308,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	}
 
 	function currentTelemetryInstance(ctx: ExtensionContext): InstanceDescriptor {
-		const personaName = host.controller.activePersona?.name ?? "";
-		const displayName = exocomSelfStatusLabel(host.identity.chosen, host.identity.name, personaName);
+		const displayName = exocomSelfStatusLabel(host.identity.name);
 		return {
 			displayName,
 			persona: host.controller.activePersona?.name ?? "",
@@ -376,7 +375,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		publishTelemetryPeers(peers);
 		try {
 			const selfPersona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
-			const ident = exocomSelfWidgetLabel(host.identity.chosen, host.identity.name, selfPersona);
+			const ident = exocomSelfWidgetLabel(host.identity.name);
 			const roleBit = host.identity.chosen && selfPersona ? ` · ${selfPersona}` : "";
 			const scopeBit = exocomScope
 				? exocomScope.joined
@@ -406,7 +405,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try {
 			host.lastCtx.ui.setStatus(
 				"persona-exocom",
-				`📡 ${exocomSelfStatusLabel(host.identity.chosen, host.identity.name, host.controller.activePersona?.name ?? "")} · ${exocomScope?.joined ? `scope ${exocomScope.scopeCode} · home ${exocomScope.homeWorkspaceCode}` : `workspace ${exocomScope?.scopeCode ?? "?"}`} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
+				`📡 ${exocomSelfStatusLabel(host.identity.name)} · ${exocomScope?.joined ? `scope ${exocomScope.scopeCode} · home ${exocomScope.homeWorkspaceCode}` : `workspace ${exocomScope?.scopeCode ?? "?"}`} · ${peers.length} peer${peers.length === 1 ? "" : "s"} · ${exocomPlane?.totalReceived ?? 0} in · ${exocomPlane?.totalSent ?? 0} out`,
 			);
 		} catch {
 			/* cosmetic */

@@ -778,7 +778,7 @@ export class ExocomPlane {
 	 * still mutate (TOCTOU).
 	 * Returns an error when the message carries a descriptor but the copy failed.
 	 */
-	private snapshotArtifact(msg: ExocomMessage): { ok: true; msg: ExocomMessage } | { ok: false; error: string } {
+	private snapshotArtifact(msg: ExocomMessage): { ok: true; msg: ExocomMessage; snapshotPath?: string } | { ok: false; error: string } {
 		const descriptor = parseExocomArtifactDescriptor(msg.text);
 		if (!descriptor) return { ok: true, msg };
 		const artifactsDir = join(exocomRoot(this.deps.agentDir, this.deps.hash), "artifacts");
@@ -863,7 +863,7 @@ export class ExocomPlane {
 			path: dest,
 			size: descriptor.size,
 		};
-		return { ok: true, msg: { ...msg, text: JSON.stringify(quarantined) } };
+		return { ok: true, msg: { ...msg, text: JSON.stringify(quarantined) }, snapshotPath: dest };
 	}
 
 	private handleConnection(socket: net.Socket): void {
@@ -891,6 +891,12 @@ export class ExocomPlane {
 						write(this.nack(raw.msg_id, snapshot.error));
 						return;
 					}
+					// A message the receiver refused or already had does not reference this snapshot. A throw
+					// proves neither: the receiver may have queued the delivery first, so that copy is kept.
+					const discardSnapshot = (): void => {
+						if (snapshot.snapshotPath === undefined) return;
+						try { unlinkSync(snapshot.snapshotPath); } catch { /* the TTL sweep reclaims a leftover */ }
+					};
 					let disposition: ExocomInboundResult | undefined;
 					try {
 						disposition = this.deps.onInbound(snapshot.msg, entry);
@@ -899,10 +905,12 @@ export class ExocomPlane {
 						return;
 					}
 					if (disposition?.accepted === false) {
+						discardSnapshot();
 						write(this.nack(raw.msg_id, disposition.reason.slice(0, 256) || "receiver rejected message"));
 						return;
 					}
 					if (disposition?.accepted === true && disposition.duplicate === true) {
+						discardSnapshot();
 						write(this.ack(raw.msg_id));
 						return;
 					}

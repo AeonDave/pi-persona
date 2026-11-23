@@ -17,7 +17,8 @@ const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import { endpoint, exocomRoot, registryPath } from "../../../src/exocom/paths.ts";
 import { ARTIFACT_MAX_BYTES, ExocomPlane, type ExocomInboundResult } from "../../../src/exocom/plane.ts";
-import { readAll, registryEntryFixture, removeEntry, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
+import { readAll, sessionKey, writeEntry, type RegistryEntry } from "../../../src/exocom/registry.ts";
+import { deleteRegistryFile, registryEntryFixture } from "../../helpers/exocom-registry.ts";
 import { frameSigningPayload, type ExocomBye, type ExocomMessage } from "../../../src/exocom/envelope.ts";
 import { buildInboundDelivery } from "../../../src/exocom/inbound.ts";
 import { SenderBudget, SeenMessages } from "../../../src/exocom/guards.ts";
@@ -29,6 +30,15 @@ before(async () => { dir = await mkdtemp(join(tmpdir(), "exo-plane-")); });
 after(async () => { await rm(dir, { recursive: true, force: true }); });
 
 let seq = 0;
+
+/** Poll until `condition` holds instead of guessing how long delivery takes; fail clearly on timeout. */
+async function waitUntil(condition: () => boolean, message: string, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) assert.fail(`timed out after ${timeoutMs} ms waiting until ${message}`);
+		await new Promise((r) => setTimeout(r, 10));
+	}
+}
 
 // Cross-platform endpoint (POSIX socket file / Windows named pipe via `paths.endpoint`) —
 // this box is win32, so building it via `endpoint()` (rather than hardcoding a `.sock` path
@@ -140,7 +150,7 @@ test("a message from one plane lands as inbound on another; list shows the peer"
 		assert.ok(a.listPeers().some((p) => p.name === "dev"), "a sees b");
 		const { msg_id } = await a.send("dev", "audit src/auth");
 		assert.match(msg_id, /.+/);
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the peer receives the message");
 		assert.equal(got.length, 1);
 		assert.equal(got[0]?.text, "audit src/auth");
 		assert.equal(got[0]?.from_name, "elite");
@@ -217,7 +227,7 @@ test("a qualified target keeps routing to its session after the peer changes cal
 		assert.notEqual(renamed.target, beforeRename.target, "the display token reflects the renamed label");
 		assert.equal(sender.resolvePeer(beforeRename.target).session_id, beforeRename.session_id);
 		await sender.send(beforeRename.target, "still reaches the original session");
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		await waitUntil(() => inbox.length >= 1, "the original session receives the message");
 		assert.equal(inbox.length, 1);
 		assert.equal(inbox[0]?.text, "still reaches the original session");
 	} finally {
@@ -235,7 +245,7 @@ test("an oversize message spills to an artifact and sends {preview,path,size} in
 	try {
 		const big = "x".repeat(20_000);
 		await a.send("dev", big);
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the spilled message arrives");
 		assert.equal(got.length, 1);
 		const payload = JSON.parse(got[0]?.text ?? "{}") as { kind: string; preview: string; path: string; size: number };
 		assert.equal(payload.kind, "exocom_artifact");
@@ -277,7 +287,7 @@ test("a delivered artifact survives the sender's stop()", async () => {
 	await b.start();
 	try {
 		await a.send("spill-reader", "z".repeat(20_000));
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the spilled message arrives");
 		const payload = JSON.parse(got[0]?.text ?? "{}") as { path: string };
 		await a.stop();
 		assert.equal(readFileSync(payload.path, "utf8").length, 20_000, "the receiver can still read the handed-off artifact");
@@ -295,7 +305,7 @@ test("stop() reclaims expired artifacts while leaving a handed-off one for its r
 	await b.start();
 	try {
 		await a.send("ttl-reader", "w".repeat(20_000));
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the spilled message arrives");
 		const fresh = (JSON.parse(got[0]?.text ?? "{}") as { path: string }).path;
 
 		// An artifact an earlier session handed off and nothing has swept since.
@@ -327,11 +337,11 @@ test("hops increments across a correlated reply (nextHops wiring)", async () => 
 	await b.start();
 	try {
 		const { msg_id } = await a.send("dev", "audit please");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => inboundAtB.length >= 1, "b receives the first message");
 		assert.equal(inboundAtB[0]?.hops, 0);
 		const aEntry = b.listPeers().find((p) => p.name === "elite")!;
 		await b.send(b.replyTargetFor(aEntry), "done", msg_id);
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => inboundAtA.length >= 1, "a receives the correlated reply");
 		assert.equal(inboundAtA[0]?.hops, 1, "reply increments hops from the message it answers");
 		assert.equal(inboundAtA[0]?.in_reply_to, msg_id);
 	} finally { await a.stop(); await b.stop(); }
@@ -377,7 +387,7 @@ test("an evicted qualified reply target cannot fall through to a raw-name decoy"
 			ts: new Date().toISOString(),
 		}));
 		await injectMessages(receiverEntry.endpoint, filler);
-		removeEntry(dir, "h", sourceEntry.session_id);
+		deleteRegistryFile(dir, "h", sourceEntry.session_id);
 
 		const decoySession = `sid-eviction-decoy-${process.pid}-${seq++}`;
 		decoy = new ExocomPlane({
@@ -497,7 +507,7 @@ test("send() resolves a deduped displayName (e.g. elite#2) through the SAME help
 		assert.ok(second, "one of the two same-named peers is numbered elite#2 (ordered by session_id)");
 		const expectA = second?.session_id === sessA;
 		await c.send("elite#2", "hi #2");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => gotA.length + gotB.length >= 1, "one same-named peer receives the message");
 		assert.equal(gotA.length, expectA ? 1 : 0, "the RIGHT peer receives it, not just any same-named one");
 		assert.equal(gotB.length, expectA ? 0 : 1, "the RIGHT peer receives it, not just any same-named one");
 	} finally { await a.stop(); await b.stop(); await c.stop(); }
@@ -531,7 +541,7 @@ test("a plain send resolves the session-pinned target, which a name-squatting pe
 		});
 		await squatter.start();
 		await sender.send(token, "SECRET-FOR-LYRA");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => pinnedInbox.length >= 1, "the pinned session receives the message");
 		assert.equal(pinnedInbox.length, 1, "the pinned session received the message");
 		assert.equal(squatterInbox.length, 0, "the peer holding that string as a display name never sees it");
 	} finally {
@@ -601,16 +611,14 @@ test("an artifact claim is honoured only when the payload on disk is this worksp
 		writeFileSync(elsewhere, "s".repeat(20_000));
 
 		await injectMessage(readerEntry.endpoint, claim(randomUUID(), { path: elsewhere }));
-		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(got.length, 0, "the receiver is never asked to read a peer-chosen path");
 
 		await injectMessage(readerEntry.endpoint, claim(randomUUID(), { size: 1 }));
-		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(got.length, 0, "a peer cannot under-declare what the payload it points at costs");
 
 		const honest = randomUUID();
 		await injectMessage(readerEntry.endpoint, claim(honest));
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the honest spill arrives");
 		assert.equal(got.length, 1, "an honest spill still lands");
 		assert.equal(got[0]?.msg_id, honest);
 		const delivered = JSON.parse(got[0]?.text ?? "{}") as { path?: string };
@@ -643,7 +651,6 @@ test("a spill claim naming the right path is still refused when nothing on disk 
 		// check stands between "Full payload: <path>" and a model told to read a missing file.
 		const phantom = randomUUID();
 		const phantomReply = await injectForReply(readerEntry.endpoint, claim(phantom, 20_000));
-		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(got.length, 0, "a descriptor for a file that does not exist is never delivered");
 		assert.match(phantomReply, /"kind":"nack"/, "and the sender is told, rather than silently succeeding");
 
@@ -653,14 +660,13 @@ test("a spill claim naming the right path is still refused when nothing on disk 
 		const inlineable = randomUUID();
 		writeFileSync(join(artifactsDir, `${inlineable}.txt`), "z".repeat(5_000));
 		await injectForReply(readerEntry.endpoint, claim(inlineable, 5_000));
-		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(got.length, 0, "a payload that fits the inline budget is not an artifact");
 
 		// Same shape, one byte over the inline budget: delivered.
 		const genuine = randomUUID();
 		writeFileSync(join(artifactsDir, `${genuine}.txt`), "z".repeat(EXOCOM.INLINE_MAX_BYTES + 1));
 		await injectForReply(readerEntry.endpoint, claim(genuine, EXOCOM.INLINE_MAX_BYTES + 1));
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the genuine artifact arrives");
 		assert.equal(got.length, 1, "the guard rejects only what could have been inlined");
 		assert.equal(got[0]?.msg_id, genuine);
 	} finally { await sender.stop(); await reader.stop(); }
@@ -795,6 +801,39 @@ test("receiver snapshots never overwrite an existing exclusive destination", asy
 		assert.equal(got.length, 0, "an occupied receiver destination fails closed");
 		assert.match(reply, /"kind":"nack"/);
 	} finally { await sender.stop(); await reader.stop(); }
+});
+
+test("a received snapshot is removed when the receiver rejects or deduplicates the message, and kept when it throws", async () => {
+	const dispositions: Array<{ name: string; decide: () => ExocomInboundResult; reply: RegExp; kept: boolean }> = [
+		{ name: "rejected", decide: () => ({ accepted: false, reason: "receiver inbox full" }), reply: /"kind":"nack"/, kept: false },
+		{ name: "duplicate", decide: () => ({ accepted: true, duplicate: true }), reply: /"kind":"ack"/, kept: false },
+		// A throw can follow a delivery the receiver already queued, which still points at the copy.
+		{ name: "thrown", decide: () => { throw new Error("receiver failed"); }, reply: /"kind":"nack"/, kept: true },
+	];
+	for (const { name, decide, reply: expected, kept } of dispositions) {
+		const snapshotId = randomUUID();
+		const sender = planeFor(`orphan-${name}-sender`, () => {});
+		const reader = planeFor(`orphan-${name}-reader`, () => {}, decide, { artifactSnapshotId: () => snapshotId });
+		await sender.start();
+		await reader.start();
+		try {
+			const senderEntry = readAll(dir, "h").find((p) => p.name === `orphan-${name}-sender`)!;
+			const readerEntry = readAll(dir, "h").find((p) => p.name === `orphan-${name}-reader`)!;
+			const artifactsDir = join(exocomRoot(dir, "h"), "artifacts");
+			mkdirSync(artifactsDir, { recursive: true });
+			const msgId = randomUUID();
+			const sourcePath = join(artifactsDir, `${msgId}.txt`);
+			writeFileSync(sourcePath, "O".repeat(20_000));
+			const frame = signedPlaneMessage(sender, {
+				kind: "message", msg_id: msgId, from_session: senderEntry.session_id, from_endpoint: senderEntry.endpoint,
+				from_name: `orphan-${name}-sender`, hops: 0, ts: new Date().toISOString(),
+				text: JSON.stringify({ kind: "exocom_artifact", preview: "preview", path: sourcePath, size: 20_000 }),
+			});
+			const reply = await injectForReply(readerEntry.endpoint, frame);
+			assert.match(reply, expected, `${name}: the sender sees the receiver's verdict`);
+			assert.equal(existsSync(join(artifactsDir, "received", `${snapshotId}.txt`)), kept, `${name}: the snapshot copy is ${kept ? "kept" : "removed"}`);
+		} finally { await sender.stop(); await reader.stop(); }
+	}
 });
 
 test("received artifact snapshots are reclaimed by the existing TTL and file cap", async () => {
@@ -998,7 +1037,7 @@ test("a call-sign shaped like a session token is not answerable, and the refusal
 		);
 		assert.equal(inbox.length, 0, "a token-shaped string is never answered by whoever holds it as a label");
 		await sender.send(peer.target, "by token");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => inbox.length >= 1, "the token-addressed message arrives");
 		assert.equal(inbox.length, 1, "…and that address delivers");
 	} finally { await quinn.stop(); await sender.stop(); }
 });
@@ -1119,7 +1158,7 @@ test("send()/inbound bump VIEWER-CENTRIC per-peer counters, not a global self-re
 		assert.equal(b.sentToPeer(aSeenFromB.session_id), 0);
 		assert.equal(b.receivedFromPeer(aSeenFromB.session_id), 0);
 		await a.send("dev", "hi");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => b.receivedFromPeer(aSeenFromB.session_id) >= 1, "b counts the inbound message");
 		// From A's side: A sent TO dev, never received FROM dev.
 		assert.equal(a.sentToPeer(bSeenFromA.session_id), 1, "sender's per-peer sent bumps only once the ack settles");
 		assert.equal(a.receivedFromPeer(bSeenFromA.session_id), 0);
@@ -1231,13 +1270,13 @@ test("heartbeat re-registration after entry loss keeps this instance authenticab
 	await b.start();
 	try {
 		const bEntry = a.listPeers().find((p) => p.name === "key-loser")!;
-		removeEntry(dir, "h", bEntry.session_id);
+		deleteRegistryFile(dir, "h", bEntry.session_id);
 		b.heartbeat(registryEntryFixture({
 			session_id: bEntry.session_id, name: "key-loser", pid: process.pid, endpoint: bEntry.endpoint,
 			heartbeat_at: new Date().toISOString(),
 		}));
 		await a.send("key-loser", "still authenticable");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the message from the re-keyed peer arrives");
 		assert.equal(got.length, 1);
 	} finally { await a.stop(); await b.stop(); }
 });
@@ -1280,20 +1319,22 @@ test("a peer's own signed bye retires its entry and refreshes the pool; a forged
 			s.once("close", () => resolve());
 			s.once("error", () => resolve());
 		});
-		await new Promise((r) => setTimeout(r, 100));
 	};
 
 	try {
 		writeEntry(dir, "h", leaver);
 		await sayBye(generateKeyPairSync("ed25519").privateKey);
+		// A fixed wait proves a negative (the forged bye changes nothing); there is no event to poll for.
+		await new Promise((r) => setTimeout(r, 100));
 		assert.equal(existsSync(leaverFile), true, "a bye signed by anyone else must not evict the peer it names");
 		assert.equal(poolChanges, 0, "…and must not even be reported as a pool change");
 
 		await sayBye(leaverKeys.privateKey);
+		await waitUntil(() => !existsSync(leaverFile), "the signed bye retires the entry");
 		assert.equal(existsSync(leaverFile), false, "the peer's own signed bye retires its entry");
 		assert.equal(poolChanges, 1, "…and refreshes the pool at once instead of waiting for the stale sweep");
 	} finally {
-		removeEntry(dir, "h", leaverSession);
+		deleteRegistryFile(dir, "h", leaverSession);
 		await receiver.stop();
 	}
 });
@@ -1329,7 +1370,7 @@ test("replyTargetFor is stable and independent of listPeers() display numbering"
 		assert.match(viewer.replyTargetFor(lapsed), /^lapsed@[a-f0-9]{24}$/, "an unlisted sender gets a routable qualified target");
 		assert.ok(existsSync(lapsedFile), "resolving a name left the registry alone");
 	} finally {
-		removeEntry(dir, "h", lapsedSession);
+		deleteRegistryFile(dir, "h", lapsedSession);
 		await a.stop();
 		await b.stop();
 		await viewer.stop();
@@ -1351,7 +1392,7 @@ test("qualified stale targets stay within the exocom_send schema budget for long
 		assert.ok(target.length <= 80, "the qualified target fits exocom_send's schema");
 		assert.match(target, new RegExp(`^${longName}@[a-f0-9]{24}$`));
 	} finally {
-		removeEntry(dir, "h", longSession);
+		deleteRegistryFile(dir, "h", longSession);
 		await viewer.stop();
 	}
 });
@@ -1375,7 +1416,7 @@ test("a reply to an authenticated stale sender uses a qualified target, not its 
 			assert.ok(fromEntry, "the sender was authenticated before it became stale");
 			writeEntry(dir, "h", { ...fromEntry!, heartbeat_at: new Date(Date.now() - 10 * 60_000).toISOString() });
 			replyTarget = receiver.replyTargetFor(fromEntry!);
-			removeEntry(dir, "h", fromEntry!.session_id);
+			deleteRegistryFile(dir, "h", fromEntry!.session_id);
 			return { accepted: true };
 		},
 	});
@@ -1431,7 +1472,7 @@ test("an unreadable registry during name resolution does not turn delivery into 
 	await sender.start();
 	try {
 		await sender.send("pool-fail", "still deliverable");
-		await new Promise((r) => setTimeout(r, 100));
+		await waitUntil(() => got.length >= 1, "the message arrives despite the pool read failure");
 		assert.match(got[0] ?? "", /^pool-sender@/, "the hint uses a routable qualified target");
 	} finally { await sender.stop(); await receiver.stop(); }
 });
