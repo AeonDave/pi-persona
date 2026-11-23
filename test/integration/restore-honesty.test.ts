@@ -215,7 +215,8 @@ async function withHarness(run: (h: Harness) => Promise<void>): Promise<void> {
 		await h?.dispose();
 		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
 		else process.env.PI_AGENT_DIR = previousAgentDir;
-		await rm(root, { recursive: true, force: true });
+		// A real job killed at teardown can hold its working directory for a moment on Windows (EBUSY).
+		await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	}
 }
 
