@@ -264,11 +264,15 @@ test("reclaim continues past a transcript that cannot be unlinked, frees its loc
 	const h = storeFixture("persona-conversation-unlink-fail-");
 	try {
 		h.commit();
-		const stuck = h.orphan(DEAD), removable = h.orphan(DEAD);
+		const orphans = [h.orphan(DEAD), h.orphan(DEAD)].map((file) => fs.realpathSync.native(file));
 		const realUnlink = fs.unlinkSync;
-		let failing = true;
+		let stuck: string | undefined;
 		fs.unlinkSync = ((path: PathLike) => {
-			if (failing && String(path) === stuck) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+			const file = String(path);
+			if (!stuck && orphans.includes(file)) {
+				stuck = file;
+				throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+			}
 			return realUnlink(path);
 		}) as typeof fs.unlinkSync;
 		syncBuiltinESMExports();
@@ -276,10 +280,11 @@ test("reclaim continues past a transcript that cannot be unlinked, frees its loc
 			const first = h.store.create();
 			assert.ok(first.ok, first.ok ? "" : first.error);
 			first.value.release();
+			assert.ok(stuck, "the first orphan unlink must receive EBUSY");
+			const removable = orphans.find((file) => file !== stuck)!;
 			assert.equal(existsSync(removable), false, "the sweep continues past the failure");
 			assert.equal(existsSync(stuck), true);
 			assert.equal(existsSync(stuck.replace(/\.jsonl$/, ".lock")), false, "the failed key's lock is released");
-			failing = false;
 			const second = h.store.create();
 			assert.ok(second.ok, second.ok ? "" : second.error);
 			second.value.release();
