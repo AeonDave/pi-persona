@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from "node:crypto";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -1079,39 +1080,63 @@ test("a failed duplicate-session start does not remove the incumbent registry en
 });
 
 test("an EADDRINUSE duplicate endpoint start does not remove the incumbent", async () => {
-	const a = planeFor("same-endpoint-incumbent", () => {});
+	const hash = "same-endpoint";
+	const a = planeForHash(hash, "same-endpoint-incumbent", () => {});
 	await a.start();
-	const incumbent = readAll(dir, "h").find((p) => p.name === "same-endpoint-incumbent")!;
-	let duplicateCleanup = 0;
+	const incumbent = readAll(dir, hash).find((p) => p.name === "same-endpoint-incumbent")!;
 	const duplicate = new ExocomPlane({
-		agentDir: dir, hash: "h",
+		agentDir: dir, hash,
 		identity: {
 			session_id: incumbent.session_id, name: "same-endpoint-duplicate", persona: "same-endpoint-duplicate", purpose: "", color: "#36F9F6", model: "m",
 			endpoint: incumbent.endpoint, cwd: "/",
 		},
 		getCard: () => ({ name: "same-endpoint-duplicate", persona: "same-endpoint-duplicate", model: "m", context_pct: 0, inbox: 0 }),
 		onInbound: () => ({ accepted: true }),
-		unlinkEndpoint: () => { duplicateCleanup += 1; },
 	});
 	try {
-		await assert.rejects(() => duplicate.start(), /failed to listen|EADDRINUSE/);
+		await assert.rejects(() => duplicate.start(), {
+			name: "ExocomListenError", code: "EADDRINUSE", endpoint: incumbent.endpoint,
+			message: `exocom plane: failed to listen on ${incumbent.endpoint} (EADDRINUSE)`,
+		});
+		const artifactsDir = join(exocomRoot(dir, hash), "artifacts");
+		mkdirSync(artifactsDir, { recursive: true });
+		const sharedArtifact = join(artifactsDir, `${randomUUID()}.txt`);
+		writeFileSync(sharedArtifact, "incumbent artifact");
+		const expiredAt = (Date.now() - EXOCOM.ARTIFACT_TTL_MS - 60_000) / 1000;
+		utimesSync(sharedArtifact, expiredAt, expiredAt);
+		const stalePeerId = "stale-peer";
+		writeEntry(dir, hash, registryEntryFixture({ session_id: stalePeerId, pid: process.pid }));
+		const staleRegistryFile = registryPath(dir, hash, sessionKey(stalePeerId));
 		await duplicate.stop();
-		assert.equal(duplicateCleanup, 0, "a failed bind never owns the incumbent endpoint");
+		assert.deepEqual(
+			{ artifactRetained: existsSync(sharedArtifact), registryRetained: existsSync(staleRegistryFile) },
+			{ artifactRetained: true, registryRetained: true },
+			"a plane that never joined leaves scope-wide cleanup to registered peers",
+		);
 		const probe = new ExocomPlane({
-			agentDir: dir, hash: "h",
+			agentDir: dir, hash,
 			identity: {
 				session_id: `sid-same-endpoint-probe-${process.pid}-${seq++}`, name: "same-endpoint-probe", persona: "same-endpoint-probe", purpose: "", color: "#36F9F6", model: "m",
 				endpoint: incumbent.endpoint, cwd: "/",
 			},
 			getCard: () => ({ name: "same-endpoint-probe", persona: "same-endpoint-probe", model: "m", context_pct: 0, inbox: 0 }),
 			onInbound: () => ({ accepted: true }),
+			// A denied probe on POSIX says nothing about the incumbent listener.
+			net: {
+				...net,
+				connect() {
+					const socket = new net.Socket();
+					queueMicrotask(() => socket.emit("error", Object.assign(new Error("probe denied"), { code: "EACCES" })));
+					return socket;
+				},
+			},
 		});
 		try {
-			await assert.rejects(() => probe.start(), /failed to listen|EADDRINUSE/);
+			await assert.rejects(() => probe.start(), { code: "EADDRINUSE", endpoint: incumbent.endpoint });
 		} finally {
 			await probe.stop();
 		}
-		const stored = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id);
+		const stored = readAll(dir, hash).find((p) => p.session_id === incumbent.session_id);
 		assert.equal(stored?.endpoint, incumbent.endpoint, "the exact endpoint incumbent survived the failed bind");
 		assert.equal(stored?.public_key, incumbent.public_key);
 	} finally {
@@ -1120,29 +1145,46 @@ test("an EADDRINUSE duplicate endpoint start does not remove the incumbent", asy
 	}
 });
 
-test("an old plane cannot remove a replacement that owns its session slot", async () => {
-	const a = planeFor("original-owner", () => {});
-	await a.start();
-	const incumbent = readAll(dir, "h").find((p) => p.name === "original-owner")!;
-	const b = new ExocomPlane({
-		agentDir: dir, hash: "h",
-		identity: {
-			session_id: incumbent.session_id, name: "replacement-owner", persona: "replacement-owner", purpose: "", color: "#36F9F6", model: "m",
-			endpoint: endpoint(dir, "h", `replacement-${seq++}`, process.platform), cwd: "/",
+test("a same-session successor keeps its registry slot and listener after the old native server closes", async () => {
+	const hash = "endpoint-handover";
+	const sessionId = `sid-endpoint-handover-${process.pid}`;
+	const address = endpoint(dir, hash, sessionId, process.platform);
+	const deps = {
+		agentDir: dir, hash,
+		identity: { session_id: sessionId, name: "handover", persona: "handover", purpose: "", color: "#36F9F6", model: "m", endpoint: address, cwd: "/" },
+		getCard: () => ({ name: "handover", persona: "handover", model: "m", context_pct: 0, inbox: 0 }),
+		onInbound: () => ({ accepted: true as const }),
+	};
+	const successor = new ExocomPlane({ ...deps, identity: { ...deps.identity, name: "successor" } });
+	const original = new ExocomPlane({
+		...deps,
+		net: {
+			...net,
+			createServer() {
+				const server = net.createServer();
+				const close = server.close.bind(server);
+				server.close = (callback) => close((error) => {
+					if (error) return callback?.(error);
+					// The OS has released the endpoint. Let the real successor join before old cleanup resumes.
+					void successor.start().then(() => callback?.(), (err: Error) => callback?.(err));
+				});
+				return server;
+			},
 		},
-		getCard: () => ({ name: "replacement-owner", persona: "replacement-owner", model: "m", context_pct: 0, inbox: 0 }),
-		onInbound: () => ({ accepted: true }),
 	});
-	await b.start();
 	try {
-		const replacement = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id)!;
-		assert.notEqual(replacement.endpoint, incumbent.endpoint);
-		await a.stop();
-		const stored = readAll(dir, "h").find((p) => p.session_id === incumbent.session_id);
-		assert.equal(stored?.endpoint, replacement.endpoint, "the old plane stop left the replacement registered");
-		assert.equal(stored?.public_key, replacement.public_key);
+		await original.start();
+		const incumbent = readAll(dir, hash)[0]!;
+		await original.stop();
+		const replacement = readAll(dir, hash)[0]!;
+		assert.equal(replacement.name, "successor");
+		assert.equal(replacement.endpoint, incumbent.endpoint);
+		assert.notEqual(replacement.public_key, incumbent.public_key);
+		const socket = net.connect(address);
+		try { await once(socket, "connect"); } finally { socket.destroy(); }
 	} finally {
-		await b.stop();
+		await original.stop();
+		await successor.stop();
 	}
 });
 

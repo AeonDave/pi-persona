@@ -12,6 +12,7 @@ import {
 	statSync,
 	symlinkSync,
 	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -411,6 +412,19 @@ test("persistent permission errors time out boundedly and never remove a foreign
 	assert.equal(attempts, 80, "transient-looking failures have a fixed retry bound");
 	assert.equal(readFileSync(lockFile, "utf8"), lockBytes, "permission failures never trigger stale-lock reclamation");
 	assert.equal(readFileSync(file, "utf8"), canonicalBytes);
+});
+
+test("an old settings lock still held by a live Pi protects its pending update", () => {
+	const file = join(tempDir("pi-persona-settings-owner-"), "settings.json");
+	patchPersonaSettings(file, { preferences: { nudge: true } });
+	const lock = `${file}.lock`;
+	const bytes = `${process.pid}\n0123456789abcdef\n`;
+	writeFileSync(lock, bytes);
+	const old = new Date(Date.now() - 6 * 60_000);
+	utimesSync(lock, old, old);
+	assert.throws(() => patchPersonaSettings(file, { preferences: { nudge: false } }, { sleep: () => {} }), /lock/i);
+	assert.equal(readFileSync(lock, "utf8"), bytes);
+	assert.equal(readPersonaSettings(file).preferences.nudge, true);
 });
 
 test("migration imports valid models and last persona, commits once, and archives exact originals", () => {

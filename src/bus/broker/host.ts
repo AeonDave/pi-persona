@@ -30,13 +30,14 @@
  * idempotent teardown.
  */
 
-import { chmodSync, existsSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import nodeNet from "node:net";
 import type net from "node:net";
 
 import { createFrameReader, encodeFrame, MAX_CLIENT_FRAME_BYTES } from "./framing.ts";
 import { type Frame, isFrame, isToken } from "./messages.ts";
+import { reclaimStaleSocket } from "../endpoint.ts";
 import type { InProcessBus } from "../inproc.ts";
 import { isReadReplyFor, readFailure, RESULT_READ_MAX_FRAME_BYTES, RESULT_READ_MAX_PENDING,
 	RESULT_READ_MAX_REQUESTS, RESULT_READ_TIMEOUT_MS, type PreparedResultReader, type ReadReply,
@@ -90,28 +91,8 @@ export interface StartBrokerHostDeps {
  *  handles exist or are connected. */
 const AUTH_FAILED = "authentication failed";
 
-const STALE_PROBE_TIMEOUT_MS = 1000;
 /** Per-handle cap on steers buffered while a spawned child has not registered yet. */
 export const MAX_PENDING_STEERS = 16;
-
-/** Probe a POSIX socket path: is something actually listening there? */
-function isConnectable(netImpl: typeof import("node:net"), endpoint: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		const socket = netImpl.connect(endpoint);
-		const finish = (ok: boolean): void => {
-			clearTimeout(timer);
-			socket.removeListener("connect", onConnect);
-			socket.removeListener("error", onError);
-			socket.destroy();
-			resolve(ok);
-		};
-		const onConnect = (): void => finish(true);
-		const onError = (): void => finish(false);
-		socket.once("connect", onConnect);
-		socket.once("error", onError);
-		const timer = setTimeout(() => finish(false), STALE_PROBE_TIMEOUT_MS);
-	});
-}
 
 type ListenAttempt = { server: net.Server } | { code: string };
 
@@ -156,14 +137,8 @@ async function bindServer(netImpl: typeof import("node:net"), endpoint: string, 
 		!("server" in attempt) &&
 		attempt.code === "EADDRINUSE" &&
 		process.platform !== "win32" &&
-		existsSync(endpoint) &&
-		!(await isConnectable(netImpl, endpoint))
+		await reclaimStaleSocket(netImpl, endpoint)
 	) {
-		try {
-			unlinkSync(endpoint);
-		} catch {
-			/* another session may have reaped it first */
-		}
 		attempt = await attemptListen(netImpl, endpoint, onConnection);
 	}
 	if (!("server" in attempt)) {
@@ -266,10 +241,6 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 			});
 		}
 	}
-
-	const unsubBus = bus.onMessage((env) => {
-		if (connections.has(env.to)) drain(env.to);
-	});
 
 	function handleConnection(socket: net.Socket): void {
 		sockets.add(socket);
@@ -514,6 +485,10 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 		}
 	}
 
+	const unsubBus = bus.onMessage((env) => {
+		if (connections.has(env.to)) drain(env.to);
+	});
+
 	return {
 		endpoint: deps.endpoint,
 		prepareResultReader,
@@ -565,13 +540,6 @@ export async function startBrokerHost(deps: StartBrokerHostDeps): Promise<Broker
 					resolve();
 				}
 			});
-			if (process.platform !== "win32") {
-				try {
-					unlinkSync(deps.endpoint);
-				} catch {
-					/* already gone, or this was a fake/in-memory endpoint */
-				}
-			}
 		},
 	};
 }

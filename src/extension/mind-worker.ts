@@ -84,6 +84,7 @@ export function installMindWorker(pi: Pick<ExtensionAPI, "events">, d: MindWorke
 			const thinking = ctx.thinkingLevel;
 			if (!model || !isThinkingLevel(thinking)) { refuse("current model or thinking level is unavailable"); return; }
 			const modelRef = `${model.provider}/${model.id}`;
+			const launch = d.tracker.reserveBatch(1);
 			const task = request.task;
 			const ac = new AbortController();
 			const job = { cancel: () => ac.abort() };
@@ -110,7 +111,7 @@ export function installMindWorker(pi: Pick<ExtensionAPI, "events">, d: MindWorke
 				const common = { output: result?.output ?? run.progress.output, ...(limited ? { error: MIND_DEADLINE_ERROR } : run.error || result?.error ? { error: run.error ?? result?.error ?? "Mind worker failed" } : {}), ...(run.resultReceipt?.ref ? { resultRef: run.resultReceipt.ref } : {}), ...(result?.modelUsed ? { model: result.modelUsed } : {}), ...(result?.thinkingEffective ? { thinking: result.thinkingEffective } : {}) };
 				resolveCompletion(status === "done" ? { status, ok: true, ...common } : { status, ok: false, ...common });
 			});
-			id = d.tracker.launch({ agent: "mind", label: "mind", task, model: modelRef, queued: true, delivery: "companion" }, (onProgress, runId) => Promise.resolve().then(async () => {
+			id = launch({ agent: "mind", label: "mind", task, model: modelRef, queued: true, delivery: "companion" }, (onProgress, runId) => Promise.resolve().then(async () => {
 				const nodeId = `async:${runId}`;
 				let cumulativeUsage = emptyUsage();
 				let observedUsage: ChildUsage | undefined;

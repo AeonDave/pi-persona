@@ -118,7 +118,11 @@ These are the guardrails a contributor must not violate. They are enforced in co
   resolve, join reducers valid) above strategies. The flow engine stays thin — parse, verify,
   schedule, persist, resume — and a flow node may call any strategy. Journaled: finished nodes replay
   from disk with no re-spend. A resume matches only the same flow, the same task and the same project
-  (`flowRunHash` = flow + task + cwd); another task starts from scratch. A `gate: true` phase shows its
+  (`flowRunHash` = flow + task + cwd). One invocation owns that identity until all phase writers settle,
+  including late results after a cancellation. A second matching invocation reports the conflict before
+  starting workers. Different tasks run concurrently and serialize appends and cleanup in the shared
+  journal file. Checkpoint approval belongs to the latest recorded result for its phase.
+  A `gate: true` phase shows its
   output and its dependents to the operator; a rejection returns `stoppedAtGate` (not a failure, though
   `ok` stays false so mandatory orchestration still fails closed).
 - **I6 — Spawning is opportunistic by default; mandatory only when the persona declares it.** Two
@@ -397,11 +401,18 @@ configuration; both engines also compare the effective prompt, selected skills a
 before provider use. A missing, changed, busy, expired or failed transcript fails closed.
 
 `conversations/store.ts` owns a separate native JSONL transcript beneath the persistent supervisor
-session's directory and records branch-scoped lineage metadata in the parent session. The exact
+session's directory and records branch-scoped lineage metadata in the parent session. New storage
+uses the canonical session path, including its on-disk casing on Windows. If opening a session by
+its original path spelling identifies an existing transcript directory containing saved files, that
+spelling continues to use that directory for listing, continuation, quotas and cleanup. Opening a
+fork or a copy derives its own directory from its path and session ID. The exact
 latest run ID selects the next turn; old IDs cannot fork an already-continued worker. One lease
 serializes access until the writer is known quiescent, including after cancellation or a forced UI
-settlement. Stored content can include worker prompts, tool calls and results; it is not the terminal
-result archive. Availability lasts seven days from the last saved turn; admission and settlement
+settlement. A child-process launch records a pending writer before spawn and its PID immediately
+afterward. A crashed supervisor's lease is reclaimable once each recorded writer is verified dead.
+A crash before PID publication leaves an uncertain lease for manual recovery. The transcript contains
+the worker's native conversation, which may include prompts, tool calls and results.
+Availability lasts seven days from the last saved turn; admission and settlement
 limits are 8 MiB per transcript, 64 MiB total and 64 lineages per owner. A running writer may cross
 a byte limit before settlement, whereupon that transcript is not saved as a continuation. A fresh,
 uncommitted transcript is removed once its writer is quiescent (a stopped or timed-out in-process
@@ -411,10 +422,12 @@ Saved unexpired conversations are never evicted on quota. Each admission first r
 admission lock and from at most 256 directory entries, the transcripts that can never be resumed: those
 with no recorded run (stopped, timed-out, failed or aborted attempts, and crash leftovers whose lease
 owner is dead; a live, same-process or unknown owner is skipped) and expired lineages without a
-retained worktree. An unindexed transcript is deleted only when the session file on disk, read under
-that key's lock, does not mention its key, so another process on the same session cannot lose a
-conversation it just saved. Unreadable session history or an unreadable session file deletes nothing. If a new conversation cannot be admitted, the ordinary delegation still runs without saved
-continuation. `intercom conversations` shows this branch's availability; explicit `intercom forget
+retained worktree. Admission and cleanup check current conversation metadata on disk because another
+Pi activation may have settled a newer turn. An unindexed transcript is deleted only when the
+session file on disk, read under that key's lock, does not mention its key. Unreadable session
+history or an unreadable session file deletes nothing. If a new conversation cannot be admitted,
+the delegation still runs without saved continuation. `intercom conversations` shows this branch's
+availability; explicit `intercom forget
 { to: <latestRunId> }` removes the transcript and any retained worktree, including unapplied changes,
 without deleting archived terminal reports.
 
@@ -837,7 +850,10 @@ schema, provenance, freshness and application checks; valid JSON alone does not 
   maximum 10-second wait. Abort, disconnect, a full or missing inbox, or a lost receipt reports
   `delivered: false`. It never waits for a recipient answer or approval and does not replay.
   `extension/broker-host.ts`'s `SupervisorBroker` owns the lifecycle: it starts
-  the host lazily on the first child-engine build and warns once on a failed bind. Children built while
+  the host lazily on the first child-engine build and warns once on a failed bind. The broker subscribes
+  to the local bus after binding and leaves endpoint teardown to the native listener. Broker and Exocom
+  serialize POSIX orphan reclamation and recheck the identity of the socket that refused the probe.
+  Children built while
   it's down spawn without a bus endpoint, so they never burn connect backoff against a dead socket;
   the next build retries; `/doctor` surfaces its state on one line. A dropped client connection flips the
   child-side bridge to `⇄ offline` and fails a fresh ask fast rather than hanging.
@@ -1078,7 +1094,9 @@ for the supervisor and for explicit retrieval; the default TUI projection is del
   not a projection of the active branch. Branch navigation changes neither visibility nor the shared
   lifetime budget. Restored logs never restore processes. Activation-unique monitor ids avoid historical result collisions. A finite
   lifetime serialized-byte/count budget includes all previous entries of the archive type, even
-  unreadable versions. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
+  unreadable versions. A saved session checks the on-disk count and bytes under a short per-archive
+  claim before appending. This also protects terminal results when two Pi processes resume the same
+  file. After the first scan, accounting reads the newly appended tail. Session-file deletion owns log deletion; ordinary shutdown saves diagnostics,
   not deletes them. Operator-only expandable log entries do not create model context or extra wakes;
   each draws only as the fallback card for a run whose wake is not queued or on the current branch.
 - `src/ui/resource-groups.ts` adds presentation-only Timers/Monitors/Scripts categories without
@@ -1111,6 +1129,8 @@ run ids. Budgets: 128 entries, 8 MiB cumulative serialized payload per owning se
 per record; bodies cap at 262,144 UTF-16 units with honest truncation metadata. Unknown, malformed
 and duplicate history still consumes quota; unaccountable history disables new persistence instead
 of resetting it. A fork/copy is a new owning file charged only for the entries it actually carries.
+Native appends share an owning-file quota transaction. Each live archive reads subsequent native
+entries from its last verified file offset to charge reports saved by another Pi activation.
 `storage: "session-entry"` means the host accepted the entry — never an fsync guarantee; memory-only
 retention is labelled as such. Retrieval is read-only: `intercom results` lists, `intercom result
 { ref, offset, limit }` pages (8,000 default / 16,000 max units, surrogate-safe), with no respawn,
@@ -1156,10 +1176,10 @@ adds voluntary tasks, optional offers and explicit evidence excerpts. Tool adapt
 
 On Pi reload shutdown, `src/exocom/reload.ts` bounds a snapshot of accepted, undelivered postcards
 and replies in a native session entry, including their fenced text and authenticated reply context.
-It restores the snapshot once on the same session, branch, scope and agent directory within five
-minutes; an ineligible or expired handoff is invalidated and reported. Reply routing and hop context
-survive the handoff. This is not crash or process-restart recovery; ledger-backed asks, answers and
-offers retain their own lifecycle.
+Only the Pi instance that saved the snapshot can restore it. On reload its session manager must
+present the snapshot ID within five minutes, for the same session, branch, scope and agent directory.
+Reply routing and hop context survive the handoff. Process exit ends the handoff.
+Ledger-backed asks, answers and offers retain their own lifecycle.
 `exocom_ask` resolves its target through the live registry to a raw session id, never a display name.
 Attribution is resolved by `from_session`, never the envelope's self-reported `from_name`.
 
@@ -1167,9 +1187,11 @@ A pending ask gates the participant to `exocom_answer`/`exocom_decline`, `exocom
 metadata, `exocom_status`, explicit collaboration reads (`exocom_task` list/get, `exocom_publish`
 read, `exocom_profile` get), and read-only filesystem tools. Profile `set`/`clear` and all other
 mutations remain unavailable until the ask is settled. Naming does not settle an ask. The bounded
-`pendingAskPrompt` explains the outstanding obligation. `exocom_wait` is non-blocking. Clean shutdown
-releases this session's claims/asks; if that best-effort write fails, the vanished owner is pruned on
-the next ledger transaction (live registry sessions are the lease), and `expireWaiters` wakes any
+`pendingAskPrompt` explains the outstanding obligation. `exocom_wait` is non-blocking. Only an
+activation that completed startup may release the session's claims, asks and tasks during shutdown.
+A second process resuming the same native session in the same scope leaves the first process's
+endpoint, ledger and reload handoff intact. If the owner's shutdown write fails, the next ledger
+transaction prunes the vanished owner using the live registry, and `expireWaiters` wakes any
 waiter left behind instead of leaving `exocom_wait` armed forever. This gate is cooperative
 coordination for participating local Pi processes — not filesystem authorization, not isolation from
 another same-user process, and not a delegate/council or task/run replacement.
@@ -1382,11 +1404,17 @@ There is no `sync`/`async` switch on `delegate` and no `intercom wait`; the mode
   in a `pi-persona:runs` session entry (`core/session-runs.ts`). The next `session_start` (reload,
   in-session resume, `pi -c`; not fork or `/new`) tells the supervisor once through a passive `nextTurn`
   message, acknowledges it, and continues run ids so they never restart at `run-1` within a session.
+  Shutdowns of separate activations merge any pending loss on disk. Restore checks and acknowledges
+  the owning file's current notice under the same claim so a stale manager cannot replay it.
   Every `session_start` (fork and crash recovery included) first continues the counter past the
-  highest run id the session file names (`highestIssuedRun`), so those ids are never reissued even
-  when no entry for this session id exists; which runs the file names, and which it can miss, is in
+  highest run id the session file names (`highestIssuedRun`). Before launching, a persistent
+  session atomically reserves its run IDs in a per-file watermark shared by every live Pi
+  activation. A fan-out reserves its entire range before starting any leg. The file receipt scan is in
   [Companion status keys](#companion-status-keys).
-  Only ids matching a strict shape and capped counts are ever read back.
+  For a saved native session, independent Pi processes reserve ordinals against the same counter
+  before launching a worker. Failed or interrupted launches can leave a gap. The next reservation
+  uses the larger of the saved counter and the IDs restored from Pi history. In-memory sessions
+  keep a local counter. Only ids matching a strict shape and capped counts are ever read back.
   Async failures are ALWAYS reported; the runtime `DelegationLedger` vetoes a blind retry loop (an
   identical agent+model+task delegation that failed twice is stopped before it spawns). Coaching is
   gated by `coaching: on` AND `canUseBus`.
@@ -1509,22 +1537,15 @@ end-of-run summary and terminal title only — `persona-background`.
     outside the under-counts listed below; different summation orders may leave a rounding residue.
   - *Run ids the file names are never reissued*: before any launch, `session_start` continues the
     tracker counter past the highest `run-<n>` the file names (`highestIssuedRun`), then past this
-    session's own shutdown entry. Read, whatever session id wrote them: terminal records'
+    session's own shutdown entry. Persistent activations of the same file also share its run ID
+    watermark, which covers runs whose native receipt has yet to land. The startup scan reads
+    terminal records'
     `originRunId`; every `pi-persona:runs` entry (`issued` and lost run ids); and persisted tool
     results — `delegate` launch receipts (`runId`, `runIds[]`, `runs[].id`) and headless settles
     (`settledRuns[].id`), `council`/`flow` launch receipts (`runId`), and a successful live
     `intercom result` (`ok: true` with a `status`; its `runId` is the found run's id). Every other
     intercom `runId` echoes the model's `to` argument and is never read; malformed or out-of-range
-    ids are ignored. So a fork (new session id), or a crash (no shutdown entry) while a background
-    run was still in flight or after the archive quota or an append failure dropped a record,
-    reissues no id that reached the file in any of those places. Still reissuable after a crash
-    (nothing in the file names the id): a run launched by a headless `delegate`/`council`/`flow`
-    call still in flight, or an interactive launch before its receipt was appended; a headless
-    `council`/`flow` run whose record was not saved (its result names no run id); a Mind worker
-    run whose record was not saved (no launch receipt names it; only a later successful
-    `intercom result` would); and a launch made inside another tool's call (codemode
-    `ctx.executeTool`) unless its result reaches the file as a `delegate`/`council`/`flow`
-    tool-result message.
+    ids are ignored. A fork seeds its new watermark from the run IDs copied into its own file.
   - *Untracked roots*: `/orchestrate`, `/flow` and a mandated `orchestration:` turn record their
     top-level root with `originRunId: root:<uuid>` (`untrackedRootRunId`); its usage is the sum of
     the legs the engine wrapper already added. Tracked `council`/`flow` runs keep only their tracker

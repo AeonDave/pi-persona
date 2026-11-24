@@ -4,9 +4,11 @@
  */
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, fsyncSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 
 import { attributePeer } from "../core/fence.ts";
+import { tryFileClaim } from "../io/file-claim.ts";
+import { processState } from "../io/process-state.ts";
 import { findWriteSetOverlaps, writeSetPathError } from "../core/ownership.ts";
 import { frameSigningPayload, isSemanticFrame, truncateForInject, type ExocomAsk, type ExocomClaim, type ExocomSemanticFrame } from "./envelope.ts";
 import { comparableClaimPath, foldsClaimPathCase } from "./claim-paths.ts";
@@ -311,7 +313,7 @@ export function answerFor(state: LedgerState, askId: string, requesterSession?: 
 	return state.answers.find((answer) => answer.ask_id === askId && (requesterSession === undefined || answer.requester_session === requesterSession));
 }
 
-export interface LedgerPruneOptions { now: number; ttlMs: number; liveSessions: ReadonlySet<string>; }
+export interface LedgerPruneOptions { now: number; ttlMs: number; liveSessions: Pick<ReadonlySet<string>, "has">; }
 function isFresh(ts: string, now: number, ttlMs: number): boolean {
 	const at = Date.parse(ts);
 	return Number.isFinite(at) && now - at <= ttlMs;
@@ -397,15 +399,9 @@ function backoffMs(attempt: number): number {
 	return Math.min(LEDGER_LIMITS.lockBackoffMs * attempt, LEDGER_LIMITS.lockBackoffMaxMs);
 }
 
-/** Same liveness probe the registry uses: ESRCH is dead, EPERM is a live process we cannot signal. */
-function pidAlive(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
-}
-
 function lockOwnerPid(lock: string): number | undefined {
 	try {
-		const first = readFileSync(lock, "utf8").trim().split(/s+/)[0];
+		const first = readFileSync(lock, "utf8").trim().split(/\s+/, 1)[0];
 		const pid = Number(first);
 		if (Number.isInteger(pid) && pid > 0) return pid;
 	} catch (error) {
@@ -420,33 +416,23 @@ function lockIsStale(lock: string): boolean {
 	const held = lstatSync(lock);
 	if (held.isSymbolicLink() || !held.isFile() || held.nlink > 1) throw unsafe(lock);
 	const pid = lockOwnerPid(lock);
-	if (pid !== undefined) return pid === process.pid || !pidAlive(pid);
+	if (pid !== undefined) return processState(pid) === "dead";
 	return Date.now() - held.mtimeMs > LEDGER_LIMITS.staleLockMs;
 }
 
 /** Remove a crash-left lock. Two contenders that both judged it stale must not both unlink by path:
- * the second would delete the lock the first has just taken. A `wx` gate admits one reclaimer at a
+ * the second would delete the lock the first has just taken. A file claim admits one reclaimer at a
  * time, and the staleness check is repeated inside it, where only this process can remove the lock
  * (an acquirer needs it absent, and its owner is dead). Returns false while another reclaimer holds
  * the gate. No live lock is ever moved or linked, so the holder's token-checked release is unaffected. */
 function reclaimStaleLock(lock: string): boolean {
-	const gate = `${lock}.reclaim`;
-	let fd: number;
-	try {
-		fd = openSync(gate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		// shortcut: a reclaimer that died inside its gate is cleared by age and by path, so two
-		// contenders clearing the same dead gate can overlap; closing that needs an OS-level lock.
-		try { if (Date.now() - lstatSync(gate).mtimeMs > LEDGER_LIMITS.staleLockMs) unlinkSync(gate); } catch { /* another contender cleared it */ }
-		return false;
-	}
+	const release = tryFileClaim(dirname(lock), `${basename(lock)}.reclaim`);
+	if (!release) return false;
 	try {
 		if (lockIsStale(lock)) unlinkSync(lock);
 		return true;
 	} finally {
-		closeSync(fd);
-		try { unlinkSync(gate); } catch { /* already cleared */ }
+		release();
 	}
 }
 
@@ -640,7 +626,7 @@ function replaceWithSnapshotLocked(path: string, state: LedgerState, io?: Ledger
 /** Atomic cross-process read/apply/append transaction. I/O failures become an explicit NACK. */
 export interface LedgerCommitOptions {
 	/** Applied under the same transaction lock before validating the new event. */
-	prune?: LedgerPruneOptions;
+	prune?: () => LedgerPruneOptions | undefined;
 	/** Authoritative write admission, evaluated against the locked task definition (not a preflight read). */
 	canClaim?: boolean;
 	/** Host whose filesystem case rules gate claim overlap; defaults to this process's platform. */
@@ -664,13 +650,26 @@ function pruningChanged(before: LedgerState, after: LedgerState): boolean {
 		|| JSON.stringify(before.collaboration) !== JSON.stringify(after.collaboration);
 }
 
+/** A bound endpoint is a new lease even when Pi resumes its old session ID. Serialize publication
+ * with ledger writers so a newly addressed ask cannot be mistaken for an old obligation. */
+export function admitLedgerSession(path: string, sessionId: string, now: number, ttlMs: number, publish: () => void): void {
+	const release = acquireLedgerLock(path);
+	try {
+		const previous = loadLedger(path);
+		const retired = pruneLedger(previous, { now, ttlMs, liveSessions: { has: (id) => id !== sessionId } });
+		publish();
+		if (pruningChanged(previous, retired)) replaceWithSnapshotLocked(path, retired);
+	} finally { release(); }
+}
+
 export function commitLedgerEvent(path: string, event: LedgerEvent, options: LedgerCommitOptions = {}): ApplyResult {
 	let release: (() => void) | undefined;
 	try {
 		release = acquireLedgerLock(path, options.io);
 		const sizeBeforeRecovery = recoverIncompleteTrailingRecordLocked(path);
 		const loaded = loadLedger(path);
-		const pruned = options.prune ? pruneLedger(loaded, options.prune) : loaded;
+		const prune = options.prune?.();
+		const pruned = prune ? pruneLedger(loaded, prune) : loaded;
 		const writes = event.kind === "claim" || event.kind === "task_create" ? event.write_set.length > 0
 			: event.kind === "task_take" && (pruned.collaboration?.tasks.find((task) => task.created.work_key === event.work_key)?.created.write_set.length ?? 0) > 0;
 		if (options.canClaim === false && writes) return { ok: false, error: "this session cannot claim write paths in the selected scope" };

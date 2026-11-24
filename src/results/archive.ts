@@ -171,7 +171,16 @@ export class TerminalResultArchive {
 		this.retained.push(retained);
 		if (this.deps.persistent && this.chargedPayloadBytes !== null) {
 			try {
-				this.deps.append(TERMINAL_RESULT_ENTRY, parseTerminalResultRecord(record)!);
+				const write = () => this.deps.append(TERMINAL_RESULT_ENTRY, parseTerminalResultRecord(record)!);
+				if (this.deps.commitWithinQuota) {
+					if (!this.deps.commitWithinQuota(cost, write)) {
+						this.retained.pop();
+						this.chargedEntries--;
+						this.chargedPayloadBytes -= cost;
+						this.localBytes -= cost;
+						return this.failure("quota", "Terminal result owning-file quota exhausted; append-only storage is not reclaimed");
+					}
+				} else write();
 				retained.storage = "session-entry";
 			} catch (error) { retained.storageError = errorDetail(error); }
 		}

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ConversationStore } from "../conversations/store.ts";
+import { ConversationHistory } from "../conversations/history.ts";
 import type { ConversationLease, ConversationRecord, ConversationResult } from "../conversations/types.ts";
 import type { AgentRunSpec } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
@@ -49,12 +50,13 @@ export class WorkerConversations {
 	constructor(privatePi: ExtensionAPI, privateDeps: ConversationRuntimeDeps) { this.pi = privatePi; this.deps = privateDeps; }
 	private readonly pi: ExtensionAPI;
 	private readonly deps: ConversationRuntimeDeps;
+	private readonly nativeHistory = new ConversationHistory();
 
 	private store(ctx: ExtensionContext): ConversationStore {
 		const sessionId = ctx.sessionManager.getSessionId(), sessionFile = ctx.sessionManager.getSessionFile();
 		const branchAnchor = ctx.sessionManager.getLeafId();
 		return new ConversationStore({
-			sessionId, sessionFile,
+			sessionId, sessionFile, nativeHistory: this.nativeHistory,
 			entries: () => ctx.sessionManager.getEntries(), append: (type, data) => {
 				const current = this.deps.currentContext();
 				if (!current || current.sessionManager.getSessionId() !== sessionId || current.sessionManager.getSessionFile() !== sessionFile) throw new Error("Supervisor session changed before conversation metadata could be saved");
@@ -152,7 +154,8 @@ export class WorkerConversations {
 				const blocked = this.deps.gate(spec);
 				if (blocked) throw new Error(blocked);
 				admitted = true;
-				return { ...spec, session: { file: lease.file, resume: previous !== undefined, ...(previous?.worktree ? { worktree: previous.worktree } : {}) } };
+				return { ...spec, session: { file: lease.file, resume: previous !== undefined, setExternalWriter: lease.setExternalWriter,
+					...(previous?.worktree ? { worktree: previous.worktree } : {}) } };
 			},
 			settle: (id, spec, result) => {
 				quiescent = result.sessionSaved === true || result.sessionQuiescent === true;

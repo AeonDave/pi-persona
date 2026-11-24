@@ -127,7 +127,7 @@ test("persisted staleAt survives later read clocks and completed task expiry rem
 	try {
 		for (const event of [create, take()]) assert.equal(commitLedgerEvent(file, event as ExocomSemanticFrame).ok, true);
 		const pulse: ExocomSemanticFrame = { from_session: "a", from_name: "invented", ts, kind: "progress", work_key: "unrelated", note: "pulse", msg_id: "pulse" };
-		assert.equal(commitLedgerEvent(file, pulse, { prune: { now, ttlMs: 1000, liveSessions: new Set(["a"]) } }).ok, true);
+		assert.equal(commitLedgerEvent(file, pulse, { prune: () => ({ now, ttlMs: 1000, liveSessions: new Set(["a"]) }) }).ok, true);
 		const saved = loadLedger(file);
 		assert.equal(saved.collaboration!.tasks[0]?.staleAt, now);
 		assert.equal(pruneLedger(saved, { now: now + 500, ttlMs: 1000, liveSessions: new Set(["a"]) }).collaboration!.tasks[0]?.staleAt, now);
@@ -158,7 +158,7 @@ test("transaction admission checks write authority against the actual locked tas
 		assert.equal(commitLedgerEvent(file, { ...base, from_session: "b", kind: "task_finish", work_key: "readonly", task_id: "readonly", outcome: "done", note: "Done", msg_id: "readonly-finished" }).ok, true);
 		const replacement = { ...create, work_key: "readonly", msg_id: "replacement", write_set: ["replacement.ts"] };
 		assert.equal(commitLedgerEvent(file, replacement as ExocomSemanticFrame, {
-			prune: { now: Date.parse(ts) + 2000, ttlMs: 1000, liveSessions: new Set(["a", "b"]) },
+			prune: () => ({ now: Date.parse(ts) + 2000, ttlMs: 1000, liveSessions: new Set(["a", "b"]) }),
 		}).ok, true);
 		assert.equal(commitLedgerEvent(file, { ...take(), work_key: "readonly", msg_id: "stale-preflight-take" } as ExocomSemanticFrame, { canClaim: false }).ok, false,
 			"a task replaced after preflight cannot acquire write authority");
@@ -175,7 +175,7 @@ test("lifecycle growth is reserved so a full task ledger remains reloadable afte
 			if (!result.ok) break;
 		}
 		const result = commitLedgerEvent(file, { kind: "progress", work_key: "pulse", from_session: "a", from_name: "invented", ts, note: "pulse", msg_id: "growth-prune" },
-			{ prune: { now: Date.parse(ts), ttlMs: 1000, liveSessions: new Set() }, compactAtBytes: 1 });
+			{ prune: () => ({ now: Date.parse(ts), ttlMs: 1000, liveSessions: new Set() }), compactAtBytes: 1 });
 		assert.equal(result.ok, true);
 		assert.doesNotThrow(() => loadLedger(file));
 		assert.ok(loadLedger(file).collaboration!.tasks.every((task) => task.stale));

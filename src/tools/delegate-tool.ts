@@ -35,7 +35,7 @@ import type { AgentResult } from "../orchestration/types.ts";
 import { sanitizeLabel } from "../extension/shared.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import type { AgentTree } from "../ui/agent-tree.ts";
-import { buildCompletionReport, observedRunModel, runDisplayName, type AsyncRunTracker } from "../engine/async.ts";
+import { buildCompletionReport, observedRunModel, runDisplayName, type AsyncRunTracker, type RunLauncher } from "../engine/async.ts";
 import type { BackgroundRuns } from "./background-run.ts";
 import { emptyUsage, type ProgressSnapshot, type ToolEvent } from "../engine/stream.ts";
 import { progressPatch } from "../ui/agent-tree.ts";
@@ -469,14 +469,15 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 	// stays parked until the run settles, so the leg may not block on a supervisor reply it cannot give.
 	// `fanOut` is set for a leg of a `tasks` call: its batch id, the per-call concurrency gate, and the
 	// header row it hangs under (interactive fan-outs of 2+ legs only).
-	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, inline: boolean, fanOut?: { batch: string; slots: Semaphore | undefined; groupId: string | undefined }, continuation?: ConversationTurn, brief?: DelegateCall["brief"], ctx = d.lastCtx): string {
+	function launchAsyncRun(agent: string, task: string, runSpec: AgentRunSpec, label: string, inline: boolean, fanOut?: { batch: string; slots: Semaphore | undefined; groupId: string | undefined }, continuation?: ConversationTurn, brief?: DelegateCall["brief"], ctx = d.lastCtx,
+		launch: RunLauncher = (meta, run) => d.tracker.launch(meta, run)): string {
 		let turn = continuation;
 		const model = shortModel(runSpec.model);
 		const thinking = d.launchThinking(runSpec);
 		// The writer classification travels WITH the run (d.tracker metadata), not in a side Set keyed by
 		// the returned id: a thunk that throws synchronously settles the run inside launch(), so a
 		// registration after launch() returns would re-insert an already-dead run and leak it.
-		const id = d.tracker.launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), ...(runSpec.writeSet ? { writeSet: runSpec.writeSet } : {}), queued: true, ...(fanOut ? { batch: fanOut.batch } : {}) }, (onProgress, runId) => {
+		const id = launch({ agent, task, label, ...(model ? { model } : {}), mutates: mayMutateWorkspace(runSpec), ...(runSpec.writeSet ? { writeSet: runSpec.writeSet } : {}), queued: true, ...(fanOut ? { batch: fanOut.batch } : {}) }, (onProgress, runId) => {
 			const nodeId = `async:${runId}`;
 			// A real, HARD stop for the async run (a steer is only a soft request the child may
 			// ignore): aborting this signal makes the engine call the sub-agent's `agent.abort()`.
@@ -798,6 +799,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			if (veto) return { content: [{ type: "text", text: veto }], details: failureDetails({}), isError: true };
 			if (params.tasks && params.tasks.length > 0) {
 				const tasks = params.tasks.slice(0, d.RUN_LIMITS.maxChildren);
+				const launch = d.tracker.reserveBatch(tasks.length);
 				const dropped = params.tasks.length - tasks.length;
 				const effectiveConcurrency = normalizeDelegateConcurrency(params.concurrency, d.RUN_LIMITS.maxConcurrency);
 				// Avoid an extra scheduling hop when the requested limit cannot bind (also keeps a
@@ -814,7 +816,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					const spec = specOf(t, nameOffset + i);
 					const thinking = d.launchThinking(spec);
 					const label = nameFor(t, nameOffset + i);
-					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut, undefined, t.brief, ctx);
+					const id = launchAsyncRun(t.agent, t.task, spec, label, inline, fanOut, undefined, t.brief, ctx, launch);
 					const model = shortModel(spec.model);
 					return { id, label, agent: t.agent, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), request: snapshotLaunchRequest(spec) };
 				});

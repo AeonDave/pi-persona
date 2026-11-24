@@ -3,10 +3,7 @@
  * (message/bye), sends point-to-point with large-message artifact spill (R3) and a
  * single reconnect on a peer-restarting error (R4), and cleans up on stop.
  *
- * Reuses the broker's length-prefixed framing (`bus/broker/framing.ts`) verbatim, and its
- * stale-socket reclaim probe (`bus/broker/host.ts`'s `isConnectable`/`attemptListen`) —
- * those two are not exported there, so the small probe + bind-attempt helpers are lifted
- * here rather than re-implemented differently.
+ * Reuses the broker's length-prefixed framing (`bus/broker/framing.ts`).
  */
 
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
@@ -30,12 +27,12 @@ import type net from "node:net";
 import { join, resolve } from "node:path";
 
 import { createFrameReader, encodeFrame } from "../bus/broker/framing.ts";
-import { preparePrivateEndpointDir } from "../bus/endpoint.ts";
+import { preparePrivateEndpointDir, reclaimStaleSocket } from "../bus/endpoint.ts";
 import { frameSigningPayload, isExocomFrame, nextHops, parseExocomArtifactDescriptor, truncateForInject, type AgentCard, type ExocomAck, type ExocomArtifactDescriptor, type ExocomBye, type ExocomFrame, type ExocomMessage, type ExocomNack, type ExocomWakeFrame } from "./envelope.ts";
 import { EXOCOM } from "./limits.ts";
 import { exocomRoot } from "./paths.ts";
 import { normalizeExocomProfile, type ExocomProfile } from "./profile.ts";
-import { isAlive, normalizePeerName, normalizeRegistryEntry, prune, readAll, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
+import { isAlive, normalizePeerName, normalizeRegistryEntry, prune, readAll, readLeaseKeys, registerEntry, removeEntryIfMatches, writeEntry, type RegistryEntry, type RegistryOwnership } from "./registry.ts";
 
 export interface ExocomIdentity {
 	session_id: string; name: string; persona: string; purpose: string; color: string;
@@ -71,15 +68,13 @@ export interface ExocomPlaneDeps {
 	readPool?: (agentDir: string, hash: string) => RegistryEntry[];
 	/** Bounds `send`'s ack-wait (defaults to `EXOCOM.ACK_TIMEOUT_MS`); shrinkable in tests. */
 	ackTimeoutMs?: number;
-	/** Endpoint cleanup seam; production unlinks only POSIX socket paths. */
-	unlinkEndpoint?: () => void;
 	/** Test seam: runs after source validation and immediately before snapshot I/O. */
 	beforeArtifactRead?: (sourcePath: string) => void;
 	/** Test seam: production receiver snapshot names come from `randomUUID()`. */
 	artifactSnapshotId?: () => string;
 }
 
-const STALE_PROBE_TIMEOUT_MS = 1000;
+const BYE_TIMEOUT_MS = 1000;
 const RECONNECT_DELAY_MS = 150;
 const MAX_TRACKED_HOPS = 1024;
 
@@ -147,28 +142,19 @@ function closeServer(server: net.Server): Promise<void> {
 	});
 }
 
-/** Probe: is something actually listening at `endpoint`? (lifted from `broker/host.ts`,
- *  which does not export it — same probe, not a different one.) */
-function isConnectable(netImpl: typeof import("node:net"), endpoint: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		const socket = netImpl.connect(endpoint);
-		const finish = (ok: boolean): void => {
-			clearTimeout(timer);
-			socket.removeListener("connect", onConnect);
-			socket.removeListener("error", onError);
-			socket.destroy();
-			resolve(ok);
-		};
-		const onConnect = (): void => finish(true);
-		const onError = (): void => finish(false);
-		socket.once("connect", onConnect);
-		socket.once("error", onError);
-		const timer = setTimeout(() => finish(false), STALE_PROBE_TIMEOUT_MS);
-		timer.unref?.();
-	});
-}
-
 type ListenAttempt = { server: net.Server } | { code: string };
+
+export class ExocomListenError extends Error {
+	readonly code: string;
+	readonly endpoint: string;
+
+	constructor(code: string, endpoint: string) {
+		super(`exocom plane: failed to listen on ${endpoint} (${code})`);
+		this.name = "ExocomListenError";
+		this.code = code;
+		this.endpoint = endpoint;
+	}
+}
 
 /** One bind attempt on a fresh server; connection handler wired before `listen()` so no
  *  connection can race it. On success: permanent error sink + `unref()`. */
@@ -197,8 +183,7 @@ function attemptListen(netImpl: typeof import("node:net"), endpoint: string, onC
 	});
 }
 
-/** Bind `endpoint`, reclaiming a stale POSIX socket file once (mirrors `broker/host.ts`'s
- *  bind pattern, minus its host-election concerns — exocom peers are all equal). Windows
+/** Bind `endpoint`, reclaiming a stale POSIX socket file once. Windows
  *  named pipes leave no stale-file state behind, so the reclaim step is POSIX-only. */
 async function bindServer(netImpl: typeof import("node:net"), endpoint: string, onConnection: (socket: net.Socket) => void): Promise<net.Server> {
 	let attempt = await attemptListen(netImpl, endpoint, onConnection);
@@ -206,13 +191,11 @@ async function bindServer(netImpl: typeof import("node:net"), endpoint: string, 
 		!("server" in attempt) &&
 		attempt.code === "EADDRINUSE" &&
 		process.platform !== "win32" &&
-		existsSync(endpoint) &&
-		!(await isConnectable(netImpl, endpoint))
+		await reclaimStaleSocket(netImpl, endpoint)
 	) {
-		try { unlinkSync(endpoint); } catch { /* another instance may have reaped it first */ }
 		attempt = await attemptListen(netImpl, endpoint, onConnection);
 	}
-	if (!("server" in attempt)) throw new Error(`exocom plane: failed to listen on ${endpoint} (${attempt.code})`);
+	if (!("server" in attempt)) throw new ExocomListenError(attempt.code, endpoint);
 	return attempt.server;
 }
 
@@ -271,7 +254,7 @@ function sendNoReply(netImpl: typeof import("node:net"), endpoint: string, frame
 		socket.once("connect", () => socket.write(encodeFrame(frame), () => socket.end()));
 		socket.once("close", finish);
 		socket.once("error", finish);
-		const timer = setTimeout(finish, STALE_PROBE_TIMEOUT_MS);
+		const timer = setTimeout(finish, BYE_TIMEOUT_MS);
 		timer.unref?.();
 	});
 }
@@ -403,8 +386,6 @@ export class ExocomPlane {
 	private readonly publicKey: string;
 	private readonly artifacts = new Map<string, string>();
 	private server: net.Server | undefined;
-	private readonly unlinkEndpoint: () => void;
-	private endpointOwned = false;
 	private profile: ExocomProfile | undefined;
 	/** Last successfully published metadata, so editing a profile cannot restore startup labels. */
 	private presence: RegistryEntry | undefined;
@@ -424,11 +405,6 @@ export class ExocomPlane {
 		this.netImpl = deps.net ?? nodeNet;
 		this.now = deps.now ?? Date.now;
 		this.ackTimeoutMs = deps.ackTimeoutMs ?? EXOCOM.ACK_TIMEOUT_MS;
-		this.unlinkEndpoint = deps.unlinkEndpoint ?? (() => {
-			if (process.platform !== "win32") {
-				try { unlinkSync(deps.identity.endpoint); } catch { /* best-effort */ }
-			}
-		});
 		const pair = generateKeyPairSync("ed25519");
 		this.privateKey = pair.privateKey;
 		this.publicKey = pair.publicKey.export({ type: "spki", format: "der" }).toString("base64");
@@ -493,26 +469,24 @@ export class ExocomPlane {
 		return [...this.receivedFrom.values()].reduce((a, b) => a + b, 0);
 	}
 
-	async start(): Promise<void> {
+	/** A participant may coordinate registry publication with its locked ledger admission. */
+	async start(admit?: (publish: () => void) => void): Promise<void> {
 		const { agentDir, hash, identity } = this.deps;
-		let bound = false;
 		let registeredOnThisStart = false;
 		try {
 			preparePrivateEndpointDir(identity.endpoint, "exocom");
 			this.server = await bindServer(this.netImpl, identity.endpoint, (s) => this.handleConnection(s));
-			bound = true;
-			this.endpointOwned = true;
 			if (process.platform !== "win32") chmodSync(identity.endpoint, 0o600);
-			prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
 			const entry = this.buildEntry();
-			writeEntry(agentDir, hash, entry);
-			this.presence = entry;
-			this.registeredOwnership = {
-				session_id: entry.session_id,
-				endpoint: entry.endpoint,
-				...(entry.public_key ? { public_key: entry.public_key } : {}),
+			const publish = (): void => {
+				if (!registerEntry(agentDir, hash, entry)) throw new ExocomListenError("EADDRINUSE", identity.endpoint);
+				this.presence = entry;
+				this.registeredOwnership = entry;
+				registeredOnThisStart = true;
 			};
-			registeredOnThisStart = true;
+			if (admit) admit(publish);
+			else publish();
+			prune(agentDir, hash, { now: this.now(), staleMs: EXOCOM.STALE_AFTER_MS });
 			this.cleanupArtifacts();
 		} catch (err) {
 			const server = this.server;
@@ -521,15 +495,11 @@ export class ExocomPlane {
 				try { socket.destroy(); } catch { /* best-effort rollback */ }
 			}
 			this.sockets.clear();
-			if (server) await closeServer(server);
-			if (bound) {
-				try { this.unlinkEndpoint(); } catch { /* best-effort */ }
-				this.endpointOwned = false;
-			}
 			if (registeredOnThisStart && this.registeredOwnership) {
 				removeEntryIfMatches(agentDir, hash, this.registeredOwnership);
 				this.registeredOwnership = undefined;
 			}
+			if (server) await closeServer(server);
 			throw err;
 		}
 	}
@@ -574,6 +544,11 @@ export class ExocomPlane {
 		writeEntry(agentDir, hash, owned);
 		this.presence = owned;
 		this.registeredOwnership = { session_id: owned.session_id, endpoint: owned.endpoint, public_key: owned.public_key };
+	}
+
+	/** Ledger ownership survives uncertainty about a registry slot during cleanup. */
+	retainedLeaseKeys(now: number): Set<string> {
+		return readLeaseKeys(this.deps.agentDir, this.deps.hash, now, EXOCOM.STALE_AFTER_MS);
 	}
 
 	/** Pruned live peers, excluding self, with a display-deduped `displayName` ("orion"/"orion#2")
@@ -1129,26 +1104,22 @@ export class ExocomPlane {
 	}
 
 	async stop(): Promise<void> {
-
 		const { agentDir, hash, identity } = this.deps;
-		const bye: ExocomBye = this.signFrame({ kind: "bye", from_session: identity.session_id, from_endpoint: identity.endpoint });
-		try {
-			await Promise.all(this.listPeers().map((p) => sendNoReply(this.netImpl, p.endpoint, bye)));
-		} catch { /* shutdown remains best-effort */ }
+		const ownership = this.registeredOwnership;
+		if (ownership) {
+			const bye: ExocomBye = this.signFrame({ kind: "bye", from_session: identity.session_id, from_endpoint: identity.endpoint });
+			try {
+				await Promise.all(this.listPeers().map((p) => sendNoReply(this.netImpl, p.endpoint, bye)));
+			} catch { /* shutdown remains best-effort */ }
+		}
 		for (const s of this.sockets) {
 			try { s.destroy(); } catch { /* ignore */ }
 		}
 		this.sockets.clear();
 		const server = this.server;
 		this.server = undefined;
-		if (server) {
-			await closeServer(server);
-		}
-		if (this.endpointOwned) {
-			try { this.unlinkEndpoint(); } catch { /* ignore */ }
-			this.endpointOwned = false;
-		}
-		const ownership = this.registeredOwnership;
+		// Node removes its Unix socket during close. The path may already belong to a successor.
+		if (server) await closeServer(server);
 		if (ownership) {
 			removeEntryIfMatches(agentDir, hash, ownership);
 			this.registeredOwnership = undefined;
@@ -1158,7 +1129,7 @@ export class ExocomPlane {
 		// falls to the TTL/max-files sweep — which otherwise runs only on a plane start or the next
 		// spill. In a scope where Exocom is never enabled again, that is never: sweeping on the
 		// way out bounds the retention without touching anything still inside its TTL.
-		this.cleanupArtifacts();
+		if (ownership) this.cleanupArtifacts();
 		this.profile = undefined;
 		this.presence = undefined;
 	}

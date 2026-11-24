@@ -3,6 +3,7 @@ import {
 	MONITOR_MAX_COMMAND_CHARS, MONITOR_MAX_EVENTS, MONITOR_MAX_LABEL_CHARS,
 	type MonitorEntry, type MonitorEvent, type MonitorOutput, type MonitorRemovalReason,
 } from "../core/monitor.ts";
+import { NativeAppendBudget } from "../io/native-append-budget.ts";
 
 export const MONITOR_LOG_ENTRY = "pi-persona-monitor-log";
 export const SCRIPT_LOG_ENTRY = "pi-persona-script-log";
@@ -28,6 +29,7 @@ export interface MonitorArchiveDeps {
 	source?: "monitor" | "script";
 	/** Only the owning session's entries; never a global session/history lookup. */
 	entries: () => readonly unknown[];
+	owner?: () => { getSessionFile(): string | undefined; getSessionId(): string } | undefined;
 	/** Session-native custom data, NOT a model-visible custom message. */
 	append: (customType: string, data: unknown) => void;
 }
@@ -128,6 +130,7 @@ export class MonitorArchive {
 	private persistedCount = 0;
 	private persistedBytes = 0;
 	private historyWarning: string | undefined;
+	private diskBudget: NativeAppendBudget | undefined;
 
 	constructor(deps: MonitorArchiveDeps) {
 		this.deps = deps;
@@ -191,6 +194,13 @@ export class MonitorArchive {
 		if (this.hydrated) return;
 		this.hydrated = true;
 		try {
+			const owner = this.deps.owner?.();
+			const file = owner?.getSessionFile?.();
+			if (owner && file) {
+				this.diskBudget = new NativeAppendBudget(file, owner.getSessionId(), {
+					customType: this.entryType, maxEntries: MONITOR_LOG_MAX_RECORDS, maxBytes: MONITOR_LOG_MAX_BYTES, cost: storageCost,
+				});
+			}
 			const entries = this.deps.entries();
 			if (!Array.isArray(entries)) throw new Error("invalid session entries");
 			for (const entry of entries) {
@@ -231,7 +241,10 @@ export class MonitorArchive {
 		this.persistedCount++;
 		this.persistedBytes += cost;
 		try {
-			this.deps.append(this.entryType, copyRecord(record));
+			const append = () => this.deps.append(this.entryType, copyRecord(record));
+			if (this.diskBudget) {
+				if (!this.diskBudget.append(cost, append)) record.storageWarning = BUDGET_WARNING.replace(/^Monitor/, this.sourceLabel);
+			} else append();
 		} catch {
 			record.storageWarning = APPEND_WARNING.replace(/^Monitor/, this.sourceLabel);
 		}

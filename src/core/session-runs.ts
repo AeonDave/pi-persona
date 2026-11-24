@@ -19,7 +19,7 @@ export const RUNS_ENTRY_CUSTOM_TYPE = "pi-persona:runs";
 const RUN_ID = /^run-[0-9a-z]{1,8}$/;
 /** One cap for every count and the id list (a full 64-leg fan-out fits whole); the entry stays small. */
 const MAX_COUNT = 99;
-const MAX_ISSUED = 1_000_000_000;
+export const MAX_ISSUED_RUN = 1_000_000_000;
 /** Ids named in the notice itself; the rest are counted. */
 const MAX_NAMED_IDS = 8;
 
@@ -67,7 +67,7 @@ export function findStoredRuns(entries: readonly unknown[], sessionId: string): 
 	}
 	if (!data) return undefined;
 	const { issued, lost } = data;
-	if (typeof issued !== "number" || !Number.isInteger(issued) || issued < 0 || issued > MAX_ISSUED) return undefined;
+	if (typeof issued !== "number" || !Number.isInteger(issued) || issued < 0 || issued > MAX_ISSUED_RUN) return undefined;
 	if (!lost || typeof lost !== "object") return undefined;
 	return makeRunsEntry(sessionId, issued, lost);
 }
@@ -79,7 +79,7 @@ const TERMINAL_RESULT_ENTRY = "pi-persona-terminal-result";
 function runOrdinal(id: unknown): number {
 	if (typeof id !== "string" || !RUN_ID.test(id)) return 0;
 	const n = Number.parseInt(id.slice("run-".length), 36);
-	return Number.isSafeInteger(n) && n > 0 && n <= MAX_ISSUED ? n : 0;
+	return Number.isSafeInteger(n) && n > 0 && n <= MAX_ISSUED_RUN ? n : 0;
 }
 
 const idList = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
@@ -116,7 +116,7 @@ function toolResultRunIds(message: { toolName?: unknown; details?: unknown }): u
  * once its launch receipt or settling result is in the file. Continuing past this keeps every id
  * the file names unique for every run created from now on. A run the file never names (no record,
  * no runs entry, no such tool result) can still be reissued. Malformed or out-of-range values are
- * ignored (never rewind, never jump past {@link MAX_ISSUED}).
+ * ignored (never rewind, never jump past {@link MAX_ISSUED_RUN}).
  */
 export function highestIssuedRun(entries: readonly unknown[]): number {
 	let highest = 0;
@@ -132,7 +132,7 @@ export function highestIssuedRun(entries: readonly unknown[]): number {
 		const data = item.data as { originRunId?: unknown; issued?: unknown; lost?: { runs?: unknown } };
 		if (item.customType === TERMINAL_RESULT_ENTRY) highest = Math.max(highest, runOrdinal(data.originRunId));
 		else if (item.customType === RUNS_ENTRY_CUSTOM_TYPE) {
-			if (typeof data.issued === "number" && Number.isInteger(data.issued) && data.issued > 0 && data.issued <= MAX_ISSUED) highest = Math.max(highest, data.issued);
+			if (typeof data.issued === "number" && Number.isInteger(data.issued) && data.issued > 0 && data.issued <= MAX_ISSUED_RUN) highest = Math.max(highest, data.issued);
 			const lost = data.lost && typeof data.lost === "object" && Array.isArray(data.lost.runs) ? data.lost.runs : [];
 			for (const id of lost) highest = Math.max(highest, runOrdinal(id));
 		}

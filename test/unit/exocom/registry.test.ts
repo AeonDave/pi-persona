@@ -141,6 +141,23 @@ test("prune does not delete a replacement installed after its initial registry r
 	assert.equal(stored?.public_key, replacement.public_key);
 });
 
+test("a live owner that renews during stale inspection keeps its lease in the registry and the returned pool", () => {
+	const own = tempDir("exo-reg-renew-");
+	const stale = entry({ session_id: "renewed", public_key: Buffer.from("same-owner").toString("base64"), heartbeat_at: new Date(0).toISOString() });
+	const now = 1_000_000;
+	writeEntry(own, H, stale);
+	let renewed = false;
+	const live = prune(own, H, { now, staleMs: 120_000, isAlive: () => {
+		if (!renewed) {
+			renewed = true;
+			writeEntry(own, H, { ...stale, heartbeat_at: new Date(now).toISOString() });
+		}
+		return true;
+	} });
+	assert.deepEqual(readAll(own, H).map((e) => e.session_id), ["renewed"]);
+	assert.deepEqual(live.map((e) => e.session_id), ["renewed"]);
+});
+
 // The preserve-from-disk step below only covers the file-STILL-EXISTS case. An entry can be
 // evicted while its instance is very much alive (a >STALE_AFTER_MS stall lets every peer
 // prune it), and the next heartbeat RE-CREATES the

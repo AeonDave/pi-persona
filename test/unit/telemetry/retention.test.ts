@@ -208,12 +208,17 @@ test("shutdown flushes terminal writes and releases its lease without joining an
 	const stopped = p.stop();
 	try {
 		assert.equal(readdirSync(`${p.filePath}.leases`).some((name) => name.startsWith("writer-")), true, "the lease protects pending terminal writes");
+		let duplicateClosed = false;
+		const duplicateStop = p.stop().then(() => { duplicateClosed = true; });
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(duplicateClosed, false, "both shutdown callers must join the pending writes and lease release");
 		releaseWrites();
 		const outcome = await Promise.race([
 			stopped.then(() => "stopped"),
 			retentionWaited.then(() => "waiting for retention"),
 		]);
 		assert.equal(outcome, "stopped", "background cleanup must not gate shutdown");
+		await duplicateStop;
 		assert.equal(existsSync(`${p.filePath}.leases`), false);
 		assert.match(readFileSync(p.filePath, "utf8"), /"type":"instance.stopped"/, "the terminal event is on disk before shutdown resolves");
 		assert.equal(p.publish("instance.heartbeat", {}), undefined, "a stopped producer cannot reopen its write stream");
@@ -276,6 +281,13 @@ test("cross-process writer lease survives prune until an IPC-controlled clean st
 	t.after(() => { if (child.exitCode === null && child.pid) killProcessTree(child.pid); });
 	const next = (type: string) => received.has(type) ? Promise.resolve(received.get(type)) : new Promise<any>((resolve, reject) => waiting.set(type, { resolve, reject }));
 	const ready = await next("READY");
+	// A second Pi can resume this very session while the child is still publishing.
+	const options = { agentDir: root, cwd: "/ipc-work", sessionId: "cross-process", emit: () => {}, heartbeatMs: 0, retentionMs: 0 };
+	const bytes = readFileSync(ready.file);
+	const markers = readdirSync(`${ready.file}.leases`);
+	assert.throws(() => new TelemetryProducer(options), /another Pi/i);
+	assert.deepEqual(readFileSync(ready.file), bytes);
+	assert.deepEqual(readdirSync(`${ready.file}.leases`), markers);
 	utimesSync(ready.file, old, old);
 	await flushTelemetryRetention(root, "pi-persona", 1, now);
 	assert.equal(existsSync(ready.file), true);
@@ -283,6 +295,10 @@ test("cross-process writer lease survives prune until an IPC-controlled clean st
 	child.send("stop");
 	await stopped;
 	assert.equal(await exited, 0);
+	const successor = new TelemetryProducer(options);
+	await successor.stop();
+	const events = readFileSync(ready.file, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+	assert.equal(events.at(-1).seq, events.at(-2).seq + 1);
 	utimesSync(ready.file, old, old); // terminal publication refreshed mtime; expire only after shutdown
 	await flushTelemetryRetention(root, "pi-persona", 1, now);
 	assert.equal(existsSync(ready.file), false);

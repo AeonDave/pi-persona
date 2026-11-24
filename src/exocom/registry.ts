@@ -1,6 +1,9 @@
 /** Exocom scope registry — one JSON file per live instance. */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { processState } from "../io/process-state.ts";
+import { tryFileClaim } from "../io/file-claim.ts";
 import { agentsDir, registryPath } from "./paths.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { normalizeExocomProfile, type ExocomProfile } from "./profile.ts";
@@ -136,6 +139,8 @@ export interface RegistryWriteIO {
  *  claim and leaves this unset. */
 export interface RegistryRemoveIO {
 	afterCompare?: () => void;
+	/** A stale observation authorizes removal only until the next heartbeat. */
+	heartbeatAt?: string;
 }
 
 // A handle held by a virus scanner, the search indexer or a peer mid-read is transient, so a few
@@ -210,6 +215,37 @@ export function writeEntry(agentDir: string, hash: string, entry: RegistryEntry,
 	}
 }
 
+function readSlot(path: string, key: string): RegistryEntry | undefined {
+	const st = lstatSync(path);
+	if (!st.isFile() || st.size > MAX_REGISTRY_FILE_BYTES) return undefined;
+	const entry = normalizeRegistryEntry(JSON.parse(readFileSync(path, "utf8")));
+	return entry && sessionKey(entry.session_id) === key ? entry : undefined;
+}
+
+function observedSlotKey(file: string): string | undefined {
+	return /^([0-9a-f]{16})\.json(?:\.claim-\d+-[a-f\d-]{36})?$/.exec(file)?.[1];
+}
+
+/** A successful bind proves exclusive ownership only at that particular endpoint. Cooperating
+ * processes may derive a different name for the same registry, so also claim the session slot. */
+export function registerEntry(agentDir: string, hash: string, entry: RegistryEntry): boolean {
+	const dir = agentsDir(agentDir, hash);
+	mkdirSync(dir, { recursive: true });
+	const key = sessionKey(entry.session_id);
+	const release = tryFileClaim(dir, `register-${key}`);
+	if (!release) return false;
+	try {
+		for (const file of readdirSync(dir)) {
+			if (observedSlotKey(file) !== key) continue;
+			const incumbent = readSlot(join(dir, file), key);
+			if (!incumbent) throw new Error("exocom registry: cannot verify the existing session owner");
+			if (incumbent.endpoint !== entry.endpoint && isAlive(incumbent.pid)) return false;
+		}
+		writeEntry(agentDir, hash, entry);
+		return true;
+	} finally { release(); }
+}
+
 export function readAll(agentDir: string, hash: string): RegistryEntry[] {
 	const dir = agentsDir(agentDir, hash);
 	if (!existsSync(dir)) return [];
@@ -217,19 +253,31 @@ export function readAll(agentDir: string, hash: string): RegistryEntry[] {
 	for (const f of readdirSync(dir)) {
 		if (!f.endsWith(".json")) continue;
 		try {
-			const path = registryPath(agentDir, hash, f.slice(0, -5));
-			const st = lstatSync(path);
-			if (!st.isFile() || st.size > MAX_REGISTRY_FILE_BYTES) continue;
-			const e = normalizeRegistryEntry(JSON.parse(readFileSync(path, "utf8")));
-			if (e && f.slice(0, -5) === sessionKey(e.session_id)) out.push(e);
+			const e = readSlot(join(dir, f), f.slice(0, -5));
+			if (e) out.push(e);
 		} catch { /* skip malformed */ }
 	}
 	return out;
 }
 
+/** A temporarily claimed or unreadable registry slot cannot prove its owner departed.
+ * Snapshot slot names together, including cleanup claims, and keep uncertainty local to the affected owner. */
+export function readLeaseKeys(agentDir: string, hash: string, now: number, staleMs: number): Set<string> {
+	const dir = agentsDir(agentDir, hash);
+	const leases = new Set<string>();
+	for (const file of readdirSync(dir)) {
+		const key = observedSlotKey(file);
+		if (!key) continue;
+		try {
+			const entry = readSlot(join(dir, file), key);
+			if (entry && isAlive(entry.pid) && now - Date.parse(entry.heartbeat_at) <= staleMs) leases.add(key);
+		} catch { leases.add(key); }
+	}
+	return leases;
+}
+
 export function isAlive(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === "EPERM"; }
+	return Number.isSafeInteger(pid) && pid > 0 && processState(pid) !== "dead";
 }
 
 /** Remove dead-pid AND stale-heartbeat entries; return the live set (R7). */
@@ -243,7 +291,13 @@ export function prune(
 		const heartbeat = Date.parse(e.heartbeat_at);
 		const stale = !Number.isFinite(heartbeat) || opts.now - heartbeat > opts.staleMs;
 		if (alive(e.pid) && !stale) { live.push(e); continue; }
-		removeEntryIfMatches(agentDir, hash, e);
+		removeEntryIfMatches(agentDir, hash, e, { heartbeatAt: e.heartbeat_at });
+		// Another heartbeat or incarnation may have won after the initial listing.
+		try {
+			const key = sessionKey(e.session_id);
+			const current = readSlot(registryPath(agentDir, hash, key), key);
+			if (current && alive(current.pid) && opts.now - Date.parse(current.heartbeat_at) <= opts.staleMs) live.push(current);
+		} catch { /* the stale slot was removed */ }
 	}
 	return live;
 }
@@ -290,7 +344,7 @@ export function removeEntryIfMatches(agentDir: string, hash: string, expected: R
 		claimedByUs = true;
 		const current = normalizeRegistryEntry(JSON.parse(readFileSync(claimed, "utf8")));
 		const matches = current !== undefined && current.session_id === expected.session_id && current.endpoint === expected.endpoint
-			&& (current.public_key ?? undefined) === (expected.public_key ?? undefined);
+			&& current.public_key === expected.public_key && (io.heartbeatAt === undefined || current.heartbeat_at === io.heartbeatAt);
 		if (matches) {
 			io.afterCompare?.();
 			unlinkSync(claimed);

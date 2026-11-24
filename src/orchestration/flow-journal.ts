@@ -7,10 +7,12 @@
  * and the filename derivation are pure (tested); the read/write helpers are thin `fs` glue.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import { basename, dirname } from "node:path";
 
 import { emptyUsage } from "../engine/stream.ts";
+import { tryFileClaim, waitForFileClaim } from "../io/file-claim.ts";
 import { flowHash, type FlowSpec } from "./flow.ts";
 import type { FlowJournalEntry, ResumedResult } from "./flow-run.ts";
 
@@ -31,6 +33,17 @@ const PATH_HOSTILE = /[/\\<>:"|?*\x00-\x1f]/g;
  *  carries the full run hash (`flowRunHash`), so a resume reads only its own. */
 export function journalFileName(spec: FlowSpec): string {
 	return `${encodeFlowName(spec.name)}.${flowHash(spec).slice(0, 8)}.journal.jsonl`;
+}
+
+type FlowJournalOwnership = { status: "owned"; release: () => void } | { status: "busy" | "unavailable" };
+
+/** Claim the run identity before consulting its checkpoints, including previously saved files. */
+export function claimFlowJournal(directory: string, hash: string): FlowJournalOwnership {
+	try {
+		fs.mkdirSync(directory, { recursive: true });
+		const release = tryFileClaim(directory, `flow-${hash}`);
+		return release ? { status: "owned", release } : { status: "busy" };
+	} catch { return { status: "unavailable" }; }
 }
 
 /** A flow name reduced to something a filesystem will accept: hostile characters replaced,
@@ -59,16 +72,14 @@ export function parseJournal(content: string, hash: string): Record<string, Resu
 		if (!e || typeof e !== "object") continue;
 		if (e.hash !== hash || typeof e.phase !== "string") continue;
 		if (e.ok) {
-			const prior = out[e.phase];
 			out[e.phase] = {
 				agent: e.phase, output: e.output ?? "", usage: emptyUsage(), ok: true,
+				...(e.gateApproved === true ? { gateApproved: true } : {}),
 				...(typeof e.resultRef === "string" ? { resultRef: e.resultRef } : {}),
 				...(e.resultVersion === 1 ? { resultVersion: 1 as const } :
 					e.resultRef !== undefined || e.resultVersion !== undefined
 						? { refUnavailable: "unsupported or missing archived result journal version" } : {}),
 			};
-			// Preserve an approval from either this line or an earlier line for the same phase.
-			if (e.gateApproved || prior?.gateApproved) out[e.phase]!.gateApproved = true;
 		} else delete out[e.phase];
 	}
 	return out;
@@ -83,11 +94,30 @@ export function readJournal(path: string, hash: string): Record<string, ResumedR
 	}
 }
 
+/** Appends and cleanup share one short claim across all task hashes in this file. */
+function updateJournal(path: string, write: () => void): boolean {
+	// Marker names need room for their owner's PID and nonce even with a long Unicode flow name.
+	const name = createHash("sha256").update(basename(path)).digest("hex");
+	try {
+		const release = waitForFileClaim(dirname(path), `journal-${name}`, 1000);
+		if (!release) return false;
+		try { write(); return true; } finally { release(); }
+	} catch {
+		return false;
+	}
+}
+
 /** A finished run leaves the file: drop ITS lines (unreadable ones too), keep every other run's
  *  resumable progress, and remove the file once nothing is left. Best-effort. */
-export function clearJournal(path: string, hash: string): void {
-	try {
-		const others = fs.readFileSync(path, "utf8").split("\n").filter((line) => {
+export function clearJournal(path: string, hash: string): boolean {
+	return updateJournal(path, () => {
+		let content: string;
+		try { content = fs.readFileSync(path, "utf8"); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
+		}
+		const others = content.split("\n").filter((line) => {
 			try {
 				const e = JSON.parse(line) as FlowJournalEntry | null;
 				return !!e && typeof e === "object" && e.hash !== hash;
@@ -97,9 +127,7 @@ export function clearJournal(path: string, hash: string): void {
 		});
 		if (others.length === 0) fs.rmSync(path, { force: true });
 		else replaceFile(path, `${others.join("\n")}\n`);
-	} catch {
-		/* best effort — a journal that cannot be cleaned is only a stale resume candidate */
-	}
+	});
 }
 
 /** Write a sibling temp file and rename it over `path`, so a crash mid-rewrite cannot leave
@@ -135,12 +163,8 @@ function endsMidLine(path: string): boolean {
 /** An appending writer — one JSONL line per completed phase. Best-effort. An entry always
  *  starts on its own line: appended to an unterminated fragment, it would fail to parse along
  *  with it, and its completed phase would silently re-run on resume. */
-export function journalWriter(path: string): (entry: FlowJournalEntry) => void {
-	return (entry) => {
-		try {
-			fs.appendFileSync(path, `${endsMidLine(path) ? "\n" : ""}${JSON.stringify(entry)}\n`);
-		} catch {
-			/* best effort — journaling must never break a run */
-		}
-	};
+export function journalWriter(path: string): (entry: FlowJournalEntry) => boolean {
+	return (entry) => updateJournal(path, () => {
+		fs.appendFileSync(path, `${endsMidLine(path) ? "\n" : ""}${JSON.stringify(entry)}\n`);
+	});
 }

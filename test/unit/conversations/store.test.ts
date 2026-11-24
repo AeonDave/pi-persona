@@ -63,6 +63,35 @@ test("a verifiably stale lock remains visible as resumable without a listing mut
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("two stale-lock reclaimers cannot both admit a transcript writer", () => {
+	const h = storeFixture("persona-conversation-reclaim-race-");
+	try {
+		const saved = h.commit();
+		const path = saved.file.replace(/\.jsonl$/, ".lock");
+		writeFileSync(path, DEAD);
+		const original = fs.unlinkSync;
+		let contender: ReturnType<ConversationStore["acquire"]> | undefined;
+		let injected = false;
+		fs.unlinkSync = ((candidate: PathLike) => {
+			if (!injected && String(candidate) === path) {
+				injected = true;
+				contender = h.store.acquire(saved.runId);
+			}
+			original(candidate);
+		}) as typeof original;
+		syncBuiltinESMExports();
+		try {
+			const first = h.store.acquire(saved.runId);
+			assert.equal(injected, true, "the competing admission ran immediately before stale lock removal");
+			assert.equal(Number(first.ok) + Number(contender?.ok), 1, "exactly one writer may own the transcript");
+			assert.equal(h.store.acquire(saved.runId).ok, false, "the winning lease must still exclude a third writer");
+			if (first.ok) first.value.lease.release();
+			if (contender?.ok) contender.value.lease.release();
+			assert.equal(h.store.listAll()[0]?.available, true);
+		} finally { fs.unlinkSync = original; syncBuiltinESMExports(); }
+	} finally { h.close(); }
+});
+
 test("failed post-lock continuation validation releases its lease without deleting the saved transcript", () => {
 	const dir = mkdtempSync(join(tmpdir(), "persona-conversation-admission-error-"));
 	try {
@@ -118,7 +147,7 @@ test("releasing an unindexed fresh attempt removes its transcript and frees its 
 function storeFixture(prefix: string) {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
 	// Reclaim confirms an unindexed key against the session file, which Pi has written by the first turn.
-	writeFileSync(join(dir, "parent"), "{\"type\":\"session\"}\n");
+	writeFileSync(join(dir, "parent"), SESSION_HEADER);
 	const entries: unknown[] = [];
 	let now = 1_000;
 	let corrupt = false;
@@ -149,6 +178,7 @@ function workerDirName(dir: string): string {
 	return readdirSync(join(dir, "persona-workers"))[0]!;
 }
 const DEAD = JSON.stringify({ pid: 2147483647, token: "dead" });
+const SESSION_HEADER = '{"type":"session","id":"owner"}\n';
 
 test("releasing a fresh uncommitted lease does not read session history", () => {
 	const dir = mkdtempSync(join(tmpdir(), "persona-conversation-stale-ctx-"));
@@ -201,15 +231,32 @@ test("reclaim keeps an unindexed transcript that the session file mentions or ca
 		const other = h.orphan(undefined);
 		const key = /([0-9a-f-]{36})\.jsonl$/.exec(other)![1]!;
 		const admit = () => { const r = h.store.create(); assert.ok(r.ok, r.ok ? "" : r.error); r.value.release(); };
-		writeFileSync(join(h.dir, "parent"), `{"type":"custom","data":{"key":"${key}"}}\n`);
+		writeFileSync(join(h.dir, "parent"), `${SESSION_HEADER}{"type":"custom","data":{"key":"${key}"}}\n`);
 		admit();
 		assert.equal(existsSync(other), true, "another process committed it, so this stale view must not delete it");
 		unlinkSync(join(h.dir, "parent"));
 		admit();
 		assert.equal(existsSync(other), true, "an unreadable session file fails closed");
-		writeFileSync(join(h.dir, "parent"), "{\"type\":\"session\"}\n");
+		writeFileSync(join(h.dir, "parent"), SESSION_HEADER);
 		admit();
 		assert.equal(existsSync(other), false, "confirmed absent from the session file");
+	} finally { h.close(); }
+});
+
+test("a dead supervisor with an unpublished child PID leaves the writer lease fenced", () => {
+	const h = storeFixture("persona-conversation-launching-writer-");
+	try {
+		h.commit();
+		const file = h.orphan(JSON.stringify({ ...JSON.parse(DEAD), externalWriter: "launching" }));
+		const hold = h.store.create();
+		assert.ok(hold.ok);
+		hold.value.release();
+		assert.equal(existsSync(file), true, "launcher crash does not establish child quiescence");
+		writeFileSync(file.replace(/\.jsonl$/, ".lock"), JSON.stringify({ ...JSON.parse(DEAD), externalWriter: 2147483647 }));
+		const reclaim = h.store.create();
+		assert.ok(reclaim.ok);
+		reclaim.value.release();
+		assert.equal(existsSync(file), false, "both PIDs are now known dead");
 	} finally { h.close(); }
 });
 

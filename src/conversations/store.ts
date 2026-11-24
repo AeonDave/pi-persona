@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, parse, resolve } from "node:path";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isThinkingLevel } from "../core/types.ts";
 import { parseVerification } from "../core/worktree-verification.ts";
+import { tryFileClaim } from "../io/file-claim.ts";
+import { processState } from "../io/process-state.ts";
+import { nativeSessionStorage, prepareSessionStorage, regularPath } from "../io/session-storage.ts";
+import { ConversationHistory, CONVERSATION_ENTRY, CONVERSATION_FORGOTTEN_ENTRY } from "./history.ts";
 import type { ConversationCommit, ConversationLease, ConversationListing, ConversationRecord, ConversationResult, ConversationStoreDeps } from "./types.ts";
 
-export const CONVERSATION_ENTRY = "pi-persona:conversation:v1";
-export const CONVERSATION_FORGOTTEN_ENTRY = "pi-persona:conversation-forgotten:v1";
+export { CONVERSATION_ENTRY, CONVERSATION_FORGOTTEN_ENTRY } from "./history.ts";
 export const CONVERSATION_MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const CONVERSATION_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 export const CONVERSATION_MAX_LINEAGES = 64;
@@ -18,16 +21,6 @@ const RUN = /^run-[a-z0-9-]{1,80}$/i;
 const HASH = /^[a-f0-9]{64}$/i;
 const SPEC_KEYS = new Set(["agent", "task", "name", "model", "thinking", "tools", "skills", "role", "outputContract", "isolation", "verification", "mcp", "timeoutMs", "writeSet"]);
 const fail = <T>(code: string, error: string): ConversationResult<T> => ({ ok: false, code, error });
-
-function regularPath(path: string): boolean {
-	let current = parse(path).root;
-	for (const part of path.slice(current.length).split(/[\\/]+/).filter(Boolean)) {
-		current = join(current, part);
-		try { if (lstatSync(current).isSymbolicLink()) return false; }
-		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-	}
-	return true;
-}
 
 function validRecord(value: unknown, owner: string): value is ConversationRecord {
 	try {
@@ -56,19 +49,38 @@ function validRecord(value: unknown, owner: string): value is ConversationRecord
 	} catch { return false; }
 }
 
+/** A previously saved transcript can belong to the spelling originally opened by Pi.
+ * Derive that one candidate from this file and session ID, so a fork cannot select a
+ * source directory through an inherited record. New sessions use canonical storage. */
+function conversationStorage(deps: ConversationStoreDeps) {
+	const canonical = nativeSessionStorage(deps.sessionFile, deps.sessionId);
+	if (!canonical || !deps.sessionFile) return canonical;
+	const original = resolve(deps.sessionFile);
+	if (original === canonical.file || !existsSync(canonical.file)) return canonical;
+	const owner = createHash("sha256").update(`${realpathSync(original)}\0${deps.sessionId}`).digest("hex");
+	const directory = join(dirname(original), "persona-workers", owner);
+	if (directory === canonical.directory || !existsSync(directory) || !regularPath(directory) || !lstatSync(directory).isDirectory()) return canonical;
+	const retained = readdirSync(directory, { withFileTypes: true }).some((entry) => {
+		const key = /^(.+)\.(?:jsonl|forgotten)$/.exec(entry.name)?.[1];
+		return entry.isFile() && key !== undefined && UUID.test(key);
+	});
+	return retained ? { file: canonical.file, owner, directory } : canonical;
+}
+
 /** Session-owned transcript index. Paths are derived from opaque keys, never from callers. */
 export class ConversationStore {
 	private readonly deps: ConversationStoreDeps;
 	private readonly owner: string;
 	private readonly directory: string | undefined;
 	private readonly sessionFile: string | undefined;
+	private readonly nativeHistory: ConversationHistory;
 	constructor(deps: ConversationStoreDeps) {
 		this.deps = { ...deps };
-		const parent = deps.sessionFile && isAbsolute(deps.sessionFile) ? resolve(deps.sessionFile) : undefined;
-		const canonical = parent && existsSync(parent) ? realpathSync(parent) : parent;
-		this.owner = createHash("sha256").update(`${canonical ?? ""}\0${deps.sessionId}`).digest("hex");
-		this.directory = parent && deps.sessionId ? join(dirname(parent), "persona-workers", this.owner) : undefined;
-		this.sessionFile = parent;
+		this.nativeHistory = deps.nativeHistory ?? new ConversationHistory();
+		const storage = conversationStorage(deps);
+		this.owner = storage?.owner ?? "";
+		this.directory = storage?.directory;
+		this.sessionFile = storage?.file;
 	}
 
 	create(): ConversationResult<ConversationLease> {
@@ -92,20 +104,23 @@ export class ConversationStore {
 		try {
 			const prepared = this.prepare();
 			if (!prepared.ok) return prepared;
-			const all = this.records(this.deps.entries());
+			const entries = this.entries();
+			const all = this.records(entries);
 			const selected = all.findLast((r) => r.runId === runId);
 			if (!selected) return fail("unavailable", "Conversation is unavailable in this session");
 			const latest = all.findLast((r) => r.key === selected.key);
 			if (!latest || latest.runId !== runId) return fail("stale", "A later turn already continued this conversation");
-			if (this.forgotten(this.deps.entries()).has(selected.key) || existsSync(join(this.directory!, `${selected.key}.forgotten`))) return fail("unavailable", "Conversation has been forgotten");
+			if (this.forgotten(entries).has(selected.key) || existsSync(join(this.directory!, `${selected.key}.forgotten`))) return fail("unavailable", "Conversation has been forgotten");
 			if (branchEntries && !this.records(branchEntries).some((r) => r.key === selected.key && r.runId === runId)) return fail("branch", "Conversation is not available on this session branch");
 			if (this.expired(latest)) return fail("expired", "Conversation retention has expired");
 			const lease = this.makeLease(latest.key, latest);
 			if (!lease.ok) return lease;
 			pendingLease = lease.value;
 			// Re-read after the lock: another owner may have settled while we were acquiring it.
-			const check = this.records(this.deps.entries()).findLast((r) => r.key === latest.key);
+			const current = this.entries();
+			const check = this.records(current).findLast((r) => r.key === latest.key);
 			if (!check || check.runId !== latest.runId) return fail("stale", "Conversation changed during admission");
+			if (this.forgotten(current).has(selected.key) || existsSync(join(this.directory!, `${selected.key}.forgotten`))) return fail("unavailable", "Conversation has been forgotten");
 			if (!this.usableFile(lease.value.file) || this.hashFile(lease.value.file) !== latest.transcriptHash) return fail("unavailable", "Conversation transcript is missing, incomplete or changed since settlement");
 			pendingLease = undefined; // The successful caller now owns the lease and its writer lifecycle.
 			return { ok: true, value: { record: latest, lease: lease.value } };
@@ -120,7 +135,7 @@ export class ConversationStore {
 	listAll(branchEntries?: readonly unknown[]): ConversationListing[] {
 		try {
 			if (!this.directory) return [];
-			const entries = this.deps.entries();
+			const entries = this.entries();
 			const all = this.records(entries), forgotten = this.forgotten(entries);
 			const branch = branchEntries ? this.records(branchEntries) : all;
 			const latest = new Map<string, ConversationRecord>();
@@ -152,7 +167,7 @@ export class ConversationStore {
 		try {
 			const prepared = this.prepare();
 			if (!prepared.ok) return prepared;
-			const entries = this.deps.entries(), all = this.records(entries);
+			const all = this.records(this.entries());
 			const selected = all.findLast((r) => r.runId === runId);
 			if (!selected) return fail("unavailable", "Conversation is unavailable in this session");
 			if (all.findLast((r) => r.key === selected.key)?.runId !== runId) return fail("stale", "A later conversation turn exists");
@@ -164,7 +179,7 @@ export class ConversationStore {
 				const marker = join(this.directory!, `${selected.key}.forgotten`);
 				if (existsSync(file) && (!regularPath(file) || !lstatSync(file).isFile())) return fail("unsafe-path", "Transcript path is unsafe");
 				if (existsSync(marker) && (!regularPath(marker) || !lstatSync(marker).isFile())) return fail("unsafe-path", "Conversation cleanup marker is unsafe");
-				const current = this.deps.entries();
+				const current = this.entries();
 				if (this.records(current).findLast((r) => r.key === selected.key)?.runId !== runId) return fail("stale", "Conversation changed during admission");
 				const recorded = this.forgotten(current).has(selected.key);
 				let markerState = existsSync(marker) ? readFileSync(marker, "utf8") : undefined;
@@ -186,6 +201,19 @@ export class ConversationStore {
 				return { ok: true, value: true };
 			} finally { locked.value(); }
 		} catch (error) { return fail("storage", String(error)); }
+	}
+
+	/** Native managers only know their local branch and the history loaded when they opened it. */
+	private entries(): readonly unknown[] {
+		const local = this.deps.entries();
+		const stored = this.nativeHistory.read(this.sessionFile!, this.deps.sessionId);
+		if (!stored.length) return local;
+		const persistedIds = new Set(stored.map((entry) => entry.id).filter((id) => typeof id === "string"));
+		const unpersisted = local.filter((entry) => {
+			const id = (entry as { id?: unknown } | null)?.id;
+			return typeof id !== "string" || !persistedIds.has(id);
+		});
+		return [...stored, ...unpersisted];
 	}
 
 	private forgotten(entries: readonly unknown[]): Set<string> {
@@ -223,9 +251,7 @@ export class ConversationStore {
 	private expired(record: ConversationRecord): boolean { return (this.deps.now?.() ?? Date.now()) - record.updatedAt > CONVERSATION_RETENTION_MS; }
 	private prepare(): ConversationResult<true> {
 		if (!this.directory) return fail("sessionless", "A persistent supervisor session is required");
-		if (!regularPath(this.directory)) return fail("unsafe-path", "Conversation storage contains a symbolic link");
-		mkdirSync(this.directory, { recursive: true });
-		if (!regularPath(this.directory) || !statSync(this.directory).isDirectory()) return fail("unsafe-path", "Conversation storage directory is unsafe");
+		if (!prepareSessionStorage(this.directory)) return fail("unsafe-path", "Conversation storage directory is unsafe");
 		return { ok: true, value: true };
 	}
 	private usableFile(file: string): boolean {
@@ -261,7 +287,7 @@ export class ConversationStore {
 	private reclaim(): void {
 		let latest: Map<string, ConversationRecord>, forgotten: Set<string>;
 		try {
-			const entries = this.deps.entries();
+			const entries = this.entries();
 			latest = new Map(this.records(entries).map((r) => [r.key, r]));
 			forgotten = this.forgotten(entries);
 		} catch { return; }
@@ -283,15 +309,17 @@ export class ConversationStore {
 		}
 	}
 	/** Fails closed: a session file that cannot be read counts as mentioning the key. */
-	private sessionFileMentions(key: string): boolean {
+	private sessionFileMentions(key: string, permitMissing = false): boolean {
 		try { return readFileSync(this.sessionFile!).includes(key); }
-		catch { return true; }
+		catch (error) { return !permitMissing || (error as NodeJS.ErrnoException).code !== "ENOENT"; }
 	}
 	private quota(): { count: number; bytes: number } {
 		let count = 0, bytes = 0;
 		for (const name of readdirSync(this.directory!)) {
 			if (!/^[0-9a-f-]+\.(?:jsonl|lock)$/i.test(name)) continue;
-			const s = lstatSync(join(this.directory!, name));
+			let s;
+			try { s = lstatSync(join(this.directory!, name)); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
 			if (s.isSymbolicLink() || !s.isFile()) throw new Error("Unsafe conversation storage entry");
 			if (name.endsWith(".jsonl")) { count++; bytes += s.size; }
 			else if (!existsSync(join(this.directory!, name.replace(/\.lock$/, ".jsonl")))) count++;
@@ -300,18 +328,21 @@ export class ConversationStore {
 	}
 	/** Listing is read-only: only a positively identified dead owner is recoverable. */
 	private lockIsBusy(path: string): boolean {
+		return this.lockState(path) === "busy";
+	}
+
+	private lockState(path: string): "absent" | "busy" | "stale" {
 		try {
 			const info = lstatSync(path);
-			if (!info.isFile() || info.isSymbolicLink() || info.size > 1024) return true;
-			const data = JSON.parse(readFileSync(path, "utf8")) as { pid?: number };
-			if (!Number.isSafeInteger(data.pid) || !data.pid || data.pid < 1) return true;
-			try { process.kill(data.pid, 0); return true; }
-			catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
-		} catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+			if (!info.isFile() || info.isSymbolicLink() || info.size > 1024) return "busy";
+			const data = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; externalWriter?: unknown };
+			if (processState(data.pid ?? 0) !== "dead") return "busy";
+			if (data.externalWriter === undefined) return "stale";
+			return typeof data.externalWriter === "number" && processState(data.externalWriter) === "dead" ? "stale" : "busy";
+		} catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "busy"; }
 	}
-	private lock(name: string): ConversationResult<() => void> {
+	private lock(name: string, token = randomUUID()): ConversationResult<() => void> {
 		const path = join(this.directory!, `${name}.lock`);
-		const token = randomUUID();
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				const fd = openSync(path, "wx", 0o600);
@@ -320,35 +351,50 @@ export class ConversationStore {
 			} catch (e) {
 				if ((e as NodeJS.ErrnoException).code !== "EEXIST") return fail("storage", String(e));
 				try {
-					const info = lstatSync(path);
-					if (!info.isFile() || info.isSymbolicLink() || info.size > 1024) return fail("busy", "Conversation lock is invalid");
-					const data = JSON.parse(readFileSync(path, "utf8")) as { pid?: number };
-					if (!Number.isSafeInteger(data.pid) || !data.pid || data.pid < 1) return fail("busy", "Conversation lock owner is unknown");
-					try { process.kill(data.pid, 0); return fail("busy", "Conversation is already in use"); }
-					catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") return fail("busy", "Conversation lock owner cannot be verified"); }
-					const again = lstatSync(path);
-					if (again.ino !== info.ino || again.mtimeMs !== info.mtimeMs || again.size !== info.size) return fail("busy", "Conversation lock changed");
-					unlinkSync(path);
+					const state = this.lockState(path);
+					if (state === "absent") continue;
+					if (state === "busy") return fail("busy", "Conversation is already in use");
+					const reclaim = tryFileClaim(this.directory!, `${name}.reclaim`);
+					if (!reclaim) return fail("busy", "Conversation lock recovery is already in progress");
+					try {
+						// Only the claimant may unlink a dead owner. Recheck once the claim
+						// is ours, since another claimant may already have replaced it.
+						if (this.lockState(path) === "stale") unlinkSync(path);
+					} finally { reclaim(); }
 				} catch { return fail("busy", "Conversation lock cannot be verified"); }
 			}
 		}
 		return fail("busy", "Conversation is already in use");
 	}
 	private makeLease(key: string, previous?: ConversationRecord): ConversationResult<ConversationLease> {
-		const locked = this.lock(key);
+		const token = randomUUID();
+		const locked = this.lock(key, token);
 		if (!locked.ok) return locked;
 		const file = join(this.directory!, `${key}.jsonl`);
-		let released = false, committed = false;
+		const lockFile = join(this.directory!, `${key}.lock`);
+		let released = false, committed = false, attemptedAppend = false;
 		const lease: ConversationLease = {
 			key, file,
+			setExternalWriter: (externalWriter) => {
+				if (released || committed || !lstatSync(lockFile).isFile() || JSON.parse(readFileSync(lockFile, "utf8")).token !== token) {
+					throw new Error("Conversation writer lease is unavailable");
+				}
+				// Atomic replacement preserves the launching fence if the supervisor dies
+				// before publishing the child PID or a filesystem write fails mid-update.
+				const temp = `${lockFile}.${randomUUID()}.tmp`;
+				try {
+					writeFileSync(temp, JSON.stringify({ pid: process.pid, token, externalWriter }), { flag: "wx", mode: 0o600 });
+					renameSync(temp, lockFile);
+				} finally { try { unlinkSync(temp); } catch { /* renamed or absent */ } }
+			},
 			release: () => {
 				if (released) return;
 				try {
 					// Unsettled fresh attempts have no index entry through which forget could reach
-					// them. A fresh key is indexed only by this lease's own commit, so `committed` is
-					// authoritative; session history may belong to a stale context after a reload.
-					// The caller releases only after the writer has stopped.
-					if (!previous && !committed && existsSync(file) && regularPath(file) && lstatSync(file).isFile()) unlinkSync(file);
+					// them. An append failure may still have written the record to the native file.
+					// Read the file only for uncertain appends: the originating context may be stale.
+					if (!previous && !committed && (!attemptedAppend || !this.sessionFileMentions(key, true))
+						&& existsSync(file) && regularPath(file) && lstatSync(file).isFile()) unlinkSync(file);
 				} catch { /* A path or ownership that cannot be verified is retained. */ }
 				finally { released = true; locked.value(); }
 			},
@@ -362,9 +408,11 @@ export class ConversationStore {
 					if (!guard.ok) return guard;
 					try {
 						if (this.quota().bytes > CONVERSATION_MAX_TOTAL_BYTES) return fail("quota", "Conversation total storage quota exceeded");
-						const records = this.records(this.deps.entries());
+						const entries = this.entries();
+						const records = this.records(entries);
 						if (records.some((r) => r.runId === record.runId)) return fail("conflict", "Conversation run id already exists");
 						if (previous && records.findLast((r) => r.key === key)?.runId !== previous.runId) return fail("stale", "Conversation changed during the turn");
+						attemptedAppend = true;
 						this.deps.append(CONVERSATION_ENTRY, structuredClone(record));
 						committed = true;
 						return { ok: true, value: structuredClone(record) };

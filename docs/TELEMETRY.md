@@ -21,7 +21,11 @@ The pi-persona producer writes semantic projections under `telemetry/v2/<workspa
 
 JSONL compaction is atomic and hysteretic. It preserves the initial `instance.started` anchor and complete records; the configured byte limit is therefore a soft bound for an anchor plus one complete event. The `.previous` backup is recovered after an interrupted swap.
 
-Producer shutdown flushes its terminal event before releasing its writer lease. It does not join the shared background retention sweep, so unrelated stale sessions cannot delay this shutdown or reload. `flushRetention()` remains the explicit await for maintenance completion; cleanup errors still reach the non-fatal diagnostic sink.
+Each session stream admits one writer. A second Pi resuming the same session leaves the first writer’s
+events, sequence and compaction files intact. Use `/fork` for a separate stream, or close the active
+writer and use `/reload` to continue its sequence. Concurrent shutdown calls all wait for the terminal
+event to reach disk and for the writer lease to be released. Background retention has its own
+completion promise, `flushRetention()`.
 
 The pi-persona producer also applies a default 30-day age retention to its own valid v2 session groups; `retentionMs: 0` disables cleanup only, not writer leases. Cleanup is asynchronous after successful initialization and can be awaited with the producer's retention test seam. It strictly considers regular single-link logs plus recognized `.previous`/compaction scratch files beneath valid workspace IDs and this producer directory. Legacy data, foreign producers, malformed names, links, and unknown files are retained. Orphan backups/scratch and dead-marker-only groups are considered too; empty owned lease/producer/workspace directories are removed nonrecursively. The cutoff is exclusive and cleanup runs on activation, not on a wall-clock deletion schedule.
 

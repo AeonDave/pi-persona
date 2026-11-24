@@ -11,6 +11,7 @@ import type { ConversationWorktree } from "../core/worktree-recovery.ts";
 import type { WorktreeVerificationSpec } from "../core/worktree-verification.ts";
 import type { RunLimits } from "../core/capabilities.ts";
 import { type ChildUsage, emptyUsage, type ToolEvent } from "../engine/stream.ts";
+import type { WorkerSession } from "../engine/worker-session.ts";
 import { type JudgePrep, prepareJudge } from "./judge.ts";
 import { planModelRecovery } from "./model-retry.ts";
 import { mapWithConcurrency } from "./parallel.ts";
@@ -24,7 +25,7 @@ import { type ReducerResult, type VoteOpts, voteReduce } from "./voting.ts";
 export interface AgentRunSpec {
 	agent: string;
 	/** INTERNAL runtime-owned worker transcript; never an argument supplied by a strategy or model. */
-	session?: { file: string; resume: boolean; worktree?: ConversationWorktree };
+	session?: WorkerSession & { worktree?: ConversationWorktree };
 	/** Supervisor-assigned display identity for this run. This is metadata only; handles and
 	 * routing continue to use the configured agent name and the engine-minted child handle. */
 	name?: string;

@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 
 import { tempDir } from "../../setup/temp-dir.ts";
 import { TelemetryProducer } from "../../../src/telemetry/producer.ts";
@@ -60,7 +59,7 @@ test("producer emits v2 bus events and persists the same JSONL envelope", async 
 test("producer resumes sequence from an existing session log", async () => {
   const root = tempDir("pi-persona-telemetry-resume-");
   const first = new TelemetryProducer({ agentDir: root, cwd: "/work", sessionId: "s1", emit: () => {}, heartbeatMs: 0 });
-  mkdirSync(dirname(first.filePath), { recursive: true });
+  await first.stop();
   writeFileSync(first.filePath, `${JSON.stringify({
     version: TELEMETRY_VERSION,
     id: "s1:7",
@@ -244,7 +243,7 @@ test("producer recovers a log left in the compaction backup", async () => {
   const root = tempDir("pi-persona-telemetry-recovery-");
   const first = new TelemetryProducer({ agentDir: root, cwd: "/work", sessionId: "recover", emit: () => {}, heartbeatMs: 0 });
   first.publish("instance.heartbeat", { contextPercent: 1 });
-  await first.flush();
+  await first.stop();
   const backup = `${first.filePath}.previous`;
   writeFileSync(backup, readFileSync(first.filePath));
   rmSync(first.filePath);
@@ -252,7 +251,7 @@ test("producer recovers a log left in the compaction backup", async () => {
   const recovered = new TelemetryProducer({ agentDir: root, cwd: "/work", sessionId: "recover", emit: (event) => recoveredEvents.push(event), heartbeatMs: 0 });
   recovered.publish("instance.heartbeat", { contextPercent: 2 });
   await recovered.flush();
-  assert.equal(recoveredEvents[0]?.seq, 2);
+  assert.equal(recoveredEvents[0]?.seq, 3);
 });
 
 test("a torn final line is repaired so the first event after a crash survives", async () => {
@@ -261,8 +260,10 @@ test("a torn final line is repaired so the first event after a crash survives", 
   first.start(instance);
   first.publish("tool.started", { callId: "c1", agentId: "a1", name: "read", status: "running" });
   await first.flush();
-  // A crash mid-append leaves a partial record with no trailing newline.
-  appendFileSync(first.filePath, `{"version":2,"producerId":"pi-persona","producerVer`);
+  const beforeCrash = readFileSync(first.filePath, "utf8");
+  await first.stop();
+  // Recreate the crash bytes after relinquishing the writer lease.
+  writeFileSync(first.filePath, beforeCrash + `{"version":2,"producerId":"pi-persona","producerVer`);
 
   const resumed = new TelemetryProducer({ agentDir: root, cwd: "/work", sessionId: "torn", emit: () => {}, heartbeatMs: 0 });
   resumed.publish("tool.finished", { callId: "c1", agentId: "a1", name: "read", status: "done", durationMs: 5 });

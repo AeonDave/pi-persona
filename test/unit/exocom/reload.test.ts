@@ -17,23 +17,24 @@ const entry = (data: unknown) => ({ type: "custom", customType: EXOCOM_RELOAD_EN
 test("reload snapshot keeps FIFO text and receipt identity, and consumes once across branches", () => {
 	const snapshot = createReloadSnapshot("snapshot-1", "session-1", "scope-1", "agent-dir", 1000, [notice("1"), notice("2")]);
 	assert.ok(snapshot);
-	const found = findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 1100);
+	const found = findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 1100, snapshot.id);
 	assert.deepEqual(found?.items, [notice("1"), notice("2")]);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 1100, "other-handoff"), undefined);
 	const consumed = entry({ kind: "consumed", id: snapshot.id, sessionId: "session-1" });
-	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot), consumed], "session-1", "scope-1", "agent-dir", 1100), undefined);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot), consumed], "session-1", "scope-1", "agent-dir", 1100, snapshot.id), undefined);
 });
 
 test("reload snapshot fails closed for wrong session, scope, branch, expiry, and malformed state", () => {
 	const snapshot = createReloadSnapshot("snapshot-1", "session-1", "scope-1", "agent-dir", 1000, [notice("1")]);
 	assert.ok(snapshot);
-	assert.equal(findReloadSnapshot([], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 1100), undefined);
-	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-2", "scope-1", "agent-dir", 1100), undefined);
-	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-2", "agent-dir", 1100), undefined);
-	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "other-dir", 1100), undefined);
-	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 302000), undefined);
-	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 999), undefined);
+	assert.equal(findReloadSnapshot([], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 1100, snapshot.id), undefined);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-2", "scope-1", "agent-dir", 1100, snapshot.id), undefined);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-2", "agent-dir", 1100, snapshot.id), undefined);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "other-dir", 1100, snapshot.id), undefined);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 302000, snapshot.id), undefined);
+	assert.equal(findReloadSnapshot([entry(snapshot)], [entry(snapshot)], "session-1", "scope-1", "agent-dir", 999, snapshot.id), undefined);
 	const malformed = entry({ ...snapshot, items: [{ text: "bad" }] });
-	assert.equal(findReloadSnapshot([malformed], [malformed], "session-1", "scope-1", "agent-dir", 1100), undefined);
+	assert.equal(findReloadSnapshot([malformed], [malformed], "session-1", "scope-1", "agent-dir", 1100, snapshot.id), undefined);
 });
 
 test("reload snapshots reject oversized or duplicate input rather than silently dropping it", () => {
@@ -52,16 +53,17 @@ test("reload rejects forged or corrupt authenticated reply metadata", () => {
 		{ ...original.context, entry: { ...original.context.entry, public_key: "invalid" } },
 	]) {
 		const corrupt = entry({ kind: "snapshot", id: "s", sessionId: "session", scope: "scope", agentDir: "dir", createdAt: 1000, items: [{ ...original, context }] });
-		assert.equal(findReloadSnapshot([corrupt], [corrupt], "session", "scope", "dir", 1100), undefined);
+		assert.equal(findReloadSnapshot([corrupt], [corrupt], "session", "scope", "dir", 1100, "s"), undefined);
 	}
 });
 
-test("startup invalidates every outstanding snapshot for this session, including another branch", () => {
+test("consumption markers invalidate the matching snapshot across the session's branches", () => {
 	const first = createReloadSnapshot("one", "session", "scope", "dir", 1000, [notice("1")]);
 	const other = createReloadSnapshot("two", "session", "scope", "dir", 1001, [notice("2")]);
+	assert.ok(other);
 	const foreign = createReloadSnapshot("three", "foreign", "scope", "dir", 1001, [notice("3")]);
 	assert.deepEqual(unconsumedReloadIds([entry(first), entry(other), entry(foreign)], "session"), ["one", "two"]);
 	const markers = ["one", "two"].map((id) => entry({ kind: "consumed", id, sessionId: "session" }));
 	assert.deepEqual(unconsumedReloadIds([entry(first), entry(other), entry(foreign), ...markers], "session"), []);
-	assert.equal(findReloadSnapshot([entry(other)], [entry(first), entry(other), ...markers], "session", "scope", "dir", 1100), undefined);
+	assert.equal(findReloadSnapshot([entry(other)], [entry(first), entry(other), ...markers], "session", "scope", "dir", 1100, other.id), undefined);
 });

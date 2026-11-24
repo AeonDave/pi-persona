@@ -129,7 +129,7 @@ import { brokerEndpoint } from "./bus/broker/paths.ts";
 import { InProcessBus } from "./bus/inproc.ts";
 import { loadContracts, loadDefinitions, loadPresets, loadTeams, type LoadResult, type ScopedDir } from "./loader.ts";
 import { type FlowSpec, flowRunHash, parseFlow, verifyFlowRefs } from "./orchestration/flow.ts";
-import { clearJournal, journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
+import { claimFlowJournal, clearJournal, journalFileName, journalWriter, readJournal } from "./orchestration/flow-journal.ts";
 import { runFlow } from "./orchestration/flow-run.ts";
 import { Semaphore } from "./orchestration/parallel.ts";
 import { flowDisposition, type FlowOutcome } from "./orchestration/flow-run.ts";
@@ -1329,15 +1329,13 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 	const canRunScript = () => canRunProgram("script");
 	// Session-native custom entries own the bounded logs: they are not model messages and
 	// deleting the session removes them without orphan sidecars. Shutdown persists, never deletes.
-	const monitorArchive = new MonitorArchive({
+	const logStorage = {
+		owner: () => lastCtx?.sessionManager,
 		entries: () => lastCtx?.sessionManager.getEntries() ?? [],
-		append: (customType, data) => pi.appendEntry(customType, data),
-	});
-	const scriptArchive = new MonitorArchive({
-		source: "script",
-		entries: () => lastCtx?.sessionManager.getEntries() ?? [],
-		append: (customType, data) => pi.appendEntry(customType, data),
-	});
+		append: (customType: string, data: unknown) => pi.appendEntry(customType, data),
+	};
+	const monitorArchive = new MonitorArchive(logStorage);
+	const scriptArchive = new MonitorArchive({ ...logStorage, source: "script" });
 	const programView = {
 		tree: agentTree, stops: stopRegistry,
 		disposed: () => disposed,
@@ -2104,13 +2102,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		};
 		const hash = flowRunHash(spec, baseTask, ctx.cwd);
 		const journalDir = join(personaDataDir(), "flows");
-		try {
-			mkdirSync(journalDir, { recursive: true });
-		} catch {
-			/* best effort */
-		}
 		const journalPath = join(journalDir, journalFileName(spec)); // encodes the name — any name is storable
-		const resume = readJournal(journalPath, hash);
 
 		// Preflight: every participant the flow's phases will spawn — roster members AND the
 		// auxiliary actors each phase's strategy declares (an arbiter, a synthesiser) — resolved
@@ -2130,7 +2122,17 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 		);
 		const { rootId: flowRoot, signal, live } = visibleRoot(`flow:${spec.name}`, tracked);
 		agentTree.add({ id: flowRoot, label: `flow ${spec.name}`, status: "running", kind: "flow", ...live });
+		const journal = claimFlowJournal(journalDir, hash);
+		let journalDrain: Promise<unknown> | undefined;
 		try {
+			if (journal.status === "busy") {
+				const error = `Flow "${spec.name}" is already running or starting for this task and project.`;
+				agentTree.update(flowRoot, { status: "failed", detail: error });
+				return finish({ ok: false, results: {}, output: error, error, failureKind: "limit" });
+			}
+			const resume = journal.status === "owned" ? readJournal(journalPath, hash) : {};
+			const writeCheckpoint = journalWriter(journalPath);
+			let reportedJournalFailure = false;
 			await ensurePersonaModels(ctx, spec.phases.flatMap((p) => phasePlans.get(p.id)?.participants ?? []), signal, flowRoot, tracked);
 			if (signal.aborted) {
 				agentTree.update(flowRoot, { status: "stopped" });
@@ -2164,7 +2166,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			// The run limits bound the whole invocation: every phase draws on one child count, one token
 			// total and one maxConcurrency gate. A resume is a new invocation with a fresh budget.
 			const budget = createRunBudget(RUN_LIMITS);
-			const outcome = await runFlow(spec, baseTask, {
+			let outcome = await runFlow(spec, baseTask, {
 				hash,
 				resume,
 				signal,
@@ -2174,7 +2176,16 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					const archive = results.archive;
 					return archive ? readArchivedBody(archive, ref) : { ok: false as const, error: "terminal result archive unavailable" };
 				} } : {}),
-				journal: journalWriter(journalPath),
+				...(journal.status === "owned" ? {
+					journal: (entry) => {
+						if (writeCheckpoint(entry) || reportedJournalFailure) return;
+						reportedJournalFailure = true;
+						const warning = `Flow "${spec.name}" could not save checkpoint "${entry.phase}". A later resume may repeat work.`;
+						if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+						else process.stderr.write(`${warning}\n`);
+					},
+					onJournalDrain: (settled: Promise<unknown>) => { journalDrain = settled; },
+				} : {}),
 				onPhase: (id, status, result) => {
 					const patch: { status: AgentNodeStatus; output?: string; detail?: string } = {
 						status: status === "running" ? "running" : status === "done" ? "done" : "failed",
@@ -2243,7 +2254,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 					}
 				},
 			});
-			if (outcome.ok) clearJournal(journalPath, hash); // this run is finished; other tasks' progress stays
+			if (outcome.ok && journal.status === "owned" && !clearJournal(journalPath, hash)) {
+				const error = "Flow phases completed, but the saved checkpoints could not be cleared. A later invocation may resume them.";
+				outcome = { ...outcome, ok: false, error, failureKind: "contract", output: [outcome.output, error].filter(Boolean).join("\n\n") };
+			}
 			// A rejected checkpoint is a pause the operator chose, not a failure (same call as the flow tool).
 			const disposition = flowDisposition(outcome);
 			agentTree.update(flowRoot, { status: disposition === "failed" && signal.aborted ? "stopped" : disposition });
@@ -2253,6 +2267,10 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 			agentTree.update(flowRoot, { status: signal.aborted ? "stopped" : "failed" });
 			throw error;
 		} finally {
+			if (journal.status === "owned") {
+				if (journalDrain) void journalDrain.then(journal.release, journal.release);
+				else journal.release();
+			}
 			clearStops(flowRoot);
 			clearSteers(flowRoot);
 			agentTree.remove(flowRoot);
@@ -2963,6 +2981,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						activationError: exocomArgs.error,
 						capabilities: controller.capabilities,
 						startupError: exocom.startupError ? toastCause(exocom.startupError) : undefined,
+						endpointBusy: exocom.endpointBusy,
 					}),
 					"warning",
 				);

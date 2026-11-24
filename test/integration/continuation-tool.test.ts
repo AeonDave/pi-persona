@@ -17,7 +17,7 @@ function fixture() {
 	const cwd = mkdtempSync(join(tmpdir(), "persona-conversation-runtime-"));
 	const entries: unknown[] = [];
 	const file = join(cwd, "supervisor.jsonl");
-	writeFileSync(file, "supervisor");
+	writeFileSync(file, '{"type":"session","id":"owner"}\n');
 	let persona: string | null = "engineer";
 	let fingerprint = "a".repeat(64);
 	let policyFails = false;

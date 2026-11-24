@@ -18,8 +18,10 @@ import {
 	writeSync,
 	type BigIntStats,
 } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 
+import { tryFileClaim } from "../io/file-claim.ts";
+import { processState } from "../io/process-state.ts";
 import { PERSONA_SETTINGS, validatePreferences, type PersonaPreferences, type SettingId } from "../core/settings.ts";
 import type { PersonaConfigStore } from "./config-store.ts";
 
@@ -114,7 +116,7 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
 	return left.dev === right.dev && left.ino === right.ino;
 }
 
-function readBoundedFile(file: string, maxLinks = 1n): FileSnapshot | undefined {
+function readBoundedFile(file: string, maxLinks = 1n, maxBytes = MAX_SETTINGS_BYTES): FileSnapshot | undefined {
 	let pathBefore: BigIntStats;
 	try {
 		pathBefore = lstatSync(file, { bigint: true });
@@ -130,7 +132,7 @@ function readBoundedFile(file: string, maxLinks = 1n): FileSnapshot | undefined 
 		assertRegularSingleLink(file, before, maxLinks);
 		if (!sameIdentity(pathBefore, before)) throw new Error(`settings file changed while opening: ${file}`);
 
-		const capacity = MAX_SETTINGS_BYTES + 1;
+		const capacity = maxBytes + 1;
 		const buffer = Buffer.allocUnsafe(capacity);
 		let offset = 0;
 		while (offset < capacity) {
@@ -138,7 +140,7 @@ function readBoundedFile(file: string, maxLinks = 1n): FileSnapshot | undefined 
 			if (count === 0) break;
 			offset += count;
 		}
-		if (offset > MAX_SETTINGS_BYTES) throw new Error(`settings file exceeds ${MAX_SETTINGS_BYTES} bytes: ${file}`);
+		if (offset > maxBytes) throw new Error(`settings file exceeds ${maxBytes} bytes: ${file}`);
 
 		const after = fstatSync(fd, { bigint: true });
 		const pathAfter = lstatSync(file, { bigint: true });
@@ -244,6 +246,17 @@ function removeOwnedLock(lock: string, fd: number, identity: BigIntStats): void 
 	}
 }
 
+/** Called while publication is excluded, including the gap between exclusive open and PID write. */
+function reclaimSettingsLock(lock: string): void {
+	const snapshot = readBoundedFile(lock, 1n, 128);
+	if (!snapshot) return;
+	const pid = /^(\d+)\n/.exec(snapshot.bytes.toString("utf8"))?.[1];
+	const incomplete = snapshot.bytes.length === 0 && Date.now() - Number(snapshot.mtimeNs / 1_000_000n) > STALE_LOCK_MS;
+	if (!incomplete && (!pid || processState(Number(pid)) !== "dead")) return;
+	const current = lstatSync(lock, { bigint: true });
+	if (current.isFile() && current.nlink === 1n && snapshot.dev === current.dev && snapshot.ino === current.ino) unlinkSync(lock);
+}
+
 function acquireFileLock(
 	file: string,
 	sleep: (ms: number) => void,
@@ -252,41 +265,30 @@ function acquireFileLock(
 	const lock = `${file}.lock`;
 	let lastOpenError: string | undefined;
 	for (let attempt = 1; attempt <= LOCK_ATTEMPTS; attempt++) {
-		let fd: number;
+		const publish = tryFileClaim(dirname(lock), basename(lock));
 		try {
-			fd = openExclusiveLock(lock);
+			if (publish) {
+				const fd = openExclusiveLock(lock);
+				const identity = fstatSync(fd, { bigint: true });
+				try {
+					writeSync(fd, `${process.pid}\n${randomBytes(8).toString("hex")}\n`, null, "utf8");
+				} catch (error) {
+					removeOwnedLock(lock, fd, identity);
+					throw error;
+				}
+				return () => removeOwnedLock(lock, fd, identity);
+			}
 		} catch (error) {
 			const code = errorCode(error);
 			if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") throw error;
 			lastOpenError = code;
 			if (code === "EEXIST") {
-				try {
-					const current = lstatSync(lock, { bigint: true });
-					if (current.isFile() && !current.isSymbolicLink() && current.nlink === 1n
-						&& Date.now() - Number(current.mtimeMs) > STALE_LOCK_MS) {
-						const confirmed = lstatSync(lock, { bigint: true });
-						if (sameIdentity(current, confirmed) && confirmed.isFile() && confirmed.nlink === 1n) unlinkSync(lock);
-					}
-				} catch {
-					/* Lock disappeared or is unsafe; retain it and keep the wait bounded. */
-				}
+				try { reclaimSettingsLock(lock); } catch { /* Unsafe or unreadable ownership remains protected. */ }
 			}
-			if (attempt < LOCK_ATTEMPTS) {
-				sleep(LOCK_BACKOFF_MS);
-				continue;
-			}
-			throw new Error(`timed out acquiring persona settings lock: ${lock} (last open error: ${lastOpenError})`);
-		}
-		const identity = fstatSync(fd, { bigint: true });
-		try {
-			writeSync(fd, `${process.pid}\n${randomBytes(8).toString("hex")}\n`, null, "utf8");
-		} catch (error) {
-			removeOwnedLock(lock, fd, identity);
-			throw error;
-		}
-		return () => removeOwnedLock(lock, fd, identity);
+		} finally { publish?.(); }
+		if (attempt < LOCK_ATTEMPTS) sleep(publish ? LOCK_BACKOFF_MS : LOCK_BACKOFF_MS + Math.floor(Math.random() * 2 * LOCK_BACKOFF_MS));
 	}
-	throw new Error(`timed out acquiring persona settings lock: ${lock}`);
+	throw new Error(`timed out acquiring persona settings lock: ${lock} (last open error: ${lastOpenError ?? "busy"})`);
 }
 
 function normalizePatch(value: unknown): {

@@ -15,6 +15,8 @@ import {
 	type TelemetryPayload,
 } from "./contract.ts";
 import { telemetrySessionFileKey, telemetryWorkspaceId } from "./paths.ts";
+import { processState } from "../io/process-state.ts";
+import { waitForFileClaim } from "../io/file-claim.ts";
 
 export interface TelemetryProducerOptions {
 	agentDir: string;
@@ -45,8 +47,12 @@ export class TelemetryAdmissionError extends Error {
 	constructor(message: string) { super(message); this.name = "TelemetryAdmissionError"; }
 }
 
+export class TelemetryWriterBusy extends TelemetryAdmissionError {
+	constructor() { super("Another Pi is publishing telemetry for this session."); }
+}
+
 const markerName = (kind: "writer" | "prune") => `${kind}-${process.pid}-${randomUUID()}`;
-const markerPattern = /^(writer|prune)-(\d+)-([0-9a-f-]{36})$/;
+const markerPattern = /^(writer|prune|admission\.claim)-(\d+)-([0-9a-f-]{36})$/;
 const workspacePattern = /^[0-9a-f]{24}$/;
 
 const TERMINAL_AGENT_STATUSES = new Set(["done", "failed", "stopped"]);
@@ -299,13 +305,6 @@ function producerSegment(value: string | undefined, fallback: string): string {
 	return safe && validProducerId(safe) ? safe : fallback;
 }
 
-function pidState(pid: number): "alive" | "dead" | "unknown" {
-	if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
-	if (pid === process.pid) return "alive";
-	try { process.kill(pid, 0); return "alive"; }
-	catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown"; }
-}
-
 function isMissing(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
@@ -354,18 +353,21 @@ function assertSafeArtifactSync(file: string): void {
 	} catch (error) { if (!isMissing(error)) throw error; }
 }
 
-function assertNoPruneClaimsSync(dir: string): void {
+function assertStreamAvailable(dir: string, ownMarker: string): void {
 	for (const name of readdirSync(dir)) {
+		if (name === ownMarker) continue;
 		const match = markerPattern.exec(name);
 		if (!match) throw new TelemetryAdmissionError("Unknown telemetry lease marker");
 		const marker = join(dir, name);
 		let info;
 		try { info = lstatSync(marker); } catch (error) { if (isMissing(error)) continue; throw error; }
 		if (!info.isFile() || info.nlink !== 1 || info.size !== 0) throw new TelemetryAdmissionError("Unsafe telemetry lease marker");
-		if (match[1] === "prune") {
-			if (pidState(Number(match[2])) !== "dead") throw new TelemetryAdmissionError("Active telemetry prune claim");
-			try { unlinkSync(marker); } catch (error) { if (!isMissing(error)) throw error; }
+		if (match[1] === "admission.claim") continue; // tryFileClaim arbitrates these contenders.
+		if (processState(Number(match[2])) !== "dead") {
+			if (match[1] === "writer") throw new TelemetryWriterBusy();
+			throw new TelemetryAdmissionError("Active telemetry prune claim");
 		}
+		try { unlinkSync(marker); } catch (error) { if (!isMissing(error)) throw error; }
 	}
 }
 
@@ -417,8 +419,8 @@ async function hasProtectedWriter(leaseDir: string, ownClaim: string): Promise<b
 		let info;
 		try { info = await lstat(path); } catch (error) { if (isMissing(error)) continue; throw error; }
 		if (!info.isFile() || info.nlink !== 1 || info.size !== 0) return true;
-		const state = pidState(Number(match[2]));
-		if (state === "unknown" || (match[1] === "writer" && state === "alive")) return true;
+		const state = processState(Number(match[2]));
+		if (state === "unknown" || (match[1] !== "prune" && state === "alive")) return true;
 		if (state === "dead") {
 			try { await unlink(path); } catch (error) { if (!isMissing(error)) throw error; }
 		}
@@ -488,7 +490,7 @@ export class TelemetryProducer {
 	private writeChain: Promise<void> = Promise.resolve();
 	private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 	private instance: InstanceDescriptor | undefined;
-	private stopped = false;
+	private shutdown: Promise<void> | undefined;
 	private leasePath: string;
 	private retentionSweep: Promise<void> = Promise.resolve();
 	readonly producerId: string;
@@ -514,10 +516,15 @@ export class TelemetryProducer {
 		try {
 			ensureDirectoriesSync(base, dir, createdDirectories);
 			ensureDirectoriesSync(base, leaseDir, createdDirectories);
-			const fd = openSync(this.leasePath, "wx", 0o600);
-			leaseCreated = true;
-			closeSync(fd);
-			assertNoPruneClaimsSync(leaseDir);
+			// Elect one writer even when two clean sessions reach admission together.
+			const admit = waitForFileClaim(leaseDir, "admission");
+			if (!admit) throw new TelemetryWriterBusy();
+			try {
+				const fd = openSync(this.leasePath, "wx", 0o600);
+				leaseCreated = true;
+				closeSync(fd);
+				assertStreamAvailable(leaseDir, basename(this.leasePath));
+			} finally { admit(); }
 			for (const name of readdirSync(dir)) {
 				if (artifactPattern.exec(name)?.[1] === fileKey) assertSafeArtifactSync(join(dir, name));
 			}
@@ -526,6 +533,7 @@ export class TelemetryProducer {
 				try { unlinkSync(this.leasePath); } catch { /* remove only our unique marker */ }
 			}
 			removeCreatedDirectoriesSync(createdDirectories, options.onError);
+			if (error instanceof TelemetryWriterBusy) throw error;
 			throw new TelemetryAdmissionError(`Cannot acquire telemetry writer lease: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		const backup = `${this.filePath}.previous`;
@@ -549,7 +557,7 @@ export class TelemetryProducer {
 	}
 
 	start(instance: InstanceDescriptor): void {
-		if (this.instance || this.stopped) return;
+		if (this.instance || this.shutdown) return;
 		this.instance = sanitizeInstance(instance);
 		this.publish("instance.started", this.instance);
 		const heartbeatMs = this.options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
@@ -568,7 +576,11 @@ export class TelemetryProducer {
 	}
 
 	publish<T extends KnownTelemetryEventType>(type: T, payload: TelemetryPayload<T>): TelemetryEvent<T> | undefined {
-		if (this.stopped) return undefined;
+		if (this.shutdown) return undefined;
+		return this.emitEvent(type, payload);
+	}
+
+	private emitEvent<T extends KnownTelemetryEventType>(type: T, payload: TelemetryPayload<T>): TelemetryEvent<T> {
 		this.seq += 1;
 		const event = {
 			version: TELEMETRY_VERSION,
@@ -609,20 +621,20 @@ export class TelemetryProducer {
 
 	async flushRetention(): Promise<void> { await this.retentionSweep; }
 
-	async stop(reason?: string): Promise<void> {
-		if (this.stopped) return;
+	stop(reason?: string): Promise<void> {
+		if (this.shutdown) return this.shutdown;
 		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 		this.heartbeatTimer = undefined;
-		this.publish("instance.stopped", { reason: reason ? boundedText(reason, 120) : "shutdown" });
-		this.stopped = true;
-		try {
-			await this.flush();
-			// Retention is shared background maintenance, not part of this writer's lifetime.
-			// Keep the lease through terminal writes, but do not delay host shutdown/reload
-			// on a sweep of unrelated sessions. flushRetention() remains an explicit join.
-		} finally {
-			try { await unlink(this.leasePath); } catch (error) { if (!isMissing(error)) reportRetentionError(this.options.onError, error); }
-			try { await removeEmptyDir(dirname(this.leasePath)); } catch (error) { reportRetentionError(this.options.onError, error); }
-		}
+		// Install the shared completion before a terminal-event listener can reenter stop().
+		this.shutdown = Promise.resolve().then(async () => {
+			try {
+				this.emitEvent("instance.stopped", { reason: reason ? boundedText(reason, 120) : "shutdown" });
+				await this.flush();
+			} finally {
+				try { await unlink(this.leasePath); } catch (error) { if (!isMissing(error)) reportRetentionError(this.options.onError, error); }
+				try { await removeEmptyDir(dirname(this.leasePath)); } catch (error) { reportRetentionError(this.options.onError, error); }
+			}
+		});
+		return this.shutdown;
 	}
 }

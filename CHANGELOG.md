@@ -6,6 +6,25 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.20.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.20.1) - 2026-11-24
+
+### Fixed
+
+- Resuming the same Pi session in two windows with Exocom enabled now leaves the first window's
+  claims, pending questions and tasks intact. The second window explains how to join as a separate
+  peer. Taking over the connection after the first window closes no longer replays its queued messages.
+- Two windows sharing a saved session now reserve distinct worker IDs. A window with older history
+  cannot discard a newer continuation or its retained worktree. A child worker that survives its
+  supervisor keeps its transcript while it writes. Terminal results, monitor logs and script logs
+  share their respective on-disk budgets across windows. Concurrent shutdowns preserve both windows'
+  interrupted-work reports for one notice on restore.
+- A duplicate telemetry writer leaves the active stream and event numbering intact. Concurrent
+  shutdown callers wait for the same final write. A settings writer keeps its lock while it is alive.
+- A rejected child-broker listener leaves the first supervisor's subscriptions and socket intact.
+  On Unix, closing the old listener preserves a successor that has already bound the address.
+- Concurrent flow runs preserve each other's checkpoints. An identical flow, task and project already
+  running is reported before another phase starts. Approvals apply to the output that was reviewed.
+
 ## [1.20.0](https://github.com/AeonDave/pi-persona/releases/tag/v1.20.0) - 2026-11-23
 
 ### Security

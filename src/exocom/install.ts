@@ -2,7 +2,7 @@
  * Exocom plane + work ledger + wait + tools. Owns session-scoped plane state.
  */
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -39,8 +39,10 @@ import { EXOCOM } from "./limits.ts";
 import { endpoint as exocomEndpointFor, ledgerPath } from "./paths.ts";
 import { ExocomPlane, type DisplayPeer } from "./plane.ts";
 import type { ExocomArgSelection } from "./activation.ts";
+import { formatExocomStartupError, isExocomEndpointBusy } from "./availability.ts";
 import { selectExocomScope, type ExocomScope } from "./scope.ts";
 import {
+	admitLedgerSession,
 	answerFor,
 	commitLedgerEvent,
 	droppedAskIds,
@@ -56,7 +58,7 @@ import {
 import { buildInboundDelivery } from "./inbound.ts";
 import { waitNoticeMatchesAskId } from "./wait.ts";
 import type { ExocomSemanticFrame } from "./envelope.ts";
-import { prune as pruneExocom, type RegistryEntry } from "./registry.ts";
+import { prune as pruneExocom, sessionKey, type RegistryEntry } from "./registry.ts";
 import { registerExocomTools } from "../tools/exocom.ts";
 import { registerExocomWorkTools } from "../tools/exocom-work.ts";
 import { registerExocomCollaborationTools } from "../tools/exocom-collaboration.ts";
@@ -65,7 +67,7 @@ import { collaborationWriteIntent, deliverCollaborationOffer } from "./collabora
 import type { SessionIdentity } from "../extension/identity.ts";
 import { WriteWarnings } from "./write-guard.ts";
 import { ExocomPeerPresenceStore, projectExocomPeerPresence, type ExocomPeerPresence } from "./presence.ts";
-import { createReloadSnapshot, EXOCOM_RELOAD_ENTRY, findReloadSnapshot, unconsumedReloadIds, type ReloadSnapshot } from "./reload.ts";
+import { authorizeReload, createReloadSnapshot, EXOCOM_RELOAD_ENTRY, findReloadSnapshot, takeReloadId, unconsumedReloadIds, type ReloadSnapshot } from "./reload.ts";
 
 interface ExocomNotice extends PresentedNotice { receipt?: { sender: string; id: string } }
 
@@ -86,7 +88,8 @@ export interface ExocomHost {
 
 export interface ExocomInstall {
 	refreshIdentity(): void;
-	reconcile(ctx: ExtensionContext): Promise<void>;
+	/** Pass the reload reason on session_start only, to handle its one-use inbox handoff. */
+	reconcile(ctx: ExtensionContext, reload?: boolean): Promise<void>;
 	queue(op: () => Promise<void>): Promise<void>;
 	stop(reloadCtx?: ExtensionContext): Promise<void>;
 	onPersonaChanged(ctx: ExtensionContext): Promise<void>;
@@ -115,10 +118,10 @@ export interface ExocomInstall {
 	/** Warn-once memory for writes landing inside a peer's open claim (Task 7). Cleared on stop(). */
 	readonly writeWarnings: WriteWarnings;
 	readonly startupError: string | undefined;
+	readonly endpointBusy: boolean;
 	get notifier(): IdleCoalescingNotifier<ExocomNotice> | undefined;
 	get waitNotifier(): IdleCoalescingNotifier<PresentedNotice> | undefined;
 	kickWait(): void;
-	prepareReload(ctx: ExtensionContext, reload: boolean): void;
 }
 
 export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall {
@@ -141,6 +144,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		}
 	};
 	let exocomLedgerFile = "";
+	let exocomAgentDir = "";
 	let exocomSessionId = "";
 	let refreshIdentity: (() => void) | undefined;
 	let exocomScope: ExocomScope | undefined;
@@ -152,7 +156,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	let exocomSeen: SeenMessages | undefined;
 	let exocomNotifier: IdleCoalescingNotifier<ExocomNotice> | undefined;
 	let startupError: string | undefined;
-	let reloadSnapshot: ReloadSnapshot | undefined;
+	let endpointBusy = false;
 	let exocomStarted = false;
 	const exocomAcceptsDelivery = (): boolean => exocomStarted && !host.disposed;
 	/** Latched while the inbox is at EXOCOM_INBOX_MAX, so a peer hammering a full inbox produces one
@@ -178,27 +182,25 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		try { ctx.ui.notify("exocom: pending peer messages could not be restored after reload.", "warning"); } catch { /* teardown remains best effort */ }
 	}
 
-	/** Consume stale entries on every start; only this reload and branch may restore a snapshot. */
-	function prepareReload(ctx: ExtensionContext, reload: boolean): void {
-		reloadSnapshot = undefined;
+	/** Only the manager that saved this handoff may consume it in the shared session history. */
+	function consumeReload(ctx: ExtensionContext, restoreId: string, scope?: ExocomScope): ReloadSnapshot | undefined {
 		try {
 			const sessionId = ctx.sessionManager.getSessionId();
 			const entries = ctx.sessionManager.getEntries();
 			const outstanding = unconsumedReloadIds(entries, sessionId);
-			if (outstanding.length === 0) return;
+			let snapshot: ReloadSnapshot | undefined;
 			try {
-				if (reload && exocomRequested() && canParticipateInExocom(host.controller.capabilities)) {
-					const agentDir = resolve(host.userAgentDir());
-					const scope = exocomScope ?? selectExocomScope(agentDir, ctx.cwd, host.exocomArgs.joinCode);
-					reloadSnapshot = findReloadSnapshot(ctx.sessionManager.getBranch(), entries, sessionId, scope.scopeWorkspaceId, agentDir, Date.now());
+				if (scope) {
+					snapshot = findReloadSnapshot(ctx.sessionManager.getBranch(), entries, sessionId, scope.scopeWorkspaceId, exocomAgentDir, Date.now(), restoreId);
 				}
 			} finally {
-				for (const id of outstanding) pi.appendEntry(EXOCOM_RELOAD_ENTRY, { kind: "consumed", id, sessionId });
+				if (outstanding.includes(restoreId)) pi.appendEntry(EXOCOM_RELOAD_ENTRY, { kind: "consumed", id: restoreId, sessionId });
 			}
-			if (reload && !reloadSnapshot) reloadWarning(ctx);
+			if (!snapshot) reloadWarning(ctx);
+			return snapshot;
 		} catch {
-			reloadSnapshot = undefined;
-			if (reload) reloadWarning(ctx);
+			reloadWarning(ctx);
+			return undefined;
 		}
 	}
 
@@ -216,14 +218,14 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	}
 
 	function currentLedgerPruneOptions(): LedgerPruneOptions | undefined {
-		const plane = exocomPlane;
-		if (!plane || !exocomSessionId) return undefined;
+		if (!exocomPlane || !exocomScope || !exocomSessionId) return undefined;
 		try {
-			const liveSessions = new Set([exocomSessionId, ...plane.listPeers().map((peer) => peer.session_id)]);
+			const now = Date.now();
+			const leases = exocomPlane.retainedLeaseKeys(now);
 			return {
-				now: Date.now(),
+				now,
 				ttlMs: EXOCOM.LEDGER_RESULT_TTL_MS,
-				liveSessions,
+				liveSessions: { has: (session) => session === exocomSessionId || leases.has(sessionKey(session)) },
 			};
 		} catch {
 			// Registry uncertainty must not erase ownership in memory. Keep the durable state until
@@ -237,15 +239,17 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// `exocomWaitNotifier`, both already in scope at the top of `installExocom`.
 	/** Wake every waiter whose ask was pruned because a party left the pool — the next heartbeat,
 	 *  not the ten-minute cap, is when the supervisor learns the answer will never come. */
-	function expireWaiters(askIds: string[]): void {
-		if (askIds.length === 0 || exocomWaiters.length === 0) return;
-		const gone = new Set(askIds);
+	function expireWaiters(previous: LedgerState, pruned: LedgerState): void {
+		if (exocomWaiters.length === 0) return;
+		const retained = new Set(pruned.askIds); // both pending asks and retained answers
+		const left = new Set(droppedAskIds(previous, pruned));
 		for (let i = exocomWaiters.length - 1; i >= 0; i--) {
 			const waiter = exocomWaiters[i]!;
-			if (!gone.has(waiter.ask_id)) continue;
+			if (retained.has(waiter.ask_id)) continue;
 			clearTimeout(waiter.handle);
 			exocomWaiters.splice(i, 1);
-			exocomWaitNotifier?.notify({ text: `[pi-persona] exocom wait ended: the peer left the pool before answering · work_key=${waiter.work_key} ask_id=${waiter.ask_id}` });
+			const reason = left.has(waiter.ask_id) ? "the peer left the pool before answering" : "the ask closed without a retained answer";
+			exocomWaitNotifier?.notify({ text: `[pi-persona] exocom wait ended: ${reason} · work_key=${waiter.work_key} ask_id=${waiter.ask_id}` });
 		}
 	}
 
@@ -255,7 +259,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		const prune = currentLedgerPruneOptions();
 		if (!prune) return state;
 		const pruned = pruneLedger(state, prune);
-		expireWaiters(droppedAskIds(state, pruned));
+		expireWaiters(state, pruned);
 		return pruned;
 	}
 
@@ -462,27 +466,26 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// so identity + the canUseBus gate reflect the persona actually active. Never throws: a
 	// bind/registry failure degrades to "exocom inactive", it must never block a normal session
 	// from starting (mirrors the broker host's own fire-and-forget-on-failure discipline).
-	async function startExocom(ctx: ExtensionContext): Promise<void> {
+	async function startExocom(ctx: ExtensionContext, restoreId?: string): Promise<void> {
 		if (!exocomRequested()) return;
 		if (!canParticipateInExocom(host.controller.capabilities)) return;
 		startupError = undefined;
+		endpointBusy = false;
 		try {
 			if (host.exocomArgs.error) throw new Error(host.exocomArgs.error);
 			const sessionId = ctx.sessionManager.getSessionId();
-			exocomSessionId = sessionId;
-			const agentDir = host.userAgentDir();
-			const scope = exocomScope ?? selectExocomScope(agentDir, ctx.cwd, host.exocomArgs.joinCode);
+			const requestedDir = host.userAgentDir();
+			const scope = exocomScope ?? selectExocomScope(requestedDir, ctx.cwd, host.exocomArgs.joinCode);
+			const agentDir = realpathSync.native(requestedDir);
 			exocomScope = scope;
 			const hash = scope.scopeWorkspaceId;
 			// Identity belongs to the session, including when Exocom is disabled or restarted.
 			// Until a name is chosen, the unique provisional label stays distinct from its persona.
-			pruneExocom(agentDir, hash, { now: Date.now(), staleMs: EXOCOM.STALE_AFTER_MS });
 			const ep = exocomEndpointFor(agentDir, hash, sessionId, process.platform);
 			const persona = sanitizePeerField(host.controller.activePersona?.name ?? "", 48);
 			const model = sanitizePeerField(ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", 96);
 			exocomBudget = new SenderBudget({ windowMs: EXOCOM.SENDER_WINDOW_MS, maxMsgs: EXOCOM.SENDER_MAX_MSGS, maxBytes: EXOCOM.SENDER_MAX_BYTES });
 			exocomSeen = new SeenMessages({ ttlMs: EXOCOM.SEEN_TTL_MS });
-			exocomLedgerFile = ledgerPath(agentDir, hash);
 			exocomWaitNotifier = new IdleCoalescingNotifier<PresentedNotice>({
 				isIdle: () => exocomAcceptsDelivery() && host.canDeliverNotifications(),
 				deliver: (message, items) => deliverNotice(message, items, "pi-persona"),
@@ -621,13 +624,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						// immediate wake, but must not keep the receiver trapped behind the ask gate.
 					}
 				}
-				const prune = currentLedgerPruneOptions();
 				if (collaborationWriteIntent(frame, currentLedgerState())
 					&& (exocomScope?.joined === true || (host.controller.capabilities && !canCallTool(host.controller.capabilities, "exocom_claim")))) {
 					throw new Error("exocom: this session cannot claim write paths in the selected scope");
 				}
 				const applied = commitLedgerEvent(exocomLedgerFile, frame, {
-					...(prune ? { prune } : {}),
+					prune: currentLedgerPruneOptions,
 					canClaim: exocomScope?.joined !== true && (!host.controller.capabilities || canCallTool(host.controller.capabilities, "exocom_claim")),
 				});
 				if (!applied.ok) throw new Error(`exocom: ${applied.error}`);
@@ -657,7 +659,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				return { msg_id: frame.msg_id };
 			};
 
-			exocomPlane = new ExocomPlane({
+			const plane = new ExocomPlane({
 
 				agentDir,
 				hash,
@@ -809,15 +811,47 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 				onPoolChange: () => renderExocomWidget(),
 				onSent: () => renderExocomWidget(),
 			});
-			// Seed before binding: fresh arrivals must follow the restored FIFO backlog.
-			if (reloadSnapshot) {
-				for (const item of reloadSnapshot.items) {
-					if (!exocomPlane.restoreInboundContext(item.context)) throw new Error("invalid restored peer reply context");
-					exocomSeen.seenBefore(item.receipt.sender, item.receipt.id);
-					exocomNotifier.notify({ text: item.text, ...(item.message ? { message: item.message } : {}), receipt: item.receipt });
-				}
-			}
-			await exocomPlane.start();
+			const ledgerFile = ledgerPath(agentDir, hash);
+			await plane.start((publish) => {
+				// All tool accessors stay closed until both registration and ledger admission succeed.
+				registerExocomTools(pi, () => exocomPlane, (raw) => {
+					return host.identity.rename(raw, host.lastCtx ?? ctx);
+				}, () => exocomScope);
+				registerExocomWorkTools(pi, {
+					getPlane: () => exocomPlane,
+					sessionId: () => sessionId,
+					name: () => host.identity.name,
+					now: () => Date.now(),
+					canClaim: () => exocomScope?.joined !== true,
+					resolveTarget: (target) => {
+						const plane = exocomPlane;
+						if (!plane) throw new Error("exocom is not active for this persona");
+						return plane.resolvePeer(target).session_id;
+					},
+					dispatch: dispatchSemantic,
+					armWait: armExocomWait,
+					ledger: () => currentLedgerState(),
+					labelFor: peerLabelFor,
+				});
+				registerExocomCollaborationTools(pi, {
+					getPlane: () => exocomPlane,
+					sessionId: () => sessionId, name: () => host.identity.name, now: () => Date.now(),
+					canClaim: () => exocomScope?.joined !== true,
+					canCallTool: (name) => !host.controller.capabilities || canCallTool(host.controller.capabilities, name),
+					resolveTarget: (target) => {
+						if (!exocomPlane) throw new Error("exocom is not active for this persona");
+						return exocomPlane.resolvePeer(target).session_id;
+					},
+					dispatch: dispatchSemantic, ledger: currentLedgerState, labelFor: peerLabelFor,
+					targetForSession: (id) => exocomPlane?.listPeers().find((peer) => peer.session_id === id)?.target,
+				});
+				registerExocomProfileTool(pi, () => exocomPlane);
+				admitLedgerSession(ledgerFile, sessionId, Date.now(), EXOCOM.LEDGER_RESULT_TTL_MS, publish);
+			});
+			exocomPlane = plane;
+			exocomSessionId = sessionId;
+			exocomLedgerFile = ledgerFile;
+			exocomAgentDir = agentDir;
 			refreshIdentity = () => exocomHeartbeatTick(agentDir, hash, sessionId, ep, ctx.cwd);
 			renderExocomWidget();
 			// A throw from a bare timer callback is an uncaughtException — it would take the whole host
@@ -851,63 +885,36 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 			// Makes maxDeliveries a per-MINUTE ceiling (R6) instead of a one-shot lifetime cap.
 			exocomResetTimer = setInterval(() => exocomNotifier?.resetDeliveries(), 60_000);
 			exocomResetTimer.unref?.();
-			// I3: a LIVE accessor, not the plane object itself — `stopExocom` nulls `exocomPlane` on a
-			// `canUseBus` downgrade, and the tool bodies re-read it on every call, failing closed
-			// once it's gone (pi has no `unregisterTool`, so this is how revocation is made real).
-			registerExocomTools(pi, () => exocomPlane, (raw) => {
-				return host.identity.rename(raw, host.lastCtx ?? ctx);
-			}, () => exocomScope);
-			registerExocomWorkTools(pi, {
-				getPlane: () => exocomPlane,
-				sessionId: () => sessionId,
-				name: () => host.identity.name,
-				now: () => Date.now(),
-				canClaim: () => exocomScope?.joined !== true,
-				resolveTarget: (target) => {
-					const plane = exocomPlane;
-					if (!plane) throw new Error("exocom is not active for this persona");
-					return plane.resolvePeer(target).session_id;
-				},
-				dispatch: dispatchSemantic,
-				armWait: armExocomWait,
-				ledger: () => currentLedgerState(),
-				labelFor: peerLabelFor,
-			});
-			registerExocomCollaborationTools(pi, {
-				getPlane: () => exocomPlane,
-				sessionId: () => sessionId, name: () => host.identity.name, now: () => Date.now(),
-				canClaim: () => exocomScope?.joined !== true,
-				canCallTool: (name) => !host.controller.capabilities || canCallTool(host.controller.capabilities, name),
-				resolveTarget: (target) => {
-					if (!exocomPlane) throw new Error("exocom is not active for this persona");
-					return exocomPlane.resolvePeer(target).session_id;
-				},
-				dispatch: dispatchSemantic, ledger: currentLedgerState, labelFor: peerLabelFor,
-				targetForSession: (id) => exocomPlane?.listPeers().find((peer) => peer.session_id === id)?.target,
-			});
-			registerExocomProfileTool(pi, () => exocomPlane);
+			const snapshot = restoreId && consumeReload(ctx, restoreId, scope);
+			if (snapshot) {
+				for (const item of snapshot.items) {
+					if (!plane.restoreInboundContext(item.context)) throw new Error("invalid restored peer reply context");
+					exocomSeen.seenBefore(item.receipt.sender, item.receipt.id);
+					exocomNotifier.notify({ text: item.text, ...(item.message ? { message: item.message } : {}), receipt: item.receipt });
+				}
+			}
+			// Open delivery only after the restored FIFO is ready.
 			exocomStarted = true;
 			exocomNotifier.kick();
-			reloadSnapshot = undefined;
 		} catch (err) {
-			startupError = err instanceof Error ? err.message : String(err);
-			if (reloadSnapshot) reloadWarning(ctx);
-			reloadSnapshot = undefined;
-			// `plane.start()` may have bound its server before a later registry write failed.
-			// Teardown while the reference is still owned; this also cancels notifier/timers.
+			startupError = formatExocomStartupError(err);
+			if (restoreId) reloadWarning(ctx);
 			await stopExocom();
-			const message = err instanceof Error ? err.message : String(err);
+			const busy = isExocomEndpointBusy(err);
+			endpointBusy = busy;
 			let surfacedInUi = false;
 			if (ctx.hasUI) {
 				try {
-					ctx.ui.notify(`exocom failed to start: ${toastCause(message)}`, "error");
+					ctx.ui.notify(busy ? startupError : `exocom failed to start: ${toastCause(startupError)}`, busy ? "warning" : "error");
 					surfacedInUi = true;
 				} catch {
 					/* the session may already be tearing down; stderr remains available */
 				}
 			}
-			if (!surfacedInUi || process.env.PI_PERSONA_DEBUG) {
-				process.stderr.write(`[pi-persona] exocom: failed to start: ${message}\n`);
+			if (!surfacedInUi) process.stderr.write(`[pi-persona] ${busy ? startupError : `exocom: failed to start: ${startupError}`}\n`);
+			if (process.env.PI_PERSONA_DEBUG && (surfacedInUi || busy)) {
+				const detail = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`[pi-persona] exocom: ${busy ? "bind diagnostic" : "failed to start"}: ${detail}\n`);
 			}
 		}
 	}
@@ -945,19 +952,16 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// consumer (engine/adapter.ts, engine/inproc.ts, the buildEngine call sites) reads
 	// `host.controller.capabilities` FRESH at bind time — this does the same for exocom. Already
 	// running and still gated on ⇒ a no-op (the heartbeat already relabels under the new persona).
-	async function applyExocomGate(ctx: ExtensionContext): Promise<void> {
+	async function applyExocomGate(ctx: ExtensionContext, restoreId?: string): Promise<void> {
 		const shouldRun = exocomRequested() && canParticipateInExocom(host.controller.capabilities);
-		if (shouldRun && !exocomPlane) await startExocom(ctx);
-		else if (!shouldRun && exocomPlane) await stopExocom();
+		if (shouldRun && !exocomPlane) await startExocom(ctx, restoreId);
+		else if (!shouldRun) {
+			if (restoreId) consumeReload(ctx, restoreId);
+			if (exocomPlane) await stopExocom();
+		}
 		syncExocomActiveTools();
 	}
-	// Lifecycle transitions run ONE AT A TIME. `startExocom` publishes `exocomPlane` synchronously
-	// but then suspends inside `plane.start()`'s bind, so an overlapping transition (rapid f8
-	// cycling into a canUseBus:false persona; a Ctrl+C during startup) would otherwise tear down a
-	// plane that has not finished starting: `plane.stop()` closes nothing (no server assigned yet),
-	// then `start()` resumes and keeps a bound socket plus a fresh registry entry for a plane the
-	// extension has already discarded. EVERY start/stop goes through this queue — the shutdown
-	// teardown included, since it is the transition most likely to race a still-pending start.
+	// Serialize bind, persona changes and shutdown so teardown also joins a pending registration.
 	let exocomReconcile: Promise<void> = Promise.resolve();
 	function queueExocom(op: () => Promise<void>): Promise<void> {
 		const next = exocomReconcile.then(op);
@@ -966,8 +970,12 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		exocomReconcile = next.catch(() => {});
 		return next;
 	}
-	function reconcileExocom(ctx: ExtensionContext): Promise<void> {
-		return queueExocom(() => applyExocomGate(ctx));
+	function reconcileExocom(ctx: ExtensionContext, reload?: boolean): Promise<void> {
+		return queueExocom(() => {
+			if (reload === undefined) return applyExocomGate(ctx);
+			const id = takeReloadId(ctx.sessionManager);
+			return applyExocomGate(ctx, reload ? id : undefined);
+		});
 	}
 
 	// Every mid-session persona change funnels through here. Besides re-gating exocom, the incoming
@@ -985,6 +993,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 	// teardown only here — like the broker teardown above — covers every exit path without a
 	// redundant raw process.on(SIGINT/SIGTERM) handler.
 	async function stopExocom(reloadCtx?: ExtensionContext): Promise<void> {
+		const wasActive = exocomStarted;
 		exocomStarted = false;
 		if (exocomHeartbeat) {
 			clearInterval(exocomHeartbeat);
@@ -1002,7 +1011,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		exocomWaiters.length = 0;
 		// A clean shutdown best-effort relinquishes every slice/question owned by this exact session.
 		// Crash or write-failure recovery is the registry-liveness prune.
-		if (exocomLedgerFile && exocomSessionId) {
+		if (wasActive) {
 			try {
 				const state = currentLedgerState();
 				const workKeys = new Set([
@@ -1011,7 +1020,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 					...(state.collaboration?.tasks.filter((task) => !task.finished && (task.taken?.from_session ?? task.created.from_session) === exocomSessionId).map((task) => task.created.work_key) ?? []),
 				]);
 				for (const work_key of workKeys) {
-					const prune = currentLedgerPruneOptions();
 					commitLedgerEvent(exocomLedgerFile, {
 						kind: "release",
 						work_key,
@@ -1019,7 +1027,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 						from_name: host.identity.name || exocomSessionId,
 						msg_id: randomUUID(),
 						ts: new Date().toISOString(),
-					}, prune ? { prune } : {});
+					}, { prune: currentLedgerPruneOptions });
 				}
 			} catch {
 				/* Teardown stays best-effort; registry lease reconciliation handles a crash-equivalent. */
@@ -1027,6 +1035,9 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		}
 		if (exocomPlane) {
 			const plane = exocomPlane;
+			// Revoke every tool's live accessor before the first asynchronous step in teardown.
+			exocomPlane = undefined;
+			refreshIdentity = undefined;
 			peerPresence.publish([]);
 			try {
 				publishTelemetryPeers([]);
@@ -1050,17 +1061,18 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 							if (!context) throw new Error("missing authenticated reply context");
 							return { ...item, receipt, context };
 						});
-						const snapshot = stopped && exocomScope && createReloadSnapshot(randomUUID(), exocomSessionId, exocomScope.scopeWorkspaceId, resolve(host.userAgentDir()), Date.now(), items);
+						const snapshot = stopped && exocomScope && createReloadSnapshot(randomUUID(), exocomSessionId, exocomScope.scopeWorkspaceId, exocomAgentDir, Date.now(), items);
 						if (!snapshot) throw new Error("invalid reload snapshot");
 						pi.appendEntry(EXOCOM_RELOAD_ENTRY, snapshot);
+						authorizeReload(reloadCtx.sessionManager, snapshot.id);
 					} catch { reloadWarning(reloadCtx); }
 				}
 			}
-			exocomPlane = undefined;
 		}
 		exocomNotifier?.cancel();
 		exocomNotifier = undefined;
 		exocomLedgerFile = "";
+		exocomAgentDir = "";
 		exocomSessionId = "";
 		writeWarnings.clear();
 		exocomInboxFull = false;
@@ -1078,7 +1090,6 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		} catch {
 			/* cosmetic */
 		}
-		refreshIdentity = undefined;
 		syncExocomActiveTools();
 	}
 	return {
@@ -1096,6 +1107,7 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		onPeersChanged: (listener) => peerPresence.onChange(listener),
 		get name() { return host.identity.name; },
 		get startupError() { return startupError; },
+		get endpointBusy() { return endpointBusy; },
 		get namedByModel() { return host.identity.chosen; },
 		get scope() { return exocomScope; },
 		renderWidget: renderExocomWidget,
@@ -1109,6 +1121,5 @@ export function installExocom(pi: ExtensionAPI, host: ExocomHost): ExocomInstall
 		get notifier() { return exocomNotifier; },
 		get waitNotifier() { return exocomWaitNotifier; },
 		kickWait() { exocomWaitNotifier?.kick(); },
-		prepareReload,
 	};
 }

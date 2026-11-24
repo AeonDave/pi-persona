@@ -128,6 +128,8 @@ export interface TerminalResultArchiveDeps {
 	entries: () => readonly unknown[];
 	/** Native custom ENTRY, not a model message. May throw after partially committing. */
 	append: (customType: string, data: unknown) => void;
+	/** Authoritative owning-file quota transaction. False means nothing was appended. */
+	commitWithinQuota?: (cost: number, append: () => void) => boolean;
 	persistent: boolean;
 	/** Must return result:<UUID>. The default uses node:crypto.randomUUID(). */
 	makeRef?: () => string;

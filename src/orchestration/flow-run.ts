@@ -68,6 +68,8 @@ export interface FlowRunDeps {
 	abortGraceMs?: number;
 	/** Append one entry as each phase completes. */
 	journal?: (entry: FlowJournalEntry) => void;
+	/** A cancelled wave can still journal late phase results after the run returns. */
+	onJournalDrain?: (settled: Promise<unknown>) => void;
 	/** Phases already completed (from a prior run's journal) — skipped, output reused. */
 	resume?: Record<string, ResumedResult>;
 	/** Live UI: phase lifecycle. */
@@ -274,8 +276,8 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 		// flight instead of waiting on strategies that never consult the signal.
 		const settled = new Map<string, AgentResult>();
 		let forced = false;
-		const wave = Promise.all(
-			runnable.map(async (p): Promise<void> => {
+		const phases = runnable.map(
+			async (p): Promise<void> => {
 				deps.onPhase?.(p.id, "running");
 				const upstream: Record<string, AgentResult> = {};
 				for (const n of p.needs ?? []) {
@@ -314,8 +316,10 @@ export async function runFlow(spec: FlowSpec, baseTask: string, deps: FlowRunDep
 				settled.set(p.id, r);
 				deps.onPhase?.(p.id, r.ok ? "done" : "failed", r);
 				journalSettled(p.id, r);
-			}),
+			},
 		);
+		const wave = Promise.all(phases);
+		deps.onJournalDrain?.(Promise.allSettled(phases));
 
 		const abort = whenAborted(deps.signal);
 		try {

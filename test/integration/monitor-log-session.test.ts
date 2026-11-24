@@ -6,13 +6,15 @@ import { test } from "node:test";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import { SessionManager, type CustomEntry, type FileEntry } from "@earendil-works/pi-coding-agent";
 import type { MonitorEntry } from "../../src/core/monitor.ts";
-import { MONITOR_LOG_ENTRY, MonitorArchive, type MonitorLogRecord } from "../../src/monitor/archive.ts";
+import { MONITOR_LOG_ENTRY, SCRIPT_LOG_ENTRY, MONITOR_LOG_MAX_RECORDS, MonitorArchive, type MonitorLogRecord } from "../../src/monitor/archive.ts";
 
 // Real development Pi storage, without AgentSession, provider registration, or model requests.
 // SessionManager has no close/dispose API: its synchronous writes close their file descriptors.
 // Returning from the writer scope below and opening a fresh manager is the reload boundary.
-function archiveFor(manager: SessionManager): MonitorArchive {
+function archiveFor(manager: SessionManager, source: "monitor" | "script" = "monitor"): MonitorArchive {
 	return new MonitorArchive({
+		source,
+		owner: () => manager,
 		entries: () => manager.getEntries(),
 		append: (type, data) => { manager.appendCustomEntry(type, data); },
 	});
@@ -56,6 +58,29 @@ function inventory(root: string): string[] {
 function readJsonl(path: string): FileEntry[] {
 	return readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line) as FileEntry);
 }
+
+test("concurrent Pi windows share the persisted budget for each monitor and script log", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-persona-log-limit-"));
+	try {
+		const first = SessionManager.create(root, root);
+		conversation(first);
+		for (const source of ["monitor", "script"] as const) {
+			const kind = source === "monitor" ? MONITOR_LOG_ENTRY : SCRIPT_LOG_ENTRY;
+			for (let i = 1; i < MONITOR_LOG_MAX_RECORDS; i++) first.appendCustomEntry(kind, { version: 99 });
+			const file = first.getSessionFile()!;
+			const second = SessionManager.open(file);
+			const a = archiveFor(first, source);
+			const b = archiveFor(second, source);
+			const left = monitor(root, source + "-first"), right = monitor(root, source + "-second");
+			a.armed(left);
+			b.armed(right);
+			a.removed(left, { kind: "cancelled" });
+			b.removed(right, { kind: "cancelled" });
+			assert.equal(readJsonl(file).filter(e => e.type === "custom" && e.customType === kind).length, MONITOR_LOG_MAX_RECORDS);
+			assert.match(b.result(right.id)?.storageWarning ?? "", /budget/);
+		}
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("real Pi JSONL owns terminal monitor logs across reopen, excludes them from context, and leaves no sidecars on deletion", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-persona-monitor-log-session-"));

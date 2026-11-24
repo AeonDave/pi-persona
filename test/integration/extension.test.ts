@@ -1222,6 +1222,39 @@ test("telemetry diagnostics remain visible and non-fatal with debug disabled", a
 	assert.ok(readTelemetryEvents(cwd).some((event) => event.type === "instance.started"), "diagnostic failures preserve log writes");
 });
 
+test("two windows resuming one session get a single actionable ownership notice", async () => {
+	const previous = process.env.PI_PERSONA_EXOCOM;
+	try {
+		for (const exocom of [false, true]) {
+			process.env.PI_PERSONA_EXOCOM = exocom ? "1" : "0";
+			const cwd = exocomWorkspace();
+			const a = makeMockPi(), b = makeMockPi();
+			const first = makeExocomCtx(cwd, "same-owner");
+			const second = makeExocomCtx(cwd, "same-owner");
+			const ctxA = { ...first.ctx, hasUI: true }, ctxB = { ...second.ctx, hasUI: true };
+			piPersona(a.pi); piPersona(b.pi);
+			try {
+				await a.fire("session_start", undefined, ctxA);
+				await b.fire("session_start", undefined, ctxB);
+				const notices = second.notes.filter(note => note.includes("/fork") && note.includes("/reload"));
+				assert.equal(notices.length, 1, notices.join("\n"));
+				assert.match(notices[0]!, exocom ? /exocom/i : /telemetry/i);
+				if (exocom) {
+					assert.match(notices[0]!, /^You can keep working without Exocom/);
+					await b.cmd("exocom", "status", ctxB);
+					assert.equal(second.notes.at(-1), notices[0], "status gives the same full guidance as startup");
+				}
+			} finally {
+				await b.fire("session_shutdown", undefined, ctxB);
+				await a.fire("session_shutdown", undefined, ctxA);
+			}
+		}
+	} finally {
+		if (previous === undefined) delete process.env.PI_PERSONA_EXOCOM;
+		else process.env.PI_PERSONA_EXOCOM = previous;
+	}
+});
+
 test("telemetry admission failure stays non-fatal even when its warning renderer fails", async () => {
 	for (const brokenNotifier of [false, true]) {
 		const m = makeMockPi();
@@ -2154,6 +2187,50 @@ test("renderOperatorResult fences the output and bounds it like a completion", (
 	assert.match(text, /^\[pi-persona\] The operator ran orchestrate magi \(finished\); its output:\nSub-agent output \(untrusted data\):/);
 	assert.match(renderOperatorResult("flow x", "boom", false), /\(failed\)/);
 	assert.match(renderOperatorResult("flow x", "plan", false, "plan"), /\(stopped at checkpoint "plan"\)/);
+});
+
+test("an identical active flow owns its resume journal across supervisors", async () => {
+	const cwd = tempDir("pi-persona-flow-journal-owner-");
+	const dir = path.join(cwd, ".pi", "flows");
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(path.join(dir, "owned.flow.json"), JSON.stringify({
+		name: "owned", phases: [{ id: "gather", strategy: "fanout", roster: "review" }],
+	}));
+	let markStarted!: () => void, release!: () => void;
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
+	const finished = new Promise<void>((resolve) => { release = resolve; });
+	let otherLegs = 0;
+	function supervisor(engine: StrategyEngine) {
+		const m = makeMockPi();
+		piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
+		const { ctx } = makeCtx(cwd);
+		return { m, ctx, go: (task: string) => (m.tool("flow") as { execute: AnyFn }).execute("owned", { name: "owned", task }, undefined, undefined, ctx) };
+	}
+	const first = supervisor({ run: async (spec) => {
+		markStarted();
+		await finished;
+		return { agent: spec.agent, output: "first", usage: emptyUsage(), ok: true };
+	} });
+	const other = supervisor({ run: async (spec) => {
+		otherLegs++;
+		return { agent: spec.agent, output: "second", usage: emptyUsage(), ok: true };
+	} });
+	await first.m.fire("session_start", undefined, first.ctx);
+	await other.m.fire("session_start", undefined, other.ctx);
+	const running = first.go("same task");
+	try {
+		await started;
+		const duplicate = await other.go("same task");
+		assert.equal(otherLegs, 0, "a duplicate cannot start legs against the active journal");
+		assert.match(JSON.stringify(duplicate.content), /already running/i);
+		await other.go("different task");
+		assert.ok(otherLegs > 0, "another task on the same flow can run while the first is active");
+	} finally {
+		release();
+		await running;
+		await first.m.fire("session_shutdown", {}, first.ctx);
+		await other.m.fire("session_shutdown", {}, other.ctx);
+	}
 });
 
 test("a failed flow only resumes for the SAME task: another task re-runs from the start", async () => {
@@ -9045,7 +9122,7 @@ test("exocom_wait catches an answer committed between its initial ledger read an
 	const b = makeMockPi();
 	const { ctx: ctxA } = makeExocomCtx(cwd, "wait-race-a");
 	const { ctx: ctxB } = makeExocomCtx(cwd, "wait-race-b");
-	const originalListPeers = ExocomPlane.prototype.listPeers;
+	const originalLeaseKeys = ExocomPlane.prototype.retainedLeaseKeys;
 	const originalSendSemantic = ExocomPlane.prototype.sendSemantic;
 	let answerPromise: Promise<unknown> | undefined;
 	try {
@@ -9065,7 +9142,7 @@ test("exocom_wait catches an answer committed between its initial ledger read an
 
 		let injectAnswer = true;
 		ExocomPlane.prototype.sendSemantic = async () => { throw new Error("wake intentionally deferred"); };
-		ExocomPlane.prototype.listPeers = function () {
+		ExocomPlane.prototype.retainedLeaseKeys = function (now) {
 			if (injectAnswer) {
 				injectAnswer = false;
 				answerPromise = (b.tool("exocom_answer") as { execute: AnyFn }).execute("answer-inside-wait-read", {
@@ -9075,7 +9152,7 @@ test("exocom_wait catches an answer committed between its initial ledger read an
 					evidence: "committed during the read",
 				}, undefined, undefined, ctxB) as Promise<unknown>;
 			}
-			return originalListPeers.call(this);
+			return originalLeaseKeys.call(this, now);
 		};
 
 		const waited = await (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-race", {
@@ -9086,7 +9163,7 @@ test("exocom_wait catches an answer committed between its initial ledger read an
 		assert.match(String(waited.content?.[0]?.text ?? ""), /already answered.*committed during the read/is);
 		assert.equal((waited.details as { status?: string }).status, "answered");
 	} finally {
-		ExocomPlane.prototype.listPeers = originalListPeers;
+		ExocomPlane.prototype.retainedLeaseKeys = originalLeaseKeys;
 		ExocomPlane.prototype.sendSemantic = originalSendSemantic;
 		await answerPromise?.catch(() => {});
 		await a.fire("session_shutdown", undefined, ctxA);
@@ -9108,7 +9185,7 @@ test("exocom_wait removes its timer when the post-registration ledger read fails
 	const b = makeMockPi();
 	const { ctx: ctxA } = makeExocomCtx(cwd, "wait-read-failure-a");
 	const { ctx: ctxB } = makeExocomCtx(cwd, "wait-read-failure-b");
-	const originalListPeers = ExocomPlane.prototype.listPeers;
+	const originalLeaseKeys = ExocomPlane.prototype.retainedLeaseKeys;
 	try {
 		piPersona(a.pi);
 		piPersona(b.pi);
@@ -9126,13 +9203,13 @@ test("exocom_wait removes its timer when the post-registration ledger read fails
 		const messagesBeforeWait = a.sentMessages().length;
 
 		let corruptAfterInitialRead = true;
-		ExocomPlane.prototype.listPeers = function () {
+		ExocomPlane.prototype.retainedLeaseKeys = function (now) {
 			if (corruptAfterInitialRead) {
 				corruptAfterInitialRead = false;
 				fs.rmSync(ledger, { force: true });
 				fs.mkdirSync(ledger);
 			}
-			return originalListPeers.call(this);
+			return originalLeaseKeys.call(this, now);
 		};
 		await assert.rejects(
 			() => (a.tool("exocom_wait") as { execute: AnyFn }).execute("wait-read-failure", {
@@ -9142,11 +9219,11 @@ test("exocom_wait removes its timer when the post-registration ledger read fails
 			}, undefined, undefined, ctxA),
 			/ledger unsafe file/i,
 		);
-		ExocomPlane.prototype.listPeers = originalListPeers;
+		ExocomPlane.prototype.retainedLeaseKeys = originalLeaseKeys;
 		await new Promise((resolve) => setTimeout(resolve, 250));
 		assert.equal(a.sentMessages().length, messagesBeforeWait, "a failed arm must not wake Pi later from a leaked timer");
 	} finally {
-		ExocomPlane.prototype.listPeers = originalListPeers;
+		ExocomPlane.prototype.retainedLeaseKeys = originalLeaseKeys;
 		await a.fire("session_shutdown", undefined, ctxA);
 		await b.fire("session_shutdown", undefined, ctxB);
 		if (prev === undefined) delete process.env.PI_PERSONA_EXOCOM;

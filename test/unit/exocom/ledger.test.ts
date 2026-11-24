@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { tryFileClaim } from "../../../src/io/file-claim.ts";
 
 import type { ExocomSemanticFrame } from "../../../src/exocom/envelope.ts";
 import { answerFor, applyLedgerEvent, commitLedgerEvent, droppedAskIds, emptyLedger, LEDGER_LIMITS, loadLedger, parseLedger, pendingAskBlock, pendingAsksTo, pruneLedger } from "../../../src/exocom/ledger.ts";
@@ -451,7 +453,7 @@ test("transactionally prunes non-live state under the same lock before applying 
 		assert.equal(commitLedgerEvent(ledger, claim()).ok, true);
 		const next = claim({ work_key: "wk-live", from_session: "sess-live", write_set: ["src/live.ts"], msg_id: "claim-live" });
 		const committed = commitLedgerEvent(ledger, next, {
-			prune: { now: Date.now(), ttlMs: 60_000, liveSessions: new Set(["sess-live"]) },
+			prune: () => ({ now: Date.now(), ttlMs: 60_000, liveSessions: new Set(["sess-live"]) }),
 		});
 		assert.equal(committed.ok, true);
 		assert.deepEqual(loadLedger(ledger).claims.map((entry) => entry.work_key), ["wk-live"]);
@@ -649,7 +651,7 @@ test("commit does not steal a live owner's lock even when the sidecar mtime is a
 	const ready = join(dir, "ready");
 	const child = spawn(process.execPath, ["-e", `
 		const fs = require("node:fs");
-		fs.writeFileSync(${JSON.stringify(lock)}, String(process.pid) + "\\n", { flag: "wx" });
+		fs.writeFileSync(${JSON.stringify(lock)}, process.pid + " " + require("node:crypto").randomUUID() + "\\n", { flag: "wx" });
 		fs.writeFileSync(${JSON.stringify(ready)}, "ready");
 		setInterval(() => {}, 1 << 30);
 	`], { stdio: "ignore" });
@@ -674,11 +676,30 @@ test("commit reclaims a crashed owner's lock immediately without waiting the sta
 	const ledger = join(dir, "ledger.jsonl");
 	const lock = `${ledger}.lock`;
 	try {
-		writeFileSync(lock, `${unusedPid()}\n`, { flag: "wx" });
+		writeFileSync(lock, `${unusedPid()} 01c21c22-cbc1-40c7-baaf-045eb230343e\n`, { flag: "wx" });
 		const committed = commitLedgerEvent(ledger, claim());
 		assert.equal(committed.ok, true);
 		assert.equal(loadLedger(ledger).claims.length, 1);
 		assert.equal(existsSync(lock), false, "successful commit must release the sidecar");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a reentrant commit cannot steal the live transaction's lock in the same process", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-reentrant-"));
+	const ledger = join(dir, "ledger.jsonl");
+	try {
+		let nested: ReturnType<typeof commitLedgerEvent> | undefined;
+		const outer = commitLedgerEvent(ledger, claim(), { io: { write: (fd, bytes, offset, length) => {
+			const old = new Date(Date.now() - LEDGER_LIMITS.staleLockMs - 5_000);
+			utimesSync(`${ledger}.lock`, old, old);
+			nested = commitLedgerEvent(ledger, claim({ msg_id: "nested" }));
+			return writeSync(fd, bytes, offset, length);
+		} } });
+		assert.equal(outer.ok, true);
+		assert.ok(nested && !nested.ok && /lock/.test(nested.error), "the nested writer must fail while the outer transaction holds the lock");
+		assert.deepEqual(loadLedger(ledger).claims.map((item) => item.msg_id), ["msg-claim-a"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -708,26 +729,25 @@ test("a stale-lock reclaim never deletes a live lock that replaced the dead one 
 	}
 });
 
-test("one reclaimer at a time: a held gate defers the reclaim, and a dead gate is cleared by age", () => {
+test("a live reclaim gate defers recovery and a dead reclaimer's marker cannot hide a successor", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-persona-ledger-reclaim-gate-"));
 	const ledger = join(dir, "ledger.jsonl");
 	const lock = `${ledger}.lock`;
-	const gate = `${lock}.reclaim`;
+	const gate = tryFileClaim(dir, "ledger.jsonl.lock.reclaim");
+	assert.ok(gate);
 	try {
 		writeFileSync(lock, `${unusedPid()}
 `, { flag: "wx" });
-		writeFileSync(gate, "", { flag: "wx" });
 		const deferred = commitLedgerEvent(ledger, claim());
 		assert.equal(deferred.ok, false, "another reclaimer holds the gate, so this one must not unlink the lock");
 		assert.equal(existsSync(lock), true);
-		assert.equal(existsSync(gate), true, "a fresh gate belongs to a live reclaimer");
-
-		const old = new Date(Date.now() - LEDGER_LIMITS.staleLockMs - 1_000);
-		utimesSync(gate, old, old);
+		gate();
+		writeFileSync(`${lock}.reclaim.claim-${unusedPid()}-${randomUUID()}`, "", { flag: "wx" });
 		const recovered = commitLedgerEvent(ledger, claim());
 		assert.equal(recovered.ok, true, "a gate left by a dead reclaimer does not wedge the ledger");
 		assert.deepEqual(readdirSync(dir).sort(), ["ledger.jsonl"], "neither the lock nor the gate is left behind");
 	} finally {
+		gate();
 		rmSync(dir, { recursive: true, force: true });
 	}
 });

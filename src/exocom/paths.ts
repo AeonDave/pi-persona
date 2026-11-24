@@ -21,12 +21,15 @@ export function ledgerPath(agentDir: string, hash: string): string {
 export function registryPath(agentDir: string, hash: string, key: string): string {
 	return join(agentsDir(agentDir, hash), `${key}.json`);
 }
-export function socketPath(_agentDir: string, hash: string, sessionId: string): string {
+function scopeNamespace(agentDir: string, hash: string): string {
+	return shortHash(`${workspaceHash(agentDir)}:${hash}`);
+}
+export function socketPath(agentDir: string, hash: string, sessionId: string): string {
 	// sockaddr_un is only 104 bytes on macOS and 108 on Linux. Keep both directory and
 	// filename fixed-size, outside a potentially long ~/.pi path.
-	return join(tmpdir(), `pi-exocom-${shortHash(hash)}`, `${shortHash(sessionId, 20)}.sock`);
+	return join(tmpdir(), `pi-exocom-${scopeNamespace(agentDir, hash)}`, `${shortHash(sessionId, 20)}.sock`);
 }
 export function endpoint(agentDir: string, hash: string, sessionId: string, platform: NodeJS.Platform): string {
-	if (platform === "win32") return `\\\\.\\pipe\\pi-persona-exocom-${shortHash(hash)}-${shortHash(sessionId, 20)}`;
+	if (platform === "win32") return `\\\\.\\pipe\\pi-persona-exocom-${scopeNamespace(agentDir, hash)}-${shortHash(sessionId, 20)}`;
 	return socketPath(agentDir, hash, sessionId);
 }

@@ -9,10 +9,12 @@ import { after, test } from "node:test";
 const _loopKeeper = setInterval(() => {}, 60_000);
 after(() => clearInterval(_loopKeeper));
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, linkSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { tempDir } from "../../setup/temp-dir.ts";
+import { tryFileClaim } from "../../../src/io/file-claim.ts";
 import { flowHash, flowRunHash, parseFlow, topoOrder, verifyFlowRefs } from "../../../src/orchestration/flow.ts";
 import { clearJournal, journalFileName, journalWriter, parseJournal } from "../../../src/orchestration/flow-journal.ts";
 import { flowDisposition, runFlow } from "../../../src/orchestration/flow-run.ts";
@@ -600,21 +602,27 @@ test("a phase that COMPLETES after its cancelled run is journaled for resume but
 	const ac = new AbortController();
 	const journal: Array<{ phase: string; ok: boolean; output: string }> = [];
 	const statuses: Array<[string, string]> = [];
+	let release!: () => void;
+	const finished = new Promise<void>((resolve) => { release = resolve; });
+	let writers: Promise<unknown> | undefined;
 	const outcome = await runFlow(r.flow, "t", {
 		hash: "h",
 		signal: ac.signal,
 		abortGraceMs: 10,
 		journal: (e) => journal.push(e),
+		onJournalDrain: (pending) => { writers = pending; },
 		onPhase: (id, st) => statuses.push([id, st]),
 		runPhase: async ({ phase }) => {
 			ac.abort();
-			await new Promise((res) => setTimeout(res, 80)); // outlives the grace
+			await finished;
 			return ok(phase.id, "too late");
 		},
 	});
 	assert.equal(outcome.cancelled, true);
 	assert.equal(outcome.results.a?.output, "", "the run had already given up on it");
-	await new Promise((res) => setTimeout(res, 150)); // let the abandoned phase land
+	release();
+	assert.ok(writers, "the owner must retain the journal until the late write settles");
+	await writers;
 	assert.deepEqual(
 		journal.map((e) => [e.phase, e.ok, e.output]),
 		[["a", true, "too late"]],
@@ -701,6 +709,32 @@ ${line("A", "a2")}
 	clearJournal(path, "B");
 	assert.equal(existsSync(path), false, "nothing left, nothing kept");
 	clearJournal(path, "B"); // a missing file is not an error
+});
+
+test("a journal transaction already holding the file excludes concurrent append and clear", () => {
+	const dir = tempDir("flow-journal-busy-");
+	const path = join(dir, "j.jsonl");
+	const prior = JSON.stringify({ phase: "plan", hash: "A", ok: true, output: "saved" }) + "\n";
+	writeFileSync(path, prior);
+	const release = tryFileClaim(dir, `journal-${createHash("sha256").update("j.jsonl").digest("hex")}`)!;
+	try {
+		assert.equal(journalWriter(path)({ phase: "plan", hash: "B", ok: true, output: "other" }), false);
+		assert.equal(readFileSync(path, "utf8"), prior, "a writer must not append while a rewrite owns the file");
+		assert.equal(clearJournal(path, "A"), false, "cleanup must report that resumable checkpoints are still present");
+		assert.equal(readFileSync(path, "utf8"), prior, "a clearer must not remove a file with an active writer");
+	} finally { release(); }
+});
+
+test("an earlier checkpoint approval does not approve a later unreviewed journal entry", () => {
+	const approved = { phase: "plan", hash: "H", ok: true, output: "first", gateApproved: true };
+	for (const newer of [
+		{ phase: "plan", hash: "H", ok: true, output: "second" },
+		{ phase: "plan", hash: "H", ok: true, output: "", resultRef: "result:other", resultVersion: 1 },
+	]) {
+		const resume = parseJournal([approved, newer].map((entry) => JSON.stringify(entry)).join("\n"), "H");
+		assert.ok(resume.plan);
+		assert.equal(resume.plan.gateApproved, undefined);
+	}
 });
 
 test("journalWriter starts each entry on its own line after a crash left a fragment", () => {

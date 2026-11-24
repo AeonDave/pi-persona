@@ -50,6 +50,12 @@ permissions. Missing availability is **unknown**. Profiles disappear when the Ex
 Peer rows show each peer's model with its self-reported Pi effort (`opus-5 · high`); a peer that
 does not report one shows the model alone.
 
+Within a scope, each native Pi session can have one active Exocom connection. If two Pi windows
+resume the same session, the first keeps its connection, claims, pending questions and tasks.
+The second can still use Pi. To collaborate from both windows while keeping the conversation so far,
+use `/fork` in the second window. To take over the original connection, close the first window and
+run `/reload` in the second.
+
 For a first exchange, start two Pi sessions in the same workspace with `pi --exocom`. Enter in Pi A:
 `Name yourself Ember for this session and list your Exocom peers.` Then enter in Pi B:
 `Name yourself Flint, list your Exocom peers, and send Ember: Hello from Pi B.` The agent uses the
@@ -107,12 +113,11 @@ default to 10 entries (maximum 20); detailed pages default to 5 and allow at mos
 Tool cards collapse long content and expand using Pi's normal keybinding; this never changes the
 stored evidence or the text supplied to the model.
 
-During Pi `/reload`, accepted postcards and replies still waiting for delivery can be handed off
-in a bounded snapshot in the native session file, which contains their text. Restoration is one-time
-and requires the same session, branch, Exocom scope and agent directory within five minutes; reply
-routing and hop context are preserved. An ineligible or expired handoff is invalidated and reported.
-This handoff does not guarantee recovery after a crash or process restart. Asks, answers and offers
-continue to use their existing ledger and lifecycle rules.
+During `/reload`, Pi saves the text of accepted postcards and replies still waiting for delivery
+in a bounded snapshot in the native session file. The window that saved the messages can restore
+them once, within five minutes, on the same session, branch, Exocom scope and agent directory.
+Replies keep their original routing and hop count. Closing Pi ends this handoff. Asks, answers
+and offers continue to use the shared ledger.
 
 Loss of a task owner's registry lease or explicit release marks unfinished work **stale**. It never
 silently reopens the task. Inspect the work and create a newly scoped task if reassignment is needed.

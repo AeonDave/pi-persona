@@ -12,7 +12,9 @@ import { canCallTool, canDelegateTo, canFanOut } from "../core/capabilities.ts";
 import type { PiPersonaConfig } from "../core/config.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { HANDOFF_TOOL_NAMES, longWaitSeconds, type DelegationNudge, type PersistenceNudge, type PollGuard } from "../core/nudge.ts";
-import { findStoredRuns, highestIssuedRun, makeRunsEntry, restoreNotice, RUNS_ENTRY_CUSTOM_TYPE } from "../core/session-runs.ts";
+import { highestIssuedRun, makeRunsEntry, restoreNotice, RUNS_ENTRY_CUSTOM_TYPE } from "../core/session-runs.ts";
+import { withCurrentRunHistory } from "./run-history.ts";
+import { nativeRunOrdinals } from "./run-ordinals.ts";
 import { buildSessionAnchor } from "../core/time.ts";
 import { readClockSnapshot } from "./clock.ts";
 import { type AsyncRun, type AsyncRunTracker, type IdleCoalescingNotifier, type PeekWatcher } from "../engine/async.ts";
@@ -38,7 +40,7 @@ import type { PersonaController, PersonaHost } from "../persona/controller.ts";
 import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaConfigStore } from "../persona/config-store.ts";
 import { TELEMETRY_EVENT_NAME } from "../telemetry/contract.ts";
-import { TelemetryProducer, type TelemetryAgentInput } from "../telemetry/producer.ts";
+import { TelemetryProducer, TelemetryWriterBusy, type TelemetryAgentInput } from "../telemetry/producer.ts";
 import { isNonAgentNode, type AgentTree, type AgentNode } from "../ui/agent-tree.ts";
 import type { ActivityIngress } from "./companion.ts";
 import type { MemoryOwnerControl } from "./memory-owner.ts";
@@ -89,7 +91,7 @@ export interface HookHost {
 	/** Refuses an unchanged repeat of an intercom peek/result; absent when the nudge kill switch is off. */
 	pollGuard: PollGuard | undefined;
 	/** The async-run tracker: what is still running, and the run-id counter a restore continues. */
-	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom" | "forceSettle" | "drain">;
+	tracker: Pick<AsyncRunTracker, "running" | "issued" | "continueFrom" | "useRunOrdinals" | "forceSettle" | "drain">;
 	appendNudgeEntry(content: string): void;
 	completionNotifier: IdleCoalescingNotifier<AsyncRun>;
 	intercomNotifier: IdleCoalescingNotifier<PendingAsk>;
@@ -175,7 +177,16 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				notifications: h.timerNotifier.peekPending().length + h.monitors.pendingCount() + h.scripts.pendingCount(),
 			};
 			if (lost.runs.length === 0 && lost.timers === 0 && lost.monitors === 0 && lost.scripts === 0 && lost.notifications === 0 && h.tracker.issued <= restoredIssued) return;
-			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(sessionId, h.tracker.issued, lost));
+			withCurrentRunHistory(ctx.sessionManager, (stored) => {
+				if (stored) {
+					lost.runs.unshift(...stored.lost.runs);
+					lost.timers += stored.lost.timers;
+					lost.monitors += stored.lost.monitors;
+					lost.scripts += stored.lost.scripts;
+					lost.notifications += stored.lost.notifications;
+				}
+				pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(sessionId, Math.max(h.tracker.issued, stored?.issued ?? 0), lost));
+			});
 		} catch { /* shutdown must complete */ }
 	}
 	function announceLostWork(ctx: ExtensionContext): void {
@@ -185,15 +196,16 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			// Before any launch: past every run id the FILE names (a fork or a crash leaves no entry for
 			// this session id), then past this session's own shutdown entry (the normal resume path).
 			h.tracker.continueFrom(highestIssuedRun(entries));
-			const stored = findStoredRuns(entries, manager.getSessionId());
-			if (stored) h.tracker.continueFrom(stored.issued);
 			restoredIssued = h.tracker.issued;
-			if (!stored) return;
-			const notice = restoreNotice(stored.lost);
-			if (!notice) return;
-			pi.sendMessage({ customType: "pi-persona", content: notice, display: true }, { deliverAs: "nextTurn" }); // passive: never starts a turn
-			// Acknowledge so the newest entry is an empty loss: the same loss can never be announced twice.
-			pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 0 }));
+			withCurrentRunHistory(manager, (stored) => {
+				if (!stored) return;
+				h.tracker.continueFrom(stored.issued);
+				restoredIssued = h.tracker.issued;
+				const notice = restoreNotice(stored.lost);
+				if (!notice) return;
+				pi.sendMessage({ customType: "pi-persona", content: notice, display: true }, { deliverAs: "nextTurn" }); // passive: never starts a turn
+				pi.appendEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(stored.sessionId, stored.issued, { runs: [], timers: 0, monitors: 0, scripts: 0, notifications: 0 }));
+			});
 		} catch { /* the session start must complete */ }
 	}
 
@@ -213,6 +225,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 		try { history = ctx.sessionManager?.getEntries() ?? []; } catch { /* zero, not a broken start */ }
 		h.childUsage.restore(history);
 		h.publishPersonaCost();
+		h.tracker.useRunOrdinals(nativeRunOrdinals(ctx.sessionManager?.getSessionFile(), ctx.sessionManager?.getSessionId() ?? ""));
 		announceLostWork(ctx);
 		// Opt-in only (PI_PERSONA_SEED=on): auto-install the bundled defaults once. Default is off —
 		// a fresh install shows no h.personas until `/persona seed` or `/persona restore`.
@@ -263,8 +276,7 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 			h.personaHost.setStatus(h.controller.activePersona?.label);
 		}
 		if (h.disposed) return;
-		exocom.prepareReload(ctx, _event?.reason === "reload");
-		await exocom.reconcile(ctx); // after persona activation, so plane + active tools share one gate
+		await exocom.reconcile(ctx, _event?.reason === "reload"); // only the admitted plane can restore its inbox
 		if (h.disposed) return;
 		await h.telemetry?.stop("session-replaced");
 		if (h.disposed) return;
@@ -292,11 +304,17 @@ export function installHooks(pi: ExtensionAPI, h: HookHost, exocom: ExocomInstal
 				h.telemetry.start(exocom.currentTelemetryInstance(ctx));
 			} catch (error) {
 				h.telemetry = undefined;
-				const message = "pi-persona: telemetry unavailable (safe session admission failed)";
-				try {
-					if (ctx.hasUI) ctx.ui.notify(message, "warning");
-					else process.stderr.write(`${message}\n`);
-				} catch { /* admission diagnostics are non-fatal too */ }
+				const duplicateWriter = error instanceof TelemetryWriterBusy;
+				// Exocom already showed the fork/reload remedy for this same duplicate window.
+				if (!duplicateWriter || !exocom.endpointBusy) {
+					const message = duplicateWriter
+						? "pi-persona: another Pi is publishing telemetry for this session. Use /fork for a separate stream, or /reload after closing the other Pi."
+						: "pi-persona: telemetry unavailable (safe session admission failed)";
+					try {
+						if (ctx.hasUI) ctx.ui.notify(message, "warning");
+						else process.stderr.write(`${message}\n`);
+					} catch { /* admission diagnostics are non-fatal too */ }
+				}
 			}
 			if (h.telemetry) {
 				// Re-seeded with the replay, so the dedupe below always mirrors what THIS producer last

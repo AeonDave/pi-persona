@@ -1,9 +1,12 @@
 /** Session-native terminal archive ownership. Owners are frozen before asynchronous work starts. */
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { TerminalResultArchive } from "../results/archive.ts";
+import { payloadBytes } from "../results/record.ts";
 import { resultReceipt, selectTerminalOutput, type ResultReceipt } from "../results/retrieval.ts";
-import type { TerminalResultInput, TerminalStatus } from "../results/types.ts";
+import { RESULT_MAX_ENTRIES, RESULT_MAX_PAYLOAD_BYTES, TERMINAL_RESULT_ENTRY, type TerminalResultInput, type TerminalStatus } from "../results/types.ts";
+import { NativeAppendBudget } from "../io/native-append-budget.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { emptyUsage } from "../engine/stream.ts";
 import { type AsyncRun, type AsyncRunTracker } from "../engine/async.ts";
@@ -65,11 +68,15 @@ export class SessionResults {
 		let historyError: unknown;
 		let historyFailed = false;
 		try { entries = manager ? manager.getEntries() : []; } catch (error) { historyError = error; historyFailed = true; }
+		const budget = file && isAbsolute(file) ? new NativeAppendBudget(file, id, {
+			customType: TERMINAL_RESULT_ENTRY, maxEntries: RESULT_MAX_ENTRIES, maxBytes: RESULT_MAX_PAYLOAD_BYTES, cost: payloadBytes,
+		}) : undefined;
 		const owner: Owner = {
 			id, file, manager, generation,
 			archive: new TerminalResultArchive({
 				entries: () => { if (historyFailed) throw historyError; return entries; },
 				persistent: file !== undefined,
+				...(budget ? { commitWithinQuota: (cost, append) => budget.append(cost, append) } : {}),
 				append: (type, data) => {
 					if (this.owner !== owner || (manager && (manager.getSessionId() !== id || manager.getSessionFile() !== file))) {
 						throw new Error("Terminal archive owner was revoked");

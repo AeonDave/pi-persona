@@ -10,6 +10,22 @@ const TTL_MS = EXOCOM.SEEN_TTL_MS;
 const MAX_ITEM_BYTES = 128 * 1024;
 const MAX_SNAPSHOT_BYTES = EXOCOM_INBOX_MAX * MAX_ITEM_BYTES;
 
+// Pi retains its SessionManager across /reload, including a fresh extension module load.
+// Keep only the owner's one-use snapshot ID here; the bounded payload stays in native history.
+const reloadKey = Symbol.for("pi-persona:exocom-reload-owners:v1");
+const runtime = globalThis as typeof globalThis & { [reloadKey]?: WeakMap<object, string> };
+const reloadOwners = runtime[reloadKey] ??= new WeakMap<object, string>();
+
+export function authorizeReload(manager: object, snapshotId: string): void {
+	reloadOwners.set(manager, snapshotId);
+}
+
+export function takeReloadId(manager: object): string | undefined {
+	const id = reloadOwners.get(manager);
+	reloadOwners.delete(manager);
+	return id;
+}
+
 export interface ReloadNotice extends PresentedNotice {
 	receipt: { sender: string; id: string };
 	context: InboundContext;
@@ -70,13 +86,13 @@ export function unconsumedReloadIds(entries: readonly unknown[], sessionId: stri
 	return [...ids].filter((id) => !consumed.has(id));
 }
 
-export function findReloadSnapshot(branch: readonly unknown[], entries: readonly unknown[], sessionId: string, scope: string, agentDir: string, now: number): ReloadSnapshot | undefined {
+export function findReloadSnapshot(branch: readonly unknown[], entries: readonly unknown[], sessionId: string, scope: string, agentDir: string, now: number, snapshotId: string): ReloadSnapshot | undefined {
 	const outstanding = new Set(unconsumedReloadIds(entries, sessionId));
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const data = entryData(branch[i]);
-		if (!data || data.kind !== "snapshot" || data.sessionId !== sessionId || !token(data.id) || !outstanding.has(data.id)) continue;
+		if (!data || data.kind !== "snapshot" || data.sessionId !== sessionId || data.id !== snapshotId || !outstanding.has(snapshotId)) continue;
 		if (data.scope !== scope || data.agentDir !== agentDir || typeof data.createdAt !== "number" || now < data.createdAt || now - data.createdAt > TTL_MS || !Array.isArray(data.items)) return undefined;
-		return createReloadSnapshot(data.id, sessionId, scope, agentDir, data.createdAt, data.items as ReloadNotice[]);
+		return createReloadSnapshot(snapshotId, sessionId, scope, agentDir, data.createdAt, data.items as ReloadNotice[]);
 	}
 	return undefined;
 }

@@ -233,6 +233,13 @@ export async function runChildAgent(
 			delete inherited.PI_PERSONA_CODE_OUTLINE;
 			delete inherited.PI_PERSONA_SELECTED_SKILLS;
 			delete inherited.PI_PERSONA_SESSION_CONTRACT;
+			try { spec.session?.setExternalWriter?.("launching"); }
+			catch (error) {
+				spawnError = error instanceof Error ? error : new Error(String(error));
+				quiescent = true;
+				resolveP(1);
+				return;
+			}
 			const proc = spawn(inv.command, inv.args, {
 				cwd: spec.cwd ?? process.cwd(),
 				shell: false,
@@ -249,6 +256,10 @@ export async function runChildAgent(
 				// a user-set PI_PERSONA_DISABLE kill switch (see inproc.ts pushDisableGuard).
 				env: { ...inherited, PI_PERSONA_DISABLE: "1", PI_PERSONA_CHILD: "1", PI_PERSONA_LEG: "1", ...opts.env },
 			});
+			if (proc.pid !== undefined) {
+				try { spec.session?.setExternalWriter?.(proc.pid); }
+				catch { /* the durable launching state still excludes an uncertain writer */ }
+			}
 
 			let settled = false;
 			let exited = false; // real liveness: set on 'close' (NOT proc.killed, which is "signal sent")

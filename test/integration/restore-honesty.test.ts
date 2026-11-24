@@ -33,7 +33,7 @@ import {
 	type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import piPersona from "../../src/extension.ts";
-import { RUNS_ENTRY_CUSTOM_TYPE, type RunsEntry } from "../../src/core/session-runs.ts";
+import { makeRunsEntry, RUNS_ENTRY_CUSTOM_TYPE, type RunsEntry } from "../../src/core/session-runs.ts";
 
 interface Contentish {
 	role: string;
@@ -90,12 +90,12 @@ interface Harness {
 	/** Texts of the supervisor's own tool results, in order. */
 	toolResults: string[];
 	runsEntries: () => RunsEntry[];
-	script: (...steps: Array<"delegate" | "timer" | "monitor" | "script" | "quick-script" | "busy" | "idle">) => void;
+	script: (...steps: Array<"delegate" | "timer" | "monitor" | "script" | "quick-script" | "peek" | "busy" | "idle">) => void;
 	releaseBusy: () => void;
 	dispose: () => Promise<void>;
 }
 
-async function harness(root: string): Promise<Harness> {
+async function harness(root: string, persistentSession?: SessionManager): Promise<Harness> {
 	const cwd = join(root, "workspace");
 	const agentDir = join(root, "agent");
 	await mkdir(join(cwd, ".pi", "agents"), { recursive: true });
@@ -145,7 +145,7 @@ async function harness(root: string): Promise<Harness> {
 	const busyGate = new Promise<void>((resolve) => { releaseBusy = resolve; });
 	child.setResponses(Array.from({ length: 4 }, () => async () => { await gate; return fauxAssistantMessage("late"); }));
 
-	const sessionManager = SessionManager.inMemory(cwd);
+	const sessionManager = persistentSession ?? SessionManager.inMemory(cwd);
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir,
@@ -166,6 +166,7 @@ async function harness(root: string): Promise<Harness> {
 		monitor: () => fauxAssistantMessage(fauxToolCall("monitor", { action: "arm", command: process.execPath, args: ["-e", "setTimeout(() => {}, 60000)"], label: "restore probe", mode: "exit", timeoutSeconds: 120 }, { id: "m-1" }), { stopReason: "toolUse" }),
 		script: () => fauxAssistantMessage(fauxToolCall("script", { action: "run", command: process.execPath, args: ["-e", "setTimeout(() => {}, 60000)"], label: "script restore probe", timeoutSeconds: 120 }, { id: "s-1" }), { stopReason: "toolUse" }),
 		"quick-script": () => fauxAssistantMessage(fauxToolCall("script", { action: "run", command: process.execPath, args: ["-e", "console.log('retained result')"], label: "quick script", timeoutSeconds: 120 }, { id: "s-fast" }), { stopReason: "toolUse" }),
+		peek: () => fauxAssistantMessage(fauxToolCall("intercom", { action: "peek" }, { id: "peek" }), { stopReason: "toolUse" }),
 		busy: async () => { await busyGate; return fauxAssistantMessage("Finished the current turn."); },
 		idle: () => fauxAssistantMessage("Understood; ending my turn."),
 	};
@@ -222,6 +223,51 @@ async function withHarness(run: (h: Harness) => Promise<void>): Promise<void> {
 
 const NOTICE = /Session restored\. Background work from before the restore did not survive/;
 const requestsMentioningNotice = (h: Harness) => h.requests.filter((messages) => messages.some((m) => NOTICE.test(textOf(m))));
+
+test("two Pi activations opened from one persisted snapshot issue separate run ids", { timeout: 90_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-persona-shared-run-ids-"));
+	const previousAgentDir = process.env.PI_AGENT_DIR;
+	process.env.PI_AGENT_DIR = join(root, "agent");
+	let first: Harness | undefined;
+	let second: Harness | undefined;
+	try {
+		const cwd = join(root, "workspace");
+		await mkdir(cwd);
+		const original = SessionManager.create(cwd, join(root, "sessions"));
+		original.appendMessage({ role: "user", content: "shared history", timestamp: 1 });
+		original.appendCustomEntry(RUNS_ENTRY_CUSTOM_TYPE, makeRunsEntry(original.getSessionId(), 0, {
+			runs: [], timers: 1, monitors: 0, scripts: 0, notifications: 0,
+		}));
+		const sessionFile = original.getSessionFile()!;
+		const firstManager = SessionManager.open(sessionFile);
+		const secondManager = SessionManager.open(sessionFile);
+		first = await harness(root, firstManager);
+		second = await harness(root, secondManager);
+		first.script("delegate", "idle");
+		second.script("delegate", "idle");
+		await first.session.prompt("first activation launches work");
+		await second.session.prompt("second activation launches work");
+		assert.ok(requestsMentioningNotice(first).length > 0);
+		assert.equal(requestsMentioningNotice(second).length, 0, "a manager opened before the first acknowledgement must read its persisted state");
+		const launchId = (h: Harness) => h.toolResults.map((text) => /Launched async run (run-[a-z0-9]+)/.exec(text)?.[1]).find(Boolean);
+		assert.equal(launchId(first), "run-1");
+		assert.equal(launchId(second), "run-2", "the live peer's first launch already owns run-1");
+		await second.dispose();
+		assert.deepEqual(second.runsEntries().at(-1)?.lost.runs, ["run-2"]);
+		first.script("peek", "idle");
+		await first.session.prompt("check which workers are still running");
+		assert.match(first.toolResults.at(-1) ?? "", /run-1/);
+		assert.doesNotMatch(first.toolResults.at(-1) ?? "", /run-2/);
+		await first.dispose();
+		assert.deepEqual(first.runsEntries().at(-1)?.lost.runs, ["run-2", "run-1"], "neither shutdown masks the other's unacknowledged loss");
+	} finally {
+		await first?.dispose();
+		await second?.dispose();
+		if (previousAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+		else process.env.PI_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	}
+});
 
 test("a completed script's pending notification is reported on restore and its log remains", { timeout: 90_000 }, async () => {
 	await withHarness(async (h) => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -30,6 +30,52 @@ function conversation(manager: SessionManager): void {
 	manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "offline storage fixture" }], api: "openai-responses", provider: "fixture", model: "fixture", stopReason: "stop", timestamp: 2,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 }
+
+test("two native archive owners share the owning file's lifetime record quota", () => {
+	const root = mkdtempSync(join(tmpdir(), "persona-terminal-quota-shared-"));
+	try {
+		const initial = SessionManager.create(root, root);
+		conversation(initial);
+		const file = initial.getSessionFile()!;
+		const activate = (manager: SessionManager) => {
+			const owner = new SessionResults({ appendEntry: (type, data) => { manager.appendCustomEntry(type, data); } });
+			owner.activate(ctx(manager));
+			return owner.bind("fixture");
+		};
+		const fill = activate(initial);
+		for (let i = 0; i < RESULT_MAX_ENTRIES - 1; i++) {
+			assert.equal(fill(`seed-${i}`, result("seeded report")).storage, "session-entry");
+		}
+		const first = activate(SessionManager.open(file));
+		const second = activate(SessionManager.open(file));
+		assert.equal(first("first", result("the last reserved report")).storage, "session-entry");
+		const refused = second("second", result("over quota"));
+		assert.notEqual(refused.storage, "session-entry");
+		assert.match(refused.warning ?? "", /quota/i);
+		assert.equal(terminalEntries(SessionManager.open(file)).length, RESULT_MAX_ENTRIES);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a torn native tail pauses archive writes until Pi repairs the line on open", () => {
+	const root = mkdtempSync(join(tmpdir(), "persona-terminal-torn-tail-"));
+	try {
+		const initial = SessionManager.create(root, root);
+		conversation(initial);
+		const file = initial.getSessionFile()!;
+		const activate = (manager: SessionManager) => {
+			const owner = new SessionResults({ appendEntry: (type, data) => { manager.appendCustomEntry(type, data); } });
+			owner.activate(ctx(manager));
+			return owner.bind("fixture");
+		};
+		const original = activate(initial);
+		assert.equal(original("saved", result("complete report")).storage, "session-entry");
+		appendFileSync(file, '{"type":"message","id":"torn');
+		assert.equal(original("partial", result("must wait")).storage, "memory-only");
+		const recovered = SessionManager.open(file);
+		assert.equal(activate(recovered)("recovered", result("persist after native repair")).storage, "session-entry");
+		assert.equal(terminalEntries(SessionManager.open(file)).length, 2);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function toolFor(owner: SessionResults, tracker = new AsyncRunTracker()) {
 	let tool: any;

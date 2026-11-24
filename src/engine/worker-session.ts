@@ -6,6 +6,8 @@ import { basename, dirname, isAbsolute, join, normalize, parse, resolve } from "
 export interface WorkerSession {
 	file: string;
 	resume: boolean;
+	/** Persist the child writer before it can outlive its supervisor. */
+	setExternalWriter?: (state: "launching" | number) => void;
 }
 
 const MAX_SESSION_BYTES = 8 * 1024 * 1024;

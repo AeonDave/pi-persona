@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { once } from "node:events";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import nodeNet from "node:net";
 import { tmpdir } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
+import { promisify } from "node:util";
 
 import { InProcessBus } from "../../src/bus/inproc.ts";
 import { makeBrokerClient } from "../../src/bus/broker/client.ts";
@@ -12,6 +15,7 @@ import { encodeFrame } from "../../src/bus/broker/framing.ts";
 import { type BrokerHost, startBrokerHost } from "../../src/bus/broker/host.ts";
 import { brokerEndpoint } from "../../src/bus/broker/paths.ts";
 import { preparePrivateEndpointDir } from "../../src/bus/endpoint.ts";
+import { tryFileClaim } from "../../src/io/file-claim.ts";
 import { SupervisorBroker } from "../../src/extension/broker-host.ts";
 import { readFailure, type ReadReply, type ScopedReader } from "../../src/bus/result-reader.ts";
 
@@ -93,18 +97,108 @@ test("REAL reader cancellation reaches the callback; host close settles all pend
 	} finally { client.close(); await host.close(); }
 });
 
-test("REAL bind collision fails reader preparation before any child registration", async () => {
+test("a duplicate broker fails reader preparation and leaves the incumbent reachable", async (t) => {
 	const endpoint = brokerEndpoint(randomUUID());
 	preparePrivateEndpointDir(endpoint, "broker");
-	const host = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
-	const other = new SupervisorBroker({ bus: new InProcessBus(), supervisorHandle: "supervisor", warn: () => {} });
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	const host = await startBrokerHost({ endpoint, bus, supervisorHandle: "supervisor" });
+	const client = makeBrokerClient({ endpoint, handle: "child", token: expectChild(host, "child") });
+	const otherBus = new InProcessBus();
+	const subscribe = otherBus.onMessage.bind(otherBus);
+	let activeSubscriptions = 0;
+	t.mock.method(otherBus, "onMessage", (listener: Parameters<InProcessBus["onMessage"]>[0]) => {
+		activeSubscriptions++;
+		const unsubscribe = subscribe(listener);
+		return () => { unsubscribe(); activeSubscriptions--; };
+	});
+	const other = new SupervisorBroker({ bus: otherBus, supervisorHandle: "supervisor", warn: () => {} });
 	try {
 		other.ensure(endpoint);
 		let revoked = false;
 		await assert.rejects(other.prepareResultReader("reader", { read: async () => assert.fail("no read"), revoke: () => { revoked = true; } }), /preparation/);
 		assert.equal(revoked, true);
+		await other.close();
+		// A separately resumed Pi process sees the same production endpoint.
+		const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", `
+			import { startBrokerHost } from "./src/bus/broker/host.ts";
+			import { InProcessBus } from "./src/bus/inproc.ts";
+			try {
+				const host = await startBrokerHost({ endpoint: process.argv[1], supervisorHandle: "supervisor", bus: new InProcessBus() });
+				await host.close();
+			} catch (error) { console.log(error.message); }
+		`, endpoint], { windowsHide: true, timeout: 10_000 });
+		assert.match(stdout, /EADDRINUSE/);
 		assert.deepEqual(host.connectedHandles(), []);
-	} finally { await other.close(); await host.close(); }
+		await client.register();
+		assert.equal(await client.send("supervisor", "progress", "incumbent still reachable"), true);
+		assert.equal(bus.take("supervisor")[0]?.text, "incumbent still reachable");
+		assert.equal(activeSubscriptions, 0, "the rejected host retained no subscription to its own bus");
+	} finally { client.close(); await other.close(); await host.close(); }
+});
+
+if (process.platform !== "win32") {
+	test("only one process may reclaim an orphaned Unix socket at a time", async () => {
+		const endpoint = brokerEndpoint(randomUUID());
+		preparePrivateEndpointDir(endpoint, "broker");
+		execFileSync(process.execPath, ["-e",
+			'require("node:net").createServer().listen(process.argv[1], () => process.exit(0))', endpoint],
+		{ timeout: 10_000 });
+		const start = () => startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
+		const release = tryFileClaim(dirname(endpoint), basename(endpoint))!;
+		let host: BrokerHost | undefined;
+		try {
+			try {
+				await assert.rejects(async () => { host = await start(); }, /EADDRINUSE/);
+				assert.ok(statSync(endpoint).isSocket());
+			} finally { release(); }
+			host = await start();
+			const client = makeBrokerClient({ endpoint, handle: "worker", token: expectChild(host, "worker") });
+			try { await client.register(); } finally { client.close(); }
+		} finally { await host?.close(); rmSync(endpoint, { force: true }); }
+	});
+
+	test("broker bind preserves a regular file at the Unix socket path", async () => {
+		const endpoint = brokerEndpoint(randomUUID());
+		preparePrivateEndpointDir(endpoint, "broker");
+		writeFileSync(endpoint, "occupied by a regular file", { flag: "wx" });
+		let unexpected: BrokerHost | undefined;
+		try {
+			await assert.rejects(async () => {
+				unexpected = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor" });
+			}, /EADDRINUSE/);
+			assert.equal(readFileSync(endpoint, "utf8"), "occupied by a regular file");
+		} finally { await unexpected?.close(); rmSync(endpoint, { force: true }); }
+	});
+}
+
+test("closing a broker preserves the successor listener at its released endpoint", async () => {
+	const endpoint = brokerEndpoint(randomUUID());
+	preparePrivateEndpointDir(endpoint, "broker");
+	const successor = nodeNet.createServer((socket) => socket.end("successor"));
+	const net = {
+		...nodeNet,
+		createServer() {
+			const server = nodeNet.createServer();
+			// Bind the successor as soon as the OS releases the endpoint, before host.close() returns.
+			server.once("close", () => successor.listen(endpoint));
+			return server;
+		},
+	};
+	const host = await startBrokerHost({ endpoint, bus: new InProcessBus(), supervisorHandle: "supervisor", net });
+	try {
+		const rebound = once(successor, "listening");
+		await host.close();
+		await rebound;
+		const socket = nodeNet.connect(endpoint);
+		try {
+			const [data] = await once(socket, "data");
+			assert.equal(data.toString(), "successor");
+		} finally { socket.destroy(); }
+	} finally {
+		await host.close();
+		if (successor.listening) await new Promise<void>((resolve) => successor.close(() => resolve()));
+	}
 });
 
 // A REAL socket/pipe round-trip (host.test.ts/client.test.ts both use an in-memory fake `net`

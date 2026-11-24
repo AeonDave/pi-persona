@@ -123,6 +123,18 @@ export async function drainUntil(inFlight: ReadonlySet<Promise<unknown>>, deadli
 
 /** The run's id is passed in so the launcher can wire a steer handle keyed by it. */
 export type RunThunk = (onProgress: (snapshot: ProgressSnapshot) => void, runId: string) => Promise<AgentResult>;
+interface RunLaunchMeta {
+	agent: string;
+	task: string;
+	label?: string;
+	model?: string;
+	mutates?: boolean;
+	writeSet?: readonly string[];
+	queued?: boolean;
+	batch?: AsyncRun["batch"];
+	delivery?: AsyncRun["delivery"];
+}
+export type RunLauncher = (meta: RunLaunchMeta, run: RunThunk) => string;
 
 /** How many uncollected evictions the tracker remembers, so a later `result` can answer "dropped
  *  under pressure" instead of an indistinguishable "never existed". Bounded: a session that drops
@@ -141,6 +153,7 @@ export class AsyncRunTracker {
 	/** Each launched thunk's natural settlement chain, until it settles: what {@link drain} awaits. */
 	private readonly inFlight = new Set<Promise<void>>();
 	private seq = 0;
+	private reserveOrdinal: ((minimum: number, count: number) => number) | undefined;
 	private readonly maxRetained: number;
 	private readonly now: () => number;
 
@@ -163,9 +176,34 @@ export class AsyncRunTracker {
 		if (Number.isSafeInteger(issued) && issued > this.seq) this.seq = issued;
 	}
 
-	launch(meta: { agent: string; task: string; label?: string; model?: string; mutates?: boolean; writeSet?: readonly string[]; queued?: boolean; batch?: AsyncRun["batch"]; delivery?: AsyncRun["delivery"] }, run: RunThunk): string {
-		this.seq += 1;
-		const id = `run-${this.seq.toString(36)}`;
+	useRunOrdinals(reserve: ((minimum: number, count: number) => number) | undefined): void {
+		this.reserveOrdinal = reserve;
+	}
+
+	private reserveRange(count: number): number {
+		const minimum = this.seq + 1;
+		const first = this.reserveOrdinal ? this.reserveOrdinal(minimum, count) : minimum;
+		this.seq = first + count - 1;
+		return first;
+	}
+
+	/** Decide admission for every leg before opening a batch row or starting its first worker. */
+	reserveBatch(count: number): RunLauncher {
+		if (!Number.isSafeInteger(count) || count < 1) throw new Error("Invalid run reservation size");
+		let next = this.reserveRange(count);
+		const end = next + count;
+		return (meta, run) => {
+			if (next === end) throw new Error("Run reservation exhausted");
+			return this.launchAt(next++, meta, run);
+		};
+	}
+
+	launch(meta: RunLaunchMeta, run: RunThunk): string {
+		return this.launchAt(this.reserveRange(1), meta, run);
+	}
+
+	private launchAt(ordinal: number, meta: RunLaunchMeta, run: RunThunk): string {
+		const id = `run-${ordinal.toString(36)}`;
 		const startedAt = this.now(); // one clock read, so the launch and stall stamps cannot disagree
 		const entry: AsyncRun = {
 			id,
