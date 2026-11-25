@@ -107,7 +107,7 @@
     "@types/pngjs": "6.0.5",
     "fast-check": "^4.10.2",
     "tsx": "^4.23.13",
-    "typebox": "1.4.6",
+    "typebox": "1.4.7",
     "typescript": "^7.0.2"
   },
   "pi": {
