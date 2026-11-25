@@ -446,9 +446,11 @@ delegate { resume: "run-1", task: "Check the remaining edge case" }
 Use the latest run ID for that conversation; the follow-up receives a new run ID. The only other
 accepted field is an optional `brief`. A continuation keeps the worker's alias, agent, exact
 provider/model and other configuration, and the current delegate permissions, brief requirements,
-concurrency limits and interactive/headless behavior are checked again. Configuration or skill/tool
-contract changes, an unavailable transcript, a different owning session/branch, and failed or
-cancelled turns prevent continuation; start a new worker when those checks fail.
+concurrency limits and interactive/headless behavior are checked again. If the worker rejects the
+configuration before its first model request, check `intercom conversations` for the last successful
+run ID. When that conversation is still available, restore the matching configuration and resume
+that ID. To work under different settings, start a new worker. A changed or unavailable transcript,
+a different owning session or branch, or a failed or cancelled worker turn also prevents continuation.
 
 Saved worker transcripts are native Pi session files alongside the owning supervisor session. They
 can contain prompts, tool calls and tool results. Availability is limited to seven days since the

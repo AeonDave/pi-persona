@@ -7,6 +7,7 @@ import { tryFileClaim } from "../io/file-claim.ts";
 import { processState } from "../io/process-state.ts";
 import { nativeSessionStorage, prepareSessionStorage, regularPath } from "../io/session-storage.ts";
 import { ConversationHistory, CONVERSATION_ENTRY, CONVERSATION_FORGOTTEN_ENTRY } from "./history.ts";
+import { restoreRejectedResume } from "./rejected-resume.ts";
 import type { ConversationCommit, ConversationLease, ConversationListing, ConversationRecord, ConversationResult, ConversationStoreDeps } from "./types.ts";
 
 export { CONVERSATION_ENTRY, CONVERSATION_FORGOTTEN_ENTRY } from "./history.ts";
@@ -121,7 +122,6 @@ export class ConversationStore {
 			const check = this.records(current).findLast((r) => r.key === latest.key);
 			if (!check || check.runId !== latest.runId) return fail("stale", "Conversation changed during admission");
 			if (this.forgotten(current).has(selected.key) || existsSync(join(this.directory!, `${selected.key}.forgotten`))) return fail("unavailable", "Conversation has been forgotten");
-			if (!this.usableFile(lease.value.file) || this.hashFile(lease.value.file) !== latest.transcriptHash) return fail("unavailable", "Conversation transcript is missing, incomplete or changed since settlement");
 			pendingLease = undefined; // The successful caller now owns the lease and its writer lifecycle.
 			return { ok: true, value: { record: latest, lease: lease.value } };
 		} catch (e) { return fail("storage", String(e)); }
@@ -153,7 +153,7 @@ export class ConversationStore {
 				if (this.lockIsBusy(join(this.directory, `${r.key}.lock`))) reason = "busy";
 				else if (this.expired(r)) reason = "expired";
 				else {
-					try { if (!this.usableFile(file) || this.hashFile(file) !== r.transcriptHash) reason = "transcript-unavailable"; }
+					try { if (!this.usableFile(file) || this.hashFile(file).digest !== r.transcriptHash) reason = "transcript-unavailable"; }
 					catch { reason = "transcript-unavailable"; }
 				}
 				out.push({ record: structuredClone(r), available: reason === undefined, ...(reason === undefined ? {} : { reason }) });
@@ -258,7 +258,7 @@ export class ConversationStore {
 		try { const s = lstatSync(file); return regularPath(file) && s.isFile() && s.size > 0 && s.size <= CONVERSATION_MAX_FILE_BYTES; }
 		catch { return false; }
 	}
-	private hashFile(file: string): string {
+	private hashFile(file: string) {
 		const fd = openSync(file, "r");
 		try {
 			const before = fstatSync(fd);
@@ -274,7 +274,7 @@ export class ConversationStore {
 			}
 			const after = fstatSync(fd);
 			if (total !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) throw new Error("Conversation transcript changed during reading");
-			return hash.digest("hex");
+			return { digest: hash.digest("hex"), stat: after };
 		} finally { closeSync(fd); }
 	}
 	/**
@@ -372,13 +372,25 @@ export class ConversationStore {
 		if (!locked.ok) return locked;
 		const file = join(this.directory!, `${key}.jsonl`);
 		const lockFile = join(this.directory!, `${key}.lock`);
+		let baseline: ReturnType<ConversationStore["hashFile"]> | undefined;
+		if (previous) {
+			try {
+				baseline = this.usableFile(file) ? this.hashFile(file) : undefined;
+				if (baseline?.digest !== previous.transcriptHash) return fail("unavailable", "Conversation transcript is missing, incomplete or changed since settlement");
+			} catch (error) { return fail("storage", String(error)); }
+			finally { if (baseline?.digest !== previous.transcriptHash) locked.value(); }
+		}
 		let released = false, committed = false, attemptedAppend = false;
+		const leaseOwned = (): boolean => {
+			try {
+				return !released && !committed && regularPath(lockFile) && lstatSync(lockFile).isFile()
+					&& JSON.parse(readFileSync(lockFile, "utf8")).token === token;
+			} catch { return false; }
+		};
 		const lease: ConversationLease = {
 			key, file,
 			setExternalWriter: (externalWriter) => {
-				if (released || committed || !lstatSync(lockFile).isFile() || JSON.parse(readFileSync(lockFile, "utf8")).token !== token) {
-					throw new Error("Conversation writer lease is unavailable");
-				}
+				if (!leaseOwned()) throw new Error("Conversation writer lease is unavailable");
 				// Atomic replacement preserves the launching fence if the supervisor dies
 				// before publishing the child PID or a filesystem write fails mid-update.
 				const temp = `${lockFile}.${randomUUID()}.tmp`;
@@ -387,6 +399,7 @@ export class ConversationStore {
 					renameSync(temp, lockFile);
 				} finally { try { unlinkSync(temp); } catch { /* renamed or absent */ } }
 			},
+			restoreRejectedResume: () => baseline !== undefined && leaseOwned() && restoreRejectedResume(file, baseline.stat, baseline.digest),
 			release: () => {
 				if (released) return;
 				try {
@@ -402,7 +415,7 @@ export class ConversationStore {
 				if (released || committed) return fail("lease", "Conversation lease is no longer writable");
 				try {
 					if (!this.usableFile(file)) return fail("unavailable", "Conversation transcript missing or exceeds per-conversation quota");
-					const record: ConversationRecord = { ...fields, key, owner: this.owner, transcriptHash: this.hashFile(file), updatedAt: this.deps.now?.() ?? Date.now() };
+					const record: ConversationRecord = { ...fields, key, owner: this.owner, transcriptHash: this.hashFile(file).digest, updatedAt: this.deps.now?.() ?? Date.now() };
 					if (!validRecord(record, this.owner) || (previous ? record.rootRunId !== previous.rootRunId || record.previousRunId !== previous.runId : record.rootRunId !== record.runId || record.previousRunId !== undefined)) return fail("invalid", "Invalid conversation metadata or lineage");
 					const guard = this.lock("admission");
 					if (!guard.ok) return guard;

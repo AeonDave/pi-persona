@@ -31,6 +31,8 @@ export interface ConversationLease {
 	readonly key: string;
 	readonly file: string;
 	setExternalWriter: NonNullable<WorkerSession["setExternalWriter"]>;
+	/** Use only after a witnessed first-start rejection and proven writer quiescence. */
+	restoreRejectedResume(): boolean;
 	commit(fields: ConversationCommit): ConversationResult<ConversationRecord>;
 	release(): void;
 }

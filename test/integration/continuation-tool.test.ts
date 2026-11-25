@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -185,6 +185,42 @@ test("failed resumed turns cannot be advertised as successful continuations", ()
 		assert.equal(h.runtime.resume(h.ctx, { resume: "run-2", task: "again" }).ok, false);
 	} finally { h.close(); }
 });
+
+for (const scenario of ["first-start rejection", "quiescence unknown", "unattested", "unexpected entries", "changed prefix"] as const) {
+	test(`worker continuation preserves only a proven rejected prompt: ${scenario}`, () => {
+		const h = fixture();
+		try {
+			const turn = h.runtime.start(h.ctx, h.spec, h.brief);
+			assert.ok(turn);
+			const prepared = turn.prepare(h.spec);
+			const file = prepared.session?.file;
+			assert.ok(file);
+			const original = '{"type":"message","id":"original","message":{"role":"assistant","stopReason":"stop"}}\n';
+			writeFileSync(file, original);
+			turn.settle("run-1", prepared, h.result);
+			turn.release();
+			const resumed = h.runtime.resume(h.ctx, { resume: "run-1", task: "again" });
+			assert.ok(resumed.ok);
+			const spec = resumed.value.turn.prepare(specOf(resumed.value.params as AgentRunSpec));
+			const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+			const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost };
+			const suffix = [
+				{ type: "message", id: "new1", parentId: "original", message: { role: "user", content: [{ type: "text", text: "again" }] } },
+				{ type: "message", id: "new2", parentId: "new1", message: { role: "assistant", stopReason: "aborted", content: [], usage } },
+			];
+			writeFileSync(file, [scenario === "changed prefix" ? original.replace('"original"', '"tampered"') : original,
+				...suffix.map((row) => `${JSON.stringify(row)}\n`), scenario === "unexpected entries" ? '{"type":"tool_execution_end"}\n' : ""].join(""));
+			const beforeSettlement = readFileSync(file, "utf8");
+			const result = resumed.value.turn.settle("run-2", spec, { ...h.result, ok: false, sessionSaved: false, failureKind: "contract",
+				resumeRejectedAtStart: scenario !== "unattested", sessionQuiescent: scenario !== "quiescence unknown" });
+			resumed.value.turn.release();
+			assert.equal(result.ok, false);
+			assert.equal(readFileSync(file, "utf8"), scenario === "first-start rejection" ? original : beforeSettlement);
+			assert.equal(h.runtime.list(h.ctx)[0]?.runId, scenario === "first-start rejection" ? "run-1" : undefined);
+			if (scenario === "quiescence unknown") assert.equal(h.runtime.entries(h.ctx)[0]?.reason, "busy");
+		} finally { h.close(); }
+	});
+}
 
 test("policy drift while queued rejects admission and releases the lease", () => {
 	const h = fixture();

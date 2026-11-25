@@ -9,6 +9,7 @@ import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { makeInProcessEngine } from "../../src/engine/inproc.ts";
 import { makeEngine } from "../../src/engine/adapter.ts";
+import { ConversationStore } from "../../src/conversations/store.ts";
 
 test("real Pi in-process worker reopens its conversation without replaying old events or usage", { timeout: 20_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "persona-worker-sdk-"));
@@ -42,6 +43,8 @@ test("real Pi in-process worker reopens its conversation without replaying old e
 		assert.equal(changed.ok, false);
 		assert.equal(changed.failureKind, "contract");
 		assert.equal(changed.sessionSaved, false);
+		assert.equal(changed.sessionQuiescent, true);
+		assert.equal(changed.resumeRejectedAtStart, true);
 		assert.equal(faux.state.callCount, 2, "changed worker prompt never reaches the provider");
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });
@@ -78,28 +81,57 @@ test("real child Pi reopens its saved conversation and emits only the new turn",
 test("real child rejects changed selected skill before the resumed provider request", { timeout: 30_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "persona-worker-skills-"));
 	try {
-		const file = join(cwd, "worker-sessions", "worker.jsonl");
-		await mkdir(dirname(file), { recursive: true });
+		const parent = join(cwd, "parent", "supervisor.jsonl");
+		await mkdir(dirname(parent), { recursive: true });
+		await writeFile(parent, '{"type":"session","id":"owner"}\n');
+		const entries: unknown[] = [];
+		const store = new ConversationStore({ sessionId: "owner", sessionFile: parent, entries: () => entries,
+			append: (customType, data) => entries.push({ type: "custom", customType, data }) });
+		const created = store.create();
+		assert.ok(created.ok);
+		const initial = created.value;
+		const { file } = initial;
 		const receipt = join(cwd, "receipt.jsonl");
 		const skillDir = join(cwd, "skills", "audit");
 		const skill = join(skillDir, "SKILL.md");
 		const cli = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
 		const provider = fileURLToPath(new URL("../fixtures/selected-skills-provider.mjs", import.meta.url));
 		await mkdir(skillDir, { recursive: true });
-		await writeFile(skill, "---\nname: audit\ndescription: audit\n---\nORIGINAL BODY\n");
+		const originalSkill = "---\nname: audit\ndescription: audit\n---\nORIGINAL BODY\n";
+		await writeFile(skill, originalSkill);
 		await writeFile(receipt, "");
 		await writeFile(join(cwd, "settings.json"), JSON.stringify({ extensions: [provider], retry: { enabled: false }, compaction: { enabled: false } }));
 		const engine = makeEngine({ cwd, resolveAgent: (name) => ({ name, model: "skill-child-test/local", systemPrompt: "Test worker.", source: "test" }), childOptions: { resolveInvocation: (args) => ({ command: process.execPath, args: [cli, ...args] }), env: { PI_AGENT_DIR: cwd, PI_CODING_AGENT_DIR: cwd, PI_OFFLINE: "1", SELECTED_SKILLS_RECEIPT: receipt } } });
-		const first = await engine.run({ agent: "a", task: "first", skills: ["audit"], tools: [], session: { file, resume: false } });
+		const spec = { agent: "a", task: "first", skills: ["audit"], tools: [] };
+		const first = await engine.run({ ...spec, session: { file, resume: false, setExternalWriter: initial.setExternalWriter } });
 		assert.equal(first.ok, true, first.error);
 		assert.equal(first.sessionSaved, true);
+		assert.ok(initial.commit({ rootRunId: "run-1", runId: "run-1", cwd, persona: null,
+			fingerprint: "a".repeat(64), spec, model: "skill-child-test/local" }).ok);
+		initial.release();
 		const before = await readFile(receipt, "utf8");
+		const original = await readFile(file);
+		const acquired = store.acquire("run-1");
+		assert.ok(acquired.ok);
+		const resume = { file, resume: true, setExternalWriter: acquired.value.lease.setExternalWriter };
 		await writeFile(skill, "---\nname: audit\ndescription: audit\n---\nCHANGED BODY\n");
-		const second = await engine.run({ agent: "a", task: "follow up", skills: ["audit"], tools: [], session: { file, resume: true } });
+		const second = await engine.run({ ...spec, task: "follow up", session: resume });
 		assert.equal(second.ok, false);
 		assert.equal(second.failureKind, "contract");
 		assert.equal(second.sessionSaved, false);
+		assert.equal(second.sessionQuiescent, true);
+		assert.equal(second.resumeRejectedAtStart, true);
 		assert.match(second.error ?? "", /contract changed/i);
 		assert.equal(await readFile(receipt, "utf8"), before);
+		assert.ok(acquired.value.lease.restoreRejectedResume());
+		acquired.value.lease.release();
+		assert.deepEqual(await readFile(file), original);
+		await writeFile(skill, originalSkill);
+		const retry = store.acquire("run-1");
+		assert.ok(retry.ok);
+		const third = await engine.run({ ...spec, task: "follow up", session: { ...resume, setExternalWriter: retry.value.lease.setExternalWriter } });
+		assert.equal(third.ok, true, third.error);
+		assert.equal(third.sessionSaved, true);
+		retry.value.lease.release();
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });

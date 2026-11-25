@@ -400,6 +400,15 @@ require a fresh worker. Admission rechecks the owning session and branch, worksp
 configuration; both engines also compare the effective prompt, selected skills and tool contract
 before provider use. A missing, changed, busy, expired or failed transcript fails closed.
 
+New worker contracts also save per-component hashes so a rejected continuation can identify
+changes to tool selection, tool definitions, the skill catalog, selected skill instructions or
+prompt configuration. The original aggregate hash still decides admission. If the first contract
+check rejects the continuation before inference, Pi can already have appended the new prompt and
+an empty aborted response. Once the writer has stopped, Persona uses the transcript lease to verify
+the previously saved bytes and the exact abort sequence before removing that tail. The original
+successful run ID can then be used again once its configuration matches. Earlier failed attempts
+without this check and transcripts containing other changes retain their existing integrity checks.
+
 `conversations/store.ts` owns a separate native JSONL transcript beneath the persistent supervisor
 session's directory and records branch-scoped lineage metadata in the parent session. New storage
 uses the canonical session path, including its on-disk casing on Windows. If opening a session by

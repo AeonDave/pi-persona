@@ -53,6 +53,7 @@ import { validateWorkerSession, type WorkerSession } from "./worker-session.ts";
 import { installSessionContract } from "./session-contract.ts";
 
 class SessionContractError extends Error {}
+class ResumeContractRejectedAtStart extends SessionContractError {}
 
 /** The minimal slice of Pi's AgentSession the engine drives — also the test seam. */
 export interface InProcSession {
@@ -282,7 +283,10 @@ const createPiSession: CreateInProcSession = async (opts) => {
 			const failure = selectedSkills?.getFailure();
 			if (failure !== undefined) throw new SelectedSkillsError(failure);
 			const contractFailure = sessionContract?.getFailure();
-			if (contractFailure !== undefined) throw new SessionContractError(contractFailure);
+			if (contractFailure !== undefined) {
+				if (sessionContract?.wasResumeRejectedAtStart()) throw new ResumeContractRejectedAtStart(contractFailure);
+				throw new SessionContractError(contractFailure);
+			}
 		},
 		agent: {
 			abort: () => session.agent.abort(),
@@ -982,7 +986,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// folded into the AgentResult below. Otherwise the stream state stays empty
 			// and the user sees an opaque "agent failed (unknown)".
 			let thrownError: string | undefined;
-			let selectedSkillsFailed = false;
+			let startupContractFailed = false;
+			let resumeRejectedAtStart = false;
 			let thinkingEffective: ThinkingLevel | undefined;
 			let shutdownComplete = false;
 			try {
@@ -998,7 +1003,8 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				else await Promise.race([runToIdle(), abortGate]);
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
-				selectedSkillsFailed = e instanceof SelectedSkillsError || e instanceof SessionContractError;
+				startupContractFailed = e instanceof SelectedSkillsError || e instanceof SessionContractError;
+				resumeRejectedAtStart = e instanceof ResumeContractRejectedAtStart;
 			} finally {
 				// Every exit path, cancellation included, needs the bounded shutdown handshake before an
 				// unsaved transcript can be discarded: only proven quiescence releases its storage. A
@@ -1056,7 +1062,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 				result.error = `${tag} agent produced no output within the ${startupMs}ms startup window — either it never started (a stalled init) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (hardTimedOut) result.error = `${tag} agent exceeded the ${hardMs}ms hard cap${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
-			else if (selectedSkillsFailed) result.error = `${tag} ${thrownError}`;
+			else if (startupContractFailed) result.error = `${tag} ${thrownError}`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
@@ -1072,7 +1078,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 						? "timeout"
 						: aborted
 							? "abort"
-							: selectedSkillsFailed
+							: startupContractFailed
 								? "contract"
 								: hostModuleHint
 									? "agent"
@@ -1094,6 +1100,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			if (spec.session) {
 				result.sessionSaved = false;
 				result.sessionQuiescent = shutdownComplete;
+				if (resumeRejectedAtStart && result.failureKind === "contract") result.resumeRejectedAtStart = true;
 				if (result.ok && shutdownComplete) {
 					try { await validateWorkerSession({ ...spec.session, resume: true }, deps.cwd); result.sessionSaved = true; }
 					catch { /* The result remains valid, but the transcript is not resumable. */ }

@@ -6,6 +6,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+## [1.20.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.20.2) - 2026-11-25
+
+### Fixed
+
+- A worker continuation rejected before its first model request can now keep its last successful
+  transcript available for another attempt. For newly saved workers, the rejection identifies
+  which part of the tool, skill or prompt configuration changed.
+
 ## [1.20.1](https://github.com/AeonDave/pi-persona/releases/tag/v1.20.1) - 2026-11-24
 
 ### Fixed

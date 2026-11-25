@@ -159,6 +159,10 @@ export class WorkerConversations {
 			},
 			settle: (id, spec, result) => {
 				quiescent = result.sessionSaved === true || result.sessionQuiescent === true;
+				if (admitted && previous && !result.ok && result.failureKind === "contract" && result.resumeRejectedAtStart
+					&& result.sessionSaved === false && result.sessionQuiescent === true && lease.restoreRejectedResume()) {
+					return { ...result, output: `${result.output}\n\n[pi-persona] The previously saved worker transcript was preserved.` };
+				}
 				const current = this.deps.currentContext();
 				if (!result.ok || result.worktreeRecovery) return result;
 				if (!result.sessionSaved || !result.modelUsed) return unretained(result, "The worker completed, but its conversation could not be retained for continuation.");

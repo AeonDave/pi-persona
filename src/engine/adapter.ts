@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { validateWorkerSession } from "./worker-session.ts";
-import { SESSION_CONTRACT_ENV, SESSION_CONTRACT_ERROR_MARKER } from "./session-contract.ts";
+import { SESSION_CONTRACT_ENV, SESSION_CONTRACT_ERROR_MARKER, SESSION_CONTRACT_START_REJECTION_MARKER } from "./session-contract.ts";
 
 import type { AgentConfig } from "../agents/agent.ts";
 import { type ContractDef, contractInstructions, parseAndValidate, pinContract, type PinnedContract } from "../core/contract.ts";
@@ -323,9 +323,11 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			const selectedFailure = encodedSkills && !child.ok
 				? child.stderr.split(/\r?\n/).find((line) => line.startsWith(SELECTED_SKILLS_ERROR_MARKER))?.slice(SELECTED_SKILLS_ERROR_MARKER.length)
 				: undefined;
-			const sessionContractFailure = spec.session && !child.ok
-				? child.stderr.split(/\r?\n/).find((line) => line.startsWith(SESSION_CONTRACT_ERROR_MARKER))?.slice(SESSION_CONTRACT_ERROR_MARKER.length)
+			const sessionContractLines = spec.session && !child.ok ? child.stderr.split(/\r?\n/) : [];
+			const rejectedAtStart = spec.session?.resume
+				? sessionContractLines.find((line) => line.startsWith(SESSION_CONTRACT_START_REJECTION_MARKER))?.slice(SESSION_CONTRACT_START_REJECTION_MARKER.length)
 				: undefined;
+			const sessionContractFailure = rejectedAtStart ?? sessionContractLines.find((line) => line.startsWith(SESSION_CONTRACT_ERROR_MARKER))?.slice(SESSION_CONTRACT_ERROR_MARKER.length);
 			if ((selectedFailure || sessionContractFailure) && !child.timedOut && !child.aborted) result.error = `${tag} ${selectedFailure ?? sessionContractFailure}`;
 			else if (child.errorMessage) result.error = `${tag} ${child.errorMessage}`;
 			else if (!child.ok) result.error = `${tag} ${child.stderr.trim() || `agent failed (exit ${child.exitCode})`}`;
@@ -338,7 +340,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			// Keyed on turns===0 (never really started), not empty output, so an early tool/log line
 			// can't mask it. Name the cause + the fix so the operator never has to guess (a real prod
 			// report: a dead `mcp: true` async delegation with an opaque timeout).
-			if (!child.ok && !selectedFailure && !hostModuleHint && spec.mcp === true && child.usage.turns === 0) {
+			if (!child.ok && !selectedFailure && !sessionContractFailure && !hostModuleHint && spec.mcp === true && child.usage.turns === 0) {
 				result.error =
 					`${result.error ?? `${tag} agent failed`} — mcp:true leg never completed a turn: the MCP adapter likely hung initializing in the headless child ` +
 					`(a server needing interactive OAuth can't authenticate without a UI). Fix: authenticate the MCP server once in a normal \`pi\` session (\`/mcp auth\`) so its token is cached — the headless child reuses it; ` +
@@ -381,6 +383,7 @@ export function makeEngine(deps: EngineAdapterDeps): StrategyEngine {
 			result.sessionQuiescent = child.quiescent;
 			if (spec.session) {
 				result.sessionSaved = false;
+				if (rejectedAtStart && result.failureKind === "contract") result.resumeRejectedAtStart = true;
 				if (result.ok && child.quiescent) {
 					try { await validateWorkerSession({ ...spec.session, resume: true }, deps.cwd ?? process.cwd()); result.sessionSaved = true; }
 					catch { /* The result remains valid, but the transcript is not resumable. */ }

@@ -59,8 +59,8 @@ Later sessions can start directly with `pi --persona dev`. Seeding never replace
 | Option | Command |
 |---|---|
 | This project only | `pi install -l npm:@aeondave/pi-persona` |
-| Pin this release | `pi install npm:@aeondave/pi-persona@1.20.1` |
-| Pin the Git tag | `pi install git:github.com/AeonDave/pi-persona@v1.20.1` |
+| Pin this release | `pi install npm:@aeondave/pi-persona@1.20.2` |
+| Pin the Git tag | `pi install git:github.com/AeonDave/pi-persona@v1.20.2` |
 | Update an unpinned install | `pi update npm:@aeondave/pi-persona` |
 
 Restart Pi after updating. Update pinned installs explicitly. When switching from Git to npm, remove

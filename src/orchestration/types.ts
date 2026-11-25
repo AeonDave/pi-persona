@@ -40,6 +40,8 @@ export interface AgentResult {
 	sessionSaved?: boolean;
 	/** True only when the worker attempt can no longer write its transcript or checkout. */
 	sessionQuiescent?: boolean;
+	/** The runtime contract guard rejected the resumed worker at its first agent_start. */
+	resumeRejectedAtStart?: boolean;
 	/** Exact isolated checkout retained for this saved worker conversation. */
 	sessionWorktree?: ConversationWorktree;
 	output: string;
