@@ -972,7 +972,7 @@ unsafe-sink risks, secrets/token mishandling, and missing input validation. Cite
 ```
 
 **A flow with a human checkpoint** — phases are journaled and dependents wait for a `gate: true`
-approval. The checkpoint prompt shows the gated phase's output (12 lines) and what runs next, with Reject as the default. A rejection is reported as `stopped · checkpoint <id>` under the `flow <name>` call line and keeps the gated output; it is not a failure, though a mandatory flow still fails closed. Headless sessions always reject checkpoints. Save as `.pi/flows/gated-build.flow.json`:
+approval. The checkpoint prompt shows the gated phase's output (12 lines) and what runs next, with Reject as the default. Terminals that support Pi's program status show the pending checkpoint as a permission request. A rejection is reported as `stopped · checkpoint <id>` under the `flow <name>` call line and keeps the gated output; it is not a failure, though a mandatory flow still fails closed. Headless sessions always reject checkpoints. Save as `.pi/flows/gated-build.flow.json`:
 
 ```json
 {
@@ -1053,7 +1053,7 @@ build retries. A connected broker child's status shows `⇄ <handle>`; if that c
 status flips to `⇄ offline` and a fresh ask on it fails fast instead of hanging.
 
 `/doctor` also reports the installed host's version against this extension's floor: `pi: <version>
-(requires ≥ 1.6.0)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
+(requires ≥ 1.6.1)`, with a trailing `— BELOW FLOOR` marker once an installed version fails the
 check (`src/core/pi-compat.ts`). `pi: unknown` means the host's own `package.json` could not be
 resolved (a non-standard install layout) — not a failed check.
 

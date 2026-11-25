@@ -6,6 +6,9 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+- Persona now requires Pi 1.6.1. Terminals that display Pi's program status show a flow's
+  Approve/Reject checkpoint as a permission request.
+
 ## [1.20.2](https://github.com/AeonDave/pi-persona/releases/tag/v1.20.2) - 2026-11-25
 
 ### Fixed

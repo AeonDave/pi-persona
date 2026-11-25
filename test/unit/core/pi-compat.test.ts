@@ -13,11 +13,10 @@ test("satisfiesFloor compares major.minor.patch and ignores prerelease tags", ()
 	assert.equal(satisfiesFloor("garbage", "1.0.0"), false);
 });
 
-test("the supported host baseline is Pi 1.6.0 and rejects earlier stable releases", () => {
-	assert.equal(MIN_PI_VERSION, "1.6.0");
-	assert.equal(satisfiesFloor("1.5.2", MIN_PI_VERSION), false);
-	assert.equal(satisfiesFloor("1.5.999", MIN_PI_VERSION), false);
-	assert.equal(satisfiesFloor("1.6.0", MIN_PI_VERSION), true);
+test("the supported host baseline is Pi 1.6.1 and rejects the previous patch", () => {
+	assert.equal(MIN_PI_VERSION, "1.6.1");
+	assert.equal(satisfiesFloor("1.6.0", MIN_PI_VERSION), false);
+	assert.equal(satisfiesFloor("1.6.1", MIN_PI_VERSION), true);
 });
 
 test("installedPiVersion reads the host package version without throwing", () => {

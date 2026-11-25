@@ -8,7 +8,7 @@ export interface IdleCompactionQualification {
 /**
  * Pi can clear a newer native compaction controller while an earlier request settles,
  * including when an extension vetoes overlapping public hooks. First seen on 1.4.0 and still
- * present on 1.6.0, where `scripts/idle-compaction-host-check.mjs` fails.
+ * present on 1.6.1, where `scripts/idle-compaction-host-check.mjs` fails.
  * Unlock only in a future Persona release after the upstream fix passes the real
  * host lifecycle qualification. An environment variable or saved preference cannot
  * override this gate; an upstream version change alone is not qualification.

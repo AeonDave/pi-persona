@@ -242,7 +242,7 @@ No code changes planned until the audit completes.
 | **Configurable `STALL_FLAG_MS`** | `PI_PERSONA_STALL_MS` env var for operators with unusual workloads | Low (1.17.1 fixes the root causes) |
 | **Progress contract redesign** | Replace length-based output comparison with structured liveness states (queued/initializing/generating/executing/waiting) | Medium |
 | **`context: fork`** | Child context forking (deliberately deferred per AGENTS.md) | Deferred |
-| **Native idle compaction** | Authorized defaults: off, 15 minutes idle, context above 40%, one attempt per idle episode. Implementation restored behind an explicit host qualification block; settings disclose unavailability. [Policy and admission checks](docs/plans/2026-10-20-compaction-evaluation-proposal.md#authorized-idle-timing-and-failed-admission-gate) | Activation blocked: overlapping manual compaction corrupts controller cleanup (Pi 1.4.0 through 1.6.0) ([reproduction and tested fix](https://github.com/earendil-works/pi/issues/7738#issuecomment-6436968518)). No environment or saved-setting bypass; unlock only after supported-host qualification |
+| **Native idle compaction** | Authorized defaults: off, 15 minutes idle, context above 40%, one attempt per idle episode. Implementation restored behind an explicit host qualification block; settings disclose unavailability. [Policy and admission checks](docs/plans/2026-10-20-compaction-evaluation-proposal.md#authorized-idle-timing-and-failed-admission-gate) | Activation blocked: overlapping manual compaction corrupts controller cleanup (Pi 1.4.0 through 1.6.1) ([reproduction and tested fix](https://github.com/earendil-works/pi/issues/7738#issuecomment-6436968518)). No environment or saved-setting bypass; unlock only after supported-host qualification |
 | **Compaction continuity and summary evaluation** | The [open proposal](docs/plans/2026-10-20-compaction-evaluation-proposal.md) keeps runtime checkpoints and structured summaries separate from native timing | Deferred pending separate authorization and paired quality/cost evidence |
 | **Token-budget alerting** | Operator-visible warning when a child approaches its token budget | Low |
 | **Permission system built-in presets** | Ship `permission:` blocks in bundled persona seed files | Blocked on `pi-persona-policy` |
@@ -254,7 +254,7 @@ No code changes planned until the audit completes.
 - Patch (`x.y.z+1`): bugfixes, doc updates, no new features
 - Minor (`x.y+1.0`): new features, new integrations, backward-compatible
 - The project follows [Keep a Changelog](https://keepachangelog.com/) in `CHANGELOG.md`
-- Host policy: qualify the latest stable Pi together with plugin updates (currently 1.6.0); do not maintain historical-host compatibility branches.
+- Host policy: qualify the latest stable Pi together with plugin updates (currently 1.6.1); do not maintain historical-host compatibility branches.
 - Node.js floor: ≥ 22.19
 
 ## References

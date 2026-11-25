@@ -2243,7 +2243,7 @@ export default function piPersona(pi: ExtensionAPI, options: PiPersonaOptions = 
 						// Reject first: a stray Enter on the default row fails closed. The run signal dismisses
 						// the prompt, so a stopped flow is not held open by a question nobody will answer.
 						const pick = await inGateLine(signal, undefined, () =>
-							ctx.ui.select(gateReviewText({ flow: spec.name, phase: phase.id, next, output: result.output }), ["Reject", "Approve"], { signal }),
+							ctx.ui.select(gateReviewText({ flow: spec.name, phase: phase.id, next, output: result.output }), ["Reject", "Approve"], { signal, blockedKind: "permission" }),
 						);
 						return pick === "Approve";
 					} catch {

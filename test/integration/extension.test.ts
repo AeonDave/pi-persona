@@ -1677,15 +1677,15 @@ test("a flow checkpoint is reviewable, defaults to Reject, and a 'no' is a stop 
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeInProcessEngine: () => engine, makeEngine: () => engine } });
 	const base = makeCtx(cwd).ctx;
-	const asked: Array<{ title: string; options: string[]; signal: AbortSignal | undefined }> = [];
+	const asked: Array<{ title: string; options: string[]; signal: AbortSignal | undefined; blockedKind: string | undefined }> = [];
 	const ctx = {
 		...base,
 		hasUI: true,
 		sessionManager: nativeSessionManager("gate-review-session"),
 		ui: {
 			...base.ui,
-			select: async (title: string, options: string[], opts?: { signal?: AbortSignal }) => {
-				asked.push({ title, options, signal: opts?.signal });
+			select: async (title: string, options: string[], opts?: { signal?: AbortSignal; blockedKind?: string }) => {
+				asked.push({ title, options, signal: opts?.signal, blockedKind: opts?.blockedKind });
 				return "Reject";
 			},
 		},
@@ -1705,6 +1705,7 @@ test("a flow checkpoint is reviewable, defaults to Reject, and a 'no' is a stop 
 	assert.match(asked[0]?.title ?? "", /the plan from/, "the operator reads the gated output, not a 160-character stub");
 	assert.deepEqual(asked[0]?.options, ["Reject", "Approve"], "a stray Enter must fail closed");
 	assert.ok(asked[0]?.signal instanceof AbortSignal, "the run's own stop dismisses the prompt");
+	assert.equal(asked[0]?.blockedKind, "permission", "the host reports that a flow is waiting for approval");
 	const wake = String((m.sentMessages()[0]?.message as { content?: string }).content ?? "");
 	assert.match(wake, /1 stopped/, "an unapproved checkpoint is a stop, not a failure");
 	assert.doesNotMatch(wake, /❌/);
